@@ -24,3 +24,17 @@ const (
 )
 
 var OAuthScopes = "channel_read chat:read user_blocks_edit user_blocks_read user_follows_edit user_read"
+
+// GQLClientIDFallbacks is the ordered list of public Twitch client IDs the GQL
+// client cycles through when a request fails with PersistedQueryNotFound. These
+// are the well-known, non-secret client IDs shipped by Twitch's own web/TV/
+// mobile clients (the same values every miner uses). Twitch periodically
+// rotates or invalidates the persisted-query hashes tied to a given client ID,
+// which breaks every GQL call for a hardcoded default; trying the alternates
+// lets the miner recover without a code change. The default (ClientIDTV) is
+// first so healthy requests keep using it.
+var GQLClientIDFallbacks = []string{
+	ClientIDTV,
+	ClientIDBrowser,
+	ClientIDMobile,
+}
