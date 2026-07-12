@@ -73,14 +73,38 @@ type DropsPageData struct {
 	DebugURL       string
 }
 
+// DropDetailView is one drop within a campaign, rendered in the Drops-page
+// modal so every reward in the campaign is visible individually (not just the
+// current/final one shown on the card).
+type DropDetailView struct {
+	Name        string
+	Benefit     string
+	ImageURL    string
+	Claimed     bool
+	StatusLabel string
+	Percent     int
+
+	// HasMinuteProgress and the minute fields mirror the card's precise
+	// watch-time bar; populated only for still-earnable drops with a known
+	// minute requirement.
+	HasMinuteProgress bool
+	MinutesWatched    int
+	MinutesRequired   int
+}
+
 // DropCampaignView is one row in the Drops-page campaign queue.
 type DropCampaignView struct {
+	ID                string
 	Name              string
 	GameName          string
 	BoxArtURL         string
 	DropName          string
 	DropBenefit       string
 	ChannelRestricted bool
+
+	// Drops is the full per-drop breakdown for the campaign, shown in the
+	// modal opened from the card.
+	Drops []DropDetailView
 
 	// Claimed marks an already-claimed campaign (Campaign.ClaimStatus);
 	// StatusLabel is the human text shown as the status pill.

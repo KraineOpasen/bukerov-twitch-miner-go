@@ -12,3 +12,42 @@
     <div class="animate-pulse text-neutral-400">Loading drop campaigns...</div>
 </section>
 {{end}}
+
+{{define "scripts"}}
+<script>
+    // Delegated so it keeps working after htmx swaps the campaign list on
+    // auto-refresh (the campaign cards and their <dialog> modals are re-created,
+    // but these listeners live on document and never get replaced).
+    function openDropModal(id) {
+        const dialog = document.getElementById(id);
+        if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
+    }
+
+    document.addEventListener('click', (e) => {
+        const closeBtn = e.target.closest('[data-drop-modal-close]');
+        if (closeBtn) {
+            const dialog = closeBtn.closest('dialog');
+            if (dialog) dialog.close();
+            return;
+        }
+
+        // Click on the dialog element itself (its backdrop area) closes it.
+        if (e.target.tagName === 'DIALOG') {
+            e.target.close();
+            return;
+        }
+
+        const trigger = e.target.closest('[data-drop-modal]');
+        if (trigger) openDropModal(trigger.dataset.dropModal);
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const trigger = e.target.closest('[data-drop-modal]');
+        if (trigger) {
+            e.preventDefault();
+            openDropModal(trigger.dataset.dropModal);
+        }
+    });
+</script>
+{{end}}

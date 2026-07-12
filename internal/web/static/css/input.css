@@ -146,7 +146,15 @@
   @apply flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-purple-500/10;
 }
 
+@utility modal-dialog {
+  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-0 w-[92vw] max-w-lg text-neutral-100 shadow-xl;
+}
+
 /* Custom component styles that need selectors */
+.modal-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.7);
+}
+
 .details-panel summary {
   @apply px-4 py-3 cursor-pointer font-medium text-neutral-100 hover:bg-purple-500/10 transition-colors;
 }

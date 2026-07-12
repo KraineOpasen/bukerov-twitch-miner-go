@@ -9,6 +9,7 @@ type Drop struct {
 	ID                    string
 	Name                  string
 	Benefit               string
+	ImageURL              string
 	MinutesRequired       int
 	CurrentMinutesWatched int
 	PercentageProgress    int
@@ -35,6 +36,12 @@ func NewDropFromGQL(data map[string]interface{}) *Drop {
 			if benefit, ok := edge["benefit"].(map[string]interface{}); ok {
 				if name, ok := benefit["name"].(string); ok {
 					drop.Benefit = name
+				}
+				// imageAssetURL is the reward's own artwork; the Drops-page
+				// modal uses it as each drop's icon, falling back to the
+				// campaign box art when Twitch omits it.
+				if img, ok := benefit["imageAssetURL"].(string); ok {
+					drop.ImageURL = img
 				}
 			}
 		}

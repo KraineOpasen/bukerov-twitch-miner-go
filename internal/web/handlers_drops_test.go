@@ -79,6 +79,42 @@ func TestBuildDropCampaignViewFields(t *testing.T) {
 	}
 }
 
+func TestBuildDropDetailViews(t *testing.T) {
+	c := &models.Campaign{
+		Name: "Cool Campaign",
+		Drops: []*models.Drop{
+			{Name: "Tier 2", Benefit: "Emote", ImageURL: "img2", MinutesRequired: 120, CurrentMinutesWatched: 30},
+			{Name: "Tier 1", Benefit: "Badge", ImageURL: "img1", MinutesRequired: 60, CurrentMinutesWatched: 60},
+		},
+		ClaimedDropNames: []string{"Tier 0 (already got it)"},
+	}
+
+	views := buildDropDetailViews(c)
+	if len(views) != 3 {
+		t.Fatalf("expected 3 detail views (2 in-progress + 1 claimed), got %d", len(views))
+	}
+
+	// In-progress drops are ordered by watch requirement (Tier 1 before Tier 2).
+	if views[0].Name != "Tier 1" || views[1].Name != "Tier 2" {
+		t.Errorf("expected drops ordered by requirement, got %q then %q", views[0].Name, views[1].Name)
+	}
+	if views[0].Claimed || views[0].StatusLabel != "In progress" {
+		t.Errorf("expected first drop in progress, got %+v", views[0])
+	}
+	if views[0].Percent != 100 || !views[0].HasMinuteProgress || views[0].MinutesWatched != 60 || views[0].MinutesRequired != 60 {
+		t.Errorf("unexpected progress on first drop: %+v", views[0])
+	}
+	if views[1].Percent != 25 {
+		t.Errorf("expected 25%% on Tier 2, got %d", views[1].Percent)
+	}
+
+	// Already-claimed rewards (from claim history) come last, marked claimed.
+	claimed := views[2]
+	if !claimed.Claimed || claimed.StatusLabel != "Already claimed" || claimed.Percent != 100 || claimed.Name != "Tier 0 (already got it)" {
+		t.Errorf("unexpected claimed detail view: %+v", claimed)
+	}
+}
+
 // TestTemplatesRenderDropsAndCards ensures the new templates parse and execute
 // against their view models (embedded via the same globs the server uses).
 func TestTemplatesRenderDropsAndCards(t *testing.T) {
@@ -91,16 +127,29 @@ func TestTemplatesRenderDropsAndCards(t *testing.T) {
 
 	var buf bytes.Buffer
 	dropsData := DropsListData{Campaigns: []DropCampaignView{
-		{Name: "C", GameName: "Rust", BoxArtURL: "x", DropName: "Skin", ChannelRestricted: true,
+		{ID: "camp-1", Name: "C", GameName: "Rust", BoxArtURL: "x", DropName: "Skin", ChannelRestricted: true,
 			StatusLabel: "In progress", OverallPercent: 25, HasMinuteProgress: true,
-			MinutesWatched: 30, MinutesRequired: 120, MinutesRemaining: 90, MinutePercent: 25},
-		{Name: "Done", StatusLabel: "Already claimed", Claimed: true, OverallPercent: 100},
+			MinutesWatched: 30, MinutesRequired: 120, MinutesRemaining: 90, MinutePercent: 25,
+			Drops: []DropDetailView{
+				{Name: "Emote Pack", Benefit: "5 Emotes", StatusLabel: "In progress", Percent: 25,
+					HasMinuteProgress: true, MinutesWatched: 30, MinutesRequired: 120},
+				{Name: "Old Badge", StatusLabel: "Already claimed", Claimed: true, Percent: 100},
+			}},
+		{ID: "camp-2", Name: "Done", StatusLabel: "Already claimed", Claimed: true, OverallPercent: 100},
 	}}
 	if err := partials.ExecuteTemplate(&buf, "drops_list", dropsData); err != nil {
 		t.Fatalf("drops_list render failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Channel-only drop") || !strings.Contains(buf.String(), "90 min remaining") {
-		t.Errorf("drops_list output missing expected content:\n%s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "Channel-only drop") || !strings.Contains(out, "90 min remaining") {
+		t.Errorf("drops_list output missing expected content:\n%s", out)
+	}
+	// The per-campaign modal and its individual drops must render.
+	if !strings.Contains(out, `id="drop-modal-0"`) || !strings.Contains(out, `data-drop-modal="drop-modal-0"`) {
+		t.Errorf("drops_list output missing modal wiring:\n%s", out)
+	}
+	if !strings.Contains(out, "Emote Pack") || !strings.Contains(out, "Old Badge") {
+		t.Errorf("drops_list output missing per-drop detail rows:\n%s", out)
 	}
 
 	buf.Reset()
