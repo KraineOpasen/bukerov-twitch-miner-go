@@ -32,6 +32,8 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			ReconnectDelay:        cfg.RateLimits.ReconnectDelay,
 			StreamCheckInterval:   cfg.RateLimits.StreamCheckInterval,
 
+			ConnectionTimeoutMinutes: cfg.RateLimits.ConnectionTimeoutMinutes,
+
 			RotationIntervalMinMinutes: cfg.RateLimits.RotationIntervalMinMinutes,
 			RotationIntervalMaxMinutes: cfg.RateLimits.RotationIntervalMaxMinutes,
 		},
@@ -82,6 +84,8 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			ReconnectDelay:        defaults.RateLimits.ReconnectDelay,
 			StreamCheckInterval:   defaults.RateLimits.StreamCheckInterval,
 
+			ConnectionTimeoutMinutes: defaults.RateLimits.ConnectionTimeoutMinutes,
+
 			RotationIntervalMinMinutes: defaults.RateLimits.RotationIntervalMinMinutes,
 			RotationIntervalMaxMinutes: defaults.RateLimits.RotationIntervalMaxMinutes,
 		},
@@ -128,6 +132,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.RateLimits.RequestDelay = s.RateLimits.RequestDelay
 	cfg.RateLimits.ReconnectDelay = s.RateLimits.ReconnectDelay
 	cfg.RateLimits.StreamCheckInterval = s.RateLimits.StreamCheckInterval
+	cfg.RateLimits.ConnectionTimeoutMinutes = s.RateLimits.ConnectionTimeoutMinutes
 	cfg.RateLimits.RotationIntervalMinMinutes = s.RateLimits.RotationIntervalMinMinutes
 	cfg.RateLimits.RotationIntervalMaxMinutes = s.RateLimits.RotationIntervalMaxMinutes
 

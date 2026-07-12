@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
 type StatusHandler func(streamer string, online bool)
+type AuthErrorHandler func(err error)
 
 type WebSocketPool struct {
 	clients     []*WebSocketClient
@@ -24,6 +26,7 @@ type WebSocketPool struct {
 
 	onMessage      MessageHandler
 	onStatusChange StatusHandler
+	onAuthError    AuthErrorHandler
 
 	mu sync.RWMutex
 }
@@ -44,6 +47,26 @@ func (p *WebSocketPool) SetMessageHandler(handler MessageHandler) {
 
 func (p *WebSocketPool) SetStatusHandler(handler StatusHandler) {
 	p.onStatusChange = handler
+}
+
+func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
+	p.onAuthError = handler
+}
+
+// LastActivity returns the most recent PONG timestamp across all connections
+// in the pool, i.e. the last confirmed sign of life from Twitch PubSub. Used
+// by the connection-health watchdog.
+func (p *WebSocketPool) LastActivity() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var latest time.Time
+	for _, ws := range p.clients {
+		if t := ws.LastPong(); t.After(latest) {
+			latest = t
+		}
+	}
+	return latest
 }
 
 func (p *WebSocketPool) Submit(topic Topic) error {
@@ -447,6 +470,10 @@ func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
 
 func (p *WebSocketPool) handleError(err error) {
 	slog.Error("WebSocket error", "error", err)
+
+	if errors.Is(err, ErrBadAuth) && p.onAuthError != nil {
+		p.onAuthError(err)
+	}
 }
 
 func min(a, b int) int {

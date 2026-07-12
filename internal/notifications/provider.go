@@ -6,10 +6,13 @@ import "context"
 type NotificationType string
 
 const (
-	NotificationTypeMention       NotificationType = "mention"
-	NotificationTypePointsReached NotificationType = "points"
-	NotificationTypeOnline        NotificationType = "online"
-	NotificationTypeOffline       NotificationType = "offline"
+	NotificationTypeMention            NotificationType = "mention"
+	NotificationTypePointsReached      NotificationType = "points"
+	NotificationTypeOnline             NotificationType = "online"
+	NotificationTypeOffline            NotificationType = "offline"
+	NotificationTypeReauthRequired     NotificationType = "reauth_required"
+	NotificationTypeConnectionLost     NotificationType = "connection_lost"
+	NotificationTypeConnectionRestored NotificationType = "connection_restored"
 )
 
 // Notification represents a notification to be sent.

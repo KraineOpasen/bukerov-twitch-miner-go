@@ -53,6 +53,14 @@ func (m *NotificationsModule) Migrations() []database.Migration {
 				INSERT OR IGNORE INTO notification_config (id) VALUES (1);
 			`,
 		},
+		{
+			Version:     2,
+			Description: "Add system channel columns for reauth/connection-health notifications",
+			SQL: `
+				ALTER TABLE notification_config ADD COLUMN system_channel_id TEXT DEFAULT '';
+				ALTER TABLE notification_config ADD COLUMN system_enabled INTEGER DEFAULT 1;
+			`,
+		},
 	}
 }
 
@@ -74,11 +82,12 @@ func (r *Repository) GetConfig() (*NotificationConfig, error) {
 	defer r.mu.RUnlock()
 
 	row := r.db.QueryRow(`
-		SELECT 
+		SELECT
 			mentions_channel_id, points_channel_id, online_channel_id, offline_channel_id,
 			mentions_enabled, mentions_all_chats, mentions_streamers,
 			online_enabled, online_all_streamers, online_streamers,
-			offline_enabled, offline_all_streamers, offline_streamers
+			offline_enabled, offline_all_streamers, offline_streamers,
+			system_channel_id, system_enabled
 		FROM notification_config WHERE id = 1
 	`)
 
@@ -90,6 +99,7 @@ func (r *Repository) GetConfig() (*NotificationConfig, error) {
 		&cfg.MentionsEnabled, &cfg.MentionsAllChats, &mentionsStreamersJSON,
 		&cfg.OnlineEnabled, &cfg.OnlineAllStreamers, &onlineStreamersJSON,
 		&cfg.OfflineEnabled, &cfg.OfflineAllStreamers, &offlineStreamersJSON,
+		&cfg.SystemChannelID, &cfg.SystemEnabled,
 	)
 	if err != nil {
 		return nil, err
@@ -134,13 +144,16 @@ func (r *Repository) SaveConfig(cfg *NotificationConfig) error {
 			online_streamers = ?,
 			offline_enabled = ?,
 			offline_all_streamers = ?,
-			offline_streamers = ?
+			offline_streamers = ?,
+			system_channel_id = ?,
+			system_enabled = ?
 		WHERE id = 1
 	`,
 		cfg.MentionsChannelID, cfg.PointsChannelID, cfg.OnlineChannelID, cfg.OfflineChannelID,
 		cfg.MentionsEnabled, cfg.MentionsAllChats, string(mentionsStreamersJSON),
 		cfg.OnlineEnabled, cfg.OnlineAllStreamers, string(onlineStreamersJSON),
 		cfg.OfflineEnabled, cfg.OfflineAllStreamers, string(offlineStreamersJSON),
+		cfg.SystemChannelID, cfg.SystemEnabled,
 	)
 
 	return err

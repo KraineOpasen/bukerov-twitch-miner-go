@@ -44,6 +44,12 @@ type RateLimitSettings struct {
 	ReconnectDelay        int     `json:"reconnectDelay"`
 	StreamCheckInterval   int     `json:"streamCheckInterval"`
 
+	// ConnectionTimeoutMinutes is the watchdog threshold: if neither the
+	// Twitch API nor the PubSub websocket have seen any successful activity
+	// for this many minutes, the connection is considered lost (dashboard
+	// banner + Discord notification + ERROR log) until activity resumes.
+	ConnectionTimeoutMinutes int `json:"connectionTimeoutMinutes"`
+
 	// RotationIntervalMinMinutes/RotationIntervalMaxMinutes bound how long
 	// (in minutes) the watched pair dwells before rotating when more than
 	// constants.MaxSimultaneousStreams streamers are online: a new random
@@ -110,12 +116,13 @@ func DefaultDiscordSettings() DiscordSettings {
 
 func DefaultRateLimitSettings() RateLimitSettings {
 	return RateLimitSettings{
-		WebsocketPingInterval: 27,
-		CampaignSyncInterval:  60,
-		MinuteWatchedInterval: 60,
-		RequestDelay:          0.5,
-		ReconnectDelay:        60,
-		StreamCheckInterval:   600,
+		WebsocketPingInterval:    27,
+		CampaignSyncInterval:     60,
+		MinuteWatchedInterval:    60,
+		RequestDelay:             0.5,
+		ReconnectDelay:           60,
+		StreamCheckInterval:      600,
+		ConnectionTimeoutMinutes: 15,
 		// 30-80 minutes: long enough that a channel clears the ~7-minute
 		// watch-streak window and makes real drop progress before losing its
 		// slot; randomized (redrawn on every actual pair switch) so the
@@ -246,6 +253,12 @@ func ValidateConfig(config *Config) {
 		config.RateLimits.StreamCheckInterval = 60
 	} else if config.RateLimits.StreamCheckInterval > 900 {
 		config.RateLimits.StreamCheckInterval = 900
+	}
+
+	if config.RateLimits.ConnectionTimeoutMinutes < 5 {
+		config.RateLimits.ConnectionTimeoutMinutes = 5
+	} else if config.RateLimits.ConnectionTimeoutMinutes > 60 {
+		config.RateLimits.ConnectionTimeoutMinutes = 60
 	}
 
 	if config.RateLimits.RotationIntervalMinMinutes < 5 {

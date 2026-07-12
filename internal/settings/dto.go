@@ -29,6 +29,8 @@ type RateLimitSettings struct {
 	ReconnectDelay        int     `json:"reconnectDelay"`
 	StreamCheckInterval   int     `json:"streamCheckInterval"`
 
+	ConnectionTimeoutMinutes int `json:"connectionTimeoutMinutes"`
+
 	RotationIntervalMinMinutes int `json:"rotationIntervalMinMinutes"`
 	RotationIntervalMaxMinutes int `json:"rotationIntervalMaxMinutes"`
 }

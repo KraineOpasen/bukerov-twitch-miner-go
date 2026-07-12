@@ -23,6 +23,11 @@ import (
 var (
 	ErrStreamerDoesNotExist = errors.New("streamer does not exist")
 	ErrStreamerIsOffline    = errors.New("streamer is offline")
+
+	// ErrUnauthorized indicates the Twitch OAuth token was rejected (expired
+	// or revoked). Callers should treat this as "reauthorization required"
+	// rather than a transient failure.
+	ErrUnauthorized = errors.New("twitch: unauthorized (token expired or revoked)")
 )
 
 const (
@@ -53,6 +58,11 @@ type TwitchClient struct {
 	spadeURLPattern        *regexp.Regexp
 	settingsURLPattern     *regexp.Regexp
 
+	authErrorHandler func()
+
+	healthMu    sync.RWMutex
+	lastSuccess time.Time
+
 	mu sync.RWMutex
 }
 
@@ -67,7 +77,64 @@ func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient
 		twilightBuildIDPattern: regexp.MustCompile(`window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`),
 		spadeURLPattern:        regexp.MustCompile(`"spade_url":"(.*?)"`),
 		settingsURLPattern:     regexp.MustCompile(`(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)`),
+		lastSuccess:            time.Now(),
 	}
+}
+
+// SetAuthErrorHandler registers a callback invoked the first time (and every
+// subsequent time) a request fails with ErrUnauthorized.
+func (c *TwitchClient) SetAuthErrorHandler(handler func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authErrorHandler = handler
+}
+
+// LastSuccessAt returns when the client last completed a request without an
+// auth or transport error. Used by the connection-health watchdog.
+func (c *TwitchClient) LastSuccessAt() time.Time {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	return c.lastSuccess
+}
+
+func (c *TwitchClient) markSuccess() {
+	c.healthMu.Lock()
+	c.lastSuccess = time.Now()
+	c.healthMu.Unlock()
+}
+
+func (c *TwitchClient) handleUnauthorized() {
+	c.mu.RLock()
+	handler := c.authErrorHandler
+	c.mu.RUnlock()
+
+	if handler != nil {
+		handler()
+	}
+}
+
+// isAuthError reports whether an HTTP status code or GQL response body
+// indicates the OAuth token was rejected.
+func isAuthError(statusCode int, result map[string]interface{}) bool {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return true
+	}
+
+	if errMsg, ok := result["error"].(string); ok && strings.EqualFold(errMsg, "Unauthorized") {
+		return true
+	}
+
+	if errs, ok := result["errors"].([]interface{}); ok {
+		for _, e := range errs {
+			if em, ok := e.(map[string]interface{}); ok {
+				if msg, ok := em["message"].(string); ok && strings.Contains(strings.ToLower(msg), "unauthorized") {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func (c *TwitchClient) PostGQL(operation constants.GQLOperation) (map[string]interface{}, error) {
@@ -84,7 +151,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		return nil, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
-	respBody, err := c.doGQLRequestWithRetry(body, operation.OperationName)
+	respBody, statusCode, err := c.doGQLRequestWithRetry(body, operation.OperationName)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +161,12 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
+	if isAuthError(statusCode, result) {
+		c.handleUnauthorized()
+		return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+	}
+
+	c.markSuccess()
 	return result, nil
 }
 
@@ -108,7 +181,7 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		names[i] = op.OperationName
 	}
 
-	respBody, err := c.doGQLRequestWithRetry(body, strings.Join(names, ","))
+	respBody, statusCode, err := c.doGQLRequestWithRetry(body, strings.Join(names, ","))
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +191,18 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		c.handleUnauthorized()
+		return nil, fmt.Errorf("%w (status %d)", ErrUnauthorized, statusCode)
+	}
+	for _, item := range result {
+		if isAuthError(statusCode, item) {
+			c.handleUnauthorized()
+			return nil, ErrUnauthorized
+		}
+	}
+
+	c.markSuccess()
 	return result, nil
 }
 
@@ -126,27 +211,27 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 // errors (timeouts, connection resets) and HTTP 429/5xx responses. Other
 // HTTP errors (4xx auth/logic errors) are returned immediately since
 // retrying them would just reproduce the same failure.
-func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string) ([]byte, error) {
+func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string) ([]byte, int, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
 		req, err := http.NewRequest("POST", constants.GQLURL, bytes.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, 0, fmt.Errorf("failed to create request: %w", err)
 		}
 		c.setGQLHeaders(req)
 
 		respBody, statusCode, err := c.doGQLOnce(req)
 		if err == nil {
 			slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
-			return respBody, nil
+			return respBody, statusCode, nil
 		}
 
 		lastErr = err
 
 		transient := statusCode == 0 || isTransientGQLStatus(statusCode)
 		if !transient {
-			return nil, err
+			return nil, statusCode, err
 		}
 
 		if attempt == gqlMaxRetries {
@@ -170,7 +255,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string)
 		"error", lastErr,
 	)
 
-	return nil, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
+	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
 }
 
 // doGQLOnce performs a single HTTP round trip. It returns the response body
