@@ -6,24 +6,52 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
+// twitchClient is the slice of *api.TwitchClient the drops tracker actually
+// uses, narrowed to an interface so the full campaign-sync pipeline can be
+// exercised end-to-end in tests (previously only the pure buildTrackedCampaign
+// helper was testable, so a regression that emptied the live sync path went
+// unnoticed). Satisfied by *api.TwitchClient.
+type twitchClient interface {
+	PostGQL(op constants.GQLOperation) (map[string]interface{}, error)
+	GetDropCampaignDetails(campaignID string) (map[string]interface{}, error)
+	ClaimDrop(drop *models.Drop) (bool, error)
+}
+
+// SyncStatus is a snapshot of the most recent campaign sync. It exists so the
+// debug snapshot (and any future health check) can tell whether the sync ran,
+// what Twitch's dashboard returned, how many campaigns were recovered from the
+// inventory's in-progress list, how many ended up tracked, and whether the last
+// run errored - none of which was observable before, since every sync
+// diagnostic was DEBUG-only and a production container runs without -debug.
+type SyncStatus struct {
+	LastSyncAt         time.Time
+	Runs               int
+	DashboardCampaigns int
+	RecoveredCampaigns int
+	TrackedCampaigns   int
+	LastError          string
+}
+
 type DropsTracker struct {
-	client    *api.TwitchClient
+	client    twitchClient
 	streamers []*models.Streamer
 	settings  config.RateLimitSettings
 
 	campaigns []*models.Campaign
 
-	// lastSync records when syncCampaigns last completed, surfaced in the
-	// debug snapshot so an empty Drops page can be told apart from a sync
-	// that never ran.
-	lastSync time.Time
+	// Sync bookkeeping for SyncStatus (and LastSync); all guarded by mu.
+	syncRuns           int
+	lastSyncAt         time.Time
+	lastDashboardCount int
+	lastRecoveredCount int
+	lastTrackedCount   int
+	lastSyncErr        string
 
 	// dropBlacklist holds case-insensitive keywords; a campaign is skipped
 	// during rotation prioritization when any of its drop/reward names matches
@@ -37,7 +65,7 @@ type DropsTracker struct {
 }
 
 func NewDropsTracker(
-	client *api.TwitchClient,
+	client twitchClient,
 	streamers []*models.Streamer,
 	settings config.RateLimitSettings,
 	dropBlacklist []string,
@@ -67,6 +95,14 @@ func (d *DropsTracker) Start(ctx context.Context) {
 	go d.loop()
 }
 
+// SyncNow runs a single campaign sync synchronously, refreshing the tracked
+// campaign pool and SyncStatus before it returns. The background loop runs the
+// same logic on each tick; this exposes it so a caller (or a test) can force an
+// immediate refresh without waiting out the sync interval.
+func (d *DropsTracker) SyncNow() {
+	d.syncCampaigns()
+}
+
 func (d *DropsTracker) Stop() {
 	d.mu.Lock()
 	if d.cancel != nil {
@@ -92,7 +128,38 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 func (d *DropsTracker) LastSync() time.Time {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.lastSync
+	return d.lastSyncAt
+}
+
+// SyncStatus returns a snapshot of the last campaign sync for the debug
+// endpoint. Safe to call from any goroutine.
+func (d *DropsTracker) SyncStatus() SyncStatus {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return SyncStatus{
+		LastSyncAt:         d.lastSyncAt,
+		Runs:               d.syncRuns,
+		DashboardCampaigns: d.lastDashboardCount,
+		RecoveredCampaigns: d.lastRecoveredCount,
+		TrackedCampaigns:   d.lastTrackedCount,
+		LastError:          d.lastSyncErr,
+	}
+}
+
+// recordSync updates the sync bookkeeping surfaced by SyncStatus.
+func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount int, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.syncRuns++
+	d.lastSyncAt = time.Now()
+	d.lastDashboardCount = dashboardCount
+	d.lastRecoveredCount = recoveredCount
+	d.lastTrackedCount = trackedCount
+	if err != nil {
+		d.lastSyncErr = err.Error()
+	} else {
+		d.lastSyncErr = ""
+	}
 }
 
 func (d *DropsTracker) loop() {
@@ -116,16 +183,25 @@ func (d *DropsTracker) loop() {
 func (d *DropsTracker) syncCampaigns() {
 	d.claimAllDropsFromInventory()
 
-	campaigns, err := d.getActiveCampaigns()
+	campaigns, dashboardCount, err := d.getActiveCampaigns()
 	if err != nil {
-		slog.Error("Failed to get campaigns", "error", err)
+		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch", "error", err)
+		d.recordSync(0, 0, 0, err)
 		return
 	}
 
+	// Campaigns produced by the dashboard -> DropCampaignDetails path, before
+	// syncWithInventory folds in any in-progress campaign that path missed.
 	fromDashboard := len(campaigns)
 
 	campaigns = d.syncWithInventory(campaigns)
 	afterInventory := len(campaigns)
+	// Anything syncWithInventory added beyond the dashboard set was recovered
+	// straight from the inventory's in-progress list.
+	recovered := afterInventory - fromDashboard
+	if recovered < 0 {
+		recovered = 0
+	}
 
 	campaigns = d.applyClaimHistory(campaigns)
 	afterClaimHistory := len(campaigns)
@@ -134,38 +210,53 @@ func (d *DropsTracker) syncCampaigns() {
 	afterBlacklist := len(campaigns)
 
 	slog.Debug("Drops sync: campaign counts through the pipeline",
+		"dashboardCount", dashboardCount,
 		"fromDashboard", fromDashboard,
 		"afterInventory", afterInventory,
+		"recoveredFromInventory", recovered,
 		"afterClaimHistory", afterClaimHistory,
 		"afterBlacklist", afterBlacklist)
 
-	if len(campaigns) == 0 {
-		slog.Debug("Drops sync: no active drop campaigns tracked after filtering " +
-			"(enable -debug to see per-campaign skip reasons above)")
-	} else {
+	d.mu.Lock()
+	d.campaigns = campaigns
+	d.mu.Unlock()
+
+	// One concise INFO line per sync so a production deployment - which runs
+	// without -debug - can confirm the sync ran and see what it found.
+	// Previously every sync diagnostic was DEBUG-only, so an empty Drops page
+	// was indistinguishable from a sync that never ran, silently skipped every
+	// campaign, or errored. Detailed per-campaign skip reasons stay at DEBUG.
+	switch {
+	case len(campaigns) > 0:
 		names := make([]string, 0, len(campaigns))
 		for _, c := range campaigns {
 			names = append(names, c.Name)
 		}
-		slog.Debug("Drops sync: tracking active drop campaigns", "count", len(campaigns), "campaigns", names)
+		slog.Info("Drops sync complete: tracking active drop campaigns",
+			"tracked", len(campaigns), "dashboardCampaigns", dashboardCount,
+			"recoveredFromInventory", recovered, "campaigns", names)
+	case dashboardCount == 0:
+		slog.Info("Drops sync complete: Twitch reports no active drop campaigns for this account")
+	default:
+		slog.Info("Drops sync complete: active drop campaigns exist on Twitch but none are trackable "+
+			"(all filtered out by date window, claim history, or blacklist; run with -debug for per-campaign reasons)",
+			"dashboardCampaigns", dashboardCount)
 	}
 
-	d.mu.Lock()
-	d.campaigns = campaigns
-	d.lastSync = time.Now()
-	d.mu.Unlock()
+	d.recordSync(dashboardCount, recovered, len(campaigns), nil)
 
 	d.updateStreamerCampaigns()
 }
 
-func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, error) {
+func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, int, error) {
 	dashboardCampaigns, err := d.getDropsDashboard("ACTIVE")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	dashboardCount := len(dashboardCampaigns)
 
 	slog.Debug("Drops sync: fetched active campaigns from dashboard",
-		"dashboardCount", len(dashboardCampaigns))
+		"dashboardCount", dashboardCount)
 
 	var campaigns []*models.Campaign
 	for _, summary := range dashboardCampaigns {
@@ -210,7 +301,7 @@ func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, error) {
 	slog.Debug("Drops sync: active campaigns after detail fetch and filtering",
 		"trackedCount", len(campaigns))
 
-	return campaigns, nil
+	return campaigns, dashboardCount, nil
 }
 
 // campaignSkipReason explains why buildTrackedCampaign declined to track a
@@ -233,21 +324,36 @@ const (
 // unit-tested directly.
 func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campaign, int, campaignSkipReason) {
 	campaign := models.NewCampaignFromGQL(detail)
+	summaryCampaign := models.NewCampaignFromGQL(summary)
 
 	if campaign.ID == "" {
-		if id, ok := summary["id"].(string); ok {
-			campaign.ID = id
-		}
+		campaign.ID = summaryCampaign.ID
 	}
 	if campaign.Name == "" {
-		if name, ok := summary["name"].(string); ok {
-			campaign.Name = name
-		}
+		campaign.Name = summaryCampaign.Name
 	}
-	if campaign.Game == nil {
-		if summaryGame := models.NewCampaignFromGQL(summary).Game; summaryGame != nil {
-			campaign.Game = summaryGame
-		}
+	if campaign.Game == nil && summaryCampaign.Game != nil {
+		campaign.Game = summaryCampaign.Game
+	}
+
+	// Backfill the campaign-level date window from the summary when the details
+	// response omits it. The ViewerDropsDashboard summary always carries the
+	// campaign's startAt/endAt; a details response that doesn't would otherwise
+	// leave DateMatch false and get the campaign silently skipped as "outside
+	// its date window" even while it's actively running - the exact class of
+	// silent filtering that leaves the Drops page empty during live farming.
+	// DateMatch is then recomputed from whatever dates we end up with, so a
+	// details response that genuinely places the campaign outside its window
+	// (non-zero dates) is preserved rather than overridden by the summary.
+	if campaign.StartAt.IsZero() && !summaryCampaign.StartAt.IsZero() {
+		campaign.StartAt = summaryCampaign.StartAt
+	}
+	if campaign.EndAt.IsZero() && !summaryCampaign.EndAt.IsZero() {
+		campaign.EndAt = summaryCampaign.EndAt
+	}
+	if !campaign.StartAt.IsZero() && !campaign.EndAt.IsZero() {
+		now := time.Now()
+		campaign.DateMatch = campaign.StartAt.Before(now) && campaign.EndAt.After(now)
 	}
 
 	dropsFromDetails := len(campaign.Drops)
