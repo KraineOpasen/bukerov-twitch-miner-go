@@ -149,6 +149,10 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 			streamers[i].IsLive = st.GetIsOnline()
 			if streamers[i].IsLive {
 				streamers[i].LiveDuration = util.FormatDuration(time.Since(st.GetOnlineAt()))
+				streamers[i].GameName = st.Stream.GameName()
+				streamers[i].Title = st.Stream.GetTitle()
+				streamers[i].ViewersCount = st.Stream.GetViewersCount()
+				streamers[i].ViewersCountFormatted = util.FormatNumber(streamers[i].ViewersCount)
 				trackedLive = append(trackedLive, streamers[i])
 			} else {
 				offlineAt := st.GetOfflineAt()
