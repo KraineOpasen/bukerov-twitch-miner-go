@@ -9,11 +9,17 @@ internal/analytics/static/css/app.css
 
 # Configuration (contains sensitive data)
 config.json
+/config/
 cookies/
 *.cookies
 
+# SQLite database (contains personal mining data)
+/database/
+*.db
+
 # Logs and analytics data
 logs/
+*.log
 /analytics/
 
 # IDE
