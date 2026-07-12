@@ -9,6 +9,16 @@ const (
 	CampaignExpired CampaignStatus = "EXPIRED"
 )
 
+// CampaignClaimStatus distinguishes a campaign that's still watchable from
+// one whose reward has already been fully granted, so the dashboard can
+// eventually surface the two states separately.
+type CampaignClaimStatus string
+
+const (
+	CampaignClaimStatusInProgress     CampaignClaimStatus = "in_progress"
+	CampaignClaimStatusAlreadyClaimed CampaignClaimStatus = "already_claimed"
+)
+
 type Campaign struct {
 	ID          string
 	Name        string
@@ -20,11 +30,18 @@ type Campaign struct {
 	InInventory bool
 	Drops       []*Drop
 	DateMatch   bool
+
+	// ClaimStatus and ClaimedDropNames are populated by ApplyClaimHistory
+	// and reflect the account's Twitch-wide claim history rather than just
+	// this campaign instance's own progress.
+	ClaimStatus      CampaignClaimStatus
+	ClaimedDropNames []string
 }
 
 func NewCampaignFromGQL(data map[string]interface{}) *Campaign {
 	c := &Campaign{
-		Drops: make([]*Drop, 0),
+		Drops:       make([]*Drop, 0),
+		ClaimStatus: CampaignClaimStatusInProgress,
 	}
 
 	if id, ok := data["id"].(string); ok {
@@ -117,6 +134,37 @@ func (c *Campaign) ClearClaimedDrops() {
 		}
 	}
 	c.Drops = validDrops
+}
+
+// ApplyClaimHistory drops any reward already present in claimedRewards
+// (keyed by Drop.RewardKey) from this campaign's watchable drops. Those keys
+// represent rewards Twitch's account-wide claim history has already
+// confirmed as granted, which covers recurring/regional variants of this
+// same campaign -- ones sharing the same reward name and game but a
+// different campaign or drop ID -- so their watch time isn't wasted again.
+// It records what was skipped and marks the campaign fully claimed once
+// nothing watchable is left.
+func (c *Campaign) ApplyClaimHistory(claimedRewards map[string]bool) {
+	gameID := ""
+	if c.Game != nil {
+		gameID = c.Game.ID
+	}
+
+	kept := make([]*Drop, 0, len(c.Drops))
+	for _, drop := range c.Drops {
+		if claimedRewards[drop.RewardKey(gameID)] {
+			c.ClaimedDropNames = append(c.ClaimedDropNames, drop.Name)
+			continue
+		}
+		kept = append(kept, drop)
+	}
+	c.Drops = kept
+
+	if len(c.Drops) == 0 && len(c.ClaimedDropNames) > 0 {
+		c.ClaimStatus = CampaignClaimStatusAlreadyClaimed
+	} else {
+		c.ClaimStatus = CampaignClaimStatusInProgress
+	}
 }
 
 func (c *Campaign) SyncDrops(inventoryDrops []interface{}, claimFunc func(*Drop) bool) {

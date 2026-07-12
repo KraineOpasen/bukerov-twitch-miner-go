@@ -652,7 +652,9 @@ Campaign
 ├── startAt: datetime
 ├── endAt: datetime
 ├── allowedChannels: string[] (empty = all)
-└── drops: Drop[]
+├── drops: Drop[]
+├── claimStatus: in_progress | already_claimed
+└── claimedDropNames: string[] (rewards stripped by claim-history check)
 ```
 
 ### Drop Structure
@@ -686,6 +688,15 @@ Drop
    ├── Match drops to campaigns
    └── Update progress
 
+2b. Apply Claim History
+   ├── GET Inventory (gameEventDrops: account-wide granted rewards)
+   ├── Normalize each granted reward to a game+name key
+   ├── Strip any campaign drop whose normalized key was already granted
+   │   (covers recurring/regional variants of the same campaign under a
+   │   different campaign or drop ID)
+   ├── Campaign.claimStatus = already_claimed once all its drops are stripped
+   └── Log "already claimed" (campaign) and skipped-drop cases
+
 3. Check Claimable
    ├── dropInstanceId != null
    ├── isClaimed == false
@@ -703,6 +714,31 @@ A streamer is eligible for drops when:
 - Streamer is online
 - Stream has active campaign IDs
 - Campaign game matches stream game
+
+### Claim History Check
+
+Before a campaign can make a streamer eligible for the `PriorityDrops`
+channel-selection boost, `DropsTracker.applyClaimHistory`
+(`internal/drops/drops.go`) cross-references each of its drops against the
+account's Twitch-wide claim history (`gameEventDrops` in the `Inventory`
+response) via `Drop.RewardKey` / `Campaign.ApplyClaimHistory`
+(`internal/models/drop.go`, `internal/models/campaign.go`).
+
+Reward identity is normalized as `lower(gameID) + "::" + lower(dropName)`
+rather than trusting Twitch's raw campaign/drop IDs, since a recurring or
+regional variant of the same campaign reuses the same reward name and game
+under a different (and occasionally colliding) campaign/drop ID. A drop
+whose normalized key already appears in the claim history is stripped from
+`Campaign.Drops` before campaigns are matched to streamers; if that empties
+a campaign, its `ClaimStatus` becomes `already_claimed`. Since
+`updateStreamerCampaigns` only assigns campaigns with `len(Drops) > 0`, an
+already-claimed campaign is never used to prioritize channel selection or
+consume watch time. Each skip is logged (`slog.Info`, "already claimed" /
+"already-claimed reward") naming the campaign and which rewards were already
+granted. `ClaimStatus`/`ClaimedDropNames` are kept on the (still in-memory)
+campaign list rather than discarded, so a future dashboard view can list
+already-claimed campaigns separately from in-progress ones without further
+backend changes.
 
 ### Channel-Restricted Campaigns
 

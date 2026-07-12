@@ -81,6 +81,7 @@ func (d *DropsTracker) syncCampaigns() {
 	}
 
 	campaigns = d.syncWithInventory(campaigns)
+	campaigns = d.applyClaimHistory(campaigns)
 
 	d.mu.Lock()
 	d.campaigns = campaigns
@@ -217,6 +218,89 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 	}
 
 	return campaigns
+}
+
+// applyClaimHistory cross-references each campaign's drops against the
+// account's Twitch-wide claim history (the inventory's gameEventDrops),
+// which lists rewards already granted independently of whether this exact
+// campaign instance has been joined. This is what lets a recurring or
+// regional variant of a campaign -- one sharing the same reward name and
+// game but a different campaign/drop ID -- get recognized as already
+// claimed before it's ever prioritized for watch time.
+func (d *DropsTracker) applyClaimHistory(campaigns []*models.Campaign) []*models.Campaign {
+	inventory, err := d.getInventory()
+	if err != nil {
+		slog.Error("Failed to fetch inventory for claim history check", "error", err)
+		return campaigns
+	}
+
+	claimedRewards := extractClaimedRewardKeys(inventory)
+	if len(claimedRewards) == 0 {
+		return campaigns
+	}
+
+	for _, campaign := range campaigns {
+		campaign.ApplyClaimHistory(claimedRewards)
+
+		switch {
+		case campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed:
+			slog.Info("Skipping drop campaign: already claimed",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"alreadyClaimed", campaign.ClaimedDropNames)
+		case len(campaign.ClaimedDropNames) > 0:
+			slog.Info("Skipping already-claimed reward within active drop campaign",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"alreadyClaimed", campaign.ClaimedDropNames)
+		}
+	}
+
+	return campaigns
+}
+
+// extractClaimedRewardKeys reads the inventory's gameEventDrops -- Twitch's
+// account-wide record of rewards already granted -- and normalizes each one
+// into a Drop.RewardKey-compatible identifier (game + reward name). Raw
+// reward/drop IDs are intentionally not used here: they can differ (or even
+// collide) between recurring/regional variants of the same campaign, while
+// the reward's own name and game stay stable.
+func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool {
+	claimed := make(map[string]bool)
+	if inventory == nil {
+		return claimed
+	}
+
+	events, ok := inventory["gameEventDrops"].([]interface{})
+	if !ok || events == nil {
+		return claimed
+	}
+
+	for _, e := range events {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name, _ := entry["name"].(string)
+		if name == "" {
+			if benefit, ok := entry["benefit"].(map[string]interface{}); ok {
+				name, _ = benefit["name"].(string)
+			}
+		}
+		if name == "" {
+			continue
+		}
+
+		gameID, _ := entry["gameId"].(string)
+		if gameID == "" {
+			if game, ok := entry["game"].(map[string]interface{}); ok {
+				gameID, _ = game["id"].(string)
+			}
+		}
+
+		claimed[models.NormalizeRewardKey(gameID, name)] = true
+	}
+
+	return claimed
 }
 
 func (d *DropsTracker) claimAllDropsFromInventory() {
