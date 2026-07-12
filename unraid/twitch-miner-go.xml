@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>twitch-miner-go</Name>
-  <Repository>thegame402/twitch-miner-go</Repository>
-  <Registry>https://hub.docker.com/r/thegame402/twitch-miner-go/</Registry>
+  <Repository>ghcr.io/kraineopasen/bukerov-twitch-miner-go</Repository>
+  <Registry>https://github.com/KraineOpasen/bukerov-twitch-miner-go/pkgs/container/bukerov-twitch-miner-go</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>sh</Shell>
