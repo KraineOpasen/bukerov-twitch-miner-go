@@ -29,89 +29,109 @@ const (
 	ansiOrangeGain   = "\033[38;5;214m" // RAID
 )
 
-// staticMsgColors maps a fixed slog message (the msg field) to a color. Only
-// INFO/DEBUG records are looked up here — WARN and ERROR are colored purely by
-// level in colorForRecord before this map is consulted. Messages that need to
-// inspect record attributes (Points earned, Prediction result) are handled
-// separately and are intentionally absent from this map.
-var staticMsgColors = map[string]string{
-	// Online / offline transitions.
-	"Streamer is online":    ansiGreen,
-	"Streamer went offline": ansiRed,
-
-	// Predictions.
-	"Placing prediction bet": ansiBlue,
-	"Prediction confirmed":   ansiSoftBlue,
-
-	// Bets filtered out by BetSettings filter conditions.
-	"Skipping bet":       ansiMagenta,
-	"Bet amount too low": ansiMagenta,
-
-	// Gains — same intent as "Points earned", so the same yellow family.
-	"Claiming bonus":                 ansiYellow,
-	"Claiming moment":                ansiYellow,
-	"Claiming drop":                  ansiYellow,
-	"Claimed drop":                   ansiYellow,
-	"Contributing to community goal": ansiYellow,
-
-	// Startup / bookkeeping noise — muted so real events stand out.
-	"Loaded streamer":                         ansiGray,
-	"Loading streamers":                       ansiGray,
-	"Joined IRC chat":                         ansiGray,
-	"Discord notification provider connected": ansiGray,
+// lineStyle is the console decoration for one log line: an ANSI color that
+// wraps the whole line and an emoji prefixed to it. Both come from a single
+// lookup (styleForRecord) so a given message gets its color and icon from one
+// place — the mapping is never duplicated. An empty field means "none".
+type lineStyle struct {
+	color string
+	emoji string
 }
 
-// colorForRecord picks the ANSI color prefix for a record, or "" for the
-// terminal default. Level wins first (ERROR red, WARN amber), then message
-// category. This mirrors the colorama palette used by the upstream Python
-// miner, adapted to this project's actual msg values.
-func colorForRecord(r slog.Record) string {
+// staticMsgStyles maps a fixed slog message (the msg field) to its console
+// style. Only INFO/DEBUG records are looked up here — WARN and ERROR are styled
+// purely by level in styleForRecord before this map is consulted. Messages that
+// need to inspect record attributes (Points earned, Prediction result) are
+// handled separately and are intentionally absent from this map.
+//
+// The palette/emoji mirror the colorama style of rdavydov/Twitch-Channel-
+// Points-Miner-v2 and Guliveer/twitch-miner-go, adapted to this project's real
+// msg values.
+var staticMsgStyles = map[string]lineStyle{
+	// Startup banner.
+	"Twitch Channel Points Miner": {emoji: "🚀"},
+
+	// Online / offline transitions.
+	"Streamer is online":    {color: ansiGreen, emoji: "🟢"},
+	"Streamer went offline": {color: ansiRed, emoji: "😴"},
+
+	// Predictions.
+	"Placing prediction bet": {color: ansiBlue, emoji: "🎫"},
+	"Prediction confirmed":   {color: ansiSoftBlue, emoji: "✅"},
+
+	// Bets filtered out by BetSettings filter conditions.
+	"Skipping bet":       {color: ansiMagenta},
+	"Bet amount too low": {color: ansiMagenta},
+
+	// Gains — same intent as "Points earned", so the same yellow family.
+	"Claiming bonus":                 {color: ansiYellow, emoji: "🎁"},
+	"Claiming moment":                {color: ansiYellow, emoji: "🎮"},
+	"Claiming drop":                  {color: ansiYellow, emoji: "🎮"},
+	"Claimed drop":                   {color: ansiYellow, emoji: "🎮"},
+	"Contributing to community goal": {color: ansiYellow},
+
+	// Raids.
+	"Joining raid": {emoji: "🚩"},
+
+	// Fair watch-pair rotation (PR #4).
+	"Rotating watch pair": {emoji: "🔄"},
+
+	// Startup / bookkeeping noise — muted so real events stand out; a neutral
+	// wrench keeps them grouped without competing with the notable events.
+	"Loaded streamer":                         {color: ansiGray, emoji: "🔧"},
+	"Loading streamers":                       {color: ansiGray, emoji: "🔧"},
+	"Joined IRC chat":                         {color: ansiGray, emoji: "🔧"},
+	"Discord notification provider connected": {color: ansiGray, emoji: "🔧"},
+}
+
+// styleForRecord picks the console color+emoji for a record. Level wins first
+// (ERROR red 🔴, WARN amber ⚠️), then message category. Returns a zero lineStyle
+// (no color, no emoji) for anything unmapped, which prints as the plain
+// terminal default.
+func styleForRecord(r slog.Record) lineStyle {
 	switch {
 	case r.Level >= slog.LevelError:
-		return ansiRed
+		return lineStyle{color: ansiRed, emoji: "🔴"}
 	case r.Level >= slog.LevelWarn:
-		return ansiAmber
+		return lineStyle{color: ansiAmber, emoji: "⚠️"}
 	}
 
 	switch r.Message {
 	case "Points earned":
-		return pointsEarnedColor(r)
+		return pointsEarnedStyle(r)
 	case "Prediction result":
-		return predictionResultColor(r)
+		return predictionResultStyle(r)
 	}
 
-	if c, ok := staticMsgColors[r.Message]; ok {
-		return c
-	}
-	return ""
+	return staticMsgStyles[r.Message]
 }
 
-// pointsEarnedColor varies the gain-yellow slightly by the "reason" attribute
-// so CLAIM/RAID/WATCH_STREAK pops read differently from the constant passive
-// WATCH stream. Any unknown reason falls back to plain yellow.
-func pointsEarnedColor(r slog.Record) string {
+// pointsEarnedStyle varies the gain-yellow and icon by the "reason" attribute so
+// CLAIM/RAID/WATCH_STREAK read differently from the constant passive WATCH
+// stream. Any unknown reason falls back to the WATCH styling.
+func pointsEarnedStyle(r slog.Record) lineStyle {
 	switch attrString(r, "reason") {
 	case "CLAIM":
-		return ansiBrightYellow
+		return lineStyle{color: ansiBrightYellow, emoji: "🎁"}
 	case "WATCH_STREAK":
-		return ansiGold
+		return lineStyle{color: ansiGold, emoji: "🔥"}
 	case "RAID":
-		return ansiOrangeGain
+		return lineStyle{color: ansiOrangeGain, emoji: "🚩"}
 	default:
-		return ansiYellow
+		return lineStyle{color: ansiYellow, emoji: "🖊️"}
 	}
 }
 
-// predictionResultColor is green on WIN, red on LOSE, and muted for REFUND or
-// anything else.
-func predictionResultColor(r slog.Record) string {
+// predictionResultStyle is green 🏆 on WIN, red ❌ on LOSE, and muted (no emoji)
+// for REFUND or anything else.
+func predictionResultStyle(r slog.Record) lineStyle {
 	switch attrString(r, "result") {
 	case "WIN":
-		return ansiGreen
+		return lineStyle{color: ansiGreen, emoji: "🏆"}
 	case "LOSE":
-		return ansiRed
+		return lineStyle{color: ansiRed, emoji: "❌"}
 	default:
-		return ansiGray
+		return lineStyle{color: ansiGray}
 	}
 }
 
@@ -165,6 +185,11 @@ func (h *consoleHandler) Enabled(_ context.Context, level slog.Level) bool {
 func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 	var buf bytes.Buffer
 
+	// The record is formatted unmodified — the emoji is prefixed to the output
+	// line below, never to the slog message, so it never passes through slog's
+	// string quoting (which would escape variation-selector emoji like ⚠️/🖊️).
+	// The file handler formats the same untouched record, so the on-disk log
+	// stays plain text with neither color nor emoji.
 	var inner slog.Handler = slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: h.level})
 	for _, op := range h.withOps {
 		inner = op(inner)
@@ -178,19 +203,31 @@ func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// The "Colored Output" setting gates all console decoration (color + emoji);
+	// with it off, stdout is the same plain text as the file.
 	if !h.color {
 		_, err := h.w.Write(line)
 		return err
 	}
 
-	color := colorForRecord(r)
-	if color == "" {
+	style := styleForRecord(r)
+	if style.color == "" && style.emoji == "" {
 		_, err := h.w.Write(line)
 		return err
 	}
 
 	trimmed := bytes.TrimRight(line, "\n")
-	_, err := fmt.Fprintf(h.w, "%s%s%s\n", color, trimmed, ansiReset)
+
+	prefix := ""
+	if style.emoji != "" {
+		prefix = style.emoji + " "
+	}
+
+	if style.color == "" {
+		_, err := fmt.Fprintf(h.w, "%s%s\n", prefix, trimmed)
+		return err
+	}
+	_, err := fmt.Fprintf(h.w, "%s%s%s%s\n", style.color, prefix, trimmed, ansiReset)
 	return err
 }
 
