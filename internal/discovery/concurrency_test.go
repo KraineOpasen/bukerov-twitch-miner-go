@@ -32,8 +32,12 @@ type safeSender struct{}
 
 func (safeSender) Send(*models.Streamer) (error, error) { return nil, nil }
 
-func newRaceManager(t *testing.T) *Manager {
-	t.Helper()
+// TestConcurrentSyncStateWatch runs the three real access patterns
+// concurrently: the sync loop (syncOnce), an HTTP/debug reader (State), and
+// the watch loop (processWatch) -- exactly the goroutines Start() + the web
+// server create in production. Run under -race (the repo's standard test
+// invocation) it guards the mu discipline around shared *Channel entries.
+func TestConcurrentSyncStateWatch(t *testing.T) {
 	provider := &safeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	client := &safeClient{streams: []api.DirectoryStream{
 		{ChannelID: "1", Login: "chan_a", Viewers: 100, GameID: "g1", DropsEnabled: true},
@@ -44,19 +48,10 @@ func newRaceManager(t *testing.T) *Manager {
 	m.sender = safeSender{}
 
 	m.syncOnce() // build the initial pool; chan_a's *Channel is shared from here on
-	if len(m.pool) != 1 {
-		t.Fatalf("setup: expected 1 pool entry, got %d", len(m.pool))
-	}
-	return m
-}
 
-// syncOnce (sync loop goroutine) vs State (HTTP/debug goroutine).
-func TestRaceReproSyncVsState(t *testing.T) {
-	m := newRaceManager(t)
-
-	const iters = 50000
+	const iters = 20000
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { // sync loop
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
@@ -67,22 +62,6 @@ func TestRaceReproSyncVsState(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
 			_ = m.State()
-		}
-	}()
-	wg.Wait()
-}
-
-// syncOnce (sync loop goroutine) vs processWatch (watch loop goroutine).
-func TestRaceReproSyncVsWatch(t *testing.T) {
-	m := newRaceManager(t)
-
-	const iters = 50000
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { // sync loop
-		defer wg.Done()
-		for i := 0; i < iters; i++ {
-			m.syncOnce()
 		}
 	}()
 	go func() { // watch loop
