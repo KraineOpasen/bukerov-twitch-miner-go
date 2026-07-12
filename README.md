@@ -8,7 +8,7 @@
 [![Release](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/release.yml/badge.svg)](https://github.com/PatrickWalther/twitch-miner-go/releases)
 [![Release](https://img.shields.io/github/v/release/KraineOpasen/bukerov-twitch-miner-go?label=release)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases)
 
-A fork of [PatrickWalther/twitch-miner-go](https://github.com/PatrickWalther/twitch-miner-go), itself a Go rewrite of [Twitch-Channel-Points-Miner-v2](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2). This rewrite was done for performance and size reasons - the Docker image is over 85x smaller (only ~5MB vs 440MB) and standalone binaries at under 5MB each.
+A fork of [PatrickWalther/twitch-miner-go](https://github.com/PatrickWalther/twitch-miner-go).
 
 This tool passively earns Twitch channel points by simulating viewer presence across multiple streams.
 
