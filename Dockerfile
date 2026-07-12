@@ -60,8 +60,8 @@ FROM scratch
 # Copy CA certificates for HTTPS requests
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Copy timezone data (UTC only to minimize image size)
-COPY --from=builder /usr/share/zoneinfo/UTC /usr/share/zoneinfo/UTC
+# Copy full timezone database so the TZ env var can select any zone at runtime
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 ENV TZ=UTC
 
 # Copy binary
