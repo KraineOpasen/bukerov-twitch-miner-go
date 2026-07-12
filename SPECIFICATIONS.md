@@ -697,7 +697,16 @@ Drop
 1. Sync Campaigns (every 60 minutes)
    ├── GET ViewerDropsDashboard (status: ACTIVE)
    ├── GET DropCampaignDetails for each
+   ├── Backfill campaign date window (startAt/endAt) from the dashboard
+   │   summary when the details response omits it, then recompute the
+   │   date-window match, so an active campaign isn't dropped as "outside its
+   │   date window" while a genuinely-expired details window is still honored
    └── Filter by date range
+
+   (One concise INFO line is logged per sync — dashboard count, recovered-
+   from-inventory count, and tracked count — and the same figures plus the
+   tracked campaign list are exposed at GET /debug/snapshot under "drops", so
+   an empty Drops page is diagnosable without -debug.)
 
 2. Sync Inventory
    ├── GET Inventory

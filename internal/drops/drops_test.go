@@ -171,6 +171,74 @@ func TestBuildInProgressCampaignNoIDReturnsNil(t *testing.T) {
 	}
 }
 
+// TestBuildTrackedCampaignBackfillsDatesFromSummary verifies that when the
+// DropCampaignDetails response omits the campaign-level date window, the dates
+// (and thus DateMatch) are backfilled from the ViewerDropsDashboard summary,
+// so an in-window campaign is tracked instead of being silently skipped as
+// "outside its date window".
+func TestBuildTrackedCampaignBackfillsDatesFromSummary(t *testing.T) {
+	now := time.Now()
+	summary := map[string]interface{}{
+		"id":      "campaign-amd",
+		"name":    "AMD Summer Arena Drops#2",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"endAt":   rfc3339(now.Add(48 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	// Details carry drops but no campaign-level startAt/endAt.
+	detail := map[string]interface{}{
+		"id":     "campaign-amd",
+		"name":   "AMD Summer Arena Drops#2",
+		"status": "ACTIVE",
+		"game":   map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-1", "Garage Slot", 60),
+		},
+	}
+
+	campaign, _, skip := buildTrackedCampaign(summary, detail)
+	if skip != skipNone {
+		t.Fatalf("expected campaign to be tracked after date backfill, got skip reason %v", skip)
+	}
+	if campaign.StartAt.IsZero() || campaign.EndAt.IsZero() {
+		t.Errorf("expected dates backfilled from summary, got start=%v end=%v", campaign.StartAt, campaign.EndAt)
+	}
+	if !campaign.DateMatch {
+		t.Error("expected DateMatch true after backfilling an in-window date range")
+	}
+}
+
+// TestBuildTrackedCampaignDetailsExpiredNotOverridden ensures the date backfill
+// never resurrects a campaign the details response genuinely reports as expired:
+// when details carry their own (out-of-window) dates, those win over the
+// summary.
+func TestBuildTrackedCampaignDetailsExpiredNotOverridden(t *testing.T) {
+	now := time.Now()
+	summary := map[string]interface{}{
+		"id":      "campaign-amd",
+		"name":    "AMD Summer Arena Drops#2",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"endAt":   rfc3339(now.Add(48 * time.Hour)),
+	}
+	detail := map[string]interface{}{
+		"id":      "campaign-amd",
+		"name":    "AMD Summer Arena Drops#2",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-72 * time.Hour)),
+		"endAt":   rfc3339(now.Add(-24 * time.Hour)),
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-1", "Garage Slot", 60),
+		},
+	}
+
+	_, _, skip := buildTrackedCampaign(summary, detail)
+	if skip != skipOutsideDateWindow {
+		t.Fatalf("expected details' expired window to win, got skip reason %v", skip)
+	}
+}
+
 func TestBuildTrackedCampaignOutsideDateWindow(t *testing.T) {
 	now := time.Now()
 	detail := map[string]interface{}{
