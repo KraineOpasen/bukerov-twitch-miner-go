@@ -4,8 +4,8 @@
 
 # Twitch Channel Points Miner
 
-[![CI](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/ci.yml/badge.svg)](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/ci.yml)
-[![Release](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/release.yml/badge.svg)](https://github.com/PatrickWalther/twitch-miner-go/releases)
+[![CI](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/ci.yml/badge.svg)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/ci.yml)
+[![Release](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/release.yml/badge.svg)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases)
 [![Release](https://img.shields.io/github/v/release/KraineOpasen/bukerov-twitch-miner-go?label=release)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases)
 
 A fork of [PatrickWalther/twitch-miner-go](https://github.com/PatrickWalther/twitch-miner-go).
@@ -20,11 +20,19 @@ This tool passively earns Twitch channel points by simulating viewer presence ac
 - **Raid Following**: Automatically join raids for +250 points
 - **Prediction Betting**: Intelligent automated betting on channel predictions with multiple strategies
 - **Game Drops**: Track and claim game drops from inventory
+- **Channel-Restricted Drop Priority**: Correctly prioritizes campaigns limited to specific channels, watching a permitted channel when one is required
+- **Drop Claim Deduplication**: Skips drop campaigns already claimed according to Twitch's account claim history
+- **Drop Name Blacklist**: Skip unwanted drop campaigns by keyword
 - **Moments Claiming**: Automatically claim Twitch Moments when available
-- **Community Goals**: Contribute channel points to streamer community goals
+- **Community Goals**: Contribute channel points to streamer community goals, with optional per-contribution limits (percentage of balance and absolute cap)
+- **Per-Streamer Rotation Preference**: Nudge the watch rotation to prefer or avoid specific streamers when priority is otherwise equal
 - **Multi-Streamer Support**: Monitor multiple streamers with priority-based scheduling
-- **Real-time Analytics**: Web-based dashboard for tracking point earnings
+- **Resilient Twitch API**: GQL retry with exponential backoff on transient errors, plus client-ID fallback on `PersistedQueryNotFound`
+- **Connection Health Watchdog**: Detects auth-token expiry and connection loss (dashboard banner, Discord alert, error log) and recovers when activity resumes
+- **Real-time Analytics**: Web-based dashboard for tracking point earnings, including a dedicated **Drops** page
 - **Discord Notifications**: Get notified for mentions, point goals, and stream status changes
+- **Colored Console Logging**: Optional category-based color scheme for console output
+- **Diagnostics Endpoint**: Optional localhost-only debug HTTP server exposing the miner's internal decision state
 
 ## Quick Start
 
@@ -74,7 +82,7 @@ docker run -d \
   -v ~/twitch-miner/logs:/logs \
   -v ~/twitch-miner/database:/database \
   -p 5000:5000 \
-  thegame402/twitch-miner-go:latest
+  ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
 ```
 
 ### Step 3: Authenticate with Twitch
@@ -106,13 +114,15 @@ docker run -d \
   -v ~/twitch-miner/logs:/logs \
   -v ~/twitch-miner/database:/database \
   -p 5000:5000 \
-  thegame402/twitch-miner-go:latest
+  ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
 ```
 
-### Alternative: Use GitHub Container Registry
+### About the image
+
+The container image is published only to the GitHub Container Registry (GHCR); there is no Docker Hub image for this fork.
 
 ```bash
-docker pull ghcr.io/patrickwalther/twitch-miner-go:latest
+docker pull ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
 ```
 
 ---
@@ -121,7 +131,7 @@ docker pull ghcr.io/patrickwalther/twitch-miner-go:latest
 
 ### Step 1: Download the binary
 
-Download the latest release for your platform from the [Releases page](https://github.com/PatrickWalther/twitch-miner-go/releases).
+Download the latest release for your platform from the [Releases page](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases).
 
 | Platform | File |
 |----------|------|
@@ -201,15 +211,15 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 ### Via Community Applications (Recommended)
 
 1. Install the **Community Applications** plugin from the Apps tab
-2. Search for "twitch-miner-go" in Community Applications
-3. If no results appear, click the **DockerHub** button next to the search field
+2. Search for "bukerov-twitch-miner-go" in Community Applications
+3. If no results appear, use the [Manual Installation](#manual-installation) steps below — this fork's image is published to GHCR (`ghcr.io/kraineopasen/bukerov-twitch-miner-go`), not Docker Hub
 4. Click Install and configure paths
 5. After installation, edit the config file at your configured path
 
 ### Manual Installation
 
 1. Go to Docker tab → Add Container
-2. Set repository to: `thegame402/twitch-miner-go:latest`
+2. Set repository to: `ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest`
 3. Add the following path mappings:
 
 | Container Path | Host Path | Description |
@@ -235,8 +245,8 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 ### Step 1: Clone and build
 
 ```bash
-git clone https://github.com/PatrickWalther/twitch-miner-go.git
-cd twitch-miner-go
+git clone https://github.com/KraineOpasen/bukerov-twitch-miner-go.git
+cd bukerov-twitch-miner-go
 
 # Build with version info (includes Tailwind CSS build)
 make build
@@ -285,6 +295,7 @@ When `enableAnalytics` is true, the miner provides a web dashboard at http://loc
 
 - **Dashboard**: Overview of all streamers with current points and today's earnings
 - **Streamer Pages**: Historical point data with interactive charts
+- **Drops**: Drop campaign queue with dual progress bars (per-drop and per-campaign) and a per-campaign detail modal
 - **Settings**: Runtime configuration that can be changed without restart
 - **Notifications**: Discord notification management (when Discord is enabled)
 - **Chat Logs**: Searchable chat history per streamer (when enabled)
@@ -327,6 +338,7 @@ Generate a sample config with all options:
   "claimDropsOnStartup": false,
   "enableAnalytics": true,
   "priority": ["STREAK", "DROPS", "ORDER"],
+  "dropBlacklist": ["keyword to skip"],
   "streamerSettings": {
     "makePredictions": true,
     "followRaid": true,
@@ -334,6 +346,8 @@ Generate a sample config with all options:
     "claimMoments": true,
     "watchStreak": true,
     "communityGoals": false,
+    "communityGoalsMaxPercent": 10,
+    "communityGoalsMaxAmount": 0,
     "chat": "ONLINE",
     "bet": {
       "strategy": "SMART",
@@ -351,7 +365,8 @@ Generate a sample config with all options:
     { 
       "username": "streamer2",
       "settings": {
-        "makePredictions": false
+        "makePredictions": false,
+        "preference": "prefer"
       }
     }
   ],
@@ -373,7 +388,10 @@ Generate a sample config with all options:
     "minuteWatchedInterval": 60,
     "requestDelay": 0.5,
     "reconnectDelay": 60,
-    "streamCheckInterval": 600
+    "streamCheckInterval": 600,
+    "connectionTimeoutMinutes": 15,
+    "rotationIntervalMinMinutes": 30,
+    "rotationIntervalMaxMinutes": 80
   },
   "logger": {
     "save": true,
@@ -381,7 +399,8 @@ Generate a sample config with all options:
     "consoleLevel": "INFO",
     "fileLevel": "DEBUG",
     "colored": false,
-    "autoClear": true
+    "autoClear": true,
+    "timeZone": ""
   },
   "debug": {
     "enabled": false,
@@ -417,8 +436,11 @@ Applied globally via `streamerSettings`, can be overridden per-streamer:
 | `claimMoments` | true | Claim Twitch Moments |
 | `watchStreak` | true | Prioritize watch streaks |
 | `communityGoals` | false | Contribute to community goals |
+| `communityGoalsMaxPercent` | 10 | Cap a single contribution to this % of balance (0 = no percentage cap) |
+| `communityGoalsMaxAmount` | 0 | Cap a single contribution to this many points (0 = no absolute cap) |
 | `chat` | ONLINE | When to join IRC chat |
 | `chatLogs` | null | Override global chat logging |
+| `preference` | (none) | Rotation preference: `prefer`, `avoid`, or unset — tips the watch rotation only when priority is otherwise equal |
 
 ### Chat Presence Modes
 
@@ -483,6 +505,9 @@ Defaults are tuned to avoid Twitch rate limiting:
 | `requestDelay` | 0.5 | 0.1-2.0 | Seconds between API calls |
 | `reconnectDelay` | 60 | 30-300 | Seconds before reconnecting |
 | `streamCheckInterval` | 600 | 60-900 | Seconds between status checks |
+| `connectionTimeoutMinutes` | 15 | 5-60 | Minutes without any successful activity before the connection is flagged as lost |
+| `rotationIntervalMinMinutes` | 30 | 5-180 | Minimum minutes the watched pair dwells before rotating |
+| `rotationIntervalMaxMinutes` | 80 | 5-240 | Maximum minutes the watched pair dwells before rotating |
 
 ### Debug Endpoint
 
