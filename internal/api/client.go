@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strings"
@@ -23,6 +24,22 @@ var (
 	ErrStreamerDoesNotExist = errors.New("streamer does not exist")
 	ErrStreamerIsOffline    = errors.New("streamer is offline")
 )
+
+const (
+	// gqlMaxRetries is the number of retries attempted after the initial try,
+	// i.e. up to gqlMaxRetries+1 total attempts per GQL request.
+	gqlMaxRetries  = 4
+	gqlBaseBackoff = 500 * time.Millisecond
+	gqlMaxBackoff  = 8 * time.Second
+)
+
+// isTransientGQLStatus reports whether an HTTP status code represents a
+// transient failure worth retrying (rate limiting or server-side errors).
+// 4xx errors other than 429 (bad auth, bad request, etc.) are not retried
+// since retrying them would just repeat the same failure.
+func isTransientGQLStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+}
 
 type TwitchClient struct {
 	auth          *auth.TwitchAuth
@@ -67,25 +84,10 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		return nil, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", constants.GQLURL, bytes.NewReader(body))
+	respBody, err := c.doGQLRequestWithRetry(body, operation.OperationName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
-
-	c.setGQLHeaders(req)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	slog.Debug("GQL response", "operation", operation.OperationName, "status", resp.StatusCode)
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -101,22 +103,14 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		return nil, fmt.Errorf("failed to marshal operations: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", constants.GQLURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	names := make([]string, len(operations))
+	for i, op := range operations {
+		names[i] = op.OperationName
 	}
 
-	c.setGQLHeaders(req)
-
-	resp, err := c.client.Do(req)
+	respBody, err := c.doGQLRequestWithRetry(body, strings.Join(names, ","))
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, err
 	}
 
 	var result []map[string]interface{}
@@ -125,6 +119,91 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	}
 
 	return result, nil
+}
+
+// doGQLRequestWithRetry sends the given already-marshaled GQL request body,
+// retrying with exponential backoff on transient failures: network-level
+// errors (timeouts, connection resets) and HTTP 429/5xx responses. Other
+// HTTP errors (4xx auth/logic errors) are returned immediately since
+// retrying them would just reproduce the same failure.
+func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string) ([]byte, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
+		req, err := http.NewRequest("POST", constants.GQLURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		c.setGQLHeaders(req)
+
+		respBody, statusCode, err := c.doGQLOnce(req)
+		if err == nil {
+			slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
+			return respBody, nil
+		}
+
+		lastErr = err
+
+		transient := statusCode == 0 || isTransientGQLStatus(statusCode)
+		if !transient {
+			return nil, err
+		}
+
+		if attempt == gqlMaxRetries {
+			break
+		}
+
+		wait := gqlBackoffDuration(attempt)
+		slog.Warn("GQL request failed, retrying",
+			"operation", operationLabel,
+			"attempt", attempt+1,
+			"maxAttempts", gqlMaxRetries+1,
+			"waitSeconds", wait.Seconds(),
+			"error", lastErr,
+		)
+		time.Sleep(wait)
+	}
+
+	slog.Error("GQL request exhausted all retries, skipping this cycle",
+		"operation", operationLabel,
+		"attempts", gqlMaxRetries+1,
+		"error", lastErr,
+	)
+
+	return nil, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
+}
+
+// doGQLOnce performs a single HTTP round trip. It returns the response body
+// on success, or an error with the observed status code (0 for network-level
+// errors, where no HTTP response was received at all).
+func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, error) {
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if isTransientGQLStatus(resp.StatusCode) {
+		return nil, resp.StatusCode, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
+	}
+
+	return respBody, resp.StatusCode, nil
+}
+
+// gqlBackoffDuration returns the exponential backoff delay (with jitter) for
+// the given zero-based retry attempt, capped at gqlMaxBackoff.
+func gqlBackoffDuration(attempt int) time.Duration {
+	backoff := gqlBaseBackoff * time.Duration(1<<uint(attempt))
+	if backoff > gqlMaxBackoff {
+		backoff = gqlMaxBackoff
+	}
+	jitter := time.Duration(rand.Int63n(int64(backoff)/2 + 1))
+	return backoff + jitter
 }
 
 func (c *TwitchClient) setGQLHeaders(req *http.Request) {
