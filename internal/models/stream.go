@@ -137,6 +137,20 @@ func (s *Stream) UpdateMinuteWatched() float64 {
 	return delta
 }
 
+func (s *Stream) GetMinuteWatched() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.MinuteWatched
+}
+
+func (s *Stream) GetWatchStreakMissing() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.WatchStreakMissing
+}
+
 func (s *Stream) GetTitle() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

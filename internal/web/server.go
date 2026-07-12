@@ -37,6 +37,7 @@ type Server struct {
 	basePath       string
 	streamers      []*models.Streamer
 	discordEnabled bool
+	debugURL       string
 
 	analytics               *analytics.Service
 	server                  *http.Server
@@ -54,17 +55,17 @@ func NewServer(analyticsSettings config.AnalyticsSettings, username string, base
 	templates := loadTemplates()
 
 	return &Server{
-		host:         analyticsSettings.Host,
-		port:         analyticsSettings.Port,
-		refresh:      analyticsSettings.Refresh,
-		daysAgo:      analyticsSettings.DaysAgo,
-		username:     username,
-		basePath:     basePath,
-		streamers:    streamers,
-		analytics:    analyticsSvc,
-		templates:    templates,
-		status: NewStatusBroadcaster(),
-		ready:  len(streamers) > 0,
+		host:      analyticsSettings.Host,
+		port:      analyticsSettings.Port,
+		refresh:   analyticsSettings.Refresh,
+		daysAgo:   analyticsSettings.DaysAgo,
+		username:  username,
+		basePath:  basePath,
+		streamers: streamers,
+		analytics: analyticsSvc,
+		templates: templates,
+		status:    NewStatusBroadcaster(),
+		ready:     len(streamers) > 0,
 	}
 }
 
@@ -72,17 +73,17 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 	templates := loadTemplates()
 
 	return &Server{
-		host:         analyticsSettings.Host,
-		port:         analyticsSettings.Port,
-		refresh:      analyticsSettings.Refresh,
-		daysAgo:      analyticsSettings.DaysAgo,
-		username:     username,
-		basePath:     basePath,
-		streamers:    nil,
-		analytics:    analyticsSvc,
-		templates:    templates,
-		status: NewStatusBroadcaster(),
-		ready:  false,
+		host:      analyticsSettings.Host,
+		port:      analyticsSettings.Port,
+		refresh:   analyticsSettings.Refresh,
+		daysAgo:   analyticsSettings.DaysAgo,
+		username:  username,
+		basePath:  basePath,
+		streamers: nil,
+		analytics: analyticsSvc,
+		templates: templates,
+		status:    NewStatusBroadcaster(),
+		ready:     false,
 	}
 }
 
@@ -156,6 +157,14 @@ func (s *Server) SetDiscordEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.discordEnabled = enabled
+}
+
+// SetDebugURL publishes the localhost debug-snapshot URL so pages can link
+// to it from the nav bar; empty (the default) hides the link.
+func (s *Server) SetDebugURL(url string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.debugURL = url
 }
 
 func getAuthCredentials() (username, password string) {

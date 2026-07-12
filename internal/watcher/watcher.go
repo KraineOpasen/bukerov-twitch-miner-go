@@ -34,6 +34,18 @@ type MinuteWatcher struct {
 	// needs no locking of its own.
 	rotation rotationState
 
+	// selectionReasons and selectionMode are per-tick scratch state for the
+	// debug snapshot, rebuilt on every processWatching pass. Like rotation,
+	// they are only touched from the loop() goroutine; the copy other
+	// goroutines may read is debugState below.
+	selectionReasons map[int]string
+	selectionMode    string
+
+	// debugState is the last published watch-decision snapshot, guarded by
+	// debugMu because the debug HTTP endpoint reads it from its own goroutine.
+	debugMu    sync.Mutex
+	debugState DebugState
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -121,8 +133,12 @@ func (w *MinuteWatcher) loop() {
 }
 
 func (w *MinuteWatcher) processWatching() {
+	w.selectionReasons = make(map[int]string)
+	w.selectionMode = ModeIdle
+
 	onlineStreamers := w.getOnlineStreamers()
 	if len(onlineStreamers) == 0 {
+		w.publishDebugState(nil, ModeIdle)
 		return
 	}
 
@@ -133,6 +149,7 @@ func (w *MinuteWatcher) processWatching() {
 	}
 
 	watching := w.selectStreamersToWatch(onlineStreamers)
+	w.publishDebugState(watching, w.selectionMode)
 	if len(watching) == 0 {
 		return
 	}
@@ -174,6 +191,8 @@ func (w *MinuteWatcher) getOnlineStreamers() []int {
 		if s.GetIsOnline() {
 			if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
 				online = append(online, i)
+			} else {
+				w.noteSelection(i, "went online less than 30s ago - waiting for the stream to settle before watching")
 			}
 		}
 	}
@@ -198,8 +217,10 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 		// Not enough online streamers to need rotation; drop any stale pair
 		// so a fresh one is computed next time we go above the limit.
 		w.rotation.hasPair = false
+		w.selectionMode = ModeDirect
 		return w.selectByPriority(candidates)
 	}
+	w.selectionMode = ModeRotation
 	return w.selectRotating(candidates)
 }
 
@@ -217,6 +238,7 @@ func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
 	for _, idx := range onlineIndexes {
 		if w.streamers[idx].Settings.Preference == models.PreferenceAvoid {
 			avoided = append(avoided, w.streamers[idx].Username)
+			w.noteSelection(idx, `excluded from watching: preference is set to "avoid" and other channels are online`)
 			continue
 		}
 		filtered = append(filtered, idx)
@@ -225,6 +247,9 @@ func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
 	if len(filtered) == 0 {
 		// Every online streamer is marked avoid - watching something is
 		// still required, so the exclusion is lifted entirely.
+		for _, idx := range onlineIndexes {
+			w.noteSelection(idx, `"avoid" preference ignored: every online channel is marked avoid, so something must still be watched`)
+		}
 		return onlineIndexes
 	}
 	if len(avoided) > 0 {
@@ -291,6 +316,10 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	}
 
 	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes)
+
+	for _, idx := range pair {
+		w.noteSelectionIfEmpty(idx, "watched: holds a rotation slot (had the least accumulated watch time when the pair was last recomputed)")
+	}
 
 	if w.rotation.lastWatched == nil {
 		w.rotation.lastWatched = make(map[int]time.Time)
@@ -361,6 +390,7 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 				w.rotation.deferredFor[idx] = true
 				w.rotation.lastSwitch = now
 				w.rotation.nextInterval = streakDeferDelay
+				w.noteSelection(idx, "watched: rotation swap-out postponed - within minutes of completing its watch streak")
 				return
 			}
 		}
@@ -504,6 +534,16 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 		return pair
 	}
 
+	switch {
+	case bestRestricted:
+		w.noteSelection(best, "watched: boosted into a slot - channel-restricted drop campaign only progresses on this exact channel")
+	case w.streamers[best].DropsCondition():
+		w.noteSelection(best, "watched: boosted into a slot - active drop campaign")
+	default:
+		w.noteSelection(best, "watched: boosted into a slot - watch streak not yet earned this stream")
+	}
+	w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost (keeps its rotation slot and returns when the boost ends)")
+
 	if pair[0] == victim {
 		pair[0] = best
 	} else {
@@ -562,6 +602,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			for _, idx := range onlineIndexes {
 				if !watching[idx] {
 					watching[idx] = true
+					w.noteSelection(idx, "watched: selected by ORDER priority (position in the configured streamer list)")
 					if remainingSlots() <= 0 {
 						break
 					}
@@ -586,6 +627,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			for _, item := range items {
 				if !watching[item.index] {
 					watching[item.index] = true
+					w.noteSelection(item.index, fmt.Sprintf("watched: selected by %s priority (%d channel points)", priority, item.points))
 					if remainingSlots() <= 0 {
 						break
 					}
@@ -601,6 +643,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 					s.Stream.MinuteWatched < 7 {
 					if !watching[idx] {
 						watching[idx] = true
+						w.noteSelection(idx, "watched: selected by STREAK priority - watch streak not yet earned this stream")
 						if remainingSlots() <= 0 {
 							break
 						}
@@ -618,6 +661,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 				if w.streamers[idx].DropsCondition() && w.streamers[idx].HasChannelRestrictedCampaign() {
 					if !watching[idx] {
 						watching[idx] = true
+						w.noteSelection(idx, "watched: selected by DROPS priority - channel-restricted drop campaign only progresses on this exact channel")
 						if remainingSlots() <= 0 {
 							break
 						}
@@ -631,6 +675,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 				if w.streamers[idx].DropsCondition() {
 					if !watching[idx] {
 						watching[idx] = true
+						w.noteSelection(idx, "watched: selected by DROPS priority - active drop campaign")
 						if remainingSlots() <= 0 {
 							break
 						}
@@ -658,6 +703,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			for _, item := range items {
 				if !watching[item.index] {
 					watching[item.index] = true
+					w.noteSelection(item.index, fmt.Sprintf("watched: selected by SUBSCRIBED priority (%.1fx points multiplier)", item.multiplier))
 					if remainingSlots() <= 0 {
 						break
 					}

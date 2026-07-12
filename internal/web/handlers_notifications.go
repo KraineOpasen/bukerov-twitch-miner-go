@@ -15,6 +15,7 @@ func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request)
 	s.mu.RLock()
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
 	notifMgr := s.notificationManager
 	s.mu.RUnlock()
 
@@ -39,6 +40,7 @@ func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request)
 		RefreshMinutes: refresh,
 		Version:        version.Version,
 		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
 		ConfigValid:    configValid,
 		ConfigError:    configError,
 		Streamers:      streamers,

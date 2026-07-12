@@ -54,6 +54,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
 	s.mu.RUnlock()
 
 	data := DashboardData{
@@ -64,6 +65,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		StreamerCount:  len(streamers),
 		PointsToday:    util.FormatNumber(pointsToday),
 		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
 	}
 
 	s.renderPage(w, "dashboard.html", data)
@@ -92,6 +94,7 @@ func (s *Server) handleStreamerPage(w http.ResponseWriter, r *http.Request) {
 	refresh := s.refresh
 	daysAgo := s.daysAgo
 	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
 	s.mu.RUnlock()
 
 	startTS := time.Now().AddDate(0, 0, -daysAgo).UnixMilli()
@@ -120,6 +123,7 @@ func (s *Server) handleStreamerPage(w http.ResponseWriter, r *http.Request) {
 		DataPoints:     len(data.Series),
 		DaysAgo:        daysAgo,
 		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
 	}
 
 	s.renderPage(w, "streamer.html", pageData)

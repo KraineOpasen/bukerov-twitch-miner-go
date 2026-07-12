@@ -15,7 +15,10 @@ import (
 	"github.com/PatrickWalther/twitch-miner-go/internal/chat"
 	"github.com/PatrickWalther/twitch-miner-go/internal/config"
 	"github.com/PatrickWalther/twitch-miner-go/internal/database"
+	"github.com/PatrickWalther/twitch-miner-go/internal/debug"
 	"github.com/PatrickWalther/twitch-miner-go/internal/drops"
+	"github.com/PatrickWalther/twitch-miner-go/internal/events"
+	"github.com/PatrickWalther/twitch-miner-go/internal/logger"
 	"github.com/PatrickWalther/twitch-miner-go/internal/models"
 	"github.com/PatrickWalther/twitch-miner-go/internal/notifications"
 	"github.com/PatrickWalther/twitch-miner-go/internal/pubsub"
@@ -43,12 +46,20 @@ type Miner struct {
 	analyticsSvc  *analytics.Service
 	webServer     *web.Server
 	notifications *notifications.Manager
+	debugServer   *debug.Server
 
 	deviceID          string
 	externalAnalytics bool
 
 	nextStreamCheck    time.Time
 	streamCheckTrigger chan struct{}
+
+	// startedAt/reauthRequired/connectionLost/connectionDetail feed the debug
+	// snapshot's overall status; all guarded by mu.
+	startedAt        time.Time
+	reauthRequired   bool
+	connectionLost   bool
+	connectionDetail string
 
 	authErrOnce sync.Once
 
@@ -251,6 +262,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		if m.notifications != nil {
 			m.webServer.SetNotificationManager(m.notifications)
 		}
+		if m.config.Debug.Enabled {
+			m.webServer.SetDebugURL(fmt.Sprintf("http://localhost:%d/debug/snapshot", m.config.Debug.Port))
+		}
 	}
 
 	var mentionHandler chat.MentionHandler
@@ -334,6 +348,26 @@ func (m *Miner) subscribeToTopics() error {
 
 func (m *Miner) startMining(ctx context.Context) {
 	slog.Info("Starting mining operations")
+
+	m.mu.Lock()
+	m.startedAt = time.Now()
+	m.mu.Unlock()
+
+	// The debug server starts here - after every component is wired up - so
+	// its snapshot handler never observes half-initialized miner fields.
+	if m.config.Debug.Enabled {
+		logPath := ""
+		if m.config.Logger.Save {
+			logPath = logger.LogFilePath(m.config.Username)
+		}
+		m.debugServer = debug.NewServer(m.config.Debug.Port, m.BuildDebugSnapshot, logPath)
+		if err := m.debugServer.Start(); err != nil {
+			slog.Error("Failed to start debug server", "error", err)
+			m.debugServer = nil
+		}
+	}
+
+	events.Record(events.TypeMinerStarted, "", "mining operations started")
 
 	for _, s := range m.streamers.All() {
 		m.client.CheckStreamerOnline(s)
@@ -472,6 +506,10 @@ func (m *Miner) handleAuthError() {
 	m.authErrOnce.Do(func() {
 		slog.Error("Twitch authorization expired or was revoked - reauthorization required")
 
+		m.mu.Lock()
+		m.reauthRequired = true
+		m.mu.Unlock()
+
 		if m.notifications != nil {
 			m.notifications.NotifyReauthRequired("Restart the miner and complete the Twitch device login again.")
 		}
@@ -513,6 +551,11 @@ func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 				detail := connectionLostDetail(apiStale, pubsubStale, threshold)
 				slog.Error("Connection lost - harvesting paused", "apiStale", apiStale, "pubsubStale", pubsubStale, "thresholdMinutes", m.config.RateLimits.ConnectionTimeoutMinutes)
 
+				m.mu.Lock()
+				m.connectionLost = true
+				m.connectionDetail = detail
+				m.mu.Unlock()
+
 				if m.notifications != nil {
 					m.notifications.NotifyConnectionLost(detail)
 				}
@@ -522,6 +565,11 @@ func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 			} else if !lost && connectionLost {
 				connectionLost = false
 				slog.Info("Connection restored - harvesting resumed")
+
+				m.mu.Lock()
+				m.connectionLost = false
+				m.connectionDetail = ""
+				m.mu.Unlock()
 
 				if m.notifications != nil {
 					m.notifications.NotifyConnectionRestored()
@@ -566,6 +614,10 @@ func (m *Miner) stop() {
 
 	if m.webServer != nil {
 		m.webServer.Stop()
+	}
+
+	if m.debugServer != nil {
+		m.debugServer.Stop()
 	}
 
 	if m.analyticsSvc != nil {

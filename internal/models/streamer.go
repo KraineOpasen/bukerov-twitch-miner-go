@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/PatrickWalther/twitch-miner-go/internal/events"
 )
 
 type ChatPresence string
@@ -102,6 +104,7 @@ func (s *Streamer) SetOffline() {
 	if s.IsOnline {
 		s.OfflineAt = time.Now()
 		s.IsOnline = false
+		events.Record(events.TypeStreamerOffline, s.Username, "")
 	}
 }
 
@@ -113,6 +116,7 @@ func (s *Streamer) SetOnline() {
 		s.OnlineAt = time.Now()
 		s.IsOnline = true
 		s.Stream.InitWatchStreak()
+		events.Record(events.TypeStreamerOnline, s.Username, "")
 	}
 }
 
@@ -173,6 +177,38 @@ func (s *Streamer) HasChannelRestrictedCampaign() bool {
 		}
 	}
 	return false
+}
+
+// CampaignSummary is a read-only view of an assigned drop campaign, exposed
+// for the debug snapshot without handing out the mutable *Campaign itself.
+type CampaignSummary struct {
+	Name              string
+	Game              string
+	EndAt             time.Time
+	ChannelRestricted bool
+	RemainingDrops    int
+}
+
+// ActiveCampaignsSummary returns summaries of the drop campaigns currently
+// assigned to this streamer's stream (empty when offline or none match).
+func (s *Streamer) ActiveCampaignsSummary() []CampaignSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	summaries := make([]CampaignSummary, 0, len(s.Stream.Campaigns))
+	for _, c := range s.Stream.Campaigns {
+		summary := CampaignSummary{
+			Name:              c.Name,
+			EndAt:             c.EndAt,
+			ChannelRestricted: c.IsChannelRestricted(),
+			RemainingDrops:    len(c.Drops),
+		}
+		if c.Game != nil {
+			summary.Game = c.Game.Name
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
 }
 
 func (s *Streamer) ViewerHasPointsMultiplier() bool {

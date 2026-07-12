@@ -90,3 +90,43 @@ func TestValidateConfigClampsRotationRangeAndOrdering(t *testing.T) {
 			cfg.RateLimits.RotationIntervalMaxMinutes, cfg.RateLimits.RotationIntervalMinMinutes)
 	}
 }
+
+func TestDebugSettingsDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Debug.Enabled {
+		t.Error("expected debug server disabled by default")
+	}
+	if cfg.Debug.Port != 5757 {
+		t.Errorf("expected default debug port 5757, got %d", cfg.Debug.Port)
+	}
+}
+
+func TestLoadConfigDefaultsDebugPortWhenAbsent(t *testing.T) {
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"debug": {"enabled": true}
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if !cfg.Debug.Enabled {
+		t.Error("expected debug enabled from config")
+	}
+	if cfg.Debug.Port != 5757 {
+		t.Errorf("expected absent port to fall back to 5757, got %d", cfg.Debug.Port)
+	}
+}
+
+func TestValidateConfigClampsDebugPort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Debug.Port = 99999
+	ValidateConfig(&cfg)
+
+	if cfg.Debug.Port != 5757 {
+		t.Errorf("expected out-of-range port reset to 5757, got %d", cfg.Debug.Port)
+	}
+}

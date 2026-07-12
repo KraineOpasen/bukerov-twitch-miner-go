@@ -15,6 +15,13 @@ type Logger struct {
 	handler slog.Handler
 }
 
+// LogFilePath returns the path of the log file Setup writes to for username
+// when file logging (settings.Save) is enabled. Exposed so other components
+// (the debug endpoint's log tail) can locate the same file.
+func LogFilePath(username string) string {
+	return filepath.Join("logs", username+".log")
+}
+
 func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 	consoleLevel := parseLevel(settings.ConsoleLevel)
 	fileLevel := parseLevel(settings.FileLevel)
@@ -29,7 +36,7 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 			return nil, err
 		}
 
-		logPath := filepath.Join("logs", username+".log")
+		logPath := LogFilePath(username)
 
 		if settings.AutoClear {
 			clearOldLogs(logPath, 7)

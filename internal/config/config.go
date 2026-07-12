@@ -29,6 +29,7 @@ type Config struct {
 	Logger              LoggerSettings          `json:"logger"`
 	Analytics           AnalyticsSettings       `json:"analytics"`
 	Discord             DiscordSettings         `json:"discord"`
+	Debug               DebugSettings           `json:"debug"`
 }
 
 type StreamerConfig struct {
@@ -85,6 +86,15 @@ type AnalyticsSettings struct {
 	EnableChatLogs bool   `json:"enableChatLogs"`
 }
 
+// DebugSettings configures the localhost-only diagnostic HTTP server
+// (GET /debug/snapshot and GET /debug/log). It always binds to 127.0.0.1 -
+// only the port is configurable - so the internal state it exposes is never
+// reachable from outside the machine (or container) running the miner.
+type DebugSettings struct {
+	Enabled bool `json:"enabled"`
+	Port    int  `json:"port"`
+}
+
 // DiscordSettings contains Discord integration configuration.
 // Only connection settings are stored in config; notification rules are in the database.
 type DiscordSettings struct {
@@ -103,6 +113,14 @@ func DefaultConfig() Config {
 		Logger:              DefaultLoggerSettings(),
 		Analytics:           DefaultAnalyticsSettings(),
 		Discord:             DefaultDiscordSettings(),
+		Debug:               DefaultDebugSettings(),
+	}
+}
+
+func DefaultDebugSettings() DebugSettings {
+	return DebugSettings{
+		Enabled: false,
+		Port:    5757,
 	}
 }
 
@@ -275,5 +293,9 @@ func ValidateConfig(config *Config) {
 
 	if config.RateLimits.RotationIntervalMaxMinutes < config.RateLimits.RotationIntervalMinMinutes {
 		config.RateLimits.RotationIntervalMaxMinutes = config.RateLimits.RotationIntervalMinMinutes
+	}
+
+	if config.Debug.Port < 1 || config.Debug.Port > 65535 {
+		config.Debug.Port = DefaultDebugSettings().Port
 	}
 }
