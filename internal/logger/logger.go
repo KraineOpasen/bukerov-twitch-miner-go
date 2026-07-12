@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"io"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -26,10 +26,13 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 	consoleLevel := parseLevel(settings.ConsoleLevel)
 	fileLevel := parseLevel(settings.FileLevel)
 
-	var writers []io.Writer
-	writers = append(writers, os.Stdout)
-
 	l := &Logger{}
+
+	// The console handler colorizes each line for stdout (what Docker/Portainer
+	// display), keyed off the record's level and msg category. The file handler
+	// deliberately stays a plain slog.TextHandler so the on-disk log — served
+	// verbatim by the /debug/log endpoint — contains no ANSI escape codes.
+	handlers := []slog.Handler{newConsoleHandler(os.Stdout, consoleLevel)}
 
 	if settings.Save {
 		if err := os.MkdirAll("logs", 0755); err != nil {
@@ -47,24 +50,63 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 			return nil, err
 		}
 		l.file = file
-		writers = append(writers, file)
+
+		handlers = append(handlers, slog.NewTextHandler(file, &slog.HandlerOptions{
+			Level: fileLevel,
+		}))
 	}
 
-	multiWriter := io.MultiWriter(writers...)
-
-	level := consoleLevel
-	if settings.Save && fileLevel < consoleLevel {
-		level = fileLevel
-	}
-
-	handler := slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
-		Level: level,
-	})
-
+	handler := fanoutHandler{handlers: handlers}
 	l.handler = handler
 	slog.SetDefault(slog.New(handler))
 
 	return l, nil
+}
+
+// fanoutHandler dispatches every record to each underlying handler, each of
+// which enforces its own level. This is what lets the console (colored, INFO by
+// default) and the file (plain, DEBUG by default) diverge in both level and
+// formatting while sharing a single slog.Logger.
+type fanoutHandler struct {
+	handlers []slog.Handler
+}
+
+func (h fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	for _, hh := range h.handlers {
+		if hh.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, hh := range h.handlers {
+		if !hh.Enabled(ctx, r.Level) {
+			continue
+		}
+		// Clone because handlers may retain or mutate the record.
+		if err := hh.Handle(ctx, r.Clone()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h fanoutHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	next := make([]slog.Handler, len(h.handlers))
+	for i, hh := range h.handlers {
+		next[i] = hh.WithAttrs(attrs)
+	}
+	return fanoutHandler{handlers: next}
+}
+
+func (h fanoutHandler) WithGroup(name string) slog.Handler {
+	next := make([]slog.Handler, len(h.handlers))
+	for i, hh := range h.handlers {
+		next[i] = hh.WithGroup(name)
+	}
+	return fanoutHandler{handlers: next}
 }
 
 func (l *Logger) Close() {
