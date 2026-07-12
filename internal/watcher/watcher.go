@@ -30,6 +30,12 @@ type MinuteWatcher struct {
 	// needs no locking of its own.
 	rotation rotationState
 
+	// streakDiag tracks, per streamer index, which watch-streak pursuit events
+	// have already been logged for the current streak, so each is logged at
+	// most once instead of every tick. Like rotation, it is only touched from
+	// the loop() goroutine and needs no locking.
+	streakDiag map[int]streakDiagState
+
 	// selectionReasons and selectionMode are per-tick scratch state for the
 	// debug snapshot, rebuilt on every processWatching pass. Like rotation,
 	// they are only touched from the loop() goroutine; the copy other
@@ -71,6 +77,22 @@ type rotationState struct {
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 	deferredFor map[int]bool      // streamers whose scheduled swap-out was already postponed once
 }
+
+// streakDiagState records which watch-streak pursuit log lines have already
+// been emitted for a streamer's current (still-missing) streak.
+type streakDiagState struct {
+	pursuing bool // "Pursuing watch streak" already logged
+	stalled  bool // "watched past the threshold but no streak" already warned
+}
+
+// watchStreakThresholdMinutes is roughly how many minutes of watch time Twitch
+// needs before it grants a watch-streak bonus (a streak is earned by viewing
+// ~5 minutes of a consecutive broadcast; 7 leaves a margin). It doubles as the
+// "should have earned it by now" line: once a streamer has been watched this
+// long with the streak still missing, the streak isn't merely under-watched -
+// something upstream (auth, viewing simulation, or a Twitch-side change) is
+// keeping Twitch from crediting it.
+const watchStreakThresholdMinutes = 7.0
 
 func NewMinuteWatcher(
 	client *api.TwitchClient,
@@ -189,6 +211,7 @@ func (w *MinuteWatcher) processWatching() {
 					slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
 				}
 			}
+			w.noteStreakProgress(idx)
 		}
 
 		select {
@@ -556,7 +579,6 @@ func containsPair(online []int, pair [2]int) bool {
 // ranking computed by rotateToLeastWatchedPair.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
 	best := -1
-	bestRestricted := false
 	for _, idx := range onlineIndexes {
 		if idx == pair[0] || idx == pair[1] {
 			continue
@@ -564,22 +586,14 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 		if !w.isBoostEligible(idx) {
 			continue
 		}
-		// A channel-restricted campaign can only ever progress by watching
-		// this exact channel, so it always outranks a candidate that merely
-		// has an unrestricted campaign or a watch streak in progress.
-		restricted := w.streamers[idx].HasChannelRestrictedCampaign()
-		switch {
-		case best == -1:
-			best, bestRestricted = idx, restricted
-		case restricted && !bestRestricted:
-			best, bestRestricted = idx, restricted
-		case restricted == bestRestricted && w.rotation.lastWatched[idx].Before(w.rotation.lastWatched[best]):
-			best, bestRestricted = idx, restricted
+		if best == -1 || w.betterBoostCandidate(idx, best) {
+			best = idx
 		}
 	}
 	if best == -1 {
 		return pair
 	}
+	bestRestricted := w.streamers[best].HasChannelRestrictedCampaign()
 
 	victim := -1
 	for _, slot := range pair {
@@ -620,7 +634,54 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 	return s.Settings.WatchStreak &&
 		s.Stream.WatchStreakMissing &&
 		(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-		s.Stream.MinuteWatched < 7
+		s.Stream.MinuteWatched < watchStreakThresholdMinutes
+}
+
+// streakInProgress reports whether a boost-eligible streamer is part-way
+// through earning its watch streak: some watch time already banked, streak
+// still missing. Preferring these when picking the boost seat lets the watcher
+// finish a streak it already started instead of alternating between several
+// fresh pending-streak streamers each tick and completing none of them.
+func (w *MinuteWatcher) streakInProgress(idx int) bool {
+	s := w.streamers[idx]
+	return s.Settings.WatchStreak &&
+		s.Stream.WatchStreakMissing &&
+		s.Stream.MinuteWatched > 0 &&
+		s.Stream.MinuteWatched < watchStreakThresholdMinutes
+}
+
+// betterBoostCandidate reports whether off-pair streamer cand should take the
+// single boost seat over the current best. The ranking, highest priority first:
+//
+//  1. A channel-restricted drop campaign - its progress can only ever be earned
+//     by watching this exact channel, so it can't wait for a rotation turn.
+//  2. A watch streak already in progress, most-watched first - finish a streak
+//     the bot already started (converges) rather than starting a new one and
+//     leaving both unfinished (thrashes).
+//  3. Least-recently-watched - the original fairness tie-break.
+func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
+	cr := w.streamers[cand].HasChannelRestrictedCampaign()
+	br := w.streamers[best].HasChannelRestrictedCampaign()
+	if cr != br {
+		return cr
+	}
+
+	cp := w.streakInProgress(cand)
+	bp := w.streakInProgress(best)
+	if cp != bp {
+		return cp
+	}
+	if cp && bp {
+		// Both mid-streak: prefer the one with the most watch time banked so the
+		// pursuit converges on a single streamer instead of alternating.
+		cm := w.streamers[cand].Stream.MinuteWatched
+		bm := w.streamers[best].Stream.MinuteWatched
+		if cm != bm {
+			return cm > bm
+		}
+	}
+
+	return w.rotation.lastWatched[cand].Before(w.rotation.lastWatched[best])
 }
 
 func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
@@ -629,7 +690,48 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 		return false
 	}
 	mw := s.Stream.MinuteWatched
-	return mw >= 5 && mw < 7
+	return mw >= 5 && mw < watchStreakThresholdMinutes
+}
+
+// noteStreakProgress logs watch-streak pursuit for a streamer that just had a
+// minute-watched successfully reported. It emits at most one "Pursuing watch
+// streak" INFO and one "past the threshold" WARN per streak, so the operator
+// can both see the bot actively chasing streaks (previously invisible - the
+// only streak log was the earned "Points earned" line, which never appears
+// when streaks aren't being credited) and, crucially, tell apart "not watched
+// enough yet" from "watched enough but Twitch never granted it".
+func (w *MinuteWatcher) noteStreakProgress(idx int) {
+	s := w.streamers[idx]
+	if !s.Settings.WatchStreak || !s.Stream.GetWatchStreakMissing() {
+		// Streak disabled or already earned for this broadcast: drop any pursuit
+		// state so the next fresh broadcast reports again from scratch.
+		delete(w.streakDiag, idx)
+		return
+	}
+
+	if w.streakDiag == nil {
+		w.streakDiag = make(map[int]streakDiagState)
+	}
+	state := w.streakDiag[idx]
+	mw := s.Stream.GetMinuteWatched()
+
+	if !state.pursuing {
+		state.pursuing = true
+		slog.Info("Pursuing watch streak",
+			"streamer", s.Username,
+			"minutesWatched", mw,
+			"neededMinutes", watchStreakThresholdMinutes)
+	}
+
+	if mw >= watchStreakThresholdMinutes && !state.stalled {
+		state.stalled = true
+		slog.Warn("Watched past the watch-streak threshold but Twitch has not granted the streak - if this persists the streak is not being credited (check authorization / viewing), not merely under-watched",
+			"streamer", s.Username,
+			"minutesWatched", mw,
+			"thresholdMinutes", watchStreakThresholdMinutes)
+	}
+
+	w.streakDiag[idx] = state
 }
 
 // selectByPriority is the original priority-based picker, used as-is when
@@ -700,7 +802,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 				if s.Settings.WatchStreak &&
 					s.Stream.WatchStreakMissing &&
 					(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-					s.Stream.MinuteWatched < 7 {
+					s.Stream.MinuteWatched < watchStreakThresholdMinutes {
 					if !watching[idx] {
 						watching[idx] = true
 						w.noteSelection(idx, "watched: selected by STREAK priority - watch streak not yet earned this stream")
