@@ -8,7 +8,7 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS := -s -w -X $(MODULE)/internal/version.Version=$(VERSION)
 GOFLAGS := -trimpath -buildvcs=false
-DOCKER_REPO ?= thegame402/twitch-miner-go
+DOCKER_REPO ?= ghcr.io/kraineopasen/bukerov-twitch-miner-go
 
 # UPX configuration
 UPX_VERSION := 5.0.2
@@ -175,4 +175,4 @@ help:
 	@echo ""
 	@echo "Variables:"
 	@echo "  VERSION         Version string (default: git tag or 'dev')"
-	@echo "  DOCKER_REPO     Docker repository (default: thegame402/twitch-miner-go)"
+	@echo "  DOCKER_REPO     Docker repository (default: ghcr.io/kraineopasen/bukerov-twitch-miner-go)"
