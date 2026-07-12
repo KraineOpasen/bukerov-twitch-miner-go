@@ -78,6 +78,14 @@ type minuteSender interface {
 	Send(streamer *models.Streamer) (simulateErr error, err error)
 }
 
+// TrackedLoginsProvider exposes the logins of the configured streamer list so
+// discovery never duplicates a channel the watch rotation already covers
+// (double minute-watched reporting for one channel would both waste the slot
+// and look anomalous). Satisfied by *streamer.Manager.
+type TrackedLoginsProvider interface {
+	Names() []string
+}
+
 // Channel is one discovered directory candidate. All fields except Streamer
 // are guarded by the owning Manager's mu — they are written by the sync loop
 // and read by the watch loop and State() concurrently. Streamer has its own
@@ -112,6 +120,7 @@ type Manager struct {
 	client    twitchAPI
 	sender    minuteSender
 	campaigns CampaignsProvider
+	tracked   TrackedLoginsProvider
 	settings  config.RateLimitSettings
 
 	games []string
@@ -135,6 +144,7 @@ type Manager struct {
 func NewManager(
 	client *api.TwitchClient,
 	campaigns CampaignsProvider,
+	tracked TrackedLoginsProvider,
 	settings config.RateLimitSettings,
 	games []string,
 ) *Manager {
@@ -142,10 +152,38 @@ func NewManager(
 		client:    client,
 		sender:    watcher.NewMinuteSender(client),
 		campaigns: campaigns,
+		tracked:   tracked,
 		settings:  settings,
 		games:     games,
 		resync:    make(chan struct{}, 1),
 	}
+}
+
+// trackedLogins returns the configured streamer logins as a lowercase set.
+func (m *Manager) trackedLogins() map[string]bool {
+	if m.tracked == nil {
+		return nil
+	}
+	names := m.tracked.Names()
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[strings.ToLower(n)] = true
+	}
+	return set
+}
+
+// isTracked reports whether the login is on the configured streamer list.
+func (m *Manager) isTracked(login string) bool {
+	if m.tracked == nil {
+		return false
+	}
+	lower := strings.ToLower(login)
+	for _, n := range m.tracked.Names() {
+		if strings.ToLower(n) == lower {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) Start(ctx context.Context) {
@@ -276,6 +314,8 @@ func (m *Manager) syncOnce() time.Duration {
 			"games", inactiveGames)
 	}
 
+	trackedSet := m.trackedLogins()
+
 	m.mu.Lock()
 	var newPool []*Channel
 	for _, l := range listings {
@@ -293,6 +333,12 @@ func (m *Manager) syncOnce() time.Duration {
 		candidates := make([]*Channel, 0, len(l.streams))
 		for _, ds := range l.streams {
 			if !ds.DropsEnabled || ds.Login == "" || ds.ChannelID == "" {
+				continue
+			}
+			// Channels on the configured streamer list are the rotation's
+			// business — duplicating them here would double-report watch
+			// minutes for the same channel and waste the discovery slot.
+			if trackedSet[strings.ToLower(ds.Login)] {
 				continue
 			}
 			ch := m.findExistingLocked(ds.Login)
@@ -383,6 +429,47 @@ func (m *Manager) gameStillActive(gameID string) bool {
 		if len(c.Drops) > 0 && c.ClaimStatus != models.CampaignClaimStatusAlreadyClaimed {
 			return true
 		}
+	}
+	return false
+}
+
+// channelCarriesActiveCampaign reports whether at least one of the campaigns
+// Twitch lists as available on this channel (Stream.CampaignIDs) is a
+// tracker-active one: still unclaimed per the account's claim history, not
+// blacklisted (those never reach Campaigns()), and — for channel-restricted
+// campaigns — actually allowing this channel. This mirrors the intersection
+// updateStreamerCampaigns performs for tracked streamers; without it a
+// top-viewed channel carrying only an already-claimed recurring campaign
+// would hold the slot forever while a smaller channel runs the new one.
+func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
+	if m.campaigns == nil {
+		return false
+	}
+
+	ids := ch.Streamer.Stream.CampaignIDs
+	if len(ids) == 0 {
+		return false
+	}
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+
+	_, gameID, _, _ := m.channelFacts(ch)
+	for _, c := range m.campaigns.Campaigns() {
+		if c.Game == nil || c.Game.ID != gameID {
+			continue
+		}
+		if len(c.Drops) == 0 || c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
+			continue
+		}
+		if !idSet[c.ID] {
+			continue
+		}
+		if c.IsChannelRestricted() && !c.AllowsChannel(ch.Streamer.ChannelID) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -570,6 +657,9 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	if !m.gameConfigured(game) {
 		return "game removed from directory discovery settings", true
 	}
+	if m.isTracked(ch.Streamer.Username) {
+		return "channel is now on the configured streamer list (rotation covers it)", true
+	}
 	if !ch.Streamer.GetIsOnline() {
 		return "channel went offline", true
 	}
@@ -579,8 +669,8 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {
 		return "channel switched to a different game", true
 	}
-	if len(ch.Streamer.Stream.CampaignIDs) == 0 {
-		return "channel no longer has an available drop campaign", true
+	if !m.channelCarriesActiveCampaign(ch) {
+		return "channel no longer carries an active unclaimed drop campaign", true
 	}
 	return "", false
 }
@@ -607,9 +697,13 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 		if offline {
 			continue
 		}
-		// The pool may briefly hold channels of a just-removed game until the
-		// triggered resync rebuilds it; never select those.
+		// The pool may briefly hold channels of a just-removed game or a
+		// just-added tracked streamer until the triggered resync rebuilds it;
+		// never select those.
 		if !m.gameConfigured(game) {
+			continue
+		}
+		if m.isTracked(ch.Streamer.Username) {
 			continue
 		}
 		if !m.gameStillActive(gameID) {
@@ -639,7 +733,7 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 		if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {
 			continue
 		}
-		if len(ch.Streamer.Stream.CampaignIDs) == 0 {
+		if !m.channelCarriesActiveCampaign(ch) {
 			continue
 		}
 

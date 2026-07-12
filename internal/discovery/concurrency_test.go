@@ -39,7 +39,7 @@ func newRaceManager(t *testing.T) *Manager {
 		{ChannelID: "1", Login: "chan_a", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 
-	m := NewManager(nil, provider, testRateLimits(), []string{"World of Tanks"})
+	m := NewManager(nil, provider, &fakeTracked{}, testRateLimits(), []string{"World of Tanks"})
 	m.client = client
 	m.sender = safeSender{}
 

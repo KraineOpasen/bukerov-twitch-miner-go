@@ -800,24 +800,34 @@ Flow, per configured game:
    game's last campaign is claimed, the game drops out of discovery
    automatically.
 2. **Directory sync** — `DirectoryPage_Game` (slug resolved via
-   `DirectoryGameRedirect`, with a local slugify fallback) lists up to 30
-   live channels with `systemFilters: ["DROPS_ENABLED"]`, sorted by viewer
-   count. The sync runs every `campaignSyncInterval` minutes, dropping to a
-   2-minute retry while the pool is empty. One GQL query per game per sync.
+   `DirectoryGameRedirect` with per-game caching and a local slugify
+   fallback; a slug that stops resolving is evicted and re-resolved) lists
+   up to 30 live channels with `systemFilters: ["DROPS_ENABLED"]`, sorted by
+   viewer count. Channels already on the configured streamer list are
+   excluded — they belong to the rotation, and double-watching one channel
+   would duplicate its minute-watched reporting. The sync runs every
+   `campaignSyncInterval` minutes, dropping to a 2-minute retry while the
+   pool is empty (or when every candidate has been verified unwatchable). A
+   failed query keeps the game's previous candidates.
 3. **The extra watch slot** — the best candidate (configured game order,
    then viewers descending, mirroring reference miners' top-by-viewers
    pick) is verified online via the normal `CheckStreamerOnline` path (spade
    URL + stream payload + per-channel campaign IDs) and then receives
    minute-watched events through the same `watcher.MinuteSender` mechanism
    the rotation uses, on the same `minuteWatchedInterval` cadence with the
-   same ±20% jitter. At most 3 candidates are online-verified per tick to
-   bound API bursts.
+   same ±20% jitter. Channel eligibility requires an intersection between
+   the channel's available campaign IDs and the tracker's active unclaimed
+   campaigns (honoring channel-restricted allow-lists) — the same check
+   `updateStreamerCampaigns` performs for tracked streamers — so a channel
+   carrying only an already-claimed recurring campaign is never farmed. At
+   most 3 candidates are online-verified per tick to bound API bursts.
 4. **Auto-switching** — the slot abandons its channel and moves to the next
-   candidate when the channel goes offline, switches game, loses its
-   available campaigns (`DropsHighlightService_AvailableDrops` returns
-   none), or the game's campaigns are exhausted. Log lines: `Discovered
-   channel selected`, `Switching discovered channel`, and `Discovery pool
-   empty` (once per transition).
+   candidate when the channel goes offline, switches game, no longer
+   carries a tracker-active campaign (claimed/blacklisted ones don't
+   count), the game's campaigns are exhausted, or the channel/game is
+   removed from (or the channel is added to) the relevant settings lists.
+   Log lines: `Discovered channel selected`, `Switching discovered
+   channel`, and `Discovery pool empty` (once per transition).
 
 Drop progress earned this way lands in the account inventory and is claimed
 by the existing drops tracker (`claimAllDropsFromInventory` / inventory

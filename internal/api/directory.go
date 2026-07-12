@@ -65,11 +65,20 @@ func (c *TwitchClient) GetDirectoryStreams(gameName string, limit int) ([]Direct
 	streams := parseDirectoryStreams(resp)
 	if len(streams) == 0 {
 		// Distinguish "no live drops-enabled channels" (a legitimate empty
-		// directory, data.game present) from a failed query (GQL errors,
-		// e.g. a rotated persisted-query hash), so callers can keep their
-		// previous channel pool instead of clearing it on a transient error.
+		// directory, data.game present) from failure modes, so callers can
+		// keep their previous channel pool instead of clearing it:
+		// - GQL errors (e.g. a rotated persisted-query hash);
+		// - data.game explicitly null, meaning the slug didn't resolve — in
+		//   that case also drop the cached slug so the next sync re-resolves
+		//   instead of failing forever on a stale/guessed value.
 		if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
 			return nil, fmt.Errorf("directory query for %q returned GQL errors: %v", gameName, errs)
+		}
+		if data, ok := resp["data"].(map[string]interface{}); ok {
+			if g, present := data["game"]; present && g == nil {
+				c.invalidateGameSlug(gameName)
+				return nil, fmt.Errorf("directory slug %q for game %q did not resolve", slug, gameName)
+			}
 		}
 	}
 	return streams, nil
@@ -104,6 +113,15 @@ func (c *TwitchClient) resolveGameSlug(gameName string) string {
 	c.gameSlugs[key] = slug
 	c.slugMu.Unlock()
 	return slug
+}
+
+// invalidateGameSlug drops a cached slug that turned out not to resolve, so
+// the next lookup goes back through the GQL slug redirect.
+func (c *TwitchClient) invalidateGameSlug(gameName string) {
+	key := strings.ToLower(strings.TrimSpace(gameName))
+	c.slugMu.Lock()
+	delete(c.gameSlugs, key)
+	c.slugMu.Unlock()
 }
 
 // parseDirectoryStreams walks a DirectoryPage_Game response down to
@@ -198,6 +216,12 @@ func (c *TwitchClient) GetGameSlug(gameName string) (string, error) {
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
+		// No data at all: report GQL errors as a failure (e.g. a rotated
+		// persisted-query hash) rather than conflating them with "Twitch
+		// doesn't know this game".
+		if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
+			return "", fmt.Errorf("slug lookup for %q returned GQL errors: %v", gameName, errs)
+		}
 		return "", nil
 	}
 	game, ok := data["game"].(map[string]interface{})

@@ -72,8 +72,14 @@ func onlineCandidate(login, channelID, game, gameID string, viewers int) *Channe
 	return ch
 }
 
+type fakeTracked struct {
+	names []string
+}
+
+func (f *fakeTracked) Names() []string { return f.names }
+
 func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient, sender *fakeSender) *Manager {
-	m := NewManager(nil, campaigns, testRateLimits(), games)
+	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games)
 	m.client = client
 	m.sender = sender
 	return m
@@ -198,6 +204,104 @@ func TestSelectBestBoundsChecksPerTick(t *testing.T) {
 	}
 	if len(client.checked) != maxCandidateChecksPerTick {
 		t.Errorf("expected at most %d online checks per tick, got %d", maxCandidateChecksPerTick, len(client.checked))
+	}
+}
+
+func TestSelectBestRequiresChannelLevelActiveCampaign(t *testing.T) {
+	// The game stays "active" thanks to a new unclaimed campaign, but the
+	// top-viewed channel only carries the recurring campaign the account has
+	// already claimed. The slot must skip it and take the smaller channel
+	// actually running the unclaimed campaign.
+	claimed := activeCampaign("g1", "World of Tanks")
+	claimed.ID = "camp-old"
+	claimed.ClaimStatus = models.CampaignClaimStatusAlreadyClaimed
+
+	fresh := activeCampaign("g1", "World of Tanks")
+	fresh.ID = "camp-new"
+
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{claimed, fresh}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+
+	topButClaimed := onlineCandidate("top_channel", "1", "World of Tanks", "g1", 9000)
+	topButClaimed.Streamer.Stream.CampaignIDs = []string{"camp-old"}
+
+	smallButFresh := onlineCandidate("small_channel", "2", "World of Tanks", "g1", 100)
+	smallButFresh.Streamer.Stream.CampaignIDs = []string{"camp-new"}
+
+	m.pool = []*Channel{topButClaimed, smallButFresh}
+
+	if got := m.selectBest(nil); got != smallButFresh {
+		var login string
+		if got != nil {
+			login = got.Streamer.Username
+		}
+		t.Fatalf("expected small_channel (carries the unclaimed campaign), got %q", login)
+	}
+}
+
+func TestChannelCarriesActiveCampaignHonorsChannelRestriction(t *testing.T) {
+	restricted := activeCampaign("g1", "World of Tanks")
+	restricted.ID = "camp-restricted"
+	restricted.Channels = []string{"allowed-channel-id"}
+
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{restricted}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+
+	allowed := onlineCandidate("allowed_channel", "allowed-channel-id", "World of Tanks", "g1", 100)
+	allowed.Streamer.Stream.CampaignIDs = []string{"camp-restricted"}
+	if !m.channelCarriesActiveCampaign(allowed) {
+		t.Error("expected allow-listed channel to qualify for the restricted campaign")
+	}
+
+	other := onlineCandidate("other_channel", "other-channel-id", "World of Tanks", "g1", 100)
+	other.Streamer.Stream.CampaignIDs = []string{"camp-restricted"}
+	if m.channelCarriesActiveCampaign(other) {
+		t.Error("expected non-allow-listed channel to be rejected for a channel-restricted campaign")
+	}
+}
+
+func TestSyncOnceExcludesTrackedStreamers(t *testing.T) {
+	// Channels already on the configured streamer list belong to the
+	// rotation; discovery must not double-watch them.
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	client := &fakeClient{streams: []api.DirectoryStream{
+		{ChannelID: "1", Login: "tracked_streamer", Viewers: 9000, GameID: "g1", DropsEnabled: true},
+		{ChannelID: "2", Login: "free_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
+	}}
+	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m.tracked = &fakeTracked{names: []string{"tracked_streamer"}}
+
+	m.syncOnce()
+
+	if len(m.pool) != 1 || m.pool[0].Streamer.Username != "free_channel" {
+		names := make([]string, len(m.pool))
+		for i, ch := range m.pool {
+			names[i] = ch.Streamer.Username
+		}
+		t.Fatalf("expected only free_channel in the pool, got %v", names)
+	}
+}
+
+func TestProcessWatchAbandonsChannelAddedToStreamerList(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	sender := &fakeSender{}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+
+	promoted := onlineCandidate("promoted_channel", "1", "World of Tanks", "g1", 9000)
+	backup := onlineCandidate("backup_channel", "2", "World of Tanks", "g1", 500)
+	m.pool = []*Channel{promoted, backup}
+	m.current = promoted
+
+	// The user adds the watched discovered channel to the streamer list.
+	m.tracked = &fakeTracked{names: []string{"promoted_channel"}}
+
+	m.processWatch()
+
+	if m.current != backup {
+		t.Fatalf("expected switch to backup_channel after promotion to the streamer list, got %+v", m.current)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "backup_channel" {
+		t.Errorf("expected the minute to go to backup_channel, got %v", sender.sent)
 	}
 }
 

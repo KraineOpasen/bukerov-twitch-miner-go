@@ -330,10 +330,12 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	// The discovery manager is always constructed (so the Settings page can
 	// enable it at runtime), but it stays dormant — no API calls, no watch
-	// slot — while the configured game list is empty.
+	// slot — while the configured game list is empty. It gets the streamer
+	// manager so it never duplicates a channel the rotation already watches.
 	m.discovery = discovery.NewManager(
 		m.client,
 		m.dropsTracker,
+		m.streamers,
 		m.config.RateLimits,
 		m.config.DirectoryGames,
 	)
