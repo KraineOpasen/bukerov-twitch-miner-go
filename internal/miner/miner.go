@@ -16,6 +16,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
@@ -43,6 +44,7 @@ type Miner struct {
 	chatManager   *chat.ChatManager
 	watcher       *watcher.MinuteWatcher
 	dropsTracker  *drops.DropsTracker
+	discovery     *discovery.Manager
 	analyticsSvc  *analytics.Service
 	webServer     *web.Server
 	notifications *notifications.Manager
@@ -326,8 +328,21 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.DropBlacklist,
 	)
 
+	// The discovery manager is always constructed (so the Settings page can
+	// enable it at runtime), but it stays dormant — no API calls, no watch
+	// slot — while the configured game list is empty. It gets the streamer
+	// manager so it never duplicates a channel the rotation already watches.
+	m.discovery = discovery.NewManager(
+		m.client,
+		m.dropsTracker,
+		m.streamers,
+		m.config.RateLimits,
+		m.config.DirectoryGames,
+	)
+
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
+		m.webServer.SetDiscoveryProvider(m.discovery)
 	}
 
 	if m.config.ClaimDropsOnStartup {
@@ -402,6 +417,7 @@ func (m *Miner) startMining(ctx context.Context) {
 
 	m.watcher.Start(ctx)
 	m.dropsTracker.Start(ctx)
+	m.discovery.Start(ctx)
 
 	if m.webServer != nil {
 		if !m.externalAnalytics {
@@ -682,6 +698,7 @@ func (m *Miner) stop() {
 	m.wsPool.Close()
 	m.watcher.Stop()
 	m.dropsTracker.Stop()
+	m.discovery.Stop()
 
 	if m.webServer != nil {
 		m.webServer.Stop()
@@ -731,6 +748,10 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 
 	if m.dropsTracker != nil {
 		m.dropsTracker.UpdateBlacklist(m.config.DropBlacklist)
+	}
+
+	if m.discovery != nil {
+		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.RateLimits)
 	}
 
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)

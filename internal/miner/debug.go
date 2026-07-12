@@ -144,6 +144,26 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		}
 	}
 
+	if m.discovery != nil {
+		if st := m.discovery.State(); st.Enabled {
+			info := &debug.DiscoveryInfo{
+				Games:      st.Games,
+				Watching:   st.Watching,
+				LastSyncAt: st.LastSync,
+			}
+			for _, ch := range st.Channels {
+				info.Channels = append(info.Channels, debug.DiscoveryChannel{
+					Login:          ch.Login,
+					Game:           ch.Game,
+					Viewers:        ch.Viewers,
+					Status:         ch.Status,
+					MinutesWatched: ch.MinutesWatched,
+				})
+			}
+			snap.Discovery = info
+		}
+	}
+
 	snap.RecentEvents = events.Recent(snapshotRecentEvents)
 	return snap
 }

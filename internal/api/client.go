@@ -79,6 +79,12 @@ type TwitchClient struct {
 	healthMu    sync.RWMutex
 	lastSuccess time.Time
 
+	// gameSlugs caches game display name (lowercased) -> directory slug
+	// lookups for the discovery subsystem; slugs are stable, so caching
+	// halves that subsystem's GQL calls per sync.
+	slugMu    sync.Mutex
+	gameSlugs map[string]string
+
 	mu sync.RWMutex
 }
 

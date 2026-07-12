@@ -73,6 +73,21 @@
         </div>
     </details>
 
+    <details id="directory-discovery" class="details-panel">
+        <summary class="text-lg">Directory Discovery</summary>
+        <div class="details-content">
+            <p class="text-neutral-400 text-sm mb-4">Games for which the miner discovers live drops-enabled channels via the Twitch directory and farms the most-viewed one in an extra watch slot. This never touches the streamer list or its watch rotation. Use the exact game name as shown on Twitch (e.g. <span class="text-neutral-100">World of Tanks</span>). Leave the list empty to keep discovery off.</p>
+
+            <div class="flex gap-3 mb-4">
+                <input type="text" id="new-directory-game-input" placeholder="Enter game name" class="input-field flex-1">
+                <button type="button" id="add-directory-game-btn" class="btn-secondary whitespace-nowrap">Add Game</button>
+            </div>
+
+            <ul class="space-y-2" id="directory-game-list">
+            </ul>
+        </div>
+    </details>
+
     <details id="ratelimits" class="details-panel">
         <summary class="text-lg">Rate Limits</summary>
         <div class="details-content space-y-0">
@@ -382,6 +397,66 @@
         }
 
         document.getElementById('dropBlacklist').value = (settings.dropBlacklist || []).join('\n');
+
+        populateDirectoryGameList(settings.directoryGames || []);
+    }
+
+    function populateDirectoryGameList(games) {
+        const list = document.getElementById('directory-game-list');
+        list.innerHTML = '';
+        games.forEach(g => list.appendChild(createDirectoryGameItem(g)));
+    }
+
+    function createDirectoryGameItem(game) {
+        const li = document.createElement('li');
+        li.className = 'streamer-item';
+        li.dataset.game = game;
+
+        const header = document.createElement('div');
+        header.className = 'streamer-header';
+
+        const name = document.createElement('span');
+        name.className = 'flex-1 text-neutral-100 font-medium';
+        name.textContent = game;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.textContent = '✕';
+        removeBtn.addEventListener('click', () => {
+            li.remove();
+            showToast(`Removed ${game}`);
+        });
+
+        header.appendChild(name);
+        header.appendChild(removeBtn);
+        li.appendChild(header);
+        return li;
+    }
+
+    function addDirectoryGame() {
+        const input = document.getElementById('new-directory-game-input');
+        const game = input.value.trim();
+        if (!game) {
+            showToast('Please enter a game name', 'error');
+            return;
+        }
+
+        const exists = Array.from(document.querySelectorAll('#directory-game-list .streamer-item'))
+            .some(item => item.dataset.game.toLowerCase() === game.toLowerCase());
+        if (exists) {
+            showToast('Game already in the list', 'error');
+            return;
+        }
+
+        document.getElementById('directory-game-list').appendChild(createDirectoryGameItem(game));
+        input.value = '';
+        showToast(`Added ${game}`);
+    }
+
+    function gatherDirectoryGames() {
+        return Array.from(document.querySelectorAll('#directory-game-list .streamer-item'))
+            .map(item => item.dataset.game);
     }
 
     // parseBlacklist splits the textarea on newlines and commas, trims each
@@ -647,7 +722,7 @@
             return;
         }
 
-        const existing = document.querySelector(`.streamer-item[data-username="${username}"]`);
+        const existing = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
         if (existing) {
             showToast('Streamer already exists', 'error');
             return;
@@ -664,7 +739,7 @@
 
     function removeStreamer(username) {
         if (!confirm(`Remove ${username}?`)) return;
-        const item = document.querySelector(`.streamer-item[data-username="${username}"]`);
+        const item = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
         if (item) {
             item.remove();
             showToast(`Removed ${username}`);
@@ -699,7 +774,9 @@
     }
 
     function gatherStreamers() {
-        const items = document.querySelectorAll('.streamer-item');
+        // Scoped to #streamer-list: the Directory Discovery game list reuses
+        // the .streamer-item styling but has no per-streamer settings inside.
+        const items = document.querySelectorAll('#streamer-list .streamer-item');
         const streamers = [];
         
         items.forEach(item => {
@@ -751,7 +828,8 @@
                 botToken: document.getElementById('discordBotToken').value,
                 guildId: document.getElementById('discordGuildId').value
             },
-            dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value)
+            dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
+            directoryGames: gatherDirectoryGames()
         };
     }
 
@@ -809,6 +887,14 @@
         if (e.key === 'Enter') {
             e.preventDefault();
             addStreamer();
+        }
+    });
+
+    document.getElementById('add-directory-game-btn').addEventListener('click', addDirectoryGame);
+    document.getElementById('new-directory-game-input').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            addDirectoryGame();
         }
     });
 

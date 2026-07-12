@@ -127,6 +127,31 @@ type DropsListData struct {
 	Campaigns []DropCampaignView
 }
 
+// DiscoveredChannelView is one row in the Drops-page "Discovered Channels"
+// section (the directory-discovery candidate pool).
+type DiscoveredChannelView struct {
+	Login            string
+	Game             string
+	Status           string
+	ViewersFormatted string
+	Watching         bool
+	Offline          bool
+
+	// MinutesWatched/HasMinutesWatched show accumulated watch time for the
+	// channel currently occupying the discovery slot.
+	MinutesWatched    int
+	HasMinutesWatched bool
+}
+
+// DiscoveryListData feeds the discovery_list partial. Enabled is false while
+// no directory games are configured, in which case the section renders a
+// pointer to Settings instead of a channel table.
+type DiscoveryListData struct {
+	Enabled  bool
+	Games    []string
+	Channels []DiscoveredChannelView
+}
+
 type NotificationsPageData struct {
 	Username       string
 	RefreshMinutes int

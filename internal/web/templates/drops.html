@@ -11,6 +11,17 @@
 >
     <div class="animate-pulse text-neutral-400">Loading drop campaigns...</div>
 </section>
+
+<h2 class="text-xl font-bold mt-10 mb-2">Discovered Channels</h2>
+<p class="text-neutral-400 text-sm mb-4">Live drops-enabled channels found in the Twitch directory for your configured games. The most-viewed available channel is farmed in an extra watch slot, separate from the streamer rotation; it switches automatically when a channel goes offline or its drops end.</p>
+
+<section
+    hx-get="/api/discovery"
+    hx-trigger="load, every 1m"
+    hx-swap="innerHTML"
+>
+    <div class="animate-pulse text-neutral-400">Loading discovered channels...</div>
+</section>
 {{end}}
 
 {{define "scripts"}}

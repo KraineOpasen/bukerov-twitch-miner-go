@@ -13,6 +13,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
@@ -32,6 +33,13 @@ type NextStreamCheckProvider interface {
 // the Drops page can render them. It's satisfied by the drops tracker.
 type CampaignsProvider interface {
 	Campaigns() []*models.Campaign
+}
+
+// DiscoveryProvider exposes the directory-discovery subsystem's state so the
+// Drops page can render the discovered-channels pool. It's satisfied by the
+// discovery manager.
+type DiscoveryProvider interface {
+	State() discovery.State
 }
 
 // RewardsProvider exposes custom channel-points reward listing/redemption and
@@ -63,6 +71,7 @@ type Server struct {
 	notificationManager     *notifications.Manager
 	nextStreamCheckProvider NextStreamCheckProvider
 	campaignsProvider       CampaignsProvider
+	discoveryProvider       DiscoveryProvider
 	rewardsProvider         RewardsProvider
 	status                  *StatusBroadcaster
 	ready                   bool
@@ -177,6 +186,12 @@ func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
 	s.campaignsProvider = provider
 }
 
+func (s *Server) SetDiscoveryProvider(provider DiscoveryProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discoveryProvider = provider
+}
+
 func (s *Server) SetRewardsProvider(provider RewardsProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -249,6 +264,7 @@ func (s *Server) Start() {
 	// Drops routes
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
+	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)
 
 	// Status routes
 	mux.HandleFunc("/api/status", s.handleAPIStatus)
