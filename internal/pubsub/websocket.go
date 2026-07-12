@@ -96,6 +96,14 @@ func (ws *WebSocketClient) Close() {
 	}
 }
 
+// LastPong returns the last time this connection received a PONG, i.e. the
+// last confirmed sign of life. Used by the connection-health watchdog.
+func (ws *WebSocketClient) LastPong() time.Time {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ws.lastPong
+}
+
 func (ws *WebSocketClient) IsClosed() bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()

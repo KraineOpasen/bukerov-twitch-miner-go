@@ -47,8 +47,10 @@ type Miner struct {
 	deviceID          string
 	externalAnalytics bool
 
-	nextStreamCheck     time.Time
-	streamCheckTrigger  chan struct{}
+	nextStreamCheck    time.Time
+	streamCheckTrigger chan struct{}
+
+	authErrOnce sync.Once
 
 	mu sync.RWMutex
 }
@@ -155,6 +157,7 @@ func (m *Miner) authenticate() error {
 
 	m.client = api.NewTwitchClient(m.auth, m.deviceID)
 	m.client.UpdateClientVersion()
+	m.client.SetAuthErrorHandler(m.handleAuthError)
 
 	userID, err := m.client.GetChannelID(m.config.Username)
 	if err != nil {
@@ -194,6 +197,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.wsPool = pubsub.NewWebSocketPool(m.client, m.auth.GetAuthToken(), streamers, m.config.RateLimits)
 	m.wsPool.SetMessageHandler(m.handlePubSubMessage)
 	m.wsPool.SetStatusHandler(m.handleStatusChange)
+	m.wsPool.SetAuthErrorHandler(func(error) { m.handleAuthError() })
 
 	if m.config.EnableAnalytics {
 		if m.externalAnalytics && m.analyticsSvc != nil {
@@ -347,6 +351,7 @@ func (m *Miner) startMining(ctx context.Context) {
 	}
 
 	go m.streamCheckLoop(ctx)
+	go m.healthWatchdogLoop(ctx)
 }
 
 func (m *Miner) streamCheckLoop(ctx context.Context) {
@@ -454,6 +459,90 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 				}
 			}
 		}
+	}
+}
+
+// handleAuthError is called the first time a Twitch API request or PubSub
+// connection is rejected for an invalid/expired/revoked OAuth token. It logs
+// an ERROR, notifies Discord (if enabled), and surfaces a dashboard banner
+// telling the operator to reauthorize - fires once per process lifetime since
+// this codebase has no mid-run token refresh, so the miner needs a restart
+// and fresh login regardless of how many requests fail afterward.
+func (m *Miner) handleAuthError() {
+	m.authErrOnce.Do(func() {
+		slog.Error("Twitch authorization expired or was revoked - reauthorization required")
+
+		if m.notifications != nil {
+			m.notifications.NotifyReauthRequired("Restart the miner and complete the Twitch device login again.")
+		}
+
+		if m.webServer != nil {
+			m.webServer.GetStatusBroadcaster().SetReauthRequired(true, "Twitch authorization expired or was revoked. Restart the miner and log in again.")
+		}
+	})
+}
+
+// healthWatchdogLoop periodically checks how long it has been since the API
+// client or the PubSub pool last had confirmed successful contact with
+// Twitch. If neither has responded within the configured threshold, it
+// raises a "connection lost" signal (log + Discord + dashboard banner); once
+// contact resumes, it logs and notifies recovery and clears the banner.
+func (m *Miner) healthWatchdogLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	connectionLost := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.mu.RLock()
+			threshold := time.Duration(m.config.RateLimits.ConnectionTimeoutMinutes) * time.Minute
+			m.mu.RUnlock()
+
+			now := time.Now()
+			apiStale := m.client != nil && now.Sub(m.client.LastSuccessAt()) > threshold
+			pubsubStale := m.wsPool != nil && !m.wsPool.LastActivity().IsZero() && now.Sub(m.wsPool.LastActivity()) > threshold
+
+			lost := apiStale || pubsubStale
+
+			if lost && !connectionLost {
+				connectionLost = true
+				detail := connectionLostDetail(apiStale, pubsubStale, threshold)
+				slog.Error("Connection lost - harvesting paused", "apiStale", apiStale, "pubsubStale", pubsubStale, "thresholdMinutes", m.config.RateLimits.ConnectionTimeoutMinutes)
+
+				if m.notifications != nil {
+					m.notifications.NotifyConnectionLost(detail)
+				}
+				if m.webServer != nil {
+					m.webServer.GetStatusBroadcaster().SetConnectionLost(true, detail)
+				}
+			} else if !lost && connectionLost {
+				connectionLost = false
+				slog.Info("Connection restored - harvesting resumed")
+
+				if m.notifications != nil {
+					m.notifications.NotifyConnectionRestored()
+				}
+				if m.webServer != nil {
+					m.webServer.GetStatusBroadcaster().SetConnectionLost(false, "")
+				}
+			}
+		}
+	}
+}
+
+func connectionLostDetail(apiStale, pubsubStale bool, threshold time.Duration) string {
+	minutes := int(threshold.Minutes())
+	switch {
+	case apiStale && pubsubStale:
+		return fmt.Sprintf("No successful Twitch API or PubSub activity for over %d minutes.", minutes)
+	case apiStale:
+		return fmt.Sprintf("No successful Twitch API response for over %d minutes.", minutes)
+	default:
+		return fmt.Sprintf("No PubSub activity for over %d minutes.", minutes)
 	}
 }
 

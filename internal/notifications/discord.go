@@ -12,10 +12,13 @@ import (
 
 // Discord notification embed colors
 const (
-	ColorMention = 0x9146FF // Twitch purple
-	ColorPoints  = 0xFFD700 // Gold
-	ColorOnline  = 0x00FF00 // Green
-	ColorOffline = 0xFF4545 // Red
+	ColorMention            = 0x9146FF // Twitch purple
+	ColorPoints             = 0xFFD700 // Gold
+	ColorOnline             = 0x00FF00 // Green
+	ColorOffline            = 0xFF4545 // Red
+	ColorReauthRequired     = 0xFF0000 // Bright red
+	ColorConnectionLost     = 0xFFA500 // Orange
+	ColorConnectionRestored = 0x00FF00 // Green
 )
 
 // DiscordProvider implements the Provider interface for Discord notifications.
@@ -115,6 +118,12 @@ func (d *DiscordProvider) Send(ctx context.Context, notification Notification) e
 			color = ColorOnline
 		case NotificationTypeOffline:
 			color = ColorOffline
+		case NotificationTypeReauthRequired:
+			color = ColorReauthRequired
+		case NotificationTypeConnectionLost:
+			color = ColorConnectionLost
+		case NotificationTypeConnectionRestored:
+			color = ColorConnectionRestored
 		default:
 			color = ColorMention
 		}

@@ -90,6 +90,14 @@
 
             <div class="setting-row">
                 <div>
+                    <div class="setting-label">Connection Timeout</div>
+                    <div class="setting-description">Minutes without any successful API or PubSub activity before the dashboard shows "connection lost" (5-60)</div>
+                </div>
+                <input type="number" class="input-field w-28" id="connectionTimeoutMinutes" min="5" max="60">
+            </div>
+
+            <div class="setting-row">
+                <div>
                     <div class="setting-label">Rotation Interval (Min)</div>
                     <div class="setting-description">Minimum minutes the watch pair dwells before rotating, when more than 2 tracked streamers are online (5-180)</div>
                 </div>
@@ -311,6 +319,7 @@
         document.getElementById('requestDelay').value = settings.rateLimits.requestDelay;
         document.getElementById('reconnectDelay').value = settings.rateLimits.reconnectDelay;
         document.getElementById('streamCheckInterval').value = settings.rateLimits.streamCheckInterval;
+        document.getElementById('connectionTimeoutMinutes').value = settings.rateLimits.connectionTimeoutMinutes;
         document.getElementById('rotationIntervalMinMinutes').value = settings.rateLimits.rotationIntervalMinMinutes;
         document.getElementById('rotationIntervalMaxMinutes').value = settings.rateLimits.rotationIntervalMaxMinutes;
 
@@ -606,6 +615,7 @@
                 requestDelay: parseFloat(document.getElementById('requestDelay').value),
                 reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),
                 streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value),
+                connectionTimeoutMinutes: parseInt(document.getElementById('connectionTimeoutMinutes').value),
                 rotationIntervalMinMinutes: parseInt(document.getElementById('rotationIntervalMinMinutes').value),
                 rotationIntervalMaxMinutes: parseInt(document.getElementById('rotationIntervalMaxMinutes').value)
             },

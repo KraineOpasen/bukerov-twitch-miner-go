@@ -364,6 +364,117 @@ func (m *Manager) NotifyOffline(streamer string) {
 	}()
 }
 
+// NotifyReauthRequired sends a notification that Twitch authorization has
+// expired or been revoked and the miner needs to be logged in again.
+func (m *Manager) NotifyReauthRequired(detail string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	if !enabled || discord == nil {
+		return
+	}
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
+		slog.Debug("Reauth notification skipped: system notifications not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      NotificationTypeReauthRequired,
+		Title:     "🔒 Twitch reauthorization required",
+		Message:   fmt.Sprintf("Twitch rejected the miner's login token. %s\nRestart the miner and log in again to resume harvesting.", detail),
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send reauth-required notification", "error", err)
+		}
+	}()
+}
+
+// NotifyConnectionLost sends a notification that the miner has lost contact
+// with Twitch (API and/or PubSub) for longer than the configured threshold.
+func (m *Manager) NotifyConnectionLost(detail string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	if !enabled || discord == nil {
+		return
+	}
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
+		slog.Debug("Connection-lost notification skipped: system notifications not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      NotificationTypeConnectionLost,
+		Title:     "🔌 Connection lost - harvesting paused",
+		Message:   detail,
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send connection-lost notification", "error", err)
+		}
+	}()
+}
+
+// NotifyConnectionRestored sends a notification that connectivity to Twitch
+// has resumed after a NotifyConnectionLost event.
+func (m *Manager) NotifyConnectionRestored() {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	if !enabled || discord == nil {
+		return
+	}
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
+		slog.Debug("Connection-restored notification skipped: system notifications not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      NotificationTypeConnectionRestored,
+		Title:     "✅ Connection restored",
+		Message:   "Twitch API and PubSub connectivity is back. Harvesting has resumed.",
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send connection-restored notification", "error", err)
+		}
+	}()
+}
+
 // GetDiscordChannels returns available Discord channels.
 func (m *Manager) GetDiscordChannels(ctx context.Context, forceRefresh bool) ([]Channel, error) {
 	m.mu.RLock()
@@ -512,6 +623,22 @@ func (m *Manager) SendTestNotifications() (int, error) {
 		})
 		if err != nil {
 			slog.Error("Test offline notification failed", "error", err)
+		} else {
+			sent++
+		}
+	}
+
+	// Test system (reauth/connection-health) notification
+	if cfg.SystemChannelID != "" {
+		err := discord.Send(ctx, Notification{
+			Type:      NotificationTypeConnectionRestored,
+			Title:     "Test System Notification",
+			Message:   "This channel will receive reauthorization and connection-health alerts.",
+			ChannelID: cfg.SystemChannelID,
+			Color:     ColorConnectionRestored,
+		})
+		if err != nil {
+			slog.Error("Test system notification failed", "error", err)
 		} else {
 			sent++
 		}

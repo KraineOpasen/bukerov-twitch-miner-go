@@ -7,6 +7,28 @@
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/js/htmx.min.js" defer></script>
     <script src="/static/js/apexcharts.min.js" defer></script>
+    <style>
+        #health-banner {
+            position: sticky;
+            top: 3.5rem;
+            z-index: 40;
+            padding: 0.75rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            text-align: center;
+            border-bottom: 1px solid transparent;
+        }
+        #health-banner.health-banner-reauth {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-bottom-color: #ef4444;
+            color: #f87171;
+        }
+        #health-banner.health-banner-lost {
+            background-color: rgba(234, 179, 8, 0.1);
+            border-bottom-color: #eab308;
+            color: #facc15;
+        }
+    </style>
 </head>
 <body class="min-h-screen bg-neutral-900 text-neutral-100 pb-16">
     <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-neutral-900/95 flex items-center justify-center z-[1000]">
@@ -48,7 +70,11 @@
             </div>
         </div>
     </nav>
-    
+
+    <div id="health-banner" class="hidden" role="alert">
+        <div class="max-w-6xl mx-auto" id="health-banner-text"></div>
+    </div>
+
     <main class="max-w-6xl mx-auto px-4 py-8">
         {{block "content" .}}{{end}}
     </main>
@@ -79,8 +105,25 @@
             const content = document.getElementById('status-content');
             const message = document.getElementById('status-message');
             const spinner = document.getElementById('status-spinner');
-            
+            const healthBanner = document.getElementById('health-banner');
+            const healthBannerText = document.getElementById('health-banner-text');
+
+            function updateHealthBanner(status) {
+                if (status.reauthRequired) {
+                    healthBanner.className = 'health-banner-reauth';
+                    healthBannerText.textContent = '⚠ Twitch authorization required — ' + (status.reauthMessage || 'please log in again.');
+                } else if (status.connectionLost) {
+                    healthBanner.className = 'health-banner-lost';
+                    healthBannerText.textContent = '⚠ Connection lost — harvesting paused. ' + (status.connectionMessage || '');
+                } else {
+                    healthBanner.className = 'hidden';
+                    healthBannerText.textContent = '';
+                }
+            }
+
             function updateStatus(status) {
+                updateHealthBanner(status);
+
                 if (status.status === 'running') {
                     overlay.classList.add('hidden');
                     const reloadKey = 'miner_loaded_' + window.location.pathname;
