@@ -153,6 +153,7 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 				streamers[i].Title = st.Stream.GetTitle()
 				streamers[i].ViewersCount = st.Stream.GetViewersCount()
 				streamers[i].ViewersCountFormatted = util.FormatNumber(streamers[i].ViewersCount)
+				streamers[i].ChannelRestrictedDrop = st.HasChannelRestrictedCampaign()
 				trackedLive = append(trackedLive, streamers[i])
 			} else {
 				offlineAt := st.GetOfflineAt()

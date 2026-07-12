@@ -296,9 +296,30 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 				}
 			}
 
-			if hasID {
-				streamerCampaigns = append(streamerCampaigns, campaign)
+			if !hasID {
+				continue
 			}
+
+			if campaign.IsChannelRestricted() {
+				if !campaign.AllowsChannel(streamer.ChannelID) {
+					// Defensive: Twitch's per-channel CampaignIDs lookup
+					// (GetCampaignIDsFromStreamer) should already exclude
+					// campaigns this channel isn't eligible for, so this
+					// should never trigger in practice. If it ever does,
+					// make it loud instead of silently over-crediting watch
+					// time Twitch won't actually count.
+					slog.Warn("Withholding drop progress: channel not in campaign's allowed-channel list",
+						"streamer", streamer.Username, "channelID", streamer.ChannelID,
+						"campaign", campaign.Name, "campaignID", campaign.ID,
+						"allowedChannels", campaign.Channels)
+					continue
+				}
+				slog.Info("Channel-restricted drop campaign assigned to streamer",
+					"streamer", streamer.Username, "campaign", campaign.Name,
+					"campaignID", campaign.ID, "allowedChannels", campaign.Channels)
+			}
+
+			streamerCampaigns = append(streamerCampaigns, campaign)
 		}
 
 		streamer.Stream.Campaigns = streamerCampaigns

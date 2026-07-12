@@ -82,6 +82,10 @@
   @apply bg-purple-600 text-white text-[0.65rem] px-2 py-0.5 rounded uppercase;
 }
 
+@utility drop-exclusive-badge {
+  @apply bg-amber-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+}
+
 @utility priority-item {
   @apply flex items-center gap-3 p-3 bg-neutral-900 border border-neutral-700 rounded-md mb-2 cursor-grab;
 }

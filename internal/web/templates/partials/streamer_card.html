@@ -13,6 +13,9 @@
         <span class="live-badge flex-shrink-0">LIVE</span>
         {{end}}
     </div>
+    {{if .ChannelRestrictedDrop}}
+    <span class="drop-exclusive-badge inline-block mb-2" title="This drop campaign only counts progress on this channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
+    {{end}}
     <div class="text-3xl font-bold text-neutral-100">{{.PointsFormatted}}</div>
     <div class="text-sm text-neutral-400">channel points</div>
     <div class="text-sm mt-2">

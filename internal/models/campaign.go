@@ -87,6 +87,28 @@ func NewCampaignFromGQL(data map[string]interface{}) *Campaign {
 	return c
 }
 
+// IsChannelRestricted reports whether this campaign only credits watch time
+// on a specific set of channels (Twitch's `allow.channels`), as opposed to
+// crediting progress on any channel streaming the campaign's game.
+func (c *Campaign) IsChannelRestricted() bool {
+	return len(c.Channels) > 0
+}
+
+// AllowsChannel reports whether channelID is eligible to progress this
+// campaign. Unrestricted campaigns (IsChannelRestricted() == false) allow
+// any channel.
+func (c *Campaign) AllowsChannel(channelID string) bool {
+	if !c.IsChannelRestricted() {
+		return true
+	}
+	for _, id := range c.Channels {
+		if id == channelID {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Campaign) ClearClaimedDrops() {
 	validDrops := make([]*Drop, 0)
 	for _, drop := range c.Drops {
