@@ -386,6 +386,7 @@ func containsPair(online []int, pair [2]int) bool {
 // ranking computed by rotateToLeastWatchedPair.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
 	best := -1
+	bestRestricted := false
 	for _, idx := range onlineIndexes {
 		if idx == pair[0] || idx == pair[1] {
 			continue
@@ -393,8 +394,17 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 		if !w.isBoostEligible(idx) {
 			continue
 		}
-		if best == -1 || w.rotation.lastWatched[idx].Before(w.rotation.lastWatched[best]) {
-			best = idx
+		// A channel-restricted campaign can only ever progress by watching
+		// this exact channel, so it always outranks a candidate that merely
+		// has an unrestricted campaign or a watch streak in progress.
+		restricted := w.streamers[idx].HasChannelRestrictedCampaign()
+		switch {
+		case best == -1:
+			best, bestRestricted = idx, restricted
+		case restricted && !bestRestricted:
+			best, bestRestricted = idx, restricted
+		case restricted == bestRestricted && w.rotation.lastWatched[idx].Before(w.rotation.lastWatched[best]):
+			best, bestRestricted = idx, restricted
 		}
 	}
 	if best == -1 {
@@ -508,7 +518,25 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			}
 
 		case config.PriorityDrops:
+			// Streamers holding a channel-restricted campaign go first:
+			// that progress can only ever be earned by watching this exact
+			// channel, whereas an unrestricted campaign's progress could in
+			// principle also be picked up by watching a different streamer
+			// with the same game.
 			for _, idx := range onlineIndexes {
+				if w.streamers[idx].DropsCondition() && w.streamers[idx].HasChannelRestrictedCampaign() {
+					if !watching[idx] {
+						watching[idx] = true
+						if remainingSlots() <= 0 {
+							break
+						}
+					}
+				}
+			}
+			for _, idx := range onlineIndexes {
+				if remainingSlots() <= 0 {
+					break
+				}
 				if w.streamers[idx].DropsCondition() {
 					if !watching[idx] {
 						watching[idx] = true

@@ -146,6 +146,23 @@ func (s *Streamer) DropsCondition() bool {
 		len(s.Stream.CampaignIDs) > 0
 }
 
+// HasChannelRestrictedCampaign reports whether this streamer currently has
+// an assigned drop campaign that only credits progress on this specific
+// channel (as opposed to any channel streaming the campaign's game). Such a
+// campaign cannot be farmed by watching a different streamer, so channel
+// selection should prioritize keeping this one watched.
+func (s *Streamer) HasChannelRestrictedCampaign() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, c := range s.Stream.Campaigns {
+		if c.IsChannelRestricted() {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Streamer) ViewerHasPointsMultiplier() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

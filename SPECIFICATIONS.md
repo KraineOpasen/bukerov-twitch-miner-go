@@ -704,6 +704,32 @@ A streamer is eligible for drops when:
 - Stream has active campaign IDs
 - Campaign game matches stream game
 
+### Channel-Restricted Campaigns
+
+A campaign's `allowedChannels` (parsed from GraphQL `allow.channels`) is either
+empty (any channel streaming the game credits progress) or a specific list of
+channel IDs (only those channels credit progress).
+
+Per-channel eligibility is determined authoritatively by Twitch: each
+configured streamer's `CampaignIDs` comes from a per-channel query
+(`DropsHighlightServiceAvailableDrops`, scoped by `channelID`), so a channel
+that isn't in a campaign's allowed list won't have that campaign's ID
+returned for it in the first place. `updateStreamerCampaigns`
+(`internal/drops/drops.go`) additionally cross-checks `allowedChannels`
+against the streamer's own channel ID as a defensive second layer, logging a
+warning and withholding the campaign if it ever mismatches (see
+`Campaign.AllowsChannel`).
+
+Because a channel-restricted campaign can only ever progress by watching that
+exact channel, the watcher's `DROPS` priority and rotation boost
+(`internal/watcher/watcher.go`) treat streamers holding one as higher
+priority than streamers whose active campaigns are all unrestricted — an
+unrestricted campaign's progress could in principle also be earned by
+watching a different configured streamer with the same game, so it's safer
+to spend a limited watch slot on the channel-restricted one first. The
+dashboard shows a "Channel-only drop" badge on a streamer's card when this
+applies.
+
 ---
 
 ## Chat Integration

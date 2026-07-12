@@ -195,6 +195,33 @@ func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 	}
 }
 
+// TestApplyPriorityBoostPrefersChannelRestrictedDrop covers the case where
+// two off-pair streamers are both boost-eligible via DropsCondition, but
+// only one holds a channel-restricted campaign (progress only countable on
+// that exact channel). That one must win the boost seat even if it was
+// watched more recently than the unrestricted-campaign candidate.
+func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
+	w, online := newTestWatcher(4)
+	w.streamers[2].Stream.CampaignIDs = []string{"campaign-unrestricted"}
+	w.streamers[3].Stream.CampaignIDs = []string{"campaign-restricted"}
+	w.streamers[3].Stream.Campaigns = []*models.Campaign{
+		{ID: "campaign-restricted", Channels: []string{w.streamers[3].ChannelID}},
+	}
+
+	pair := [2]int{0, 1}
+	w.rotation.lastWatched = map[int]time.Time{
+		0: time.Now(),
+		1: time.Now().Add(-time.Minute),
+		2: time.Now().Add(-time.Hour), // watched longer ago than 3
+		3: time.Now().Add(-time.Minute / 2),
+	}
+
+	boosted := w.applyPriorityBoost(pair, online)
+	if boosted[0] != 3 && boosted[1] != 3 {
+		t.Fatalf("expected channel-restricted-campaign streamer 3 to win the boost seat over streamer 2, got %v", boosted)
+	}
+}
+
 func TestNearStreakCompletionProtectsFromSwap(t *testing.T) {
 	w, online := newTestWatcher(3)
 	w.streamers[2].Stream.CampaignIDs = []string{"campaign-1"}
