@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Drop struct {
 	ID                    string
@@ -85,4 +88,18 @@ func (d *Drop) DateTimeMatch() bool {
 
 func (d *Drop) IsPrintable() bool {
 	return !d.IsClaimed && d.CurrentMinutesWatched > 0 && d.CurrentMinutesWatched < d.MinutesRequired
+}
+
+// RewardKey normalizes this drop's reward identity by game + drop name, so
+// recurring/regional campaign variants that grant the identical reward under
+// a different (and sometimes colliding) campaign or drop ID are recognized
+// as the same reward rather than relying on Twitch's raw IDs.
+func (d *Drop) RewardKey(gameID string) string {
+	return NormalizeRewardKey(gameID, d.Name)
+}
+
+// NormalizeRewardKey builds a stable, case/whitespace-insensitive identifier
+// for a drop reward from its game and display name.
+func NormalizeRewardKey(gameID, name string) string {
+	return strings.ToLower(strings.TrimSpace(gameID)) + "::" + strings.ToLower(strings.TrimSpace(name))
 }

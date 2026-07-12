@@ -51,6 +51,68 @@ func TestNewCampaignFromGQLParsesAllowedChannels(t *testing.T) {
 	}
 }
 
+func TestCampaignApplyClaimHistoryStripsMatchedDrops(t *testing.T) {
+	c := &Campaign{
+		ID:   "campaign-regional-eu",
+		Name: "Cool Skin Drop",
+		Game: &Game{ID: "game-1"},
+		Drops: []*Drop{
+			{ID: "drop-a", Name: "Legendary Skin"},
+			{ID: "drop-b", Name: "Emote Pack"},
+		},
+	}
+
+	claimed := map[string]bool{
+		NormalizeRewardKey("game-1", "Legendary Skin"): true,
+	}
+
+	c.ApplyClaimHistory(claimed)
+
+	if len(c.Drops) != 1 || c.Drops[0].Name != "Emote Pack" {
+		t.Fatalf("expected only unclaimed drop to remain, got %+v", c.Drops)
+	}
+	if len(c.ClaimedDropNames) != 1 || c.ClaimedDropNames[0] != "Legendary Skin" {
+		t.Errorf("expected ClaimedDropNames to record the skipped drop, got %v", c.ClaimedDropNames)
+	}
+	if c.ClaimStatus != CampaignClaimStatusInProgress {
+		t.Errorf("campaign still has an unclaimed drop, expected in_progress, got %s", c.ClaimStatus)
+	}
+}
+
+func TestCampaignApplyClaimHistoryMarksFullyClaimed(t *testing.T) {
+	c := &Campaign{
+		ID:   "campaign-regional-na",
+		Name: "Cool Skin Drop",
+		Game: &Game{ID: "game-1"},
+		Drops: []*Drop{
+			{ID: "drop-a-na", Name: "Legendary Skin"},
+		},
+	}
+
+	// Same game + reward name as a different campaign/drop ID: a
+	// recurring/regional variant of an already-claimed campaign.
+	claimed := map[string]bool{
+		NormalizeRewardKey("game-1", "Legendary Skin"): true,
+	}
+
+	c.ApplyClaimHistory(claimed)
+
+	if len(c.Drops) != 0 {
+		t.Fatalf("expected all drops to be stripped, got %+v", c.Drops)
+	}
+	if c.ClaimStatus != CampaignClaimStatusAlreadyClaimed {
+		t.Errorf("expected already_claimed status, got %s", c.ClaimStatus)
+	}
+}
+
+func TestNormalizeRewardKeyIgnoresCaseAndWhitespace(t *testing.T) {
+	a := NormalizeRewardKey("Game-1", "  Legendary Skin ")
+	b := NormalizeRewardKey("game-1", "legendary skin")
+	if a != b {
+		t.Errorf("expected normalized keys to match regardless of case/whitespace: %q != %q", a, b)
+	}
+}
+
 func TestNewCampaignFromGQLNoAllowMeansUnrestricted(t *testing.T) {
 	data := map[string]interface{}{
 		"id":     "campaign-1",
