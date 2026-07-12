@@ -609,6 +609,68 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	return nil
 }
 
+// ClaimAvailableBonus is the polling fallback for channel-points bonus chests.
+// The primary claim path is driven by the community-points-user PubSub
+// "claim-available" event, but PubSub delivery is known to occasionally drop
+// events (a recurring pain point across Twitch miners), leaving a chest
+// unclaimed until it expires. This re-reads the channel-points context
+// directly and claims any bonus currently available, returning true when a
+// claim was actually made so the caller can log that the fallback - rather
+// than PubSub - caught it.
+func (c *TwitchClient) ClaimAvailableBonus(streamer *models.Streamer) (bool, error) {
+	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
+		"channelLogin": streamer.Username,
+	})
+
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		return false, err
+	}
+
+	claimID := availableClaimID(resp)
+	if claimID == "" {
+		return false, nil
+	}
+
+	if err := c.ClaimBonus(streamer, claimID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// availableClaimID walks a ChannelPointsContext GraphQL response down to the
+// currently-claimable bonus chest's claim ID, returning "" when no bonus is
+// available. It defends against every level being absent so a partial or
+// unexpected response is treated as "nothing to claim" rather than panicking.
+func availableClaimID(resp map[string]interface{}) string {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	community, ok := data["community"].(map[string]interface{})
+	if !ok || community == nil {
+		return ""
+	}
+	channel, ok := community["channel"].(map[string]interface{})
+	if !ok || channel == nil {
+		return ""
+	}
+	self, ok := channel["self"].(map[string]interface{})
+	if !ok || self == nil {
+		return ""
+	}
+	communityPoints, ok := self["communityPoints"].(map[string]interface{})
+	if !ok || communityPoints == nil {
+		return ""
+	}
+	availableClaim, ok := communityPoints["availableClaim"].(map[string]interface{})
+	if !ok || availableClaim == nil {
+		return ""
+	}
+	id, _ := availableClaim["id"].(string)
+	return id
+}
+
 func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) error {
 	slog.Info("Claiming bonus", "streamer", streamer.Username)
 
