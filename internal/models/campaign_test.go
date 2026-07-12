@@ -113,6 +113,60 @@ func TestNormalizeRewardKeyIgnoresCaseAndWhitespace(t *testing.T) {
 	}
 }
 
+func TestCampaignCurrentDropPicksNextUnmetMilestone(t *testing.T) {
+	c := &Campaign{
+		Drops: []*Drop{
+			{Name: "Tier 3", MinutesRequired: 180, CurrentMinutesWatched: 40},
+			{Name: "Tier 1", MinutesRequired: 60, CurrentMinutesWatched: 40},
+			{Name: "Tier 2", MinutesRequired: 120, CurrentMinutesWatched: 40},
+		},
+	}
+
+	current := c.CurrentDrop()
+	if current == nil || current.Name != "Tier 1" {
+		t.Fatalf("expected the lowest unmet milestone (Tier 1), got %+v", current)
+	}
+}
+
+func TestCampaignCurrentDropFallsBackToFinalWhenAllMet(t *testing.T) {
+	c := &Campaign{
+		Drops: []*Drop{
+			{Name: "Tier 1", MinutesRequired: 60, CurrentMinutesWatched: 60},
+			{Name: "Tier 2", MinutesRequired: 120, CurrentMinutesWatched: 130},
+		},
+	}
+
+	current := c.CurrentDrop()
+	if current == nil || current.Name != "Tier 2" {
+		t.Fatalf("expected fallback to the furthest milestone (Tier 2), got %+v", current)
+	}
+}
+
+func TestCampaignCurrentDropNilWhenNoDrops(t *testing.T) {
+	c := &Campaign{}
+	if c.CurrentDrop() != nil {
+		t.Error("campaign with no drops should have no current drop")
+	}
+}
+
+func TestCampaignOverallProgressPercent(t *testing.T) {
+	c := &Campaign{
+		Drops: []*Drop{
+			{MinutesRequired: 60, CurrentMinutesWatched: 60},
+			{MinutesRequired: 120, CurrentMinutesWatched: 30},
+		},
+	}
+	// Measured against the furthest milestone: 30/120 = 25%.
+	if pct := c.OverallProgressPercent(); pct != 25 {
+		t.Errorf("expected 25%%, got %d", pct)
+	}
+
+	claimed := &Campaign{ClaimStatus: CampaignClaimStatusAlreadyClaimed}
+	if pct := claimed.OverallProgressPercent(); pct != 100 {
+		t.Errorf("already-claimed campaign should report 100%%, got %d", pct)
+	}
+}
+
 func TestNewCampaignFromGQLNoAllowMeansUnrestricted(t *testing.T) {
 	data := map[string]interface{}{
 		"id":     "campaign-1",

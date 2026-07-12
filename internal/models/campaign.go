@@ -167,6 +167,58 @@ func (c *Campaign) ApplyClaimHistory(claimedRewards map[string]bool) {
 	}
 }
 
+// CurrentDrop returns the drop the campaign is actively working toward: the
+// unclaimed drop with the lowest remaining watch requirement that isn't met
+// yet (the next reward to unlock). If every remaining drop's threshold is
+// already met, it returns the furthest milestone. Returns nil when there are
+// no remaining drops (e.g. an already-claimed campaign).
+func (c *Campaign) CurrentDrop() *Drop {
+	if len(c.Drops) == 0 {
+		return nil
+	}
+
+	var current *Drop
+	for _, d := range c.Drops {
+		if d.CurrentMinutesWatched < d.MinutesRequired {
+			if current == nil || d.MinutesRequired < current.MinutesRequired {
+				current = d
+			}
+		}
+	}
+	if current != nil {
+		return current
+	}
+
+	// All thresholds met: fall back to the furthest milestone.
+	return c.FinalDrop()
+}
+
+// FinalDrop returns the campaign's furthest milestone — the remaining drop
+// with the largest required watch time — or nil when there are no drops.
+func (c *Campaign) FinalDrop() *Drop {
+	var final *Drop
+	for _, d := range c.Drops {
+		if final == nil || d.MinutesRequired > final.MinutesRequired {
+			final = d
+		}
+	}
+	return final
+}
+
+// OverallProgressPercent reports the campaign's progress toward its full
+// reward as a 0-100 percentage, measured against the furthest milestone. An
+// already-claimed campaign reports 100.
+func (c *Campaign) OverallProgressPercent() int {
+	if c.ClaimStatus == CampaignClaimStatusAlreadyClaimed {
+		return 100
+	}
+	final := c.FinalDrop()
+	if final == nil {
+		return 0
+	}
+	return final.ClampedProgress()
+}
+
 func (c *Campaign) SyncDrops(inventoryDrops []interface{}, claimFunc func(*Drop) bool) {
 	for _, invDrop := range inventoryDrops {
 		dropData, ok := invDrop.(map[string]interface{})

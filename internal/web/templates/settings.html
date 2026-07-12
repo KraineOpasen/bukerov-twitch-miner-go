@@ -20,6 +20,29 @@
         </div>
     </details>
 
+    <details id="preferences" class="details-panel">
+        <summary class="text-lg">Channel Preferences</summary>
+        <div class="details-content">
+            <p class="text-neutral-400 text-sm mb-4">A read-only summary of each streamer's rotation preference, gathered in one place. Set a streamer's preference under <span class="text-neutral-100">Streamers → custom settings → Rotation Preference</span>; the lists below refresh after you save.</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-3">
+                        <span class="prefer-badge">★ Prefer</span>
+                        <span class="text-neutral-100 font-medium">Preferred channels</span>
+                    </div>
+                    <ul id="preferred-list" class="space-y-1 text-sm"></ul>
+                </div>
+                <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-3">
+                        <span class="avoid-badge">Avoid</span>
+                        <span class="text-neutral-100 font-medium">Avoided channels</span>
+                    </div>
+                    <ul id="avoided-list" class="space-y-1 text-sm"></ul>
+                </div>
+            </div>
+        </div>
+    </details>
+
     <details id="defaults" class="details-panel">
         <summary class="text-lg">Default Streamer Settings</summary>
         <div class="details-content">
@@ -303,6 +326,7 @@
 
     function populateForm(settings) {
         populateStreamerList(settings.streamers || []);
+        populatePreferenceSummary(settings.streamers || []);
         
         const defaultContainer = document.getElementById('default-settings-container');
         defaultContainer.innerHTML = renderStreamerSettingsForm('default', settings.defaultSettings || {}, false);
@@ -343,6 +367,42 @@
             document.getElementById('discordBotToken').value = settings.discord.botToken || '';
             document.getElementById('discordGuildId').value = settings.discord.guildId || '';
         }
+    }
+
+    function populatePreferenceSummary(streamers) {
+        const preferred = document.getElementById('preferred-list');
+        const avoided = document.getElementById('avoided-list');
+        preferred.innerHTML = '';
+        avoided.innerHTML = '';
+
+        const emptyItem = (text) => {
+            const li = document.createElement('li');
+            li.className = 'text-neutral-500 italic';
+            li.textContent = text;
+            return li;
+        };
+        const nameItem = (name) => {
+            const li = document.createElement('li');
+            li.className = 'text-neutral-100';
+            const a = document.createElement('a');
+            a.href = '/streamer/' + encodeURIComponent(name);
+            a.className = 'hover:text-purple-400 transition-colors';
+            a.textContent = name;
+            li.appendChild(a);
+            return li;
+        };
+
+        streamers.forEach(s => {
+            const pref = s.settings && s.settings.preference;
+            if (pref === 'prefer') {
+                preferred.appendChild(nameItem(s.username));
+            } else if (pref === 'avoid') {
+                avoided.appendChild(nameItem(s.username));
+            }
+        });
+
+        if (!preferred.children.length) preferred.appendChild(emptyItem('No preferred channels'));
+        if (!avoided.children.length) avoided.appendChild(emptyItem('No avoided channels'));
     }
 
     function populateStreamerList(streamers) {

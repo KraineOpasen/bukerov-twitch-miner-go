@@ -86,6 +86,33 @@ func (d *Drop) DateTimeMatch() bool {
 	return d.StartAt.Before(now) && d.EndAt.After(now)
 }
 
+// ClampedProgress returns this drop's watch progress as a 0-100 percentage,
+// clamped so an over-watched drop (Twitch occasionally reports more minutes
+// than required) never renders past a full bar.
+func (d *Drop) ClampedProgress() int {
+	if d.MinutesRequired <= 0 {
+		return 0
+	}
+	pct := (d.CurrentMinutesWatched * 100) / d.MinutesRequired
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+// MinutesRemaining reports how many more watched minutes this drop needs
+// before its reward unlocks (never negative).
+func (d *Drop) MinutesRemaining() int {
+	remaining := d.MinutesRequired - d.CurrentMinutesWatched
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 func (d *Drop) IsPrintable() bool {
 	return !d.IsClaimed && d.CurrentMinutesWatched > 0 && d.CurrentMinutesWatched < d.MinutesRequired
 }
