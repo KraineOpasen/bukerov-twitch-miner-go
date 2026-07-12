@@ -978,8 +978,6 @@ func (c *TwitchClient) ClaimDrop(drop *models.Drop) (bool, error) {
 }
 
 func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goalID, title string, amount int) error {
-	slog.Info("Contributing to community goal", "goal", title, "amount", amount)
-
 	op := constants.ContributeCommunityPointsCommunityGoal.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
 			"amount":        amount,
@@ -1003,5 +1001,12 @@ func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goal
 	}
 
 	streamer.SetChannelPoints(streamer.GetChannelPoints() - amount)
+
+	slog.Info("Contributed to community goal",
+		"streamer", streamer.Username,
+		"goal", title,
+		"amount", amount,
+		"remainingBalance", streamer.GetChannelPoints())
+
 	return nil
 }

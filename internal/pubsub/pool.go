@@ -507,18 +507,60 @@ func (p *WebSocketPool) handleCommunityPointsChannel(msg *PubSubMessage, streame
 
 func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
 	for _, goal := range streamer.CommunityGoals {
-		if goal.Status == models.CommunityGoalStarted && goal.IsInStock {
-			amountLeft := goal.AmountLeft()
-			if amountLeft > 0 && streamer.GetChannelPoints() > 0 {
-				amount := min(amountLeft, streamer.GetChannelPoints())
-				if amount > 0 {
-					if err := p.client.ContributeToCommunityGoal(streamer, goal.GoalID, goal.Title, amount); err != nil {
-						slog.Error("Failed to contribute to community goal", "error", err)
-					}
-				}
-			}
+		if goal.Status != models.CommunityGoalStarted || !goal.IsInStock {
+			continue
+		}
+
+		amountLeft := goal.AmountLeft()
+		points := streamer.GetChannelPoints()
+		if amountLeft <= 0 || points <= 0 {
+			continue
+		}
+
+		amount := computeGoalContribution(goal, points, streamer.Settings)
+		if amount <= 0 {
+			slog.Info("Skipping community goal contribution: configured limit resolves to zero",
+				"streamer", streamer.Username,
+				"goal", goal.Title,
+				"balance", points,
+				"maxPercent", streamer.Settings.CommunityGoalsMaxPercent,
+				"maxAmount", streamer.Settings.CommunityGoalsMaxAmount)
+			continue
+		}
+
+		if err := p.client.ContributeToCommunityGoal(streamer, goal.GoalID, goal.Title, amount); err != nil {
+			slog.Error("Failed to contribute to community goal", "error", err)
 		}
 	}
+}
+
+// computeGoalContribution decides how many points to contribute to a single
+// community goal, honoring both Twitch's server-side per-user-per-stream cap and
+// the user-configured percentage / absolute limits.
+//
+// Twitch's ContributeCommunityPointsCommunityGoal mutation accepts an arbitrary
+// integer `amount`, so partial contributions are supported at the API level; the
+// only server-imposed ceiling is goal.PerStreamUserMaxContribution.
+func computeGoalContribution(goal *models.CommunityGoal, points int, settings models.StreamerSettings) int {
+	amount := min(goal.AmountLeft(), points)
+
+	// Never exceed Twitch's per-user-per-stream server cap when it is advertised.
+	if goal.PerStreamUserMaxContribution > 0 {
+		amount = min(amount, goal.PerStreamUserMaxContribution)
+	}
+
+	// User-configured percentage cap of the current balance (0 = no cap).
+	if pct := settings.CommunityGoalsMaxPercent; pct > 0 && pct < 100 {
+		capped := int(int64(points) * int64(pct) / 100)
+		amount = min(amount, capped)
+	}
+
+	// User-configured absolute cap per contribution (0 = no cap).
+	if maxAmount := settings.CommunityGoalsMaxAmount; maxAmount > 0 {
+		amount = min(amount, maxAmount)
+	}
+
+	return amount
 }
 
 func (p *WebSocketPool) handleError(err error) {

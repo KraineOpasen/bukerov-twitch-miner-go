@@ -1045,6 +1045,8 @@ Per-streamer configuration options:
 | `claimMoments` | bool | true | Claim moments |
 | `watchStreak` | bool | true | Prioritize watch streaks |
 | `communityGoals` | bool | false | Contribute to goals |
+| `communityGoalsMaxPercent` | int | 10 | Cap per contribution to this % of current balance (0 = no limit; used only when `communityGoals` is true) |
+| `communityGoalsMaxAmount` | int | 0 | Absolute point cap per contribution (0 = no limit; the lower of this and the % cap wins) |
 | `chat` | enum | ONLINE | IRC presence mode |
 | `chatLogs` | bool* | null | Override global chat logging (null = use global) |
 | `bet` | object | Default | Betting configuration |
@@ -1200,6 +1202,16 @@ CommunityGoal
 ├── perStreamUserMaxContribution: int
 └── isInStock: bool
 ```
+
+**Contribution mechanics.** The `ContributeCommunityPointsCommunityGoal` mutation
+accepts an arbitrary integer `amount` in its input, so contributions can be any
+partial value — the API is not restricted to fixed steps or an all-in amount.
+The only server-imposed ceiling per stream is `perStreamUserMaxContribution`.
+The miner therefore contributes `min(amountLeft, balance, perStreamUserMax,
+maxPercent%·balance, maxAmount)` where the last two terms are the user-configured
+limits (`communityGoalsMaxPercent` / `communityGoalsMaxAmount`, `0` disabling
+each). Every contribution is logged with the amount spent and the remaining
+balance so total spend is auditable.
 
 ### Raid
 

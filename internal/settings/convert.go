@@ -10,14 +10,16 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 	preference := string(s.Preference)
 
 	return StreamerSettingsConfig{
-		MakePredictions: &s.MakePredictions,
-		FollowRaid:      &s.FollowRaid,
-		ClaimDrops:      &s.ClaimDrops,
-		ClaimMoments:    &s.ClaimMoments,
-		WatchStreak:     &s.WatchStreak,
-		CommunityGoals:  &s.CommunityGoals,
-		Chat:            &chat,
-		Preference:      &preference,
+		MakePredictions:          &s.MakePredictions,
+		FollowRaid:               &s.FollowRaid,
+		ClaimDrops:               &s.ClaimDrops,
+		ClaimMoments:             &s.ClaimMoments,
+		WatchStreak:              &s.WatchStreak,
+		CommunityGoals:           &s.CommunityGoals,
+		CommunityGoalsMaxPercent: &s.CommunityGoalsMaxPercent,
+		CommunityGoalsMaxAmount:  &s.CommunityGoalsMaxAmount,
+		Chat:                     &chat,
+		Preference:               &preference,
 		Bet: &BetSettingsJSON{
 			Strategy:      &strategy,
 			Percentage:    &s.Bet.Percentage,
@@ -75,6 +77,12 @@ func ApplyStreamerSettingsFromDTO(dst *models.StreamerSettings, src StreamerSett
 	}
 	if src.CommunityGoals != nil {
 		dst.CommunityGoals = *src.CommunityGoals
+	}
+	if src.CommunityGoalsMaxPercent != nil {
+		dst.CommunityGoalsMaxPercent = *src.CommunityGoalsMaxPercent
+	}
+	if src.CommunityGoalsMaxAmount != nil {
+		dst.CommunityGoalsMaxAmount = *src.CommunityGoalsMaxAmount
 	}
 	if src.Chat != nil {
 		dst.Chat = models.ChatPresence(*src.Chat)

@@ -61,15 +61,21 @@ type StreamerConfig struct {
 // Only non-nil fields are applied; others fall back to DefaultSettings.
 // Pointer fields allow distinguishing between "unset" and "false"/zero values.
 type StreamerSettingsConfig struct {
-	MakePredictions *bool            `json:"makePredictions,omitempty"`
-	FollowRaid      *bool            `json:"followRaid,omitempty"`
-	ClaimDrops      *bool            `json:"claimDrops,omitempty"`
-	ClaimMoments    *bool            `json:"claimMoments,omitempty"`
-	WatchStreak     *bool            `json:"watchStreak,omitempty"`
-	CommunityGoals  *bool            `json:"communityGoals,omitempty"`
-	Chat            *string          `json:"chat,omitempty"`
-	Bet             *BetSettingsJSON `json:"bet,omitempty"`
-	Preference      *string          `json:"preference,omitempty"`
+	MakePredictions *bool `json:"makePredictions,omitempty"`
+	FollowRaid      *bool `json:"followRaid,omitempty"`
+	ClaimDrops      *bool `json:"claimDrops,omitempty"`
+	ClaimMoments    *bool `json:"claimMoments,omitempty"`
+	WatchStreak     *bool `json:"watchStreak,omitempty"`
+	CommunityGoals  *bool `json:"communityGoals,omitempty"`
+	// CommunityGoalsMaxPercent caps a single contribution to this percentage of
+	// the current balance (0 = no cap). Applies only when CommunityGoals is on.
+	CommunityGoalsMaxPercent *int `json:"communityGoalsMaxPercent,omitempty"`
+	// CommunityGoalsMaxAmount caps a single contribution to this absolute number
+	// of points (0 = no cap). Applies only when CommunityGoals is on.
+	CommunityGoalsMaxAmount *int             `json:"communityGoalsMaxAmount,omitempty"`
+	Chat                    *string          `json:"chat,omitempty"`
+	Bet                     *BetSettingsJSON `json:"bet,omitempty"`
+	Preference              *string          `json:"preference,omitempty"`
 }
 
 // BetSettingsJSON contains prediction betting configuration with pointer fields for partial overrides.
