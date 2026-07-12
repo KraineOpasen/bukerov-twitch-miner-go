@@ -147,6 +147,7 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 	for i := range streamers {
 		if st, ok := streamerMap[streamers[i].Name]; ok {
 			streamers[i].IsLive = st.GetIsOnline()
+			streamers[i].Preference = string(st.GetSettings().Preference)
 			if streamers[i].IsLive {
 				streamers[i].LiveDuration = util.FormatDuration(time.Since(st.GetOnlineAt()))
 				streamers[i].GameName = st.Stream.GameName()

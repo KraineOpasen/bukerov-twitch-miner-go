@@ -193,13 +193,49 @@ func (w *MinuteWatcher) getOnlineStreamers() []int {
 // only influencing how often a channel gets an extra turn - never granting
 // it a permanent exclusive slot.
 func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
-	if len(onlineIndexes) <= constants.MaxSimultaneousStreams {
+	candidates := w.filterAvoided(onlineIndexes)
+	if len(candidates) <= constants.MaxSimultaneousStreams {
 		// Not enough online streamers to need rotation; drop any stale pair
 		// so a fresh one is computed next time we go above the limit.
 		w.rotation.hasPair = false
-		return w.selectByPriority(onlineIndexes)
+		return w.selectByPriority(candidates)
 	}
-	return w.selectRotating(onlineIndexes)
+	return w.selectRotating(candidates)
+}
+
+// filterAvoided drops streamers marked PreferenceAvoid from the candidate
+// set, unless doing so would leave nothing to watch (e.g. the only online
+// channel is marked avoid) - avoid excludes a channel from active watching
+// except when it's the only online channel at all.
+func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
+	if len(onlineIndexes) <= 1 {
+		return onlineIndexes
+	}
+
+	filtered := make([]int, 0, len(onlineIndexes))
+	var avoided []string
+	for _, idx := range onlineIndexes {
+		if w.streamers[idx].Settings.Preference == models.PreferenceAvoid {
+			avoided = append(avoided, w.streamers[idx].Username)
+			continue
+		}
+		filtered = append(filtered, idx)
+	}
+
+	if len(filtered) == 0 {
+		// Every online streamer is marked avoid - watching something is
+		// still required, so the exclusion is lifted entirely.
+		return onlineIndexes
+	}
+	if len(avoided) > 0 {
+		slog.Debug("Excluding avoided streamers from watch selection", "avoided", avoided)
+	}
+	return filtered
+}
+
+// isPreferred reports whether the streamer at idx is marked PreferencePrefer.
+func (w *MinuteWatcher) isPreferred(idx int) bool {
+	return w.streamers[idx].Settings.Preference == models.PreferencePrefer
 }
 
 // selectRotating implements the fair watch-pair rotation for the case where
@@ -271,6 +307,13 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 // since it only needs to bridge the last couple of minutes to 7.
 const streakDeferDelay = 2 * time.Minute
 
+// preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
+// minutes) applied in favor of PreferencePrefer streamers when ranking the
+// base rotation pair. It's deliberately small relative to typical rotation
+// windows so it only breaks near-ties instead of overriding the fairness
+// guarantee.
+const preferenceWeightBiasMinutes = 5.0
+
 // rotateToLeastWatchedPair recomputes the base pair from accumulated watch
 // time, unless doing so would interrupt a leaving streamer's near-complete
 // watch streak (see selectRotating's doc comment).
@@ -281,8 +324,19 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 	copy(candidates, onlineIndexes)
 	sort.Slice(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
-		if weights[a] != weights[b] {
-			return weights[a] < weights[b]
+		// A preferred streamer is treated as if it had watched slightly less
+		// than it actually has, tipping the ranking in its favor without
+		// overriding the fairness guarantee: it still accumulates real watch
+		// time and falls back in line once the gap exceeds this handicap.
+		wa, wb := weights[a], weights[b]
+		if w.isPreferred(a) {
+			wa -= preferenceWeightBiasMinutes
+		}
+		if w.isPreferred(b) {
+			wb -= preferenceWeightBiasMinutes
+		}
+		if wa != wb {
+			return wa < wb
 		}
 		la, lb := w.rotation.lastWatched[a], w.rotation.lastWatched[b]
 		if !la.Equal(lb) {
@@ -316,10 +370,36 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 		}
 	}
 
+	changed := !w.rotation.hasPair || newPair != w.rotation.activePair
+
 	w.rotation.activePair = newPair
 	w.rotation.hasPair = true
 	w.rotation.lastSwitch = now
 	w.rotation.nextInterval = w.randomRotationInterval()
+
+	if changed {
+		w.logPairChange(newPair)
+	}
+}
+
+// logPairChange emits a debug log for a rotation pair switch, calling out
+// any member selected because of a prefer preference so the effect is
+// visible without having to reconstruct the ranking from raw watch times.
+func (w *MinuteWatcher) logPairChange(pair [2]int) {
+	names := []string{w.streamers[pair[0]].Username, w.streamers[pair[1]].Username}
+
+	var preferred []string
+	for _, idx := range pair {
+		if w.isPreferred(idx) {
+			preferred = append(preferred, w.streamers[idx].Username)
+		}
+	}
+
+	if len(preferred) > 0 {
+		slog.Debug("Rotation pair changed", "pair", names, "preferred", preferred)
+	} else {
+		slog.Debug("Rotation pair changed", "pair", names)
+	}
 }
 
 // watchWeights returns each online streamer's accumulated watch minutes
@@ -455,6 +535,17 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 // selectByPriority is the original priority-based picker, used as-is when
 // there are <= constants.MaxSimultaneousStreams online (no rotation needed).
 func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
+	// Preferred streamers are moved to the front (stably, so relative order
+	// is otherwise unchanged). This only breaks ties within each priority
+	// step below - it never lets a preferred streamer skip ahead of one that
+	// actually satisfies a higher-ranked priority.
+	ordered := make([]int, len(onlineIndexes))
+	copy(ordered, onlineIndexes)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return w.isPreferred(ordered[i]) && !w.isPreferred(ordered[j])
+	})
+	onlineIndexes = ordered
+
 	watching := make(map[int]bool)
 
 	remainingSlots := func() int {
@@ -486,7 +577,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			for _, idx := range onlineIndexes {
 				items = append(items, indexedPoints{index: idx, points: w.streamers[idx].GetChannelPoints()})
 			}
-			sort.Slice(items, func(i, j int) bool {
+			sort.SliceStable(items, func(i, j int) bool {
 				if priority == config.PriorityPointsAscending {
 					return items[i].points < items[j].points
 				}
@@ -561,7 +652,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 					})
 				}
 			}
-			sort.Slice(items, func(i, j int) bool {
+			sort.SliceStable(items, func(i, j int) bool {
 				return items[i].multiplier > items[j].multiplier
 			})
 			for _, item := range items {

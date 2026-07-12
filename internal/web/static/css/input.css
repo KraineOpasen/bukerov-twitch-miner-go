@@ -86,6 +86,14 @@
   @apply bg-amber-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
 }
 
+@utility prefer-badge {
+  @apply bg-emerald-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+}
+
+@utility avoid-badge {
+  @apply bg-red-700 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+}
+
 @utility priority-item {
   @apply flex items-center gap-3 p-3 bg-neutral-900 border border-neutral-700 rounded-md mb-2 cursor-grab;
 }

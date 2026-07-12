@@ -9,9 +9,16 @@
     {{end}}
     <div class="flex items-center justify-between gap-2 pr-7 mb-2">
         <h3 class="text-purple-500 font-semibold text-lg truncate">{{.Name}}</h3>
-        {{if .IsLive}}
-        <span class="live-badge flex-shrink-0">LIVE</span>
-        {{end}}
+        <div class="flex items-center gap-1.5 flex-shrink-0">
+            {{if eq .Preference "prefer"}}
+            <span class="prefer-badge" title="Preferred for watch rotation">★ Prefer</span>
+            {{else if eq .Preference "avoid"}}
+            <span class="avoid-badge" title="Avoided for watch rotation, unless it's the only online channel">Avoid</span>
+            {{end}}
+            {{if .IsLive}}
+            <span class="live-badge">LIVE</span>
+            {{end}}
+        </div>
     </div>
     {{if .ChannelRestrictedDrop}}
     <span class="drop-exclusive-badge inline-block mb-2" title="This drop campaign only counts progress on this channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
