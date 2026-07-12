@@ -3,13 +3,9 @@ package watcher
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/rand"
-	"net/http"
-	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -49,7 +45,9 @@ type MinuteWatcher struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	httpClient *http.Client
+	// sender performs the actual watch-minute reporting (playback token,
+	// playlist touch, spade event). Shared mechanism with the discovery slot.
+	sender *MinuteSender
 
 	mu sync.RWMutex
 }
@@ -81,7 +79,7 @@ func NewMinuteWatcher(
 		priorities: priorities,
 		settings:   settings,
 		store:      store,
-		httpClient: &http.Client{Timeout: 20 * time.Second},
+		sender:     NewMinuteSender(client),
 	}
 }
 
@@ -754,126 +752,9 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 }
 
 func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) error {
-	sig, token, err := w.client.GetPlaybackAccessToken(streamer.Username)
-	if err != nil {
-		return fmt.Errorf("failed to get playback token: %w", err)
+	simulateErr, err := w.sender.Send(streamer)
+	if simulateErr != nil {
+		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", simulateErr)
 	}
-
-	if err := w.simulateWatching(streamer.Username, sig, token); err != nil {
-		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", err)
-	}
-
-	if streamer.Stream.SpadeURL == "" {
-		return fmt.Errorf("no spade URL")
-	}
-
-	payload, err := streamer.Stream.EncodePayload()
-	if err != nil {
-		return fmt.Errorf("failed to encode payload: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", streamer.Stream.SpadeURL, strings.NewReader("data="+payload))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", constants.TVUserAgent)
-
-	resp, err := w.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-func (w *MinuteWatcher) simulateWatching(channel, sig, token string) error {
-	playlistURL := fmt.Sprintf("%s/api/channel/hls/%s.m3u8", constants.UsherURL, channel)
-
-	params := url.Values{
-		"sig":   {sig},
-		"token": {token},
-	}
-
-	resp, err := w.httpClient.Get(playlistURL + "?" + params.Encode())
-	if err != nil {
-		return fmt.Errorf("failed to get playlist: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("playlist request failed with status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read playlist: %w", err)
-	}
-
-	lines := strings.Split(string(body), "\n")
-	var lowestQualityURL string
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(line, "http") {
-			lowestQualityURL = line
-			break
-		}
-	}
-
-	if lowestQualityURL == "" {
-		return fmt.Errorf("no stream URL found in playlist")
-	}
-
-	streamListResp, err := w.httpClient.Get(lowestQualityURL)
-	if err != nil {
-		return fmt.Errorf("failed to get stream list: %w", err)
-	}
-	defer func() { _ = streamListResp.Body.Close() }()
-
-	if streamListResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("stream list request failed with status %d", streamListResp.StatusCode)
-	}
-
-	streamListBody, err := io.ReadAll(streamListResp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read stream list: %w", err)
-	}
-
-	streamLines := strings.Split(string(streamListBody), "\n")
-	var segmentURL string
-	for i := len(streamLines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(streamLines[i])
-		if strings.HasPrefix(line, "http") {
-			segmentURL = line
-			break
-		}
-	}
-
-	if segmentURL == "" {
-		return fmt.Errorf("no segment URL found")
-	}
-
-	req, err := http.NewRequest("HEAD", segmentURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create HEAD request: %w", err)
-	}
-	req.Header.Set("User-Agent", constants.TVUserAgent)
-
-	headResp, err := w.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("HEAD request failed: %w", err)
-	}
-	defer func() { _ = headResp.Body.Close() }()
-
-	if headResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HEAD request returned status %d", headResp.StatusCode)
-	}
-
-	return nil
+	return err
 }

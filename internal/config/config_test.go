@@ -130,3 +130,34 @@ func TestValidateConfigClampsDebugPort(t *testing.T) {
 		t.Errorf("expected out-of-range port reset to 5757, got %d", cfg.Debug.Port)
 	}
 }
+
+func TestLoadConfigDirectoryGamesDefaultEmpty(t *testing.T) {
+	// Backward compatibility: configs written before directory discovery
+	// existed must load with the subsystem fully disabled.
+	path := writeTestConfig(t, `{"username": "test"}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if len(cfg.DirectoryGames) != 0 {
+		t.Errorf("expected no directory games by default, got %v", cfg.DirectoryGames)
+	}
+}
+
+func TestLoadConfigParsesDirectoryGames(t *testing.T) {
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"directoryGames": ["World of Tanks", "Rust"]
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if len(cfg.DirectoryGames) != 2 || cfg.DirectoryGames[0] != "World of Tanks" || cfg.DirectoryGames[1] != "Rust" {
+		t.Errorf("expected configured directory games, got %v", cfg.DirectoryGames)
+	}
+}

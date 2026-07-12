@@ -1,0 +1,49 @@
+{{define "discovery_list"}}
+{{if not .Enabled}}
+<div class="card text-center text-neutral-400">
+    Directory discovery is off. Add games under <a href="/settings" class="text-purple-500 hover:underline">Settings → Directory Discovery</a> to automatically farm drops from the most-viewed live channel of each game.
+</div>
+{{else if not .Channels}}
+<div class="card text-center text-neutral-400">
+    No live drops-enabled channels found right now for {{range $i, $g := .Games}}{{if $i}}, {{end}}<span class="text-neutral-100">{{$g}}</span>{{end}}. The directory is re-checked automatically.
+</div>
+{{else}}
+<div class="card p-0 overflow-hidden">
+    <table class="w-full text-sm">
+        <thead>
+            <tr class="text-left text-xs text-neutral-400 border-b border-neutral-700">
+                <th class="px-4 py-3 font-medium">Channel</th>
+                <th class="px-4 py-3 font-medium">Game</th>
+                <th class="px-4 py-3 font-medium text-right">Viewers</th>
+                <th class="px-4 py-3 font-medium">Drops</th>
+                <th class="px-4 py-3 font-medium text-right">Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Channels}}
+            <tr class="border-b border-neutral-800 last:border-b-0 {{if .Watching}}bg-purple-500/5{{end}}">
+                <td class="px-4 py-3">
+                    <a href="https://www.twitch.tv/{{.Login}}" target="_blank" rel="noopener" class="text-neutral-100 font-medium hover:text-purple-400 transition-colors">{{.Login}}</a>
+                    {{if .HasMinutesWatched}}
+                    <span class="text-xs text-neutral-400 ml-2">{{.MinutesWatched}} min watched</span>
+                    {{end}}
+                </td>
+                <td class="px-4 py-3 text-neutral-300">{{.Game}}</td>
+                <td class="px-4 py-3 text-right text-neutral-300">{{.ViewersFormatted}}</td>
+                <td class="px-4 py-3"><span class="status-pill status-pill-progress">Drops enabled</span></td>
+                <td class="px-4 py-3 text-right">
+                    {{if .Watching}}
+                    <span class="status-pill status-pill-progress">Watching</span>
+                    {{else if .Offline}}
+                    <span class="status-pill status-pill-claimed">Offline</span>
+                    {{else}}
+                    <span class="text-xs text-neutral-400">Available</span>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+{{end}}

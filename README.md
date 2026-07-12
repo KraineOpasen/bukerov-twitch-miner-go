@@ -23,6 +23,7 @@ This tool passively earns Twitch channel points by simulating viewer presence ac
 - **Channel-Restricted Drop Priority**: Correctly prioritizes campaigns limited to specific channels, watching a permitted channel when one is required
 - **Drop Claim Deduplication**: Skips drop campaigns already claimed according to Twitch's account claim history
 - **Drop Name Blacklist**: Skip unwanted drop campaigns by keyword
+- **Directory Channel Discovery**: For configured games, automatically finds live drops-enabled channels in the Twitch directory and farms the most-viewed one in an extra watch slot, switching channels when they go offline or their drops end — no need to list them as streamers
 - **Moments Claiming**: Automatically claim Twitch Moments when available
 - **Community Goals**: Contribute channel points to streamer community goals, with optional per-contribution limits (percentage of balance and absolute cap)
 - **Per-Streamer Rotation Preference**: Nudge the watch rotation to prefer or avoid specific streamers when priority is otherwise equal
@@ -339,6 +340,7 @@ Generate a sample config with all options:
   "enableAnalytics": true,
   "priority": ["STREAK", "DROPS", "ORDER"],
   "dropBlacklist": ["keyword to skip"],
+  "directoryGames": ["World of Tanks"],
   "streamerSettings": {
     "makePredictions": true,
     "followRaid": true,
@@ -423,6 +425,22 @@ The miner watches up to 2 streams simultaneously, selected by priority order:
 | `ORDER` | Follow order in streamers list |
 | `POINTS_ASCENDING` | Lowest points first |
 | `POINTS_DESCENDING` | Highest points first |
+
+### Directory Discovery
+
+Independently of the streamer list, `directoryGames` (also editable on the
+Settings page) enables drops farming by game: while a listed game has an
+active unclaimed drop campaign, the miner queries the game's Twitch directory
+for live drops-enabled channels, watches the most-viewed one in an **extra
+watch slot** (the 2-slot streamer rotation above is not affected), and
+automatically switches to the next-best channel when the current one goes
+offline, changes game, or its drops end. Discovered channels appear in the
+**Discovered Channels** section of the Drops page. An empty list (the
+default) disables the feature entirely.
+
+Note: Twitch credits watch time for at most 2 concurrent streams, so the
+discovery slot is most effective when fewer than two of your configured
+streamers are live.
 
 ### Streamer Settings
 

@@ -36,6 +36,14 @@ type Config struct {
 	// rotation prioritization, in addition to the claim-history dedup.
 	DropBlacklist []string `json:"dropBlacklist,omitempty"`
 
+	// DirectoryGames lists game names (as shown on Twitch, e.g. "World of
+	// Tanks") for which directory-based channel discovery is enabled: the
+	// miner periodically queries the game's Twitch directory for live
+	// drops-enabled channels and farms the best one in an extra watch slot,
+	// separate from the fixed streamer list and its 2-slot rotation. Empty
+	// (the default) disables the whole subsystem.
+	DirectoryGames []string `json:"directoryGames,omitempty"`
+
 	// AutoRedeem holds per-streamer auto-redeem configuration for custom
 	// channel-points rewards, keyed by lowercase streamer username. It is a
 	// top-level map (rather than a StreamerSettings field) so it survives the

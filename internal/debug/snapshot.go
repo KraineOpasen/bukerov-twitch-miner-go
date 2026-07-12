@@ -23,6 +23,7 @@ type Snapshot struct {
 
 	Watching     WatchingInfo    `json:"watching"`
 	Streamers    []StreamerState `json:"streamers"`
+	Discovery    *DiscoveryInfo  `json:"discovery,omitempty"`
 	RecentEvents []events.Event  `json:"recentEvents"`
 }
 
@@ -112,4 +113,23 @@ type PredictionInfo struct {
 type WatchStreakInfo struct {
 	Pending        bool    `json:"pending"`
 	MinutesWatched float64 `json:"minutesWatched"`
+}
+
+// DiscoveryInfo describes the directory-discovery subsystem: the configured
+// games, the discovered candidate pool, and which channel occupies the extra
+// discovery watch slot. Present only while discovery is enabled.
+type DiscoveryInfo struct {
+	Games      []string           `json:"games"`
+	Watching   string             `json:"watching,omitempty"`
+	LastSyncAt time.Time          `json:"lastSyncAt,omitzero"`
+	Channels   []DiscoveryChannel `json:"channels,omitempty"`
+}
+
+type DiscoveryChannel struct {
+	Login   string `json:"login"`
+	Game    string `json:"game"`
+	Viewers int    `json:"viewers"`
+	// Status: "watching", "available", or "offline".
+	Status         string  `json:"status"`
+	MinutesWatched float64 `json:"minutesWatched,omitempty"`
 }

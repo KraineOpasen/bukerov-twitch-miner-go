@@ -149,6 +149,9 @@ internal/
 ├── drops/                      # Game drops tracking
 │   └── drops.go                # Campaign sync, drop claiming
 │
+├── discovery/                  # Directory-based channel discovery (extra drops watch slot)
+│   └── discovery.go            # Per-game directory sync, candidate pool, auto-switching slot
+│
 ├── debug/                      # Localhost-only diagnostic HTTP server
 │   ├── server.go               # 127.0.0.1-bound server: /debug/snapshot, /debug/log
 │   └── snapshot.go             # Snapshot JSON document types
@@ -382,6 +385,8 @@ All Twitch API interactions use persisted GraphQL queries with SHA256 hashes.
 | `ChannelFollows` | `eecf815273d3d949e5cf0085cc5084cd8a1b5b7b6f7990cf43cb0beadf546907` | Get followed channels |
 | `ContributeCommunityPointsCommunityGoal` | `5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6` | Contribute to goals |
 | `RedeemCustomReward` | `d56249a7adb4978898ea3412e196688d4ac3cea1c0c2dfd65561d229ea5dcc42` | Redeem custom channel-points reward (renamed server-side from `RedeemCommunityPointsCustomReward`) |
+| `DirectoryPage_Game` | `cb5dc816e139dcb8a118f14b4b677d59abc224a4b016c4bc2bb00a47fe0ddec4` | List live channels in a game directory (drops-only via `options.systemFilters: ["DROPS_ENABLED"]`); hash rotates every few months — track DevilXD/TwitchDropsMiner's constants.py |
+| `DirectoryGameRedirect` | `1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc` | Resolve a game display name to its directory slug (`game(name:) { id slug }`) |
 
 ---
 
@@ -776,6 +781,63 @@ watching a different configured streamer with the same game, so it's safer
 to spend a limited watch slot on the channel-restricted one first. The
 dashboard shows a "Channel-only drop" badge on a streamer's card when this
 applies.
+
+### Directory-Based Channel Discovery (`internal/discovery`)
+
+An optional subsystem (config key `directoryGames`, a list of game names;
+empty = disabled) that farms drops for games *without* requiring any matching
+channel in the configured streamer list. It is fully independent of the fixed
+2-slot watch rotation: discovered channels are ephemeral `models.Streamer`
+objects that never enter the streamer manager, PubSub pool, chat, rotation,
+or the watch-time fairness store.
+
+Flow, per configured game:
+
+1. **Eligibility** — a game is only queried while the drops tracker holds at
+   least one active, unclaimed campaign for it (matched by game name against
+   `DropsTracker.Campaigns()`, which is already filtered by date window,
+   claim history, and the drop-name blacklist). When the final reward of a
+   game's last campaign is claimed, the game drops out of discovery
+   automatically.
+2. **Directory sync** — `DirectoryPage_Game` (slug resolved via
+   `DirectoryGameRedirect`, with a local slugify fallback) lists up to 30
+   live channels with `systemFilters: ["DROPS_ENABLED"]`, sorted by viewer
+   count. The sync runs every `campaignSyncInterval` minutes, dropping to a
+   2-minute retry while the pool is empty. One GQL query per game per sync.
+3. **The extra watch slot** — the best candidate (configured game order,
+   then viewers descending, mirroring reference miners' top-by-viewers
+   pick) is verified online via the normal `CheckStreamerOnline` path (spade
+   URL + stream payload + per-channel campaign IDs) and then receives
+   minute-watched events through the same `watcher.MinuteSender` mechanism
+   the rotation uses, on the same `minuteWatchedInterval` cadence with the
+   same ±20% jitter. At most 3 candidates are online-verified per tick to
+   bound API bursts.
+4. **Auto-switching** — the slot abandons its channel and moves to the next
+   candidate when the channel goes offline, switches game, loses its
+   available campaigns (`DropsHighlightService_AvailableDrops` returns
+   none), or the game's campaigns are exhausted. Log lines: `Discovered
+   channel selected`, `Switching discovered channel`, and `Discovery pool
+   empty` (once per transition).
+
+Drop progress earned this way lands in the account inventory and is claimed
+by the existing drops tracker (`claimAllDropsFromInventory` / inventory
+sync) — discovery itself never claims.
+
+No PubSub topics are subscribed for discovered channels: online state is
+maintained by directory syncs plus the stale-stream re-check, so the
+subsystem adds zero WebSocket connections. All of its GQL calls go through
+the shared client and therefore inherit the retry/backoff, the
+PersistedQueryNotFound client-ID fallback, and the connection-health
+watchdog's `LastSuccessAt` accounting.
+
+Caveat: Twitch only credits watch time for up to 2 simultaneous streams
+(`constants.MaxSimultaneousStreams`). The discovery slot deliberately does
+not take a rotation slot, so when two configured streamers are already being
+watched it reports a third stream; Twitch may not credit all three for
+channel points, and drop-progress crediting under concurrent viewing follows
+Twitch's server-side rules. The slot is most effective when fewer than two
+configured streamers are live — e.g. overnight — and its per-channel
+watch-minute accounting is visible on the Drops page either way.
 
 ---
 

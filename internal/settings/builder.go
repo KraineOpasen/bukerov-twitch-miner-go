@@ -72,7 +72,8 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			BotToken: cfg.Discord.BotToken,
 			GuildID:  cfg.Discord.GuildID,
 		},
-		DropBlacklist: cfg.DropBlacklist,
+		DropBlacklist:  cfg.DropBlacklist,
+		DirectoryGames: cfg.DirectoryGames,
 	}
 }
 
@@ -125,7 +126,8 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			BotToken: defaults.Discord.BotToken,
 			GuildID:  defaults.Discord.GuildID,
 		},
-		DropBlacklist: defaults.DropBlacklist,
+		DropBlacklist:  defaults.DropBlacklist,
+		DirectoryGames: defaults.DirectoryGames,
 	}
 }
 
@@ -171,8 +173,34 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.Discord.GuildID = s.Discord.GuildID
 
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
+	cfg.DirectoryGames = normalizeGameList(s.DirectoryGames)
 
 	config.ValidateConfig(cfg)
+}
+
+// normalizeGameList trims each game name, drops blanks, and removes
+// case-insensitive duplicates while preserving the user's order (order acts
+// as the discovery priority between games). Returns nil when nothing remains
+// so the field is omitted from config.json rather than serialized as [].
+func normalizeGameList(games []string) []string {
+	cleaned := make([]string, 0, len(games))
+	seen := make(map[string]bool, len(games))
+	for _, g := range games {
+		trimmed := strings.TrimSpace(g)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		cleaned = append(cleaned, trimmed)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 // GetStreamerSettings retrieves effective settings for a streamer from config.

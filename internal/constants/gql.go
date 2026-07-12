@@ -128,4 +128,34 @@ var (
 		"RedeemCustomReward",
 		"d56249a7adb4978898ea3412e196688d4ac3cea1c0c2dfd65561d229ea5dcc42",
 	)
+
+	// DirectoryPageGame lists live channels in a game's directory
+	// (twitch.tv/directory/category/<slug>) — the operation reference drop
+	// miners (DevilXD/TwitchDropsMiner and its forks) use to find
+	// drops-enabled channels per game. Takes the game *slug* plus an options
+	// object whose systemFilters: ["DROPS_ENABLED"] restricts results
+	// server-side to streams with drops activated (there is no per-stream
+	// drops flag in the response).
+	//
+	// Twitch rotates this operation's hash every few months (5 rotations
+	// since 2024), sometimes changing the variable shape with it (the
+	// current era sends includeCostreaming; the pre-2025 era sent
+	// includeIsDJ). Hash below is in effect since 2026-05, cross-validated
+	// against DevilXD master and a dozen independent miners. On rotation the
+	// GQL client logs PersistedQueryNotFound loudly — update the hash (and
+	// re-check the variables in internal/api/directory.go) from
+	// DevilXD/TwitchDropsMiner's constants.py, the canonical tracker.
+	DirectoryPageGame = NewGQLOperation(
+		"DirectoryPage_Game",
+		"cb5dc816e139dcb8a118f14b4b677d59abc224a4b016c4bc2bb00a47fe0ddec4",
+	)
+
+	// DirectoryGameRedirect resolves a game's display name to its directory
+	// slug (query: game(name: $name) { id slug }). Used before
+	// DirectoryPageGame since that operation only accepts slugs; a local
+	// slugify fallback covers lookup failures. Hash unchanged since 2024.
+	DirectoryGameRedirect = NewGQLOperation(
+		"DirectoryGameRedirect",
+		"1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc",
+	)
 )
