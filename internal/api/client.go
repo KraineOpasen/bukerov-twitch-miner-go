@@ -51,6 +51,7 @@ type TwitchClient struct {
 	deviceID      string
 	clientSession string
 	clientVersion string
+	clientID      string
 	userAgent     string
 	client        *http.Client
 
@@ -72,6 +73,7 @@ func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient
 		deviceID:               deviceID,
 		clientSession:          util.RandomHex(16),
 		clientVersion:          constants.DefaultClientVersion,
+		clientID:               constants.ClientIDTV,
 		userAgent:              constants.TVUserAgent,
 		client:                 &http.Client{Timeout: 30 * time.Second},
 		twilightBuildIDPattern: regexp.MustCompile(`window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`),
@@ -151,7 +153,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		return nil, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
-	respBody, statusCode, err := c.doGQLRequestWithRetry(body, operation.OperationName)
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, operation.OperationName)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +183,7 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		names[i] = op.OperationName
 	}
 
-	respBody, statusCode, err := c.doGQLRequestWithRetry(body, strings.Join(names, ","))
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, strings.Join(names, ","))
 	if err != nil {
 		return nil, err
 	}
@@ -206,12 +208,97 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	return result, nil
 }
 
-// doGQLRequestWithRetry sends the given already-marshaled GQL request body,
-// retrying with exponential backoff on transient failures: network-level
-// errors (timeouts, connection resets) and HTTP 429/5xx responses. Other
-// HTTP errors (4xx auth/logic errors) are returned immediately since
-// retrying them would just reproduce the same failure.
-func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string) ([]byte, int, error) {
+// isPersistedQueryNotFound reports whether a GQL response body carries a
+// PersistedQueryNotFound error. Twitch returns this (typically with HTTP 200)
+// when the persisted-query sha256 hash it has on record for the given Client-Id
+// no longer matches — usually because Twitch rotated/invalidated the hashes or
+// the client ID itself. It is detected via a raw substring match so it works
+// for both single and batched responses regardless of the exact error shape
+// (errors[].message vs errorType).
+func isPersistedQueryNotFound(respBody []byte) bool {
+	return bytes.Contains(respBody, []byte("PersistedQueryNotFound"))
+}
+
+// clientIDCandidates returns the ordered list of client IDs to try for a GQL
+// request: the currently-active one first, followed by the remaining known
+// public client IDs from constants.GQLClientIDFallbacks (de-duplicated).
+func clientIDCandidates(active string) []string {
+	candidates := []string{active}
+	for _, id := range constants.GQLClientIDFallbacks {
+		if id != active {
+			candidates = append(candidates, id)
+		}
+	}
+	return candidates
+}
+
+// doGQLRequestWithClientIDFallback sends a GQL request and, on a
+// PersistedQueryNotFound response, transparently retries with the alternate
+// public Twitch client IDs before giving up. This guards against the
+// well-known failure where Twitch rotates or invalidates the persisted-query
+// hashes tied to a hardcoded client ID, which would otherwise break every GQL
+// call at once. Transient network/HTTP failures are handled one layer down by
+// doGQLRequestWithRetry — this layer deals only with the stale
+// client-ID/query-hash case, and its returned error is passed straight
+// through.
+//
+// It starts with the currently-active client ID and, on PersistedQueryNotFound,
+// walks the remaining candidates. When an alternate client ID succeeds it is
+// promoted to the active default (so subsequent requests use it directly) and
+// logged at WARN level so the rotation is visible and the hardcoded default can
+// be updated.
+func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel string) ([]byte, int, error) {
+	activeClientID := c.getClientID()
+	candidates := clientIDCandidates(activeClientID)
+
+	var (
+		respBody   []byte
+		statusCode int
+		err        error
+	)
+
+	for i, clientID := range candidates {
+		respBody, statusCode, err = c.doGQLRequestWithRetry(body, operationLabel, clientID)
+		if err != nil {
+			return respBody, statusCode, err
+		}
+
+		if !isPersistedQueryNotFound(respBody) {
+			if clientID != activeClientID {
+				c.setClientID(clientID)
+				slog.Warn("GQL PersistedQueryNotFound resolved by switching Twitch client ID; consider updating the default client ID",
+					"operation", operationLabel,
+					"previousClientID", activeClientID,
+					"newClientID", clientID,
+				)
+			}
+			return respBody, statusCode, nil
+		}
+
+		slog.Warn("GQL request returned PersistedQueryNotFound; trying next client ID",
+			"operation", operationLabel,
+			"clientID", clientID,
+			"remainingCandidates", len(candidates)-i-1,
+		)
+	}
+
+	slog.Error("GQL request returned PersistedQueryNotFound on all known client IDs; persisted-query hashes are likely stale and need updating",
+		"operation", operationLabel,
+		"clientIDsTried", len(candidates),
+	)
+
+	// Return the last response so the caller parses it as usual and fails
+	// downstream gracefully (missing data) rather than treating this as a
+	// hard transport error.
+	return respBody, statusCode, nil
+}
+
+// doGQLRequestWithRetry sends the given already-marshaled GQL request body
+// using the supplied client ID, retrying with exponential backoff on transient
+// failures: network-level errors (timeouts, connection resets) and HTTP 429/5xx
+// responses. Other HTTP errors (4xx auth/logic errors) are returned immediately
+// since retrying them would just reproduce the same failure.
+func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID string) ([]byte, int, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
@@ -219,7 +306,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel string)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
 		}
-		c.setGQLHeaders(req)
+		c.setGQLHeaders(req, clientID)
 
 		respBody, statusCode, err := c.doGQLOnce(req)
 		if err == nil {
@@ -291,14 +378,29 @@ func gqlBackoffDuration(attempt int) time.Duration {
 	return backoff + jitter
 }
 
-func (c *TwitchClient) setGQLHeaders(req *http.Request) {
+func (c *TwitchClient) setGQLHeaders(req *http.Request, clientID string) {
 	req.Header.Set("Authorization", "OAuth "+c.auth.GetAuthToken())
-	req.Header.Set("Client-Id", constants.ClientIDTV)
+	req.Header.Set("Client-Id", clientID)
 	req.Header.Set("Client-Session-Id", c.clientSession)
 	req.Header.Set("Client-Version", c.getClientVersion())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("X-Device-Id", c.deviceID)
+}
+
+// getClientID returns the currently-active Twitch client ID used for GQL
+// requests. It starts as constants.ClientIDTV and may be swapped to a fallback
+// by doGQLRequestWithClientIDFallback when Twitch invalidates the default.
+func (c *TwitchClient) getClientID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.clientID
+}
+
+func (c *TwitchClient) setClientID(id string) {
+	c.mu.Lock()
+	c.clientID = id
+	c.mu.Unlock()
 }
 
 func (c *TwitchClient) getClientVersion() string {
