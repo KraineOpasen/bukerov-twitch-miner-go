@@ -737,6 +737,39 @@ Drop
    └── Mark as claimed
 ```
 
+### Lightweight progress sync
+
+The full sync above runs only every `campaignSyncInterval` minutes (60 by
+default) because it is expensive: a `ViewerDropsDashboard` listing plus one
+`DropCampaignDetails` fetch per active campaign plus several `Inventory`
+reads. On its own that leaves the dashboard/Drops-page progress up to a full
+interval stale — a campaign shown at 58% (140/240 min) while Twitch already
+credits ~69%.
+
+To keep the displayed progress within a minute or two of Twitch's real
+progress, `DropsTracker` runs a second, much cheaper loop
+(`progressLoop`/`syncProgress`) on `dropProgressSyncInterval` minutes (2 by
+default, range 1-60):
+
+```
+Progress sync (dropProgressSyncInterval, or on demand)
+   ├── GET Inventory   (single query; no dashboard listing, no per-campaign
+   │                    DropCampaignDetails fetches)
+   ├── For each already-tracked campaign the inventory reports progress for:
+   │   clone it, advance its drops' currentMinutesWatched from the inventory
+   │   `self` data, drop claimed/out-of-window drops
+   └── Republish the campaign pool (fresh objects, swapped under lock so the
+       Drops page and directory discovery keep reading immutable published
+       campaigns) only when progress actually changed
+```
+
+It never discovers, claims, or filters campaigns — those stay with the full
+sync — it only advances the watched-minute counters of campaigns the full
+sync already published (a new campaign still appears at the next full sync).
+The watcher calls `DropsTracker.TriggerProgressSync` after every successfully
+reported watched minute, so a watched minute is reflected on the Drops page
+within seconds rather than waiting out the interval.
+
 ### Drops Eligibility
 
 A streamer is eligible for drops when:
@@ -1163,7 +1196,8 @@ Defaults are tuned to match the Python miner and avoid Twitch rate limiting. Ran
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `websocketPingInterval` | int | 27 | Base seconds between WebSocket pings (20-60), ±2.5s jitter applied |
-| `campaignSyncInterval` | int | 60 | Minutes between drop campaign syncs (5-120) |
+| `campaignSyncInterval` | int | 60 | Minutes between full drop campaign syncs — discovery, claiming, filtering (5-120) |
+| `dropProgressSyncInterval` | int | 2 | Minutes between lightweight inventory-only drop-progress refreshes shown on the Drops page; also triggered right after each watched minute (1-60) |
 | `minuteWatchedInterval` | int | 60 | Base seconds for minute-watched cycle (30-120), divided by # of streamers, ±20% jitter |
 | `requestDelay` | float | 0.5 | Seconds between consecutive API calls (0.1-2.0) |
 | `reconnectDelay` | int | 60 | Seconds to wait before reconnecting (30-300) |
@@ -1383,7 +1417,8 @@ Defaults are tuned to match the Python miner. Random jitter is applied to avoid 
 | Setting | Default | Min | Max | Description |
 |---------|---------|-----|-----|-------------|
 | `websocketPingInterval` | 27 | 20 | 60 | Base seconds between WebSocket pings (±2.5s jitter) |
-| `campaignSyncInterval` | 60 | 5 | 120 | Minutes between drop campaign syncs |
+| `campaignSyncInterval` | 60 | 5 | 120 | Minutes between full drop campaign syncs (discovery, claiming, filtering) |
+| `dropProgressSyncInterval` | 2 | 1 | 60 | Minutes between lightweight inventory-only drop-progress refreshes (also on each watched minute) |
 | `minuteWatchedInterval` | 60 | 30 | 120 | Base seconds for minute-watched cycle (divided by # streamers, ±20% jitter) |
 | `requestDelay` | 0.5 | 0.1 | 2.0 | Seconds between consecutive API calls |
 | `reconnectDelay` | 60 | 30 | 300 | Seconds to wait before reconnecting |

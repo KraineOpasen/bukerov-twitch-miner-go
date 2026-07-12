@@ -58,6 +58,13 @@ type DropsTracker struct {
 	// one. Guarded by mu so it can be updated at runtime from the Settings page.
 	dropBlacklist []string
 
+	// resync wakes the lightweight progress-sync loop early (buffered to 1 so
+	// bursts of triggers between syncs coalesce into a single extra run). Fed by
+	// TriggerProgressSync, e.g. right after a watched minute is reported so the
+	// Drops page reflects the new progress within seconds instead of waiting out
+	// DropProgressSyncInterval.
+	resync chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -75,6 +82,7 @@ func NewDropsTracker(
 		streamers:     streamers,
 		settings:      settings,
 		dropBlacklist: dropBlacklist,
+		resync:        make(chan struct{}, 1),
 	}
 }
 
@@ -87,12 +95,34 @@ func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Unlock()
 }
 
+// UpdateSettings replaces the rate-limit settings at runtime (e.g. from the
+// Settings page) so a changed CampaignSyncInterval/DropProgressSyncInterval
+// takes effect on the next tick of the respective loop without a restart.
+func (d *DropsTracker) UpdateSettings(settings config.RateLimitSettings) {
+	d.mu.Lock()
+	d.settings = settings
+	d.mu.Unlock()
+}
+
 func (d *DropsTracker) Start(ctx context.Context) {
 	d.mu.Lock()
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	d.mu.Unlock()
 
 	go d.loop()
+	go d.progressLoop()
+}
+
+// TriggerProgressSync asks the progress-sync loop to run an immediate
+// lightweight refresh instead of waiting out DropProgressSyncInterval. It is
+// non-blocking and coalescing: if a run is already queued the trigger is
+// dropped. Wired to the watcher so a freshly-reported watched minute is
+// reflected on the Drops page within seconds.
+func (d *DropsTracker) TriggerProgressSync() {
+	select {
+	case d.resync <- struct{}{}:
+	default:
+	}
 }
 
 // SyncNow runs a single campaign sync synchronously, refreshing the tracked
@@ -163,7 +193,7 @@ func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount i
 }
 
 func (d *DropsTracker) loop() {
-	syncInterval := time.Duration(d.settings.CampaignSyncInterval) * time.Minute
+	syncInterval := d.campaignSyncInterval()
 
 	d.syncCampaigns()
 
@@ -178,6 +208,166 @@ func (d *DropsTracker) loop() {
 			d.syncCampaigns()
 		}
 	}
+}
+
+// progressLoop runs the lightweight, inventory-only progress refresh on the
+// (much shorter) DropProgressSyncInterval cadence, or immediately when
+// TriggerProgressSync fires. It exists so the Drops page tracks Twitch's real
+// drop progress within a minute or two instead of lagging up to a full
+// CampaignSyncInterval behind, without paying for the full campaign-discovery
+// pipeline (dashboard listing + per-campaign details fetches) every time.
+func (d *DropsTracker) progressLoop() {
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
+
+	for {
+		timer := time.NewTimer(d.progressSyncInterval())
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		case <-d.resync:
+			timer.Stop()
+		}
+		d.syncProgress()
+	}
+}
+
+// campaignSyncInterval returns the configured full-sync cadence, guarded so a
+// runtime UpdateSettings write can't race the read; it falls back to the
+// built-in default when unset.
+func (d *DropsTracker) campaignSyncInterval() time.Duration {
+	d.mu.RLock()
+	mins := d.settings.CampaignSyncInterval
+	d.mu.RUnlock()
+	if mins <= 0 {
+		mins = 60
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// progressSyncInterval returns the configured lightweight progress-sync
+// cadence, guarded against a racing UpdateSettings write; it falls back to the
+// built-in default when unset.
+func (d *DropsTracker) progressSyncInterval() time.Duration {
+	d.mu.RLock()
+	mins := d.settings.DropProgressSyncInterval
+	d.mu.RUnlock()
+	if mins <= 0 {
+		mins = 2
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+// syncProgress runs a lightweight, inventory-only refresh of the watched-minute
+// progress of the already-tracked campaigns. Unlike syncCampaigns it issues a
+// single Inventory GQL request and touches neither the ViewerDropsDashboard
+// listing nor the per-campaign DropCampaignDetails calls, so it is cheap enough
+// to run every couple of minutes (and on demand after a watched minute). It
+// never adds, removes, or claims campaigns/drops -- discovery, claiming, and
+// blacklist/claim-history filtering all stay with the full sync -- it only
+// advances the progress counters of campaigns the full sync already published.
+func (d *DropsTracker) syncProgress() {
+	d.mu.RLock()
+	existing := make([]*models.Campaign, len(d.campaigns))
+	copy(existing, d.campaigns)
+	d.mu.RUnlock()
+
+	// Nothing tracked yet: the full sync hasn't populated the campaign pool, so
+	// there's no progress to refresh and no reason to hit the network.
+	if len(existing) == 0 {
+		return
+	}
+
+	inventory, err := d.getInventory()
+	if err != nil || inventory == nil {
+		return
+	}
+
+	inProgress, ok := inventory["dropCampaignsInProgress"].([]interface{})
+	if !ok || inProgress == nil {
+		return
+	}
+
+	progressByID := make(map[string][]interface{}, len(inProgress))
+	for _, prog := range inProgress {
+		progData, ok := prog.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := progData["id"].(string)
+		if id == "" {
+			continue
+		}
+		if drops, ok := progData["timeBasedDrops"].([]interface{}); ok {
+			progressByID[id] = drops
+		}
+	}
+
+	// Build a fresh slice so published campaigns stay immutable after they're
+	// swapped in (the Drops page and directory discovery read them lock-free and
+	// rely on that invariant). Only campaigns the inventory reports progress for
+	// are cloned and advanced; the rest are carried over unchanged by pointer.
+	updated := make([]*models.Campaign, len(existing))
+	changed := false
+	for i, c := range existing {
+		drops, ok := progressByID[c.ID]
+		if !ok {
+			updated[i] = c
+			continue
+		}
+
+		clone := c.Clone()
+		// nil claim callback: this path is display-only. Claiming stays with the
+		// full sync / claimAllDropsFromInventory so no network write happens on
+		// the hot progress path.
+		clone.SyncDrops(drops, nil)
+		clone.ClearClaimedDrops()
+		updated[i] = clone
+
+		if !changed && progressDiffers(c, clone) {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return
+	}
+
+	d.mu.Lock()
+	d.campaigns = updated
+	d.mu.Unlock()
+
+	// Re-point the streamers at the refreshed campaigns so watch-priority
+	// decisions see the new progress too, exactly as the full sync does.
+	d.updateStreamerCampaigns()
+
+	slog.Debug("Drops progress sync: refreshed tracked campaign progress from inventory",
+		"campaigns", len(updated))
+}
+
+// progressDiffers reports whether the watched-minute progress (or the set of
+// still-unclaimed drops) changed between the pre- and post-refresh campaign, so
+// syncProgress only republishes -- and re-points streamers -- when something
+// actually moved. Compared by drop ID so it is independent of ordering or of
+// drops ClearClaimedDrops removed on the refreshed copy.
+func progressDiffers(before, after *models.Campaign) bool {
+	if len(before.Drops) != len(after.Drops) {
+		return true
+	}
+	beforeMinutes := make(map[string]int, len(before.Drops))
+	for _, drop := range before.Drops {
+		beforeMinutes[drop.ID] = drop.CurrentMinutesWatched
+	}
+	for _, drop := range after.Drops {
+		prev, ok := beforeMinutes[drop.ID]
+		if !ok || prev != drop.CurrentMinutesWatched {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DropsTracker) syncCampaigns() {

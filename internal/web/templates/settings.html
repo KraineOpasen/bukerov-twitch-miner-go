@@ -102,11 +102,19 @@
             <div class="setting-row">
                 <div>
                     <div class="setting-label">Campaign Sync Interval</div>
-                    <div class="setting-description">Seconds between drop campaign syncs (5-120)</div>
+                    <div class="setting-description">Minutes between full drop campaign syncs (5-120)</div>
                 </div>
                 <input type="number" class="input-field w-28" id="campaignSyncInterval" min="5" max="120">
             </div>
-            
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">Drop Progress Sync Interval</div>
+                    <div class="setting-description">Minutes between lightweight drop-progress refreshes shown on the Drops page (1-60)</div>
+                </div>
+                <input type="number" class="input-field w-28" id="dropProgressSyncInterval" min="1" max="60">
+            </div>
+
             <div class="setting-row">
                 <div>
                     <div class="setting-label">Minute Watched Interval</div>
@@ -373,6 +381,7 @@
 
         document.getElementById('websocketPingInterval').value = settings.rateLimits.websocketPingInterval;
         document.getElementById('campaignSyncInterval').value = settings.rateLimits.campaignSyncInterval;
+        document.getElementById('dropProgressSyncInterval').value = settings.rateLimits.dropProgressSyncInterval;
         document.getElementById('minuteWatchedInterval').value = settings.rateLimits.minuteWatchedInterval;
         document.getElementById('requestDelay').value = settings.rateLimits.requestDelay;
         document.getElementById('reconnectDelay').value = settings.rateLimits.reconnectDelay;
@@ -804,6 +813,7 @@
             rateLimits: {
                 websocketPingInterval: parseInt(document.getElementById('websocketPingInterval').value),
                 campaignSyncInterval: parseInt(document.getElementById('campaignSyncInterval').value),
+                dropProgressSyncInterval: parseInt(document.getElementById('dropProgressSyncInterval').value),
                 minuteWatchedInterval: parseInt(document.getElementById('minuteWatchedInterval').value),
                 requestDelay: parseFloat(document.getElementById('requestDelay').value),
                 reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),

@@ -129,6 +129,31 @@ func (c *Campaign) AllowsChannel(channelID string) bool {
 	return false
 }
 
+// Clone returns a copy of the campaign safe to mutate independently of the
+// original: the Drops slice and each Drop are copied (as are the Channels and
+// ClaimedDropNames slices) so watch progress can be advanced on the copy
+// without touching a campaign object other goroutines may still be reading
+// lock-free (the Drops page and directory discovery rely on published
+// campaigns staying immutable after they're swapped into the tracker). Game is
+// shared: it is treated as immutable and is never mutated in place.
+func (c *Campaign) Clone() *Campaign {
+	clone := *c
+	if c.Drops != nil {
+		clone.Drops = make([]*Drop, len(c.Drops))
+		for i, d := range c.Drops {
+			dc := *d
+			clone.Drops[i] = &dc
+		}
+	}
+	if c.Channels != nil {
+		clone.Channels = append([]string(nil), c.Channels...)
+	}
+	if c.ClaimedDropNames != nil {
+		clone.ClaimedDropNames = append([]string(nil), c.ClaimedDropNames...)
+	}
+	return &clone
+}
+
 func (c *Campaign) ClearClaimedDrops() {
 	validDrops := make([]*Drop, 0)
 	for _, drop := range c.Drops {

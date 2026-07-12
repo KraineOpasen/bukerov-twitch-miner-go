@@ -44,12 +44,13 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		DefaultSettings: StreamerSettingsToDTO(cfg.StreamerSettings),
 		Priority:        priority,
 		RateLimits: RateLimitSettings{
-			WebsocketPingInterval: cfg.RateLimits.WebsocketPingInterval,
-			CampaignSyncInterval:  cfg.RateLimits.CampaignSyncInterval,
-			MinuteWatchedInterval: cfg.RateLimits.MinuteWatchedInterval,
-			RequestDelay:          cfg.RateLimits.RequestDelay,
-			ReconnectDelay:        cfg.RateLimits.ReconnectDelay,
-			StreamCheckInterval:   cfg.RateLimits.StreamCheckInterval,
+			WebsocketPingInterval:    cfg.RateLimits.WebsocketPingInterval,
+			CampaignSyncInterval:     cfg.RateLimits.CampaignSyncInterval,
+			DropProgressSyncInterval: cfg.RateLimits.DropProgressSyncInterval,
+			MinuteWatchedInterval:    cfg.RateLimits.MinuteWatchedInterval,
+			RequestDelay:             cfg.RateLimits.RequestDelay,
+			ReconnectDelay:           cfg.RateLimits.ReconnectDelay,
+			StreamCheckInterval:      cfg.RateLimits.StreamCheckInterval,
 
 			ConnectionTimeoutMinutes: cfg.RateLimits.ConnectionTimeoutMinutes,
 
@@ -98,12 +99,13 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		DefaultSettings: StreamerSettingsToDTO(defaults.StreamerSettings),
 		Priority:        priority,
 		RateLimits: RateLimitSettings{
-			WebsocketPingInterval: defaults.RateLimits.WebsocketPingInterval,
-			CampaignSyncInterval:  defaults.RateLimits.CampaignSyncInterval,
-			MinuteWatchedInterval: defaults.RateLimits.MinuteWatchedInterval,
-			RequestDelay:          defaults.RateLimits.RequestDelay,
-			ReconnectDelay:        defaults.RateLimits.ReconnectDelay,
-			StreamCheckInterval:   defaults.RateLimits.StreamCheckInterval,
+			WebsocketPingInterval:    defaults.RateLimits.WebsocketPingInterval,
+			CampaignSyncInterval:     defaults.RateLimits.CampaignSyncInterval,
+			DropProgressSyncInterval: defaults.RateLimits.DropProgressSyncInterval,
+			MinuteWatchedInterval:    defaults.RateLimits.MinuteWatchedInterval,
+			RequestDelay:             defaults.RateLimits.RequestDelay,
+			ReconnectDelay:           defaults.RateLimits.ReconnectDelay,
+			StreamCheckInterval:      defaults.RateLimits.StreamCheckInterval,
 
 			ConnectionTimeoutMinutes: defaults.RateLimits.ConnectionTimeoutMinutes,
 
@@ -151,6 +153,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 
 	cfg.RateLimits.WebsocketPingInterval = s.RateLimits.WebsocketPingInterval
 	cfg.RateLimits.CampaignSyncInterval = s.RateLimits.CampaignSyncInterval
+	cfg.RateLimits.DropProgressSyncInterval = s.RateLimits.DropProgressSyncInterval
 	cfg.RateLimits.MinuteWatchedInterval = s.RateLimits.MinuteWatchedInterval
 	cfg.RateLimits.RequestDelay = s.RateLimits.RequestDelay
 	cfg.RateLimits.ReconnectDelay = s.RateLimits.ReconnectDelay
