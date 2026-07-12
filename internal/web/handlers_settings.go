@@ -12,6 +12,7 @@ func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
 	s.mu.RUnlock()
 
 	data := SettingsPageData{
@@ -19,6 +20,7 @@ func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		RefreshMinutes: refresh,
 		Version:        version.Version,
 		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
 	}
 	s.renderPage(w, "settings.html", data)
 }

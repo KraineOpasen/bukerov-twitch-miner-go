@@ -9,6 +9,7 @@ import (
 	"github.com/PatrickWalther/twitch-miner-go/internal/api"
 	"github.com/PatrickWalther/twitch-miner-go/internal/config"
 	"github.com/PatrickWalther/twitch-miner-go/internal/constants"
+	"github.com/PatrickWalther/twitch-miner-go/internal/events"
 	"github.com/PatrickWalther/twitch-miner-go/internal/models"
 )
 
@@ -208,6 +209,9 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 						slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
 						return false
 					}
+					if claimed {
+						events.Record(events.TypeDropClaimed, "", drop.Name)
+					}
 					return claimed
 				})
 			}
@@ -341,6 +345,7 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 					slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
 				} else if claimed {
 					slog.Info("Claimed drop", "drop", drop.Name)
+					events.Record(events.TypeDropClaimed, "", drop.Name)
 				}
 				time.Sleep(5 * time.Second)
 			}

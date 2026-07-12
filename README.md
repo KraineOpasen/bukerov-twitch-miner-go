@@ -382,6 +382,10 @@ Generate a sample config with all options:
     "fileLevel": "DEBUG",
     "colored": false,
     "autoClear": true
+  },
+  "debug": {
+    "enabled": false,
+    "port": 5757
   }
 }
 ```
@@ -479,6 +483,24 @@ Defaults are tuned to avoid Twitch rate limiting:
 | `requestDelay` | 0.5 | 0.1-2.0 | Seconds between API calls |
 | `reconnectDelay` | 60 | 30-300 | Seconds before reconnecting |
 | `streamCheckInterval` | 600 | 60-900 | Seconds between status checks |
+
+### Debug Endpoint
+
+An optional localhost-only diagnostic HTTP server (disabled by default):
+
+```json
+"debug": {
+  "enabled": true,
+  "port": 5757
+}
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET http://127.0.0.1:5757/debug/snapshot` | JSON snapshot of the miner's internal state: overall status, the active watch pair and why it was chosen, a per-streamer human-readable reason for being watched or not, drop campaigns, active predictions, and the most recent events (claims, bets, online/offline transitions) |
+| `GET http://127.0.0.1:5757/debug/log?lines=1000` | The last N lines of the log file as plain text (default 1000, max 2000) |
+
+The server binds strictly to `127.0.0.1` and is never reachable from other machines; no tokens or cookies are exposed. When enabled, the dashboard nav bar shows a **Debug** link to the snapshot. Note for Docker users: since it only listens on the container's loopback interface, it isn't reachable through `-p` port mappings — it's intended for running the binary directly.
 
 ---
 

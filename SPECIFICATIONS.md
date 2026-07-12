@@ -119,7 +119,8 @@ cmd/
 
 internal/
 ├── miner/                      # Main application controller (orchestrator)
-│   └── miner.go                # Coordinates all components, context-based lifecycle
+│   ├── miner.go                # Coordinates all components, context-based lifecycle
+│   └── debug.go                # Assembles the /debug/snapshot document from all components
 │
 ├── streamer/                   # Streamer management
 │   └── manager.go              # Loading, storing, updating streamers
@@ -141,10 +142,19 @@ internal/
 │   └── client.go               # IRC protocol handling
 │
 ├── watcher/                    # Minute-watched tracking
-│   └── watcher.go              # Simulates viewing, reports to Twitch
+│   ├── watcher.go              # Simulates viewing, reports to Twitch
+│   ├── store.go                # Persisted watch-time window (rotation fairness)
+│   └── debug.go                # Per-tick selection snapshot for the debug endpoint
 │
 ├── drops/                      # Game drops tracking
 │   └── drops.go                # Campaign sync, drop claiming
+│
+├── debug/                      # Localhost-only diagnostic HTTP server
+│   ├── server.go               # 127.0.0.1-bound server: /debug/snapshot, /debug/log
+│   └── snapshot.go             # Snapshot JSON document types
+│
+├── events/                     # In-memory ring buffer of recent miner events
+│   └── events.go               # Claims/bets/online-offline history for diagnostics
 │
 ├── analytics/                  # Analytics data layer (no HTTP)
 │   ├── service.go              # Point/annotation recording service

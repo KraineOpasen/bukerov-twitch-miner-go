@@ -27,6 +27,7 @@ type DashboardData struct {
 	StreamerCount  int
 	PointsToday    string
 	DiscordEnabled bool
+	DebugURL       string
 }
 
 type StreamerPageData struct {
@@ -38,6 +39,7 @@ type StreamerPageData struct {
 	DataPoints     int
 	DaysAgo        int
 	DiscordEnabled bool
+	DebugURL       string
 }
 
 type StreamerGridData struct {
@@ -51,6 +53,7 @@ type SettingsPageData struct {
 	RefreshMinutes int
 	Version        string
 	DiscordEnabled bool
+	DebugURL       string
 }
 
 type NotificationsPageData struct {
@@ -58,6 +61,7 @@ type NotificationsPageData struct {
 	RefreshMinutes int
 	Version        string
 	DiscordEnabled bool
+	DebugURL       string
 	ConfigValid    bool
 	ConfigError    string
 	Streamers      []string

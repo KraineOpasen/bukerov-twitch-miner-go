@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/PatrickWalther/twitch-miner-go/internal/api"
 	"github.com/PatrickWalther/twitch-miner-go/internal/config"
 	"github.com/PatrickWalther/twitch-miner-go/internal/constants"
+	"github.com/PatrickWalther/twitch-miner-go/internal/events"
 	"github.com/PatrickWalther/twitch-miner-go/internal/models"
 )
 
@@ -51,6 +53,41 @@ func (p *WebSocketPool) SetStatusHandler(handler StatusHandler) {
 
 func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
 	p.onAuthError = handler
+}
+
+// PredictionSnapshot is a read-only view of a tracked prediction event,
+// exposed for the debug endpoint.
+type PredictionSnapshot struct {
+	Streamer     string
+	EventID      string
+	Title        string
+	Status       string
+	CreatedAt    time.Time
+	BetPlaced    bool
+	BetConfirmed bool
+	BetAmount    int
+}
+
+// PredictionsSnapshot returns a view of every prediction event the pool is
+// currently tracking. Safe to call from any goroutine.
+func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	snapshots := make([]PredictionSnapshot, 0, len(p.predictions))
+	for _, e := range p.predictions {
+		snapshots = append(snapshots, PredictionSnapshot{
+			Streamer:     e.Streamer.Username,
+			EventID:      e.EventID,
+			Title:        e.Title,
+			Status:       string(e.Status),
+			CreatedAt:    e.CreatedAt,
+			BetPlaced:    e.BetPlaced,
+			BetConfirmed: e.BetConfirmed,
+			BetAmount:    e.Bet.Decision.Amount,
+		})
+	}
+	return snapshots
 }
 
 // LastActivity returns the most recent PONG timestamp across all connections
@@ -177,6 +214,14 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 					"reason", reasonCode,
 				)
 				streamer.UpdateHistory(reasonCode, earned)
+
+				// Passive WATCH gains arrive every few minutes per streamer
+				// and would drown everything else in the ring buffer, so only
+				// the notable reason codes (CLAIM, WATCH_STREAK, RAID, ...)
+				// are recorded.
+				if reasonCode != "WATCH" {
+					events.Record(events.TypePointsEarned, streamer.Username, fmt.Sprintf("+%d (%s)", earned, reasonCode))
+				}
 			}
 		}
 
@@ -188,6 +233,8 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 			if claimID, ok := claim["id"].(string); ok {
 				if err := p.client.ClaimBonus(streamer, claimID); err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
+				} else {
+					events.Record(events.TypeBonusClaimed, streamer.Username, "bonus claimed")
 				}
 			}
 		}
@@ -237,6 +284,8 @@ func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer
 		}
 		if err := p.client.JoinRaid(streamer, raid); err != nil {
 			slog.Error("Failed to join raid", "error", err)
+		} else {
+			events.Record(events.TypeRaidJoined, streamer.Username, "raid to "+targetLogin)
 		}
 	}
 }
@@ -253,6 +302,8 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 	if momentID, ok := msg.Data["moment_id"].(string); ok {
 		if err := p.client.ClaimMoment(streamer, momentID); err != nil {
 			slog.Error("Failed to claim moment", "error", err)
+		} else {
+			events.Record(events.TypeMomentClaimed, streamer.Username, "moment claimed")
 		}
 	}
 }
@@ -388,6 +439,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 	case "prediction-made":
 		event.BetConfirmed = true
 		slog.Info("Prediction confirmed", "event", event.Title)
+		events.Record(events.TypeBetPlaced, streamer.Username, fmt.Sprintf("bet %d points on %q", event.Bet.Decision.Amount, event.Title))
 
 	case "prediction-result":
 		if !event.BetConfirmed {
@@ -408,6 +460,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			"result", event.Result.Type,
 			"gained", gained,
 		)
+		events.Record(events.TypeBetResult, streamer.Username, fmt.Sprintf("%s %+d points on %q", event.Result.Type, gained, event.Title))
 
 		streamer.UpdateHistory("PREDICTION", gained)
 
