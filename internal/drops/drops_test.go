@@ -90,6 +90,87 @@ func TestBuildTrackedCampaignSummaryOnlyIsSkipped(t *testing.T) {
 	}
 }
 
+// inProgressDrop builds an inventory dropCampaignsInProgress timeBasedDrops
+// entry with `self` watch progress, as the Inventory query returns it.
+func inProgressDrop(id, name string, required, watched float64, claimed bool) map[string]interface{} {
+	return map[string]interface{}{
+		"id":                     id,
+		"name":                   name,
+		"requiredMinutesWatched": required,
+		"self": map[string]interface{}{
+			"currentMinutesWatched": watched,
+			"isClaimed":             claimed,
+		},
+	}
+}
+
+// TestBuildInProgressCampaignRecoversFromInventory reproduces the regression:
+// a campaign Twitch is actively crediting (present in the inventory's
+// dropCampaignsInProgress with live progress) must be tracked even when the
+// entry carries no per-drop date window — which the dashboard/details path
+// would filter out, leaving the Drops page empty while drops keep filling up.
+func TestBuildInProgressCampaignRecoversFromInventory(t *testing.T) {
+	d := &DropsTracker{}
+	prog := map[string]interface{}{
+		"id":   "campaign-wot",
+		"name": "World of Tanks Drops",
+		"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			// 118/120 minutes: ~99% done, not yet claimable (no instance ID).
+			inProgressDrop("drop-1", "Garage Slot", 120, 118, false),
+		},
+	}
+
+	campaign := d.buildInProgressCampaign(prog)
+	if campaign == nil {
+		t.Fatal("expected a recovered campaign, got nil")
+	}
+	if campaign.ID != "campaign-wot" {
+		t.Errorf("unexpected campaign id %q", campaign.ID)
+	}
+	if !campaign.InInventory {
+		t.Error("expected campaign marked as in inventory")
+	}
+	if campaign.Game == nil || campaign.Game.Name != "World of Tanks" {
+		t.Errorf("expected game populated, got %+v", campaign.Game)
+	}
+	if len(campaign.Drops) != 1 {
+		t.Fatalf("expected 1 tracked drop, got %d", len(campaign.Drops))
+	}
+	if got := campaign.Drops[0].CurrentMinutesWatched; got != 118 {
+		t.Errorf("expected watch progress applied from self, got %d", got)
+	}
+}
+
+// TestBuildInProgressCampaignDropsClaimedRewards shows an already-claimed drop
+// is not resurfaced, so a fully-claimed campaign contributes nothing.
+func TestBuildInProgressCampaignDropsClaimedRewards(t *testing.T) {
+	d := &DropsTracker{}
+	prog := map[string]interface{}{
+		"id":   "campaign-done",
+		"name": "Finished Campaign",
+		"game": map[string]interface{}{"id": "game-x", "name": "Game X"},
+		"timeBasedDrops": []interface{}{
+			inProgressDrop("drop-1", "Reward", 60, 60, true),
+		},
+	}
+
+	campaign := d.buildInProgressCampaign(prog)
+	if campaign == nil {
+		t.Fatal("expected a campaign, got nil")
+	}
+	if len(campaign.Drops) != 0 {
+		t.Errorf("expected claimed drop to be dropped, got %d drops", len(campaign.Drops))
+	}
+}
+
+func TestBuildInProgressCampaignNoIDReturnsNil(t *testing.T) {
+	d := &DropsTracker{}
+	if got := d.buildInProgressCampaign(map[string]interface{}{"name": "no id"}); got != nil {
+		t.Errorf("expected nil for entry without a campaign id, got %+v", got)
+	}
+}
+
 func TestBuildTrackedCampaignOutsideDateWindow(t *testing.T) {
 	now := time.Now()
 	detail := map[string]interface{}{

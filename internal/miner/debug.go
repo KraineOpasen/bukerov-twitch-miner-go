@@ -144,6 +144,26 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		}
 	}
 
+	if m.dropsTracker != nil {
+		campaigns := m.dropsTracker.Campaigns()
+		info := &debug.DropsSyncInfo{LastSyncAt: m.dropsTracker.LastSync()}
+		for _, c := range campaigns {
+			tc := debug.TrackedCampaignInfo{
+				RemainingDrops:    len(c.Drops),
+				OverallPercent:    c.OverallProgressPercent(),
+				ClaimStatus:       string(c.ClaimStatus),
+				ChannelRestricted: c.IsChannelRestricted(),
+				InInventory:       c.InInventory,
+				Name:              c.Name,
+			}
+			if c.Game != nil {
+				tc.Game = c.Game.Name
+			}
+			info.Campaigns = append(info.Campaigns, tc)
+		}
+		snap.Drops = info
+	}
+
 	if m.discovery != nil {
 		if st := m.discovery.State(); st.Enabled {
 			info := &debug.DiscoveryInfo{
