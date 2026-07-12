@@ -54,6 +54,18 @@ func (d *DropsTracker) Stop() {
 	d.mu.Unlock()
 }
 
+// Campaigns returns a snapshot of the currently tracked active drop
+// campaigns (a copy of the slice, safe to read concurrently). The dashboard's
+// Drops page uses this to render the campaign queue.
+func (d *DropsTracker) Campaigns() []*models.Campaign {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	campaigns := make([]*models.Campaign, len(d.campaigns))
+	copy(campaigns, d.campaigns)
+	return campaigns
+}
+
 func (d *DropsTracker) loop() {
 	syncInterval := time.Duration(d.settings.CampaignSyncInterval) * time.Minute
 

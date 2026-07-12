@@ -211,6 +211,57 @@ func (s *Streamer) ActiveCampaignsSummary() []CampaignSummary {
 	return summaries
 }
 
+// CampaignProgress is a compact, read-only view of the drop campaign a
+// streamer is currently progressing, sized for the dashboard mini progress
+// bar. Percent is the campaign's overall 0-100 progress toward its reward.
+type CampaignProgress struct {
+	CampaignName      string
+	Game              string
+	DropName          string
+	Percent           int
+	MinutesWatched    int
+	MinutesRequired   int
+	ChannelRestricted bool
+}
+
+// ActiveCampaignProgress returns a compact progress summary of the assigned
+// drop campaign this streamer is furthest along on, for the dashboard mini
+// progress bar. It returns nil when the streamer has no assigned campaign
+// with a measurable current drop.
+func (s *Streamer) ActiveCampaignProgress() *CampaignProgress {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var best *Campaign
+	bestPct := -1
+	for _, c := range s.Stream.Campaigns {
+		if c.CurrentDrop() == nil {
+			continue
+		}
+		if pct := c.OverallProgressPercent(); pct > bestPct {
+			bestPct = pct
+			best = c
+		}
+	}
+	if best == nil {
+		return nil
+	}
+
+	drop := best.CurrentDrop()
+	progress := &CampaignProgress{
+		CampaignName:      best.Name,
+		DropName:          drop.Name,
+		Percent:           best.OverallProgressPercent(),
+		MinutesWatched:    drop.CurrentMinutesWatched,
+		MinutesRequired:   drop.MinutesRequired,
+		ChannelRestricted: best.IsChannelRestricted(),
+	}
+	if best.Game != nil {
+		progress.Game = best.Game.Name
+	}
+	return progress
+}
+
 func (s *Streamer) ViewerHasPointsMultiplier() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -17,6 +17,15 @@ type StreamerInfo struct {
 	ViewersCountFormatted string `json:"viewers_count_formatted,omitempty"`
 	ChannelRestrictedDrop bool   `json:"channel_restricted_drop,omitempty"`
 	Preference            string `json:"preference,omitempty"`
+
+	// HasCampaign and the Campaign* fields drive the compact drop-progress
+	// mini bar on the streamer card; populated only for live streamers with
+	// an assigned, in-progress campaign.
+	HasCampaign         bool   `json:"has_campaign,omitempty"`
+	CampaignName        string `json:"campaign_name,omitempty"`
+	CampaignDropName    string `json:"campaign_drop_name,omitempty"`
+	CampaignPercent     int    `json:"campaign_percent,omitempty"`
+	CampaignMinutesInfo string `json:"campaign_minutes_info,omitempty"`
 }
 
 type DashboardData struct {
@@ -54,6 +63,44 @@ type SettingsPageData struct {
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
+}
+
+type DropsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
+// DropCampaignView is one row in the Drops-page campaign queue.
+type DropCampaignView struct {
+	Name              string
+	GameName          string
+	BoxArtURL         string
+	DropName          string
+	DropBenefit       string
+	ChannelRestricted bool
+
+	// Claimed marks an already-claimed campaign (Campaign.ClaimStatus);
+	// StatusLabel is the human text shown as the status pill.
+	Claimed     bool
+	StatusLabel string
+
+	// OverallPercent is the campaign's progress toward its full reward.
+	OverallPercent int
+
+	// HasMinuteProgress is true when Twitch reports exact watch minutes for
+	// the current drop, enabling the precise minutes bar and remaining label.
+	HasMinuteProgress bool
+	MinutesWatched    int
+	MinutesRequired   int
+	MinutesRemaining  int
+	MinutePercent     int
+}
+
+type DropsListData struct {
+	Campaigns []DropCampaignView
 }
 
 type NotificationsPageData struct {

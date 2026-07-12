@@ -304,6 +304,10 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.RateLimits,
 	)
 
+	if m.webServer != nil {
+		m.webServer.SetCampaignsProvider(m.dropsTracker)
+	}
+
 	if m.config.ClaimDropsOnStartup {
 		slog.Info("Claiming all drops from inventory on startup")
 	}

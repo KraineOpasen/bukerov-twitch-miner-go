@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -159,6 +160,15 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 				streamers[i].ViewersCount = st.Stream.GetViewersCount()
 				streamers[i].ViewersCountFormatted = util.FormatNumber(streamers[i].ViewersCount)
 				streamers[i].ChannelRestrictedDrop = st.HasChannelRestrictedCampaign()
+				if prog := st.ActiveCampaignProgress(); prog != nil {
+					streamers[i].HasCampaign = true
+					streamers[i].CampaignName = prog.CampaignName
+					streamers[i].CampaignDropName = prog.DropName
+					streamers[i].CampaignPercent = prog.Percent
+					if prog.MinutesRequired > 0 {
+						streamers[i].CampaignMinutesInfo = fmt.Sprintf("%d/%d min", prog.MinutesWatched, prog.MinutesRequired)
+					}
+				}
 				trackedLive = append(trackedLive, streamers[i])
 			} else {
 				offlineAt := st.GetOfflineAt()

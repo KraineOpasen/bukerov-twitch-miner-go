@@ -94,6 +94,38 @@
   @apply bg-red-700 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
 }
 
+@utility progress-track {
+  @apply h-2 w-full bg-neutral-700 rounded-full overflow-hidden;
+}
+
+@utility progress-fill {
+  @apply h-full bg-purple-500 rounded-full transition-all duration-300;
+}
+
+@utility progress-fill-minute {
+  @apply h-full bg-purple-400 rounded-full transition-all duration-300;
+}
+
+@utility progress-fill-claimed {
+  @apply h-full bg-neutral-500 rounded-full;
+}
+
+@utility mini-progress-track {
+  @apply h-1 w-full bg-neutral-700 rounded-full overflow-hidden;
+}
+
+@utility status-pill {
+  @apply text-[0.65rem] font-bold px-2 py-0.5 rounded uppercase tracking-wide;
+}
+
+@utility status-pill-progress {
+  @apply bg-purple-600/20 text-purple-300;
+}
+
+@utility status-pill-claimed {
+  @apply bg-neutral-700 text-neutral-300;
+}
+
 @utility priority-item {
   @apply flex items-center gap-3 p-3 bg-neutral-900 border border-neutral-700 rounded-md mb-2 cursor-grab;
 }

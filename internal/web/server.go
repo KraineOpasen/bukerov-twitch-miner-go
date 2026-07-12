@@ -28,6 +28,12 @@ type NextStreamCheckProvider interface {
 	GetNextStreamCheck() time.Time
 }
 
+// CampaignsProvider exposes the currently tracked active drop campaigns so
+// the Drops page can render them. It's satisfied by the drops tracker.
+type CampaignsProvider interface {
+	Campaigns() []*models.Campaign
+}
+
 type Server struct {
 	host           string
 	port           int
@@ -46,6 +52,7 @@ type Server struct {
 	onSettingsUpdate        settings.SettingsUpdateCallback
 	notificationManager     *notifications.Manager
 	nextStreamCheckProvider NextStreamCheckProvider
+	campaignsProvider       CampaignsProvider
 	status                  *StatusBroadcaster
 	ready                   bool
 	mu                      sync.RWMutex
@@ -90,7 +97,7 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 func loadTemplates() map[string]*template.Template {
 	templates := make(map[string]*template.Template)
 
-	pages := []string{"dashboard.html", "streamer.html", "settings.html", "notifications.html"}
+	pages := []string{"dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html"}
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(templatesFS,
 			"templates/base.html",
@@ -153,6 +160,12 @@ func (s *Server) SetNextStreamCheckProvider(provider NextStreamCheckProvider) {
 	s.nextStreamCheckProvider = provider
 }
 
+func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.campaignsProvider = provider
+}
+
 func (s *Server) SetDiscordEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -210,6 +223,10 @@ func (s *Server) Start() {
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/streamer/", s.handleStreamerPage)
 	mux.HandleFunc("/api/streamers", s.handleAPIStreamers)
+
+	// Drops routes
+	mux.HandleFunc("/drops", s.handleDropsPage)
+	mux.HandleFunc("/api/drops", s.handleAPIDrops)
 
 	// Status routes
 	mux.HandleFunc("/api/status", s.handleAPIStatus)

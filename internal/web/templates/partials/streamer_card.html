@@ -41,6 +41,17 @@
     {{if .Title}}
     <div class="text-xs text-neutral-400 mt-2 truncate" title="{{.Title}}">{{.Title}}</div>
     {{end}}
+    {{if .HasCampaign}}
+    <div class="mt-3" title="Drop campaign: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
+        <div class="flex justify-between text-xs text-neutral-400 mb-1">
+            <span class="truncate">Drop{{if .CampaignMinutesInfo}} · {{.CampaignMinutesInfo}}{{end}}</span>
+            <span class="flex-shrink-0">{{.CampaignPercent}}%</span>
+        </div>
+        <div class="mini-progress-track">
+            <div class="progress-fill" style="width: {{.CampaignPercent}}%"></div>
+        </div>
+    </div>
+    {{end}}
     {{end}}
     {{if not .IsLive}}
     <div class="text-xs text-neutral-400 mt-2">Last activity: {{.LastActivityFormatted}}</div>
