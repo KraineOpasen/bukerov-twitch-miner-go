@@ -527,6 +527,20 @@
                 </div>
                 <div class="setting-row">
                     <div>
+                        <div class="setting-label">Max Contribution %</div>
+                        <div class="setting-description">Max % of current balance to contribute to a goal at once (0 = no limit). Applies only when Community Goals is enabled.</div>
+                    </div>
+                    <input type="number" class="input-field w-28" data-field="communityGoalsMaxPercent" data-prefix="${prefix}" min="0" max="100" value="${settings.communityGoalsMaxPercent !== undefined ? settings.communityGoalsMaxPercent : 10}">
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Max Contribution Amount</div>
+                        <div class="setting-description">Absolute point cap per contribution (0 = no limit). The lower of this and Max Contribution % is used. Applies only when Community Goals is enabled.</div>
+                    </div>
+                    <input type="number" class="input-field w-28" data-field="communityGoalsMaxAmount" data-prefix="${prefix}" min="0" value="${settings.communityGoalsMaxAmount !== undefined ? settings.communityGoalsMaxAmount : 0}">
+                </div>
+                <div class="setting-row">
+                    <div>
                         <div class="setting-label">Chat Presence</div>
                         <div class="setting-description">When to join chat</div>
                     </div>

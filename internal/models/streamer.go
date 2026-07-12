@@ -29,28 +29,38 @@ const (
 )
 
 type StreamerSettings struct {
-	MakePredictions bool         `json:"makePredictions"`
-	FollowRaid      bool         `json:"followRaid"`
-	ClaimDrops      bool         `json:"claimDrops"`
-	ClaimMoments    bool         `json:"claimMoments"`
-	WatchStreak     bool         `json:"watchStreak"`
-	CommunityGoals  bool         `json:"communityGoals"`
-	Chat            ChatPresence `json:"chat"`
-	ChatLogs        *bool        `json:"chatLogs,omitempty"`
-	Bet             BetSettings  `json:"bet"`
-	Preference      Preference   `json:"preference,omitempty"`
+	MakePredictions bool `json:"makePredictions"`
+	FollowRaid      bool `json:"followRaid"`
+	ClaimDrops      bool `json:"claimDrops"`
+	ClaimMoments    bool `json:"claimMoments"`
+	WatchStreak     bool `json:"watchStreak"`
+	CommunityGoals  bool `json:"communityGoals"`
+	// CommunityGoalsMaxPercent caps a single community-goal contribution to this
+	// percentage of the current channel-point balance (1-100). 0 means no
+	// percentage cap. Only used when CommunityGoals is enabled.
+	CommunityGoalsMaxPercent int `json:"communityGoalsMaxPercent"`
+	// CommunityGoalsMaxAmount caps a single community-goal contribution to this
+	// absolute number of points. 0 means no absolute cap. Only used when
+	// CommunityGoals is enabled.
+	CommunityGoalsMaxAmount int          `json:"communityGoalsMaxAmount"`
+	Chat                    ChatPresence `json:"chat"`
+	ChatLogs                *bool        `json:"chatLogs,omitempty"`
+	Bet                     BetSettings  `json:"bet"`
+	Preference              Preference   `json:"preference,omitempty"`
 }
 
 func DefaultStreamerSettings() StreamerSettings {
 	return StreamerSettings{
-		MakePredictions: true,
-		FollowRaid:      true,
-		ClaimDrops:      true,
-		ClaimMoments:    true,
-		WatchStreak:     true,
-		CommunityGoals:  false,
-		Chat:            ChatOnline,
-		Bet:             DefaultBetSettings(),
+		MakePredictions:          true,
+		FollowRaid:               true,
+		ClaimDrops:               true,
+		ClaimMoments:             true,
+		WatchStreak:              true,
+		CommunityGoals:           false,
+		CommunityGoalsMaxPercent: 10,
+		CommunityGoalsMaxAmount:  0,
+		Chat:                     ChatOnline,
+		Bet:                      DefaultBetSettings(),
 	}
 }
 
