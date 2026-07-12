@@ -328,6 +328,11 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.DropBlacklist,
 	)
 
+	// A reported watched minute is real drop progress; nudge the drops tracker
+	// to refresh its lightweight progress view promptly so the Drops page stays
+	// within seconds of Twitch instead of lagging up to a full sync interval.
+	m.watcher.SetOnMinuteWatched(m.dropsTracker.TriggerProgressSync)
+
 	// The discovery manager is always constructed (so the Settings page can
 	// enable it at runtime), but it stays dormant — no API calls, no watch
 	// slot — while the configured game list is empty. It gets the streamer
@@ -748,6 +753,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 
 	if m.dropsTracker != nil {
 		m.dropsTracker.UpdateBlacklist(m.config.DropBlacklist)
+		m.dropsTracker.UpdateSettings(m.config.RateLimits)
 	}
 
 	if m.discovery != nil {

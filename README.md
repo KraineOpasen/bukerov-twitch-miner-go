@@ -387,6 +387,7 @@ Generate a sample config with all options:
   "rateLimits": {
     "websocketPingInterval": 27,
     "campaignSyncInterval": 60,
+    "dropProgressSyncInterval": 2,
     "minuteWatchedInterval": 60,
     "requestDelay": 0.5,
     "reconnectDelay": 60,
@@ -518,7 +519,8 @@ Defaults are tuned to avoid Twitch rate limiting:
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
 | `websocketPingInterval` | 27 | 20-60 | Seconds between WebSocket pings |
-| `campaignSyncInterval` | 60 | 5-120 | Minutes between drop campaign syncs |
+| `campaignSyncInterval` | 60 | 5-120 | Minutes between full drop campaign syncs (discovery, claiming, filtering) |
+| `dropProgressSyncInterval` | 2 | 1-60 | Minutes between lightweight inventory-only drop-progress refreshes shown on the Drops page (also triggered right after each watched minute) |
 | `minuteWatchedInterval` | 60 | 30-120 | Seconds for minute-watched cycle |
 | `requestDelay` | 0.5 | 0.1-2.0 | Seconds between API calls |
 | `reconnectDelay` | 60 | 30-300 | Seconds before reconnecting |

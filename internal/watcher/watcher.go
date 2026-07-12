@@ -49,6 +49,12 @@ type MinuteWatcher struct {
 	// playlist touch, spade event). Shared mechanism with the discovery slot.
 	sender *MinuteSender
 
+	// onMinuteWatched, if set, is invoked once after any watch tick that
+	// successfully reported at least one minute-watched. The drops tracker uses
+	// it to refresh drop progress promptly (a watched minute means real progress
+	// was just made) instead of waiting out its sync interval. Guarded by mu.
+	onMinuteWatched func()
+
 	mu sync.RWMutex
 }
 
@@ -96,6 +102,14 @@ func (w *MinuteWatcher) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
+	w.mu.Unlock()
+}
+
+// SetOnMinuteWatched registers a callback invoked after each watch tick that
+// successfully reported at least one minute-watched. Pass nil to clear it.
+func (w *MinuteWatcher) SetOnMinuteWatched(fn func()) {
+	w.mu.Lock()
+	w.onMinuteWatched = fn
 	w.mu.Unlock()
 }
 
@@ -160,12 +174,14 @@ func (w *MinuteWatcher) processWatching() {
 
 	sleepBetween := time.Duration(w.settings.MinuteWatchedInterval) * time.Second / time.Duration(len(watching))
 
+	reported := false
 	for _, idx := range watching {
 		streamer := w.streamers[idx]
 
 		if err := w.sendMinuteWatched(streamer); err != nil {
 			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "error", err)
 		} else {
+			reported = true
 			slog.Debug("Sent minute watched", "streamer", streamer.Username, "minutesWatched", streamer.Stream.MinuteWatched)
 			delta := streamer.Stream.UpdateMinuteWatched()
 			if w.store != nil && delta > 0 {
@@ -179,6 +195,18 @@ func (w *MinuteWatcher) processWatching() {
 		case <-w.ctx.Done():
 			return
 		case <-time.After(w.randomizedDelay(sleepBetween)):
+		}
+	}
+
+	// A watched minute means real drop progress was just made; nudge any
+	// listener (the drops tracker) to refresh promptly instead of waiting out
+	// its sync interval.
+	if reported {
+		w.mu.RLock()
+		hook := w.onMinuteWatched
+		w.mu.RUnlock()
+		if hook != nil {
+			hook()
 		}
 	}
 }

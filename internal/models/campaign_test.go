@@ -216,3 +216,41 @@ func TestNewCampaignFromGQLNoAllowMeansUnrestricted(t *testing.T) {
 		t.Error("campaign with no allow field should not be channel-restricted")
 	}
 }
+
+// TestCampaignCloneIsIndependent verifies Clone produces a copy whose drops can
+// be advanced without mutating the original -- the invariant the lightweight
+// drops progress sync relies on so it can update watched minutes on a copy
+// while other goroutines read the published campaign lock-free.
+func TestCampaignCloneIsIndependent(t *testing.T) {
+	original := &Campaign{
+		ID:               "campaign-1",
+		Name:             "Original",
+		Game:             &Game{ID: "game-1", Name: "Game One"},
+		Channels:         []string{"channel-1"},
+		ClaimedDropNames: []string{"Old Reward"},
+		Drops: []*Drop{
+			{ID: "drop-1", Name: "Reward", MinutesRequired: 240, CurrentMinutesWatched: 140},
+		},
+	}
+
+	clone := original.Clone()
+
+	// Mutating the clone's drop progress and slices must not touch the original.
+	clone.Drops[0].CurrentMinutesWatched = 180
+	clone.Channels[0] = "channel-2"
+	clone.ClaimedDropNames = append(clone.ClaimedDropNames, "New Reward")
+
+	if original.Drops[0].CurrentMinutesWatched != 140 {
+		t.Errorf("clone mutation leaked into original drop progress: got %d, want 140",
+			original.Drops[0].CurrentMinutesWatched)
+	}
+	if original.Channels[0] != "channel-1" {
+		t.Errorf("clone mutation leaked into original channels: got %q, want channel-1", original.Channels[0])
+	}
+	if len(original.ClaimedDropNames) != 1 {
+		t.Errorf("clone append leaked into original claimed names: got %d, want 1", len(original.ClaimedDropNames))
+	}
+	if clone.Game != original.Game {
+		t.Error("Game is treated as immutable and should be shared by reference")
+	}
+}

@@ -82,6 +82,17 @@ type RateLimitSettings struct {
 	ReconnectDelay        int     `json:"reconnectDelay"`
 	StreamCheckInterval   int     `json:"streamCheckInterval"`
 
+	// DropProgressSyncInterval is how often (in minutes) the drops tracker runs
+	// a lightweight, inventory-only refresh of the watched-minute progress of
+	// the already-tracked campaigns. Unlike CampaignSyncInterval it issues a
+	// single cheap Inventory query and touches neither the ViewerDropsDashboard
+	// listing nor the per-campaign DropCampaignDetails calls, so it can run far
+	// more often to keep the Drops page within a minute or two of Twitch's real
+	// progress instead of up to a full CampaignSyncInterval behind. Campaign
+	// discovery, claiming, and blacklist/claim-history filtering all stay on the
+	// slower CampaignSyncInterval.
+	DropProgressSyncInterval int `json:"dropProgressSyncInterval"`
+
 	// ConnectionTimeoutMinutes is the watchdog threshold: if neither the
 	// Twitch API nor the PubSub websocket have seen any successful activity
 	// for this many minutes, the connection is considered lost (dashboard
@@ -173,6 +184,7 @@ func DefaultRateLimitSettings() RateLimitSettings {
 	return RateLimitSettings{
 		WebsocketPingInterval:    27,
 		CampaignSyncInterval:     60,
+		DropProgressSyncInterval: 2,
 		MinuteWatchedInterval:    60,
 		RequestDelay:             0.5,
 		ReconnectDelay:           60,
@@ -284,6 +296,12 @@ func ValidateConfig(config *Config) {
 		config.RateLimits.CampaignSyncInterval = 5
 	} else if config.RateLimits.CampaignSyncInterval > 120 {
 		config.RateLimits.CampaignSyncInterval = 120
+	}
+
+	if config.RateLimits.DropProgressSyncInterval < 1 {
+		config.RateLimits.DropProgressSyncInterval = 1
+	} else if config.RateLimits.DropProgressSyncInterval > 60 {
+		config.RateLimits.DropProgressSyncInterval = 60
 	}
 
 	if config.RateLimits.MinuteWatchedInterval < 30 {

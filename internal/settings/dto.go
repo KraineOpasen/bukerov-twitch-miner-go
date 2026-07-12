@@ -24,12 +24,13 @@ type DiscordUIConfig struct {
 
 // RateLimitSettings contains timing intervals for various miner operations.
 type RateLimitSettings struct {
-	WebsocketPingInterval int     `json:"websocketPingInterval"`
-	CampaignSyncInterval  int     `json:"campaignSyncInterval"`
-	MinuteWatchedInterval int     `json:"minuteWatchedInterval"`
-	RequestDelay          float64 `json:"requestDelay"`
-	ReconnectDelay        int     `json:"reconnectDelay"`
-	StreamCheckInterval   int     `json:"streamCheckInterval"`
+	WebsocketPingInterval    int     `json:"websocketPingInterval"`
+	CampaignSyncInterval     int     `json:"campaignSyncInterval"`
+	DropProgressSyncInterval int     `json:"dropProgressSyncInterval"`
+	MinuteWatchedInterval    int     `json:"minuteWatchedInterval"`
+	RequestDelay             float64 `json:"requestDelay"`
+	ReconnectDelay           int     `json:"reconnectDelay"`
+	StreamCheckInterval      int     `json:"streamCheckInterval"`
 
 	ConnectionTimeoutMinutes int `json:"connectionTimeoutMinutes"`
 

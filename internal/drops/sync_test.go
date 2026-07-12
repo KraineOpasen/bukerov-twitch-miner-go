@@ -200,6 +200,100 @@ func TestSyncCampaignsTracksActiveCampaign(t *testing.T) {
 	}
 }
 
+// TestSyncProgressAdvancesTrackedProgress verifies the lightweight,
+// inventory-only progress sync updates the watched-minute counters of an
+// already-tracked campaign without a full re-sync -- the fix for the Drops
+// page lagging up to a full CampaignSyncInterval behind Twitch's real
+// progress. A campaign is first tracked at 140/240 min, Twitch then advances
+// it to 180/240, and syncProgress (a single Inventory read, no
+// dashboard/details fetch) must surface the new value.
+func TestSyncProgressAdvancesTrackedProgress(t *testing.T) {
+	summary := map[string]interface{}{
+		"id":     "campaign-amd",
+		"name":   "AMD Summer Arena Drops#2",
+		"status": "ACTIVE",
+		"game":   map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail := map[string]interface{}{
+		"id":      "campaign-amd",
+		"name":    "AMD Summer Arena Drops#2",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(nowMinusHours(2)),
+		"endAt":   rfc3339(nowPlusHours(48)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-1", "Alienware Mystery Drop", 240),
+		},
+	}
+
+	progressAt := func(watched float64) map[string]interface{} {
+		return map[string]interface{}{
+			"id":   "campaign-amd",
+			"name": "AMD Summer Arena Drops#2",
+			"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{
+				inProgressDrop("drop-1", "Alienware Mystery Drop", 240, watched, false),
+			},
+		}
+	}
+
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		inventory: inventoryWithInProgress(progressAt(140)),
+		details:   map[string]map[string]interface{}{"campaign-amd": detail},
+	}
+
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+
+	got := tracker.Campaigns()
+	if len(got) != 1 || len(got[0].Drops) != 1 {
+		t.Fatalf("expected 1 tracked campaign with 1 drop, got %+v", got)
+	}
+	if w := got[0].Drops[0].CurrentMinutesWatched; w != 140 {
+		t.Fatalf("expected initial tracked progress 140, got %d", w)
+	}
+
+	// Twitch advances the drop; the lightweight progress sync must pick it up
+	// without going through the dashboard/details discovery path again.
+	client.inventory = inventoryWithInProgress(progressAt(180))
+	tracker.syncProgress()
+
+	got = tracker.Campaigns()
+	if len(got) != 1 || len(got[0].Drops) != 1 {
+		t.Fatalf("expected the campaign to remain tracked after progress sync, got %+v", got)
+	}
+	if w := got[0].Drops[0].CurrentMinutesWatched; w != 180 {
+		t.Errorf("expected progress advanced to 180 after syncProgress, got %d", w)
+	}
+}
+
+// TestSyncProgressNoTrackedCampaignsIsSafe guards that a progress sync run
+// before the full sync has populated any campaigns is a harmless no-op (it must
+// not panic or fabricate campaigns from the inventory -- discovery stays with
+// the full sync).
+func TestSyncProgressNoTrackedCampaignsIsSafe(t *testing.T) {
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(),
+		inventory: inventoryWithInProgress(map[string]interface{}{
+			"id":   "campaign-amd",
+			"name": "AMD Summer Arena Drops#2",
+			"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{
+				inProgressDrop("drop-1", "Alienware Mystery Drop", 240, 180, false),
+			},
+		}),
+		details: map[string]map[string]interface{}{},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+
+	tracker.syncProgress()
+
+	if got := len(tracker.Campaigns()); got != 0 {
+		t.Fatalf("expected progress sync to add no campaigns, got %d", got)
+	}
+}
+
 // TestSyncCampaignsDistinguishesEmptyFromFiltered verifies SyncStatus makes the
 // two silent-failure modes distinguishable: Twitch returning no active
 // campaigns at all vs returning campaigns that all get filtered out (here the
