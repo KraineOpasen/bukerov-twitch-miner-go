@@ -137,6 +137,20 @@ func (s *Stream) UpdateMinuteWatched() float64 {
 	return delta
 }
 
+func (s *Stream) GetTitle() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.Title
+}
+
+func (s *Stream) GetViewersCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.ViewersCount
+}
+
 func (s *Stream) GameName() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

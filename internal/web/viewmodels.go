@@ -11,6 +11,10 @@ type StreamerInfo struct {
 	IsLive                bool   `json:"is_live"`
 	LiveDuration          string `json:"live_duration,omitempty"`
 	OfflineDuration       string `json:"offline_duration,omitempty"`
+	GameName              string `json:"game_name,omitempty"`
+	Title                 string `json:"title,omitempty"`
+	ViewersCount          int    `json:"viewers_count,omitempty"`
+	ViewersCountFormatted string `json:"viewers_count_formatted,omitempty"`
 }
 
 type DashboardData struct {

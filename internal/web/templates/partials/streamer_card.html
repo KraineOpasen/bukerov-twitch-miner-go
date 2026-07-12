@@ -22,6 +22,16 @@
         <span class="text-neutral-400">Offline for {{.OfflineDuration}}</span>
         {{end}}
     </div>
+    {{if .IsLive}}
+    {{if or .GameName .ViewersCount}}
+    <div class="text-xs text-neutral-400 mt-2 truncate">
+        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} &middot; {{end}}{{if .ViewersCount}}{{.ViewersCountFormatted}} viewers{{end}}
+    </div>
+    {{end}}
+    {{if .Title}}
+    <div class="text-xs text-neutral-400 mt-2 truncate" title="{{.Title}}">{{.Title}}</div>
+    {{end}}
+    {{end}}
     {{if not .IsLive}}
     <div class="text-xs text-neutral-400 mt-2">Last activity: {{.LastActivityFormatted}}</div>
     {{end}}
