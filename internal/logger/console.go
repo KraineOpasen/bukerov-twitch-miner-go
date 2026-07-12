@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sync"
 )
 
@@ -143,23 +142,20 @@ type consoleHandler struct {
 	withOps []func(slog.Handler) slog.Handler
 }
 
-func newConsoleHandler(w io.Writer, level slog.Level) *consoleHandler {
+// newConsoleHandler builds the colored stdout handler. Coloring follows the
+// explicit `colored` flag (the Logger "Colored Output" setting) and nothing
+// else — deliberately no isatty/IsTerminal check on os.Stdout. Terminal
+// autodetection breaks the main use case: the container's stdout is read by web
+// log viewers (Portainer, Dozzle) over the Docker API with no TTY attached, so
+// isatty would report "not a terminal" and strip the color the user asked for,
+// even though those viewers render ANSI just fine. We trust the user's choice.
+func newConsoleHandler(w io.Writer, level slog.Level, colored bool) *consoleHandler {
 	return &consoleHandler{
 		level: level,
 		w:     w,
 		mu:    &sync.Mutex{},
-		color: colorEnabled(),
+		color: colored,
 	}
-}
-
-// colorEnabled honors the de-facto NO_COLOR standard (https://no-color.org) so
-// the output can be forced plain, but otherwise always colors — Docker/Portainer
-// render ANSI even though stdout is not a TTY, which is the whole point here.
-func colorEnabled() bool {
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
-		return false
-	}
-	return true
 }
 
 func (h *consoleHandler) Enabled(_ context.Context, level slog.Level) bool {
