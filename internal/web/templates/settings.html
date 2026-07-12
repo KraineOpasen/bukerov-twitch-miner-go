@@ -265,6 +265,12 @@
         { value: 'NEVER', label: 'Never' }
     ];
 
+    const preferenceOptions = [
+        { value: '', label: 'None' },
+        { value: 'prefer', label: 'Prefer' },
+        { value: 'avoid', label: 'Avoid' }
+    ];
+
     const strategyOptions = [
         { value: 'SMART', label: 'Smart' },
         { value: 'MOST_VOTED', label: 'Most Voted' },
@@ -443,7 +449,18 @@
                         ${chatOptions.map(o => `<option value="${o.value}" ${selectValue('chat', settings.chat, 'ONLINE') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
                     </select>
                 </div>
-                
+                ${isOverride ? `
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Rotation Preference</div>
+                        <div class="setting-description">Prefer: favored when picking who to watch. Avoid: never watched unless it's the only online channel. Neither overrides DROPS/STREAK priority or fair rotation.</div>
+                    </div>
+                    <select class="input-field w-36" data-field="preference" data-prefix="${prefix}">
+                        ${preferenceOptions.map(o => `<option value="${o.value}" ${selectValue('preference', settings.preference, '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>
+                ` : ''}
+
                 <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">Betting Settings</h4>
                 
                 <div class="setting-row">

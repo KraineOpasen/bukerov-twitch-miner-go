@@ -15,6 +15,17 @@ const (
 	ChatOffline ChatPresence = "OFFLINE"
 )
 
+// Preference marks a streamer's rotation preference relative to other online
+// streamers. It never overrides DROPS/STREAK priority or fair time-based
+// rotation - it only tips the balance when those are otherwise equal.
+type Preference string
+
+const (
+	PreferenceNone   Preference = ""
+	PreferencePrefer Preference = "prefer"
+	PreferenceAvoid  Preference = "avoid"
+)
+
 type StreamerSettings struct {
 	MakePredictions bool         `json:"makePredictions"`
 	FollowRaid      bool         `json:"followRaid"`
@@ -25,6 +36,7 @@ type StreamerSettings struct {
 	Chat            ChatPresence `json:"chat"`
 	ChatLogs        *bool        `json:"chatLogs,omitempty"`
 	Bet             BetSettings  `json:"bet"`
+	Preference      Preference   `json:"preference,omitempty"`
 }
 
 func DefaultStreamerSettings() StreamerSettings {

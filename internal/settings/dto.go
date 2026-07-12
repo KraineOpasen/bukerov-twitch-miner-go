@@ -68,6 +68,7 @@ type StreamerSettingsConfig struct {
 	CommunityGoals  *bool            `json:"communityGoals,omitempty"`
 	Chat            *string          `json:"chat,omitempty"`
 	Bet             *BetSettingsJSON `json:"bet,omitempty"`
+	Preference      *string          `json:"preference,omitempty"`
 }
 
 // BetSettingsJSON contains prediction betting configuration with pointer fields for partial overrides.

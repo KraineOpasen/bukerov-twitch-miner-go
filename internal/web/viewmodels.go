@@ -16,6 +16,7 @@ type StreamerInfo struct {
 	ViewersCount          int    `json:"viewers_count,omitempty"`
 	ViewersCountFormatted string `json:"viewers_count_formatted,omitempty"`
 	ChannelRestrictedDrop bool   `json:"channel_restricted_drop,omitempty"`
+	Preference            string `json:"preference,omitempty"`
 }
 
 type DashboardData struct {

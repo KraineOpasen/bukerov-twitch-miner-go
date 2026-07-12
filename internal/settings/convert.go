@@ -7,6 +7,7 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 	chat := string(s.Chat)
 	strategy := string(s.Bet.Strategy)
 	delayMode := string(s.Bet.DelayMode)
+	preference := string(s.Preference)
 
 	return StreamerSettingsConfig{
 		MakePredictions: &s.MakePredictions,
@@ -16,6 +17,7 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 		WatchStreak:     &s.WatchStreak,
 		CommunityGoals:  &s.CommunityGoals,
 		Chat:            &chat,
+		Preference:      &preference,
 		Bet: &BetSettingsJSON{
 			Strategy:      &strategy,
 			Percentage:    &s.Bet.Percentage,
@@ -76,6 +78,9 @@ func ApplyStreamerSettingsFromDTO(dst *models.StreamerSettings, src StreamerSett
 	}
 	if src.Chat != nil {
 		dst.Chat = models.ChatPresence(*src.Chat)
+	}
+	if src.Preference != nil {
+		dst.Preference = models.Preference(*src.Preference)
 	}
 	if src.Bet != nil {
 		ApplyBetSettingsFromDTO(&dst.Bet, src.Bet)

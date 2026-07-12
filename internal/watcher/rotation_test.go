@@ -178,6 +178,64 @@ func TestWatchTimeStorePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestAvoidExcludedFromSelectionWhenOthersOnline covers the "avoid" contract:
+// a streamer marked PreferenceAvoid must never be picked while any other
+// online streamer is available.
+func TestAvoidExcludedFromSelectionWhenOthersOnline(t *testing.T) {
+	w, online := newTestWatcher(4)
+	w.streamers[1].Settings.Preference = models.PreferenceAvoid
+
+	for tick := 0; tick < 10; tick++ {
+		forceRotate(w)
+		got := w.selectStreamersToWatch(online)
+		for _, idx := range got {
+			if idx == 1 {
+				t.Fatalf("tick %d: avoided streamer 1 was selected while other streamers were online: %v", tick, got)
+			}
+		}
+	}
+}
+
+// TestAvoidStillWatchedWhenOnlyOnlineChannel covers the exception to "avoid":
+// if it's the only online channel at all, it must still be watched.
+func TestAvoidStillWatchedWhenOnlyOnlineChannel(t *testing.T) {
+	w, _ := newTestWatcher(1)
+	w.streamers[0].Settings.Preference = models.PreferenceAvoid
+
+	got := w.selectStreamersToWatch([]int{0})
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("expected the sole online (avoided) streamer to still be watched, got %v", got)
+	}
+}
+
+// TestPreferBiasesRotationTowardPreferredStreamer covers the "prefer"
+// contract: all else being roughly equal, a preferred streamer should be
+// picked more often than an otherwise-equivalent non-preferred one - without
+// ever excluding the others outright (unlike avoid).
+func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
+	w, online := newTestWatcher(4)
+	for _, s := range w.streamers {
+		s.Settings.WatchStreak = false
+	}
+	w.streamers[0].Settings.Preference = models.PreferencePrefer
+
+	watchedCount := make(map[int]int)
+	const ticks = 20
+	for i := 0; i < ticks; i++ {
+		forceRotate(w)
+		pair := w.selectRotating(online)
+		for _, idx := range pair {
+			watchedCount[idx]++
+		}
+	}
+
+	for _, idx := range online[1:] {
+		if watchedCount[idx] > watchedCount[0] {
+			t.Errorf("non-preferred streamer %d watched %d times, more than preferred streamer 0's %d", idx, watchedCount[idx], watchedCount[0])
+		}
+	}
+}
+
 func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 	w, online := newTestWatcher(3)
 	// streamer 2 has an active drop campaign but isn't in the base pair.
