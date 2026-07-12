@@ -29,10 +29,13 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 	l := &Logger{}
 
 	// The console handler colorizes each line for stdout (what Docker/Portainer
-	// display), keyed off the record's level and msg category. The file handler
+	// display), keyed off the record's level and msg category. Coloring is driven
+	// solely by the explicit settings.Colored toggle — never by TTY autodetection,
+	// because the primary consumer is a web log viewer (Portainer/Dozzle) reading
+	// the container's stdout over the Docker API without a TTY. The file handler
 	// deliberately stays a plain slog.TextHandler so the on-disk log — served
 	// verbatim by the /debug/log endpoint — contains no ANSI escape codes.
-	handlers := []slog.Handler{newConsoleHandler(os.Stdout, consoleLevel)}
+	handlers := []slog.Handler{newConsoleHandler(os.Stdout, consoleLevel, settings.Colored)}
 
 	if settings.Save {
 		if err := os.MkdirAll("logs", 0755); err != nil {

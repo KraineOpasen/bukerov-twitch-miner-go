@@ -400,7 +400,9 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 		}
 	}
 
-	changed := !w.rotation.hasPair || newPair != w.rotation.activePair
+	oldPair := w.rotation.activePair
+	hadPair := w.rotation.hasPair
+	changed := !hadPair || newPair != oldPair
 
 	w.rotation.activePair = newPair
 	w.rotation.hasPair = true
@@ -408,28 +410,60 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 	w.rotation.nextInterval = w.randomRotationInterval()
 
 	if changed {
-		w.logPairChange(newPair)
+		w.logPairChange(oldPair, hadPair, newPair)
 	}
 }
 
-// logPairChange emits a debug log for a rotation pair switch, calling out
-// any member selected because of a prefer preference so the effect is
-// visible without having to reconstruct the ranking from raw watch times.
-func (w *MinuteWatcher) logPairChange(pair [2]int) {
-	names := []string{w.streamers[pair[0]].Username, w.streamers[pair[1]].Username}
+// logPairChange emits an INFO log whenever the fair-rotation watch pair is
+// recomputed, so the switch is visible in production logs (previously this was
+// a DEBUG line and never showed at the default INFO console level). It reports
+// exactly which member left and which took its place, plus the reason: a
+// prefer-weighted streamer tipping the ranking ("prefer weight") versus the
+// plain least-accumulated-watch-time ordering ("fair rotation"). Transient
+// DROPS/STREAK boosts (applyPriorityBoost) don't change the stored pair and so
+// aren't reported here — they'd fire every tick.
+func (w *MinuteWatcher) logPairChange(oldPair [2]int, hadPair bool, newPair [2]int) {
+	newNames := []string{w.streamers[newPair[0]].Username, w.streamers[newPair[1]].Username}
 
 	var preferred []string
-	for _, idx := range pair {
+	for _, idx := range newPair {
 		if w.isPreferred(idx) {
 			preferred = append(preferred, w.streamers[idx].Username)
 		}
 	}
 
+	reason := "fair rotation"
 	if len(preferred) > 0 {
-		slog.Debug("Rotation pair changed", "pair", names, "preferred", preferred)
-	} else {
-		slog.Debug("Rotation pair changed", "pair", names)
+		reason = "prefer weight"
 	}
+
+	if !hadPair {
+		slog.Info("Rotating watch pair", "pair", newNames, "reason", "initial pair")
+		return
+	}
+
+	var swappedIn, swappedOut []string
+	for _, idx := range newPair {
+		if idx != oldPair[0] && idx != oldPair[1] {
+			swappedIn = append(swappedIn, w.streamers[idx].Username)
+		}
+	}
+	for _, idx := range oldPair {
+		if idx != newPair[0] && idx != newPair[1] {
+			swappedOut = append(swappedOut, w.streamers[idx].Username)
+		}
+	}
+
+	attrs := []any{
+		"pair", newNames,
+		"swappedIn", swappedIn,
+		"swappedOut", swappedOut,
+		"reason", reason,
+	}
+	if len(preferred) > 0 {
+		attrs = append(attrs, "preferred", preferred)
+	}
+	slog.Info("Rotating watch pair", attrs...)
 }
 
 // watchWeights returns each online streamer's accumulated watch minutes
