@@ -24,6 +24,21 @@ var (
 	ErrStreamerDoesNotExist = errors.New("streamer does not exist")
 	ErrStreamerIsOffline    = errors.New("streamer is offline")
 
+	// ErrRewardUnavailable is returned when a custom channel-points reward is
+	// not (or no longer) redeemable — it disappeared from the channel, was
+	// disabled/paused, went out of stock, or is on cooldown. Distinct from a
+	// transport error so callers can show a "reward no longer available"
+	// message instead of a generic failure.
+	ErrRewardUnavailable = errors.New("reward is not available")
+
+	// ErrInsufficientPoints is returned when the viewer's channel-points
+	// balance is below a custom reward's cost.
+	ErrInsufficientPoints = errors.New("not enough channel points")
+
+	// ErrRewardInputRequired is returned when a reward requires viewer text
+	// input but none was supplied.
+	ErrRewardInputRequired = errors.New("this reward requires text input")
+
 	// ErrUnauthorized indicates the Twitch OAuth token was rejected (expired
 	// or revoked). Callers should treat this as "reauthorization required"
 	// rather than a transient failure.
@@ -1004,4 +1019,181 @@ func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goal
 
 	streamer.SetChannelPoints(streamer.GetChannelPoints() - amount)
 	return nil
+}
+
+// GetCustomRewards returns the streamer's custom channel-points rewards (the
+// personal rewards a viewer can redeem with points, not Community Goals). It
+// reuses the ChannelPointsContext query — the same one that carries the point
+// balance and goals — and, since that response also includes the up-to-date
+// balance, refreshes the streamer's cached points as a side effect so callers
+// can immediately compare cost against balance.
+func (c *TwitchClient) GetCustomRewards(streamer *models.Streamer) ([]*models.CustomReward, error) {
+	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
+		"channelLogin": streamer.Username,
+	})
+
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := channelPointsChannel(resp)
+	if channel == nil {
+		return nil, ErrStreamerDoesNotExist
+	}
+
+	if self, ok := channel["self"].(map[string]interface{}); ok && self != nil {
+		if communityPoints, ok := self["communityPoints"].(map[string]interface{}); ok {
+			if balance, ok := communityPoints["balance"].(float64); ok {
+				streamer.SetChannelPoints(int(balance))
+			}
+		}
+	}
+
+	settings, ok := channel["communityPointsSettings"].(map[string]interface{})
+	if !ok || settings == nil {
+		return nil, nil
+	}
+
+	rawRewards, ok := settings["customRewards"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	rewards := make([]*models.CustomReward, 0, len(rawRewards))
+	for _, r := range rawRewards {
+		if rewardMap, ok := r.(map[string]interface{}); ok {
+			reward := models.CustomRewardFromGQL(rewardMap)
+			if reward.ID != "" {
+				rewards = append(rewards, reward)
+			}
+		}
+	}
+
+	return rewards, nil
+}
+
+// channelPointsChannel walks a ChannelPointsContext response down to the
+// community.channel object, returning nil if any level is missing so callers
+// treat an unexpected shape as "no data" rather than panicking.
+func channelPointsChannel(resp map[string]interface{}) map[string]interface{} {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	community, ok := data["community"].(map[string]interface{})
+	if !ok || community == nil {
+		return nil
+	}
+	channel, ok := community["channel"].(map[string]interface{})
+	if !ok || channel == nil {
+		return nil
+	}
+	return channel
+}
+
+// RedeemCustomReward spends channel points on a custom reward. The reward's
+// current cost, title and prompt are echoed back in the input because Twitch
+// rejects the redemption (PROPERTIES_MISMATCH) if any of them no longer match
+// the server's copy — which is exactly the "reward changed between showing the
+// list and clicking" race we want surfaced as a clear error. textInput carries
+// the viewer's message for user-input rewards and is omitted otherwise.
+//
+// Errors are mapped to friendly messages: transport failures propagate as-is,
+// while Twitch's own rejection codes become ErrInsufficientPoints /
+// ErrRewardUnavailable or a descriptive error, never a panic. On success the
+// streamer's cached balance is decremented by the cost.
+func (c *TwitchClient) RedeemCustomReward(streamer *models.Streamer, reward *models.CustomReward, textInput string) error {
+	slog.Info("Redeeming custom reward", "streamer", streamer.Username, "reward", reward.Title, "cost", reward.Cost)
+
+	input := map[string]interface{}{
+		"channelID":     streamer.ChannelID,
+		"cost":          reward.Cost,
+		"pricingType":   "POINTS",
+		"prompt":        reward.Prompt,
+		"rewardID":      reward.ID,
+		"title":         reward.Title,
+		"transactionID": util.RandomHex(16),
+	}
+	if reward.IsUserInputRequired && textInput != "" {
+		input["textInput"] = textInput
+	}
+
+	op := constants.RedeemCustomReward.WithVariables(map[string]interface{}{
+		"input": input,
+	})
+
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		return err
+	}
+
+	if err := redeemResponseError(resp); err != nil {
+		return err
+	}
+
+	streamer.SetChannelPoints(streamer.GetChannelPoints() - reward.Cost)
+	return nil
+}
+
+// redeemResponseError inspects a RedeemCustomReward response and returns a
+// friendly error when the redemption failed, or nil on success. It handles
+// both top-level GraphQL errors and the mutation payload's own error object
+// (data.redeemCommunityPointsCustomReward.error — the field keeps its old name
+// even though the operation was renamed).
+func redeemResponseError(resp map[string]interface{}) error {
+	if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
+		if em, ok := errs[0].(map[string]interface{}); ok {
+			if msg, ok := em["message"].(string); ok && msg != "" {
+				return fmt.Errorf("redemption rejected: %s", msg)
+			}
+		}
+		return fmt.Errorf("redemption rejected")
+	}
+
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("redemption failed: unexpected response")
+	}
+
+	payload, ok := data["redeemCommunityPointsCustomReward"].(map[string]interface{})
+	if !ok {
+		payload, _ = data["redeemCustomReward"].(map[string]interface{})
+	}
+	if payload == nil {
+		// No payload and no errors: treat as success rather than inventing a
+		// failure, mirroring how Twitch omits the object on some success paths.
+		return nil
+	}
+
+	errObj, ok := payload["error"].(map[string]interface{})
+	if !ok || errObj == nil {
+		return nil
+	}
+
+	code, _ := errObj["code"].(string)
+	return redeemErrorForCode(code)
+}
+
+// redeemErrorForCode maps a Twitch redemption error code to a user-facing
+// error, preferring the shared sentinels so callers can branch on them.
+func redeemErrorForCode(code string) error {
+	switch code {
+	case "INSUFFICIENT_POINTS":
+		return ErrInsufficientPoints
+	case "NOT_AVAILABLE", "DISABLED", "OUT_OF_STOCK":
+		return ErrRewardUnavailable
+	case "COOLDOWN":
+		return fmt.Errorf("reward is on cooldown")
+	case "MAX_PER_STREAM_EXCEEDED":
+		return fmt.Errorf("maximum redemptions per stream reached")
+	case "MAX_PER_USER_PER_STREAM_EXCEEDED":
+		return fmt.Errorf("you have already redeemed this reward this stream")
+	case "PROPERTIES_MISMATCH":
+		return fmt.Errorf("reward changed — refresh and try again")
+	case "":
+		return fmt.Errorf("redemption failed")
+	default:
+		return fmt.Errorf("redemption failed: %s", code)
+	}
 }

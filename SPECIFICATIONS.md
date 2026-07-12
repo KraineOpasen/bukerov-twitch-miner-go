@@ -381,6 +381,7 @@ All Twitch API interactions use persisted GraphQL queries with SHA256 hashes.
 | `GetIDFromLogin` | `94e82a7b1e3c21e186daa73ee2afc4b8f23bade1fbbff6fe8ac133f50a2f58ca` | Get user ID from username |
 | `ChannelFollows` | `eecf815273d3d949e5cf0085cc5084cd8a1b5b7b6f7990cf43cb0beadf546907` | Get followed channels |
 | `ContributeCommunityPointsCommunityGoal` | `5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6` | Contribute to goals |
+| `RedeemCustomReward` | `d56249a7adb4978898ea3412e196688d4ac3cea1c0c2dfd65561d229ea5dcc42` | Redeem custom channel-points reward (renamed server-side from `RedeemCommunityPointsCustomReward`) |
 
 ---
 

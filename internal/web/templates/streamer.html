@@ -23,9 +23,48 @@
 </div>
 
 <div class="chart-container">
-    <h3 class="text-lg font-semibold mb-4">Points Over Time</h3>
-    <div id="points-chart"></div>
+    <div class="flex items-center justify-between gap-4 mb-2 flex-wrap">
+        <h3 class="text-lg font-semibold">Channel Point Rewards</h3>
+        <button type="button" id="open-rewards-btn" class="btn-secondary">Manage Rewards</button>
+    </div>
+    <p class="text-neutral-400 text-sm">Redeem this streamer's custom channel-point rewards manually, or let the miner auto-redeem selected rewards within a points budget. Rewards that require a typed message can only be redeemed manually.</p>
 </div>
+
+<dialog id="rewards-modal" class="modal-dialog">
+    <div class="flex items-start justify-between gap-4 px-5 py-4 border-b border-neutral-700">
+        <div class="min-w-0">
+            <h3 class="text-neutral-100 font-semibold">Rewards — {{.Streamer.Name}}</h3>
+            <div class="text-xs text-neutral-400">Balance: <span id="rewards-balance">—</span> points</div>
+        </div>
+        <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" id="rewards-modal-close" aria-label="Close">✕</button>
+    </div>
+
+    <div class="px-5 py-4 max-h-[70vh] overflow-y-auto space-y-4">
+        <div id="rewards-status" class="hidden text-sm rounded-md px-3 py-2"></div>
+
+        <div id="rewards-list" class="space-y-3">
+            <div class="text-neutral-400 text-sm">Loading rewards…</div>
+        </div>
+
+        <details id="auto-redeem-panel" class="details-panel">
+            <summary class="text-base">Automatic redemption</summary>
+            <div class="details-content space-y-3">
+                <p class="text-neutral-400 text-sm">
+                    When enabled, the miner automatically redeems the rewards you check <span class="text-neutral-100">Auto</span> above — but only while they're available and only up to the total budget below. Rewards requiring a typed message are never auto-redeemed. The budget counts total points spent this run and resets on restart or when you change these settings.
+                </p>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="auto-enabled" class="w-5 h-5 accent-purple-600">
+                    <span class="text-neutral-100">Enable auto-redeem for this streamer</span>
+                </label>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <label class="text-sm text-neutral-400" for="auto-budget">Budget (points)</label>
+                    <input type="number" id="auto-budget" min="0" max="1000000" step="100" class="input-field w-36" placeholder="5000">
+                </div>
+                <button type="button" id="auto-save" class="btn-primary">Save auto-redeem settings</button>
+            </div>
+        </details>
+    </div>
+</dialog>
 
 <div class="chart-container">
     <h3 class="text-lg font-semibold mb-4">Date Range</h3>
@@ -432,5 +471,183 @@
             fetchChatMessages(0, false);
         }
     }, {{.RefreshMinutes}} * 60 * 1000);
+</script>
+
+<script>
+    // Channel Point Rewards modal: manual redemption and per-streamer
+    // auto-redeem configuration. `streamerName`, `escapeHtml` come from the
+    // shared script scope above.
+    (function() {
+        const modal = document.getElementById('rewards-modal');
+        if (!modal) return;
+
+        const openBtn = document.getElementById('open-rewards-btn');
+        const closeBtn = document.getElementById('rewards-modal-close');
+        const listEl = document.getElementById('rewards-list');
+        const statusEl = document.getElementById('rewards-status');
+        const balanceEl = document.getElementById('rewards-balance');
+        const autoEnabled = document.getElementById('auto-enabled');
+        const autoBudget = document.getElementById('auto-budget');
+        const autoSave = document.getElementById('auto-save');
+
+        let rewards = [];
+        let autoCfg = { enabled: false, budget: 0, rewardIds: [] };
+
+        function fmt(n) { return (typeof n === 'number') ? n.toLocaleString() : n; }
+
+        function showStatus(msg, ok) {
+            statusEl.textContent = msg;
+            // Inline colors so the status reads correctly even if the CSS
+            // wasn't rebuilt to include these Tailwind color utilities.
+            statusEl.style.background = ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
+            statusEl.style.color = ok ? '#86efac' : '#fca5a5';
+            statusEl.classList.remove('hidden');
+        }
+        function clearStatus() { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
+
+        async function loadRewards() {
+            listEl.innerHTML = '<div class="text-neutral-400 text-sm">Loading rewards…</div>';
+            try {
+                const res = await fetch(`/api/streamer/${encodeURIComponent(streamerName)}/rewards`);
+                if (!res.ok) throw new Error('request failed');
+                const data = await res.json();
+                rewards = data.rewards || [];
+                autoCfg = data.autoRedeem || { enabled: false, budget: 0, rewardIds: [] };
+                balanceEl.textContent = (data.balance != null) ? fmt(data.balance) : '—';
+                autoEnabled.checked = !!autoCfg.enabled;
+                autoBudget.value = autoCfg.budget ? autoCfg.budget : '';
+                renderRewards();
+            } catch (e) {
+                rewards = [];
+                listEl.innerHTML = '<div class="text-neutral-400 text-sm">Could not load rewards. This streamer may not be tracked, or has no custom rewards.</div>';
+            }
+        }
+
+        function renderRewards() {
+            if (!rewards.length) {
+                listEl.innerHTML = '<div class="text-neutral-400 text-sm">No custom rewards found for this channel.</div>';
+                return;
+            }
+            const allow = new Set(autoCfg.rewardIds || []);
+            listEl.innerHTML = rewards.map(r => rewardRow(r, allow.has(r.id))).join('');
+        }
+
+        function rewardRow(r, autoChecked) {
+            const cost = fmt(r.cost);
+            const pill = r.available
+                ? '<span class="status-pill status-pill-progress">Available</span>'
+                : `<span class="status-pill status-pill-claimed">${escapeHtml(r.unavailableReason || 'Unavailable')}</span>`;
+            const subBadge = r.subOnly ? '<span class="status-pill status-pill-claimed">Sub only</span>' : '';
+            const redeemBtn = r.available
+                ? `<button type="button" class="btn-secondary text-sm" data-redeem="${escapeHtml(r.id)}">Redeem</button>`
+                : '<button type="button" class="btn-secondary text-sm" style="opacity:0.5;cursor:not-allowed" disabled>Redeem</button>';
+            const autoControl = r.requiresInput
+                ? '<span class="text-xs text-neutral-500" title="Rewards requiring text can only be redeemed manually">Manual only</span>'
+                : `<label class="flex items-center gap-1 text-xs text-neutral-400 cursor-pointer"><input type="checkbox" class="w-4 h-4 accent-purple-600" data-auto-id="${escapeHtml(r.id)}" ${autoChecked ? 'checked' : ''}> Auto</label>`;
+            const inputField = r.requiresInput
+                ? `<input type="text" class="input-field w-full mb-2" maxlength="500" placeholder="Enter your message" data-redeem-input="${escapeHtml(r.id)}">`
+                : '';
+
+            return `
+            <div class="card">
+                <div class="flex items-start justify-between gap-3 flex-wrap">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-neutral-100 font-medium">${escapeHtml(r.title)}</span>
+                            ${pill}${subBadge}
+                        </div>
+                        <div class="text-sm text-purple-400 mt-1">${cost} points${r.requiresInput ? ' · requires message' : ''}</div>
+                        ${r.prompt ? `<div class="text-xs text-neutral-400 mt-1">${escapeHtml(r.prompt)}</div>` : ''}
+                    </div>
+                    <div class="flex items-center gap-3 flex-shrink-0">
+                        ${autoControl}
+                        ${redeemBtn}
+                    </div>
+                </div>
+                <div class="hidden mt-3" data-redeem-panel="${escapeHtml(r.id)}">
+                    ${inputField}
+                    <div class="flex items-center gap-2">
+                        <button type="button" class="btn-primary text-sm" data-redeem-confirm="${escapeHtml(r.id)}">Confirm redeem (${cost})</button>
+                        <button type="button" class="btn-secondary text-sm" data-redeem-cancel="${escapeHtml(r.id)}">Cancel</button>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function panelFor(id) { return listEl.querySelector(`[data-redeem-panel="${cssAttr(id)}"]`); }
+        function cssAttr(v) { return String(v).replace(/"/g, '\\"'); }
+
+        function togglePanel(id, show) {
+            const panel = panelFor(id);
+            if (panel) panel.classList.toggle('hidden', !show);
+        }
+
+        async function doRedeem(id) {
+            const reward = rewards.find(r => r.id === id);
+            if (!reward) return;
+            let textInput = '';
+            if (reward.requiresInput) {
+                const input = listEl.querySelector(`[data-redeem-input="${cssAttr(id)}"]`);
+                textInput = input ? input.value.trim() : '';
+                if (!textInput) { showStatus('This reward requires a message before redeeming.', false); return; }
+            }
+            const btn = listEl.querySelector(`[data-redeem-confirm="${cssAttr(id)}"]`);
+            if (btn) { btn.disabled = true; btn.textContent = 'Redeeming…'; }
+            try {
+                const res = await fetch(`/api/streamer/${encodeURIComponent(streamerName)}/redeem`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rewardId: id, textInput })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showStatus(`Redeemed "${reward.title}".`, true);
+                    await loadRewards();
+                } else {
+                    showStatus(data.message || 'Redemption failed.', false);
+                    if (btn) { btn.disabled = false; btn.textContent = `Confirm redeem (${fmt(reward.cost)})`; }
+                }
+            } catch (e) {
+                showStatus('Redemption failed — please try again.', false);
+                if (btn) { btn.disabled = false; btn.textContent = `Confirm redeem (${fmt(reward.cost)})`; }
+            }
+        }
+
+        listEl.addEventListener('click', async (e) => {
+            const openPanel = e.target.closest('[data-redeem]');
+            if (openPanel) { clearStatus(); togglePanel(openPanel.dataset.redeem, true); return; }
+            const cancel = e.target.closest('[data-redeem-cancel]');
+            if (cancel) { togglePanel(cancel.dataset.redeemCancel, false); return; }
+            const confirm = e.target.closest('[data-redeem-confirm]');
+            if (confirm) { await doRedeem(confirm.dataset.redeemConfirm); return; }
+        });
+
+        autoSave.addEventListener('click', async () => {
+            const rewardIds = Array.from(listEl.querySelectorAll('[data-auto-id]:checked')).map(el => el.dataset.autoId);
+            const budget = parseInt(autoBudget.value, 10) || 0;
+            const enabled = autoEnabled.checked;
+            if (enabled && budget <= 0) { showStatus('Set a budget above 0 to enable auto-redeem.', false); return; }
+            if (enabled && rewardIds.length === 0) { showStatus('Check at least one reward to auto-redeem.', false); return; }
+            autoSave.disabled = true;
+            try {
+                const res = await fetch(`/api/streamer/${encodeURIComponent(streamerName)}/auto-redeem`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled, budget, rewardIds })
+                });
+                if (!res.ok) { throw new Error(await res.text()); }
+                autoCfg = { enabled, budget, rewardIds };
+                showStatus('Auto-redeem settings saved.', true);
+            } catch (e) {
+                showStatus('Failed to save auto-redeem settings: ' + (e.message || 'error'), false);
+            } finally {
+                autoSave.disabled = false;
+            }
+        });
+
+        openBtn.addEventListener('click', () => { clearStatus(); modal.showModal(); loadRewards(); });
+        closeBtn.addEventListener('click', () => modal.close());
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.close(); });
+    })();
 </script>
 {{end}}

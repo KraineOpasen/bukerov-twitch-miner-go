@@ -22,6 +22,7 @@ const (
 	TypeDropClaimed     Type = "drop_claimed"
 	TypeMomentClaimed   Type = "moment_claimed"
 	TypeRaidJoined      Type = "raid_joined"
+	TypeRewardRedeemed  Type = "reward_redeemed"
 )
 
 type Event struct {
