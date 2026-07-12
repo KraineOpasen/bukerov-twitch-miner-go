@@ -34,6 +34,16 @@ type CampaignsProvider interface {
 	Campaigns() []*models.Campaign
 }
 
+// RewardsProvider exposes custom channel-points reward listing/redemption and
+// per-streamer auto-redeem configuration to the dashboard. It's satisfied by
+// the miner, which owns the API client and streamer state.
+type RewardsProvider interface {
+	ListCustomRewards(username string) ([]*models.CustomReward, error)
+	RedeemCustomReward(username, rewardID, textInput string) error
+	GetAutoRedeem(username string) config.AutoRedeemConfig
+	SetAutoRedeem(username string, cfg config.AutoRedeemConfig) error
+}
+
 type Server struct {
 	host           string
 	port           int
@@ -53,6 +63,7 @@ type Server struct {
 	notificationManager     *notifications.Manager
 	nextStreamCheckProvider NextStreamCheckProvider
 	campaignsProvider       CampaignsProvider
+	rewardsProvider         RewardsProvider
 	status                  *StatusBroadcaster
 	ready                   bool
 	mu                      sync.RWMutex
@@ -166,6 +177,12 @@ func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
 	s.campaignsProvider = provider
 }
 
+func (s *Server) SetRewardsProvider(provider RewardsProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rewardsProvider = provider
+}
+
 func (s *Server) SetDiscordEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -223,6 +240,11 @@ func (s *Server) Start() {
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/streamer/", s.handleStreamerPage)
 	mux.HandleFunc("/api/streamers", s.handleAPIStreamers)
+
+	// Custom channel-points rewards (per-streamer): list, redeem, auto-redeem
+	// config. The "/api/streamer/" subtree is distinct from the exact
+	// "/api/streamers" pattern above.
+	mux.HandleFunc("/api/streamer/", s.handleAPIStreamerRewards)
 
 	// Drops routes
 	mux.HandleFunc("/drops", s.handleDropsPage)

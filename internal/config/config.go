@@ -35,6 +35,30 @@ type Config struct {
 	// whose drop or reward name contains one of them is skipped during drop
 	// rotation prioritization, in addition to the claim-history dedup.
 	DropBlacklist []string `json:"dropBlacklist,omitempty"`
+
+	// AutoRedeem holds per-streamer auto-redeem configuration for custom
+	// channel-points rewards, keyed by lowercase streamer username. It is a
+	// top-level map (rather than a StreamerSettings field) so it survives the
+	// Settings-page save round-trip untouched and is edited independently from
+	// the streamer-page Rewards panel. Absent/disabled entries mean no
+	// auto-redeem.
+	AutoRedeem map[string]AutoRedeemConfig `json:"autoRedeem,omitempty"`
+}
+
+// AutoRedeemConfig is the per-streamer opt-in for automatically redeeming
+// custom channel-points rewards. Nothing is ever auto-redeemed unless Enabled
+// is true, a positive Budget is set, and the specific reward is whitelisted in
+// RewardIDs — the miner never spends on rewards the user did not explicitly
+// pick, and never on user-input rewards regardless of whitelist.
+type AutoRedeemConfig struct {
+	Enabled bool `json:"enabled"`
+	// Budget is the maximum total points the miner may spend auto-redeeming on
+	// this streamer for the current process lifetime. Spending is tracked in
+	// memory and resets on restart or when the config is edited.
+	Budget int `json:"budget"`
+	// RewardIDs is the whitelist of custom-reward IDs the miner is allowed to
+	// auto-redeem for this streamer.
+	RewardIDs []string `json:"rewardIds,omitempty"`
 }
 
 type StreamerConfig struct {

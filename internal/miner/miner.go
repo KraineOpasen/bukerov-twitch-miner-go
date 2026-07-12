@@ -63,7 +63,25 @@ type Miner struct {
 
 	authErrOnce sync.Once
 
+	// autoRedeemState tracks in-memory auto-redeem runtime per streamer
+	// (points spent so far and which rewards were already redeemed in the
+	// current availability window). Guarded by mu; reset on restart and
+	// whenever the streamer's auto-redeem config is edited.
+	autoRedeemState map[string]*autoRedeemRuntime
+
 	mu sync.RWMutex
+}
+
+// autoRedeemRuntime is the per-streamer in-memory budget/window bookkeeping for
+// auto-redeeming custom rewards.
+type autoRedeemRuntime struct {
+	// spent is the total points auto-redeemed for this streamer this run.
+	spent int
+	// redeemed marks reward IDs already auto-redeemed while they were
+	// continuously available, so a reward is redeemed once per availability
+	// window (edge-triggered) instead of every poll. Cleared for a reward when
+	// it is next seen unavailable (e.g. on cooldown), re-arming it.
+	redeemed map[string]bool
 }
 
 func New(cfg *config.Config, configPath string) *Miner {
@@ -74,6 +92,7 @@ func New(cfg *config.Config, configPath string) *Miner {
 		configPath:         configPath,
 		deviceID:           deviceID,
 		streamCheckTrigger: make(chan struct{}, 1),
+		autoRedeemState:    make(map[string]*autoRedeemRuntime),
 	}
 }
 
@@ -217,6 +236,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				m.webServer.SetSettingsProvider(m)
 				m.webServer.SetSettingsUpdateCallback(m.ApplySettings)
 				m.webServer.SetNextStreamCheckProvider(m)
+				m.webServer.SetRewardsProvider(m)
 			}
 		} else {
 			svc, err := analytics.NewService(m.db, m.dbBasePath)
@@ -237,6 +257,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				m.webServer.SetSettingsProvider(m)
 				m.webServer.SetSettingsUpdateCallback(m.ApplySettings)
 				m.webServer.SetNextStreamCheckProvider(m)
+				m.webServer.SetRewardsProvider(m)
 			}
 		}
 	}
@@ -428,13 +449,13 @@ func (m *Miner) pollBonuses() {
 		claimed, err := m.client.ClaimAvailableBonus(s)
 		if err != nil {
 			slog.Debug("Bonus poll failed", "streamer", s.Username, "error", err)
-			continue
-		}
-		if claimed {
+		} else if claimed {
 			slog.Info("Claimed channel points bonus via GQL fallback poll (PubSub missed the claim-available event)",
 				"streamer", s.Username)
 			events.Record(events.TypeBonusClaimed, s.Username, "bonus claimed (GQL fallback)")
 		}
+
+		m.evaluateAutoRedeem(s)
 	}
 }
 

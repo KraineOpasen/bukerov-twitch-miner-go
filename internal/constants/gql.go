@@ -117,4 +117,15 @@ var (
 		"ContributeCommunityPointsCommunityGoal",
 		"5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6",
 	)
+
+	// RedeemCustomReward spends channel points on a streamer's custom
+	// channel-points reward. Twitch renamed this operation server-side from
+	// RedeemCommunityPointsCustomReward to RedeemCustomReward (and now requires
+	// pricingType + prompt in the input); the mutation field in the response is
+	// still redeemCommunityPointsCustomReward. Hash captured from the current
+	// Twitch web client.
+	RedeemCustomReward = NewGQLOperation(
+		"RedeemCustomReward",
+		"d56249a7adb4978898ea3412e196688d4ac3cea1c0c2dfd65561d229ea5dcc42",
+	)
 )
