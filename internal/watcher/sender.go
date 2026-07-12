@@ -65,7 +65,7 @@ func (s *MinuteSender) Send(streamer *models.Streamer) (simulateErr error, err e
 	if err != nil {
 		return simulateErr, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return simulateErr, fmt.Errorf("unexpected status: %d", resp.StatusCode)
@@ -98,7 +98,7 @@ func (s *MinuteSender) simulateWatching(channel, sig, token string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get playlist: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("playlist request failed with status %d", resp.StatusCode)
