@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
 // watchTimeWindow is the trailing period over which accumulated watch

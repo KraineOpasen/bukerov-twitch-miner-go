@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/constants"
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 type ChatLogger interface {

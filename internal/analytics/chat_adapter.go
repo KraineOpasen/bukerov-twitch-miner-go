@@ -1,6 +1,6 @@
 package analytics
 
-import "github.com/PatrickWalther/twitch-miner-go/internal/chat"
+import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/chat"
 
 type ChatLoggerAdapter struct {
 	service *Service

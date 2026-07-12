@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 func TestBuildDropCampaignViewsOrdering(t *testing.T) {

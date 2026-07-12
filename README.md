@@ -4,8 +4,8 @@
 
 # Twitch Channel Points Miner
 
-[![CI](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/ci.yml/badge.svg)](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/ci.yml)
-[![Release](https://github.com/PatrickWalther/twitch-miner-go/actions/workflows/release.yml/badge.svg)](https://github.com/PatrickWalther/twitch-miner-go/releases)
+[![CI](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/ci.yml/badge.svg)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/ci.yml)
+[![Release](https://github.com/KraineOpasen/bukerov-twitch-miner-go/actions/workflows/release.yml/badge.svg)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases)
 [![Release](https://img.shields.io/github/v/release/KraineOpasen/bukerov-twitch-miner-go?label=release)](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases)
 
 A fork of [PatrickWalther/twitch-miner-go](https://github.com/PatrickWalther/twitch-miner-go).
@@ -121,7 +121,7 @@ docker pull ghcr.io/patrickwalther/twitch-miner-go:latest
 
 ### Step 1: Download the binary
 
-Download the latest release for your platform from the [Releases page](https://github.com/PatrickWalther/twitch-miner-go/releases).
+Download the latest release for your platform from the [Releases page](https://github.com/KraineOpasen/bukerov-twitch-miner-go/releases).
 
 | Platform | File |
 |----------|------|
@@ -235,7 +235,7 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 ### Step 1: Clone and build
 
 ```bash
-git clone https://github.com/PatrickWalther/twitch-miner-go.git
+git clone https://github.com/KraineOpasen/bukerov-twitch-miner-go.git
 cd twitch-miner-go
 
 # Build with version info (includes Tailwind CSS build)
@@ -245,7 +245,7 @@ make build
 make build-compressed
 
 # Or build manually (requires Tailwind CSS to be pre-built)
-go build -ldflags "-s -w -X github.com/PatrickWalther/twitch-miner-go/internal/version.Version=$(git describe --tags)" -o twitch-miner-go ./cmd/miner
+go build -ldflags "-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=$(git describe --tags)" -o twitch-miner-go ./cmd/miner
 ```
 
 ### Step 2: Generate config and run

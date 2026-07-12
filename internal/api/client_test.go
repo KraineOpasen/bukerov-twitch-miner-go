@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 )
 
 func channelPointsResponse(claimID string) map[string]interface{} {

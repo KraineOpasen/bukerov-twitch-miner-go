@@ -9,7 +9,7 @@ package debug
 import (
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 )
 
 // Snapshot is the JSON document served by GET /debug/snapshot.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/gorilla/websocket"
 )
 

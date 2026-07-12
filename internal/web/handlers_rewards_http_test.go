@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/config"
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 type stubRewardsProvider struct {

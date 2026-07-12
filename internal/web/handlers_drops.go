@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"sort"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
-	"github.com/PatrickWalther/twitch-miner-go/internal/version"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
 func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {

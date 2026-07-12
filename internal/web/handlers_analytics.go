@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 )
 
 func (s *Server) handleStreamers(w http.ResponseWriter, r *http.Request) {
