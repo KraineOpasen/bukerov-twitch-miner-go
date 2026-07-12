@@ -262,11 +262,22 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	}
 	m.chatManager = chat.NewChatManager(m.config.Username, m.auth.GetAuthToken(), chatLogger, chatLogsEnabled, mentionHandler)
 
+	var watchTimeStore *watcher.WatchTimeStore
+	if m.db != nil {
+		store, err := watcher.NewWatchTimeStore(m.db)
+		if err != nil {
+			slog.Error("Failed to create watch-time store, rotation fairness will not persist across restarts", "error", err)
+		} else {
+			watchTimeStore = store
+		}
+	}
+
 	m.watcher = watcher.NewMinuteWatcher(
 		m.client,
 		streamers,
 		m.config.Priority,
 		m.config.RateLimits,
+		watchTimeStore,
 	)
 
 	m.dropsTracker = drops.NewDropsTracker(

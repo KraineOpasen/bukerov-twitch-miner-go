@@ -31,6 +31,9 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			RequestDelay:          cfg.RateLimits.RequestDelay,
 			ReconnectDelay:        cfg.RateLimits.ReconnectDelay,
 			StreamCheckInterval:   cfg.RateLimits.StreamCheckInterval,
+
+			RotationIntervalMinMinutes: cfg.RateLimits.RotationIntervalMinMinutes,
+			RotationIntervalMaxMinutes: cfg.RateLimits.RotationIntervalMaxMinutes,
 		},
 		Logger: LoggerSettings{
 			ConsoleLevel: cfg.Logger.ConsoleLevel,
@@ -78,6 +81,9 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			RequestDelay:          defaults.RateLimits.RequestDelay,
 			ReconnectDelay:        defaults.RateLimits.ReconnectDelay,
 			StreamCheckInterval:   defaults.RateLimits.StreamCheckInterval,
+
+			RotationIntervalMinMinutes: defaults.RateLimits.RotationIntervalMinMinutes,
+			RotationIntervalMaxMinutes: defaults.RateLimits.RotationIntervalMaxMinutes,
 		},
 		Logger: LoggerSettings{
 			ConsoleLevel: defaults.Logger.ConsoleLevel,
@@ -122,6 +128,8 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.RateLimits.RequestDelay = s.RateLimits.RequestDelay
 	cfg.RateLimits.ReconnectDelay = s.RateLimits.ReconnectDelay
 	cfg.RateLimits.StreamCheckInterval = s.RateLimits.StreamCheckInterval
+	cfg.RateLimits.RotationIntervalMinMinutes = s.RateLimits.RotationIntervalMinMinutes
+	cfg.RateLimits.RotationIntervalMaxMinutes = s.RateLimits.RotationIntervalMaxMinutes
 
 	cfg.Logger.ConsoleLevel = s.Logger.ConsoleLevel
 	cfg.Logger.FileLevel = s.Logger.FileLevel
