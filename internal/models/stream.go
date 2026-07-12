@@ -121,19 +121,44 @@ func (s *Stream) InitWatchStreak() {
 	s.minuteWatchedUpdated = time.Time{}
 }
 
-// UpdateMinuteWatched advances the cumulative watched-minutes counter and
+// UpdateMinuteWatched advances the continuous watched-minutes counter and
 // returns the delta (in minutes) credited by this call. The first call after
 // InitWatchStreak returns 0, since there's no prior timestamp to measure from.
-func (s *Stream) UpdateMinuteWatched() float64 {
+//
+// maxGap is the largest interval between two consecutive minute-watched reports
+// that still counts as continuous viewing of the same broadcast. When the gap
+// since the previous report exceeds it, the streamer was not watched
+// continuously (rotated out of a watch slot, a failed cycle, a brief offline
+// blip, ...). Twitch resets its server-side watch-streak session on such a
+// break, so MinuteWatched must restart from zero too: otherwise it would count
+// wall-clock elapsed time instead of actually-watched time, cross the
+// watch-streak threshold on phantom minutes the viewer never continuously
+// watched, and - because the streak-pursuit logic stops chasing a streamer once
+// MinuteWatched passes the threshold - abandon a streak that was in fact never
+// earned. A non-positive maxGap disables the break check (unbounded
+// accumulation, the historical behaviour).
+func (s *Stream) UpdateMinuteWatched(maxGap time.Duration) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var delta float64
-	if !s.minuteWatchedUpdated.IsZero() {
-		delta = time.Since(s.minuteWatchedUpdated).Minutes()
-		s.MinuteWatched += delta
+	now := time.Now()
+	if s.minuteWatchedUpdated.IsZero() {
+		s.minuteWatchedUpdated = now
+		return 0
 	}
-	s.minuteWatchedUpdated = time.Now()
+
+	gap := now.Sub(s.minuteWatchedUpdated)
+	s.minuteWatchedUpdated = now
+
+	if maxGap > 0 && gap > maxGap {
+		// Continuity broken - restart the streak progress from scratch and
+		// credit nothing for the gap (no viewing actually happened during it).
+		s.MinuteWatched = 0
+		return 0
+	}
+
+	delta := gap.Minutes()
+	s.MinuteWatched += delta
 	return delta
 }
 

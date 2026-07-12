@@ -635,7 +635,10 @@ func (m *Manager) processWatch() {
 		return
 	}
 
-	current.Streamer.Stream.UpdateMinuteWatched()
+	m.mu.RLock()
+	maxContinuousGap := 2 * time.Duration(m.settings.MinuteWatchedInterval) * time.Second
+	m.mu.RUnlock()
+	current.Streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
 	if v := current.Streamer.Stream.GetViewersCount(); v > 0 {
 		m.mu.Lock()
 		current.Viewers = v
