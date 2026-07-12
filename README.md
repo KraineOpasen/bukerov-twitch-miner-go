@@ -255,7 +255,7 @@ make build
 make build-compressed
 
 # Or build manually (requires Tailwind CSS to be pre-built)
-go build -ldflags "-s -w -X github.com/PatrickWalther/twitch-miner-go/internal/version.Version=$(git describe --tags)" -o twitch-miner-go ./cmd/miner
+go build -ldflags "-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=$(git describe --tags)" -o twitch-miner-go ./cmd/miner
 ```
 
 ### Step 2: Generate config and run

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
 type Repository struct {

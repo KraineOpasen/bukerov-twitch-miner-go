@@ -3,7 +3,7 @@ package settings
 import (
 	"testing"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 func TestApplyToConfigNormalizesDropBlacklist(t *testing.T) {

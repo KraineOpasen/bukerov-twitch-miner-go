@@ -7,13 +7,13 @@
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/PatrickWalther/twitch-miner-go/issues</Support>
-  <Project>https://github.com/PatrickWalther/twitch-miner-go</Project>
+  <Support>https://github.com/KraineOpasen/bukerov-twitch-miner-go/issues</Support>
+  <Project>https://github.com/KraineOpasen/bukerov-twitch-miner-go</Project>
   <Overview>Twitch Channel Points Miner - Automatically earn Twitch channel points by simulating viewer presence. Features: Passive point farming, automatic bonus claiming, watch streak detection, raid following, prediction betting, game drops tracking, moments claiming, and real-time analytics dashboard.</Overview>
   <Category>Tools:</Category>
   <WebUI>http://[IP]:[PORT:5000]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/PatrickWalther/twitch-miner-go/main/unraid/twitch-miner-go.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/PatrickWalther/twitch-miner-go/main/assets/icon.svg</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/KraineOpasen/bukerov-twitch-miner-go/main/unraid/twitch-miner-go.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/KraineOpasen/bukerov-twitch-miner-go/main/assets/icon.svg</Icon>
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>

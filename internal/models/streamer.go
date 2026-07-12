@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 )
 
 type ChatPresence string

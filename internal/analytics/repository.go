@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/database"
-	"github.com/PatrickWalther/twitch-miner-go/internal/util"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
 
 type Repository interface {

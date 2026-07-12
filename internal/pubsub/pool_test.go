@@ -3,7 +3,7 @@ package pubsub
 import (
 	"testing"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 func TestComputeGoalContribution(t *testing.T) {

@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/analytics"
-	"github.com/PatrickWalther/twitch-miner-go/internal/config"
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
-	"github.com/PatrickWalther/twitch-miner-go/internal/notifications"
-	"github.com/PatrickWalther/twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
 //go:embed templates/*.html templates/partials/*.html

@@ -3,11 +3,11 @@ package miner
 import (
 	"time"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/debug"
-	"github.com/PatrickWalther/twitch-miner-go/internal/events"
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
-	"github.com/PatrickWalther/twitch-miner-go/internal/version"
-	"github.com/PatrickWalther/twitch-miner-go/internal/watcher"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
 
 // snapshotRecentEvents bounds how many ring-buffer events one snapshot

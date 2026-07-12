@@ -1,4 +1,4 @@
-module github.com/PatrickWalther/twitch-miner-go
+module github.com/KraineOpasen/bukerov-twitch-miner-go
 
 go 1.24.0
 

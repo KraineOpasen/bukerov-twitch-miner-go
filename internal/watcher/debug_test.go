@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // runSelectionTick mimics the selection portion of processWatching: it

@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/config"
-	"github.com/PatrickWalther/twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
 // Manager handles notification dispatching across multiple providers.

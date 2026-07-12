@@ -1,6 +1,6 @@
 package web
 
-import "github.com/PatrickWalther/twitch-miner-go/internal/analytics"
+import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 
 type StreamerInfo struct {
 	Name                  string `json:"name"`

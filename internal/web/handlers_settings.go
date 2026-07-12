@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/settings"
-	"github.com/PatrickWalther/twitch-miner-go/internal/version"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {

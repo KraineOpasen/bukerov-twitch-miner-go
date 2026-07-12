@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/notifications"
-	"github.com/PatrickWalther/twitch-miner-go/internal/version"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
 func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request) {

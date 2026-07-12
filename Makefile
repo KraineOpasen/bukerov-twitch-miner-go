@@ -1,7 +1,7 @@
 .PHONY: build build-all clean test docker docker-push help tailwind tailwind-install tailwind-watch upx upx-install
 
 BINARY_NAME := twitch-miner-go
-MODULE := github.com/PatrickWalther/twitch-miner-go
+MODULE := github.com/KraineOpasen/bukerov-twitch-miner-go
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')

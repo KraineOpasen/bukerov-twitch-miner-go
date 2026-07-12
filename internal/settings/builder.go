@@ -3,8 +3,8 @@ package settings
 import (
 	"strings"
 
-	"github.com/PatrickWalther/twitch-miner-go/internal/config"
-	"github.com/PatrickWalther/twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // normalizeBlacklist trims each keyword and drops blank entries so the stored
