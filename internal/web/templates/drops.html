@@ -5,15 +5,15 @@
 <p class="text-neutral-400 text-sm mb-6">Active Twitch Drop campaigns, ordered by current watch priority. Channel-only campaigns and those closest to their reward come first.</p>
 
 <!--
-    Polls once a minute (not the dashboard-wide RefreshMinutes) so the fresher
+    Polls every 30 seconds (not the dashboard-wide RefreshMinutes) so the fresher
     backend progress — refreshed every DropProgressSyncInterval and on each
-    watched minute — actually reaches the page promptly. This only re-renders
-    campaign data the server already holds in memory; it does not trigger a
-    Twitch sync.
+    watched minute — reaches the page promptly without a manual refresh. This only
+    re-renders campaign data the server already holds in memory; it does not
+    trigger a Twitch sync.
 -->
 <section
     hx-get="/api/drops"
-    hx-trigger="load, every 1m"
+    hx-trigger="load, every 30s"
     hx-swap="innerHTML"
 >
     <div class="animate-pulse text-neutral-400">Loading drop campaigns...</div>
