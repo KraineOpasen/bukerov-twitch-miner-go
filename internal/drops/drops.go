@@ -110,8 +110,29 @@ func (d *DropsTracker) syncCampaigns() {
 	}
 
 	campaigns = d.syncWithInventory(campaigns)
+	afterInventory := len(campaigns)
+
 	campaigns = d.applyClaimHistory(campaigns)
+	afterClaimHistory := len(campaigns)
+
 	campaigns = d.applyBlacklist(campaigns)
+	afterBlacklist := len(campaigns)
+
+	slog.Debug("Drops sync: campaign counts through the pipeline",
+		"afterInventory", afterInventory,
+		"afterClaimHistory", afterClaimHistory,
+		"afterBlacklist", afterBlacklist)
+
+	if len(campaigns) == 0 {
+		slog.Debug("Drops sync: no active drop campaigns tracked after filtering " +
+			"(enable -debug to see per-campaign skip reasons above)")
+	} else {
+		names := make([]string, 0, len(campaigns))
+		for _, c := range campaigns {
+			names = append(names, c.Name)
+		}
+		slog.Debug("Drops sync: tracking active drop campaigns", "count", len(campaigns), "campaigns", names)
+	}
 
 	d.mu.Lock()
 	d.campaigns = campaigns
@@ -126,18 +147,104 @@ func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, error) {
 		return nil, err
 	}
 
+	slog.Debug("Drops sync: fetched active campaigns from dashboard",
+		"dashboardCount", len(dashboardCampaigns))
+
 	var campaigns []*models.Campaign
-	for _, c := range dashboardCampaigns {
-		campaign := models.NewCampaignFromGQL(c)
-		if campaign.DateMatch {
-			campaign.ClearClaimedDrops()
-			if len(campaign.Drops) > 0 {
-				campaigns = append(campaigns, campaign)
-			}
+	for _, summary := range dashboardCampaigns {
+		campaignID, _ := summary["id"].(string)
+		summaryName, _ := summary["name"].(string)
+
+		// The ViewerDropsDashboard listing returns campaign summaries without
+		// their timeBasedDrops (and without the per-drop start/end dates that
+		// ClearClaimedDrops relies on). Fetch the full campaign details so the
+		// campaign actually has drops to track; without this every campaign is
+		// filtered out below for having zero usable drops and the Drops page
+		// stays empty even while campaigns are active.
+		detail, err := d.client.GetDropCampaignDetails(campaignID)
+		if err != nil {
+			slog.Warn("Drops sync: failed to fetch campaign details, skipping",
+				"campaign", summaryName, "campaignID", campaignID, "error", err)
+			continue
+		}
+		if detail == nil {
+			slog.Debug("Drops sync: no campaign details returned, skipping",
+				"campaign", summaryName, "campaignID", campaignID)
+			continue
+		}
+
+		campaign, dropsFromDetails, skip := buildTrackedCampaign(summary, detail)
+		switch skip {
+		case skipOutsideDateWindow:
+			slog.Debug("Drops sync: skipping campaign outside its active date window",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"startAt", campaign.StartAt, "endAt", campaign.EndAt)
+			continue
+		case skipNoActiveDrops:
+			slog.Debug("Drops sync: skipping campaign with no active unclaimed drops",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"dropsFromDetails", dropsFromDetails)
+			continue
+		}
+
+		campaigns = append(campaigns, campaign)
+	}
+
+	slog.Debug("Drops sync: active campaigns after detail fetch and filtering",
+		"trackedCount", len(campaigns))
+
+	return campaigns, nil
+}
+
+// campaignSkipReason explains why buildTrackedCampaign declined to track a
+// campaign (skipNone means it should be tracked).
+type campaignSkipReason int
+
+const (
+	skipNone campaignSkipReason = iota
+	skipOutsideDateWindow
+	skipNoActiveDrops
+)
+
+// buildTrackedCampaign merges a ViewerDropsDashboard summary with its
+// DropCampaignDetails response into a tracked Campaign and decides whether it
+// should be tracked. The details response is authoritative (it's the only
+// source of timeBasedDrops and their per-drop dates); the summary is used only
+// to backfill fields details occasionally omits (id, name, game). It returns
+// the built campaign, how many drops details supplied (for diagnostics), and a
+// skip reason. Kept free of the API client so the merge/filter behavior can be
+// unit-tested directly.
+func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campaign, int, campaignSkipReason) {
+	campaign := models.NewCampaignFromGQL(detail)
+
+	if campaign.ID == "" {
+		if id, ok := summary["id"].(string); ok {
+			campaign.ID = id
+		}
+	}
+	if campaign.Name == "" {
+		if name, ok := summary["name"].(string); ok {
+			campaign.Name = name
+		}
+	}
+	if campaign.Game == nil {
+		if summaryGame := models.NewCampaignFromGQL(summary).Game; summaryGame != nil {
+			campaign.Game = summaryGame
 		}
 	}
 
-	return campaigns, nil
+	dropsFromDetails := len(campaign.Drops)
+
+	if !campaign.DateMatch {
+		return campaign, dropsFromDetails, skipOutsideDateWindow
+	}
+
+	campaign.ClearClaimedDrops()
+	if len(campaign.Drops) == 0 {
+		return campaign, dropsFromDetails, skipNoActiveDrops
+	}
+
+	return campaign, dropsFromDetails, skipNone
 }
 
 func (d *DropsTracker) getDropsDashboard(status string) ([]map[string]interface{}, error) {

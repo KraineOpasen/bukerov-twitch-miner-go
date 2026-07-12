@@ -919,6 +919,41 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 	return ids, nil
 }
 
+// GetDropCampaignDetails fetches the full details for a single drop campaign,
+// including its timeBasedDrops (each with its own start/end dates, required
+// minutes and benefit). The ViewerDropsDashboard listing only returns campaign
+// summaries without this per-drop breakdown, so the details must be fetched
+// per campaign before the campaign can be tracked. Returns the raw
+// `data.user.dropCampaign` map, or nil if the campaign is not found.
+func (c *TwitchClient) GetDropCampaignDetails(campaignID string) (map[string]interface{}, error) {
+	op := constants.DropCampaignDetails.WithVariables(map[string]interface{}{
+		"dropID":       campaignID,
+		"channelLogin": c.auth.GetUserID(),
+	})
+
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		return nil, err
+	}
+
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	user, ok := data["user"].(map[string]interface{})
+	if !ok || user == nil {
+		return nil, nil
+	}
+
+	campaign, ok := user["dropCampaign"].(map[string]interface{})
+	if !ok || campaign == nil {
+		return nil, nil
+	}
+
+	return campaign, nil
+}
+
 func (c *TwitchClient) GetPlaybackAccessToken(username string) (string, string, error) {
 	op := constants.PlaybackAccessToken.WithVariables(map[string]interface{}{
 		"login":      username,
