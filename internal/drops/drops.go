@@ -2,7 +2,9 @@ package drops
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +66,22 @@ type DropsTracker struct {
 	// Drops page reflects the new progress within seconds instead of waiting out
 	// DropProgressSyncInterval.
 	resync chan struct{}
+
+	// logMu guards the assignment/progress de-dup state below. Both the full
+	// campaign sync (loop) and the lightweight progress sync (progressLoop) call
+	// updateStreamerCampaigns from separate goroutines, so the maps it reads and
+	// rewrites must not be touched concurrently.
+	logMu sync.Mutex
+	// loggedRestrictedAssignments remembers which channel-restricted assignments
+	// (keyed by streamer+campaign) have already been announced at INFO, so the
+	// announcement fires only on a real change -- a campaign newly assigned to a
+	// streamer, or one reassigned after dropping off -- and not on every 2-minute
+	// progress sync.
+	loggedRestrictedAssignments map[string]struct{}
+	// loggedProgressBucket remembers, per campaign, the last 5% progress
+	// checkpoint already logged at INFO, so the compact progress line is throttled
+	// to checkpoint crossings instead of firing on every lightweight sync.
+	loggedProgressBucket map[string]int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -904,6 +922,31 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	campaigns := d.campaigns
 	d.mu.RUnlock()
 
+	// All assignment/progress logging shares the de-dup maps below, so serialize
+	// it against a concurrent updateStreamerCampaigns from the other sync
+	// goroutine. The work here is cheap and runs at most every couple of minutes.
+	d.logMu.Lock()
+	defer d.logMu.Unlock()
+
+	if d.loggedRestrictedAssignments == nil {
+		d.loggedRestrictedAssignments = make(map[string]struct{})
+	}
+	if d.loggedProgressBucket == nil {
+		d.loggedProgressBucket = make(map[string]int)
+	}
+
+	// currentAssignments accumulates this cycle's channel-restricted assignments;
+	// it replaces loggedRestrictedAssignments at the end so a campaign that stops
+	// being assigned is announced again if it later comes back.
+	currentAssignments := make(map[string]struct{})
+
+	// Remember the first eligible online streamer seen per campaign (streamer
+	// slice order is stable, so this is deterministic) plus its first-seen order,
+	// so the compact progress line names one farmer per campaign instead of
+	// repeating an identical line for every streamer assigned the same campaign.
+	farmer := make(map[string]*models.Streamer)
+	var progressOrder []*models.Campaign
+
 	for _, streamer := range d.streamers {
 		if !streamer.DropsCondition() {
 			continue
@@ -949,14 +992,127 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 						"allowedChannels", campaign.Channels)
 					continue
 				}
-				slog.Info("Channel-restricted drop campaign assigned to streamer",
-					"streamer", streamer.Username, "campaign", campaign.Name,
-					"campaignID", campaign.ID, "allowedChannels", campaign.Channels)
+				d.logRestrictedAssignment(streamer, campaign, currentAssignments)
 			}
 
 			streamerCampaigns = append(streamerCampaigns, campaign)
+
+			if _, ok := farmer[campaign.ID]; !ok {
+				farmer[campaign.ID] = streamer
+				progressOrder = append(progressOrder, campaign)
+			}
 		}
 
 		streamer.Stream.Campaigns = streamerCampaigns
 	}
+
+	d.loggedRestrictedAssignments = currentAssignments
+
+	for _, campaign := range progressOrder {
+		d.logCampaignProgress(farmer[campaign.ID], campaign)
+	}
+
+	// Drop remembered progress checkpoints for campaigns no longer tracked, so a
+	// long-running process doesn't accumulate stale entries. Buckets for tracked
+	// but momentarily-unfarmed campaigns are kept, so a farmer returning mid-way
+	// doesn't re-announce progress it already passed.
+	if len(d.loggedProgressBucket) > 0 {
+		tracked := make(map[string]struct{}, len(campaigns))
+		for _, c := range campaigns {
+			tracked[c.ID] = struct{}{}
+		}
+		for id := range d.loggedProgressBucket {
+			if _, ok := tracked[id]; !ok {
+				delete(d.loggedProgressBucket, id)
+			}
+		}
+	}
+}
+
+// progressLogStepPercent is the progress increment (in percent) between the
+// checkpoints at which a drop's progress line is (re-)logged at INFO. It also
+// sizes the textual bar so one cell equals one checkpoint.
+const progressLogStepPercent = 5
+
+// progressBarWidth is the number of cells in the textual drop-progress bar.
+const progressBarWidth = 100 / progressLogStepPercent
+
+// logRestrictedAssignment records that a channel-restricted campaign is assigned
+// to streamer for this cycle and announces it at INFO only the first time the
+// assignment appears (a new campaign for the streamer, or one reassigned after
+// dropping off). Steady-state re-assignments seen on every lightweight progress
+// sync are logged at DEBUG, and the long allowed-channel list is kept off the
+// INFO line entirely (available at DEBUG for troubleshooting). Callers must hold
+// d.logMu.
+func (d *DropsTracker) logRestrictedAssignment(
+	streamer *models.Streamer, campaign *models.Campaign, current map[string]struct{},
+) {
+	key := streamer.Username + "\x00" + campaign.ID
+	current[key] = struct{}{}
+
+	if _, seen := d.loggedRestrictedAssignments[key]; seen {
+		slog.Debug("Channel-restricted drop campaign still assigned to streamer",
+			"streamer", streamer.Username, "campaign", campaign.Name)
+		return
+	}
+
+	slog.Info("Channel-restricted drop campaign assigned to streamer",
+		"streamer", streamer.Username, "campaign", campaign.Name)
+	slog.Debug("Channel-restricted drop campaign allowed-channel list",
+		"streamer", streamer.Username, "campaign", campaign.Name,
+		"campaignID", campaign.ID, "allowedChannels", campaign.Channels)
+}
+
+// logCampaignProgress emits a compact, human-readable progress line for a drop
+// campaign a streamer is farming, e.g.
+//
+//	World of Tanks [cyganzor] AMD Summer Arena Drops#2: -----------> 55%
+//
+// It is throttled: the line is logged at INFO only when progress crosses a new
+// 5% checkpoint (which includes reaching 100% / claim-ready), so a campaign
+// inching forward on every lightweight sync doesn't spam the log. Cycles that
+// don't cross a checkpoint are logged at DEBUG rather than dropped, so a -debug
+// run still shows every refresh. Callers must hold d.logMu.
+func (d *DropsTracker) logCampaignProgress(streamer *models.Streamer, campaign *models.Campaign) {
+	if streamer == nil || campaign.CurrentDrop() == nil {
+		return
+	}
+
+	pct := campaign.OverallProgressPercent()
+	line := formatDropProgress(streamer.Username, campaign, pct)
+
+	bucket := pct / progressLogStepPercent
+	if last, seen := d.loggedProgressBucket[campaign.ID]; !seen || bucket > last {
+		d.loggedProgressBucket[campaign.ID] = bucket
+		slog.Info(line)
+		return
+	}
+	slog.Debug(line)
+}
+
+// formatDropProgress renders the compact one-line progress string used in the
+// logs: the game, the streamer farming it, the campaign, a textual progress bar,
+// and the percentage — deliberately without campaignID or the allowed-channel
+// list, which are debugging details rather than daily-monitoring ones.
+func formatDropProgress(streamer string, campaign *models.Campaign, pct int) string {
+	game := ""
+	if campaign.Game != nil {
+		game = campaign.Game.Name
+	}
+	if game != "" {
+		return fmt.Sprintf("%s [%s] %s: %s %d%%", game, streamer, campaign.Name, progressBar(pct), pct)
+	}
+	return fmt.Sprintf("[%s] %s: %s %d%%", streamer, campaign.Name, progressBar(pct), pct)
+}
+
+// progressBar renders pct (0-100) as a fixed-width arrow, e.g. "----------->"
+// at ~55%, growing to a full "-------------------->" at 100%.
+func progressBar(pct int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return strings.Repeat("-", pct*progressBarWidth/100) + ">"
 }
