@@ -20,6 +20,11 @@ type DropsTracker struct {
 
 	campaigns []*models.Campaign
 
+	// lastSync records when syncCampaigns last completed, surfaced in the
+	// debug snapshot so an empty Drops page can be told apart from a sync
+	// that never ran.
+	lastSync time.Time
+
 	// dropBlacklist holds case-insensitive keywords; a campaign is skipped
 	// during rotation prioritization when any of its drop/reward names matches
 	// one. Guarded by mu so it can be updated at runtime from the Settings page.
@@ -82,6 +87,14 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 	return campaigns
 }
 
+// LastSync reports when the campaign-sync pipeline last completed (zero if it
+// has not run yet). Exposed for the debug snapshot.
+func (d *DropsTracker) LastSync() time.Time {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastSync
+}
+
 func (d *DropsTracker) loop() {
 	syncInterval := time.Duration(d.settings.CampaignSyncInterval) * time.Minute
 
@@ -109,6 +122,8 @@ func (d *DropsTracker) syncCampaigns() {
 		return
 	}
 
+	fromDashboard := len(campaigns)
+
 	campaigns = d.syncWithInventory(campaigns)
 	afterInventory := len(campaigns)
 
@@ -119,6 +134,7 @@ func (d *DropsTracker) syncCampaigns() {
 	afterBlacklist := len(campaigns)
 
 	slog.Debug("Drops sync: campaign counts through the pipeline",
+		"fromDashboard", fromDashboard,
 		"afterInventory", afterInventory,
 		"afterClaimHistory", afterClaimHistory,
 		"afterBlacklist", afterBlacklist)
@@ -136,6 +152,7 @@ func (d *DropsTracker) syncCampaigns() {
 
 	d.mu.Lock()
 	d.campaigns = campaigns
+	d.lastSync = time.Now()
 	d.mu.Unlock()
 
 	d.updateStreamerCampaigns()
@@ -322,7 +339,12 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 		return campaigns
 	}
 
+	tracked := make(map[string]bool, len(campaigns))
 	for _, campaign := range campaigns {
+		if campaign.ID != "" {
+			tracked[campaign.ID] = true
+		}
+
 		campaign.ClearClaimedDrops()
 
 		for _, prog := range inProgress {
@@ -339,17 +361,7 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 			campaign.InInventory = true
 
 			if drops, ok := progData["timeBasedDrops"].([]interface{}); ok {
-				campaign.SyncDrops(drops, func(drop *models.Drop) bool {
-					claimed, err := d.client.ClaimDrop(drop)
-					if err != nil {
-						slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
-						return false
-					}
-					if claimed {
-						events.Record(events.TypeDropClaimed, "", drop.Name)
-					}
-					return claimed
-				})
+				campaign.SyncDrops(drops, d.claimDropFn())
 			}
 
 			campaign.ClearClaimedDrops()
@@ -357,7 +369,81 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 		}
 	}
 
+	// Recover campaigns Twitch is actively crediting (they appear in the
+	// inventory's dropCampaignsInProgress with live progress) but that the
+	// ViewerDropsDashboard -> DropCampaignDetails path never produced -- e.g.
+	// when a per-campaign details fetch returns nothing. Without this the
+	// Drops page shows "no active campaigns" even while drops are visibly
+	// filling up, because the inventory (which drives farming/claiming) is a
+	// separate source from the dashboard listing that populates the page.
+	for _, prog := range inProgress {
+		progData, ok := prog.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		progID, _ := progData["id"].(string)
+		if progID == "" || tracked[progID] {
+			continue
+		}
+
+		recovered := d.buildInProgressCampaign(progData)
+		if recovered == nil || len(recovered.Drops) == 0 {
+			continue
+		}
+
+		slog.Debug("Drops sync: recovered in-progress campaign from inventory missing from dashboard/details path",
+			"campaign", recovered.Name, "campaignID", recovered.ID, "drops", len(recovered.Drops))
+
+		campaigns = append(campaigns, recovered)
+		tracked[progID] = true
+	}
+
 	return campaigns
+}
+
+// claimDropFn returns the callback SyncDrops uses to claim a drop once its
+// watch requirement is met, recording a claim event on success.
+func (d *DropsTracker) claimDropFn() func(*models.Drop) bool {
+	return func(drop *models.Drop) bool {
+		claimed, err := d.client.ClaimDrop(drop)
+		if err != nil {
+			slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
+			return false
+		}
+		if claimed {
+			events.Record(events.TypeDropClaimed, "", drop.Name)
+		}
+		return claimed
+	}
+}
+
+// buildInProgressCampaign constructs a tracked Campaign directly from an
+// inventory dropCampaignsInProgress entry, applying each drop's `self`
+// progress. Unlike the dashboard/details path it does not gate on a parseable
+// date window: membership in dropCampaignsInProgress already proves Twitch
+// considers the campaign active, and inventory entries sometimes omit the
+// per-drop start/end dates ClearClaimedDrops relies on. It keeps only
+// still-unclaimed drops and returns nil for an entry with no campaign ID.
+func (d *DropsTracker) buildInProgressCampaign(progData map[string]interface{}) *models.Campaign {
+	campaign := models.NewCampaignFromGQL(progData)
+	if campaign.ID == "" {
+		return nil
+	}
+	campaign.InInventory = true
+
+	if drops, ok := progData["timeBasedDrops"].([]interface{}); ok {
+		campaign.SyncDrops(drops, d.claimDropFn())
+	}
+
+	kept := make([]*models.Drop, 0, len(campaign.Drops))
+	for _, drop := range campaign.Drops {
+		if !drop.IsClaimed {
+			kept = append(kept, drop)
+		}
+	}
+	campaign.Drops = kept
+
+	return campaign
 }
 
 // applyClaimHistory cross-references each campaign's drops against the

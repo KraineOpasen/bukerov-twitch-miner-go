@@ -702,7 +702,12 @@ Drop
 2. Sync Inventory
    ├── GET Inventory
    ├── Match drops to campaigns
-   └── Update progress
+   ├── Update progress
+   └── Recover any dropCampaignsInProgress campaign missing from the
+       dashboard/details path (build it straight from the inventory entry, no
+       date-window gating), so a campaign Twitch is actively crediting always
+       appears on the Drops page even when its DropCampaignDetails fetch
+       returned nothing
 
 2b. Apply Claim History
    ├── GET Inventory (gameEventDrops: account-wide granted rewards)

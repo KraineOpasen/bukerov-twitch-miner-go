@@ -24,6 +24,7 @@ type Snapshot struct {
 	Watching     WatchingInfo    `json:"watching"`
 	Streamers    []StreamerState `json:"streamers"`
 	Discovery    *DiscoveryInfo  `json:"discovery,omitempty"`
+	Drops        *DropsSyncInfo  `json:"drops,omitempty"`
 	RecentEvents []events.Event  `json:"recentEvents"`
 }
 
@@ -123,6 +124,27 @@ type DiscoveryInfo struct {
 	Watching   string             `json:"watching,omitempty"`
 	LastSyncAt time.Time          `json:"lastSyncAt,omitzero"`
 	Channels   []DiscoveryChannel `json:"channels,omitempty"`
+}
+
+// DropsSyncInfo mirrors the drop-campaign sync pipeline's output: the campaigns
+// the tracker currently holds (the exact set the /drops page renders) and when
+// the last sync completed. It makes an empty Drops page diagnosable — telling a
+// campaign that was filtered out apart from a sync that never ran.
+type DropsSyncInfo struct {
+	LastSyncAt time.Time             `json:"lastSyncAt,omitzero"`
+	Campaigns  []TrackedCampaignInfo `json:"campaigns,omitempty"`
+}
+
+// TrackedCampaignInfo is one campaign as held by the drops tracker, including
+// whether it was recovered from the inventory's in-progress list.
+type TrackedCampaignInfo struct {
+	Name              string `json:"name"`
+	Game              string `json:"game,omitempty"`
+	RemainingDrops    int    `json:"remainingDrops"`
+	OverallPercent    int    `json:"overallPercent"`
+	ClaimStatus       string `json:"claimStatus,omitempty"`
+	ChannelRestricted bool   `json:"channelRestricted"`
+	InInventory       bool   `json:"inInventory"`
 }
 
 type DiscoveryChannel struct {
