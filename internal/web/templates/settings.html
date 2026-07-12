@@ -60,6 +60,19 @@
         </div>
     </details>
 
+    <details id="drops" class="details-panel">
+        <summary class="text-lg">Drops</summary>
+        <div class="details-content">
+            <div class="setting-row items-start">
+                <div class="pr-4">
+                    <div class="setting-label">Drop Name Blacklist</div>
+                    <div class="setting-description">Keywords (one per line, or comma-separated). Any drop campaign whose drop or reward name contains one of these words (case-insensitive) is skipped during drop rotation prioritization — an additional exclusion on top of the already-claimed dedup.</div>
+                </div>
+                <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropBlacklist" placeholder="beta&#10;league of legends&#10;emote"></textarea>
+            </div>
+        </div>
+    </details>
+
     <details id="ratelimits" class="details-panel">
         <summary class="text-lg">Rate Limits</summary>
         <div class="details-content space-y-0">
@@ -367,6 +380,18 @@
             document.getElementById('discordBotToken').value = settings.discord.botToken || '';
             document.getElementById('discordGuildId').value = settings.discord.guildId || '';
         }
+
+        document.getElementById('dropBlacklist').value = (settings.dropBlacklist || []).join('\n');
+    }
+
+    // parseBlacklist splits the textarea on newlines and commas, trims each
+    // entry, and drops blanks so the miner receives a clean keyword list
+    // regardless of how the user separated them.
+    function parseBlacklist(raw) {
+        return raw
+            .split(/[\n,]+/)
+            .map(s => s.trim())
+            .filter(s => s.length > 0);
     }
 
     function populatePreferenceSummary(streamers) {
@@ -711,7 +736,8 @@
                 enabled: document.getElementById('discordEnabled').checked,
                 botToken: document.getElementById('discordBotToken').value,
                 guildId: document.getElementById('discordGuildId').value
-            }
+            },
+            dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value)
         };
     }
 

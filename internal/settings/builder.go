@@ -1,9 +1,28 @@
 package settings
 
 import (
+	"strings"
+
 	"github.com/PatrickWalther/twitch-miner-go/internal/config"
 	"github.com/PatrickWalther/twitch-miner-go/internal/models"
 )
+
+// normalizeBlacklist trims each keyword and drops blank entries so the stored
+// drop-name blacklist stays clean regardless of how the UI splits the input
+// (commas, newlines, stray whitespace). Returns nil when nothing remains so the
+// field is omitted from config.json rather than serialized as an empty list.
+func normalizeBlacklist(keywords []string) []string {
+	cleaned := make([]string, 0, len(keywords))
+	for _, kw := range keywords {
+		if trimmed := strings.TrimSpace(kw); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
+}
 
 // BuildRuntimeSettings constructs a RuntimeSettings DTO from the current config.
 func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
@@ -53,6 +72,7 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			BotToken: cfg.Discord.BotToken,
 			GuildID:  cfg.Discord.GuildID,
 		},
+		DropBlacklist: cfg.DropBlacklist,
 	}
 }
 
@@ -105,6 +125,7 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			BotToken: defaults.Discord.BotToken,
 			GuildID:  defaults.Discord.GuildID,
 		},
+		DropBlacklist: defaults.DropBlacklist,
 	}
 }
 
@@ -148,6 +169,8 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.Discord.Enabled = s.Discord.Enabled
 	cfg.Discord.BotToken = s.Discord.BotToken
 	cfg.Discord.GuildID = s.Discord.GuildID
+
+	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
 
 	config.ValidateConfig(cfg)
 }

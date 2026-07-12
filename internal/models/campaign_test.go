@@ -167,6 +167,43 @@ func TestCampaignOverallProgressPercent(t *testing.T) {
 	}
 }
 
+func TestCampaignMatchesBlacklist(t *testing.T) {
+	c := &Campaign{
+		Name: "Some Campaign",
+		Drops: []*Drop{
+			{Name: "Golden Skin", Benefit: "Golden Weapon Skin"},
+			{Name: "XP Boost", Benefit: "2x XP for 1 hour"},
+		},
+	}
+
+	// Case-insensitive substring match against a drop name.
+	kw, name, matched := c.MatchesBlacklist([]string{"golden"})
+	if !matched || kw != "golden" || name != "Golden Skin" {
+		t.Errorf("expected match on drop name, got keyword=%q name=%q matched=%v", kw, name, matched)
+	}
+
+	// Match against the reward (benefit) name, with surrounding whitespace and
+	// mixed case in the keyword.
+	kw, name, matched = c.MatchesBlacklist([]string{"  2X XP "})
+	if !matched || kw != "2x xp" || name != "2x XP for 1 hour" {
+		t.Errorf("expected match on benefit, got keyword=%q name=%q matched=%v", kw, name, matched)
+	}
+
+	// No keyword matches anything.
+	if _, _, matched := c.MatchesBlacklist([]string{"emote", "badge"}); matched {
+		t.Error("expected no match for unrelated keywords")
+	}
+
+	// Blank/empty keywords must never match (otherwise every campaign would be
+	// excluded once the blacklist contained a stray blank entry).
+	if _, _, matched := c.MatchesBlacklist([]string{"", "   "}); matched {
+		t.Error("blank keywords should not match any campaign")
+	}
+	if _, _, matched := c.MatchesBlacklist(nil); matched {
+		t.Error("nil keyword list should not match")
+	}
+}
+
 func TestNewCampaignFromGQLNoAllowMeansUnrestricted(t *testing.T) {
 	data := map[string]interface{}{
 		"id":     "campaign-1",

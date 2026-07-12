@@ -30,6 +30,11 @@ type Config struct {
 	Analytics           AnalyticsSettings       `json:"analytics"`
 	Discord             DiscordSettings         `json:"discord"`
 	Debug               DebugSettings           `json:"debug"`
+
+	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
+	// whose drop or reward name contains one of them is skipped during drop
+	// rotation prioritization, in addition to the claim-history dedup.
+	DropBlacklist []string `json:"dropBlacklist,omitempty"`
 }
 
 type StreamerConfig struct {

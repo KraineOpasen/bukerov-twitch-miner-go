@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type CampaignStatus string
 
@@ -165,6 +168,39 @@ func (c *Campaign) ApplyClaimHistory(claimedRewards map[string]bool) {
 	} else {
 		c.ClaimStatus = CampaignClaimStatusInProgress
 	}
+}
+
+// MatchesBlacklist reports whether any of this campaign's remaining drops has a
+// drop name or reward (benefit) name containing one of the given keywords,
+// matched case-insensitively as a substring. Blank keywords are ignored. It
+// returns the trimmed keyword that matched and the drop/reward name it matched
+// against, so callers can log precisely why a campaign was excluded from drop
+// rotation. This is an additional exclusion condition alongside the
+// claim-history dedup in ApplyClaimHistory.
+func (c *Campaign) MatchesBlacklist(keywords []string) (keyword, dropName string, matched bool) {
+	normalized := make([]string, 0, len(keywords))
+	for _, raw := range keywords {
+		if kw := strings.ToLower(strings.TrimSpace(raw)); kw != "" {
+			normalized = append(normalized, kw)
+		}
+	}
+	if len(normalized) == 0 {
+		return "", "", false
+	}
+
+	for _, drop := range c.Drops {
+		name := strings.ToLower(drop.Name)
+		benefit := strings.ToLower(drop.Benefit)
+		for _, kw := range normalized {
+			if strings.Contains(name, kw) {
+				return kw, drop.Name, true
+			}
+			if strings.Contains(benefit, kw) {
+				return kw, drop.Benefit, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // CurrentDrop returns the drop the campaign is actively working toward: the

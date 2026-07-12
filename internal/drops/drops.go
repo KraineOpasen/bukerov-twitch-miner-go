@@ -20,6 +20,11 @@ type DropsTracker struct {
 
 	campaigns []*models.Campaign
 
+	// dropBlacklist holds case-insensitive keywords; a campaign is skipped
+	// during rotation prioritization when any of its drop/reward names matches
+	// one. Guarded by mu so it can be updated at runtime from the Settings page.
+	dropBlacklist []string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -30,12 +35,23 @@ func NewDropsTracker(
 	client *api.TwitchClient,
 	streamers []*models.Streamer,
 	settings config.RateLimitSettings,
+	dropBlacklist []string,
 ) *DropsTracker {
 	return &DropsTracker{
-		client:    client,
-		streamers: streamers,
-		settings:  settings,
+		client:        client,
+		streamers:     streamers,
+		settings:      settings,
+		dropBlacklist: dropBlacklist,
 	}
+}
+
+// UpdateBlacklist replaces the drop-name blacklist. Called when the operator
+// changes it on the Settings page so the new keywords take effect on the next
+// campaign sync without a restart.
+func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
+	d.mu.Lock()
+	d.dropBlacklist = dropBlacklist
+	d.mu.Unlock()
 }
 
 func (d *DropsTracker) Start(ctx context.Context) {
@@ -95,6 +111,7 @@ func (d *DropsTracker) syncCampaigns() {
 
 	campaigns = d.syncWithInventory(campaigns)
 	campaigns = d.applyClaimHistory(campaigns)
+	campaigns = d.applyBlacklist(campaigns)
 
 	d.mu.Lock()
 	d.campaigns = campaigns
@@ -317,6 +334,34 @@ func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool 
 	}
 
 	return claimed
+}
+
+// applyBlacklist drops any campaign whose drop or reward name matches a
+// configured blacklist keyword, so it's never prioritized for watch time. This
+// mirrors the claim-history dedup as an additional exclusion condition, and
+// logs each skip distinctly (with the keyword and matched name) so it's clear
+// the campaign was excluded by the blacklist rather than for another reason.
+func (d *DropsTracker) applyBlacklist(campaigns []*models.Campaign) []*models.Campaign {
+	d.mu.RLock()
+	blacklist := d.dropBlacklist
+	d.mu.RUnlock()
+
+	if len(blacklist) == 0 {
+		return campaigns
+	}
+
+	kept := make([]*models.Campaign, 0, len(campaigns))
+	for _, campaign := range campaigns {
+		if keyword, dropName, matched := campaign.MatchesBlacklist(blacklist); matched {
+			slog.Info("Skipping drop campaign: matched drop-name blacklist",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"keyword", keyword, "matchedDrop", dropName)
+			continue
+		}
+		kept = append(kept, campaign)
+	}
+
+	return kept
 }
 
 func (d *DropsTracker) claimAllDropsFromInventory() {

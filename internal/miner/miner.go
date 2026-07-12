@@ -302,6 +302,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.client,
 		streamers,
 		m.config.RateLimits,
+		m.config.DropBlacklist,
 	)
 
 	if m.webServer != nil {
@@ -705,6 +706,10 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 
 	if m.watcher != nil {
 		m.watcher.UpdateSettings(m.config.Priority, m.config.RateLimits)
+	}
+
+	if m.dropsTracker != nil {
+		m.dropsTracker.UpdateBlacklist(m.config.DropBlacklist)
 	}
 
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
