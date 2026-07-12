@@ -540,11 +540,12 @@ Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`).
 | `POINTS_ASCENDING` | Lowest points first |
 | `POINTS_DESCENDING` | Highest points first |
 
-**More than 2 online streamers:** a fixed priority pick would starve every other online channel indefinitely, so the watched pair instead rotates fairly across all online streamers on a `rotationInterval` timer (`rateLimits.rotationInterval`, default 900s). See `internal/watcher.selectRotating` for the full algorithm:
+**More than 2 online streamers:** a fixed priority pick would starve every other online channel indefinitely, so the watched pair instead rotates fairly across all online streamers. See `internal/watcher.selectRotating` (and `store.go` for persistence) for the full algorithm:
 
-- Online streamers are split into a sequence of pairs cycled through one pair per interval: an even count splits into disjoint pairs (N/2-tick cycle, each streamer watched once per cycle); an odd count uses a sliding 2-wide window over the circular list (N-tick cycle, each streamer watched twice per cycle) since a disjoint split always leaves one streamer over.
-- `DROPS`/`STREAK`-eligible streamers can take over one seat in the current pair for a tick without consuming the base schedule position, so they get bonus airtime but the displaced streamer just gets its guaranteed turn next cycle instead - never a permanent exclusive slot.
-- A scheduled swap-out is postponed by one tick (at most once per approach) if the leaving streamer is within a few minutes of completing its watch streak, so it isn't yanked right before the bonus lands. This doesn't extend to imminent drop-campaign completion.
+- **Randomized dwell time:** every time the pair actually changes, the next dwell duration is drawn uniformly from `[rateLimits.rotationIntervalMinMinutes, rateLimits.rotationIntervalMaxMinutes]` (default 30-80 min) rather than using one fixed timer, so rotations don't happen on a single predictable period. (`rateLimits.rotationInterval`, a fixed-seconds field, is deprecated - kept only so pre-existing config.json files still parse; `LoadConfig` migrates it into the new min/max fields the first time it loads such a file.)
+- **Weighted base pair:** when the dwell time elapses (or a pair member goes offline), the pair is recomputed from each online streamer's accumulated watch minutes over the trailing 8-hour window - persisted in SQLite (`watch_time_events` table, module `watch_time`, survives container restarts) - and the two with the *least* accumulated time get the slots. Ties (e.g. cold start, nobody watched yet) are broken by in-memory recency, then index, for determinism. This is a deficit-based scheduler: whoever gets watched accumulates minutes and becomes less eligible next time, which surfaces every other online channel over time regardless of count or parity - no even/odd special-casing needed.
+- **Priority as a boost, not exclusivity:** on top of the weighted base pair, any online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat in the pair for the current tick only, without affecting the weighting above - increasing how often it's picked, never granting a permanent exclusive slot. The seat sacrificed is whichever base-pair member was watched most recently.
+- **Avoiding last-second interruptions:** a scheduled swap-out is postponed once, by a short fixed delay (2 min), if the leaving streamer is within a few minutes of completing its watch streak - but only when both current pair members are still online (an offline member is dropped immediately, regardless of streak state). This doesn't extend to imminent drop-campaign completion.
 - Predictions/bets are unaffected by this rotation: PubSub subscribes to prediction topics for every tracked online streamer regardless of its current watch-pair membership, so bets are placed independently of what's actively being watched.
 
 ---
@@ -865,7 +866,25 @@ CREATE TABLE point_rules (
 );
 ```
 
-**Note**: All timestamps are Unix timestamps in milliseconds.
+#### Watch-Time Rotation Module Schema
+
+```sql
+-- Per-streamer watch-time credits, used to rank who's most "owed" a turn in
+-- the fair watch-pair rotation (see Priority System above). Timestamps are
+-- Unix seconds (unlike the analytics/notifications tables above).
+CREATE TABLE watch_time_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    streamer TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    minutes REAL NOT NULL
+);
+
+CREATE INDEX idx_watch_time_streamer_time ON watch_time_events(streamer, timestamp);
+```
+
+Rows older than 2x the 8-hour ranking window are opportunistically pruned on write, keeping the table bounded over long uptimes. This data persists across restarts (same `/database` volume, same modular migration system as the other modules above).
+
+**Note**: All timestamps are Unix timestamps in milliseconds, except `watch_time_events.timestamp` which is Unix seconds.
 
 ---
 
@@ -988,7 +1007,9 @@ Defaults are tuned to match the Python miner and avoid Twitch rate limiting. Ran
 | `requestDelay` | float | 0.5 | Seconds between consecutive API calls (0.1-2.0) |
 | `reconnectDelay` | int | 60 | Seconds to wait before reconnecting (30-300) |
 | `streamCheckInterval` | int | 600 | Seconds between stream status checks (60-900) |
-| `rotationInterval` | int | 900 | Seconds between watch-pair rotations when > 2 tracked streamers are online (120-3600) |
+| `rotationIntervalMinMinutes` | int | 30 | Minimum minutes the watch pair dwells before rotating, when > 2 tracked streamers are online (5-180) |
+| `rotationIntervalMaxMinutes` | int | 80 | Maximum minutes the watch pair dwells before rotating; a random value in [Min, Max] is drawn on every rotation (5-240) |
+| `rotationInterval` | int | - | Deprecated fixed-seconds fallback, migrated into the two fields above on load; not read anywhere else |
 
 ---
 
@@ -1196,7 +1217,8 @@ Defaults are tuned to match the Python miner. Random jitter is applied to avoid 
 | `requestDelay` | 0.5 | 0.1 | 2.0 | Seconds between consecutive API calls |
 | `reconnectDelay` | 60 | 30 | 300 | Seconds to wait before reconnecting |
 | `streamCheckInterval` | 600 | 60 | 900 | Seconds between stream status checks |
-| `rotationInterval` | 900 | 120 | 3600 | Seconds between watch-pair rotations when > 2 tracked streamers are online |
+| `rotationIntervalMinMinutes` | 30 | 5 | 180 | Minutes the watch pair dwells before rotating (minimum of the random range) |
+| `rotationIntervalMaxMinutes` | 80 | 5 | 240 | Minutes the watch pair dwells before rotating (maximum of the random range; clamped up to Min if set lower) |
 
 ---
 

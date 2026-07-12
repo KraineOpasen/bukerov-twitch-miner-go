@@ -121,15 +121,20 @@ func (s *Stream) InitWatchStreak() {
 	s.minuteWatchedUpdated = time.Time{}
 }
 
-func (s *Stream) UpdateMinuteWatched() {
+// UpdateMinuteWatched advances the cumulative watched-minutes counter and
+// returns the delta (in minutes) credited by this call. The first call after
+// InitWatchStreak returns 0, since there's no prior timestamp to measure from.
+func (s *Stream) UpdateMinuteWatched() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var delta float64
 	if !s.minuteWatchedUpdated.IsZero() {
-		elapsed := time.Since(s.minuteWatchedUpdated)
-		s.MinuteWatched += elapsed.Minutes()
+		delta = time.Since(s.minuteWatchedUpdated).Minutes()
+		s.MinuteWatched += delta
 	}
 	s.minuteWatchedUpdated = time.Now()
+	return delta
 }
 
 func (s *Stream) GameName() string {

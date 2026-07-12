@@ -90,10 +90,18 @@
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Rotation Interval</div>
-                    <div class="setting-description">Seconds between watch-pair rotations when more than 2 tracked streamers are online (120-3600)</div>
+                    <div class="setting-label">Rotation Interval (Min)</div>
+                    <div class="setting-description">Minimum minutes the watch pair dwells before rotating, when more than 2 tracked streamers are online (5-180)</div>
                 </div>
-                <input type="number" class="input-field w-28" id="rotationInterval" min="120" max="3600">
+                <input type="number" class="input-field w-28" id="rotationIntervalMinMinutes" min="5" max="180">
+            </div>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">Rotation Interval (Max)</div>
+                    <div class="setting-description">Maximum minutes the watch pair dwells before rotating; a random value in [Min, Max] is drawn on every rotation (5-240)</div>
+                </div>
+                <input type="number" class="input-field w-28" id="rotationIntervalMaxMinutes" min="5" max="240">
             </div>
         </div>
     </details>
@@ -303,7 +311,8 @@
         document.getElementById('requestDelay').value = settings.rateLimits.requestDelay;
         document.getElementById('reconnectDelay').value = settings.rateLimits.reconnectDelay;
         document.getElementById('streamCheckInterval').value = settings.rateLimits.streamCheckInterval;
-        document.getElementById('rotationInterval').value = settings.rateLimits.rotationInterval;
+        document.getElementById('rotationIntervalMinMinutes').value = settings.rateLimits.rotationIntervalMinMinutes;
+        document.getElementById('rotationIntervalMaxMinutes').value = settings.rateLimits.rotationIntervalMaxMinutes;
 
         document.getElementById('consoleLevel').value = settings.logger.consoleLevel;
         document.getElementById('fileLevel').value = settings.logger.fileLevel;
@@ -597,7 +606,8 @@
                 requestDelay: parseFloat(document.getElementById('requestDelay').value),
                 reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),
                 streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value),
-                rotationInterval: parseInt(document.getElementById('rotationInterval').value)
+                rotationIntervalMinMinutes: parseInt(document.getElementById('rotationIntervalMinMinutes').value),
+                rotationIntervalMaxMinutes: parseInt(document.getElementById('rotationIntervalMaxMinutes').value)
             },
             logger: {
                 consoleLevel: document.getElementById('consoleLevel').value,

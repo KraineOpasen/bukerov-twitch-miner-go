@@ -25,6 +25,11 @@ type MinuteWatcher struct {
 	priorities []config.Priority
 	settings   config.RateLimitSettings
 
+	// store persists accumulated watch time per streamer so rotation
+	// fairness survives restarts. May be nil (e.g. analytics disabled), in
+	// which case rotation falls back to in-memory recency only.
+	store *WatchTimeStore
+
 	// rotation is only ever read/written from the loop() goroutine, so it
 	// needs no locking of its own.
 	rotation rotationState
@@ -41,13 +46,13 @@ type MinuteWatcher struct {
 // are online than Twitch allows to watch simultaneously
 // (constants.MaxSimultaneousStreams). See selectRotating for the algorithm.
 type rotationState struct {
-	order    []int    // online streamer indexes the current schedule was built from (ascending)
-	schedule [][2]int // sequence of index-pairs to cycle through, one per rotation tick
-	pos      int      // index into schedule of the pair currently being watched
+	activePair [2]int // streamer indexes currently occupying the watch slots
+	hasPair    bool   // whether activePair has been initialized yet
 
-	lastSwitch time.Time // when schedule[pos] last changed
+	lastSwitch   time.Time     // when activePair last changed
+	nextInterval time.Duration // randomized dwell time chosen for the current activePair
 
-	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness bookkeeping)
+	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 	deferredFor map[int]bool      // streamers whose scheduled swap-out was already postponed once
 }
 
@@ -56,12 +61,14 @@ func NewMinuteWatcher(
 	streamers []*models.Streamer,
 	priorities []config.Priority,
 	settings config.RateLimitSettings,
+	store *WatchTimeStore,
 ) *MinuteWatcher {
 	return &MinuteWatcher{
 		client:     client,
 		streamers:  streamers,
 		priorities: priorities,
 		settings:   settings,
+		store:      store,
 		httpClient: &http.Client{Timeout: 20 * time.Second},
 	}
 }
@@ -145,7 +152,12 @@ func (w *MinuteWatcher) processWatching() {
 			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "error", err)
 		} else {
 			slog.Debug("Sent minute watched", "streamer", streamer.Username, "minutesWatched", streamer.Stream.MinuteWatched)
-			streamer.Stream.UpdateMinuteWatched()
+			delta := streamer.Stream.UpdateMinuteWatched()
+			if w.store != nil && delta > 0 {
+				if err := w.store.RecordMinutes(streamer.Username, delta, time.Now()); err != nil {
+					slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
+				}
+			}
 		}
 
 		select {
@@ -182,11 +194,9 @@ func (w *MinuteWatcher) getOnlineStreamers() []int {
 // it a permanent exclusive slot.
 func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 	if len(onlineIndexes) <= constants.MaxSimultaneousStreams {
-		// Not enough online streamers to need rotation; drop any stale
-		// schedule so a fresh one is built next time we go above the limit.
-		w.rotation.order = nil
-		w.rotation.schedule = nil
-		w.rotation.pos = 0
+		// Not enough online streamers to need rotation; drop any stale pair
+		// so a fresh one is computed next time we go above the limit.
+		w.rotation.hasPair = false
 		return w.selectByPriority(onlineIndexes)
 	}
 	return w.selectRotating(onlineIndexes)
@@ -195,38 +205,38 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 // selectRotating implements the fair watch-pair rotation for the case where
 // more streamers are online than fit in a watch slot.
 //
-// Base schedule (fairness guarantee):
-// The online streamers (sorted ascending, i.e. stable config order) are
-// split into a sequence of pairs that gets cycled through one pair per
-// RotationInterval:
-//   - Even count N: split into N/2 disjoint consecutive pairs (0,1)(2,3)...
-//     Every streamer appears in exactly one pair per cycle, and the cycle
-//     only takes N/2 ticks since every tick covers two new streamers.
-//   - Odd count N: a disjoint split always leaves one streamer over, so
-//     instead we use a sliding circular window of size 2 - (0,1)(1,2)...
-//     (N-1,0) - advancing by one streamer per tick. Every streamer appears
-//     in exactly two consecutive pairs (once on each side of the window)
-//     over the full N-tick cycle, so shares stay equal.
+// Weighted base pair (fairness guarantee):
+// Every RotationInterval (a duration randomized within
+// [RotationIntervalMinMinutes, RotationIntervalMaxMinutes], redrawn on every
+// actual switch so rotations don't settle into a single predictable
+// period), the pair is recomputed from scratch: online streamers are ranked
+// by their accumulated watch minutes over the trailing watchTimeWindow
+// (persisted in SQLite, see store.go), ascending, and the two with the
+// least get the slots. Ties (most commonly at cold start, when nobody has
+// any recorded watch time yet) are broken by in-memory recency
+// (least-recently-watched first) and finally by index for determinism.
 //
-// This base schedule alone already guarantees every online channel gets a
-// watch turn within one cycle, regardless of priority.
+// This is a deficit-based scheduler: whoever gets watched accumulates
+// minutes and becomes less eligible next time, so the ranking naturally
+// surfaces every other online channel over time regardless of the total
+// count or its parity - no even/odd special-casing is needed, unlike a
+// fixed round-robin schedule.
 //
 // Priority as weight, not exclusivity:
-// Before returning the scheduled pair, any online streamer with an active
-// drop (DropsCondition) or a watch streak in progress (mirroring the
-// existing STREAK/DROPS priority conditions) can take over one seat in the
-// pair for that tick - ephemerally, without consuming or advancing the base
-// schedule position. The seat sacrificed is whichever of the two scheduled
-// members was watched most recently, so the other keeps its guaranteed
-// fairness slot. The displaced member simply gets its scheduled turn next
-// cycle instead of this tick, so no channel is permanently exclusive and no
-// channel is ever locked out.
+// On top of the ranked base pair, any online streamer with an active drop
+// (DropsCondition) or a watch streak in progress (mirroring the existing
+// STREAK/DROPS priority conditions) can take over one seat in the pair for
+// the current tick - ephemerally, without affecting the ranking above. The
+// seat sacrificed is whichever of the two base-pair members was watched
+// most recently, so the other keeps its slot. The displaced member simply
+// ranks for its turn again next time the base pair is recomputed, so no
+// channel is permanently exclusive and no channel is ever locked out.
 //
 // Avoiding last-second interruptions:
-// When the schedule is about to rotate a streamer out of the pair, if that
-// streamer is within a few minutes of completing its watch streak
-// (mirrors the `< 7 minutes` threshold used elsewhere for STREAK), the swap
-// is postponed by one extra tick so it isn't yanked right before the streak
+// When the base pair is about to rotate a streamer out, if that streamer is
+// within a few minutes of completing its watch streak (mirrors the
+// `< 7 minutes` threshold used elsewhere for STREAK), the swap is postponed
+// by a short fixed delay so it isn't yanked right before the streak
 // completes. This is a best-effort heuristic based only on watch-streak
 // timing - imminent drop-campaign completion isn't tracked here (that would
 // require deeper integration with the drops package) and can still cause a
@@ -235,22 +245,16 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 // this can never stall the rotation indefinitely.
 func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	now := time.Now()
-	rotationInterval := time.Duration(w.settings.RotationInterval) * time.Second
-	if rotationInterval <= 0 {
-		rotationInterval = 15 * time.Minute
+
+	needsNewPair := !w.rotation.hasPair ||
+		!containsPair(onlineIndexes, w.rotation.activePair) ||
+		now.Sub(w.rotation.lastSwitch) >= w.rotation.nextInterval
+
+	if needsNewPair {
+		w.rotateToLeastWatchedPair(onlineIndexes, now)
 	}
 
-	if !sameOrder(w.rotation.order, onlineIndexes) {
-		w.rebuildRotation(onlineIndexes, now)
-	} else if now.Sub(w.rotation.lastSwitch) >= rotationInterval {
-		w.advanceRotation(now)
-	}
-
-	if len(w.rotation.schedule) == 0 {
-		return nil
-	}
-
-	pair := w.applyPriorityBoost(w.rotation.schedule[w.rotation.pos])
+	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes)
 
 	if w.rotation.lastWatched == nil {
 		w.rotation.lastWatched = make(map[int]time.Time)
@@ -261,82 +265,128 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	return []int{pair[0], pair[1]}
 }
 
-func (w *MinuteWatcher) rebuildRotation(onlineIndexes []int, now time.Time) {
-	order := make([]int, len(onlineIndexes))
-	copy(order, onlineIndexes)
+// streakDeferDelay is the short wait used to postpone a swap-out that would
+// otherwise interrupt a streamer seconds away from completing its watch
+// streak - deliberately much shorter than the rotation interval itself,
+// since it only needs to bridge the last couple of minutes to 7.
+const streakDeferDelay = 2 * time.Minute
 
-	w.rotation.order = order
-	w.rotation.schedule = buildRotationSchedule(order)
-	w.rotation.pos = 0
+// rotateToLeastWatchedPair recomputes the base pair from accumulated watch
+// time, unless doing so would interrupt a leaving streamer's near-complete
+// watch streak (see selectRotating's doc comment).
+func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.Time) {
+	weights := w.watchWeights(onlineIndexes, now)
+
+	candidates := make([]int, len(onlineIndexes))
+	copy(candidates, onlineIndexes)
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if weights[a] != weights[b] {
+			return weights[a] < weights[b]
+		}
+		la, lb := w.rotation.lastWatched[a], w.rotation.lastWatched[b]
+		if !la.Equal(lb) {
+			return la.Before(lb)
+		}
+		return a < b
+	})
+	newPair := [2]int{candidates[0], candidates[1]}
+
+	// Only consider postponing the swap if the current pair is still fully
+	// online: if a member already went offline, there's nothing to protect
+	// (its streak is already lost) and it must not linger in activePair.
+	if w.rotation.hasPair && containsPair(onlineIndexes, w.rotation.activePair) {
+		for _, idx := range w.rotation.activePair {
+			if idx == newPair[0] || idx == newPair[1] {
+				continue
+			}
+			if w.nearStreakCompletion(idx) && !w.rotation.deferredFor[idx] {
+				if w.rotation.deferredFor == nil {
+					w.rotation.deferredFor = make(map[int]bool)
+				}
+				w.rotation.deferredFor[idx] = true
+				w.rotation.lastSwitch = now
+				w.rotation.nextInterval = streakDeferDelay
+				return
+			}
+		}
+
+		for _, idx := range newPair {
+			delete(w.rotation.deferredFor, idx)
+		}
+	}
+
+	w.rotation.activePair = newPair
+	w.rotation.hasPair = true
 	w.rotation.lastSwitch = now
-
-	if w.rotation.lastWatched == nil {
-		w.rotation.lastWatched = make(map[int]time.Time)
-	}
-	if w.rotation.deferredFor == nil {
-		w.rotation.deferredFor = make(map[int]bool)
-	}
+	w.rotation.nextInterval = w.randomRotationInterval()
 }
 
-// buildRotationSchedule builds the base fairness schedule described in
-// selectRotating's doc comment.
-func buildRotationSchedule(order []int) [][2]int {
-	n := len(order)
-	if n < 2 {
-		return nil
+// watchWeights returns each online streamer's accumulated watch minutes
+// over the trailing window, used to rank who's most "owed" a turn. Streamers
+// absent from the store's response (including when store is nil, e.g.
+// analytics disabled) are treated as 0.
+func (w *MinuteWatcher) watchWeights(onlineIndexes []int, now time.Time) map[int]float64 {
+	weights := make(map[int]float64, len(onlineIndexes))
+	if w.store == nil {
+		return weights
 	}
 
-	schedule := make([][2]int, 0, n)
-	if n%2 == 0 {
-		for i := 0; i+1 < n; i += 2 {
-			schedule = append(schedule, [2]int{order[i], order[i+1]})
-		}
-	} else {
-		for i := 0; i < n; i++ {
-			schedule = append(schedule, [2]int{order[i], order[(i+1)%n]})
-		}
+	usernames := make([]string, len(onlineIndexes))
+	for i, idx := range onlineIndexes {
+		usernames[i] = w.streamers[idx].Username
 	}
-	return schedule
+
+	minutes, err := w.store.WindowMinutes(usernames, now)
+	if err != nil {
+		slog.Debug("Failed to load watch-time window", "error", err)
+		return weights
+	}
+
+	for _, idx := range onlineIndexes {
+		weights[idx] = minutes[w.streamers[idx].Username]
+	}
+	return weights
 }
 
-// advanceRotation moves the schedule to the next pair, unless a streamer
-// about to be rotated out is close to completing its watch streak and
-// hasn't already had its swap-out postponed once.
-func (w *MinuteWatcher) advanceRotation(now time.Time) {
-	n := len(w.rotation.schedule)
-	if n == 0 {
-		return
+// randomRotationInterval draws a dwell time uniformly from
+// [RotationIntervalMinMinutes, RotationIntervalMaxMinutes].
+func (w *MinuteWatcher) randomRotationInterval() time.Duration {
+	minMin := w.settings.RotationIntervalMinMinutes
+	maxMin := w.settings.RotationIntervalMaxMinutes
+	if minMin <= 0 {
+		minMin = 30
+	}
+	if maxMin < minMin {
+		maxMin = minMin
 	}
 
-	nextPos := (w.rotation.pos + 1) % n
-	current := w.rotation.schedule[w.rotation.pos]
-	next := w.rotation.schedule[nextPos]
-
-	nextSet := map[int]bool{next[0]: true, next[1]: true}
-	for _, idx := range current {
-		if nextSet[idx] {
-			continue
-		}
-		if w.nearStreakCompletion(idx) && !w.rotation.deferredFor[idx] {
-			w.rotation.deferredFor[idx] = true
-			w.rotation.lastSwitch = now
-			return
-		}
+	minutes := minMin
+	if span := maxMin - minMin; span > 0 {
+		minutes += rand.Intn(span + 1)
 	}
-
-	for _, idx := range next {
-		delete(w.rotation.deferredFor, idx)
-	}
-
-	w.rotation.pos = nextPos
-	w.rotation.lastSwitch = now
+	return time.Duration(minutes) * time.Minute
 }
 
-// applyPriorityBoost lets one DROPS/STREAK-eligible streamer take over the
-// pair seat most recently watched, without touching the base schedule.
-func (w *MinuteWatcher) applyPriorityBoost(pair [2]int) [2]int {
-	var best = -1
-	for _, idx := range w.rotation.order {
+func containsPair(online []int, pair [2]int) bool {
+	var a, b bool
+	for _, idx := range online {
+		if idx == pair[0] {
+			a = true
+		}
+		if idx == pair[1] {
+			b = true
+		}
+	}
+	return a && b
+}
+
+// applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take
+// over the pair seat most recently watched, without affecting the base
+// ranking computed by rotateToLeastWatchedPair.
+func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
+	best := -1
+	for _, idx := range onlineIndexes {
 		if idx == pair[0] || idx == pair[1] {
 			continue
 		}
@@ -390,18 +440,6 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 	}
 	mw := s.Stream.MinuteWatched
 	return mw >= 5 && mw < 7
-}
-
-func sameOrder(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // selectByPriority is the original priority-based picker, used as-is when
