@@ -28,6 +28,7 @@ type RateLimitSettings struct {
 	RequestDelay          float64 `json:"requestDelay"`
 	ReconnectDelay        int     `json:"reconnectDelay"`
 	StreamCheckInterval   int     `json:"streamCheckInterval"`
+	RotationInterval      int     `json:"rotationInterval"`
 }
 
 // LoggerSettings contains logging configuration options.

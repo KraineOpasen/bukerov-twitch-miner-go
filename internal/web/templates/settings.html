@@ -87,6 +87,14 @@
                 </div>
                 <input type="number" class="input-field w-28" id="streamCheckInterval" min="60" max="900">
             </div>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">Rotation Interval</div>
+                    <div class="setting-description">Seconds between watch-pair rotations when more than 2 tracked streamers are online (120-3600)</div>
+                </div>
+                <input type="number" class="input-field w-28" id="rotationInterval" min="120" max="3600">
+            </div>
         </div>
     </details>
 
@@ -295,6 +303,7 @@
         document.getElementById('requestDelay').value = settings.rateLimits.requestDelay;
         document.getElementById('reconnectDelay').value = settings.rateLimits.reconnectDelay;
         document.getElementById('streamCheckInterval').value = settings.rateLimits.streamCheckInterval;
+        document.getElementById('rotationInterval').value = settings.rateLimits.rotationInterval;
 
         document.getElementById('consoleLevel').value = settings.logger.consoleLevel;
         document.getElementById('fileLevel').value = settings.logger.fileLevel;
@@ -587,7 +596,8 @@
                 minuteWatchedInterval: parseInt(document.getElementById('minuteWatchedInterval').value),
                 requestDelay: parseFloat(document.getElementById('requestDelay').value),
                 reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),
-                streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value)
+                streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value),
+                rotationInterval: parseInt(document.getElementById('rotationInterval').value)
             },
             logger: {
                 consoleLevel: document.getElementById('consoleLevel').value,

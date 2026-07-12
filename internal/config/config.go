@@ -43,6 +43,7 @@ type RateLimitSettings struct {
 	RequestDelay          float64 `json:"requestDelay"`
 	ReconnectDelay        int     `json:"reconnectDelay"`
 	StreamCheckInterval   int     `json:"streamCheckInterval"`
+	RotationInterval      int     `json:"rotationInterval"`
 }
 
 type LoggerSettings struct {
@@ -100,6 +101,11 @@ func DefaultRateLimitSettings() RateLimitSettings {
 		RequestDelay:          0.5,
 		ReconnectDelay:        60,
 		StreamCheckInterval:   600,
+		// 15 minutes: long enough for a channel to clear the ~7-minute watch-streak
+		// window and make meaningful drop progress before losing its slot, short
+		// enough that a typical online lineup cycles through everyone within a
+		// couple of hours. See internal/watcher for the rotation algorithm.
+		RotationInterval: 900,
 	}
 }
 
@@ -184,5 +190,11 @@ func ValidateConfig(config *Config) {
 		config.RateLimits.StreamCheckInterval = 60
 	} else if config.RateLimits.StreamCheckInterval > 900 {
 		config.RateLimits.StreamCheckInterval = 900
+	}
+
+	if config.RateLimits.RotationInterval < 120 {
+		config.RateLimits.RotationInterval = 120
+	} else if config.RateLimits.RotationInterval > 3600 {
+		config.RateLimits.RotationInterval = 3600
 	}
 }

@@ -527,7 +527,9 @@ To earn watch time points, the application must report viewing activity.
 
 ### Priority System
 
-Maximum 2 streams watched simultaneously, selected by priority:
+Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`).
+
+**2 or fewer online streamers:** all of them are watched; the priority list below picks which ones fill the (at most 2) watch slots, same as always:
 
 | Priority | Behavior |
 |----------|----------|
@@ -537,6 +539,13 @@ Maximum 2 streams watched simultaneously, selected by priority:
 | `ORDER` | Follow order in streamers list |
 | `POINTS_ASCENDING` | Lowest points first |
 | `POINTS_DESCENDING` | Highest points first |
+
+**More than 2 online streamers:** a fixed priority pick would starve every other online channel indefinitely, so the watched pair instead rotates fairly across all online streamers on a `rotationInterval` timer (`rateLimits.rotationInterval`, default 900s). See `internal/watcher.selectRotating` for the full algorithm:
+
+- Online streamers are split into a sequence of pairs cycled through one pair per interval: an even count splits into disjoint pairs (N/2-tick cycle, each streamer watched once per cycle); an odd count uses a sliding 2-wide window over the circular list (N-tick cycle, each streamer watched twice per cycle) since a disjoint split always leaves one streamer over.
+- `DROPS`/`STREAK`-eligible streamers can take over one seat in the current pair for a tick without consuming the base schedule position, so they get bonus airtime but the displaced streamer just gets its guaranteed turn next cycle instead - never a permanent exclusive slot.
+- A scheduled swap-out is postponed by one tick (at most once per approach) if the leaving streamer is within a few minutes of completing its watch streak, so it isn't yanked right before the bonus lands. This doesn't extend to imminent drop-campaign completion.
+- Predictions/bets are unaffected by this rotation: PubSub subscribes to prediction topics for every tracked online streamer regardless of its current watch-pair membership, so bets are placed independently of what's actively being watched.
 
 ---
 
@@ -979,6 +988,7 @@ Defaults are tuned to match the Python miner and avoid Twitch rate limiting. Ran
 | `requestDelay` | float | 0.5 | Seconds between consecutive API calls (0.1-2.0) |
 | `reconnectDelay` | int | 60 | Seconds to wait before reconnecting (30-300) |
 | `streamCheckInterval` | int | 600 | Seconds between stream status checks (60-900) |
+| `rotationInterval` | int | 900 | Seconds between watch-pair rotations when > 2 tracked streamers are online (120-3600) |
 
 ---
 
@@ -1186,6 +1196,7 @@ Defaults are tuned to match the Python miner. Random jitter is applied to avoid 
 | `requestDelay` | 0.5 | 0.1 | 2.0 | Seconds between consecutive API calls |
 | `reconnectDelay` | 60 | 30 | 300 | Seconds to wait before reconnecting |
 | `streamCheckInterval` | 600 | 60 | 900 | Seconds between stream status checks |
+| `rotationInterval` | 900 | 120 | 3600 | Seconds between watch-pair rotations when > 2 tracked streamers are online |
 
 ---
 
