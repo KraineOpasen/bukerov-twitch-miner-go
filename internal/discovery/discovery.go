@@ -476,6 +476,11 @@ func (m *Manager) processWatch() {
 		next := m.selectBest(nil)
 		if next == nil {
 			m.logPoolEmpty(games)
+			// The pool exists but produced nothing watchable (candidates
+			// verified offline/ineligible since the last directory sync) —
+			// ask for an early re-query instead of waiting out the full
+			// campaign-sync interval. Rate-limited inside maybeResync.
+			m.maybeResync()
 			return
 		}
 		m.setCurrent(next)
@@ -611,7 +616,13 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 			continue
 		}
 
-		if !ch.Streamer.GetIsOnline() {
+		// Refresh candidates that were never brought online as well as ones
+		// whose stream data has gone stale — a channel disqualified by a
+		// transient failure (e.g. an empty CampaignIDs fetch) must be
+		// re-checked eventually, not skipped forever while it stays online.
+		online := ch.Streamer.GetIsOnline()
+		stale := online && ch.Streamer.Stream.UpdateElapsed() > staleStreamRecheck
+		if !online || stale {
 			if checks >= maxCandidateChecksPerTick {
 				return nil
 			}
@@ -666,6 +677,20 @@ func (m *Manager) triggerResync() {
 	select {
 	case m.resync <- struct{}{}:
 	default:
+	}
+}
+
+// maybeResync requests an early directory re-query when the pool cannot
+// produce a watchable channel, rate-limited to the empty-pool retry cadence
+// so repeated failed selections never query the directory more often than a
+// genuinely empty pool would.
+func (m *Manager) maybeResync() {
+	m.mu.RLock()
+	last := m.lastSync
+	m.mu.RUnlock()
+
+	if time.Since(last) >= emptyPoolRetryInterval {
+		m.triggerResync()
 	}
 }
 

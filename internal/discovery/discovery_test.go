@@ -301,6 +301,41 @@ func TestProcessWatchClearsSlotWhenPoolExhausted(t *testing.T) {
 	}
 }
 
+func TestProcessWatchExhaustedPoolRequestsEarlyResync(t *testing.T) {
+	// All pool candidates verify offline after the last sync: the watch loop
+	// must request an early directory re-query instead of waiting out the
+	// full campaign-sync interval (60+ minutes) with a dead pool.
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	client := &fakeClient{online: map[string]bool{}}
+	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+
+	dead := onlineCandidate("dead_channel", "1", "World of Tanks", "g1", 100)
+	dead.Streamer.IsOnline = false
+	m.pool = []*Channel{dead}
+	// lastSync is zero => far past the retry cadence, so the resync fires.
+
+	m.processWatch()
+
+	if m.current != nil {
+		t.Fatalf("expected no selection from a dead pool, got %+v", m.current)
+	}
+	select {
+	case <-m.resync:
+	default:
+		t.Error("expected an early resync request when the pool is exhausted")
+	}
+
+	// With a fresh sync the same situation must NOT re-query early: the
+	// rate limit keeps failed selections at the empty-pool cadence.
+	m.lastSync = time.Now()
+	m.processWatch()
+	select {
+	case <-m.resync:
+		t.Error("expected no resync request while the last sync is recent")
+	default:
+	}
+}
+
 func TestProcessWatchDoesNothingWhenDisabled(t *testing.T) {
 	sender := &fakeSender{}
 	client := &fakeClient{}
