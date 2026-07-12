@@ -5,11 +5,14 @@
 </div>
 {{else}}
 <div class="space-y-4">
-    {{range .Campaigns}}
-    <article class="card flex gap-4">
+    {{range $i, $c := .Campaigns}}
+    <article class="card flex gap-4 cursor-pointer hover:border-purple-500 transition-colors"
+             role="button" tabindex="0"
+             data-drop-modal="drop-modal-{{$i}}"
+             aria-label="Show all drops for {{$c.Name}}">
         <div class="flex-shrink-0 w-16 h-[5.5rem] rounded-md overflow-hidden bg-neutral-900 border border-neutral-700 flex items-center justify-center">
-            {{if .BoxArtURL}}
-            <img src="{{.BoxArtURL}}" alt="{{.GameName}}" class="w-full h-full object-cover" loading="lazy"
+            {{if $c.BoxArtURL}}
+            <img src="{{$c.BoxArtURL}}" alt="{{$c.GameName}}" class="w-full h-full object-cover" loading="lazy"
                  onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
             <div class="w-full h-full items-center justify-center text-neutral-600 text-2xl" style="display:none;">🎮</div>
             {{else}}
@@ -20,50 +23,107 @@
         <div class="flex-1 min-w-0">
             <div class="flex items-start justify-between gap-2 flex-wrap">
                 <div class="min-w-0">
-                    <h3 class="text-neutral-100 font-semibold truncate">{{.Name}}</h3>
-                    {{if .GameName}}<div class="text-xs text-neutral-400 truncate">{{.GameName}}</div>{{end}}
+                    <h3 class="text-neutral-100 font-semibold truncate">{{$c.Name}}</h3>
+                    {{if $c.GameName}}<div class="text-xs text-neutral-400 truncate">{{$c.GameName}}</div>{{end}}
                 </div>
                 <div class="flex items-center gap-1.5 flex-shrink-0">
-                    {{if .ChannelRestricted}}
+                    {{if $c.ChannelRestricted}}
                     <span class="drop-exclusive-badge" title="This drop campaign only counts progress on a specific channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
                     {{end}}
-                    {{if .Claimed}}
-                    <span class="status-pill status-pill-claimed">{{.StatusLabel}}</span>
+                    {{if $c.Claimed}}
+                    <span class="status-pill status-pill-claimed">{{$c.StatusLabel}}</span>
                     {{else}}
-                    <span class="status-pill status-pill-progress">{{.StatusLabel}}</span>
+                    <span class="status-pill status-pill-progress">{{$c.StatusLabel}}</span>
                     {{end}}
                 </div>
             </div>
 
-            {{if .DropName}}
-            <div class="text-sm text-neutral-300 mt-2 truncate" title="{{.DropName}}">
-                {{if .Claimed}}Reward: {{else}}Current drop: {{end}}<span class="text-neutral-100">{{.DropName}}</span>
+            {{if $c.DropName}}
+            <div class="text-sm text-neutral-300 mt-2 truncate" title="{{$c.DropName}}">
+                {{if $c.Claimed}}Reward: {{else}}Current drop: {{end}}<span class="text-neutral-100">{{$c.DropName}}</span>
             </div>
             {{end}}
 
             <div class="mt-3">
                 <div class="flex justify-between text-xs text-neutral-400 mb-1">
                     <span>Campaign progress</span>
-                    <span>{{.OverallPercent}}%</span>
+                    <span>{{$c.OverallPercent}}%</span>
                 </div>
                 <div class="progress-track">
-                    <div class="{{if .Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{.OverallPercent}}%"></div>
+                    <div class="{{if $c.Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{$c.OverallPercent}}%"></div>
                 </div>
             </div>
 
-            {{if .HasMinuteProgress}}
+            {{if $c.HasMinuteProgress}}
             <div class="mt-3">
                 <div class="flex justify-between text-xs text-neutral-400 mb-1">
-                    <span>{{.MinutesWatched}}/{{.MinutesRequired}} min watched</span>
-                    <span>{{.MinutesRemaining}} min remaining</span>
+                    <span>{{$c.MinutesWatched}}/{{$c.MinutesRequired}} min watched</span>
+                    <span>{{$c.MinutesRemaining}} min remaining</span>
                 </div>
                 <div class="progress-track">
-                    <div class="progress-fill-minute" style="width: {{.MinutePercent}}%"></div>
+                    <div class="progress-fill-minute" style="width: {{$c.MinutePercent}}%"></div>
                 </div>
             </div>
             {{end}}
+
+            {{if $c.Drops}}
+            <div class="text-xs text-purple-400 mt-3">View all {{len $c.Drops}} drop{{if ne (len $c.Drops) 1}}s{{end}} →</div>
+            {{end}}
         </div>
     </article>
+
+    <dialog id="drop-modal-{{$i}}" class="modal-dialog">
+        <div class="flex items-start justify-between gap-4 px-5 py-4 border-b border-neutral-700">
+            <div class="min-w-0">
+                <h3 class="text-neutral-100 font-semibold truncate">{{$c.Name}}</h3>
+                {{if $c.GameName}}<div class="text-xs text-neutral-400 truncate">{{$c.GameName}}</div>{{end}}
+            </div>
+            <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" data-drop-modal-close aria-label="Close">✕</button>
+        </div>
+
+        <div class="px-5 py-4 space-y-3 max-h-[70vh] overflow-y-auto">
+            {{if not $c.Drops}}
+            <div class="text-neutral-400 text-sm">No individual drops to show for this campaign.</div>
+            {{else}}
+            {{range $c.Drops}}
+            <div class="flex gap-3 items-center bg-neutral-900 border border-neutral-700 rounded-lg p-3">
+                <div class="flex-shrink-0 w-12 h-12 rounded-md overflow-hidden bg-neutral-800 border border-neutral-700 flex items-center justify-center">
+                    {{if .ImageURL}}
+                    <img src="{{.ImageURL}}" alt="{{.Name}}" class="w-full h-full object-cover" loading="lazy"
+                         onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                    <div class="w-full h-full items-center justify-center text-neutral-600 text-lg" style="display:none;">🎁</div>
+                    {{else}}
+                    <div class="w-full h-full flex items-center justify-center text-neutral-600 text-lg">🎁</div>
+                    {{end}}
+                </div>
+
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-start justify-between gap-2">
+                        <div class="min-w-0">
+                            <div class="text-neutral-100 text-sm font-medium truncate" title="{{.Name}}">{{.Name}}</div>
+                            {{if .Benefit}}<div class="text-xs text-neutral-400 truncate" title="{{.Benefit}}">{{.Benefit}}</div>{{end}}
+                        </div>
+                        {{if .Claimed}}
+                        <span class="status-pill status-pill-claimed flex-shrink-0">{{.StatusLabel}}</span>
+                        {{else}}
+                        <span class="status-pill status-pill-progress flex-shrink-0">{{.StatusLabel}}</span>
+                        {{end}}
+                    </div>
+
+                    <div class="mt-2">
+                        <div class="progress-track">
+                            <div class="{{if .Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{.Percent}}%"></div>
+                        </div>
+                        {{if .HasMinuteProgress}}
+                        <div class="text-[0.7rem] text-neutral-400 mt-1">{{.MinutesWatched}}/{{.MinutesRequired}} min watched</div>
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+        </div>
+    </dialog>
     {{end}}
 </div>
 {{end}}

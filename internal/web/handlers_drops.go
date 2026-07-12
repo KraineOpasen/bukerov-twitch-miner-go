@@ -101,10 +101,12 @@ func buildDropCampaignViews(campaigns []*models.Campaign) []DropCampaignView {
 
 func buildDropCampaignView(c *models.Campaign) DropCampaignView {
 	view := DropCampaignView{
+		ID:                c.ID,
 		Name:              c.Name,
 		ChannelRestricted: c.IsChannelRestricted(),
 		Claimed:           c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed,
 		OverallPercent:    c.OverallProgressPercent(),
+		Drops:             buildDropDetailViews(c),
 	}
 
 	if c.Game != nil {
@@ -131,6 +133,48 @@ func buildDropCampaignView(c *models.Campaign) DropCampaignView {
 	}
 
 	return view
+}
+
+// buildDropDetailViews assembles the per-drop breakdown shown in the Drops-page
+// modal. Still-earnable drops come from Campaign.Drops (ordered by watch
+// requirement so tiers read in progression order); already-claimed rewards come
+// from Campaign.ClaimedDropNames, which the claim-history pass populated after
+// stripping those drops from Campaign.Drops. Together they list every drop in
+// the campaign with its own status, not just the current/final one.
+func buildDropDetailViews(c *models.Campaign) []DropDetailView {
+	ordered := make([]*models.Drop, len(c.Drops))
+	copy(ordered, c.Drops)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].MinutesRequired < ordered[j].MinutesRequired
+	})
+
+	views := make([]DropDetailView, 0, len(ordered)+len(c.ClaimedDropNames))
+	for _, d := range ordered {
+		detail := DropDetailView{
+			Name:        d.Name,
+			Benefit:     d.Benefit,
+			ImageURL:    d.ImageURL,
+			StatusLabel: "In progress",
+			Percent:     d.ClampedProgress(),
+		}
+		if d.MinutesRequired > 0 {
+			detail.HasMinuteProgress = true
+			detail.MinutesWatched = d.CurrentMinutesWatched
+			detail.MinutesRequired = d.MinutesRequired
+		}
+		views = append(views, detail)
+	}
+
+	for _, name := range c.ClaimedDropNames {
+		views = append(views, DropDetailView{
+			Name:        name,
+			Claimed:     true,
+			StatusLabel: "Already claimed",
+			Percent:     100,
+		})
+	}
+
+	return views
 }
 
 // boxArtURL builds a Twitch box-art CDN URL for a game by display name. The

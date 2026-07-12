@@ -11,6 +11,7 @@ type RuntimeSettings struct {
 	Logger          LoggerSettings         `json:"logger"`
 	Analytics       AnalyticsUIConfig      `json:"analytics"`
 	Discord         DiscordUIConfig        `json:"discord"`
+	DropBlacklist   []string               `json:"dropBlacklist"`
 }
 
 // DiscordUIConfig contains Discord integration settings for the UI.

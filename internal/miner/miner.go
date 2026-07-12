@@ -302,6 +302,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.client,
 		streamers,
 		m.config.RateLimits,
+		m.config.DropBlacklist,
 	)
 
 	if m.webServer != nil {
@@ -390,6 +391,51 @@ func (m *Miner) startMining(ctx context.Context) {
 
 	go m.streamCheckLoop(ctx)
 	go m.healthWatchdogLoop(ctx)
+	go m.bonusPollLoop(ctx)
+}
+
+// bonusPollInterval is how often the GQL polling fallback re-checks each online
+// streamer for an unclaimed channel-points bonus chest.
+const bonusPollInterval = 60 * time.Second
+
+// bonusPollLoop is the GQL polling fallback for channel-points bonus chests.
+// The primary claim path reacts to the community-points-user PubSub
+// "claim-available" event, but that event is not always delivered, so a chest
+// can sit unclaimed until it expires. Every bonusPollInterval this re-reads
+// each online streamer's channel-points context and claims any bonus PubSub
+// missed. Claims made here are logged distinctly so it stays visible how often
+// PubSub actually drops the event.
+func (m *Miner) bonusPollLoop(ctx context.Context) {
+	ticker := time.NewTicker(bonusPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.pollBonuses()
+		}
+	}
+}
+
+func (m *Miner) pollBonuses() {
+	for _, s := range m.streamers.All() {
+		if !s.GetIsOnline() {
+			continue
+		}
+
+		claimed, err := m.client.ClaimAvailableBonus(s)
+		if err != nil {
+			slog.Debug("Bonus poll failed", "streamer", s.Username, "error", err)
+			continue
+		}
+		if claimed {
+			slog.Info("Claimed channel points bonus via GQL fallback poll (PubSub missed the claim-available event)",
+				"streamer", s.Username)
+			events.Record(events.TypeBonusClaimed, s.Username, "bonus claimed (GQL fallback)")
+		}
+	}
 }
 
 func (m *Miner) streamCheckLoop(ctx context.Context) {
@@ -660,6 +706,10 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 
 	if m.watcher != nil {
 		m.watcher.UpdateSettings(m.config.Priority, m.config.RateLimits)
+	}
+
+	if m.dropsTracker != nil {
+		m.dropsTracker.UpdateBlacklist(m.config.DropBlacklist)
 	}
 
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
