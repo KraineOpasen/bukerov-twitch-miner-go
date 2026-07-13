@@ -322,6 +322,12 @@ func (s *Server) handler() http.Handler {
 		slog.Error("Failed to create static filesystem", "error", err)
 	} else {
 		mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+
+		// Browsers probe /favicon.ico at the site root regardless of the
+		// <link rel="icon"> tags, so serve it there too to avoid a 404.
+		mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, staticSub, "images/favicon.ico")
+		})
 	}
 
 	// Dashboard routes
