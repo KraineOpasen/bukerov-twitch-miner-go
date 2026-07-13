@@ -210,6 +210,55 @@ func TestArbitrateDirectModeVictimStableAcrossTicks(t *testing.T) {
 	}
 }
 
+// TestArbitrateDirectModeColdStartVictimByIndex documents the pure-direct-mode
+// cold-start behavior: when the bot never enters rotation (configured streamers
+// are always <=2 online), w.rotation.lastWatched is never populated, so the
+// equal-rank tie-break always falls through to the streamer-index fallback.
+// The victim is then deterministically the SAME configured streamer (lowest
+// index) on every displacement for the whole process uptime — stable, no flips,
+// but also no alternation between the two. This is intended, documented
+// behavior of this focused fix, not a bug (see the PR discussion for the note
+// on when an alternating fallback would be warranted).
+func TestArbitrateDirectModeColdStartVictimByIndex(t *testing.T) {
+	w, _ := newTestWatcher(2)
+	for _, s := range w.streamers {
+		s.Settings.WatchStreak = false
+	}
+	if len(w.rotation.lastWatched) != 0 {
+		t.Fatalf("precondition: cold start must have empty rotation recency, got %d entries", len(w.rotation.lastWatched))
+	}
+
+	disco := discoveryStreamer("disco", false) // active_drop, rank 2
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+
+	victimIdx0, survivorIdx1 := w.streamers[0].Username, w.streamers[1].Username
+	for tick := 0; tick < 2000; tick++ {
+		w.selectionReasons = make(map[int]string)
+		w.selectionMode = ModeIdle
+		cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode, order varies
+		slots, _ := w.arbitrate(cw, extra, time.Now())
+
+		survivor := ""
+		for _, s := range slots {
+			if s.origin == OriginConfigured {
+				survivor = s.streamer.Username
+			}
+		}
+		// With both recencies zero, the lower-index streamer (0) is always the
+		// victim, so the higher-index one (1) always survives — every tick.
+		if survivor != survivorIdx1 {
+			t.Fatalf("tick %d: cold-start victim must be the by-index fallback (streamer 0 = %q evicted, streamer 1 = %q kept), but %q was evicted",
+				tick, victimIdx0, survivorIdx1, survivorIdx1)
+		}
+	}
+
+	// Direct mode must never have populated rotation recency (that is what keeps
+	// the choice stable rather than alternating).
+	if len(w.rotation.lastWatched) != 0 {
+		t.Errorf("direct mode must not populate rotation recency, got %d entries", len(w.rotation.lastWatched))
+	}
+}
+
 // TestArbitrateEvictsMostRecentlyWatchedAmongEqualRank pins the tie-break rule
 // itself: among equal-rank configured occupants the most-recently-watched is
 // evicted (so the least-recently-watched, most "owed" a turn, keeps its slot),
