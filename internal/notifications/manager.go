@@ -659,6 +659,83 @@ func (m *Manager) NotifyConnectionRestored() {
 	}()
 }
 
+// NotifyHealthTransition sends an operator-facing alert when a health signal
+// (currently the watch-transport canary) flips between healthy and failed. It
+// reuses the system-notifications channel like the connection-health alerts,
+// and is only ever called by the health center on an actual transition — never
+// on repeated same-state results — so it does not spam.
+func (m *Manager) NotifyHealthTransition(signal string, healthy bool, detail string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled {
+		return
+	}
+
+	label := healthSignalLabel(signal)
+	var evType NotificationType
+	var emoji, title, message string
+	if healthy {
+		evType = NotificationTypeHealthRecovered
+		emoji, title = "✅", label+" recovered"
+		message = detail
+		if message == "" {
+			message = label + " is confirmed working again."
+		}
+	} else {
+		evType = NotificationTypeHealthDegraded
+		emoji, title = "⚠️", label+" check failed"
+		message = detail
+		if message == "" {
+			message = label + " is not being confirmed."
+		}
+	}
+
+	m.dispatchPush(evType, "", fmt.Sprintf("%s %s. %s", emoji, title, message))
+
+	if !enabled || discord == nil || cfg.SystemChannelID == "" {
+		slog.Debug("Health-transition Discord notification skipped: system channel not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      evType,
+		Title:     fmt.Sprintf("%s %s", emoji, title),
+		Message:   message,
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send health-transition notification", "error", err)
+		}
+	}()
+}
+
+// healthSignalLabel maps a health signal name to a human label for alerts.
+func healthSignalLabel(signal string) string {
+	switch signal {
+	case "watch_transport":
+		return "Watch transport"
+	case "gql_api":
+		return "GQL API"
+	case "pubsub":
+		return "PubSub"
+	case "oauth":
+		return "OAuth"
+	default:
+		return signal
+	}
+}
+
 // NotifyUpdateAvailable sends a notification that a newer miner release is
 // available. It reuses the system-notifications channel (like reauth and
 // connection-health alerts) since it is an operator-facing maintenance event.

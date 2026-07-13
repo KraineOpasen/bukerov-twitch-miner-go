@@ -418,6 +418,23 @@ func (c *TwitchClient) getClientID() string {
 	return c.clientID
 }
 
+// ActiveClientID returns a human label for the GQL client ID currently in use
+// ("TV", "Browser", "Mobile", or "Unknown"), for the Health Center. The active
+// ID can change at runtime when doGQLRequestWithClientIDFallback promotes a
+// working alternate after a PersistedQueryNotFound.
+func (c *TwitchClient) ActiveClientID() string {
+	switch c.getClientID() {
+	case constants.ClientIDTV:
+		return "TV"
+	case constants.ClientIDBrowser:
+		return "Browser"
+	case constants.ClientIDMobile:
+		return "Mobile"
+	default:
+		return "Unknown"
+	}
+}
+
 func (c *TwitchClient) setClientID(id string) {
 	c.mu.Lock()
 	c.clientID = id

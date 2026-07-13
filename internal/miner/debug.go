@@ -214,6 +214,22 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		}
 	}
 
+	if m.healthCenter != nil {
+		hs := m.healthCenter.Snapshot()
+		info := &debug.HealthInfo{ActiveClientID: hs.ActiveClientID}
+		for _, sig := range hs.Signals {
+			info.Signals = append(info.Signals, debug.HealthSignal{
+				Name:      sig.Name,
+				Status:    sig.Status,
+				CheckedAt: sig.CheckedAt,
+				Stage:     sig.Stage,
+				Detail:    sig.Detail,
+				ErrorCode: sig.ErrorCode,
+			})
+		}
+		snap.Health = info
+	}
+
 	snap.RecentEvents = events.Recent(snapshotRecentEvents)
 	return snap
 }

@@ -25,7 +25,24 @@ type Snapshot struct {
 	Streamers    []StreamerState `json:"streamers"`
 	Drops        *DropsSyncInfo  `json:"drops,omitempty"`
 	Discovery    *DiscoveryInfo  `json:"discovery,omitempty"`
+	Health       *HealthInfo     `json:"health,omitempty"`
 	RecentEvents []events.Event  `json:"recentEvents"`
+}
+
+// HealthInfo is the Health Center's aggregated signals in the debug snapshot.
+// It is redacted by construction: no tokens, cookies, signed URLs, or headers.
+type HealthInfo struct {
+	ActiveClientID string         `json:"activeClientId,omitempty"`
+	Signals        []HealthSignal `json:"signals"`
+}
+
+type HealthSignal struct {
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	CheckedAt time.Time `json:"checkedAt,omitzero"`
+	Stage     string    `json:"stage,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	ErrorCode string    `json:"errorCode,omitempty"`
 }
 
 // Miner statuses reported in Snapshot.Status.

@@ -598,6 +598,13 @@ dashboard, the debug endpoint, and discovery read it without taking any broker
 lock, and no lock is ever held across a Twitch GQL call, a spade beacon, or a
 SQLite write.
 
+**The one documented exception:** the watch-transport health canary (see *Health
+Signals*) may send a single real minute-watched beacon to a dedicated channel to
+verify the transport, opportunistically when a broker slot is free or once the
+transport has not been confirmed for a configurable max-staleness window. It
+never holds a broker slot and is not a candidate source; at most one extra beacon
+can briefly coincide with two busy slots, and only on the max-staleness schedule.
+
 ### Priority System
 
 Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`),
@@ -964,6 +971,65 @@ Discovery is most effective when fewer than two configured streamers are live
 — e.g. overnight — where it fills the otherwise-idle slots. A discovered
 channel is reported as `watching` only when the broker actually placed it in a
 slot; its per-channel watch-minute accounting is visible on the Drops page.
+
+---
+
+## Health Signals (`internal/health`)
+
+The Health Center aggregates the miner's operational signals for the dashboard
+(`/health`) and the debug snapshot (`/debug/snapshot`, `health` section). Each
+signal records only `status` (`ok`/`failed`/`idle`/`unknown`), `checkedAt`,
+`duration`, `stage`, a short human `detail`, and a stable `errorCode` —
+**never** an OAuth token, cookies, a signed playback/spade URL (which embeds
+`sig`/`token`), or an authorization header.
+
+The signals are distinct kinds of health:
+
+- **OAuth** — whether the account authorization is still valid (from the miner's
+  reauth-required state).
+- **GQL API** — whether Twitch GraphQL calls are succeeding (from the API
+  client's last-success timestamp vs `connectionTimeoutMinutes`).
+- **PubSub** — whether the WebSocket pool has recent activity (last PONG/message).
+- **Watch Transport** — whether Twitch *accepts the watch transport and beacon*
+  (from the canary, below). This is independent of whether any drop is active.
+- **Drops Inventory Sync** — whether the periodic inventory sync is running
+  without error (from the drops tracker's sync status).
+- **Drops Progress** — `ok` while campaigns are tracked, `idle` when none.
+  (Confirmed `stalled` detection — a drop whose progress isn't advancing despite
+  successful watching — is the Stage 3 drop-progress watchdog, not this stage.)
+
+The **Active GQL Client ID** (TV / Browser / Mobile) is also shown, since the
+client can promote a fallback ID after a `PersistedQueryNotFound`.
+
+### Watch-transport accrual canary
+
+The canary verifies the watch transport end-to-end by reusing the production
+beacon path — there is no second beacon implementation. It exposes
+`MinuteSender.Probe`, which runs the same steps as `MinuteSender.Send` (playback
+access token → HLS playlist → lowest-quality variant → segment HEAD → spade
+`minute-watched` POST, `application/x-www-form-urlencoded` with the base64 body
+percent-encoded), stage-instrumented and redacted.
+
+- **Scheduling (hybrid).** When enabled, the canary confirms the transport on a
+  target `canaryIntervalMinutes` cadence **opportunistically** — only when a
+  broker watch slot is free — and is **forced** (regardless of slot occupancy)
+  once the transport has not been confirmed for `canaryMaxStalenessHours`. It is
+  the single documented, rare exception to the two-slot rule (see *Watch Slot
+  Architecture*): never a permanent slot, never a candidate source.
+- **On demand.** "Run canary now" triggers an immediate probe; concurrent runs
+  are suppressed (an atomic in-flight guard) and each probe has a 60s timeout and
+  honors context cancellation.
+- **Honest limitation.** The canary confirms Twitch accepts the watch transport
+  and beacon requests; **without an active drop campaign it does not prove
+  accrual of a specific drop.** The UI and this document state this explicitly.
+- **Notifications.** Transitions (healthy→failed, failed→recovered) reuse the
+  system-notification channel (Discord + Matrix/Pushover/Gotify/webhook). Only
+  transitions notify — repeated same-state results never spam.
+
+Config (`health`, all runtime-updatable from the Health Center without a
+restart): `canaryEnabled` (default `false`), `canaryChannel` (empty disables it),
+`canaryIntervalMinutes` (default 360, clamped [60, 1440]), `canaryMaxStalenessHours`
+(default 48, clamped [1, 168]).
 
 ---
 

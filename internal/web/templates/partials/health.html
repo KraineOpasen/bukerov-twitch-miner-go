@@ -1,0 +1,62 @@
+{{define "health_center"}}
+{{if not .Available}}
+<div class="text-neutral-400 text-sm">Health monitoring is not available yet.</div>
+{{else}}
+<div class="rounded-lg border border-neutral-800 overflow-hidden mb-4">
+    <table class="w-full text-sm">
+        <tbody>
+            {{range .Signals}}
+            <tr class="border-b border-neutral-800 last:border-0">
+                <td class="px-4 py-2 text-neutral-300 whitespace-nowrap">{{.Label}}</td>
+                <td class="px-4 py-2 whitespace-nowrap">
+                    <span class="num font-semibold" style="color: {{.StatusColor}}">{{.Status}}</span>
+                    {{if .Ago}}<span class="text-neutral-500 text-xs">— {{.Ago}}</span>{{end}}
+                </td>
+                <td class="px-4 py-2 text-neutral-400 text-xs">{{.Detail}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+
+<div class="text-xs text-neutral-500 mb-4">Active GQL Client ID: <span class="text-neutral-300">{{if .ActiveClientID}}{{.ActiveClientID}}{{else}}Unknown{{end}}</span></div>
+
+<div class="rounded-lg border border-neutral-800 p-4 mb-3">
+    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">Watch-transport canary</div>
+
+    <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML" class="flex flex-col gap-3">
+        <label class="flex items-center gap-2 text-sm text-neutral-300">
+            <input type="checkbox" name="canaryEnabled" {{if .CanaryEnabled}}checked{{end}}>
+            Enable scheduled canary
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-neutral-400">
+            Canary channel (a reliable, near-always-live channel)
+            <input type="text" name="canaryChannel" value="{{.CanaryChannel}}" placeholder="e.g. a 24/7 channel login"
+                   class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100">
+        </label>
+        <div class="flex gap-4">
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Interval (minutes, 60–1440)
+                <input type="number" name="canaryIntervalMinutes" value="{{.CanaryIntervalMinutes}}" min="60" max="1440"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Max staleness (hours, 1–168)
+                <input type="number" name="canaryMaxStalenessHours" value="{{.CanaryMaxStalenessHours}}" min="1" max="168"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+        </div>
+        <div class="flex items-center gap-3">
+            <button type="submit" class="badge badge-queued">Save canary settings</button>
+            {{if .CanaryConfigured}}
+            <button type="button" hx-post="/api/health/canary/run" hx-target="#health-center" hx-swap="innerHTML" class="badge badge-queued">Run canary now</button>
+            {{else}}
+            <span class="text-xs text-neutral-500">Set a channel to enable "Run canary now".</span>
+            {{end}}
+        </div>
+    </form>
+</div>
+
+<p class="text-xs text-neutral-500">{{.Disclaimer}}</p>
+{{end}}
+{{end}}
