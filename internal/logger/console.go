@@ -3,10 +3,10 @@ package logger
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // ANSI color codes used for the console output. Only the console handler ever
@@ -150,14 +150,79 @@ func attrString(r slog.Record, key string) string {
 	return out
 }
 
+// consoleBufferLines bounds how many formatted console lines may queue for the
+// background writer before new lines are dropped. Large enough that a brief
+// stdout hiccup never drops anything, small enough to bound memory if the
+// consumer stalls for good.
+const consoleBufferLines = 4096
+
+// consoleWriter serializes console output on a single background goroutine, so
+// a slow or wedged stdout consumer (e.g. a Docker log pipe whose reader stopped
+// draining) can never stall the logging goroutines. Callers enqueue a
+// fully-formatted line and return immediately; the actual blocking Write happens
+// only on the background goroutine, holding no lock any other goroutine needs.
+// If the buffer fills (the consumer has genuinely wedged) further lines are
+// dropped and counted rather than blocking the caller — the miner keeps running
+// even if nothing is reading its stdout.
+type consoleWriter struct {
+	lines     chan []byte
+	wg        sync.WaitGroup
+	dropped   atomic.Uint64
+	closeOnce sync.Once
+}
+
+func newConsoleWriter(w io.Writer) *consoleWriter {
+	cw := &consoleWriter{lines: make(chan []byte, consoleBufferLines)}
+	cw.wg.Add(1)
+	go cw.run(w)
+	return cw
+}
+
+// run drains queued lines to w in order. Being the sole writer, it needs no
+// lock to keep lines from interleaving, and its blocking Writes never hold a
+// lock the logging goroutines wait on.
+func (cw *consoleWriter) run(w io.Writer) {
+	defer cw.wg.Done()
+	for line := range cw.lines {
+		_, _ = w.Write(line)
+	}
+}
+
+// write enqueues a formatted line. It never blocks: if the buffer is full it
+// drops the line and counts it, so a wedged stdout consumer cannot back up into
+// the caller.
+func (cw *consoleWriter) write(line []byte) {
+	select {
+	case cw.lines <- line:
+	default:
+		cw.dropped.Add(1)
+	}
+}
+
+// Close stops the background writer after draining the queued lines. Idempotent.
+// The process-wide writer created by Setup is closed once, from Logger.Close, to
+// flush any buffered lines on shutdown.
+func (cw *consoleWriter) Close() {
+	cw.closeOnce.Do(func() {
+		close(cw.lines)
+		cw.wg.Wait()
+	})
+}
+
+// Dropped reports how many console lines were dropped because the buffer was
+// full (a wedged stdout consumer). Exposed for diagnostics and tests.
+func (cw *consoleWriter) Dropped() uint64 {
+	return cw.dropped.Load()
+}
+
 // consoleHandler formats records like slog's TextHandler but wraps each line in
-// an ANSI color chosen by colorForRecord. It reuses a real TextHandler for the
+// an ANSI color chosen by styleForRecord. It reuses a real TextHandler for the
 // actual formatting (attribute escaping, groups, time layout) so the only thing
-// it adds is the color envelope.
+// it adds is the color envelope, then hands the finished line to an async
+// consoleWriter so a stalled stdout consumer can't block logging.
 type consoleHandler struct {
 	level   slog.Level
-	w       io.Writer
-	mu      *sync.Mutex
+	cw      *consoleWriter
 	color   bool
 	withOps []func(slog.Handler) slog.Handler
 }
@@ -172,8 +237,7 @@ type consoleHandler struct {
 func newConsoleHandler(w io.Writer, level slog.Level, colored bool) *consoleHandler {
 	return &consoleHandler{
 		level: level,
-		w:     w,
-		mu:    &sync.Mutex{},
+		cw:    newConsoleWriter(w),
 		color: colored,
 	}
 }
@@ -198,37 +262,47 @@ func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 		return err
 	}
 
-	line := buf.Bytes()
+	// Build the final (possibly colored) line, then hand it to the async writer.
+	// No lock is held and no blocking Write happens on this goroutine, so a
+	// stalled stdout consumer cannot stall the caller.
+	h.cw.write(h.decorate(r, buf.Bytes()))
+	return nil
+}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+// decorate returns the final console bytes for the record as a freshly
+// allocated, caller-owned slice: the plain formatted line when coloring is off
+// or the record is unstyled, otherwise the line wrapped in its ANSI color with
+// an emoji prefix. line is slog's TextHandler output (trailing newline
+// included) and is not retained.
+func (h *consoleHandler) decorate(r slog.Record, line []byte) []byte {
 	// The "Colored Output" setting gates all console decoration (color + emoji);
 	// with it off, stdout is the same plain text as the file.
 	if !h.color {
-		_, err := h.w.Write(line)
-		return err
+		return append([]byte(nil), line...)
 	}
 
 	style := styleForRecord(r)
 	if style.color == "" && style.emoji == "" {
-		_, err := h.w.Write(line)
-		return err
+		return append([]byte(nil), line...)
 	}
 
 	trimmed := bytes.TrimRight(line, "\n")
 
-	prefix := ""
+	var out bytes.Buffer
+	out.Grow(len(trimmed) + len(style.color) + len(style.emoji) + len(ansiReset) + 3)
+	if style.color != "" {
+		out.WriteString(style.color)
+	}
 	if style.emoji != "" {
-		prefix = style.emoji + " "
+		out.WriteString(style.emoji)
+		out.WriteByte(' ')
 	}
-
-	if style.color == "" {
-		_, err := fmt.Fprintf(h.w, "%s%s\n", prefix, trimmed)
-		return err
+	out.Write(trimmed)
+	if style.color != "" {
+		out.WriteString(ansiReset)
 	}
-	_, err := fmt.Fprintf(h.w, "%s%s%s%s\n", style.color, prefix, trimmed, ansiReset)
-	return err
+	out.WriteByte('\n')
+	return out.Bytes()
 }
 
 func (h *consoleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -245,16 +319,17 @@ func (h *consoleHandler) WithGroup(name string) slog.Handler {
 
 // clone returns a copy of h with op appended, replaying the accumulated
 // WithAttrs/WithGroup calls (in order) onto a fresh TextHandler on every
-// Handle. The miner doesn't currently use slog groups/With chains, but this
-// keeps the handler correct if it ever does.
+// Handle. Clones share the one consoleWriter (like the old shared mutex) so all
+// output still serializes through a single background goroutine. The miner
+// doesn't currently use slog groups/With chains, but this keeps the handler
+// correct if it ever does.
 func (h *consoleHandler) clone(op func(slog.Handler) slog.Handler) *consoleHandler {
 	ops := make([]func(slog.Handler) slog.Handler, len(h.withOps), len(h.withOps)+1)
 	copy(ops, h.withOps)
 	ops = append(ops, op)
 	return &consoleHandler{
 		level:   h.level,
-		w:       h.w,
-		mu:      h.mu,
+		cw:      h.cw,
 		color:   h.color,
 		withOps: ops,
 	}
