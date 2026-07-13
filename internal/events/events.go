@@ -30,6 +30,12 @@ const (
 	// pool candidates.
 	TypeDiscoverySelected Type = "discovery_selected"
 	TypeDiscoverySwitched Type = "discovery_switched"
+
+	// TypeSlotAssigned/TypeSlotReleased track the unified slot broker granting
+	// or releasing one of the two Twitch watch slots (configured or discovered
+	// channel), recorded only when the allocation actually changes.
+	TypeSlotAssigned Type = "slot_assigned"
+	TypeSlotReleased Type = "slot_released"
 )
 
 type Event struct {

@@ -61,6 +61,31 @@ type WatchingInfo struct {
 	// deferred (e.g. about to complete a watch streak) - the closest thing
 	// the rotation has to a "temporarily pinned/benched" list.
 	PostponedSwapOuts []PostponedSwapOut `json:"postponedSwapOuts,omitempty"`
+
+	// Slots is the unified slot broker's final allocation: which channel holds
+	// each of the (at most two) Twitch watch slots, where it came from
+	// (configured list or directory discovery), and why. Waiting lists
+	// channels proposed for a slot that did not get one this tick.
+	Slots   []WatchSlot   `json:"slots,omitempty"`
+	Waiting []WaitingSlot `json:"waiting,omitempty"`
+}
+
+// WatchSlot is one occupied watch slot in the broker's explainable allocation.
+type WatchSlot struct {
+	Slot       int    `json:"slot"`
+	Channel    string `json:"channel"`
+	Source     string `json:"source"`
+	ReasonCode string `json:"reasonCode"`
+	Reason     string `json:"reason"`
+	Campaign   string `json:"campaign,omitempty"`
+}
+
+// WaitingSlot is a channel proposed for a slot that did not get one this tick.
+type WaitingSlot struct {
+	Channel    string `json:"channel"`
+	Source     string `json:"source"`
+	ReasonCode string `json:"reasonCode"`
+	Reason     string `json:"reason"`
 }
 
 type PostponedSwapOut struct {

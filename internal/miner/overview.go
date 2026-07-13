@@ -20,6 +20,8 @@ func (m *Miner) WatchSlots() web.WatchSlotsView {
 	view := web.WatchSlotsView{
 		Watching: make(map[string]bool),
 		Reason:   make(map[string]string),
+		Origin:   make(map[string]string),
+		Games:    make(map[string]string),
 	}
 	if m.watcher == nil {
 		return view
@@ -29,12 +31,35 @@ func (m *Miner) WatchSlots() web.WatchSlotsView {
 	view.Mode = st.Mode
 	view.NextRotationAt = st.NextRotationAt
 	view.ActivePair = append([]string(nil), st.ActivePair...)
-	for _, d := range st.Decisions {
-		if d.Watching {
-			view.Watching[d.Username] = true
+
+	// The broker snapshot is the authoritative final slot allocation and is the
+	// only place discovery-occupied slots appear (they are not configured
+	// streamers).
+	for _, slot := range m.watcher.BrokerSnapshot().Slots {
+		view.Watching[slot.Channel] = true
+		view.Origin[slot.Channel] = slot.Origin
+		if slot.Reason != "" {
+			view.Reason[slot.Channel] = slot.Reason
 		}
+	}
+
+	// Discovery channels are not in the streamer list, so the sidebar needs
+	// their game name from the discovery state.
+	if m.discovery != nil {
+		for _, ch := range m.discovery.State().Channels {
+			if view.Watching[ch.Login] {
+				view.Games[ch.Login] = ch.Game
+			}
+		}
+	}
+
+	// Fall back to the per-streamer decision reason where the broker snapshot
+	// has none yet (e.g. before the first tick completes).
+	for _, d := range st.Decisions {
 		if d.Reason != "" {
-			view.Reason[d.Username] = d.Reason
+			if _, ok := view.Reason[d.Username]; !ok {
+				view.Reason[d.Username] = d.Reason
+			}
 		}
 	}
 	return view

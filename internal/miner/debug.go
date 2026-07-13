@@ -74,6 +74,28 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		})
 	}
 
+	if m.watcher != nil {
+		brokerSnap := m.watcher.BrokerSnapshot()
+		for _, s := range brokerSnap.Slots {
+			snap.Watching.Slots = append(snap.Watching.Slots, debug.WatchSlot{
+				Slot:       s.Slot,
+				Channel:    s.Channel,
+				Source:     s.Origin,
+				ReasonCode: s.ReasonCode,
+				Reason:     s.Reason,
+				Campaign:   s.Campaign,
+			})
+		}
+		for _, wc := range brokerSnap.Waiting {
+			snap.Watching.Waiting = append(snap.Watching.Waiting, debug.WaitingSlot{
+				Channel:    wc.Channel,
+				Source:     wc.Origin,
+				ReasonCode: wc.ReasonCode,
+				Reason:     wc.Reason,
+			})
+		}
+	}
+
 	// Predictions the pool still tracks in a bettable state, keyed by
 	// streamer. Resolved/cancelled ones surface via recentEvents instead.
 	activePredictions := make(map[string]*debug.PredictionInfo)

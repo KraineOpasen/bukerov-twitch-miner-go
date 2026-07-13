@@ -153,6 +153,10 @@ type WatchSlotView struct {
 	StreakPercent int
 	HasGain       bool
 	GainPerHour   string
+	// Origin is the watch-slot source: "configured" (fixed streamer list) or
+	// "discovery" (directory discovery). Discovery-occupied slots render a
+	// badge and omit configured-only detail (points/streak/gain).
+	Origin string
 }
 
 // NowWatchingView feeds the pinned sidebar block.
@@ -199,12 +203,20 @@ type OverviewData struct {
 // --- Provider view types (assembled by the miner from in-memory state) ---
 
 // WatchSlotsView is the live watch-selection state supplied by the miner:
-// which streamers occupy the two watch slots, which are queued, and when the
-// next rotation is due. All from the watcher's in-memory debug state.
+// which channels occupy the two watch slots (configured OR discovered), which
+// are queued, and when the next rotation is due. Built from the unified slot
+// broker's snapshot plus the watcher's debug state.
 type WatchSlotsView struct {
-	ActivePair     []string
-	Watching       map[string]bool
-	Reason         map[string]string
+	ActivePair []string
+	Watching   map[string]bool
+	Reason     map[string]string
+	// Origin maps a watched channel to its slot source ("configured" or
+	// "discovery").
+	Origin map[string]string
+	// Games maps a discovery-occupied channel to its game name (discovery
+	// channels are not in the configured streamer list, so the sidebar cannot
+	// look their game up there).
+	Games          map[string]string
 	Queued         []string
 	NextRotationAt time.Time
 	Mode           string

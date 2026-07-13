@@ -9,15 +9,22 @@
 <div class="watch-slot is-watching">
     <div class="flex items-center gap-2 mb-1">
         <span class="watch-dot on"></span>
+        {{if eq .Origin "discovery"}}
+        <span class="s-name text-sm truncate flex-1" title="Discovered channel (directory discovery)">{{.Name}}</span>
+        <span class="badge badge-queued" title="Filling a watch slot via directory discovery">discovery</span>
+        {{else}}
         <a href="/streamer/{{.Name}}" class="s-name text-sm truncate flex-1 hover:underline">{{.Name}}</a>
         <span class="num text-xs text-neutral-100">{{.Points}}</span>
+        {{end}}
     </div>
     {{if .Game}}<div class="text-xs text-neutral-400 truncate mb-1">{{.Game}}</div>{{end}}
+    {{if ne .Origin "discovery"}}
     <div class="flex items-center justify-between text-xs">
         {{if .HasGain}}<span class="badge-gain num">+{{.GainPerHour}}/h</span>{{else}}<span class="text-neutral-500">—</span>{{end}}
         {{if .StreakPending}}<span class="num text-online" title="Watch-streak progress">🔥 {{.StreakMinutes}}/7</span>{{end}}
     </div>
     {{if .StreakPending}}<div class="bar bar-streak mt-1"><span style="width: {{.StreakPercent}}%"></span></div>{{end}}
+    {{end}}
 </div>
 {{end}}
 {{else}}
