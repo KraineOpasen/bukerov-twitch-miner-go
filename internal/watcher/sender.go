@@ -53,7 +53,7 @@ func (s *MinuteSender) Send(streamer *models.Streamer) (simulateErr error, err e
 		return simulateErr, fmt.Errorf("failed to encode payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", streamer.Stream.SpadeURL, strings.NewReader("data="+payload))
+	req, err := http.NewRequest("POST", streamer.Stream.SpadeURL, strings.NewReader(spadeFormBody(payload)))
 	if err != nil {
 		return simulateErr, err
 	}
@@ -65,13 +65,23 @@ func (s *MinuteSender) Send(streamer *models.Streamer) (simulateErr error, err e
 	if err != nil {
 		return simulateErr, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return simulateErr, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
 	return simulateErr, nil
+}
+
+// spadeFormBody wraps the base64 minute-watched payload into the
+// application/x-www-form-urlencoded body the spade endpoint expects. The value
+// must be percent-encoded: standard base64 can contain '+', which a form parser
+// would otherwise decode as a space and corrupt the event. This mirrors the
+// reference python miner (which posts data={"data": b64} via requests) and the
+// real web player (btoa + encodeURIComponent).
+func spadeFormBody(payload string) string {
+	return url.Values{"data": {payload}}.Encode()
 }
 
 // simulateWatching mimics a player fetching the stream: playlist, lowest
@@ -88,7 +98,7 @@ func (s *MinuteSender) simulateWatching(channel, sig, token string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get playlist: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("playlist request failed with status %d", resp.StatusCode)

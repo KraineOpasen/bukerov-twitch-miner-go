@@ -194,7 +194,14 @@ func (w *MinuteWatcher) processWatching() {
 	}
 	slog.Debug("Watching streams", "count", len(watching), "max", constants.MaxSimultaneousStreams, "streamers", watchingNames)
 
-	sleepBetween := time.Duration(w.settings.MinuteWatchedInterval) * time.Second / time.Duration(len(watching))
+	interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
+	sleepBetween := interval / time.Duration(len(watching))
+
+	// A continuously-watched streamer is reported once per loop, so consecutive
+	// reports land ~interval apart. Anything past twice that means it lost its
+	// watch slot for at least a cycle - a break in continuity that resets the
+	// watch-streak progress (see Stream.UpdateMinuteWatched).
+	maxContinuousGap := 2 * interval
 
 	reported := false
 	for _, idx := range watching {
@@ -205,7 +212,7 @@ func (w *MinuteWatcher) processWatching() {
 		} else {
 			reported = true
 			slog.Debug("Sent minute watched", "streamer", streamer.Username, "minutesWatched", streamer.Stream.MinuteWatched)
-			delta := streamer.Stream.UpdateMinuteWatched()
+			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
 			if w.store != nil && delta > 0 {
 				if err := w.store.RecordMinutes(streamer.Username, delta, time.Now()); err != nil {
 					slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
