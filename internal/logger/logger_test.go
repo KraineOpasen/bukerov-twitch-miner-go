@@ -284,3 +284,38 @@ func TestConsoleWriterCloseIdempotent(t *testing.T) {
 	h.cw.Close()
 	h.cw.Close() // must not panic on the second close
 }
+
+// TestConsoleWriterWriteDuringCloseDoesNotPanic is the regression for the
+// shutdown panic: several goroutines keep logging while another calls Close
+// concurrently. Sending on a closed channel panics in Go (and -race does not
+// catch it), so if Close closed the lines channel this would crash. A write
+// racing shutdown must instead drop safely. A panic in any goroutine crashes
+// the test binary, so completing the loop is the assertion.
+func TestConsoleWriterWriteDuringCloseDoesNotPanic(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		var sink syncBuffer
+		h := newConsoleHandler(&sink, slog.LevelDebug, false)
+
+		var writers sync.WaitGroup
+		for g := 0; g < 6; g++ {
+			writers.Add(1)
+			go func() {
+				defer writers.Done()
+				for i := 0; i < 500; i++ {
+					// Handle -> cw.write; must never panic even after Close.
+					_ = h.Handle(context.Background(), infoRecord("x"))
+				}
+			}()
+		}
+
+		// Close concurrently with the in-flight writers.
+		closed := make(chan struct{})
+		go func() {
+			h.cw.Close()
+			close(closed)
+		}()
+
+		writers.Wait()
+		<-closed // Close (and thus run's drain+exit) has finished
+	}
+}

@@ -165,33 +165,62 @@ const consoleBufferLines = 4096
 // dropped and counted rather than blocking the caller — the miner keeps running
 // even if nothing is reading its stdout.
 type consoleWriter struct {
-	lines     chan []byte
+	lines chan []byte
+	// done signals run() to drain and exit. Close closes THIS, never lines:
+	// closing lines would panic any write() that races shutdown (send on a
+	// closed channel), which is a real risk because other goroutines may still
+	// be logging when Logger.Close runs. closed is the fast-path guard so
+	// post-Close writes drop instead of buffering into a queue run() no longer
+	// drains.
+	done      chan struct{}
+	closed    atomic.Bool
 	wg        sync.WaitGroup
 	dropped   atomic.Uint64
 	closeOnce sync.Once
 }
 
 func newConsoleWriter(w io.Writer) *consoleWriter {
-	cw := &consoleWriter{lines: make(chan []byte, consoleBufferLines)}
+	cw := &consoleWriter{
+		lines: make(chan []byte, consoleBufferLines),
+		done:  make(chan struct{}),
+	}
 	cw.wg.Add(1)
 	go cw.run(w)
 	return cw
 }
 
-// run drains queued lines to w in order. Being the sole writer, it needs no
-// lock to keep lines from interleaving, and its blocking Writes never hold a
-// lock the logging goroutines wait on.
+// run drains queued lines to w in order until Close signals done, then flushes
+// whatever is still buffered and exits. Being the sole writer, it needs no lock
+// to keep lines from interleaving, and its blocking Writes never hold a lock the
+// logging goroutines wait on. lines is deliberately never closed (see Close).
 func (cw *consoleWriter) run(w io.Writer) {
 	defer cw.wg.Done()
-	for line := range cw.lines {
-		_, _ = w.Write(line)
+	for {
+		select {
+		case line := <-cw.lines:
+			_, _ = w.Write(line)
+		case <-cw.done:
+			for {
+				select {
+				case line := <-cw.lines:
+					_, _ = w.Write(line)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
-// write enqueues a formatted line. It never blocks: if the buffer is full it
-// drops the line and counts it, so a wedged stdout consumer cannot back up into
-// the caller.
+// write enqueues a formatted line. It never blocks and never panics: once Close
+// has run it drops the line (counting it); otherwise it enqueues, or drops if
+// the buffer is full. It never sends on a closed channel because lines is never
+// closed.
 func (cw *consoleWriter) write(line []byte) {
+	if cw.closed.Load() {
+		cw.dropped.Add(1)
+		return
+	}
 	select {
 	case cw.lines <- line:
 	default:
@@ -201,10 +230,13 @@ func (cw *consoleWriter) write(line []byte) {
 
 // Close stops the background writer after draining the queued lines. Idempotent.
 // The process-wide writer created by Setup is closed once, from Logger.Close, to
-// flush any buffered lines on shutdown.
+// flush any buffered lines on shutdown. It signals run() via the done channel
+// and never closes lines, so a write() racing shutdown drops safely instead of
+// panicking on a send to a closed channel.
 func (cw *consoleWriter) Close() {
 	cw.closeOnce.Do(func() {
-		close(cw.lines)
+		cw.closed.Store(true)
+		close(cw.done)
 		cw.wg.Wait()
 	})
 }
