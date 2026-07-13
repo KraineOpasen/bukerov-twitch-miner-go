@@ -81,6 +81,12 @@ type MinuteWatcher struct {
 	// loop-owned, used to log slot changes only when they actually change.
 	lastSlots map[string]string
 
+	// displaceParity alternates the displacement victim in the pure
+	// cold-start tie case (equal-rank configured occupants with no rotation
+	// recency), so neither channel is starved for the whole uptime. Loop-owned;
+	// only touched from pickDisplaceable during a processWatching tick.
+	displaceParity uint64
+
 	// debugState is the last published watch-decision snapshot, guarded by
 	// debugMu because the debug HTTP endpoint reads it from its own goroutine.
 	debugMu    sync.Mutex

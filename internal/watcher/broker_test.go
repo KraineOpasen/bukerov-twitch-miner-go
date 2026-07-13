@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -167,95 +168,140 @@ func TestGatherCandidatesDropsConfiguredLogins(t *testing.T) {
 	}
 }
 
-// TestArbitrateDirectModeVictimStableAcrossTicks is the regression for the
-// non-deterministic displacement victim: with two equal-rank configured
-// channels in direct mode and one strictly-higher-rank external candidate, the
-// surviving configured channel must be identical on every tick even though
-// selectByPriority returns configuredWatch in a randomized (map-iteration)
-// order. Before the fix this flipped tick-to-tick.
-func TestArbitrateDirectModeVictimStableAcrossTicks(t *testing.T) {
-	w, _ := newTestWatcher(2)
-	for _, s := range w.streamers {
-		s.Settings.WatchStreak = false // isolate from streak protection
+// configuredSurvivor returns the single configured channel still holding a slot
+// after arbitration (the one not displaced), for the direct-mode cases below.
+func configuredSurvivor(slots []slotOccupant) string {
+	for _, s := range slots {
+		if s.origin == OriginConfigured {
+			return s.streamer.Username
+		}
 	}
-	disco := discoveryStreamer("disco", false) // active_drop, rank 2 > configured rank 1
-	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+	return ""
+}
 
-	survivor := ""
-	for tick := 0; tick < 3000; tick++ {
-		w.selectionReasons = make(map[int]string)
-		w.selectionMode = ModeIdle
-		cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode: map-order varies
-		slots, _ := w.arbitrate(cw, extra, time.Now())
+// TestArbitrateColdStartVictimAlternatesDeterministically is the regression for
+// the cold-start alternating fallback: with two equal-rank configured channels
+// in direct mode and no rotation recency, a strictly-higher-rank external
+// candidate displaces one of them each tick, and the victim must (a) alternate
+// between the two channels rather than pinning one for the whole uptime, and
+// (b) do so deterministically — driven by the loop-owned parity, NOT by
+// selectByPriority's randomized map-iteration order (the old thrash bug). Two
+// independent runs must therefore produce an identical, strictly-alternating
+// victim sequence.
+func TestArbitrateColdStartVictimAlternatesDeterministically(t *testing.T) {
+	const ticks = 40
+	run := func() (seq []string, s0, s1 string) {
+		w, _ := newTestWatcher(2)
+		for _, s := range w.streamers {
+			s.Settings.WatchStreak = false
+		}
+		s0, s1 = w.streamers[0].Username, w.streamers[1].Username
+		disco := discoveryStreamer("disco", false) // active_drop, rank 2 > configured rank 1
+		extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+		for tick := 0; tick < ticks; tick++ {
+			w.selectionReasons = make(map[int]string)
+			w.selectionMode = ModeIdle
+			cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode: map order varies
+			slots, _ := w.arbitrate(cw, extra, time.Now())
+			survivor := configuredSurvivor(slots)
+			evicted := s0
+			if survivor == s0 {
+				evicted = s1
+			}
+			seq = append(seq, evicted)
+		}
+		return seq, s0, s1
+	}
 
-		got, discoSlotted := "", false
-		for _, s := range slots {
-			if s.origin == OriginConfigured {
-				got = s.streamer.Username
-			}
-			if s.streamer.Username == "disco" {
-				discoSlotted = true
-			}
+	seq1, s0, s1 := run()
+	seq2, _, _ := run()
+
+	// Deterministic: parity-driven, independent of map-iteration order.
+	if !reflect.DeepEqual(seq1, seq2) {
+		t.Fatalf("cold-start victim sequence must be deterministic (not map-order-driven):\n run1=%v\n run2=%v", seq1, seq2)
+	}
+	// Alternating: consecutive displacements evict different channels, and both
+	// channels get evicted over time (neither is pinned).
+	sawS0, sawS1 := false, false
+	for i, v := range seq1 {
+		if v == s0 {
+			sawS0 = true
 		}
-		if !discoSlotted {
-			t.Fatalf("tick %d: the rank-2 discovery drop must always hold a slot", tick)
+		if v == s1 {
+			sawS1 = true
 		}
-		if tick == 0 {
-			survivor = got
-			continue
+		if i > 0 && v == seq1[i-1] {
+			t.Fatalf("victim must alternate each displacement, but index %d repeats %q (seq=%v)", i, v, seq1)
 		}
-		if got != survivor {
-			t.Fatalf("tick %d: surviving configured channel flipped from %q to %q — victim is not deterministic", tick, survivor, got)
-		}
+	}
+	if !sawS0 || !sawS1 {
+		t.Fatalf("both configured channels must be evicted over the run (alternation), got %v", seq1)
 	}
 }
 
-// TestArbitrateDirectModeColdStartVictimByIndex documents the pure-direct-mode
-// cold-start behavior: when the bot never enters rotation (configured streamers
-// are always <=2 online), w.rotation.lastWatched is never populated, so the
-// equal-rank tie-break always falls through to the streamer-index fallback.
-// The victim is then deterministically the SAME configured streamer (lowest
-// index) on every displacement for the whole process uptime — stable, no flips,
-// but also no alternation between the two. This is intended, documented
-// behavior of this focused fix, not a bug (see the PR discussion for the note
-// on when an alternating fallback would be warranted).
-func TestArbitrateDirectModeColdStartVictimByIndex(t *testing.T) {
+// TestArbitrateColdStartVictimOrderIndependent pins the anti-thrash guarantee
+// the alternation preserves: for a FIXED parity, the cold-start victim does not
+// depend on the configuredWatch order (parity 0 evicts the lower index, parity 1
+// the higher). The randomized map-iteration order can therefore never change the
+// outcome within a tick.
+func TestArbitrateColdStartVictimOrderIndependent(t *testing.T) {
 	w, _ := newTestWatcher(2)
 	for _, s := range w.streamers {
 		s.Settings.WatchStreak = false
 	}
-	if len(w.rotation.lastWatched) != 0 {
-		t.Fatalf("precondition: cold start must have empty rotation recency, got %d entries", len(w.rotation.lastWatched))
-	}
-
-	disco := discoveryStreamer("disco", false) // active_drop, rank 2
+	disco := discoveryStreamer("disco", false)
 	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+	s0, s1 := w.streamers[0].Username, w.streamers[1].Username
 
-	victimIdx0, survivorIdx1 := w.streamers[0].Username, w.streamers[1].Username
-	for tick := 0; tick < 2000; tick++ {
-		w.selectionReasons = make(map[int]string)
-		w.selectionMode = ModeIdle
-		cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode, order varies
-		slots, _ := w.arbitrate(cw, extra, time.Now())
-
-		survivor := ""
-		for _, s := range slots {
-			if s.origin == OriginConfigured {
-				survivor = s.streamer.Username
+	cases := []struct {
+		parity      uint64
+		wantEvicted string
+	}{
+		{0, s0},
+		{1, s1},
+	}
+	for _, tc := range cases {
+		for _, cw := range [][]int{{0, 1}, {1, 0}} {
+			w.displaceParity = tc.parity // hold parity fixed for the comparison
+			w.selectionReasons = map[int]string{}
+			slots, _ := w.arbitrate(cw, extra, time.Now())
+			survivor := configuredSurvivor(slots)
+			evicted := s0
+			if survivor == s0 {
+				evicted = s1
+			}
+			if evicted != tc.wantEvicted {
+				t.Fatalf("parity=%d cw=%v: victim must be order-independent; expected %q evicted, got survivor=%q",
+					tc.parity, cw, tc.wantEvicted, survivor)
 			}
 		}
-		// With both recencies zero, the lower-index streamer (0) is always the
-		// victim, so the higher-index one (1) always survives — every tick.
-		if survivor != survivorIdx1 {
-			t.Fatalf("tick %d: cold-start victim must be the by-index fallback (streamer 0 = %q evicted, streamer 1 = %q kept), but %q was evicted",
-				tick, victimIdx0, survivorIdx1, survivorIdx1)
+	}
+}
+
+// TestArbitrateRotationRecencyNotAlternated confirms rotation mode is untouched:
+// there both pair members carry real (equal, non-zero) recency, so displacement
+// takes the most-recently-watched branch, evicting the deterministic lower index
+// every time with no alternation and without advancing the cold-start parity.
+func TestArbitrateRotationRecencyNotAlternated(t *testing.T) {
+	w, _ := newTestWatcher(2)
+	for _, s := range w.streamers {
+		s.Settings.WatchStreak = false
+	}
+	now := time.Now()
+	w.rotation.lastWatched = map[int]time.Time{0: now, 1: now} // rotation sets both equal, non-zero
+	disco := discoveryStreamer("disco", false)
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+	s1 := w.streamers[1].Username
+
+	for i := 0; i < 50; i++ {
+		w.selectionReasons = map[int]string{}
+		slots, _ := w.arbitrate([]int{0, 1}, extra, now)
+		if survivor := configuredSurvivor(slots); survivor != s1 {
+			t.Fatalf("iter %d: rotation-mode recency must not alternate; expected lower index evicted (survivor %q), got %q", i, s1, survivor)
 		}
 	}
-
-	// Direct mode must never have populated rotation recency (that is what keeps
-	// the choice stable rather than alternating).
-	if len(w.rotation.lastWatched) != 0 {
-		t.Errorf("direct mode must not populate rotation recency, got %d entries", len(w.rotation.lastWatched))
+	if w.displaceParity != 0 {
+		t.Errorf("rotation-mode displacements must not advance the cold-start parity, got %d", w.displaceParity)
 	}
 }
 
