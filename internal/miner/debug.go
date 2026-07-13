@@ -230,6 +230,33 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		snap.Health = info
 	}
 
+	if m.progressWatchdog != nil {
+		ps := m.progressWatchdog.Snapshot()
+		info := &debug.ProgressWatchdogInfo{Enabled: ps.Enabled, EvaluatedAt: ps.EvaluatedAt}
+		for _, d := range ps.Drops {
+			info.Drops = append(info.Drops, debug.DropProgressState{
+				Campaign:             d.CampaignName,
+				Drop:                 d.DropName,
+				Channel:              d.Channel,
+				Status:               d.Status,
+				LastMinutes:          d.LastMinutes,
+				LastProgressAt:       d.LastProgressAt,
+				ReportsSinceProgress: d.ReportsSinceProgress,
+				NoProgressObs:        d.NoProgressObs,
+				RecoveryStage:        d.RecoveryStage,
+				RecoveryStageName:    d.RecoveryStageName,
+				LastRecoveryAt:       d.LastRecoveryAt,
+				Detail:               d.Detail,
+			})
+		}
+		for _, e := range m.progressWatchdog.AvoidEntries() {
+			info.Avoided = append(info.Avoided, debug.AvoidedChannel{
+				Login: e.Login, Until: e.Until, Reason: e.Reason,
+			})
+		}
+		snap.ProgressWatchdog = info
+	}
+
 	snap.RecentEvents = events.Recent(snapshotRecentEvents)
 	return snap
 }

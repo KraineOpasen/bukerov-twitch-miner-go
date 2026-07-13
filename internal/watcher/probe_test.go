@@ -84,7 +84,7 @@ func testSender(b rtBehavior, tok fakeToken) *MinuteSender {
 func canaryStreamer() *models.Streamer {
 	s := models.NewStreamer("probe_channel", models.StreamerSettings{})
 	s.ChannelID = "cid"
-	s.Stream.SpadeURL = "http://spade.test/track"
+	s.Stream.SetSpadeURL("http://spade.test/track")
 	s.Stream.SetPayload("cid", "bid", "uid", "probe_channel", nil)
 	return s
 }
@@ -195,7 +195,7 @@ func TestSendBeaconNon2xxIsFatal(t *testing.T) {
 
 func TestSendMissingSpadeURLIsFatal(t *testing.T) {
 	s := canaryStreamer()
-	s.Stream.SpadeURL = ""
+	s.Stream.SetSpadeURL("")
 	_, err := testSender(okBehavior(), fakeToken{sig: "s", token: "t"}).Send(s)
 	if err == nil {
 		t.Error("expected a missing spade URL to fail the send")

@@ -1,6 +1,7 @@
 package drops
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,9 +18,10 @@ func nowPlusHours(h int) time.Time  { return time.Now().Add(time.Duration(h) * t
 // dispatched by operation name so ViewerDropsDashboard and Inventory can be
 // answered independently, and GetDropCampaignDetails is keyed by campaign ID.
 type fakeDropsClient struct {
-	dashboard map[string]interface{}
-	inventory map[string]interface{}
-	details   map[string]map[string]interface{}
+	dashboard    map[string]interface{}
+	inventory    map[string]interface{}
+	inventoryErr error
+	details      map[string]map[string]interface{}
 }
 
 func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
@@ -27,6 +29,9 @@ func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interfa
 	case "ViewerDropsDashboard":
 		return f.dashboard, nil
 	case "Inventory":
+		if f.inventoryErr != nil {
+			return nil, f.inventoryErr
+		}
 		return f.inventory, nil
 	default:
 		return map[string]interface{}{}, nil
@@ -291,6 +296,74 @@ func TestSyncProgressNoTrackedCampaignsIsSafe(t *testing.T) {
 
 	if got := len(tracker.Campaigns()); got != 0 {
 		t.Fatalf("expected progress sync to add no campaigns, got %d", got)
+	}
+}
+
+// TestSyncProgressRecordsObservations pins the Stage 3 observation contract the
+// progress watchdog builds on: a completed inventory read counts as an
+// observation even when nothing moved ("checked and unchanged" is exactly the
+// stall evidence), an inventory failure is recorded instead of being swallowed
+// silently, and the full sync never stamps the progress-observation fields.
+func TestSyncProgressRecordsObservations(t *testing.T) {
+	summary := map[string]interface{}{
+		"id":     "campaign-amd",
+		"name":   "AMD Summer Arena Drops#2",
+		"status": "ACTIVE",
+		"game":   map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail := map[string]interface{}{
+		"id":      "campaign-amd",
+		"name":    "AMD Summer Arena Drops#2",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(nowMinusHours(2)),
+		"endAt":   rfc3339(nowPlusHours(48)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-1", "Alienware Mystery Drop", 240),
+		},
+	}
+	prog := map[string]interface{}{
+		"id":   "campaign-amd",
+		"name": "AMD Summer Arena Drops#2",
+		"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			inProgressDrop("drop-1", "Alienware Mystery Drop", 240, 140, false),
+		},
+	}
+
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		inventory: inventoryWithInProgress(prog),
+		details:   map[string]map[string]interface{}{"campaign-amd": detail},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+
+	if s := tracker.SyncStatus(); s.ProgressRuns != 0 || !s.ProgressLastSyncAt.IsZero() {
+		t.Fatalf("full sync must not stamp progress observations, got %+v", s)
+	}
+
+	// Unchanged progress: still a completed observation.
+	tracker.syncProgress()
+	s := tracker.SyncStatus()
+	if s.ProgressRuns != 1 || s.ProgressLastSyncAt.IsZero() || s.ProgressLastError != "" {
+		t.Fatalf("expected one clean observation after an unchanged progress sync, got %+v", s)
+	}
+
+	// Inventory outage: recorded, not swallowed.
+	client.inventoryErr = fmt.Errorf("inventory 502")
+	tracker.syncProgress()
+	s = tracker.SyncStatus()
+	if s.ProgressRuns != 2 || s.ProgressLastError == "" {
+		t.Fatalf("expected the inventory failure to be recorded, got %+v", s)
+	}
+
+	// Recovery: the next successful read clears the error.
+	client.inventoryErr = nil
+	tracker.syncProgress()
+	s = tracker.SyncStatus()
+	if s.ProgressRuns != 3 || s.ProgressLastError != "" {
+		t.Fatalf("expected the observation error to clear on recovery, got %+v", s)
 	}
 }
 

@@ -333,6 +333,16 @@ type DropDetailView struct {
 	MinutesRequired   int
 }
 
+// DropHealthView is the drop-progress watchdog's badge on a campaign card:
+// HEALTHY / RECOVERING / STALLED plus up to three explanatory lines (last
+// progress age, farming channel, delivered reports, current recovery stage).
+type DropHealthView struct {
+	Status     string // health.ProgressHealthy / ProgressRecovering / ProgressStalled
+	Label      string // "HEALTHY" / "RECOVERING" / "STALLED"
+	BadgeColor string // inline hex, mirrors healthStatusDisplay's palette
+	Lines      []string
+}
+
 // DropCampaignView is one row in the Drops-page campaign queue.
 type DropCampaignView struct {
 	ID                string
@@ -362,6 +372,10 @@ type DropCampaignView struct {
 	MinutesRequired   int
 	MinutesRemaining  int
 	MinutePercent     int
+
+	// Health is the progress watchdog's state for the campaign's current drop
+	// (nil when the watchdog is disabled or does not track this campaign).
+	Health *DropHealthView
 }
 
 type DropsListData struct {

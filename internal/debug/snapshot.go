@@ -21,12 +21,44 @@ type Snapshot struct {
 	StatusDetail  string    `json:"statusDetail,omitempty"`
 	UptimeSeconds int64     `json:"uptimeSeconds"`
 
-	Watching     WatchingInfo    `json:"watching"`
-	Streamers    []StreamerState `json:"streamers"`
-	Drops        *DropsSyncInfo  `json:"drops,omitempty"`
-	Discovery    *DiscoveryInfo  `json:"discovery,omitempty"`
-	Health       *HealthInfo     `json:"health,omitempty"`
-	RecentEvents []events.Event  `json:"recentEvents"`
+	Watching         WatchingInfo          `json:"watching"`
+	Streamers        []StreamerState       `json:"streamers"`
+	Drops            *DropsSyncInfo        `json:"drops,omitempty"`
+	Discovery        *DiscoveryInfo        `json:"discovery,omitempty"`
+	Health           *HealthInfo           `json:"health,omitempty"`
+	ProgressWatchdog *ProgressWatchdogInfo `json:"progressWatchdog,omitempty"`
+	RecentEvents     []events.Event        `json:"recentEvents"`
+}
+
+// ProgressWatchdogInfo is the drop-progress watchdog's per-drop state plus
+// the active channel exclusions. Redacted by construction: statuses, counters,
+// stage names, and channel logins only — never URLs or tokens.
+type ProgressWatchdogInfo struct {
+	Enabled     bool                `json:"enabled"`
+	EvaluatedAt time.Time           `json:"evaluatedAt,omitzero"`
+	Drops       []DropProgressState `json:"drops,omitempty"`
+	Avoided     []AvoidedChannel    `json:"avoided,omitempty"`
+}
+
+type DropProgressState struct {
+	Campaign             string    `json:"campaign"`
+	Drop                 string    `json:"drop"`
+	Channel              string    `json:"channel,omitempty"`
+	Status               string    `json:"status"`
+	LastMinutes          int       `json:"lastMinutes"`
+	LastProgressAt       time.Time `json:"lastProgressAt,omitzero"`
+	ReportsSinceProgress int       `json:"reportsSinceProgress"`
+	NoProgressObs        int       `json:"noProgressObservations"`
+	RecoveryStage        int       `json:"recoveryStage,omitempty"`
+	RecoveryStageName    string    `json:"recoveryStageName,omitempty"`
+	LastRecoveryAt       time.Time `json:"lastRecoveryAt,omitzero"`
+	Detail               string    `json:"detail,omitempty"`
+}
+
+type AvoidedChannel struct {
+	Login  string    `json:"login"`
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason,omitempty"`
 }
 
 // HealthInfo is the Health Center's aggregated signals in the debug snapshot.

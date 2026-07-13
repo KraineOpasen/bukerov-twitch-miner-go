@@ -598,6 +598,17 @@ dashboard, the debug endpoint, and discovery read it without taking any broker
 lock, and no lock is ever held across a Twitch GQL call, a spade beacon, or a
 SQLite write.
 
+The same staging pattern carries the drop-progress watchdog's session repair:
+`RequestSessionRefresh(login, mode)` stages a request under the mutex, and the
+loop executes it at the start of its next tick — on the loop goroutine, only
+for a channel that still holds a slot — publishing the outcome atomically
+(`LastSessionRefresh`). The broker thus stays the **single writer** of live
+watch sessions; no external goroutine ever mutates a slotted streamer. The loop
+also publishes per-slot minute-watched delivery accounting (`ReportStats`) each
+tick, and consults an optional avoid checker during selection (a temporarily
+avoided channel is skipped exactly like `DisableWatch`, but the exclusion
+expires on its own).
+
 **The one documented exception:** the watch-transport health canary (see *Health
 Signals*) may send a single real minute-watched beacon to a dedicated channel to
 verify the transport, opportunistically when a broker slot is free or once the
@@ -994,9 +1005,10 @@ The signals are distinct kinds of health:
   (from the canary, below). This is independent of whether any drop is active.
 - **Drops Inventory Sync** — whether the periodic inventory sync is running
   without error (from the drops tracker's sync status).
-- **Drops Progress** — `ok` while campaigns are tracked, `idle` when none.
-  (Confirmed `stalled` detection — a drop whose progress isn't advancing despite
-  successful watching — is the Stage 3 drop-progress watchdog, not this stage.)
+- **Drops Progress** — composed by the drop-progress watchdog (below): `ok`
+  while every tracked drop advances (with a `recovering:<stage>` marker while
+  the pipeline runs), `stalled` once a drop's stall is confirmed and automatic
+  recovery is exhausted, `idle` when nothing is tracked.
 
 The **Active GQL Client ID** (TV / Browser / Mobile) is also shown, since the
 client can promote a fallback ID after a `PersistedQueryNotFound`.
@@ -1044,6 +1056,88 @@ restart): `canaryEnabled` (default `false`), `canaryChannel` (empty disables it)
 (default 48, clamped [1, 168], and additionally floored to the interval so the
 forced-probe threshold always covers at least one opportunistic cycle — otherwise
 the force condition fires first and the hybrid degenerates into "always force").
+
+### Drop progress watchdog
+
+The watchdog (`internal/health/progress.go`) detects the failure no connection
+watchdog can see: everything upstream healthy, yet a specific drop's
+`currentMinutesWatched` stops advancing. It keeps one state per tracked
+campaign's current drop (`campaignID+dropID`): last observed minutes, when they
+last advanced, delivered watch reports since then, consecutive clean
+no-progress observations, status (`healthy`/`recovering`/`stalled`), and the
+recovery stage reached.
+
+**Stall confirmation is conjunctive** — every gate must hold simultaneously,
+and any failing gate is named in the published state (explainability):
+
+1. campaign `ACTIVE`, not past `endAt`; drop inside its date window;
+2. drop not claimable and not claimed (claimable = fully progressed — the
+   claim flow's job, not a stall);
+3. a slotted channel is farming the campaign (`IsWatching` + the tracker's
+   campaign↔channel intersection still assigns it);
+4. the channel has not switched games (`Stream.GameID()` vs campaign game);
+5. `HasPreconditionsMet` is not explicitly false;
+6. minute-watched reports are demonstrably delivered — the broker's new
+   per-slot delivery accounting shows ≥5 successes since the last progress;
+7. ≥ `watchdogStallConfirmations` consecutive inventory observations completed
+   **successfully** without progress ("checked and unchanged", never "could not
+   check" — the tracker's progress sync now records
+   `ProgressLastSyncAt`/`ProgressLastError`, and errored reads never count);
+8. more than `watchdogStallDelayMinutes` of wall time since the last advance;
+9. no Twitch outage evidence (OAuth/GQL/PubSub/watch-transport signals not
+   FAILED in the health center).
+
+**Recovery pipeline** — finite, ordered, at most one stage execution per
+evaluation pass (≈1 min, jittered), each stage cooldown-bounded
+(`watchdogRecoveryCooldownMinutes`), idempotent, ctx-bounded (60s), and visible
+in `/debug/snapshot` (`progressWatchdog` section) and the events feed:
+
+1. forced lightweight inventory sync (`TriggerProgressSync`);
+2. forced full campaign resync (`SyncNow` — dashboard, details, inventory, and
+   the campaign/channel intersection recompute; serialized against the
+   background loop, run via `runDetached`);
+3. stream-info refresh — **staged into the slot broker**
+   (`RequestSessionRefresh(login, stream_info)`): the broker loop executes it
+   at its next tick for the slot it owns (forced past the 2-minute
+   `UpdateRequired` gate) and publishes the outcome;
+4. watch-transport probe (`MinuteSender.Probe`, ctx-aware, stage-instrumented).
+   The sender caches no playback token or playlist — both are fetched fresh on
+   every send — so the spec's "refresh token/playlist" steps are honestly
+   implemented as a verified fresh fetch with the failing stage reported;
+5. watch-session recreate — staged into the broker
+   (`RequestSessionRefresh(login, session)`): spade URL re-scrape + forced
+   stream-info/payload rebuild, the online-streamer equivalent of the
+   offline→online bring-up;
+6. channel switch via the **avoid list**: the watchdog never commands the
+   broker — it marks the channel avoided for `watchdogAvoidTTLMinutes`, and the
+   broker/discovery stop selecting it, so arbitration picks the next eligible
+   channel while the broker keeps sole slot authority;
+7. one critical operator notification (system channel), transition-only. The
+   episode is then terminal (`stalled`) until progress resumes (full reset +
+   recovered notification + avoid entry cleared) or `watchdogRearmHours`
+   elapses (silent pipeline re-arm, no duplicate alert).
+
+**Concurrency architecture.** The watchdog goroutine never mutates a live
+streamer: mutating recovery stages are staged into the broker loop (the same
+single-writer staging pattern as `UpdateSettings`), the probe stage is
+read-only, and `Stream`'s spade URL / campaign fields moved behind locked
+accessors so the api client, drops tracker, broker, and watchdog no longer race
+on them. There is deliberately no imperative "switch channel" API.
+
+Config (`health`, runtime-updatable): `watchdogEnabled` (default **true** — the
+deliberate opt-out asymmetry with the opt-in canary: detection is passive reads
+of existing state, costs no extra Twitch calls, and recovery only follows a
+conservatively confirmed stall), `watchdogStallDelayMinutes` (20, clamped
+[10, 120] — Twitch credits minutes in ~15-minute batches), 
+`watchdogStallConfirmations` (3, clamped [2, 10]), `watchdogRecoveryCooldownMinutes`
+(5, clamped [1, 60]), `watchdogAvoidTTLMinutes` (60, clamped [10, 360]),
+`watchdogRearmHours` (6, clamped [1, 48]).
+
+Known limitation: if after a channel switch no eligible channel picks the
+campaign up, the state stays `recovering` with the explanatory "no slotted
+channel is farming" detail — the terminal notification only fires once a
+channel demonstrably farms without progress, because notifying on "nobody is
+farming" would alert on ordinary rotation/offline gaps.
 
 ---
 

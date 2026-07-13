@@ -38,6 +38,15 @@ type SyncStatus struct {
 	RecoveredCampaigns int
 	TrackedCampaigns   int
 	LastError          string
+
+	// Lightweight progress-sync observability (Stage 3). ProgressLastSyncAt is
+	// stamped only when an inventory read actually completed, so the progress
+	// watchdog can require "a fresh successful observation" before counting a
+	// no-progress interval — and an inventory outage (previously swallowed
+	// silently) is now visible via ProgressLastError.
+	ProgressRuns       int
+	ProgressLastSyncAt time.Time
+	ProgressLastError  string
 }
 
 type DropsTracker struct {
@@ -54,6 +63,16 @@ type DropsTracker struct {
 	lastRecoveredCount int
 	lastTrackedCount   int
 	lastSyncErr        string
+
+	// Lightweight progress-sync bookkeeping (see SyncStatus); guarded by mu.
+	progressRuns       int
+	progressLastSyncAt time.Time
+	progressLastErr    string
+
+	// fullSyncMu serializes syncCampaigns between the background loop and
+	// SyncNow (the progress watchdog's forced-resync recovery stage), so two
+	// full syncs never interleave their network calls and campaign swaps.
+	fullSyncMu sync.Mutex
 
 	// dropBlacklist holds case-insensitive keywords; a campaign is skipped
 	// during rotation prioritization when any of its drop/reward names matches
@@ -145,8 +164,10 @@ func (d *DropsTracker) TriggerProgressSync() {
 
 // SyncNow runs a single campaign sync synchronously, refreshing the tracked
 // campaign pool and SyncStatus before it returns. The background loop runs the
-// same logic on each tick; this exposes it so a caller (or a test) can force an
-// immediate refresh without waiting out the sync interval.
+// same logic on each tick; this exposes it so a caller (the progress
+// watchdog's forced-resync recovery stage, or a test) can force an immediate
+// refresh without waiting out the sync interval. Serialized against the
+// background loop via fullSyncMu inside syncCampaigns.
 func (d *DropsTracker) SyncNow() {
 	d.syncCampaigns()
 }
@@ -191,6 +212,9 @@ func (d *DropsTracker) SyncStatus() SyncStatus {
 		RecoveredCampaigns: d.lastRecoveredCount,
 		TrackedCampaigns:   d.lastTrackedCount,
 		LastError:          d.lastSyncErr,
+		ProgressRuns:       d.progressRuns,
+		ProgressLastSyncAt: d.progressLastSyncAt,
+		ProgressLastError:  d.progressLastErr,
 	}
 }
 
@@ -207,6 +231,25 @@ func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount i
 		d.lastSyncErr = err.Error()
 	} else {
 		d.lastSyncErr = ""
+	}
+}
+
+// recordProgressSync updates the lightweight progress-sync bookkeeping. A nil
+// err means an inventory read completed (even if it reported no progress and
+// nothing was republished) — the "fresh successful observation" the progress
+// watchdog gates its no-progress counting on. Called only from syncProgress;
+// the full sync intentionally does not stamp it, because its inventory step
+// swallows errors internally and a failed read must never masquerade as a
+// successful observation.
+func (d *DropsTracker) recordProgressSync(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.progressRuns++
+	d.progressLastSyncAt = time.Now()
+	if err != nil {
+		d.progressLastErr = err.Error()
+	} else {
+		d.progressLastErr = ""
 	}
 }
 
@@ -301,11 +344,23 @@ func (d *DropsTracker) syncProgress() {
 
 	inventory, err := d.getInventory()
 	if err != nil || inventory == nil {
+		if err == nil {
+			err = fmt.Errorf("empty inventory response")
+		}
+		// Previously swallowed silently — an inventory outage was invisible and
+		// indistinguishable from "progress genuinely not moving". Record it so
+		// the health center and the progress watchdog can tell the two apart.
+		d.recordProgressSync(err)
+		slog.Debug("Drops progress sync failed: could not read inventory", "error", err)
 		return
 	}
 
 	inProgress, ok := inventory["dropCampaignsInProgress"].([]interface{})
 	if !ok || inProgress == nil {
+		// A fetched inventory without an in-progress list is a legitimate state
+		// (tracked campaigns whose watching hasn't credited any minutes yet), so
+		// this counts as a completed observation reporting zero progress.
+		d.recordProgressSync(nil)
 		return
 	}
 
@@ -350,6 +405,11 @@ func (d *DropsTracker) syncProgress() {
 		}
 	}
 
+	// The inventory read completed: this is a valid progress observation
+	// whether or not anything moved — "checked and unchanged" is exactly the
+	// signal the progress watchdog counts stalls with.
+	d.recordProgressSync(nil)
+
 	if !changed {
 		return
 	}
@@ -389,6 +449,12 @@ func progressDiffers(before, after *models.Campaign) bool {
 }
 
 func (d *DropsTracker) syncCampaigns() {
+	// Serialize full syncs: the background loop and SyncNow (the progress
+	// watchdog's forced resync) must never interleave their network calls,
+	// campaign-pool swaps, and claim attempts.
+	d.fullSyncMu.Lock()
+	defer d.fullSyncMu.Unlock()
+
 	d.claimAllDropsFromInventory()
 
 	campaigns, dashboardCount, err := d.getActiveCampaigns()
@@ -967,7 +1033,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 			}
 
 			hasID := false
-			for _, id := range streamer.Stream.CampaignIDs {
+			for _, id := range streamer.Stream.GetCampaignIDs() {
 				if id == campaign.ID {
 					hasID = true
 					break
@@ -1003,7 +1069,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 			}
 		}
 
-		streamer.Stream.Campaigns = streamerCampaigns
+		streamer.Stream.SetCampaigns(streamerCampaigns)
 	}
 
 	d.loggedRestrictedAssignments = currentAssignments

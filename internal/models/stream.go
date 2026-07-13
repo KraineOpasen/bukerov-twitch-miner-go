@@ -13,12 +13,22 @@ type Stream struct {
 	Game         *Game
 	Tags         []Tag
 	ViewersCount int
-	SpadeURL     string
-	CampaignIDs  []string
-	Campaigns    []*Campaign
+
+	// CampaignIDs and Campaigns are written concurrently (api client refresh,
+	// drops sync) and read from other goroutines (watcher selection, drops
+	// intersection, progress watchdog). Production code must go through
+	// SetCampaignIDs/GetCampaignIDs and SetCampaigns/GetCampaigns; direct field
+	// access is tolerated only in single-goroutine test setup.
+	CampaignIDs []string
+	Campaigns   []*Campaign
 
 	WatchStreakMissing bool
 	MinuteWatched      float64
+
+	// spadeURL is written by the api client (stream bring-up, session refresh)
+	// and read by the minute sender and health probes on other goroutines —
+	// unexported so every access takes the lock.
+	spadeURL string
 
 	payload              []MinuteWatchedEvent
 	lastUpdate           time.Time
@@ -73,6 +83,64 @@ func (s *Stream) UpdateElapsed() time.Duration {
 		return 0
 	}
 	return time.Since(s.lastUpdate)
+}
+
+// ForceUpdateRequired invalidates the last-update timestamp so the next
+// UpdateRequired() reports true immediately, bypassing the 2-minute refresh
+// gate. Used by the progress-watchdog session refresh, which must re-fetch
+// stream info on demand rather than wait out the gate.
+func (s *Stream) ForceUpdateRequired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUpdate = time.Time{}
+}
+
+// GetSpadeURL returns the spade endpoint discovered for this stream ("" until
+// the api client has fetched it).
+func (s *Stream) GetSpadeURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.spadeURL
+}
+
+// SetSpadeURL records the spade endpoint (api client only).
+func (s *Stream) SetSpadeURL(url string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spadeURL = url
+}
+
+// GetCampaignIDs returns the campaign IDs Twitch currently advertises on this
+// channel. The returned slice is replaced wholesale by SetCampaignIDs and its
+// elements are immutable — callers may iterate but must not mutate.
+func (s *Stream) GetCampaignIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.CampaignIDs
+}
+
+// SetCampaignIDs replaces the advertised campaign ID list (api client only).
+func (s *Stream) SetCampaignIDs(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CampaignIDs = ids
+}
+
+// GetCampaigns returns the tracked campaigns assigned to this channel by the
+// drops tracker. The slice is replaced wholesale by SetCampaigns and the
+// campaigns are immutable after publish (see Campaign.Clone) — callers may
+// read but must not mutate.
+func (s *Stream) GetCampaigns() []*Campaign {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Campaigns
+}
+
+// SetCampaigns replaces the assigned tracked campaigns (drops tracker only).
+func (s *Stream) SetCampaigns(campaigns []*Campaign) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Campaigns = campaigns
 }
 
 func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game *Game) {

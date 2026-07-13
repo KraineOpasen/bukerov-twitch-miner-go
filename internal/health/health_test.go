@@ -46,7 +46,7 @@ func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) {
 	atomic.AddInt32(&f.checks, 1)
 	if f.online {
 		s.SetOnline()
-		s.Stream.SpadeURL = f.spade
+		s.Stream.SetSpadeURL(f.spade)
 	} else {
 		s.SetOffline()
 	}
@@ -62,6 +62,8 @@ type fakeProber struct {
 	entered chan struct{} // signaled once Probe is entered
 	waitCtx bool          // if true, Probe waits for ctx.Done
 }
+
+func (f *fakeProber) callCount() int32 { return atomic.LoadInt32(&f.calls) }
 
 func (f *fakeProber) Probe(ctx context.Context, _ *models.Streamer) watcher.ProbeResult {
 	atomic.AddInt32(&f.calls, 1)

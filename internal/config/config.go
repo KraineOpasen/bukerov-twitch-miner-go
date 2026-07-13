@@ -150,8 +150,14 @@ type DebugSettings struct {
 	Port    int  `json:"port"`
 }
 
-// HealthSettings configures the watch-transport accrual canary (see the Health
-// Center). It is disabled by default and inert until a canary channel is set.
+// HealthSettings configures the watch-transport accrual canary and the
+// drop-progress watchdog (see the Health Center).
+//
+// Note the deliberate default asymmetry: the canary is OPT-IN (it costs one
+// real beacon per check and needs an operator-chosen channel), while the
+// watchdog is OPT-OUT (its detection is purely passive reads of state the
+// miner already has, and its recovery stages run only after a conservatively
+// confirmed stall — accrual correctness is the miner's first priority).
 type HealthSettings struct {
 	// CanaryEnabled turns on the scheduled canary. Even when off, a channel can
 	// still be probed on demand via "Run canary now".
@@ -167,6 +173,28 @@ type HealthSettings struct {
 	// the watch transport has not been confirmed for this long (clamped to
 	// [1, 168]).
 	CanaryMaxStalenessHours int `json:"canaryMaxStalenessHours"`
+
+	// WatchdogEnabled turns on the drop-progress watchdog: stall detection for
+	// tracked drops plus the staged automatic recovery pipeline. Enabled by
+	// default (see the asymmetry note above).
+	WatchdogEnabled bool `json:"watchdogEnabled"`
+	// WatchdogStallDelayMinutes is the minimum wall time a drop's minutes must
+	// be flat before a stall can confirm (clamped to [10, 120]). Twitch credits
+	// minutes in ~15-minute batches, so values below that invite false alarms.
+	WatchdogStallDelayMinutes int `json:"watchdogStallDelayMinutes"`
+	// WatchdogStallConfirmations is how many consecutive completed inventory
+	// observations must report no progress before a stall confirms (clamped to
+	// [2, 10]).
+	WatchdogStallConfirmations int `json:"watchdogStallConfirmations"`
+	// WatchdogRecoveryCooldownMinutes is the minimum gap between two recovery
+	// stage executions (clamped to [1, 60]).
+	WatchdogRecoveryCooldownMinutes int `json:"watchdogRecoveryCooldownMinutes"`
+	// WatchdogAvoidTTLMinutes is how long the channel-switch recovery stage
+	// excludes a channel from watch selection (clamped to [10, 360]).
+	WatchdogAvoidTTLMinutes int `json:"watchdogAvoidTTLMinutes"`
+	// WatchdogRearmHours is how long an exhausted (STALLED) episode waits
+	// before the recovery pipeline may run again (clamped to [1, 48]).
+	WatchdogRearmHours int `json:"watchdogRearmHours"`
 }
 
 // DiscordSettings contains Discord integration configuration.
@@ -259,6 +287,16 @@ func DefaultHealthSettings() HealthSettings {
 		CanaryChannel:           "",
 		CanaryIntervalMinutes:   360, // 6h
 		CanaryMaxStalenessHours: 48,
+
+		// Watchdog defaults are conservative on purpose: Twitch credits drop
+		// minutes in ~15-minute batches, so 20 minutes of silence across 3
+		// clean inventory observations is required before recovery starts.
+		WatchdogEnabled:                 true,
+		WatchdogStallDelayMinutes:       20,
+		WatchdogStallConfirmations:      3,
+		WatchdogRecoveryCooldownMinutes: 5,
+		WatchdogAvoidTTLMinutes:         60,
+		WatchdogRearmHours:              6,
 	}
 }
 
@@ -473,5 +511,35 @@ func ValidateConfig(config *Config) {
 	// mirroring the rotation max>=min clamp above.
 	if minStalenessHours := (config.Health.CanaryIntervalMinutes + 59) / 60; config.Health.CanaryMaxStalenessHours < minStalenessHours {
 		config.Health.CanaryMaxStalenessHours = minStalenessHours
+	}
+
+	// Drop-progress watchdog: stall delay in [10, 120] minutes (below ~15 the
+	// normal Twitch crediting batch cadence would trip false alarms),
+	// confirmations in [2, 10], recovery cooldown in [1, 60] minutes, avoid TTL
+	// in [10, 360] minutes, rearm in [1, 48] hours.
+	if config.Health.WatchdogStallDelayMinutes < 10 {
+		config.Health.WatchdogStallDelayMinutes = 10
+	} else if config.Health.WatchdogStallDelayMinutes > 120 {
+		config.Health.WatchdogStallDelayMinutes = 120
+	}
+	if config.Health.WatchdogStallConfirmations < 2 {
+		config.Health.WatchdogStallConfirmations = 2
+	} else if config.Health.WatchdogStallConfirmations > 10 {
+		config.Health.WatchdogStallConfirmations = 10
+	}
+	if config.Health.WatchdogRecoveryCooldownMinutes < 1 {
+		config.Health.WatchdogRecoveryCooldownMinutes = 1
+	} else if config.Health.WatchdogRecoveryCooldownMinutes > 60 {
+		config.Health.WatchdogRecoveryCooldownMinutes = 60
+	}
+	if config.Health.WatchdogAvoidTTLMinutes < 10 {
+		config.Health.WatchdogAvoidTTLMinutes = 10
+	} else if config.Health.WatchdogAvoidTTLMinutes > 360 {
+		config.Health.WatchdogAvoidTTLMinutes = 360
+	}
+	if config.Health.WatchdogRearmHours < 1 {
+		config.Health.WatchdogRearmHours = 1
+	} else if config.Health.WatchdogRearmHours > 48 {
+		config.Health.WatchdogRearmHours = 48
 	}
 }

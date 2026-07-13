@@ -501,7 +501,13 @@ Generate a sample config with all options:
     "canaryEnabled": false,
     "canaryChannel": "",
     "canaryIntervalMinutes": 360,
-    "canaryMaxStalenessHours": 48
+    "canaryMaxStalenessHours": 48,
+    "watchdogEnabled": true,
+    "watchdogStallDelayMinutes": 20,
+    "watchdogStallConfirmations": 3,
+    "watchdogRecoveryCooldownMinutes": 5,
+    "watchdogAvoidTTLMinutes": 60,
+    "watchdogRearmHours": 6
   }
 }
 ```
@@ -553,6 +559,43 @@ next probe starts fresh.
 
 Transitions (healthy→failed, failed→recovered) send one operator notification via
 the configured providers; repeated same-state results never spam.
+
+### Drop Progress Watchdog
+
+The **drop-progress watchdog** catches the failure the connection watchdog can't:
+OAuth works, GQL works, the channel is online, minute-watched beacons are
+accepted, the campaign is active — **and the drop's minutes still don't move**.
+
+A stall is confirmed only when *every* condition holds at once (deliberately
+conservative — Twitch credits minutes in ~15-minute batches, so silence alone is
+never enough): the drop is active and not claimable/claimed, the campaign hasn't
+ended, the farming channel really holds a watch slot and hasn't switched games,
+the campaign is still assigned to it, watch reports are demonstrably delivered,
+several consecutive inventory checks completed *successfully* without progress,
+more than `watchdogStallDelayMinutes` passed, and Twitch itself shows no outage.
+
+Confirmed stalls trigger a **finite, staged recovery pipeline** (one bounded,
+cooldown-limited stage at a time, visible in `/debug/snapshot`): forced
+lightweight inventory sync → full campaign resync (incl. campaign/channel
+intersection) → stream-info refresh → stage-instrumented watch-transport probe
+(playback token + playlist + beacon — nothing is cached, so "refresh" means a
+verified fresh fetch) → full watch-session recreate (spade URL + payload) →
+temporary channel exclusion so the slot broker switches to the next eligible
+channel → one critical operator notification. The pipeline never loops; progress
+resuming at any point resets everything (and notifies recovery if a stall alert
+went out).
+
+The Drops page shows a per-campaign badge — **HEALTHY** (last progress, channel),
+**RECOVERING** (flat spell, delivered reports, current stage), **STALLED**
+(recovery exhausted, last attempt) — and the Health Center's *Drops Progress*
+signal reports the same as `OK`/`STALLED`.
+
+> Default asymmetry with the canary: the canary is **opt-in** (it costs one real
+> beacon per check and needs an operator-chosen channel), while the watchdog is
+> **opt-out** (`watchdogEnabled: true` by default) — its detection is purely
+> passive reads of state the miner already has, and recovery only runs after a
+> conservatively confirmed stall. Accrual correctness is the miner's first
+> priority, so it self-monitors out of the box.
 
 ### Priority System
 

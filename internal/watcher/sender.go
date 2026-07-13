@@ -136,7 +136,8 @@ func spadeFormBody(payload string) string {
 // Extracted verbatim from Send's former inline body — same order, same error
 // messages, same accepted statuses (204/200) — so Send's behavior is unchanged.
 func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer) (int, error) {
-	if streamer.Stream.SpadeURL == "" {
+	spadeURL := streamer.Stream.GetSpadeURL()
+	if spadeURL == "" {
 		return 0, fmt.Errorf("no spade URL")
 	}
 
@@ -145,7 +146,7 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 		return 0, fmt.Errorf("failed to encode payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", streamer.Stream.SpadeURL, strings.NewReader(spadeFormBody(payload)))
+	req, err := http.NewRequestWithContext(ctx, "POST", spadeURL, strings.NewReader(spadeFormBody(payload)))
 	if err != nil {
 		return 0, err
 	}

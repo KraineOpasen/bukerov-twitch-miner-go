@@ -53,6 +53,13 @@ type HealthProvider interface {
 	ApplyHealthSettings(config.HealthSettings)
 }
 
+// DropProgressProvider exposes the drop-progress watchdog's published per-drop
+// state so the Drops page can render HEALTHY/RECOVERING/STALLED badges.
+// Satisfied by the miner.
+type DropProgressProvider interface {
+	DropProgress() health.ProgressSnapshot
+}
+
 // RewardsProvider exposes custom channel-points reward listing/redemption and
 // per-streamer auto-redeem configuration to the dashboard. It's satisfied by
 // the miner, which owns the API client and streamer state.
@@ -104,6 +111,7 @@ type Server struct {
 	campaignsProvider       CampaignsProvider
 	discoveryProvider       DiscoveryProvider
 	healthProvider          HealthProvider
+	dropProgressProvider    DropProgressProvider
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
 	predictionControl       PredictionControlProvider
@@ -244,6 +252,12 @@ func (s *Server) SetHealthProvider(provider HealthProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.healthProvider = provider
+}
+
+func (s *Server) SetDropProgressProvider(provider DropProgressProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropProgressProvider = provider
 }
 
 func (s *Server) SetRewardsProvider(provider RewardsProvider) {
