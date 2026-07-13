@@ -1,0 +1,31 @@
+services:
+  twitch-miner:
+    image: ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
+    container_name: twitch-miner
+    # restart: unless-stopped is REQUIRED for auto-update to work: when the
+    # miner downloads a new release it replaces its own binary and exits 0,
+    # relying on this restart policy to bring the container back up on the new
+    # version. Without it the container would simply stop after an update.
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # Self-update between releases. The image ships with this enabled; set it
+      # to "false" to pin the container to its current binary.
+      AUTO_UPDATE: "true"
+      # How often to check GitHub Releases for a newer version. Accepts a Go
+      # duration ("12h", "6h30m") or a bare number of hours ("12"). Default 8h.
+      AUTO_UPDATE_CHECK_INTERVAL: "8h"
+      # Optional: protect the dashboard with HTTP Basic Auth.
+      # DASHBOARD_USERNAME: "admin"
+      # DASHBOARD_PASSWORD: "change-me"
+    volumes:
+      - ./config:/config
+      - ./cookies:/cookies
+      - ./logs:/logs
+      - ./database:/database
+    labels:
+      # Exclude this container from Watchtower. The miner updates itself now, so
+      # Watchtower must not also recreate it (that would fight the self-update
+      # and drop the writable layer holding the freshly downloaded binary).
+      com.centurylinklabs.watchtower.enable: "false"
