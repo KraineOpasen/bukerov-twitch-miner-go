@@ -355,6 +355,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/notifications/points", s.handleAPINotificationsPoints)
 	mux.HandleFunc("/api/notifications/points/", s.handleAPINotificationsPointsDelete)
 	mux.HandleFunc("/api/notifications/test", s.handleAPINotificationsTest)
+	mux.HandleFunc("/api/test-notification", s.handleAPITestNotification)
 
 	if authEnabled() {
 		return basicAuthMiddleware(mux)

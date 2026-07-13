@@ -29,6 +29,7 @@ type Config struct {
 	Logger              LoggerSettings          `json:"logger"`
 	Analytics           AnalyticsSettings       `json:"analytics"`
 	Discord             DiscordSettings         `json:"discord"`
+	Notifications       NotificationsSettings   `json:"notifications"`
 	Debug               DebugSettings           `json:"debug"`
 
 	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
@@ -151,6 +152,59 @@ type DiscordSettings struct {
 	GuildID  string `json:"guildId"`
 }
 
+// NotificationsSettings holds provider-agnostic notification settings that are
+// not per-provider connection secrets (those live in environment variables for
+// the push providers). Currently it carries the event batching configuration.
+type NotificationsSettings struct {
+	// Batching is the global batching configuration applied to every push
+	// provider unless overridden per-provider.
+	Batching BatchingSettings `json:"batching"`
+
+	// ProviderBatching optionally overrides the global batching config for a
+	// specific push provider, keyed by provider name ("matrix", "pushover",
+	// "gotify", "webhook"). A missing key means the global config applies.
+	ProviderBatching map[string]BatchingSettings `json:"providerBatching,omitempty"`
+}
+
+// BatchingSettings configures how notification events are grouped before being
+// delivered to a push provider. When disabled, every event is sent immediately.
+type BatchingSettings struct {
+	// Enabled turns batching on. When false, events are delivered as they
+	// arrive (one message per event).
+	Enabled bool `json:"enabled"`
+
+	// Interval is how often accumulated batches are flushed, expressed as a Go
+	// duration string (e.g. "30m", "5m", "90s"). Invalid or empty values fall
+	// back to the default interval.
+	Interval string `json:"interval"`
+
+	// MaxEntries caps how many event lines a single flushed message may
+	// contain; batches larger than this are split across several messages.
+	MaxEntries int `json:"maxEntries"`
+
+	// ImmediateEvents lists event type identifiers that always bypass batching
+	// and are delivered instantly (e.g. "drop_claim", "bet_win", "bet_lose").
+	ImmediateEvents []string `json:"immediateEvents,omitempty"`
+}
+
+// DefaultNotificationsSettings returns the default (batching disabled)
+// notification settings.
+func DefaultNotificationsSettings() NotificationsSettings {
+	return NotificationsSettings{
+		Batching: DefaultBatchingSettings(),
+	}
+}
+
+// DefaultBatchingSettings returns sensible defaults for event batching.
+func DefaultBatchingSettings() BatchingSettings {
+	return BatchingSettings{
+		Enabled:         false,
+		Interval:        "30m",
+		MaxEntries:      20,
+		ImmediateEvents: []string{"drop_claim", "bet_win", "bet_lose"},
+	}
+}
+
 func DefaultConfig() Config {
 	return Config{
 		ClaimDropsOnStartup: false,
@@ -161,6 +215,7 @@ func DefaultConfig() Config {
 		Logger:              DefaultLoggerSettings(),
 		Analytics:           DefaultAnalyticsSettings(),
 		Discord:             DefaultDiscordSettings(),
+		Notifications:       DefaultNotificationsSettings(),
 		Debug:               DefaultDebugSettings(),
 	}
 }

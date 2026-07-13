@@ -297,8 +297,8 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	streamerNames := m.streamers.Names()
 
-	if m.config.Discord.Enabled {
-		notifMgr, err := notifications.NewManager(&m.config.Discord, m.db, streamerNames)
+	if m.config.Discord.Enabled || notifications.AnyMessageProviderConfigured(m.config.Username) {
+		notifMgr, err := notifications.NewManager(&m.config.Discord, &m.config.Notifications, m.db, streamerNames, m.config.Username)
 		if err != nil {
 			slog.Error("Failed to create notification manager", "error", err)
 		} else {
@@ -837,6 +837,8 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
 
 	discordCfg := m.config.Discord
+	notifCfg := m.config.Notifications
+	notifUsername := m.config.Username
 	notifMgr := m.notifications
 	webServer := m.webServer
 	wsPool := m.wsPool
@@ -891,7 +893,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 			slog.Error("Failed to update Discord config", "error", err)
 		}
 	} else if discordCfg.Enabled && !oldDiscordEnabled {
-		newNotifMgr, err := notifications.NewManager(&discordCfg, m.db, m.streamers.Names())
+		newNotifMgr, err := notifications.NewManager(&discordCfg, &notifCfg, m.db, m.streamers.Names(), notifUsername)
 		if err != nil {
 			slog.Error("Failed to create notification manager", "error", err)
 		} else {
