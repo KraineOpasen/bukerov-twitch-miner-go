@@ -19,6 +19,7 @@ const (
 	ColorReauthRequired     = 0xFF0000 // Bright red
 	ColorConnectionLost     = 0xFFA500 // Orange
 	ColorConnectionRestored = 0x00FF00 // Green
+	ColorUpdateAvailable    = 0x1E90FF // Dodger blue
 )
 
 // DiscordProvider implements the Provider interface for Discord notifications.
@@ -124,6 +125,8 @@ func (d *DiscordProvider) Send(ctx context.Context, notification Notification) e
 			color = ColorConnectionLost
 		case NotificationTypeConnectionRestored:
 			color = ColorConnectionRestored
+		case NotificationTypeUpdateAvailable:
+			color = ColorUpdateAvailable
 		default:
 			color = ColorMention
 		}

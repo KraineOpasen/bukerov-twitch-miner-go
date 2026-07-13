@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -16,6 +17,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
@@ -24,6 +26,7 @@ var (
 	configFile = flag.String("config", "config.json", "Path to configuration file")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
 	genConfig  = flag.Bool("generate-config", false, "Generate a sample configuration file")
+	autoUpdate = flag.Bool("auto-update", false, "Automatically download and apply new GitHub releases, then restart")
 )
 
 func main() {
@@ -103,6 +106,7 @@ func main() {
 	defer stop()
 
 	m := miner.New(cfg, *configFile)
+	m.ConfigureAutoUpdate(autoUpdateEnabled(), updater.ParseCheckInterval(os.Getenv("AUTO_UPDATE_CHECK_INTERVAL")))
 	if analyticsSvc != nil {
 		m.SetAnalyticsService(analyticsSvc)
 	}
@@ -113,6 +117,19 @@ func main() {
 		slog.Error("Miner error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// autoUpdateEnabled resolves whether self-update is on. The -auto-update flag
+// takes precedence; otherwise the AUTO_UPDATE env var (true/1/yes) enables it,
+// which is how the Docker image opts in without changing the entrypoint.
+func autoUpdateEnabled() bool {
+	if *autoUpdate {
+		return true
+	}
+	if v, err := strconv.ParseBool(os.Getenv("AUTO_UPDATE")); err == nil {
+		return v
+	}
+	return false
 }
 
 func setupBasicLogger(debug bool) {

@@ -126,6 +126,17 @@ The container image is published only to the GitHub Container Registry (GHCR); t
 docker pull ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
 ```
 
+### Using Docker Compose
+
+A ready-to-use [`docker-compose.yml`](docker-compose.yml) is included. It enables
+[Automatic Updates](#automatic-updates), sets `restart: unless-stopped` (required
+for updates to take effect), and excludes the container from Watchtower:
+
+```bash
+# From a directory containing docker-compose.yml and your config/ folder
+docker compose up -d
+```
+
 ---
 
 ## Option 2: Binary Download
@@ -204,6 +215,7 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 | `-config path/to/config.json` | Use a custom config file location |
 | `-debug` | Enable debug logging |
 | `-generate-config` | Generate a sample configuration file |
+| `-auto-update` | Automatically download and apply new GitHub releases, then restart (see [Automatic Updates](#automatic-updates)) |
 
 ---
 
@@ -287,6 +299,74 @@ make build-darwin-arm64 # macOS Apple Silicon
 ```bash
 make docker
 ```
+
+---
+
+## Automatic Updates
+
+The miner can keep itself up to date by checking the project's GitHub Releases,
+downloading the binary for its platform, atomically replacing its own
+executable, and exiting `0` so its supervisor (Docker restart policy or systemd)
+restarts it on the new version.
+
+> **Watchtower note:** the Docker image is deliberately excluded from
+> [Watchtower](https://containrrr.dev/watchtower/) via the
+> `com.centurylinklabs.watchtower.enable=false` label. Between releases the
+> container will **not** be recreated by Watchtower — it now updates *itself*.
+> If you previously relied on Watchtower for this container, that job is now
+> handled by the built-in updater.
+
+### Enabling it
+
+| Method | How |
+|--------|-----|
+| CLI flag | Run with `-auto-update` |
+| Env var (Docker) | Set `AUTO_UPDATE=true` (the image sets this by default) |
+
+Both are equivalent; the flag takes precedence. When enabled the miner:
+
+- Checks for a new release at startup and then every `AUTO_UPDATE_CHECK_INTERVAL`.
+- Only self-replaces when the running binary is a **clean release build**
+  (`vX.Y.Z`). Local/dev builds (`dev`, `git describe` output like
+  `v1.2.3-4-gabcdef`) are never rolled back to a release.
+- Verifies the download against the release `checksums.txt` before installing it.
+- **Never crashes on failure.** If the download or the binary swap fails (for
+  example a read-only filesystem), it logs the error and keeps mining on the
+  current version.
+
+If auto-update is **disabled** but a newer release is found, the miner just logs
+it once per check interval (and sends a Discord *system* notification if Discord
+notifications are configured) instead of updating.
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_UPDATE` | `true` (image) / unset (binary) | `true`/`1` enables self-update; equivalent to `-auto-update` |
+| `AUTO_UPDATE_CHECK_INTERVAL` | `8h` | How often to check for a new release. Go duration (`12h`, `6h30m`) or a bare number of hours (`12`). Minimum 15m |
+
+### Requirements
+
+- **`restart: unless-stopped`** (Docker) or `Restart=always` (systemd) is
+  required — after applying an update the process exits so the supervisor can
+  restart it on the new binary. The included [`docker-compose.yml`](docker-compose.yml)
+  already sets this.
+- The container's filesystem must be writable (the default). If you run with
+  `--read-only`, the swap fails gracefully and the miner keeps running on the
+  current version.
+
+### Verifying manually
+
+1. Build and publish a test release with a **higher** tag than the running
+   version (e.g. tag `v9.9.9`) so the Release workflow uploads
+   `twitch-miner-go-linux-amd64` and `checksums.txt`.
+2. Start the container with `AUTO_UPDATE=true` and a short interval, e.g.
+   `AUTO_UPDATE_CHECK_INTERVAL=15m`, and `restart: unless-stopped`.
+3. Watch the logs: within the interval you'll see
+   `Auto-update: newer release available`, then `binary replaced successfully,
+   restarting to load the new version`, and the container restarts.
+4. Confirm the new version in the startup log line
+   `Twitch Channel Points Miner version=v9.9.9` (or the dashboard footer).
 
 ---
 

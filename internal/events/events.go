@@ -23,6 +23,7 @@ const (
 	TypeMomentClaimed   Type = "moment_claimed"
 	TypeRaidJoined      Type = "raid_joined"
 	TypeRewardRedeemed  Type = "reward_redeemed"
+	TypeUpdateAvailable Type = "update_available"
 
 	// TypeDiscoverySelected/TypeDiscoverySwitched track the directory
 	// discovery slot picking its first channel and auto-switching between

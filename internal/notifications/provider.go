@@ -13,6 +13,7 @@ const (
 	NotificationTypeReauthRequired     NotificationType = "reauth_required"
 	NotificationTypeConnectionLost     NotificationType = "connection_lost"
 	NotificationTypeConnectionRestored NotificationType = "connection_restored"
+	NotificationTypeUpdateAvailable    NotificationType = "update_available"
 )
 
 // Notification represents a notification to be sent.

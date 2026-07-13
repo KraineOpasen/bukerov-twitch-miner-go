@@ -475,6 +475,44 @@ func (m *Manager) NotifyConnectionRestored() {
 	}()
 }
 
+// NotifyUpdateAvailable sends a notification that a newer miner release is
+// available. It reuses the system-notifications channel (like reauth and
+// connection-health alerts) since it is an operator-facing maintenance event.
+func (m *Manager) NotifyUpdateAvailable(current, latest, releaseURL string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	if !enabled || discord == nil {
+		return
+	}
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
+		slog.Debug("Update-available notification skipped: system notifications not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      NotificationTypeUpdateAvailable,
+		Title:     "⬆️ Miner update available",
+		Message:   fmt.Sprintf("A new version is available: **%s** → **%s**.\n%s", current, latest, releaseURL),
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send update-available notification", "error", err)
+		}
+	}()
+}
+
 // GetDiscordChannels returns available Discord channels.
 func (m *Manager) GetDiscordChannels(ctx context.Context, forceRefresh bool) ([]Channel, error) {
 	m.mu.RLock()

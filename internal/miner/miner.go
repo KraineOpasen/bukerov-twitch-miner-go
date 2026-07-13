@@ -25,7 +25,9 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
@@ -52,6 +54,13 @@ type Miner struct {
 
 	deviceID          string
 	externalAnalytics bool
+
+	// autoUpdate holds the auto-update watcher configuration set via
+	// ConfigureAutoUpdate before Run. When nil the watcher is not started.
+	autoUpdate *autoUpdateConfig
+	// shutdownFn cancels the run context so an applied binary update can ask
+	// the miner to exit cleanly (exit 0) and let the supervisor restart it.
+	shutdownFn context.CancelFunc
 
 	nextStreamCheck    time.Time
 	streamCheckTrigger chan struct{}
@@ -98,6 +107,20 @@ func New(cfg *config.Config, configPath string) *Miner {
 	}
 }
 
+// autoUpdateConfig captures the auto-update settings resolved from CLI
+// flags/env at startup.
+type autoUpdateConfig struct {
+	enabled  bool
+	interval time.Duration
+}
+
+// ConfigureAutoUpdate enables the background release-update watcher. Called
+// before Run; with enabled=false the watcher still checks periodically and
+// logs/notifies when a newer release exists, but never replaces the binary.
+func (m *Miner) ConfigureAutoUpdate(enabled bool, interval time.Duration) {
+	m.autoUpdate = &autoUpdateConfig{enabled: enabled, interval: interval}
+}
+
 func (m *Miner) SetAnalyticsService(svc *analytics.Service) {
 	m.analyticsSvc = svc
 	m.externalAnalytics = true
@@ -110,6 +133,12 @@ func (m *Miner) SetWebServer(server *web.Server) {
 // Run starts the miner and blocks until the context is cancelled.
 // The caller is responsible for handling OS signals and cancelling the context.
 func (m *Miner) Run(ctx context.Context) error {
+	// Derive a cancelable context so an applied auto-update can request a
+	// clean shutdown (which returns nil from Run -> process exits 0).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m.shutdownFn = cancel
+
 	if err := m.initialize(); err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
@@ -436,6 +465,49 @@ func (m *Miner) startMining(ctx context.Context) {
 	go m.streamCheckLoop(ctx)
 	go m.healthWatchdogLoop(ctx)
 	go m.bonusPollLoop(ctx)
+	m.startAutoUpdater(ctx)
+}
+
+// startAutoUpdater launches the background release-update watcher when it has
+// been configured via ConfigureAutoUpdate. It runs non-blocking: a failed
+// check or a failed binary swap is logged and the miner keeps running.
+func (m *Miner) startAutoUpdater(ctx context.Context) {
+	if m.autoUpdate == nil {
+		return
+	}
+
+	upd := updater.New(updater.Options{
+		Repo:           version.Repo,
+		CurrentVersion: version.Version,
+		Enabled:        m.autoUpdate.enabled,
+		CheckInterval:  m.autoUpdate.interval,
+		Notify:         m.notifyUpdateAvailable,
+		OnUpdate: func() {
+			// Cancel the run context so every component shuts down cleanly and
+			// the process exits 0; the container/service supervisor then
+			// restarts on the freshly written binary.
+			if m.shutdownFn != nil {
+				m.shutdownFn()
+			}
+		},
+	})
+
+	go upd.Run(ctx)
+}
+
+// notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
+// update-available notification. Reads the notifications manager under lock so
+// it works even if Discord was toggled on after startup.
+func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
+	events.Record(events.TypeUpdateAvailable, "", fmt.Sprintf("%s -> %s", current, latest))
+
+	m.mu.RLock()
+	notifMgr := m.notifications
+	m.mu.RUnlock()
+
+	if notifMgr != nil {
+		notifMgr.NotifyUpdateAvailable(current, latest, releaseURL)
+	}
 }
 
 // bonusPollInterval is how often the GQL polling fallback re-checks each online

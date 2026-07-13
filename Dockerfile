@@ -76,6 +76,20 @@ WORKDIR /
 # Default config path
 ENV CONFIG_PATH=/config/config.json
 
+# Auto-update is enabled by default for the container image: this image is
+# excluded from Watchtower (label com.centurylinklabs.watchtower.enable=false),
+# so the miner keeps itself current by downloading new GitHub releases and
+# atomically replacing its own binary, then exiting 0 so the restart policy
+# (restart: unless-stopped) brings it back on the new version. Set
+# AUTO_UPDATE=false to opt out, or tune AUTO_UPDATE_CHECK_INTERVAL (Go duration
+# like "12h" or a bare number of hours) to change how often it checks.
+ENV AUTO_UPDATE=true
+ENV AUTO_UPDATE_CHECK_INTERVAL=8h
+
+# Exclude this container from Watchtower: the miner now updates itself between
+# releases, so Watchtower must not also try to recreate it.
+LABEL com.centurylinklabs.watchtower.enable=false
+
 # Run the binary
 ENTRYPOINT ["/twitch-miner-go"]
 CMD ["-config", "/config/config.json"]
