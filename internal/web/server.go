@@ -52,6 +52,16 @@ type RewardsProvider interface {
 	SetAutoRedeem(username string, cfg config.AutoRedeemConfig) error
 }
 
+// OverviewProvider supplies the two pieces of live Overview state the web
+// server can't read from the streamer objects directly: the watch-slot
+// selection (from the watcher) and the tracked predictions (from the pubsub
+// pool). Both are read-only in-memory snapshots - no new Twitch calls, no
+// extra polling. Satisfied by the miner.
+type OverviewProvider interface {
+	WatchSlots() WatchSlotsView
+	LivePredictions() []LivePrediction
+}
+
 type Server struct {
 	host           string
 	port           int
@@ -73,9 +83,24 @@ type Server struct {
 	campaignsProvider       CampaignsProvider
 	discoveryProvider       DiscoveryProvider
 	rewardsProvider         RewardsProvider
+	overviewProvider        OverviewProvider
 	status                  *StatusBroadcaster
 	ready                   bool
-	mu                      sync.RWMutex
+
+	// statsCache memoises the per-streamer analytics-derived figures
+	// (points-today and points-per-hour) so the 30s Overview poll doesn't hit
+	// SQLite on every request; it is refreshed at most once per statsTTL.
+	statsCache map[string]streamerStats
+	statsAt    time.Time
+
+	mu sync.RWMutex
+}
+
+// streamerStats holds the analytics-derived numbers cached per streamer.
+type streamerStats struct {
+	pointsToday   int
+	pointsPerHour int
+	hasRate       bool
 }
 
 func NewServer(analyticsSettings config.AnalyticsSettings, username string, basePath string, analyticsSvc *analytics.Service, streamers []*models.Streamer) *Server {
@@ -117,7 +142,7 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 func loadTemplates() map[string]*template.Template {
 	templates := make(map[string]*template.Template)
 
-	pages := []string{"dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html"}
+	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html"}
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(templatesFS,
 			"templates/base.html",
@@ -198,6 +223,12 @@ func (s *Server) SetRewardsProvider(provider RewardsProvider) {
 	s.rewardsProvider = provider
 }
 
+func (s *Server) SetOverviewProvider(provider OverviewProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.overviewProvider = provider
+}
+
 func (s *Server) SetDiscordEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -241,6 +272,31 @@ func basicAuthMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) Start() {
+	handler := s.handler()
+
+	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	if authEnabled() {
+		slog.Info("Web server authentication enabled")
+	}
+
+	s.server = &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+
+	slog.Info("Web server starting", "url", "http://"+addr+"/")
+
+	go func() {
+		if err := s.server.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("Web server error", "error", err)
+		}
+	}()
+}
+
+// handler builds the full route mux (and wraps it in basic-auth middleware
+// when configured). Split out from Start so it can be exercised directly in
+// tests and tooling.
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Static files
@@ -255,6 +311,15 @@ func (s *Server) Start() {
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/streamer/", s.handleStreamerPage)
 	mux.HandleFunc("/api/streamers", s.handleAPIStreamers)
+
+	// Overview (redesigned dashboard) routes. /api/overview returns the live
+	// content partial swapped by htmx; /api/overview/events returns the recent
+	// events for one streamer (card drawer); the quick-action endpoint reuses
+	// the existing settings pipeline.
+	mux.HandleFunc("/api/overview", s.handleAPIOverview)
+	mux.HandleFunc("/api/now-watching", s.handleAPINowWatching)
+	mux.HandleFunc("/api/overview/events/", s.handleAPIOverviewEvents)
+	mux.HandleFunc("/api/streamer-action/", s.handleAPIStreamerQuickAction)
 
 	// Custom channel-points rewards (per-streamer): list, redeem, auto-redeem
 	// config. The "/api/streamer/" subtree is distinct from the exact
@@ -291,26 +356,10 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/notifications/points/", s.handleAPINotificationsPointsDelete)
 	mux.HandleFunc("/api/notifications/test", s.handleAPINotificationsTest)
 
-	addr := fmt.Sprintf("%s:%d", s.host, s.port)
-
-	var handler http.Handler = mux
 	if authEnabled() {
-		handler = basicAuthMiddleware(mux)
-		slog.Info("Web server authentication enabled")
+		return basicAuthMiddleware(mux)
 	}
-
-	s.server = &http.Server{
-		Addr:    addr,
-		Handler: handler,
-	}
-
-	slog.Info("Web server starting", "url", "http://"+addr+"/")
-
-	go func() {
-		if err := s.server.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("Web server error", "error", err)
-		}
-	}()
+	return mux
 }
 
 func (s *Server) Stop() {

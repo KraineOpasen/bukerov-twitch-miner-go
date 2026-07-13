@@ -19,57 +19,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo := s.analytics.Repository()
-	streamers, err := repo.ListStreamers()
-	if err != nil {
-		slog.Error("Failed to list streamers", "error", err)
-		writeInternalError(w, "Internal error")
-		return
-	}
-
-	totalPoints := 0
-	pointsToday := 0
-	todayStart := time.Now().Truncate(24 * time.Hour)
-
-	for _, info := range streamers {
-		totalPoints += info.Points
-
-		data, err := repo.GetStreamerData(info.Name)
-		if err != nil {
-			continue
-		}
-		todayStartMS := todayStart.UnixMilli()
-		for i := len(data.Series) - 1; i >= 0; i-- {
-			if data.Series[i].X < todayStartMS {
-				if i+1 < len(data.Series) {
-					pointsToday += info.Points - data.Series[i+1].Y
-				}
-				break
-			}
-			if i == 0 && len(data.Series) > 0 {
-				pointsToday += info.Points - data.Series[0].Y
-			}
-		}
-	}
-
-	s.mu.RLock()
-	refresh := s.refresh
-	discordEnabled := s.discordEnabled
-	debugURL := s.debugURL
-	s.mu.RUnlock()
-
-	data := DashboardData{
-		Username:       s.username,
-		RefreshMinutes: refresh,
-		Version:        version.Version,
-		TotalPoints:    util.FormatNumber(totalPoints),
-		StreamerCount:  len(streamers),
-		PointsToday:    util.FormatNumber(pointsToday),
-		DiscordEnabled: discordEnabled,
-		DebugURL:       debugURL,
-	}
-
-	s.renderPage(w, "dashboard.html", data)
+	// The redesigned Overview renders its live content (header stats, ticker,
+	// predictions board, streamer grid) from the /api/overview partial on
+	// load; the page shell just needs the chrome data.
+	data := s.buildOverviewData()
+	s.renderPage(w, "overview.html", data)
 }
 
 func (s *Server) handleStreamerPage(w http.ResponseWriter, r *http.Request) {

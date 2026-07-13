@@ -245,6 +245,13 @@ func (w *MinuteWatcher) getOnlineStreamers() []int {
 	var online []int
 	for i, s := range w.streamers {
 		if s.GetIsOnline() {
+			// DisableWatch is a hard opt-out: the streamer stays tracked and
+			// online for display, but never becomes a watch-slot candidate -
+			// even when it's the only online channel (unlike PreferenceAvoid).
+			if s.GetSettings().DisableWatch {
+				w.noteSelection(i, "watching disabled for this streamer in its settings")
+				continue
+			}
 			if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
 				online = append(online, i)
 			} else {

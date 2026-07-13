@@ -2,6 +2,78 @@
 
 @source "../../../templates";
 
+/* Vendored variable fonts (embedded, served from /static/fonts) so the
+   single-binary/scratch build needs no network at runtime. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/static/fonts/inter.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono.woff2") format("woff2");
+}
+
+/* Single dark theme. The neutral/purple/amber/green/red scale values are
+   overridden to the project palette so the whole existing app (settings,
+   drops, streamer, notifications) is reskinned without touching every
+   utility, while dedicated semantic tokens drive the new Overview. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Backgrounds / surfaces */
+  --color-neutral-950: #131319;
+  --color-neutral-900: #1a1b22; /* main background */
+  --color-neutral-800: #232430; /* card background */
+  --color-neutral-700: #3a3b47; /* borders / offline outline */
+  --color-neutral-600: #4a4b57;
+  --color-neutral-500: #6b6a78;
+  --color-neutral-400: #9c9aab; /* secondary text */
+  --color-neutral-300: #b8b6c4;
+  --color-neutral-200: #d4d2de;
+  --color-neutral-100: #e8e6ef; /* primary text */
+
+  /* Accent (online outline / interactive) */
+  --color-purple-700: #6a5eb8;
+  --color-purple-600: #7a6ec4;
+  --color-purple-500: #8b7fd1; /* online outline */
+  --color-purple-400: #a79ddd;
+  --color-purple-300: #c3bce9;
+
+  /* Active event / drop / prediction */
+  --color-amber-700: #c78e4a;
+  --color-amber-600: #d9a25c;
+  --color-amber-500: #e0b074;
+
+  /* Success / gain */
+  --color-green-600: #7fa88c;
+  --color-green-500: #7fa88c;
+  --color-emerald-600: #7fa88c;
+  --color-emerald-500: #8fb89c;
+
+  /* Error / warning */
+  --color-red-700: #b56a52;
+  --color-red-600: #c97b63;
+  --color-red-500: #c97b63;
+
+  /* Dedicated semantic tokens */
+  --color-sidebar: #15161c;
+  --color-online: #8b7fd1;
+  --color-offline: #3a3b47;
+  --color-streamer: #e8c48a;
+  --color-event: #d9a25c;
+  --color-success: #7fa88c;
+  --color-danger: #c97b63;
+  --color-text: #e8e6ef;
+  --color-text-dim: #9c9aab;
+}
+
 @utility btn-primary {
   @apply bg-purple-600 text-white hover:bg-purple-700 px-4 py-2 rounded-md font-medium transition-colors;
 }
@@ -173,4 +245,252 @@
 
 .streamer-item.dragging {
   @apply opacity-50 border-purple-500;
+}
+
+/* =====================================================================
+   Overview redesign — layout, card states, ticker, predictions board.
+   Plain CSS (selectors / keyframes / media queries) using the @theme
+   custom properties above. Single dark theme.
+   ===================================================================== */
+
+/* Numeric readout: JetBrains Mono + tabular figures for points/timers/%. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* App shell: fixed sidebar + fluid main. */
+.app-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  min-height: 100vh;
+}
+.app-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  background: var(--color-sidebar);
+  border-right: 1px solid var(--color-neutral-700);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.app-main {
+  min-width: 0;
+  padding: 1.25rem 1.5rem 2rem;
+}
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .app-sidebar {
+    position: fixed;
+    z-index: 60;
+    width: 240px;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  .app-sidebar.is-open { transform: translateX(0); }
+  .app-main { padding: 1rem; }
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.1rem 0.5rem;
+  border-radius: 0.5rem;
+  color: var(--color-neutral-300);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-link:hover { background: rgba(139, 127, 209, 0.12); color: var(--color-neutral-100); }
+.sidebar-link.is-active {
+  background: rgba(139, 127, 209, 0.16);
+  color: var(--color-neutral-100);
+  box-shadow: inset 3px 0 0 var(--color-online);
+}
+.sidebar-link svg { width: 18px; height: 18px; flex: none; }
+
+/* Pinned "Now Watching" block. */
+.now-watching {
+  margin-top: auto;
+  border-top: 1px solid var(--color-neutral-700);
+  padding: 0.75rem;
+}
+.watch-slot {
+  border: 1px solid var(--color-neutral-700);
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0.5rem;
+  background: rgba(35, 36, 48, 0.6);
+}
+.watch-slot.is-watching { border-color: var(--color-online); box-shadow: 0 0 0 1px rgba(139,127,209,0.35); }
+.watch-slot.is-queued { border-style: dashed; opacity: 0.75; }
+.watch-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+.watch-dot.on { background: var(--color-online); box-shadow: 0 0 6px rgba(139,127,209,0.8); }
+.watch-dot.queue { background: transparent; border: 1.5px solid var(--color-neutral-500); }
+
+/* Responsive, container-reactive card grid: ~6 cols @2560 down to 1 @390,
+   never overflows horizontally. */
+.card-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+}
+
+/* Streamer card + state system. State is conveyed by border, an indicator
+   shape, and a text label — never by colour alone. */
+.s-card {
+  position: relative;
+  background: var(--color-neutral-800);
+  border: 1px solid var(--color-offline);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  cursor: pointer;
+  outline: none;
+}
+.s-card:hover { transform: translateY(-2px); border-color: var(--color-purple-400); }
+.s-card:focus-visible { box-shadow: 0 0 0 2px var(--color-online); border-color: var(--color-online); }
+.s-card.state-online, .s-card.state-watching, .s-card.state-queued { border-color: var(--color-online); }
+.s-card.state-watching { box-shadow: 0 0 0 1px rgba(139,127,209,0.45), 0 0 14px rgba(139,127,209,0.25); }
+.s-card.state-queued { border-style: dashed; }
+.s-card.state-offline { border-color: var(--color-offline); }
+.s-card.state-disabled { border-color: var(--color-offline); opacity: 0.6; border-style: dotted; }
+
+.s-name { color: var(--color-streamer); font-weight: 600; }
+.s-points { color: var(--color-neutral-100); }
+
+/* State / preference badges. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.4rem;
+  border-radius: 0.3rem;
+  line-height: 1.4;
+}
+.badge-watching { background: rgba(139,127,209,0.18); color: var(--color-purple-300); }
+.badge-queued { background: rgba(156,154,171,0.15); color: var(--color-neutral-300); }
+.badge-offline { background: rgba(58,59,71,0.5); color: var(--color-neutral-400); }
+.badge-disabled { background: rgba(201,123,99,0.15); color: var(--color-danger); }
+.badge-prefer { background: rgba(127,168,140,0.18); color: var(--color-success); }
+.badge-avoid { background: rgba(201,123,99,0.18); color: var(--color-danger); }
+.badge-event { background: rgba(217,162,92,0.16); color: var(--color-event); }
+.badge-gain { color: var(--color-success); }
+
+/* Progress bars. */
+.bar { height: 6px; width: 100%; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
+.bar > span { display: block; height: 100%; border-radius: 999px; }
+.bar-drop > span { background: var(--color-event); }
+.bar-streak > span { background: var(--color-online); }
+.bar-goal > span { background: var(--color-success); }
+
+/* Quick actions on cards. */
+.qa-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 0.4rem;
+  border: 1px solid var(--color-neutral-700);
+  color: var(--color-neutral-300); background: rgba(26,27,34,0.6);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.qa-btn:hover { color: var(--color-neutral-100); border-color: var(--color-purple-400); background: rgba(139,127,209,0.12); }
+.qa-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+.qa-btn.is-on { color: var(--color-online); border-color: var(--color-online); }
+.qa-btn.is-danger { color: var(--color-danger); border-color: var(--color-danger); }
+
+/* Events ticker: seamless marquee, pause on hover. */
+.ticker {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-neutral-800);
+  border: 1px solid var(--color-neutral-700);
+  border-radius: 0.6rem;
+  padding: 0.4rem 0;
+  white-space: nowrap;
+}
+.ticker-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 2rem;
+  padding-left: 100%;
+  animation: ticker-scroll 40s linear infinite;
+}
+.ticker:hover .ticker-track { animation-play-state: paused; }
+.ticker-item { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+.ticker-sep { color: var(--color-neutral-600); }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+
+/* Predictions board. */
+.pred-board { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
+.pred-card {
+  background: var(--color-neutral-800);
+  border: 1px solid var(--color-neutral-700);
+  border-left: 3px solid var(--color-event);
+  border-radius: 0.6rem;
+  padding: 0.75rem 0.85rem;
+}
+.pred-card.is-locked { border-left-color: var(--color-danger); }
+.pred-outcome { display: grid; grid-template-columns: 1fr auto; gap: 0.25rem 0.75rem; align-items: center; margin-top: 0.4rem; }
+.pred-outcome.chosen { background: rgba(139,127,209,0.1); border-radius: 0.35rem; padding: 0.15rem 0.35rem; }
+.pred-obar { height: 5px; grid-column: 1 / -1; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
+.pred-obar > span { display: block; height: 100%; border-radius: 999px; background: var(--color-online); }
+.pred-empty, .board-empty {
+  border: 1px dashed var(--color-neutral-700);
+  border-radius: 0.6rem;
+  padding: 1.25rem;
+  text-align: center;
+  color: var(--color-neutral-400);
+  font-size: 0.9rem;
+}
+
+/* Stale-data affordance. */
+.is-stale { position: relative; }
+.stale-pill {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.7rem; font-weight: 600;
+  color: var(--color-danger);
+  background: rgba(201,123,99,0.12);
+  border: 1px solid rgba(201,123,99,0.4);
+  padding: 0.15rem 0.5rem; border-radius: 999px;
+}
+
+/* Skeleton loading shimmer. */
+.skeleton {
+  background: linear-gradient(90deg, rgba(58,59,71,0.35) 25%, rgba(74,75,87,0.55) 37%, rgba(58,59,71,0.35) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: 0.4rem;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* Card drawer (recent events). */
+.drawer-row {
+  display: flex; justify-content: space-between; gap: 1rem;
+  padding: 0.4rem 0; border-bottom: 1px solid var(--color-neutral-700);
+  font-size: 0.85rem;
+}
+.drawer-row:last-child { border-bottom: 0; }
+
+/* Respect reduced-motion: no marquee, no transforms, static shimmer. */
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track { animation: none; padding-left: 0; flex-wrap: wrap; white-space: normal; }
+  .ticker { white-space: normal; }
+  .skeleton { animation: none; }
+  .s-card, .s-card:hover { transition: none; transform: none; }
+  .app-sidebar { transition: none; }
+  * { scroll-behavior: auto !important; }
 }

@@ -78,6 +78,10 @@ type StreamerSettingsConfig struct {
 	Chat                    *string          `json:"chat,omitempty"`
 	Bet                     *BetSettingsJSON `json:"bet,omitempty"`
 	Preference              *string          `json:"preference,omitempty"`
+	// DisableWatch hard-excludes the streamer from the watch rotation (see
+	// models.StreamerSettings.DisableWatch). Pointer so an unset value falls
+	// back to DefaultSettings rather than forcing false.
+	DisableWatch *bool `json:"disableWatch,omitempty"`
 }
 
 // BetSettingsJSON contains prediction betting configuration with pointer fields for partial overrides.

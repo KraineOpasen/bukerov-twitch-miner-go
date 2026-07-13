@@ -1,6 +1,10 @@
 package web
 
-import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+import (
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+)
 
 type StreamerInfo struct {
 	Name                  string `json:"name"`
@@ -26,6 +30,179 @@ type StreamerInfo struct {
 	CampaignDropName    string `json:"campaign_drop_name,omitempty"`
 	CampaignPercent     int    `json:"campaign_percent,omitempty"`
 	CampaignMinutesInfo string `json:"campaign_minutes_info,omitempty"`
+
+	// --- Overview redesign additions (all sourced from in-memory state) ---
+
+	// State is the single card lifecycle state used by the Overview card, one
+	// of: "offline", "online", "queued", "watching", "disabled". It drives the
+	// card's indicator shape/label/border (never colour alone).
+	State string `json:"state,omitempty"`
+
+	// Watching is true when this streamer currently occupies one of the two
+	// Twitch watch slots; Queued is true when online but waiting its rotation
+	// turn. DisableWatch mirrors the hard watch opt-out setting.
+	Watching     bool `json:"watching,omitempty"`
+	Queued       bool `json:"queued,omitempty"`
+	DisableWatch bool `json:"disable_watch,omitempty"`
+
+	// WatchReason is the watcher's human explanation for the current watch
+	// decision (tooltip on the state indicator).
+	WatchReason string `json:"watch_reason,omitempty"`
+
+	// PointsPerHour is an approximate gain rate computed from the analytics
+	// point series over the display window (empty when not computable).
+	PointsPerHour string `json:"points_per_hour,omitempty"`
+	PointsToday   string `json:"points_today,omitempty"`
+
+	// StreakPending/StreakMinutes describe watch-streak progress toward the
+	// ~7-minute threshold for the current broadcast (not a day count).
+	StreakPending bool `json:"streak_pending,omitempty"`
+	StreakMinutes int  `json:"streak_minutes,omitempty"`
+	StreakPercent int  `json:"streak_percent,omitempty"`
+
+	// LastEventText/LastEventAgo summarise the most recent notable event for
+	// this streamer from the in-memory ring buffer.
+	LastEventText string `json:"last_event_text,omitempty"`
+	LastEventAgo  string `json:"last_event_ago,omitempty"`
+
+	// Goal* fields carry the streamer's furthest-along active community goal.
+	HasGoal     bool   `json:"has_goal,omitempty"`
+	GoalTitle   string `json:"goal_title,omitempty"`
+	GoalPercent int    `json:"goal_percent,omitempty"`
+
+	// HasActivePrediction flags that a live prediction for this streamer is on
+	// the board (so the card can show a subtle marker).
+	HasActivePrediction bool `json:"has_active_prediction,omitempty"`
+}
+
+// TickerItem is one entry in the Overview events ticker (community goals and
+// other notable, in-progress streamer events).
+type TickerItem struct {
+	Streamer string
+	Kind     string // e.g. "goal", "moment", "drop"
+	Label    string
+	Percent  int
+	HasPct   bool
+}
+
+// PredictionOutcomeView is one outcome row on the live-predictions board.
+type PredictionOutcomeView struct {
+	Title       string
+	Color       string
+	Percent     int
+	Odds        string
+	PointsLabel string
+	Chosen      bool
+}
+
+// PredictionView is one card on the live-predictions board. It is strictly
+// informational (no manual betting controls).
+type PredictionView struct {
+	Streamer         string
+	Title            string
+	Status           string // ACTIVE | LOCKED
+	Locked           bool
+	SecondsLeft      int
+	SecondsLeftLabel string
+	BetPlaced        bool
+	BetConfirmed     bool
+	BetAmount        string
+	PoolLabel        string
+	Outcomes         []PredictionOutcomeView
+	WindowEndUnix    int64
+}
+
+// WatchSlotView is one of the (max two) active watch slots rendered in the
+// pinned "Now Watching" sidebar block.
+type WatchSlotView struct {
+	Name          string
+	Points        string
+	Game          string
+	StreakPending bool
+	StreakMinutes int
+	StreakPercent int
+	HasGain       bool
+	GainPerHour   string
+}
+
+// NowWatchingView feeds the pinned sidebar block.
+type NowWatchingView struct {
+	Slots            []WatchSlotView
+	QueuedNames      []string
+	HasNextRotation  bool
+	NextRotationUnix int64
+	Mode             string
+	Stale            bool
+}
+
+// OverviewData is the top-level view model for the redesigned Overview page.
+type OverviewData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+
+	BotStatus      string
+	BotStatusLabel string
+	Connected      bool
+	Stale          bool
+	ReauthRequired bool
+	ConnectionLost bool
+
+	TotalPoints   string
+	StreamerCount int
+	LiveCount     int
+	PointsToday   string
+
+	Ticker      []TickerItem
+	Predictions []PredictionView
+	NowWatching NowWatchingView
+
+	TrackedLive    []StreamerInfo
+	TrackedOffline []StreamerInfo
+	Untracked      []StreamerInfo
+
+	GeneratedUnix int64
+}
+
+// --- Provider view types (assembled by the miner from in-memory state) ---
+
+// WatchSlotsView is the live watch-selection state supplied by the miner:
+// which streamers occupy the two watch slots, which are queued, and when the
+// next rotation is due. All from the watcher's in-memory debug state.
+type WatchSlotsView struct {
+	ActivePair     []string
+	Watching       map[string]bool
+	Reason         map[string]string
+	Queued         []string
+	NextRotationAt time.Time
+	Mode           string
+}
+
+// LivePredictionOutcome mirrors one prediction outcome for the board.
+type LivePredictionOutcome struct {
+	Title           string
+	Color           string
+	PercentageUsers float64
+	Odds            float64
+	TotalPoints     int
+	Chosen          bool
+}
+
+// LivePrediction is one tracked prediction event, supplied by the miner from
+// the pubsub pool's in-memory snapshot.
+type LivePrediction struct {
+	Streamer                string
+	Title                   string
+	Status                  string
+	CreatedAt               time.Time
+	PredictionWindowSeconds float64
+	BetPlaced               bool
+	BetConfirmed            bool
+	BetAmount               int
+	TotalPoints             int
+	Outcomes                []LivePredictionOutcome
 }
 
 type DashboardData struct {
