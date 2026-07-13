@@ -600,10 +600,19 @@ SQLite write.
 
 The same staging pattern carries the drop-progress watchdog's session repair:
 `RequestSessionRefresh(login, mode)` stages a request under the mutex, and the
-loop executes it at the start of its next tick — on the loop goroutine, only
-for a channel that still holds a slot — publishing the outcome atomically
-(`LastSessionRefresh`). The broker thus stays the **single writer** of live
-watch sessions; no external goroutine ever mutates a slotted streamer. The loop
+loop executes it at the start of its next tick — only for a channel that still
+holds a slot — publishing the outcome atomically (`LastSessionRefresh`).
+Refreshes for distinct channels run in parallel (worker goroutines joined
+before the sends), so the tick-delay bound is the per-channel maximum (up to 4
+network rounds × the api client's 30s timeout for a full session recreate),
+never the sum across slots; the budget math against the minute-watched
+continuity window (`maxContinuousGap = 2×interval`) and the benign consequence
+of exceeding it in the pathological worst case (a streak-continuity reset that
+mirrors Twitch's own server-side session break) are documented on
+`executeSessionRefreshes`. Each worker mutates only its own slotted streamer
+and joins before any send, so the broker loop remains the sole effective
+writer of live watch sessions; no external goroutine ever mutates a slotted
+streamer. The loop
 also publishes per-slot minute-watched delivery accounting (`ReportStats`) each
 tick, and consults an optional avoid checker during selection (a temporarily
 avoided channel is skipped exactly like `DisableWatch`, but the exclusion

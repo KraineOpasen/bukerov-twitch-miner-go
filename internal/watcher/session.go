@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -147,13 +148,35 @@ func (w *MinuteWatcher) drainPendingRefreshes() map[string]pendingRefresh {
 }
 
 // executeSessionRefreshes runs the staged refreshes against the channels that
-// actually hold a slot this tick, on the loop goroutine, before the sends -
-// so a successful refresh takes effect for this very tick. Requests for
-// channels that lost their slot are completed as skipped (idempotent: the
-// watchdog re-stages if still needed). The refresher's HTTP calls carry the
-// api client's own 30s timeout; like the loop's existing CheckStreamerOnline
-// calls they are not ctx-cancellable mid-flight - an accepted, pre-existing
-// property of this loop, bounded by that timeout.
+// actually hold a slot this tick, before the sends - so a successful refresh
+// takes effect for this very tick. Requests for channels that lost their slot
+// are completed as skipped (idempotent: the watchdog re-stages if still
+// needed).
+//
+// Tick-delay budget (worst case, nominal one attempt per HTTP round, each
+// bounded by the api client's 30s timeout): one RefreshSession is up to FOUR
+// network rounds - GetSpadeURL is two plain HTTP requests (channel page +
+// settings.js) and UpdateStream is up to two GQL calls (stream info +
+// campaign IDs) - so up to ~120s per channel; RefreshStreamInfo is up to two
+// rounds, ~60s. Executed sequentially, both slots pending RefreshSession
+// would stack to ~240s, which cannot fit the continuity window: a slotted
+// channel's inter-send gap is the jittered inter-tick sleep (<=1.2*interval)
+// plus this delay, against maxContinuousGap = 2*interval - so the refresh
+// budget is ~0.8*interval (48s at the default 60s interval, at most 96s at
+// the 120s clamp). Refreshes for distinct channels therefore run in
+// PARALLEL (one goroutine per slotted request, joined before the sends):
+// the bound becomes the per-channel maximum, not the sum. Even so, a
+// pathological worst case (every round riding its full 30s timeout, or GQL
+// retries stacking - the same pre-existing property as this loop's inline
+// CheckStreamerOnline calls) can exceed the budget at any allowed interval;
+// the consequence is bounded and self-consistent, not unsafe:
+// Stream.UpdateMinuteWatched treats the oversized gap as a continuity break
+// and restarts the watch-streak accounting for that channel - mirroring the
+// server-side session break Twitch itself applies after such a reporting gap
+// - while drop-progress accrual (Twitch-side) is unaffected. In practice
+// rounds complete in well under a second and refreshes are rare: they exist
+// only as watchdog recovery stages, at most one new request per ~1-minute
+// watchdog pass, cooldown-bounded.
 func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 	pending := w.drainPendingRefreshes()
 	if len(pending) == 0 {
@@ -166,6 +189,7 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 	}
 
 	outcomes := make([]SessionRefreshOutcome, 0, len(pending))
+	var wg sync.WaitGroup
 	for login, req := range pending {
 		outcome := SessionRefreshOutcome{
 			Login:     login,
@@ -177,16 +201,33 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 		switch {
 		case !held:
 			outcome.Detail = "skipped: channel no longer holds a watch slot"
+			outcome.Completed = time.Now()
+			outcomes = append(outcomes, outcome)
 		case w.refresher == nil:
 			outcome.Detail = "skipped: no refresh-capable client (test harness)"
+			outcome.Completed = time.Now()
+			outcomes = append(outcomes, outcome)
 		default:
-			outcome.OK, outcome.Detail = w.refreshSession(streamer, req.mode)
+			// Distinct logins mean distinct streamer objects (one channel never
+			// holds two slots), so each worker mutates only its own streamer and
+			// writes only its own pre-allocated outcome slot - no shared state
+			// beyond the WaitGroup join below.
+			outcomes = append(outcomes, outcome)
+			idx := len(outcomes) - 1
+			wg.Add(1)
+			go func(idx int, streamer *models.Streamer, mode RefreshMode) {
+				defer wg.Done()
+				outcomes[idx].OK, outcomes[idx].Detail = w.refreshSession(streamer, mode)
+				outcomes[idx].Completed = time.Now()
+			}(idx, streamer, req.mode)
 		}
-		outcome.Completed = time.Now()
-		outcomes = append(outcomes, outcome)
+	}
+	wg.Wait()
 
+	for i := range outcomes {
 		slog.Info("Watch session refresh",
-			"channel", login, "mode", string(req.mode), "ok", outcome.OK, "detail", outcome.Detail)
+			"channel", outcomes[i].Login, "mode", string(outcomes[i].Mode),
+			"ok", outcomes[i].OK, "detail", outcomes[i].Detail)
 	}
 	w.publishRefreshOutcomes(outcomes)
 }

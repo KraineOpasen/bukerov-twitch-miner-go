@@ -262,6 +262,112 @@ func TestAvoidedChannelExcludedFromSelection(t *testing.T) {
 	}
 }
 
+// delayedRefresher simulates network latency: every GetSpadeURL/UpdateStream
+// call sleeps `delay` before succeeding (a scaled-down stand-in for the api
+// client's 30s-per-round worst case), and records per-call timing.
+type delayedRefresher struct {
+	delay time.Duration
+	inner fakeRefresher
+}
+
+func (d *delayedRefresher) GetSpadeURL(s *models.Streamer) error {
+	time.Sleep(d.delay)
+	return d.inner.GetSpadeURL(s)
+}
+
+func (d *delayedRefresher) UpdateStream(s *models.Streamer) error {
+	time.Sleep(d.delay)
+	return d.inner.UpdateStream(s)
+}
+
+// timestampingSender records when each minute-watched send happens.
+type timestampingSender struct {
+	mu    sync.Mutex
+	sends []time.Time
+}
+
+func (s *timestampingSender) Send(*models.Streamer) (error, error) {
+	s.mu.Lock()
+	s.sends = append(s.sends, time.Now())
+	s.mu.Unlock()
+	return nil, nil
+}
+
+func (s *timestampingSender) first() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sends) == 0 {
+		return time.Time{}, false
+	}
+	return s.sends[0], true
+}
+
+// TestSessionRefreshBothSlotsParallelBoundsTickDelay is the integration guard
+// for the tick-delay budget documented on executeSessionRefreshes: when BOTH
+// slots have a pending RefreshSession on the same tick, the delay inserted
+// before that tick's first minute-watched send must be bounded by the
+// per-channel MAXIMUM (refreshes run in parallel), not the SUM.
+//
+// Scaled-down latency model: 100ms per network round instead of the api
+// client's 30s ceiling. One RefreshSession = 2 rounds here (spade +
+// UpdateStream) => ~200ms per channel. Parallel execution => first send after
+// ~200ms; a sequential regression would take ~400ms. The 340ms assertion sits
+// between the two with slack for scheduler jitter, so it fails the sequential
+// implementation deterministically while staying CI-safe — an explicit upper
+// bound, not a "does not panic" check.
+func TestSessionRefreshBothSlotsParallelBoundsTickDelay(t *testing.T) {
+	const perCall = 100 * time.Millisecond
+
+	sender := &timestampingSender{}
+	checker := &staticChecker{checked: make(chan string, 16)}
+	w, streamers := newLoopWatcher(2, sender, checker)
+	ref := &delayedRefresher{delay: perCall}
+	w.refresher = ref
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.ctx = ctx
+
+	// Both slotted channels get a full session recreate staged for one tick.
+	w.RequestSessionRefresh(streamers[0].Username, RefreshSession)
+	w.RequestSessionRefresh(streamers[1].Username, RefreshSession)
+
+	// processWatching = selection (~µs) + executeSessionRefreshes + sends
+	// (instant pacer, instant sender), so the measured window is dominated by
+	// the refresh execution the test is bounding.
+	start := time.Now()
+	w.processWatching()
+
+	firstSend, ok := sender.first()
+	if !ok {
+		t.Fatal("expected the tick to send minute-watched after the refreshes")
+	}
+	elapsed := firstSend.Sub(start)
+
+	// Lower bound: both refreshes really ran their two delayed rounds.
+	if elapsed < 2*perCall {
+		t.Fatalf("first send after %v — refresh delays did not apply (expected >= %v)", elapsed, 2*perCall)
+	}
+	// Upper bound: max-per-channel (~2*perCall), NOT the sequential sum
+	// (~4*perCall). 3.4*perCall fails sequential execution with margin while
+	// tolerating scheduler jitter.
+	if limit := time.Duration(3.4 * float64(perCall)); elapsed >= limit {
+		t.Fatalf("first send delayed %v — refreshes executed sequentially (budget %v, sequential would be ~%v)",
+			elapsed, limit, 4*perCall)
+	}
+
+	// Both refreshes completed on this tick with full session mode.
+	spade, stream := ref.inner.calls()
+	if len(spade) != 2 || len(stream) != 2 {
+		t.Fatalf("expected both channels fully refreshed, got spade=%v stream=%v", spade, stream)
+	}
+	for _, login := range []string{streamers[0].Username, streamers[1].Username} {
+		if out, ok := w.LastSessionRefresh(login); !ok || !out.OK {
+			t.Fatalf("expected a published OK outcome for %s, got ok=%v %+v", login, ok, out)
+		}
+	}
+}
+
 // TestBrokerLoopConcurrentWithWatchdogCalls is the Stage 3 mandated race test:
 // the broker loop ticks and sends on live streamers while a "watchdog"
 // goroutine concurrently stages session refreshes, reads report stats and
