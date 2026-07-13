@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,13 +19,75 @@ type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
 type StatusHandler func(streamer string, online bool)
 type AuthErrorHandler func(err error)
 
+// Manual-bet / round-control sentinel errors. Their messages are already
+// user-safe, so the dashboard can surface them verbatim without leaking raw Go
+// or Twitch internals.
+var (
+	ErrPredictionNotFound = errors.New("this prediction is no longer available")
+	ErrOutcomeNotFound    = errors.New("that outcome is no longer available")
+	ErrRoundClosed        = errors.New("this prediction has already closed")
+	ErrAlreadyBet         = errors.New("a bet has already been placed on this prediction")
+	ErrAutoBetPlaced      = errors.New("auto-bet already placed a bet on this prediction")
+	ErrInvalidAmount      = errors.New("enter a positive amount")
+	ErrAmountTooLow       = errors.New("the minimum bet is 10 points")
+	ErrInsufficientPoints = errors.New("not enough channel points for that bet")
+	ErrManualBetInFlight  = errors.New("a bet is already being placed for this prediction")
+	ErrStreamerOffline    = errors.New("the streamer is offline")
+)
+
+// minPredictionBet is Twitch's minimum accepted prediction stake; both the
+// auto-bet and manual bets honour it.
+const minPredictionBet = 10
+
+// maxPredictionAge bounds how long a tracked round may linger in memory as a
+// hard safety net against leaks if a terminal event is ever missed. Real
+// prediction windows are minutes; this generous ceiling only ever reaps rounds
+// Twitch stopped talking about entirely.
+const maxPredictionAge = 2 * time.Hour
+
+// terminalCleanupGrace delays removal of a resolved/cancelled round so the
+// separate predictions-user "prediction-result" message (which may arrive after
+// the channel "event-updated") can still find the event to record history.
+const terminalCleanupGrace = 30 * time.Second
+
+// predictionPlacer is the narrow slice of the Twitch client the pool needs to
+// place a prediction bet. Kept as an interface so the betting/concurrency logic
+// can be unit-tested and locally dev-simulated without real Twitch calls;
+// *api.TwitchClient satisfies it.
+type predictionPlacer interface {
+	PlacePredictionBet(event *models.EventPrediction, outcomeID string, amount int) error
+}
+
+// roundControl is the per-round transient state backing manual betting and the
+// per-round auto-bet suppression. One entry lives alongside each tracked
+// prediction in the pool and is removed together with it, so the state can
+// never outlive its round.
+type roundControl struct {
+	// placeMu serializes the *entire* place-a-bet operation for this one round
+	// (revalidation + the Twitch call + local bookkeeping). It is what makes a
+	// manual bet and the scheduled auto-bet mutually exclusive so Twitch can
+	// never receive two stakes for the same round. It is round-scoped, so bets
+	// on other streamers/rounds run fully in parallel, and it is the only lock
+	// held across the network call — never the pool-wide mu.
+	placeMu sync.Mutex
+
+	// The flags below are quick booleans guarded by the pool's mu (read under
+	// RLock by the snapshot, written under Lock by the betting paths).
+	autoBetSkip   bool   // auto-bet suppressed for this round (manual skip, or set after a manual bet)
+	manualBet     bool   // the placed bet came from a manual dashboard action
+	manualPending bool   // a manual placement is currently in flight (double-submit guard)
+	manualErr     string // last manual placement error, human-readable
+}
+
 type WebSocketPool struct {
 	clients     []*WebSocketClient
 	client      *api.TwitchClient
+	placer      predictionPlacer
 	streamers   []*models.Streamer
 	authToken   string
 	settings    config.RateLimitSettings
 	predictions map[string]*models.EventPrediction
+	control     map[string]*roundControl
 
 	onMessage      MessageHandler
 	onStatusChange StatusHandler
@@ -36,10 +99,12 @@ type WebSocketPool struct {
 func NewWebSocketPool(twitchClient *api.TwitchClient, authToken string, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
 	return &WebSocketPool{
 		client:      twitchClient,
+		placer:      twitchClient,
 		streamers:   streamers,
 		authToken:   authToken,
 		settings:    settings,
 		predictions: make(map[string]*models.EventPrediction),
+		control:     make(map[string]*roundControl),
 	}
 }
 
@@ -86,6 +151,24 @@ type PredictionSnapshot struct {
 	TotalPoints             int
 	TotalUsers              int
 	Outcomes                []PredictionOutcomeSnapshot
+
+	// --- manual-control state (round-scoped) ---
+
+	// Online / Balance reflect the streamer's current state, so the dashboard
+	// can decide whether manual betting is offered and cap the stake.
+	Online  bool
+	Balance int
+	// ManualBet is true when the placed bet was a manual dashboard action (vs
+	// auto-bet); BetOutcomeTitle names the chosen outcome once a bet is placed.
+	ManualBet       bool
+	BetOutcomeTitle string
+	// AutoBetSkipped is true when auto-bet is suppressed for this round (manual
+	// skip toggle, or implicitly after a manual bet). ManualPending is true
+	// while a manual placement is in flight; ManualError carries the last
+	// human-readable manual failure.
+	AutoBetSkipped bool
+	ManualPending  bool
+	ManualError    string
 }
 
 // PredictionsSnapshot returns a view of every prediction event the pool is
@@ -95,7 +178,7 @@ func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
 	defer p.mu.RUnlock()
 
 	snapshots := make([]PredictionSnapshot, 0, len(p.predictions))
-	for _, e := range p.predictions {
+	for id, e := range p.predictions {
 		snap := PredictionSnapshot{
 			Streamer:                e.Streamer.Username,
 			EventID:                 e.EventID,
@@ -108,10 +191,22 @@ func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
 			BetAmount:               e.Bet.Decision.Amount,
 			TotalPoints:             e.Bet.TotalPoints,
 			TotalUsers:              e.Bet.TotalUsers,
+			Online:                  e.Streamer.GetIsOnline(),
+			Balance:                 e.Streamer.GetChannelPoints(),
+		}
+		if rc := p.control[id]; rc != nil {
+			snap.AutoBetSkipped = rc.autoBetSkip
+			snap.ManualBet = rc.manualBet
+			snap.ManualPending = rc.manualPending
+			snap.ManualError = rc.manualErr
 		}
 		for i, o := range e.Bet.Outcomes {
 			if o == nil {
 				continue
+			}
+			chosen := e.BetPlaced && i == e.Bet.Decision.Choice
+			if chosen {
+				snap.BetOutcomeTitle = o.Title
 			}
 			snap.Outcomes = append(snap.Outcomes, PredictionOutcomeSnapshot{
 				ID:              o.ID,
@@ -122,7 +217,7 @@ func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
 				PercentageUsers: o.PercentageUsers,
 				Odds:            o.Odds,
 				OddsPercentage:  o.OddsPercentage,
-				Chosen:          e.BetPlaced && i == e.Bet.Decision.Choice,
+				Chosen:          chosen,
 			})
 		}
 		snapshots = append(snapshots, snap)
@@ -414,7 +509,9 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		}
 
 		p.mu.Lock()
+		p.sweepStaleLocked()
 		p.predictions[eventID] = event
+		p.control[eventID] = &roundControl{}
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
@@ -425,23 +522,14 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 
 		go func() {
 			time.Sleep(time.Duration(closingBetAfter) * time.Second)
-			p.mu.RLock()
-			evt, exists := p.predictions[eventID]
-			p.mu.RUnlock()
-
-			if exists && evt.Status == models.PredictionActive {
-				if err := p.client.MakePrediction(evt); err != nil {
-					slog.Error("Failed to make prediction", "error", err)
-				}
-			}
+			p.placeAutoBet(eventID)
 		}()
 
 	case "event-updated":
-		p.mu.RLock()
+		p.mu.Lock()
 		event, exists := p.predictions[eventID]
-		p.mu.RUnlock()
-
 		if !exists {
+			p.mu.Unlock()
 			return
 		}
 
@@ -451,6 +539,15 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			if outcomes, ok := eventData["outcomes"].([]interface{}); ok {
 				event.Bet.UpdateOutcomes(outcomes)
 			}
+		}
+		p.mu.Unlock()
+
+		// A resolved/cancelled round is finished: drop its tracked + transient
+		// state after a short grace so the predictions-user result message can
+		// still find it. This is what keeps the round-control map from growing
+		// without bound.
+		if eventStatus == string(models.PredictionResolved) || eventStatus == string(models.PredictionCanceled) {
+			p.scheduleCleanup(eventID, terminalCleanupGrace)
 		}
 	}
 }
@@ -477,12 +574,18 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 
 	switch msg.Type {
 	case "prediction-made":
+		p.mu.Lock()
 		event.BetConfirmed = true
+		amount := event.Bet.Decision.Amount
+		p.mu.Unlock()
 		slog.Info("Prediction confirmed", "event", event.Title)
-		events.Record(events.TypeBetPlaced, streamer.Username, fmt.Sprintf("bet %d points on %q", event.Bet.Decision.Amount, event.Title))
+		events.Record(events.TypeBetPlaced, streamer.Username, fmt.Sprintf("bet %d points on %q", amount, event.Title))
 
 	case "prediction-result":
-		if !event.BetConfirmed {
+		p.mu.RLock()
+		confirmed := event.BetConfirmed
+		p.mu.RUnlock()
+		if !confirmed {
 			return
 		}
 
@@ -491,25 +594,285 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			return
 		}
 
+		p.mu.Lock()
 		placed, won, gained := event.ParseResult(result)
+		resultType := event.Result.Type
+		p.mu.Unlock()
 		_ = placed
 		_ = won
 
 		slog.Info("Prediction result",
 			"event", event.Title,
-			"result", event.Result.Type,
+			"result", resultType,
 			"gained", gained,
 		)
-		events.Record(events.TypeBetResult, streamer.Username, fmt.Sprintf("%s %+d points on %q", event.Result.Type, gained, event.Title))
+		events.Record(events.TypeBetResult, streamer.Username, fmt.Sprintf("%s %+d points on %q", resultType, gained, event.Title))
 
 		streamer.UpdateHistory("PREDICTION", gained)
 
-		switch event.Result.Type {
+		switch resultType {
 		case models.ResultRefund:
 			streamer.UpdateHistoryWithCounter("REFUND", -placed, -1)
 		case models.ResultWin:
 			streamer.UpdateHistoryWithCounter("PREDICTION", -won, -1)
 		}
+
+		// The round is over; drop its tracked + transient state promptly.
+		p.scheduleCleanup(eventID, terminalCleanupGrace)
+	}
+}
+
+// placeAutoBet runs the scheduled auto-bet for a single round. It mirrors the
+// manual path's locking exactly — the round's placeMu is held across the Twitch
+// call, and Decision/Outcomes/BetPlaced are only ever touched under the pool mu
+// — so a manual bet and this auto-bet can never both reach Twitch, and it
+// honours the per-round suppression set by a manual bet or the manual skip
+// toggle. The betting *strategy* is unchanged from before: Calculate + Skip
+// from models, the same 10-point minimum, the same logs.
+func (p *WebSocketPool) placeAutoBet(eventID string) {
+	p.mu.RLock()
+	event := p.predictions[eventID]
+	rc := p.control[eventID]
+	p.mu.RUnlock()
+	if event == nil || rc == nil {
+		return
+	}
+
+	rc.placeMu.Lock()
+	defer rc.placeMu.Unlock()
+
+	// Decide + gate under the pool lock; the network call is the only thing done
+	// outside it (serialized instead by placeMu).
+	p.mu.Lock()
+	if rc.autoBetSkip || event.BetPlaced || event.Status != models.PredictionActive {
+		p.mu.Unlock()
+		return
+	}
+	decision := event.Bet.Calculate(event.Streamer.GetChannelPoints())
+	skip, comparedValue := event.Bet.Skip()
+	p.mu.Unlock()
+
+	if decision.Amount < minPredictionBet {
+		slog.Info("Bet amount too low", "amount", decision.Amount)
+		return
+	}
+	if skip {
+		slog.Info("Skipping bet", "filter", event.Bet.Settings.FilterCondition, "value", comparedValue)
+		return
+	}
+
+	slog.Info("Placing prediction bet",
+		"event", event.Title,
+		"choice", decision.Choice,
+		"amount", decision.Amount,
+	)
+
+	if err := p.placer.PlacePredictionBet(event, decision.ID, decision.Amount); err != nil {
+		slog.Error("Failed to make prediction", "error", err)
+		return
+	}
+
+	p.mu.Lock()
+	event.BetPlaced = true
+	p.mu.Unlock()
+}
+
+// PlaceManualBet places a dashboard-initiated bet on a specific outcome of a
+// specific round after re-verifying everything server-side. It never trusts
+// client-supplied balance/status/odds: the round, its status, the outcome, the
+// open window, the live balance and the "no existing bet" invariant are all
+// re-checked here, immediately before the Twitch call, under the round's
+// placement lock. On success the round is marked so auto-bet skips it. Returns
+// the chosen outcome's title for the confirmation message.
+func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (string, error) {
+	p.mu.RLock()
+	event := p.predictions[eventID]
+	rc := p.control[eventID]
+	p.mu.RUnlock()
+	if event == nil || rc == nil {
+		return "", ErrPredictionNotFound
+	}
+
+	if amount <= 0 {
+		return "", ErrInvalidAmount
+	}
+	if amount < minPredictionBet {
+		return "", ErrAmountTooLow
+	}
+
+	outcomeIdx, outcomeTitle := p.findOutcome(event, outcomeID)
+	if outcomeIdx < 0 {
+		return "", ErrOutcomeNotFound
+	}
+
+	// Fast pre-check + double-submit guard, holding no lock across the network.
+	p.mu.Lock()
+	switch {
+	case event.BetPlaced && rc.manualBet:
+		p.mu.Unlock()
+		return "", ErrAlreadyBet
+	case event.BetPlaced:
+		p.mu.Unlock()
+		return "", ErrAutoBetPlaced
+	case rc.manualPending:
+		p.mu.Unlock()
+		return "", ErrManualBetInFlight
+	}
+	rc.manualPending = true
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		rc.manualPending = false
+		p.mu.Unlock()
+	}()
+
+	// Serialize against the scheduled auto-bet across the Twitch call.
+	rc.placeMu.Lock()
+	defer rc.placeMu.Unlock()
+
+	// Re-validate against fresh state now the placement lock is held.
+	p.mu.RLock()
+	betPlaced := event.BetPlaced
+	manualByUs := rc.manualBet
+	status := event.Status
+	online := event.Streamer.GetIsOnline()
+	balance := event.Streamer.GetChannelPoints()
+	closing := event.ClosingBetAfter(time.Now())
+	p.mu.RUnlock()
+
+	switch {
+	case betPlaced && manualByUs:
+		return "", ErrAlreadyBet
+	case betPlaced:
+		return "", ErrAutoBetPlaced
+	case status != models.PredictionActive:
+		return "", ErrRoundClosed
+	case closing <= 0:
+		return "", ErrRoundClosed
+	case !online:
+		return "", ErrStreamerOffline
+	case amount > balance:
+		return "", ErrInsufficientPoints
+	}
+
+	if err := p.placer.PlacePredictionBet(event, outcomeID, amount); err != nil {
+		human := humanizeBetError(err)
+		p.mu.Lock()
+		rc.manualErr = human
+		p.mu.Unlock()
+		return "", errors.New(human)
+	}
+
+	p.mu.Lock()
+	event.BetPlaced = true
+	event.Bet.Decision = models.Decision{Choice: outcomeIdx, Amount: amount, ID: outcomeID}
+	rc.manualBet = true
+	rc.autoBetSkip = true
+	rc.manualErr = ""
+	p.mu.Unlock()
+
+	events.Record(events.TypeBetPlaced, event.Streamer.Username, fmt.Sprintf("manual bet %d points on %q", amount, event.Title))
+	slog.Info("Manual prediction bet placed",
+		"streamer", event.Streamer.Username,
+		"event", event.Title,
+		"amount", amount,
+	)
+	return outcomeTitle, nil
+}
+
+// SetAutoBetSkip toggles per-round auto-bet suppression without placing a bet.
+// It only affects this one round: the flag is cleared when the round is cleaned
+// up, so the streamer's next prediction is handled by the normal auto-bet path,
+// and it never touches global or persisted settings. Un-skipping is allowed
+// while the round is still open and no bet has been placed.
+func (p *WebSocketPool) SetAutoBetSkip(eventID string, skip bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	event, ok := p.predictions[eventID]
+	rc := p.control[eventID]
+	if !ok || rc == nil {
+		return ErrPredictionNotFound
+	}
+	if event.BetPlaced {
+		if rc.manualBet {
+			return ErrAlreadyBet
+		}
+		return ErrAutoBetPlaced
+	}
+	if event.Status != models.PredictionActive {
+		return ErrRoundClosed
+	}
+	rc.autoBetSkip = skip
+	return nil
+}
+
+// findOutcome returns the index and title of the outcome with the given id
+// within this round, or (-1, "") when it is not part of this round — which is
+// how a stale or foreign outcome id is rejected.
+func (p *WebSocketPool) findOutcome(event *models.EventPrediction, outcomeID string) (int, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i, o := range event.Bet.Outcomes {
+		if o != nil && o.ID == outcomeID {
+			return i, o.Title
+		}
+	}
+	return -1, ""
+}
+
+// scheduleCleanup removes a finished round's tracked + transient state after a
+// grace delay. Fire-and-forget, matching the existing auto-bet timer pattern;
+// removePrediction is idempotent so overlapping schedules are harmless.
+func (p *WebSocketPool) scheduleCleanup(eventID string, after time.Duration) {
+	go func() {
+		time.Sleep(after)
+		p.removePrediction(eventID)
+	}()
+}
+
+// removePrediction deletes a round's prediction and its round-control entry.
+// Idempotent.
+func (p *WebSocketPool) removePrediction(eventID string) {
+	p.mu.Lock()
+	delete(p.predictions, eventID)
+	delete(p.control, eventID)
+	p.mu.Unlock()
+}
+
+// sweepStaleLocked drops any tracked round older than maxPredictionAge. The
+// caller must hold p.mu for writing. This is a leak backstop for the rare case
+// where a round's terminal event never arrives; the normal path is
+// scheduleCleanup on resolve/cancel.
+func (p *WebSocketPool) sweepStaleLocked() {
+	now := time.Now()
+	for id, e := range p.predictions {
+		if now.Sub(e.CreatedAt) > maxPredictionAge {
+			delete(p.predictions, id)
+			delete(p.control, id)
+		}
+	}
+}
+
+// humanizeBetError converts a PlacePredictionBet failure into a user-safe
+// message, never surfacing a raw Go error or Twitch response to the dashboard.
+func humanizeBetError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, api.ErrUnauthorized) {
+		return "Twitch rejected the request because the session expired — reauthorize the miner"
+	}
+	msg := strings.ToUpper(err.Error())
+	switch {
+	case strings.Contains(msg, "NOT_ENOUGH_POINTS"), strings.Contains(msg, "INSUFFICIENT"):
+		return ErrInsufficientPoints.Error()
+	case strings.Contains(msg, "NOT_ACTIVE"), strings.Contains(msg, "LOCKED"), strings.Contains(msg, "CLOSED"), strings.Contains(msg, "BOUND"):
+		return ErrRoundClosed.Error()
+	case strings.Contains(msg, "MAX"), strings.Contains(msg, "MIN"):
+		return "Twitch rejected the stake amount for this prediction"
+	default:
+		return "Twitch could not place the bet right now — please try again"
 	}
 }
 

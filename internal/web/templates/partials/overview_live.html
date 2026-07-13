@@ -102,7 +102,7 @@
 
 
 {{define "prediction_card"}}
-<article class="pred-card {{if .Locked}}is-locked{{end}}">
+<article class="pred-card {{if .Locked}}is-locked{{end}} {{if .ManualPending}}is-pending{{end}}" data-pred data-event-id="{{.EventID}}">
     <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
             <a href="/streamer/{{.Streamer}}" class="s-name text-sm hover:underline">{{.Streamer}}</a>
@@ -116,21 +116,81 @@
             {{end}}
         </div>
     </div>
-    <div class="mt-2 space-y-1.5">
+
+    <div class="mt-2 space-y-1.5" data-outcomes>
         {{range .Outcomes}}
-        <div class="pred-outcome {{if .Chosen}}chosen{{end}}">
+        <div class="pred-outcome {{if .Chosen}}chosen{{end}} {{if .Selectable}}selectable{{end}}"
+             {{if .Selectable}}role="radio" aria-checked="false" tabindex="0" data-outcome-id="{{.ID}}" data-outcome-title="{{.Title}}"{{end}}>
             <span class="text-sm text-neutral-100 truncate flex items-center gap-1">
-                {{if .Chosen}}<span class="text-online" title="Bot's pick">◆</span>{{end}}{{.Title}}
+                {{if .Chosen}}<span class="text-online" title="Chosen outcome">◆</span>{{end}}{{.Title}}
             </span>
             <span class="num text-xs text-neutral-300">{{.Percent}}%{{if .Odds}} · {{.Odds}}{{end}}</span>
             <div class="pred-obar"><span style="width: {{.Percent}}%"></span></div>
         </div>
         {{end}}
     </div>
+
     <div class="flex items-center justify-between mt-2 text-xs text-neutral-400">
         <span>{{if .PoolLabel}}<span class="num">{{.PoolLabel}}</span> pts pool{{end}}</span>
-        {{if .BetPlaced}}<span class="num badge {{if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">bet {{.BetAmount}}</span>{{end}}
+        {{if and .BetPlaced .BetAmount}}<span class="num badge {{if .ManualBet}}badge-watching{{else if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">bet {{.BetAmount}}</span>{{end}}
     </div>
+
+    {{/* Persistent, server-truth error (survives board re-renders). */}}
+    {{if .ManualError}}<div class="pred-msg pred-msg-error" data-server-error role="alert">{{.ManualError}}</div>{{end}}
+
+    {{if .BetPlaced}}
+    {{/* A bet exists for this round — show what/how and the auto-bet lock. */}}
+    <div class="pred-status" data-bet-status>
+        {{if .ManualBet}}
+        <span class="badge badge-watching">✓ Manual bet</span>
+        <span class="text-xs text-neutral-300"><span class="num">{{.BetAmount}}</span>{{if .BetOutcomeTitle}} on <span class="text-neutral-100">{{.BetOutcomeTitle}}</span>{{end}}</span>
+        <span class="badge badge-disabled" title="Auto-bet is locked for this round only">auto-bet locked</span>
+        {{else}}
+        <span class="badge {{if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">Auto-bet placed</span>
+        {{if .BetOutcomeTitle}}<span class="text-xs text-neutral-300">on <span class="text-neutral-100">{{.BetOutcomeTitle}}</span></span>{{end}}
+        {{end}}
+    </div>
+
+    {{else if .ManualAllowed}}
+    {{/* Compact manual-bet control. Placing requires an explicit confirm; the
+         outcome is picked from the rows above. */}}
+    <div class="pred-manual" data-manual data-event-id="{{.EventID}}" data-balance="{{.Balance}}" data-min="{{.MinBet}}">
+        <div class="pred-manual-row">
+            <input type="number" class="pred-amount num" inputmode="numeric" min="{{.MinBet}}" max="{{.Balance}}"
+                   placeholder="Points" aria-label="Bet amount for {{.Title}}" data-amount>
+            <div class="pred-fills" role="group" aria-label="Quick amounts">
+                <button type="button" class="pred-chip" data-fill="25">25%</button>
+                <button type="button" class="pred-chip" data-fill="50">50%</button>
+                <button type="button" class="pred-chip" data-fill="max">Max</button>
+            </div>
+        </div>
+        <div class="pred-manual-foot">
+            <span class="text-xs text-neutral-400">Available <span class="num">{{.BalanceLabel}}</span></span>
+            <button type="button" class="btn-bet" data-place disabled>Place bet</button>
+        </div>
+        <div class="pred-confirm" data-confirm hidden>
+            <span class="text-xs" data-confirm-text></span>
+            <div class="pred-confirm-actions">
+                <button type="button" class="btn-bet-cancel" data-cancel>Cancel</button>
+                <button type="button" class="btn-bet-go" data-go>Confirm</button>
+            </div>
+        </div>
+        <div class="pred-manual-controls">
+            <label class="pred-skip">
+                <input type="checkbox" data-skip {{if .AutoBetSkipped}}checked{{end}}>
+                <span class="text-xs text-neutral-400">Don't auto-bet this round</span>
+            </label>
+        </div>
+        <div class="pred-msg pred-msg-error" data-live-error role="alert" hidden></div>
+    </div>
+
+    {{else if .AutoBetSkipped}}
+    {{/* Round not manually bettable (locked/offline/low balance) but skipped. */}}
+    <div class="pred-status" data-bet-status>
+        <span class="badge badge-disabled">Auto-bet skipped</span>
+        {{if .SkipUndoable}}<button type="button" class="pred-link" data-unskip data-event-id="{{.EventID}}">Undo</button>{{end}}
+    </div>
+    {{end}}
 </article>
 {{end}}
 
