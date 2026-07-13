@@ -464,4 +464,14 @@ func ValidateConfig(config *Config) {
 	} else if config.Health.CanaryMaxStalenessHours > 168 {
 		config.Health.CanaryMaxStalenessHours = 168
 	}
+
+	// Max staleness must cover at least one interval. Otherwise the forced-probe
+	// condition (staleness exceeded) would fire before the opportunistic
+	// interval-elapsed condition, and the hybrid schedule would degenerate into
+	// "always force" — sending the beacon regardless of slot occupancy every
+	// interval. Clamp staleness up to the interval (rounded up to whole hours),
+	// mirroring the rotation max>=min clamp above.
+	if minStalenessHours := (config.Health.CanaryIntervalMinutes + 59) / 60; config.Health.CanaryMaxStalenessHours < minStalenessHours {
+		config.Health.CanaryMaxStalenessHours = minStalenessHours
+	}
 }

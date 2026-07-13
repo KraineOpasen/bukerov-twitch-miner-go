@@ -131,6 +131,46 @@ func TestValidateConfigClampsDebugPort(t *testing.T) {
 	}
 }
 
+func TestValidateConfigClampsHealthStalenessToInterval(t *testing.T) {
+	// The forced-probe staleness threshold must cover at least one opportunistic
+	// interval; otherwise the force condition fires first and the hybrid
+	// schedule degenerates into "always force a real beacon every interval".
+	cfg := DefaultConfig()
+	cfg.Health.CanaryIntervalMinutes = 360 // 6h
+	cfg.Health.CanaryMaxStalenessHours = 2 // below the interval
+	ValidateConfig(&cfg)
+
+	if cfg.Health.CanaryMaxStalenessHours != 6 {
+		t.Errorf("expected staleness clamped up to the 6h interval, got %d", cfg.Health.CanaryMaxStalenessHours)
+	}
+}
+
+func TestValidateConfigRoundsStalenessClampUpToWholeHours(t *testing.T) {
+	// A sub-hour remainder in the interval must round the staleness floor up so
+	// it still fully covers the interval (90 min -> 2h, never 1h).
+	cfg := DefaultConfig()
+	cfg.Health.CanaryIntervalMinutes = 90
+	cfg.Health.CanaryMaxStalenessHours = 1
+	ValidateConfig(&cfg)
+
+	if cfg.Health.CanaryMaxStalenessHours != 2 {
+		t.Errorf("expected 90-min interval to raise staleness floor to 2h, got %d", cfg.Health.CanaryMaxStalenessHours)
+	}
+}
+
+func TestValidateConfigPreservesStalenessWhenItCoversInterval(t *testing.T) {
+	// When staleness already exceeds the interval the cross-check must leave it
+	// untouched — the hybrid schedule stays intact.
+	cfg := DefaultConfig()
+	cfg.Health.CanaryIntervalMinutes = 60
+	cfg.Health.CanaryMaxStalenessHours = 48
+	ValidateConfig(&cfg)
+
+	if cfg.Health.CanaryMaxStalenessHours != 48 {
+		t.Errorf("expected staleness of 48h to be preserved, got %d", cfg.Health.CanaryMaxStalenessHours)
+	}
+}
+
 func TestLoadConfigDirectoryGamesDefaultEmpty(t *testing.T) {
 	// Backward compatibility: configs written before directory discovery
 	// existed must load with the subsystem fully disabled.
