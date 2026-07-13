@@ -1018,7 +1018,19 @@ percent-encoded), stage-instrumented and redacted.
   Architecture*): never a permanent slot, never a candidate source.
 - **On demand.** "Run canary now" triggers an immediate probe; concurrent runs
   are suppressed (an atomic in-flight guard) and each probe has a 60s timeout and
-  honors context cancellation.
+  honors context cancellation end-to-end. The prober itself is context-aware
+  (`http.NewRequestWithContext`), but the two Twitch client calls a probe needs
+  first — `GetChannelID` and `CheckStreamerOnline` — are not, so the canary runs
+  them under a watchdog (`runDetached`): on timeout/cancel the probe returns at
+  once and the still-running call is *abandoned*, not killed. **Known limitation
+  (bounded leak):** an abandoned goroutine self-terminates once the api client's
+  own HTTP timeout (30s per attempt × retries × client-id candidates) elapses, so
+  the leak is temporary, never permanent — threading a context through the whole
+  GQL stack would touch every Twitch call in the app, so the fix is confined to
+  the canary. A timed-out `CheckStreamerOnline` also drops the cached probe
+  streamer so the abandoned writer never shares it with a later probe (no data
+  race). This is documented like the cold-start victim-by-index tie-break and the
+  `consoleWriter` check-then-send micro-window.
 - **Honest limitation.** The canary confirms Twitch accepts the watch transport
   and beacon requests; **without an active drop campaign it does not prove
   accrual of a specific drop.** The UI and this document state this explicitly.
@@ -1029,7 +1041,9 @@ percent-encoded), stage-instrumented and redacted.
 Config (`health`, all runtime-updatable from the Health Center without a
 restart): `canaryEnabled` (default `false`), `canaryChannel` (empty disables it),
 `canaryIntervalMinutes` (default 360, clamped [60, 1440]), `canaryMaxStalenessHours`
-(default 48, clamped [1, 168]).
+(default 48, clamped [1, 168], and additionally floored to the interval so the
+forced-probe threshold always covers at least one opportunistic cycle — otherwise
+the force condition fires first and the hybrid degenerates into "always force").
 
 ---
 

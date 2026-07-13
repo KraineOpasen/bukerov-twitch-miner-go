@@ -541,7 +541,10 @@ minute-watched beacon path (playback token → HLS playlist → segment → spad
 POST) via a stage-instrumented probe. When enabled (`health.canaryEnabled` +
 `health.canaryChannel`), it confirms the transport opportunistically when a watch
 slot is free, and forces a check once the transport has not been confirmed for
-`health.canaryMaxStalenessHours`. "Run canary now" runs one on demand.
+`health.canaryMaxStalenessHours` (which is always at least one interval). "Run
+canary now" runs one on demand. Every probe is bounded by a 60s deadline and
+cannot stall the miner even if a Twitch call hangs — it is abandoned and the
+next probe starts fresh.
 
 > The canary confirms Twitch accepts the watch transport and beacon requests.
 > Without an active drop campaign it does **not** prove accrual of a specific

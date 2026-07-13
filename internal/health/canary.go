@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -69,6 +70,13 @@ const (
 // briefly coincide with two busy slots, and only on the max-staleness schedule.
 // It confirms Twitch accepts the watch transport and beacon; without an active
 // drop campaign it does NOT prove accrual of a specific drop.
+//
+// The whole probe path is bounded by the probe context (canaryTimeout, or an
+// explicit Stop()). The prober is context-aware, but the two Twitch client calls
+// it needs first — GetChannelID and CheckStreamerOnline — are not, so they run
+// under runDetached: on timeout/cancel the probe returns immediately and the
+// detached goroutine is abandoned rather than killed (see runDetached for the
+// documented, bounded-leak limitation).
 type Canary struct {
 	center   *Center
 	client   TwitchClient
@@ -218,20 +226,25 @@ func (c *Canary) runOnce(manual bool) {
 func (c *Canary) probe(ctx context.Context, channel string) Signal {
 	start := c.now()
 
-	streamer, err := c.streamerFor(channel)
+	streamer, err := c.streamerFor(ctx, channel)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			detail, code := abortReason(ctxErr)
+			return c.failSignal("stream_info", detail, code, start)
+		}
 		return c.failSignal("stream_info", "could not resolve the canary channel", "channel_resolve_failed", start)
 	}
 
 	// Bring the channel online (spade URL + payload) — same path a watched
-	// streamer uses. Cancellation between here and the beacon is honored by the
-	// probe's context.
-	select {
-	case <-ctx.Done():
-		return c.failSignal("stream_info", "probe cancelled", "cancelled", start)
-	default:
+	// streamer uses. CheckStreamerOnline is not context-aware, so run it under
+	// the probe deadline: if it outlives ctx we abandon it (runDetached) and drop
+	// the cached streamer, so the leaked goroutine — which keeps mutating the
+	// streamer — never shares it with a later probe.
+	if err := runDetached(ctx, func() { c.client.CheckStreamerOnline(streamer) }); err != nil {
+		c.invalidateStreamer(streamer)
+		detail, code := abortReason(err)
+		return c.failSignal("stream_info", detail, code, start)
 	}
-	c.client.CheckStreamerOnline(streamer)
 	if !streamer.GetIsOnline() {
 		return c.failSignal("stream_info", "the canary channel is offline", "channel_offline", start)
 	}
@@ -302,9 +315,10 @@ func (c *Canary) handleTransition(sig Signal) {
 }
 
 // streamerFor returns the cached ephemeral probe streamer for channel, resolving
-// its channel ID (needed for the beacon payload) once. The network resolve runs
-// without holding the lock.
-func (c *Canary) streamerFor(channel string) (*models.Streamer, error) {
+// its channel ID (needed for the beacon payload) once. GetChannelID is not
+// context-aware, so it runs under the probe deadline via runDetached; the
+// resolve never holds the lock.
+func (c *Canary) streamerFor(ctx context.Context, channel string) (*models.Streamer, error) {
 	c.mu.Lock()
 	cached := c.streamer
 	c.mu.Unlock()
@@ -312,9 +326,19 @@ func (c *Canary) streamerFor(channel string) (*models.Streamer, error) {
 		return cached, nil
 	}
 
-	id, err := c.client.GetChannelID(channel)
-	if err != nil {
+	var (
+		id     string
+		apiErr error
+	)
+	// id/apiErr are read only after runDetached returns nil (the goroutine has
+	// finished and close(done) synchronizes the write). On a ctx error we return
+	// without touching them, so the abandoned goroutine's later write races with
+	// no reader.
+	if err := runDetached(ctx, func() { id, apiErr = c.client.GetChannelID(channel) }); err != nil {
 		return nil, err
+	}
+	if apiErr != nil {
+		return nil, apiErr
 	}
 
 	s := models.NewStreamer(channel, models.StreamerSettings{ClaimDrops: false, Chat: models.ChatNever})
@@ -324,6 +348,63 @@ func (c *Canary) streamerFor(channel string) (*models.Streamer, error) {
 	c.streamer = s
 	c.mu.Unlock()
 	return s, nil
+}
+
+// invalidateStreamer drops the cached ephemeral streamer if it is still the
+// abandoned one. A CheckStreamerOnline call that outlived ctx keeps mutating the
+// streamer from its detached goroutine; clearing the cache guarantees the next
+// probe resolves a fresh streamer instead of sharing one with that leaked
+// writer. Combined with the runOnce running-guard (one probe at a time), the
+// orphaned streamer then has a single, exclusive writer — no data race.
+func (c *Canary) invalidateStreamer(orphan *models.Streamer) {
+	c.mu.Lock()
+	if c.streamer == orphan {
+		c.streamer = nil
+	}
+	c.mu.Unlock()
+}
+
+// runDetached runs fn on a fresh goroutine and returns as soon as fn finishes or
+// ctx is done, whichever comes first. On ctx cancel/timeout it returns ctx.Err()
+// WITHOUT waiting for fn.
+//
+// Known limitation (documented, like the cold-start victim-by-index tie-break
+// and the consoleWriter check-then-send micro-window): the abandoned goroutine
+// is NOT killed — the Twitch client calls it wraps (GetChannelID,
+// CheckStreamerOnline) are context-unaware and cannot be interrupted mid-flight.
+// Threading a context through the api GQL stack would touch every Twitch call in
+// the app, so the canary confines the fix to itself. Such a goroutine terminates
+// on its own once the api client's HTTP timeout (30s per attempt, times retries
+// and client-id candidates) elapses, so the leak is temporary and bounded, never
+// permanent. This buys real cancellation of probe() — the loop goroutine and
+// Stop() never block on a hung network call — at the cost of a short-lived
+// detached goroutine. Callers passing shared mutable state into fn must not
+// reuse it after a non-nil return (probe() drops the cached streamer via
+// invalidateStreamer for exactly this reason).
+func runDetached(ctx context.Context, fn func()) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// abortReason maps a watchdog context error to a redacted (detail, errorCode):
+// a deadline means the probe outran canaryTimeout, an explicit cancel means Stop.
+func abortReason(err error) (string, string) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "probe exceeded the canary timeout", "timeout"
+	}
+	return "probe cancelled", "cancelled"
 }
 
 func (c *Canary) snapshotCfg() CanaryConfig {

@@ -20,17 +20,38 @@ type fakeClient struct {
 	online    bool
 	spade     string
 	checks    int32
+
+	// Gates simulate a context-unaware call that hangs at the network level: when
+	// non-nil the method blocks until the gate is closed. The matching done
+	// channel is closed when the (possibly abandoned) call finally returns, so a
+	// test can join the detached goroutine and keep the suite race-clean.
+	idGate, idDone         chan struct{}
+	onlineGate, onlineDone chan struct{}
 }
 
-func (f *fakeClient) GetChannelID(string) (string, error) { return f.channelID, f.idErr }
+func (f *fakeClient) GetChannelID(string) (string, error) {
+	if f.idGate != nil {
+		<-f.idGate
+	}
+	if f.idDone != nil {
+		close(f.idDone)
+	}
+	return f.channelID, f.idErr
+}
 
 func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) {
+	if f.onlineGate != nil {
+		<-f.onlineGate
+	}
 	atomic.AddInt32(&f.checks, 1)
 	if f.online {
 		s.SetOnline()
 		s.Stream.SpadeURL = f.spade
 	} else {
 		s.SetOffline()
+	}
+	if f.onlineDone != nil {
+		close(f.onlineDone)
 	}
 }
 
@@ -251,6 +272,62 @@ func TestCanaryRecordedSignalRedacted(t *testing.T) {
 			t.Fatalf("recorded signal leaked %q: %q", secret, blob)
 		}
 	}
+}
+
+// probeWithin runs c.probe under a ctxTimeout deadline on a separate goroutine
+// and fails if probe does not return within hardLimit — i.e. it hung waiting on
+// a context-unaware client call instead of honoring the deadline.
+func probeWithin(t *testing.T, c *Canary, ctxTimeout, hardLimit time.Duration) Signal {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
+	defer cancel()
+	res := make(chan Signal, 1)
+	go func() { res <- c.probe(ctx, "canary_chan") }()
+	select {
+	case sig := <-res:
+		return sig
+	case <-time.After(hardLimit):
+		t.Fatalf("probe did not return within %v — it hung on a blocking client call", hardLimit)
+		return Signal{}
+	}
+}
+
+// TestCanaryProbeTimesOutWhenClientBlocks proves the watchdog: even though
+// GetChannelID / CheckStreamerOnline are context-unaware and hang indefinitely,
+// probe() still returns on its deadline (abandoning the detached goroutine), and
+// a timed-out CheckStreamerOnline invalidates the cached streamer so the leaked
+// writer never shares it with a later probe. Each subtest joins the detached
+// goroutine (close the gate, wait on done) to keep the run race-clean.
+func TestCanaryProbeTimesOutWhenClientBlocks(t *testing.T) {
+	t.Run("GetChannelID hangs", func(t *testing.T) {
+		gate, done := make(chan struct{}), make(chan struct{})
+		client := &fakeClient{channelID: "cid", online: true, spade: "http://spade.test/x", idGate: gate, idDone: done}
+		c := newCanary(NewCenter(), client, &fakeProber{res: watcher.ProbeResult{OK: true}}, &fakeNotifier{}, nil)
+		t.Cleanup(func() { close(gate); <-done })
+
+		sig := probeWithin(t, c, 20*time.Millisecond, 2*time.Second)
+		if sig.Status != StatusFailed || sig.Stage != "stream_info" || sig.ErrorCode != "timeout" {
+			t.Fatalf("expected a stream_info timeout, got %+v", sig)
+		}
+	})
+
+	t.Run("CheckStreamerOnline hangs", func(t *testing.T) {
+		gate, done := make(chan struct{}), make(chan struct{})
+		client := &fakeClient{channelID: "cid", online: true, spade: "http://spade.test/x", onlineGate: gate, onlineDone: done}
+		c := newCanary(NewCenter(), client, &fakeProber{res: watcher.ProbeResult{OK: true}}, &fakeNotifier{}, nil)
+		t.Cleanup(func() { close(gate); <-done })
+
+		sig := probeWithin(t, c, 20*time.Millisecond, 2*time.Second)
+		if sig.Status != StatusFailed || sig.Stage != "stream_info" || sig.ErrorCode != "timeout" {
+			t.Fatalf("expected a stream_info timeout, got %+v", sig)
+		}
+		c.mu.Lock()
+		cached := c.streamer
+		c.mu.Unlock()
+		if cached != nil {
+			t.Error("expected the cached streamer to be dropped after a CheckStreamerOnline timeout")
+		}
+	})
 }
 
 // --- scheduling (opportunistic vs forced) ---
