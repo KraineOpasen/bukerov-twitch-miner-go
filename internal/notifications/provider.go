@@ -14,6 +14,8 @@ const (
 	NotificationTypeConnectionLost     NotificationType = "connection_lost"
 	NotificationTypeConnectionRestored NotificationType = "connection_restored"
 	NotificationTypeUpdateAvailable    NotificationType = "update_available"
+	NotificationTypeHealthDegraded     NotificationType = "health_degraded"
+	NotificationTypeHealthRecovered    NotificationType = "health_recovered"
 )
 
 // Notification represents a notification to be sent.

@@ -31,6 +31,7 @@ type Config struct {
 	Discord             DiscordSettings         `json:"discord"`
 	Notifications       NotificationsSettings   `json:"notifications"`
 	Debug               DebugSettings           `json:"debug"`
+	Health              HealthSettings          `json:"health"`
 
 	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
 	// whose drop or reward name contains one of them is skipped during drop
@@ -149,6 +150,25 @@ type DebugSettings struct {
 	Port    int  `json:"port"`
 }
 
+// HealthSettings configures the watch-transport accrual canary (see the Health
+// Center). It is disabled by default and inert until a canary channel is set.
+type HealthSettings struct {
+	// CanaryEnabled turns on the scheduled canary. Even when off, a channel can
+	// still be probed on demand via "Run canary now".
+	CanaryEnabled bool `json:"canaryEnabled"`
+	// CanaryChannel is the login of a reliable, near-always-live channel (e.g. a
+	// 24/7 channel) the canary sends one real minute-watched beacon to. Empty
+	// disables the canary entirely.
+	CanaryChannel string `json:"canaryChannel,omitempty"`
+	// CanaryIntervalMinutes is the target cadence for a successful confirmation
+	// when a watch slot is free (clamped to [60, 1440]).
+	CanaryIntervalMinutes int `json:"canaryIntervalMinutes"`
+	// CanaryMaxStalenessHours forces a probe (regardless of slot occupancy) once
+	// the watch transport has not been confirmed for this long (clamped to
+	// [1, 168]).
+	CanaryMaxStalenessHours int `json:"canaryMaxStalenessHours"`
+}
+
 // DiscordSettings contains Discord integration configuration.
 // Only connection settings are stored in config; notification rules are in the database.
 type DiscordSettings struct {
@@ -222,6 +242,7 @@ func DefaultConfig() Config {
 		Discord:             DefaultDiscordSettings(),
 		Notifications:       DefaultNotificationsSettings(),
 		Debug:               DefaultDebugSettings(),
+		Health:              DefaultHealthSettings(),
 	}
 }
 
@@ -229,6 +250,15 @@ func DefaultDebugSettings() DebugSettings {
 	return DebugSettings{
 		Enabled: false,
 		Port:    5757,
+	}
+}
+
+func DefaultHealthSettings() HealthSettings {
+	return HealthSettings{
+		CanaryEnabled:           false,
+		CanaryChannel:           "",
+		CanaryIntervalMinutes:   360, // 6h
+		CanaryMaxStalenessHours: 48,
 	}
 }
 
@@ -419,5 +449,29 @@ func ValidateConfig(config *Config) {
 		config.Analytics.RetentionDays = 0
 	} else if config.Analytics.RetentionDays > 365 {
 		config.Analytics.RetentionDays = 365
+	}
+
+	// Health canary: interval in [60, 1440] minutes (1h–24h), max staleness in
+	// [1, 168] hours (1h–7d). The minimum interval bounds how often a real
+	// beacon is sent.
+	if config.Health.CanaryIntervalMinutes < 60 {
+		config.Health.CanaryIntervalMinutes = 60
+	} else if config.Health.CanaryIntervalMinutes > 1440 {
+		config.Health.CanaryIntervalMinutes = 1440
+	}
+	if config.Health.CanaryMaxStalenessHours < 1 {
+		config.Health.CanaryMaxStalenessHours = 1
+	} else if config.Health.CanaryMaxStalenessHours > 168 {
+		config.Health.CanaryMaxStalenessHours = 168
+	}
+
+	// Max staleness must cover at least one interval. Otherwise the forced-probe
+	// condition (staleness exceeded) would fire before the opportunistic
+	// interval-elapsed condition, and the hybrid schedule would degenerate into
+	// "always force" — sending the beacon regardless of slot occupancy every
+	// interval. Clamp staleness up to the interval (rounded up to whole hours),
+	// mirroring the rotation max>=min clamp above.
+	if minStalenessHours := (config.Health.CanaryIntervalMinutes + 59) / 60; config.Health.CanaryMaxStalenessHours < minStalenessHours {
+		config.Health.CanaryMaxStalenessHours = minStalenessHours
 	}
 }

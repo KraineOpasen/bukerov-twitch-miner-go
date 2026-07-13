@@ -496,6 +496,12 @@ Generate a sample config with all options:
   "debug": {
     "enabled": false,
     "port": 5757
+  },
+  "health": {
+    "canaryEnabled": false,
+    "canaryChannel": "",
+    "canaryIntervalMinutes": 360,
+    "canaryMaxStalenessHours": 48
   }
 }
 ```
@@ -518,6 +524,35 @@ an in-progress watch streak → an active drop → a fair-rotation/priority pick
 A channel about to complete a watch streak is never bumped, and one channel
 can never hold both slots. The Overview "Now watching" block, the Drops page,
 and `/debug/snapshot` show which channel holds each slot and the reason.
+
+The one documented exception is the health canary (see *Health Center*): a rare,
+opt-in diagnostic beacon that never holds a slot and is not a candidate source.
+
+### Health Center
+
+The **Health Center** (`/health`) shows the miner's operational signals — OAuth,
+GQL API, PubSub, Watch Transport, Drops Inventory Sync, Drops Progress — each as
+`OK`/`FAILED`/`IDLE` with how long ago it was checked, plus the active GQL client
+ID (TV/Browser/Mobile). It stores no tokens, cookies, signed URLs, or headers.
+
+The **watch-transport accrual canary** verifies that Twitch still accepts the
+watch transport, independently of whether any drop is active. It reuses the real
+minute-watched beacon path (playback token → HLS playlist → segment → spade
+POST) via a stage-instrumented probe. When enabled (`health.canaryEnabled` +
+`health.canaryChannel`), it confirms the transport opportunistically when a watch
+slot is free, and forces a check once the transport has not been confirmed for
+`health.canaryMaxStalenessHours` (which is always at least one interval). "Run
+canary now" runs one on demand. Every probe is bounded by a 60s deadline and
+cannot stall the miner even if a Twitch call hangs — it is abandoned and the
+next probe starts fresh.
+
+> The canary confirms Twitch accepts the watch transport and beacon requests.
+> Without an active drop campaign it does **not** prove accrual of a specific
+> drop. It sends one real beacon per check, so at most one extra concurrent
+> stream can briefly coincide with two busy slots, on the max-staleness schedule.
+
+Transitions (healthy→failed, failed→recovered) send one operator notification via
+the configured providers; repeated same-state results never spam.
 
 ### Priority System
 

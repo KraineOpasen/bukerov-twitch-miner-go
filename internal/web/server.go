@@ -14,6 +14,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
@@ -40,6 +41,16 @@ type CampaignsProvider interface {
 // discovery manager.
 type DiscoveryProvider interface {
 	State() discovery.State
+}
+
+// HealthProvider exposes the Health Center's aggregated signals and the canary
+// controls (run-now, settings) to the dashboard and debug endpoint. Satisfied
+// by the miner.
+type HealthProvider interface {
+	HealthSnapshot() health.Snapshot
+	RunCanaryNow()
+	CurrentHealthSettings() config.HealthSettings
+	ApplyHealthSettings(config.HealthSettings)
 }
 
 // RewardsProvider exposes custom channel-points reward listing/redemption and
@@ -92,6 +103,7 @@ type Server struct {
 	nextStreamCheckProvider NextStreamCheckProvider
 	campaignsProvider       CampaignsProvider
 	discoveryProvider       DiscoveryProvider
+	healthProvider          HealthProvider
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
 	predictionControl       PredictionControlProvider
@@ -153,7 +165,7 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 func loadTemplates() map[string]*template.Template {
 	templates := make(map[string]*template.Template)
 
-	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html"}
+	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html"}
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(templatesFS,
 			"templates/base.html",
@@ -226,6 +238,12 @@ func (s *Server) SetDiscoveryProvider(provider DiscoveryProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.discoveryProvider = provider
+}
+
+func (s *Server) SetHealthProvider(provider HealthProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.healthProvider = provider
 }
 
 func (s *Server) SetRewardsProvider(provider RewardsProvider) {
@@ -384,6 +402,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/settings", s.handleSettingsPage)
 	mux.HandleFunc("/api/settings", s.handleAPISettings)
 	mux.HandleFunc("/api/settings/reset", s.handleAPISettingsReset)
+
+	mux.HandleFunc("/health", s.handleHealthPage)
+	mux.HandleFunc("/api/health", s.handleAPIHealth)
+	mux.HandleFunc("/api/health/canary/run", s.handleAPIHealthCanaryRun)
+	mux.HandleFunc("/api/health/settings", s.handleAPIHealthSettings)
 
 	// Analytics/data routes
 	mux.HandleFunc("/streamers", s.handleStreamers)

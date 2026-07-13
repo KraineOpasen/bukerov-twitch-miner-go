@@ -373,6 +373,17 @@ func (w *MinuteWatcher) BrokerSnapshot() BrokerSnapshot {
 	return BrokerSnapshot{MaxSlots: constants.MaxSimultaneousStreams}
 }
 
+// FreeSlots reports how many of the constants.MaxSimultaneousStreams watch
+// slots are currently unoccupied, for opportunistic health-canary scheduling.
+// Reads the published snapshot, so it takes no broker lock.
+func (w *MinuteWatcher) FreeSlots() int {
+	free := constants.MaxSimultaneousStreams - len(w.BrokerSnapshot().Slots)
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
 // IsWatching reports whether the channel currently holds a watch slot. It reads
 // the published snapshot, so directory discovery can tell whether its proposed
 // channel actually got a slot without reaching into broker internals. Satisfies

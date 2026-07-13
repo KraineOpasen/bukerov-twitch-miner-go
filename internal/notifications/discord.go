@@ -125,6 +125,10 @@ func (d *DiscordProvider) Send(ctx context.Context, notification Notification) e
 			color = ColorConnectionLost
 		case NotificationTypeConnectionRestored:
 			color = ColorConnectionRestored
+		case NotificationTypeHealthDegraded:
+			color = ColorConnectionLost
+		case NotificationTypeHealthRecovered:
+			color = ColorConnectionRestored
 		case NotificationTypeUpdateAvailable:
 			color = ColorUpdateAvailable
 		default:

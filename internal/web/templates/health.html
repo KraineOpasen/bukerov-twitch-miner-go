@@ -1,0 +1,10 @@
+{{define "title"}}Health - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">Health Center</h1>
+<p class="text-neutral-400 text-sm mb-6">Operational health signals and the watch-transport accrual canary. Auto-refreshes every 15 seconds.</p>
+
+<section id="health-center" hx-get="/api/health" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    <div class="animate-pulse text-neutral-400">Loading health signals...</div>
+</section>
+{{end}}

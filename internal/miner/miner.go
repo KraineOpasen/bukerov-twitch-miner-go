@@ -19,6 +19,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
@@ -47,6 +48,8 @@ type Miner struct {
 	watcher       *watcher.MinuteWatcher
 	dropsTracker  *drops.DropsTracker
 	discovery     *discovery.Manager
+	healthCenter  *health.Center
+	canary        *health.Canary
 	analyticsSvc  *analytics.Service
 	webServer     *web.Server
 	notifications *notifications.Manager
@@ -386,9 +389,24 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.watcher.AddSource(m.discovery)
 	m.discovery.SetSlotStatus(m.watcher)
 
+	// Health center aggregates operational signals; the canary verifies the
+	// watch transport independently (one real beacon, opportunistically or once
+	// past max staleness — never a permanent slot). Both are always constructed;
+	// the canary stays inert until a channel is configured.
+	m.healthCenter = health.NewCenter()
+	m.canary = health.NewCanary(
+		m.healthCenter,
+		m.client,
+		watcher.NewMinuteSender(m.client),
+		minerHealthNotifier{m}, // reads m.notifications at call time (it may be created later)
+		m.watcher,
+		healthCanaryConfig(m.config.Health),
+	)
+
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
 		m.webServer.SetDiscoveryProvider(m.discovery)
+		m.webServer.SetHealthProvider(m)
 	}
 
 	if m.config.ClaimDropsOnStartup {
@@ -464,6 +482,9 @@ func (m *Miner) startMining(ctx context.Context) {
 	m.watcher.Start(ctx)
 	m.dropsTracker.Start(ctx)
 	m.discovery.Start(ctx)
+	if m.canary != nil {
+		m.canary.Start(ctx)
+	}
 
 	if m.webServer != nil {
 		if !m.externalAnalytics {
@@ -722,6 +743,7 @@ func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 			m.mu.RUnlock()
 
 			now := time.Now()
+			m.refreshHealthCenter(now)
 			apiStale := m.client != nil && now.Sub(m.client.LastSuccessAt()) > threshold
 			pubsubStale := m.wsPool != nil && !m.wsPool.LastActivity().IsZero() && now.Sub(m.wsPool.LastActivity()) > threshold
 
@@ -793,6 +815,9 @@ func (m *Miner) stop() {
 	m.watcher.Stop()
 	m.dropsTracker.Stop()
 	m.discovery.Stop()
+	if m.canary != nil {
+		m.canary.Stop()
+	}
 
 	if m.webServer != nil {
 		m.webServer.Stop()
