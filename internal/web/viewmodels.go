@@ -87,16 +87,19 @@ type TickerItem struct {
 
 // PredictionOutcomeView is one outcome row on the live-predictions board.
 type PredictionOutcomeView struct {
+	ID          string
 	Title       string
 	Color       string
 	Percent     int
 	Odds        string
 	PointsLabel string
 	Chosen      bool
+	// Selectable is true when this outcome can be picked for a manual bet.
+	Selectable bool
 }
 
-// PredictionView is one card on the live-predictions board. It is strictly
-// informational (no manual betting controls).
+// PredictionView is one card on the live-predictions board, including the
+// compact manual-betting controls and their states.
 type PredictionView struct {
 	Streamer         string
 	Title            string
@@ -110,6 +113,33 @@ type PredictionView struct {
 	PoolLabel        string
 	Outcomes         []PredictionOutcomeView
 	WindowEndUnix    int64
+
+	// --- manual-control fields ---
+
+	// EventID is the stable round identifier the manual-bet / skip actions are
+	// keyed on (never the streamer name or title).
+	EventID string
+	// ManualAllowed is true when a manual bet can be offered: the round is open,
+	// the streamer is online, no bet is placed yet, and the balance covers the
+	// minimum stake.
+	ManualAllowed bool
+	// ManualBet marks that the placed bet came from a manual action (vs
+	// auto-bet); BetOutcomeTitle names the chosen outcome once a bet is placed.
+	ManualBet       bool
+	BetOutcomeTitle string
+	// AutoBetSkipped is true when auto-bet is suppressed for this round;
+	// SkipUndoable is true when that skip can still be undone (round open, no
+	// bet placed). ManualPending reflects an in-flight manual placement and
+	// ManualError the last human-readable manual failure.
+	AutoBetSkipped bool
+	SkipUndoable   bool
+	ManualPending  bool
+	ManualError    string
+	// Balance is the streamer's current channel-point balance, shown as the
+	// available amount and used for the quick-fill chips.
+	Balance      int
+	BalanceLabel string
+	MinBet       int
 }
 
 // WatchSlotView is one of the (max two) active watch slots rendered in the
@@ -182,6 +212,7 @@ type WatchSlotsView struct {
 
 // LivePredictionOutcome mirrors one prediction outcome for the board.
 type LivePredictionOutcome struct {
+	ID              string
 	Title           string
 	Color           string
 	PercentageUsers float64
@@ -194,6 +225,7 @@ type LivePredictionOutcome struct {
 // the pubsub pool's in-memory snapshot.
 type LivePrediction struct {
 	Streamer                string
+	EventID                 string
 	Title                   string
 	Status                  string
 	CreatedAt               time.Time
@@ -203,6 +235,15 @@ type LivePrediction struct {
 	BetAmount               int
 	TotalPoints             int
 	Outcomes                []LivePredictionOutcome
+
+	// --- manual-control state (mirrors pubsub.PredictionSnapshot) ---
+	Online          bool
+	Balance         int
+	ManualBet       bool
+	BetOutcomeTitle string
+	AutoBetSkipped  bool
+	ManualPending   bool
+	ManualError     string
 }
 
 type DashboardData struct {

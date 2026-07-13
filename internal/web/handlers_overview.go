@@ -339,6 +339,11 @@ func (s *Server) buildCards(
 
 const watchStreakThresholdMinutes = 7
 
+// manualMinBet is Twitch's minimum prediction stake, mirrored on the dashboard
+// so the UI never offers a bet the backend would reject. Kept in sync with the
+// pool's minPredictionBet.
+const manualMinBet = 10
+
 // fmtSeconds renders a seconds count as m:ss for prediction countdowns.
 func fmtSeconds(sec int) string {
 	if sec < 0 {
@@ -471,16 +476,38 @@ func buildPredictionViews(preds []LivePrediction) []PredictionView {
 		if secondsLeft < 0 {
 			secondsLeft = 0
 		}
+		locked := p.Status == string(models.PredictionLocked)
+		// A manual bet is offered only when the round is genuinely bettable:
+		// open, still within its window, the streamer online, no bet placed yet,
+		// and the balance covers the minimum stake. This is a UI gate only — the
+		// backend re-checks all of it before actually placing.
+		manualAllowed := !locked &&
+			p.Status == string(models.PredictionActive) &&
+			!p.BetPlaced &&
+			p.Online &&
+			secondsLeft > 0 &&
+			p.Balance >= manualMinBet
 		pv := PredictionView{
 			Streamer:         p.Streamer,
 			Title:            p.Title,
 			Status:           p.Status,
-			Locked:           p.Status == string(models.PredictionLocked),
+			Locked:           locked,
 			SecondsLeft:      secondsLeft,
 			SecondsLeftLabel: fmtSeconds(secondsLeft),
 			BetPlaced:        p.BetPlaced,
 			BetConfirmed:     p.BetConfirmed,
 			WindowEndUnix:    p.CreatedAt.Add(time.Duration(p.PredictionWindowSeconds) * time.Second).Unix(),
+			EventID:          p.EventID,
+			ManualAllowed:    manualAllowed,
+			ManualBet:        p.ManualBet,
+			BetOutcomeTitle:  p.BetOutcomeTitle,
+			AutoBetSkipped:   p.AutoBetSkipped,
+			SkipUndoable:     p.AutoBetSkipped && !p.BetPlaced && p.Status == string(models.PredictionActive) && secondsLeft > 0,
+			ManualPending:    p.ManualPending,
+			ManualError:      p.ManualError,
+			Balance:          p.Balance,
+			BalanceLabel:     util.FormatNumber(p.Balance),
+			MinBet:           manualMinBet,
 		}
 		if p.BetPlaced && p.BetAmount > 0 {
 			pv.BetAmount = util.FormatNumber(p.BetAmount)
@@ -490,10 +517,12 @@ func buildPredictionViews(preds []LivePrediction) []PredictionView {
 		}
 		for _, o := range p.Outcomes {
 			ov := PredictionOutcomeView{
-				Title:   o.Title,
-				Color:   o.Color,
-				Percent: int(o.PercentageUsers + 0.5),
-				Chosen:  o.Chosen,
+				ID:         o.ID,
+				Title:      o.Title,
+				Color:      o.Color,
+				Percent:    int(o.PercentageUsers + 0.5),
+				Chosen:     o.Chosen,
+				Selectable: manualAllowed && o.ID != "",
 			}
 			if o.Odds > 0 {
 				ov.Odds = fmt.Sprintf("%.2fx", o.Odds)

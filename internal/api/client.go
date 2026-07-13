@@ -840,31 +840,24 @@ func (c *TwitchClient) JoinRaid(streamer *models.Streamer, raid *models.Raid) er
 	return err
 }
 
-func (c *TwitchClient) MakePrediction(event *models.EventPrediction) error {
-	decision := event.Bet.Calculate(event.Streamer.GetChannelPoints())
-
-	if decision.Amount < 10 {
-		slog.Info("Bet amount too low", "amount", decision.Amount)
-		return nil
-	}
-
-	skip, comparedValue := event.Bet.Skip()
-	if skip {
-		slog.Info("Skipping bet", "filter", event.Bet.Settings.FilterCondition, "value", comparedValue)
-		return nil
-	}
-
-	slog.Info("Placing prediction bet",
-		"event", event.Title,
-		"choice", decision.Choice,
-		"amount", decision.Amount,
-	)
-
+// PlacePredictionBet places a single prediction bet for an explicit outcome and
+// amount and interprets Twitch's response. It is the one and only Twitch entry
+// point for placing a prediction — both the scheduled auto-bet and a manual
+// dashboard bet go through it — so there is no second betting implementation to
+// keep in sync. It deliberately does NOT mutate the event's local bet state
+// (BetPlaced / Decision); the caller owns that bookkeeping under its own
+// synchronization, which is what lets the pool serialize auto and manual bets
+// against each other without this method knowing about locks.
+//
+// A returned error is either a transport/auth error from postGQLRequest or a
+// "prediction error: <CODE>" carrying Twitch's own rejection code (e.g.
+// NOT_ENOUGH_POINTS, EVENT_NOT_ACTIVE), so callers can surface a precise reason.
+func (c *TwitchClient) PlacePredictionBet(event *models.EventPrediction, outcomeID string, amount int) error {
 	op := constants.MakePrediction.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
 			"eventID":       event.EventID,
-			"outcomeID":     decision.ID,
-			"points":        decision.Amount,
+			"outcomeID":     outcomeID,
+			"points":        amount,
 			"transactionID": util.RandomHex(16),
 		},
 	})
@@ -880,11 +873,11 @@ func (c *TwitchClient) MakePrediction(event *models.EventPrediction) error {
 				if code, ok := errData["code"].(string); ok {
 					return fmt.Errorf("prediction error: %s", code)
 				}
+				return fmt.Errorf("prediction error")
 			}
 		}
 	}
 
-	event.BetPlaced = true
 	return nil
 }
 

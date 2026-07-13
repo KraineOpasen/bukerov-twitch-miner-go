@@ -62,6 +62,16 @@ type OverviewProvider interface {
 	LivePredictions() []LivePrediction
 }
 
+// PredictionControlProvider exposes safe, server-validated manual control over
+// live prediction rounds: placing a manual bet on a specific outcome, and
+// toggling per-round auto-bet suppression. Both are keyed on the stable round
+// (event) id and never touch global/persisted settings. Satisfied by the miner,
+// which delegates to the pubsub pool that owns the round state.
+type PredictionControlProvider interface {
+	PlaceManualBet(eventID, outcomeID string, amount int) (string, error)
+	SetAutoBetSkip(eventID string, skip bool) error
+}
+
 type Server struct {
 	host           string
 	port           int
@@ -84,6 +94,7 @@ type Server struct {
 	discoveryProvider       DiscoveryProvider
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
+	predictionControl       PredictionControlProvider
 	status                  *StatusBroadcaster
 	ready                   bool
 
@@ -229,6 +240,12 @@ func (s *Server) SetOverviewProvider(provider OverviewProvider) {
 	s.overviewProvider = provider
 }
 
+func (s *Server) SetPredictionControlProvider(provider PredictionControlProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.predictionControl = provider
+}
+
 func (s *Server) SetDiscordEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -320,6 +337,19 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/now-watching", s.handleAPINowWatching)
 	mux.HandleFunc("/api/overview/events/", s.handleAPIOverviewEvents)
 	mux.HandleFunc("/api/streamer-action/", s.handleAPIStreamerQuickAction)
+
+	// Manual prediction control: place a manual bet, or toggle per-round
+	// auto-bet suppression. Same auth/response/error/logging conventions as the
+	// other dashboard JSON endpoints.
+	mux.HandleFunc("/api/prediction/bet", s.handleAPIPredictionBet)
+	mux.HandleFunc("/api/prediction/skip", s.handleAPIPredictionSkip)
+
+	// Dev-only prediction simulator (fixtures + a fake Twitch placer), disabled
+	// by default and only wired when MINER_DEV_PREDICTIONS is set, so simulated
+	// rounds can never leak into a real run.
+	if devPredictionsEnabled() {
+		s.enableDevPredictions(mux)
+	}
 
 	// Custom channel-points rewards (per-streamer): list, redeem, auto-redeem
 	// config. The "/api/streamer/" subtree is distinct from the exact

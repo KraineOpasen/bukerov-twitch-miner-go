@@ -494,3 +494,52 @@
   .app-sidebar { transition: none; }
   * { scroll-behavior: auto !important; }
 }
+
+/* =====================================================================
+   Manual prediction betting — compact inline controls on the live board.
+   Plain CSS on the existing @theme tokens; single dark theme, keyboard
+   focus-visible, and prefers-reduced-motion aware.
+   ===================================================================== */
+.pred-outcome.selectable { cursor: pointer; border-radius: 0.35rem; padding: 0.15rem 0.35rem; transition: background 0.12s, box-shadow 0.12s; }
+.pred-outcome.selectable:hover { background: rgba(139,127,209,0.08); }
+.pred-outcome.selectable:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+.pred-outcome.picked { background: rgba(139,127,209,0.16); box-shadow: inset 0 0 0 1px var(--color-online); }
+
+.pred-manual { margin-top: 0.6rem; border-top: 1px solid var(--color-neutral-700); padding-top: 0.55rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.pred-manual-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.pred-amount { width: 6.5rem; background: var(--color-neutral-900); border: 1px solid var(--color-neutral-700); border-radius: 0.4rem; padding: 0.3rem 0.5rem; color: var(--color-neutral-100); font-size: 0.85rem; }
+.pred-amount:focus { outline: none; border-color: var(--color-online); }
+.pred-fills { display: flex; gap: 0.3rem; }
+.pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--color-neutral-700); color: var(--color-neutral-300); background: rgba(26,27,34,0.6); transition: border-color 0.12s, color 0.12s; }
+.pred-chip:hover { border-color: var(--color-purple-400); color: var(--color-neutral-100); }
+.pred-chip:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+
+.pred-manual-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.btn-bet { font-size: 0.75rem; font-weight: 600; padding: 0.32rem 0.75rem; border-radius: 0.4rem; background: var(--color-purple-600); color: #fff; border: 1px solid transparent; transition: background 0.12s; }
+.btn-bet:hover:not(:disabled) { background: var(--color-purple-700); }
+.btn-bet:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-bet:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+
+.pred-confirm { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; background: rgba(139,127,209,0.1); border: 1px solid rgba(139,127,209,0.3); border-radius: 0.4rem; padding: 0.35rem 0.5rem; flex-wrap: wrap; }
+.pred-confirm-actions { display: flex; gap: 0.35rem; }
+.btn-bet-go { font-size: 0.72rem; font-weight: 600; padding: 0.28rem 0.6rem; border-radius: 0.35rem; background: var(--color-success); color: #10231a; border: none; cursor: pointer; }
+.btn-bet-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-bet-cancel { font-size: 0.72rem; padding: 0.28rem 0.55rem; border-radius: 0.35rem; background: transparent; color: var(--color-neutral-300); border: 1px solid var(--color-neutral-700); cursor: pointer; }
+.btn-bet-go:focus-visible, .btn-bet-cancel:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+
+.pred-skip { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.pred-skip input { accent-color: var(--color-online); }
+
+.pred-status { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-neutral-700); }
+.pred-link { font-size: 0.72rem; color: var(--color-purple-300); text-decoration: underline; background: none; border: none; cursor: pointer; }
+.pred-link:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
+
+.pred-msg { font-size: 0.75rem; margin-top: 0.4rem; border-radius: 0.35rem; padding: 0.3rem 0.5rem; }
+.pred-msg-error { color: var(--color-danger); background: rgba(201,123,99,0.12); border: 1px solid rgba(201,123,99,0.35); }
+
+.pred-card.is-pending { opacity: 0.85; }
+.pred-manual.is-sending { opacity: 0.7; pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pred-outcome.selectable, .pred-chip, .btn-bet { transition: none; }
+}

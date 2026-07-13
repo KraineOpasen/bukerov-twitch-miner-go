@@ -1,9 +1,16 @@
 package miner
 
 import (
+	"errors"
+
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
+
+// errPredictionsUnavailable is returned by the manual-control methods before the
+// pubsub pool exists (e.g. during startup), so the dashboard shows a friendly
+// message rather than a nil dereference.
+var errPredictionsUnavailable = errors.New("predictions are not available yet")
 
 // WatchSlots implements web.OverviewProvider. It exposes the watcher's live
 // selection state (which streamers occupy the two watch slots, why, and when
@@ -49,6 +56,7 @@ func (m *Miner) LivePredictions() []web.LivePrediction {
 		}
 		lp := web.LivePrediction{
 			Streamer:                p.Streamer,
+			EventID:                 p.EventID,
 			Title:                   p.Title,
 			Status:                  p.Status,
 			CreatedAt:               p.CreatedAt,
@@ -57,9 +65,17 @@ func (m *Miner) LivePredictions() []web.LivePrediction {
 			BetConfirmed:            p.BetConfirmed,
 			BetAmount:               p.BetAmount,
 			TotalPoints:             p.TotalPoints,
+			Online:                  p.Online,
+			Balance:                 p.Balance,
+			ManualBet:               p.ManualBet,
+			BetOutcomeTitle:         p.BetOutcomeTitle,
+			AutoBetSkipped:          p.AutoBetSkipped,
+			ManualPending:           p.ManualPending,
+			ManualError:             p.ManualError,
 		}
 		for _, o := range p.Outcomes {
 			lp.Outcomes = append(lp.Outcomes, web.LivePredictionOutcome{
+				ID:              o.ID,
 				Title:           o.Title,
 				Color:           o.Color,
 				PercentageUsers: o.PercentageUsers,
@@ -71,4 +87,30 @@ func (m *Miner) LivePredictions() []web.LivePrediction {
 		out = append(out, lp)
 	}
 	return out
+}
+
+// PlaceManualBet implements web.PredictionControlProvider by delegating to the
+// pubsub pool, which owns the tracked-prediction state and performs all the
+// server-side revalidation and the auto-bet serialization. Returns the chosen
+// outcome title on success.
+func (m *Miner) PlaceManualBet(eventID, outcomeID string, amount int) (string, error) {
+	m.mu.RLock()
+	pool := m.wsPool
+	m.mu.RUnlock()
+	if pool == nil {
+		return "", errPredictionsUnavailable
+	}
+	return pool.PlaceManualBet(eventID, outcomeID, amount)
+}
+
+// SetAutoBetSkip implements web.PredictionControlProvider by delegating to the
+// pubsub pool. It suppresses (or un-suppresses) auto-bet for one round only.
+func (m *Miner) SetAutoBetSkip(eventID string, skip bool) error {
+	m.mu.RLock()
+	pool := m.wsPool
+	m.mu.RUnlock()
+	if pool == nil {
+		return errPredictionsUnavailable
+	}
+	return pool.SetAutoBetSkip(eventID, skip)
 }

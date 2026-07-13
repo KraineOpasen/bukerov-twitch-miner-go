@@ -1,7 +1,7 @@
 {{define "title"}}Overview - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s" hx-swap="innerHTML">
+<div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
 </div>
 
@@ -113,5 +113,260 @@
 
     // Re-run countdowns right after each htmx swap of the live region.
     document.body.addEventListener('htmx:afterSwap', tickCountdowns);
+</script>
+
+<script>
+    // =====================================================================
+    // Manual prediction betting + per-round auto-bet skip.
+    //
+    // The board re-renders every 30s (htmx innerHTML swap). Authoritative
+    // "placed / skipped" state comes from the server payload and so survives
+    // re-renders on its own. The purely transient UI state (which outcome is
+    // picked, the typed amount, whether the confirm bar is open, the last live
+    // error) is kept in `manualUI` keyed by the stable event id and re-applied
+    // after every swap, so an in-progress bet is never lost to a refresh.
+    // =====================================================================
+    const manualUI = {};
+
+    function stateFor(eventId) {
+        if (!manualUI[eventId]) manualUI[eventId] = { outcomeId: '', outcomeTitle: '', amount: '', confirming: false, error: '', inflight: false };
+        return manualUI[eventId];
+    }
+
+    function predCardFor(el) { return el.closest('[data-pred]'); }
+
+    // Validate the typed amount against the min stake and the (server-supplied)
+    // balance. Never trusts the DOM for the real decision — this only gates the
+    // button and shows a hint; the backend re-checks everything.
+    function amountState(manual) {
+        const min = parseInt(manual.dataset.min || '10', 10);
+        const balance = parseInt(manual.dataset.balance || '0', 10);
+        const st = stateFor(manual.dataset.eventId);
+        const raw = (st.amount || '').trim();
+        if (raw === '') return { ok: false, hint: '' };
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n <= 0) return { ok: false, hint: 'Enter a whole number of points' };
+        if (n < min) return { ok: false, hint: 'Minimum bet is ' + min + ' points' };
+        if (n > balance) return { ok: false, hint: 'That exceeds your balance' };
+        return { ok: true, hint: '', value: n };
+    }
+
+    function updatePlaceState(manual) {
+        const st = stateFor(manual.dataset.eventId);
+        const place = manual.querySelector('[data-place]');
+        const amt = amountState(manual);
+        const ready = !!st.outcomeId && amt.ok && !st.inflight;
+        if (place) place.disabled = !ready;
+        // Live hint for a bad/oversized amount (not a server error).
+        const liveErr = manual.querySelector('[data-live-error]');
+        if (liveErr && !st.error) {
+            if (amt.hint) { liveErr.textContent = amt.hint; liveErr.hidden = false; }
+            else { liveErr.hidden = true; }
+        }
+    }
+
+    function showLiveError(manual, msg) {
+        const liveErr = manual.querySelector('[data-live-error]');
+        if (liveErr) { liveErr.textContent = msg; liveErr.hidden = !msg; }
+    }
+
+    function selectOutcome(card, row) {
+        const eventId = card.dataset.eventId;
+        const st = stateFor(eventId);
+        st.outcomeId = row.dataset.outcomeId;
+        st.outcomeTitle = row.dataset.outcomeTitle || '';
+        st.confirming = false; st.error = '';
+        card.querySelectorAll('[data-outcome-id]').forEach(r => {
+            const on = r === row;
+            r.classList.toggle('picked', on);
+            r.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
+        const manual = card.querySelector('[data-manual]');
+        if (manual) { exitConfirm(manual); updatePlaceState(manual); }
+    }
+
+    function enterConfirm(manual) {
+        const st = stateFor(manual.dataset.eventId);
+        const amt = amountState(manual);
+        if (!st.outcomeId || !amt.ok) return;
+        st.confirming = true;
+        const confirm = manual.querySelector('[data-confirm]');
+        const text = manual.querySelector('[data-confirm-text]');
+        const place = manual.querySelector('[data-place]');
+        const balance = parseInt(manual.dataset.balance || '0', 10);
+        if (text) text.innerHTML = 'Bet <strong>' + amt.value.toLocaleString() + '</strong> on <strong>' +
+            (st.outcomeTitle || 'selected outcome') + '</strong> · balance ' + balance.toLocaleString();
+        if (confirm) confirm.hidden = false;
+        if (place) place.hidden = true;
+        updateBusy();
+    }
+
+    function exitConfirm(manual) {
+        const st = stateFor(manual.dataset.eventId);
+        st.confirming = false;
+        const confirm = manual.querySelector('[data-confirm]');
+        const place = manual.querySelector('[data-place]');
+        if (confirm) confirm.hidden = true;
+        if (place) place.hidden = false;
+        updateBusy();
+    }
+
+    async function sendBet(manual) {
+        const eventId = manual.dataset.eventId;
+        const st = stateFor(eventId);
+        const amt = amountState(manual);
+        if (!st.outcomeId || !amt.ok || st.inflight) return;
+        st.inflight = true; st.error = '';
+        updateBusy();
+        manual.classList.add('is-sending');
+        const go = manual.querySelector('[data-go]');
+        if (go) go.disabled = true;
+        try {
+            const res = await fetch('/api/prediction/bet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ eventId: eventId, outcomeId: st.outcomeId, amount: amt.value })
+            });
+            const data = await res.json().catch(() => ({ success: false, message: 'Unexpected server response' }));
+            if (res.status !== 200) throw new Error((data && data.message) || ('Request failed (' + res.status + ')'));
+            if (!data.success) {
+                st.inflight = false; st.confirming = false;
+                st.error = data.message || 'The bet could not be placed';
+                showToast(st.error, 'error');
+                updateBusy();
+                if (window.htmx) htmx.trigger('#overview-live', 'refresh');
+                return;
+            }
+            delete manualUI[eventId];
+            showToast('Bet placed: ' + (data.amount || amt.value).toLocaleString() + ' on ' + (data.outcome || st.outcomeTitle));
+            updateBusy();
+            if (window.htmx) htmx.trigger('#overview-live', 'refresh');
+        } catch (e) {
+            st.inflight = false; st.confirming = false;
+            st.error = e.message || 'Connection lost — the bet was not placed';
+            showToast(st.error, 'error');
+            showLiveError(manual, st.error);
+            updateBusy();
+        }
+    }
+
+    async function sendSkip(eventId, skip, input) {
+        if (input) input.disabled = true;
+        try {
+            const res = await fetch('/api/prediction/skip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ eventId: eventId, skip: skip })
+            });
+            const data = await res.json().catch(() => ({ success: false, message: 'Unexpected server response' }));
+            if (res.status !== 200 || !data.success) throw new Error((data && data.message) || 'Could not update auto-bet');
+            showToast(data.message || (skip ? 'Auto-bet skipped' : 'Auto-bet re-enabled'));
+            if (window.htmx) htmx.trigger('#overview-live', 'refresh');
+        } catch (e) {
+            showToast(e.message || 'Action failed', 'error');
+            if (input && input.type === 'checkbox') input.checked = !skip; // revert
+        } finally {
+            if (input) input.disabled = false;
+        }
+    }
+
+    // Pause the periodic swap only while a confirm bar is open or a bet is in
+    // flight (both short-lived), so those never vanish mid-interaction. Typed
+    // amounts / picked outcomes survive via rehydrate instead.
+    function updateBusy() {
+        window.__predBusy = Object.values(manualUI).some(s => s.confirming || s.inflight);
+    }
+
+    // Re-apply transient manual UI state to freshly-swapped cards.
+    function rehydrateManual() {
+        document.querySelectorAll('[data-manual]').forEach(manual => {
+            const eventId = manual.dataset.eventId;
+            const st = manualUI[eventId];
+            if (!st) return;
+            const card = predCardFor(manual);
+            if (st.outcomeId && card) {
+                const row = card.querySelector('[data-outcome-id="' + CSS.escape(st.outcomeId) + '"]');
+                if (row) { row.classList.add('picked'); row.setAttribute('aria-checked', 'true'); }
+            }
+            const input = manual.querySelector('[data-amount]');
+            if (input && st.amount) input.value = st.amount;
+            if (st.error) showLiveError(manual, st.error);
+            if (st.confirming) enterConfirm(manual); else updatePlaceState(manual);
+        });
+        // Drop UI state for rounds that are no longer on the board.
+        const live = new Set(Array.from(document.querySelectorAll('[data-manual]')).map(m => m.dataset.eventId));
+        Object.keys(manualUI).forEach(id => { if (!live.has(id)) delete manualUI[id]; });
+        updateBusy();
+    }
+
+    // Cancel the periodic poll while busy so an open confirm / in-flight bet is
+    // not swapped away underneath the user.
+    document.body.addEventListener('htmx:beforeRequest', (e) => {
+        const elt = e.detail && e.detail.elt;
+        if (elt && elt.id === 'overview-live' && window.__predBusy) {
+            const trig = e.detail.requestConfig && e.detail.requestConfig.triggeringEvent;
+            // Allow explicit refreshes (our own success/skip triggers), block the timer.
+            if (!trig || trig.type === 'every' || trig.type === 'load') e.preventDefault();
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        const row = e.target.closest('[data-outcome-id]');
+        if (row) { const card = predCardFor(row); if (card) { selectOutcome(card, row); } return; }
+        const place = e.target.closest('[data-place]');
+        if (place) { const m = place.closest('[data-manual]'); if (m) enterConfirm(m); return; }
+        const cancel = e.target.closest('[data-cancel]');
+        if (cancel) { const m = cancel.closest('[data-manual]'); if (m) exitConfirm(m); return; }
+        const go = e.target.closest('[data-go]');
+        if (go) { const m = go.closest('[data-manual]'); if (m) sendBet(m); return; }
+        const unskip = e.target.closest('[data-unskip]');
+        if (unskip) { sendSkip(unskip.dataset.eventId, false, unskip); return; }
+    });
+
+    document.addEventListener('input', (e) => {
+        const input = e.target.closest('[data-amount]');
+        if (!input) return;
+        const manual = input.closest('[data-manual]');
+        if (!manual) return;
+        const st = stateFor(manual.dataset.eventId);
+        st.amount = input.value; st.error = ''; st.confirming = false;
+        exitConfirm(manual);
+        updatePlaceState(manual);
+    });
+
+    document.addEventListener('change', (e) => {
+        const skip = e.target.closest('[data-skip]');
+        if (skip) { const m = skip.closest('[data-manual]'); if (m) sendSkip(m.dataset.eventId, skip.checked, skip); return; }
+    });
+
+    document.addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-fill]');
+        if (!chip) return;
+        const manual = chip.closest('[data-manual]');
+        if (!manual) return;
+        const balance = parseInt(manual.dataset.balance || '0', 10);
+        const kind = chip.dataset.fill;
+        let val = balance;
+        if (kind === '25') val = Math.floor(balance * 0.25);
+        else if (kind === '50') val = Math.floor(balance * 0.5);
+        const min = parseInt(manual.dataset.min || '10', 10);
+        if (val < min) val = Math.min(min, balance);
+        const input = manual.querySelector('[data-amount]');
+        if (input) input.value = val;
+        const st = stateFor(manual.dataset.eventId);
+        st.amount = String(val); st.error = ''; st.confirming = false;
+        exitConfirm(manual);
+        updatePlaceState(manual);
+    });
+
+    // Keyboard: pick an outcome with Enter/Space when focused.
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const row = e.target.closest('[data-outcome-id]');
+        if (row) { e.preventDefault(); const card = predCardFor(row); if (card) selectOutcome(card, row); }
+    });
+
+    document.body.addEventListener('htmx:afterSwap', rehydrateManual);
+    rehydrateManual();
 </script>
 {{end}}
