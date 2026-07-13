@@ -200,3 +200,45 @@ func (s *Server) handleAPINotificationsTest(w http.ResponseWriter, r *http.Reque
 
 	writeJSONOK(w, map[string]int{"sent": sent})
 }
+
+// handleAPITestNotification sends a test message to every enabled provider
+// (Discord plus all configured push providers), bypassing event filters and
+// batching. It responds with a per-provider status so the caller can see which
+// providers delivered successfully and which failed.
+func (s *Server) handleAPITestNotification(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeNotAllowed(w)
+		return
+	}
+
+	s.mu.RLock()
+	notifMgr := s.notificationManager
+	s.mu.RUnlock()
+
+	if notifMgr == nil {
+		writeServiceUnavailable(w, "Notifications not available")
+		return
+	}
+
+	results := notifMgr.TestAllProviders(r.Context())
+
+	// "ok" when every provider succeeded, "partial" when at least one failed,
+	// and still "ok" (with an explanatory message) when nothing is enabled.
+	status := "ok"
+	for _, res := range results {
+		if !res.OK {
+			status = "partial"
+			break
+		}
+	}
+
+	resp := map[string]any{
+		"status":    status,
+		"providers": results,
+	}
+	if len(results) == 0 {
+		resp["message"] = "no providers enabled"
+	}
+
+	writeJSONOK(w, resp)
+}

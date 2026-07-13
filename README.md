@@ -31,7 +31,7 @@ This tool passively earns Twitch channel points by simulating viewer presence ac
 - **Resilient Twitch API**: GQL retry with exponential backoff on transient errors, plus client-ID fallback on `PersistedQueryNotFound`
 - **Connection Health Watchdog**: Detects auth-token expiry and connection loss (dashboard banner, Discord alert, error log) and recovers when activity resumes
 - **Real-time Analytics**: Web-based dashboard for tracking point earnings, including a dedicated **Drops** page
-- **Discord Notifications**: Get notified for mentions, point goals, and stream status changes
+- **Notifications**: Get notified for mentions, point goals, and stream status changes via Discord, Matrix, Pushover, Gotify, or a generic webhook — with optional event batching
 - **Colored Console Logging**: Optional category-based color scheme for console output
 - **Diagnostics Endpoint**: Optional localhost-only debug HTTP server exposing the miner's internal decision state
 
@@ -384,6 +384,14 @@ Generate a sample config with all options:
     "botToken": "",
     "guildId": ""
   },
+  "notifications": {
+    "batching": {
+      "enabled": false,
+      "interval": "30m",
+      "maxEntries": 20,
+      "immediateEvents": ["drop_claim", "bet_win", "bet_lose"]
+    }
+  },
   "rateLimits": {
     "websocketPingInterval": 27,
     "campaignSyncInterval": 60,
@@ -596,6 +604,115 @@ After restarting with Discord enabled, a **Notifications** page appears in the d
 - Enable/disable mention notifications (globally or per-streamer)
 - Create point goal rules (one-time or recurring)
 - Enable/disable online/offline notifications
+
+---
+
+## Push Notification Providers
+
+In addition to Discord, the miner can deliver notifications to several "push"
+providers. Each is enabled purely by setting its environment variables — no
+config-file changes are required. They receive stream online/offline events and
+system alerts (reauthorization required, connection lost/restored), and are
+included in the test endpoint below.
+
+| Provider | Environment variables | Notes |
+|----------|-----------------------|-------|
+| **Matrix** | `MATRIX_HOMESERVER`, `MATRIX_ROOM_ID`, `MATRIX_ACCESS_TOKEN` | Posts an `m.text` message to the room via the client-server API. `MATRIX_HOMESERVER` is the base URL, e.g. `https://matrix.org`. |
+| **Pushover** | `PUSHOVER_TOKEN`, `PUSHOVER_USER_KEY` | `PUSHOVER_TOKEN` is the application API token; `PUSHOVER_USER_KEY` is your user (or group) key. |
+| **Gotify** | `GOTIFY_URL`, `GOTIFY_TOKEN` | `GOTIFY_URL` is your Gotify server base URL; `GOTIFY_TOKEN` is an application token. |
+| **Generic Webhook** | `WEBHOOK_URL` | POSTs a JSON body `{"type": "...", "title": "...", "message": "..."}` to the URL. |
+
+A provider is considered enabled only when **all** of its variables are set. Any
+combination of providers can be active at once, alongside Discord.
+
+### Per-account overrides (multi-account)
+
+Every variable also supports an optional per-account override suffixed with the
+uppercased miner username: `<VAR>_<USERNAME>`. The account-specific value wins
+when set; otherwise the global (unsuffixed) variable is used. For example, for a
+miner account `alice`:
+
+```bash
+# Global fallback used by every account
+export WEBHOOK_URL="https://example.com/hooks/global"
+# Override just for the "alice" account
+export WEBHOOK_URL_ALICE="https://example.com/hooks/alice"
+```
+
+### Docker example
+
+```bash
+docker run -d \
+  --name twitch-miner \
+  -e MATRIX_HOMESERVER=https://matrix.org \
+  -e MATRIX_ROOM_ID='!yourroom:matrix.org' \
+  -e MATRIX_ACCESS_TOKEN=syt_your_token \
+  -e PUSHOVER_TOKEN=your_app_token \
+  -e PUSHOVER_USER_KEY=your_user_key \
+  -e GOTIFY_URL=https://gotify.example.com \
+  -e GOTIFY_TOKEN=your_app_token \
+  -e WEBHOOK_URL=https://example.com/webhook \
+  ... \
+  twitch-miner-go
+```
+
+## Event Batching
+
+Batching groups low-priority events (stream online/offline, etc.) and delivers
+them as a single combined message on a fixed interval, instead of one message
+per event. It applies to every push provider and is configured in `config.json`
+under `notifications.batching`:
+
+```json
+{
+  "notifications": {
+    "batching": {
+      "enabled": true,
+      "interval": "30m",
+      "maxEntries": 20,
+      "immediateEvents": ["drop_claim", "bet_win", "bet_lose"],
+      "providerBatching": {
+        "webhook": { "enabled": false }
+      }
+    }
+  }
+}
+```
+
+- `enabled` — turn batching on. When `false`, every event is delivered immediately.
+- `interval` — how often accumulated batches are flushed (Go duration string, e.g. `"30m"`, `"5m"`, `"90s"`).
+- `maxEntries` — maximum event lines per message; larger batches are split across several messages.
+- `immediateEvents` — event type identifiers that always bypass batching and send instantly. Recognized types include `online`, `offline`, `drop_claim`, `bet_win`, `bet_lose`, `reauth_required`, `connection_lost`, `connection_restored`.
+- `providerBatching` — optional per-provider overrides (keyed by provider name: `matrix`, `pushover`, `gotify`, `webhook`). A provider not listed here uses the global config.
+
+Events are grouped by streamer/campaign and joined with newlines when flushed.
+On graceful shutdown (SIGINT/SIGTERM) any pending batches are flushed before the
+process exits.
+
+## Testing Notifications
+
+`POST /api/test-notification` sends a test message to **every** enabled provider
+(Discord and all configured push providers), bypassing event filters and
+batching, and returns a per-provider status:
+
+```bash
+curl -X POST http://localhost:5000/api/test-notification
+```
+
+```json
+{
+  "status": "partial",
+  "providers": [
+    { "provider": "discord", "ok": true },
+    { "provider": "matrix", "ok": true },
+    { "provider": "gotify", "ok": false, "error": "gotify returned 401: invalid token" }
+  ]
+}
+```
+
+`status` is `ok` when every provider succeeded and `partial` when at least one
+failed (the failing provider's `error` field explains why). If the dashboard is
+protected with HTTP Basic Auth, pass `-u username:password` to `curl`.
 
 ---
 

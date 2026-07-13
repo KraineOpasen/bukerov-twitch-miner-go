@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
@@ -13,16 +14,27 @@ import (
 // Manager handles notification dispatching across multiple providers.
 type Manager struct {
 	discordConfig *config.DiscordSettings
+	notifConfig   *config.NotificationsSettings
+	username      string
 	discord       *DiscordProvider
 	repo          *Repository
 	streamers     []string
+
+	// messageProviders are the configured push providers (Matrix, Pushover,
+	// Gotify, webhook). batchers maps each provider name to the Batcher that
+	// wraps its Send call.
+	messageProviders []MessageProvider
+	batchers         map[string]*Batcher
 
 	pointsPreviousValues map[string]int
 	mu                   sync.RWMutex
 }
 
-// NewManager creates a new notification manager.
-func NewManager(discordCfg *config.DiscordSettings, db *database.DB, streamers []string) (*Manager, error) {
+// NewManager creates a new notification manager. discordCfg carries the Discord
+// connection settings, notifCfg carries the provider-agnostic batching
+// configuration, and username is used for the per-account environment-variable
+// override of the push providers (empty for a single-account setup).
+func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.NotificationsSettings, db *database.DB, streamers []string, username string) (*Manager, error) {
 	repo, err := NewRepository(db)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create notification repository: %w", err)
@@ -30,16 +42,44 @@ func NewManager(discordCfg *config.DiscordSettings, db *database.DB, streamers [
 
 	m := &Manager{
 		discordConfig:        discordCfg,
+		notifConfig:          notifCfg,
+		username:             username,
 		streamers:            streamers,
 		repo:                 repo,
 		pointsPreviousValues: make(map[string]int),
+		batchers:             make(map[string]*Batcher),
 	}
 
 	if discordCfg.Enabled {
 		m.discord = NewDiscordProvider(discordCfg.BotToken, discordCfg.GuildID)
 	}
 
+	for _, p := range NewMessageProvidersFromEnv(username) {
+		if !p.IsConfigured() {
+			continue
+		}
+		provider := p
+		m.messageProviders = append(m.messageProviders, provider)
+		bc := NewBatchConfig(m.resolveBatchingSettings(provider.Name()))
+		m.batchers[provider.Name()] = NewBatcher(provider.Name(), bc, provider.Send)
+		slog.Info("Push notification provider configured",
+			"provider", provider.Name(), "batching", bc.Enabled)
+	}
+
 	return m, nil
+}
+
+// resolveBatchingSettings returns the batching settings for a provider, applying
+// the per-provider override when present and falling back to the global config
+// (or built-in defaults when no notification config was supplied).
+func (m *Manager) resolveBatchingSettings(providerName string) config.BatchingSettings {
+	if m.notifConfig == nil {
+		return config.DefaultBatchingSettings()
+	}
+	if override, ok := m.notifConfig.ProviderBatching[providerName]; ok {
+		return override
+	}
+	return m.notifConfig.Batching
 }
 
 // Start initializes and connects all enabled providers.
@@ -54,13 +94,30 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start the per-provider batch flush loops. Each loop performs a final
+	// flush when ctx is cancelled (graceful shutdown).
+	for _, b := range m.batchers {
+		b.Start(ctx)
+	}
+
 	return nil
 }
 
-// Stop disconnects all providers and closes the repository.
+// Stop disconnects all providers, flushes any pending batches, and closes the
+// repository.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Force-flush every pending batch before shutting down so no accumulated
+	// events are lost.
+	if len(m.batchers) > 0 {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		for _, b := range m.batchers {
+			b.Stop(flushCtx)
+		}
+		cancel()
+	}
 
 	if m.discord != nil {
 		if err := m.discord.Disconnect(); err != nil {
@@ -71,6 +128,126 @@ func (m *Manager) Stop() {
 	if m.repo != nil {
 		_ = m.repo.Close()
 	}
+}
+
+// dispatchPush forwards an event to every configured push provider through its
+// batcher. Immediate events (per the batching config) are sent instantly;
+// everything else is accumulated and flushed on the batch interval. Sending
+// happens on background goroutines so callers are never blocked on network I/O.
+func (m *Manager) dispatchPush(eventType NotificationType, group, line string) {
+	m.mu.RLock()
+	batchers := make([]*Batcher, 0, len(m.batchers))
+	for _, b := range m.batchers {
+		batchers = append(batchers, b)
+	}
+	m.mu.RUnlock()
+
+	if len(batchers) == 0 {
+		return
+	}
+
+	ev := BatchEvent{Type: eventType, Group: group, Line: line}
+	for _, b := range batchers {
+		batcher := b
+		go func() {
+			if err := batcher.Add(context.Background(), ev); err != nil {
+				slog.Error("Failed to dispatch push notification",
+					"provider", batcher.name, "type", eventType, "error", err)
+			}
+		}()
+	}
+}
+
+// NotifyEvent submits a generic, provider-agnostic event to the push providers.
+// It is the extension point for batchable events produced elsewhere in the
+// codebase (e.g. drop claims or bet outcomes): callers pass an event type
+// (which the batching config may mark as immediate), a grouping key (streamer
+// or campaign), and a one-line human-readable summary.
+func (m *Manager) NotifyEvent(eventType NotificationType, group, line string) {
+	m.dispatchPush(eventType, group, line)
+}
+
+// ProviderTestResult reports the outcome of a test notification for a single
+// provider.
+type ProviderTestResult struct {
+	Provider string `json:"provider"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+}
+
+// TestAllProviders sends a test notification to every enabled provider (Discord
+// and all configured push providers), bypassing event filters and batching. It
+// returns a per-provider result so callers can surface which providers
+// succeeded and which failed.
+func (m *Manager) TestAllProviders(ctx context.Context) []ProviderTestResult {
+	m.mu.RLock()
+	discord := m.discord
+	providers := append([]MessageProvider(nil), m.messageProviders...)
+	m.mu.RUnlock()
+
+	const testTitle = "✅ Test notification"
+	const testBody = "This is a test notification from Twitch Points Miner."
+
+	var results []ProviderTestResult
+
+	if discord != nil {
+		res := ProviderTestResult{Provider: "discord", OK: true}
+		cfg, err := m.repo.GetConfig()
+		if err != nil {
+			res.OK = false
+			res.Error = "failed to load config: " + err.Error()
+		} else {
+			channelID := firstNonEmpty(cfg.SystemChannelID, cfg.OnlineChannelID,
+				cfg.OfflineChannelID, cfg.MentionsChannelID, cfg.PointsChannelID)
+			if channelID == "" {
+				res.OK = false
+				res.Error = "no Discord channel configured"
+			} else if err := discord.Send(ctx, Notification{
+				Type:      NotificationTypeConnectionRestored,
+				Title:     testTitle,
+				Message:   testBody,
+				ChannelID: channelID,
+				Color:     ColorConnectionRestored,
+			}); err != nil {
+				res.OK = false
+				res.Error = err.Error()
+			}
+		}
+		results = append(results, res)
+	}
+
+	for _, p := range providers {
+		res := ProviderTestResult{Provider: p.Name(), OK: true}
+		if err := p.Send(ctx, Message{
+			Type:  NotificationTypeConnectionRestored,
+			Title: testTitle,
+			Body:  testBody,
+		}); err != nil {
+			res.OK = false
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+
+	return results
+}
+
+// HasAnyProvider reports whether at least one provider (Discord or a push
+// provider) is available for delivering notifications.
+func (m *Manager) HasAnyProvider() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.discord != nil || len(m.messageProviders) > 0
+}
+
+// firstNonEmpty returns the first non-empty string from the arguments.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // IsEnabled returns true if Discord notifications are enabled.
@@ -263,10 +440,6 @@ func (m *Manager) NotifyOnline(streamer string) {
 	enabled := m.discordConfig.Enabled
 	m.mu.RUnlock()
 
-	if !enabled || discord == nil {
-		return
-	}
-
 	cfg, err := m.repo.GetConfig()
 	if err != nil {
 		slog.Error("Failed to get notification config", "error", err)
@@ -290,8 +463,12 @@ func (m *Manager) NotifyOnline(streamer string) {
 		}
 	}
 
-	if cfg.OnlineChannelID == "" {
-		slog.Debug("Online notification skipped: no channel configured")
+	// Push providers receive the event independently of the Discord channel
+	// configuration (they route to their own preconfigured destinations).
+	m.dispatchPush(NotificationTypeOnline, streamer,
+		fmt.Sprintf("🟢 %s is now live! https://twitch.tv/%s", streamer, streamer))
+
+	if !enabled || discord == nil || cfg.OnlineChannelID == "" {
 		return
 	}
 
@@ -317,10 +494,6 @@ func (m *Manager) NotifyOffline(streamer string) {
 	enabled := m.discordConfig.Enabled
 	m.mu.RUnlock()
 
-	if !enabled || discord == nil {
-		return
-	}
-
 	cfg, err := m.repo.GetConfig()
 	if err != nil {
 		slog.Error("Failed to get notification config", "error", err)
@@ -344,8 +517,10 @@ func (m *Manager) NotifyOffline(streamer string) {
 		}
 	}
 
-	if cfg.OfflineChannelID == "" {
-		slog.Debug("Offline notification skipped: no channel configured")
+	m.dispatchPush(NotificationTypeOffline, streamer,
+		fmt.Sprintf("⚫ %s went offline.", streamer))
+
+	if !enabled || discord == nil || cfg.OfflineChannelID == "" {
 		return
 	}
 
@@ -372,18 +547,21 @@ func (m *Manager) NotifyReauthRequired(detail string) {
 	enabled := m.discordConfig.Enabled
 	m.mu.RUnlock()
 
-	if !enabled || discord == nil {
-		return
-	}
-
 	cfg, err := m.repo.GetConfig()
 	if err != nil {
 		slog.Error("Failed to get notification config", "error", err)
 		return
 	}
 
-	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
-		slog.Debug("Reauth notification skipped: system notifications not configured")
+	if !cfg.SystemEnabled {
+		return
+	}
+
+	m.dispatchPush(NotificationTypeReauthRequired, "",
+		fmt.Sprintf("🔒 Twitch reauthorization required. %s Restart the miner and log in again to resume harvesting.", detail))
+
+	if !enabled || discord == nil || cfg.SystemChannelID == "" {
+		slog.Debug("Reauth Discord notification skipped: system channel not configured")
 		return
 	}
 
@@ -409,18 +587,21 @@ func (m *Manager) NotifyConnectionLost(detail string) {
 	enabled := m.discordConfig.Enabled
 	m.mu.RUnlock()
 
-	if !enabled || discord == nil {
-		return
-	}
-
 	cfg, err := m.repo.GetConfig()
 	if err != nil {
 		slog.Error("Failed to get notification config", "error", err)
 		return
 	}
 
-	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
-		slog.Debug("Connection-lost notification skipped: system notifications not configured")
+	if !cfg.SystemEnabled {
+		return
+	}
+
+	m.dispatchPush(NotificationTypeConnectionLost, "",
+		fmt.Sprintf("🔌 Connection lost - harvesting paused. %s", detail))
+
+	if !enabled || discord == nil || cfg.SystemChannelID == "" {
+		slog.Debug("Connection-lost Discord notification skipped: system channel not configured")
 		return
 	}
 
@@ -446,18 +627,21 @@ func (m *Manager) NotifyConnectionRestored() {
 	enabled := m.discordConfig.Enabled
 	m.mu.RUnlock()
 
-	if !enabled || discord == nil {
-		return
-	}
-
 	cfg, err := m.repo.GetConfig()
 	if err != nil {
 		slog.Error("Failed to get notification config", "error", err)
 		return
 	}
 
-	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
-		slog.Debug("Connection-restored notification skipped: system notifications not configured")
+	if !cfg.SystemEnabled {
+		return
+	}
+
+	m.dispatchPush(NotificationTypeConnectionRestored, "",
+		"✅ Connection restored. Twitch API and PubSub connectivity is back; harvesting has resumed.")
+
+	if !enabled || discord == nil || cfg.SystemChannelID == "" {
+		slog.Debug("Connection-restored Discord notification skipped: system channel not configured")
 		return
 	}
 

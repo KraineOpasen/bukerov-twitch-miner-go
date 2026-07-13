@@ -290,6 +290,7 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/notifications/points", s.handleAPINotificationsPoints)
 	mux.HandleFunc("/api/notifications/points/", s.handleAPINotificationsPointsDelete)
 	mux.HandleFunc("/api/notifications/test", s.handleAPINotificationsTest)
+	mux.HandleFunc("/api/test-notification", s.handleAPITestNotification)
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 
