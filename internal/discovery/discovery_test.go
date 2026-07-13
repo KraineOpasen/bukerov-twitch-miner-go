@@ -37,16 +37,14 @@ func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]api.Dire
 	return f.streams, f.err
 }
 
-// fakeSender counts sends.
-type fakeSender struct {
-	sent []string
-	err  error
+// fakeSlotStatus reports a fixed set of logins as holding a watch slot, so
+// State() (which asks the broker whether a proposed channel really is being
+// watched) can be exercised without a live broker.
+type fakeSlotStatus struct {
+	watching map[string]bool
 }
 
-func (f *fakeSender) Send(s *models.Streamer) (error, error) {
-	f.sent = append(f.sent, s.Username)
-	return nil, f.err
-}
+func (f *fakeSlotStatus) IsWatching(login string) bool { return f.watching[login] }
 
 func activeCampaign(gameID, gameName string) *models.Campaign {
 	return &models.Campaign{
@@ -78,10 +76,9 @@ type fakeTracked struct {
 
 func (f *fakeTracked) Names() []string { return f.names }
 
-func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient, sender *fakeSender) *Manager {
+func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
 	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games)
 	m.client = client
-	m.sender = sender
 	return m
 }
 
@@ -102,7 +99,7 @@ func TestActiveCampaignGames(t *testing.T) {
 		noDrops,
 	}}
 
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	games := m.activeCampaignGames()
 	if games["world of tanks"] != "g1" {
@@ -125,7 +122,7 @@ func TestActiveCampaignGames(t *testing.T) {
 
 func TestSelectBestPrefersPoolOrder(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	top := onlineCandidate("big_streamer", "1", "World of Tanks", "g1", 9000)
 	second := onlineCandidate("small_streamer", "2", "World of Tanks", "g1", 100)
@@ -140,7 +137,7 @@ func TestSelectBestPrefersPoolOrder(t *testing.T) {
 func TestSelectBestSkipsIneligibleCandidates(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	client := &fakeClient{online: map[string]bool{}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	offlineMarked := onlineCandidate("marked_offline", "1", "World of Tanks", "g1", 9000)
 	offlineMarked.offline = true
@@ -170,7 +167,7 @@ func TestSelectBestSkipsIneligibleCandidates(t *testing.T) {
 func TestSelectBestVerifiesOfflineCandidatesAndMarksThem(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	client := &fakeClient{online: map[string]bool{}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	stale := onlineCandidate("stale_channel", "1", "World of Tanks", "g1", 9000)
 	stale.Streamer.IsOnline = false // listed by the directory but needs verification
@@ -191,7 +188,7 @@ func TestSelectBestVerifiesOfflineCandidatesAndMarksThem(t *testing.T) {
 func TestSelectBestBoundsChecksPerTick(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	client := &fakeClient{online: map[string]bool{}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	for i := 0; i < maxCandidateChecksPerTick+3; i++ {
 		ch := onlineCandidate("candidate", string(rune('a'+i)), "World of Tanks", "g1", 100)
@@ -220,7 +217,7 @@ func TestSelectBestRequiresChannelLevelActiveCampaign(t *testing.T) {
 	fresh.ID = "camp-new"
 
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{claimed, fresh}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	topButClaimed := onlineCandidate("top_channel", "1", "World of Tanks", "g1", 9000)
 	topButClaimed.Streamer.Stream.CampaignIDs = []string{"camp-old"}
@@ -245,7 +242,7 @@ func TestChannelCarriesActiveCampaignHonorsChannelRestriction(t *testing.T) {
 	restricted.Channels = []string{"allowed-channel-id"}
 
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{restricted}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	allowed := onlineCandidate("allowed_channel", "allowed-channel-id", "World of Tanks", "g1", 100)
 	allowed.Streamer.Stream.CampaignIDs = []string{"camp-restricted"}
@@ -268,7 +265,7 @@ func TestSyncOnceExcludesTrackedStreamers(t *testing.T) {
 		{ChannelID: "1", Login: "tracked_streamer", Viewers: 9000, GameID: "g1", DropsEnabled: true},
 		{ChannelID: "2", Login: "free_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 	m.tracked = &fakeTracked{names: []string{"tracked_streamer"}}
 
 	m.syncOnce()
@@ -282,32 +279,28 @@ func TestSyncOnceExcludesTrackedStreamers(t *testing.T) {
 	}
 }
 
-func TestProcessWatchAbandonsChannelAddedToStreamerList(t *testing.T) {
+func TestPrepareCurrentAbandonsChannelAddedToStreamerList(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	promoted := onlineCandidate("promoted_channel", "1", "World of Tanks", "g1", 9000)
 	backup := onlineCandidate("backup_channel", "2", "World of Tanks", "g1", 500)
 	m.pool = []*Channel{promoted, backup}
 	m.current = promoted
 
-	// The user adds the watched discovered channel to the streamer list.
+	// The user adds the proposed discovered channel to the streamer list.
 	m.tracked = &fakeTracked{names: []string{"promoted_channel"}}
 
-	m.processWatch()
+	got := m.prepareCurrent()
 
-	if m.current != backup {
+	if got != backup || m.current != backup {
 		t.Fatalf("expected switch to backup_channel after promotion to the streamer list, got %+v", m.current)
-	}
-	if len(sender.sent) != 1 || sender.sent[0] != "backup_channel" {
-		t.Errorf("expected the minute to go to backup_channel, got %v", sender.sent)
 	}
 }
 
 func TestInvalidReason(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	healthy := onlineCandidate("healthy", "1", "World of Tanks", "g1", 100)
 	if reason, invalid := m.invalidReason(healthy); invalid {
@@ -340,28 +333,53 @@ func TestInvalidReason(t *testing.T) {
 	}
 }
 
-func TestProcessWatchSelectsAndSends(t *testing.T) {
+func TestPrepareCurrentSelectsBest(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	best := onlineCandidate("best_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{best}
 
-	m.processWatch()
+	got := m.prepareCurrent()
 
-	if m.current != best {
+	if got != best || m.current != best {
 		t.Fatalf("expected best_channel selected as current, got %+v", m.current)
-	}
-	if len(sender.sent) != 1 || sender.sent[0] != "best_channel" {
-		t.Errorf("expected one minute-watched send to best_channel, got %v", sender.sent)
 	}
 }
 
-func TestProcessWatchSwitchesWhenCurrentGoesOffline(t *testing.T) {
+// TestWatchCandidatesProposesCurrent verifies discovery proposes its current
+// pick to the broker (as a watcher.Candidate) rather than watching it itself.
+func TestWatchCandidatesProposesCurrent(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+
+	best := onlineCandidate("best_channel", "1", "World of Tanks", "g1", 9000)
+	m.pool = []*Channel{best}
+
+	cands := m.WatchCandidates()
+	if len(cands) != 1 {
+		t.Fatalf("expected exactly one proposed candidate, got %d", len(cands))
+	}
+	if cands[0].Streamer != best.Streamer {
+		t.Errorf("expected the current pick proposed, got %q", cands[0].Streamer.Username)
+	}
+	if cands[0].Origin != "discovery" {
+		t.Errorf("expected discovery origin, got %q", cands[0].Origin)
+	}
+}
+
+func TestWatchCandidatesEmptyWhenNothingWatchable(t *testing.T) {
+	// No campaigns => nothing to farm => no candidate proposed, and no send is
+	// ever performed by discovery itself.
+	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
+	if cands := m.WatchCandidates(); cands != nil {
+		t.Fatalf("expected no candidate when disabled, got %v", cands)
+	}
+}
+
+func TestPrepareCurrentSwitchesWhenCurrentGoesOffline(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	dying := onlineCandidate("dying_channel", "1", "World of Tanks", "g1", 9000)
 	backup := onlineCandidate("backup_channel", "2", "World of Tanks", "g1", 500)
@@ -370,33 +388,24 @@ func TestProcessWatchSwitchesWhenCurrentGoesOffline(t *testing.T) {
 
 	dying.Streamer.IsOnline = false
 
-	m.processWatch()
+	got := m.prepareCurrent()
 
-	if m.current != backup {
+	if got != backup || m.current != backup {
 		t.Fatalf("expected switch to backup_channel, got %+v", m.current)
-	}
-	if len(sender.sent) != 1 || sender.sent[0] != "backup_channel" {
-		t.Errorf("expected the minute to go to backup_channel, got %v", sender.sent)
 	}
 }
 
-func TestProcessWatchClearsSlotWhenPoolExhausted(t *testing.T) {
+func TestPrepareCurrentClearsSlotWhenPoolExhausted(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	only := onlineCandidate("only_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{only}
 	m.current = only
 	only.Streamer.IsOnline = false
 
-	m.processWatch()
-
-	if m.current != nil {
+	if got := m.prepareCurrent(); got != nil || m.current != nil {
 		t.Fatalf("expected the slot to empty out, got %+v", m.current)
-	}
-	if len(sender.sent) != 0 {
-		t.Errorf("expected no sends with an empty pool, got %v", sender.sent)
 	}
 	select {
 	case <-m.resync:
@@ -405,22 +414,20 @@ func TestProcessWatchClearsSlotWhenPoolExhausted(t *testing.T) {
 	}
 }
 
-func TestProcessWatchExhaustedPoolRequestsEarlyResync(t *testing.T) {
-	// All pool candidates verify offline after the last sync: the watch loop
-	// must request an early directory re-query instead of waiting out the
-	// full campaign-sync interval (60+ minutes) with a dead pool.
+func TestPrepareCurrentExhaustedPoolRequestsEarlyResync(t *testing.T) {
+	// All pool candidates verify offline after the last sync: preparation must
+	// request an early directory re-query instead of waiting out the full
+	// campaign-sync interval (60+ minutes) with a dead pool.
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	client := &fakeClient{online: map[string]bool{}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	dead := onlineCandidate("dead_channel", "1", "World of Tanks", "g1", 100)
 	dead.Streamer.IsOnline = false
 	m.pool = []*Channel{dead}
 	// lastSync is zero => far past the retry cadence, so the resync fires.
 
-	m.processWatch()
-
-	if m.current != nil {
+	if got := m.prepareCurrent(); got != nil || m.current != nil {
 		t.Fatalf("expected no selection from a dead pool, got %+v", m.current)
 	}
 	select {
@@ -429,10 +436,10 @@ func TestProcessWatchExhaustedPoolRequestsEarlyResync(t *testing.T) {
 		t.Error("expected an early resync request when the pool is exhausted")
 	}
 
-	// With a fresh sync the same situation must NOT re-query early: the
-	// rate limit keeps failed selections at the empty-pool cadence.
+	// With a fresh sync the same situation must NOT re-query early: the rate
+	// limit keeps failed selections at the empty-pool cadence.
 	m.lastSync = time.Now()
-	m.processWatch()
+	m.prepareCurrent()
 	select {
 	case <-m.resync:
 		t.Error("expected no resync request while the last sync is recent")
@@ -440,24 +447,23 @@ func TestProcessWatchExhaustedPoolRequestsEarlyResync(t *testing.T) {
 	}
 }
 
-func TestProcessWatchDoesNothingWhenDisabled(t *testing.T) {
-	sender := &fakeSender{}
+func TestPrepareCurrentDoesNothingWhenDisabled(t *testing.T) {
 	client := &fakeClient{}
-	m := newTestManager(nil, &fakeCampaigns{}, client, sender)
+	m := newTestManager(nil, &fakeCampaigns{}, client)
 
-	m.processWatch()
-
-	if len(sender.sent) != 0 || len(client.checked) != 0 {
-		t.Error("expected a disabled subsystem to make no calls at all")
+	if got := m.prepareCurrent(); got != nil {
+		t.Errorf("expected nil from a disabled subsystem, got %+v", got)
+	}
+	if len(client.checked) != 0 {
+		t.Error("expected a disabled subsystem to make no online checks")
 	}
 }
 
-func TestProcessWatchSwitchesWhenCampaignExhausted(t *testing.T) {
-	// The game's only campaign gets fully claimed between ticks: the slot
-	// must abandon the channel even though it is still online.
+func TestPrepareCurrentSwitchesWhenCampaignExhausted(t *testing.T) {
+	// The game's only campaign gets fully claimed between ticks: the slot must
+	// abandon the channel even though it is still online.
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	current := onlineCandidate("current_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{current}
@@ -465,25 +471,19 @@ func TestProcessWatchSwitchesWhenCampaignExhausted(t *testing.T) {
 
 	provider.campaigns = nil // final reward claimed -> tracker drops the campaign
 
-	m.processWatch()
-
-	if m.current != nil {
+	if got := m.prepareCurrent(); got != nil || m.current != nil {
 		t.Fatalf("expected the slot to clear once the game has no active campaign, got %+v", m.current)
-	}
-	if len(sender.sent) != 0 {
-		t.Errorf("expected no minute sends after campaigns exhausted, got %v", sender.sent)
 	}
 }
 
-func TestProcessWatchAbandonsDeconfiguredGame(t *testing.T) {
+func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 	// The game is removed from settings while its campaign is still active:
-	// the slot must not keep watching a channel of a de-configured game.
+	// discovery must not keep proposing a channel of a de-configured game.
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{
 		activeCampaign("g1", "World of Tanks"),
 		activeCampaign("g2", "Rust"),
 	}}
-	sender := &fakeSender{}
-	m := newTestManager([]string{"World of Tanks", "Rust"}, provider, &fakeClient{}, sender)
+	m := newTestManager([]string{"World of Tanks", "Rust"}, provider, &fakeClient{})
 
 	wotChannel := onlineCandidate("wot_channel", "1", "World of Tanks", "g1", 9000)
 	rustChannel := onlineCandidate("rust_channel", "2", "Rust", "g2", 100)
@@ -491,20 +491,17 @@ func TestProcessWatchAbandonsDeconfiguredGame(t *testing.T) {
 	m.current = wotChannel
 
 	m.UpdateSettings([]string{"Rust"}, testRateLimits())
-	<-m.resync // drain so the assertion below checks processWatch, not UpdateSettings
+	<-m.resync // drain so the assertion below checks prepareCurrent, not UpdateSettings
 
-	m.processWatch()
+	got := m.prepareCurrent()
 
-	if m.current != rustChannel {
+	if got != rustChannel || m.current != rustChannel {
 		t.Fatalf("expected switch to the still-configured game's channel, got %+v", m.current)
-	}
-	if len(sender.sent) != 1 || sender.sent[0] != "rust_channel" {
-		t.Errorf("expected the minute to go to rust_channel, got %v", sender.sent)
 	}
 }
 
 func TestUpdateSettingsTriggersResync(t *testing.T) {
-	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{}, &fakeSender{})
+	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
 
 	m.UpdateSettings([]string{"World of Tanks"}, testRateLimits())
 
@@ -520,7 +517,7 @@ func TestUpdateSettingsTriggersResync(t *testing.T) {
 
 func TestSyncOnceDisabledClearsPoolAndCurrent(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	current := onlineCandidate("current_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{current}
@@ -543,7 +540,7 @@ func TestSyncOnceBuildsPoolSortedByViewers(t *testing.T) {
 		{ChannelID: "3", Login: "", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	m.syncOnce()
 
@@ -564,7 +561,7 @@ func TestSyncOnceKeepsExistingStreamerObjects(t *testing.T) {
 	client := &fakeClient{streams: []api.DirectoryStream{
 		{ChannelID: "1", Login: "sticky_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	m.syncOnce()
 	first := m.pool[0].Streamer
@@ -585,7 +582,7 @@ func TestSyncOnceSkipsGamesWithoutActiveCampaign(t *testing.T) {
 	client := &fakeClient{streams: []api.DirectoryStream{
 		{ChannelID: "1", Login: "channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
-	m := newTestManager([]string{"World of Tanks"}, provider, client, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	interval := m.syncOnce()
 
@@ -599,7 +596,9 @@ func TestSyncOnceSkipsGamesWithoutActiveCampaign(t *testing.T) {
 
 func TestStateSnapshot(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{}, &fakeSender{})
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+	// The broker reports the current pick as actually holding a slot.
+	m.SetSlotStatus(&fakeSlotStatus{watching: map[string]bool{"watching_channel": true}})
 
 	watching := onlineCandidate("watching_channel", "1", "World of Tanks", "g1", 9000)
 	available := onlineCandidate("available_channel", "2", "World of Tanks", "g1", 500)
@@ -632,8 +631,32 @@ func TestStateSnapshot(t *testing.T) {
 	}
 }
 
+// TestStateProposalNotWatchedShowsAvailable covers the new slot-broker
+// semantics: discovery's current pick is only "watching" when the broker
+// actually placed it in a slot; otherwise it is merely a waiting proposal.
+func TestStateProposalNotWatchedShowsAvailable(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+	// Broker is keeping both slots on configured streamers: nothing discovered
+	// is being watched.
+	m.SetSlotStatus(&fakeSlotStatus{watching: map[string]bool{}})
+
+	proposal := onlineCandidate("proposal_channel", "1", "World of Tanks", "g1", 9000)
+	m.pool = []*Channel{proposal}
+	m.current = proposal
+	m.lastSync = time.Now()
+
+	st := m.State()
+	if st.Watching != "" {
+		t.Errorf("expected no channel reported as watched, got %q", st.Watching)
+	}
+	if len(st.Channels) != 1 || st.Channels[0].Status != "available" {
+		t.Errorf("expected the un-slotted proposal shown as available, got %+v", st.Channels)
+	}
+}
+
 func TestStateDisabled(t *testing.T) {
-	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{}, &fakeSender{})
+	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
 	if st := m.State(); st.Enabled {
 		t.Error("expected Enabled=false with no configured games")
 	}

@@ -547,9 +547,61 @@ miner's `requests` form post and the web player's `btoa` + `encodeURIComponent`)
 }]
 ```
 
+### Watch Slot Architecture
+
+**All configured and discovered channels compete for the same maximum of two
+Twitch watch slots. Directory Discovery never creates an independent third
+watch session.**
+
+The `MinuteWatcher` (`internal/watcher`) is the **unified slot broker**: the
+single owner of the (at most `constants.MaxSimultaneousStreams` = 2) Twitch
+watch slots and the only component that drives `MinuteSender`. Every source
+of a watchable channel only *proposes candidates*; the broker alone decides
+who occupies a slot and does the minute-watched reporting.
+
+```
+Configured streamers ─┐
+Discovery candidates ─┤
+Drop candidates ──────┼── Unified Slot Broker ── Slot 1
+Streak candidates ────┤                         └─ Slot 2
+Fair rotation ────────┘
+```
+
+Each tick the broker runs two phases:
+
+- **Phase A — configured selection** (unchanged): the priority/rotation logic
+  below picks up to two channels from the configured streamer list (direct
+  priority pick when ≤2 online, fair rotation with a DROPS/STREAK boost when
+  more).
+- **Phase B — cross-source arbitration**: candidate sources (directory
+  discovery today) are layered on top. A candidate fills any free slot;
+  otherwise it may displace the lowest-ranked configured occupant it strictly
+  out-ranks — except one within minutes of completing a watch streak, which
+  is never interrupted. A channel already holding a slot never gets a second
+  one. Ranking (high→low): channel-restricted drop → in-progress watch streak
+  → active drop → fair-rotation/priority pick. With no candidate sources
+  Phase B is a pure pass-through, so single-list behavior is unchanged.
+
+The broker publishes an immutable, explainable snapshot each tick
+(`BrokerSnapshot`: per-slot `channel`/`source`/`reasonCode`/`reason`/
+`campaign`, plus a `waiting` list) consumed by the Overview "Сейчас смотрим"
+block, the Drops/discovery page, and `/debug/snapshot`. Slot changes (a
+channel taking/leaving a slot, or its reason changing) are logged at INFO and
+recorded as `slot_assigned`/`slot_released` events; a steady state logs
+nothing, so the same decision is not repeated every minute.
+
+Concurrency: `priorities`/`settings` are loop-owned and read lock-free during
+selection; `UpdateSettings` stages a change under a mutex that the loop
+applies at the start of the next tick (runtime settings without restart, no
+data race). The published snapshot is swapped via an atomic pointer, so the
+dashboard, the debug endpoint, and discovery read it without taking any broker
+lock, and no lock is ever held across a Twitch GQL call, a spade beacon, or a
+SQLite write.
+
 ### Priority System
 
-Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`).
+Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`),
+allocated by the unified slot broker (see *Watch Slot Architecture*).
 
 **2 or fewer online streamers:** all of them are watched; the priority list below picks which ones fill the (at most 2) watch slots, same as always:
 
@@ -841,10 +893,13 @@ applies.
 
 An optional subsystem (config key `directoryGames`, a list of game names;
 empty = disabled) that farms drops for games *without* requiring any matching
-channel in the configured streamer list. It is fully independent of the fixed
-2-slot watch rotation: discovered channels are ephemeral `models.Streamer`
-objects that never enter the streamer manager, PubSub pool, chat, rotation,
-or the watch-time fairness store.
+channel in the configured streamer list. It is a **candidate source for the
+unified slot broker** (see *Watch Slot Architecture* below), not an
+independent watch slot: it proposes channels and the broker decides whether
+they occupy one of the two Twitch watch slots, competing on equal footing
+with the configured streamer list. Discovered channels are ephemeral
+`models.Streamer` objects that never enter the streamer manager, PubSub pool,
+chat, rotation fairness store, or drops-claiming path of the configured list.
 
 Flow, per configured game:
 
@@ -864,18 +919,23 @@ Flow, per configured game:
    `campaignSyncInterval` minutes, dropping to a 2-minute retry while the
    pool is empty (or when every candidate has been verified unwatchable). A
    failed query keeps the game's previous candidates.
-3. **The extra watch slot** — the best candidate (configured game order,
+3. **Proposing a candidate** — the best candidate (configured game order,
    then viewers descending, mirroring reference miners' top-by-viewers
    pick) is verified online via the normal `CheckStreamerOnline` path (spade
-   URL + stream payload + per-channel campaign IDs) and then receives
-   minute-watched events through the same `watcher.MinuteSender` mechanism
-   the rotation uses, on the same `minuteWatchedInterval` cadence with the
-   same ±20% jitter. Channel eligibility requires an intersection between
-   the channel's available campaign IDs and the tracker's active unclaimed
-   campaigns (honoring channel-restricted allow-lists) — the same check
-   `updateStreamerCampaigns` performs for tracked streamers — so a channel
-   carrying only an already-claimed recurring campaign is never farmed. At
-   most 3 candidates are online-verified per tick to bound API bursts.
+   URL + stream payload + per-channel campaign IDs) and **proposed to the
+   slot broker** through `WatchCandidates()`; discovery never sends
+   minute-watched itself. The broker places the proposal in a slot (and does
+   the actual `MinuteSender` reporting) only when a slot is free or the
+   proposal out-prioritizes a configured occupant — see *Watch Slot
+   Architecture*. Candidate preparation runs on the broker's loop goroutine,
+   so a discovered channel's `models.Streamer` is only ever touched by that
+   one goroutine plus locked `State()` reads. Channel eligibility requires an
+   intersection between the channel's available campaign IDs and the
+   tracker's active unclaimed campaigns (honoring channel-restricted
+   allow-lists) — the same check `updateStreamerCampaigns` performs for
+   tracked streamers — so a channel carrying only an already-claimed
+   recurring campaign is never farmed. At most 3 candidates are
+   online-verified per tick to bound API bursts.
 4. **Auto-switching** — the slot abandons its channel and moves to the next
    candidate when the channel goes offline, switches game, no longer
    carries a tracker-active campaign (claimed/blacklisted ones don't
@@ -895,14 +955,15 @@ the shared client and therefore inherit the retry/backoff, the
 PersistedQueryNotFound client-ID fallback, and the connection-health
 watchdog's `LastSuccessAt` accounting.
 
-Caveat: Twitch only credits watch time for up to 2 simultaneous streams
-(`constants.MaxSimultaneousStreams`). The discovery slot deliberately does
-not take a rotation slot, so when two configured streamers are already being
-watched it reports a third stream; Twitch may not credit all three for
-channel points, and drop-progress crediting under concurrent viewing follows
-Twitch's server-side rules. The slot is most effective when fewer than two
-configured streamers are live — e.g. overnight — and its per-channel
-watch-minute accounting is visible on the Drops page either way.
+Twitch only credits watch time for up to 2 simultaneous streams
+(`constants.MaxSimultaneousStreams`). Discovery therefore competes for one of
+those two slots rather than adding a third: when both slots are already held
+by configured streamers (and no discovered channel out-prioritizes them),
+discovery's proposal simply waits, shown as `available` on the Drops page.
+Discovery is most effective when fewer than two configured streamers are live
+— e.g. overnight — where it fills the otherwise-idle slots. A discovered
+channel is reported as `watching` only when the broker actually placed it in a
+slot; its per-channel watch-minute accounting is visible on the Drops page.
 
 ---
 

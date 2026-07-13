@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
@@ -15,11 +16,44 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
+// onlineChecker is the slice of the Twitch client the watcher needs to
+// re-verify a stale stream; narrowed to an interface so the broker's send loop
+// can be tested with a fake. Satisfied by *api.TwitchClient.
+type onlineChecker interface {
+	CheckStreamerOnline(streamer *models.Streamer)
+}
+
+// minuteReporter abstracts MinuteSender so the loop can be exercised in tests
+// without real HTTP. Satisfied by *MinuteSender.
+type minuteReporter interface {
+	Send(streamer *models.Streamer) (simulateErr error, err error)
+}
+
+// MinuteWatcher is the unified slot broker: the single owner of the (at most
+// constants.MaxSimultaneousStreams) Twitch watch slots. It selects channels
+// from the configured streamer list AND from registered candidate sources
+// (directory discovery), then is the only component that drives MinuteSender.
+// Directory discovery never sends minute-watched itself; it only proposes
+// candidates the broker may place in a slot.
 type MinuteWatcher struct {
-	client     *api.TwitchClient
+	client     onlineChecker
 	streamers  []*models.Streamer
 	priorities []config.Priority
 	settings   config.RateLimitSettings
+
+	// pendingPriorities/pendingSettings/hasPending stage a runtime settings
+	// update from UpdateSettings (any goroutine) under mu; the loop applies
+	// them into priorities/settings at the start of the next tick. This keeps
+	// priorities/settings loop-owned (read lock-free during selection) while
+	// updates stay race-free.
+	pendingPriorities []config.Priority
+	pendingSettings   config.RateLimitSettings
+	hasPending        bool
+
+	// sources supply extra watch candidates (e.g. directory discovery) that
+	// compete for the same slots as the configured list. Guarded by mu; set at
+	// startup and snapshotted at the start of each tick.
+	sources []CandidateSource
 
 	// store persists accumulated watch time per streamer so rotation
 	// fairness survives restarts. May be nil (e.g. analytics disabled), in
@@ -43,17 +77,31 @@ type MinuteWatcher struct {
 	selectionReasons map[int]string
 	selectionMode    string
 
+	// lastSlots is the previous tick's slot allocation (login -> reason code),
+	// loop-owned, used to log slot changes only when they actually change.
+	lastSlots map[string]string
+
 	// debugState is the last published watch-decision snapshot, guarded by
 	// debugMu because the debug HTTP endpoint reads it from its own goroutine.
 	debugMu    sync.Mutex
 	debugState DebugState
 
+	// brokerSnapshot/watchingLogins publish the immutable slot allocation for
+	// the dashboard, the debug endpoint, and discovery to read lock-free.
+	brokerSnapshot atomic.Pointer[BrokerSnapshot]
+	watchingLogins atomic.Pointer[map[string]bool]
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	// sender performs the actual watch-minute reporting (playback token,
-	// playlist touch, spade event). Shared mechanism with the discovery slot.
-	sender *MinuteSender
+	// playlist touch, spade event). The broker is the sole caller of it.
+	sender minuteReporter
+
+	// pacer spaces the per-slot sends across the tick interval. nil uses the
+	// default context-aware sleep with ±20% jitter; tests override it to avoid
+	// real pauses. Returns false when the wait was interrupted by shutdown.
+	pacer func(d time.Duration) bool
 
 	// onMinuteWatched, if set, is invoked once after any watch tick that
 	// successfully reported at least one minute-watched. The drops tracker uses
@@ -111,6 +159,18 @@ func NewMinuteWatcher(
 	}
 }
 
+// AddSource registers a candidate source (e.g. directory discovery) whose
+// proposed channels compete for the same watch slots as the configured list.
+// Call before Start. Safe for concurrent use.
+func (w *MinuteWatcher) AddSource(src CandidateSource) {
+	if src == nil {
+		return
+	}
+	w.mu.Lock()
+	w.sources = append(w.sources, src)
+	w.mu.Unlock()
+}
+
 func (w *MinuteWatcher) Start(ctx context.Context) {
 	w.mu.Lock()
 	w.ctx, w.cancel = context.WithCancel(ctx)
@@ -135,16 +195,50 @@ func (w *MinuteWatcher) SetOnMinuteWatched(fn func()) {
 	w.mu.Unlock()
 }
 
+// UpdateSettings stages a runtime priority/rate-limit change. It is applied by
+// the loop goroutine at the start of the next tick (see applyPendingSettings),
+// so priorities/settings stay loop-owned and readable without locking during
+// selection, while the update itself is race-free.
 func (w *MinuteWatcher) UpdateSettings(priorities []config.Priority, settings config.RateLimitSettings) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.priorities = priorities
-	w.settings = settings
+	w.pendingPriorities = priorities
+	w.pendingSettings = settings
+	w.hasPending = true
+}
+
+// applyPendingSettings moves any staged runtime settings into the loop-owned
+// priorities/settings fields. Runs on the loop goroutine at the start of each
+// tick; also snapshots the registered sources.
+func (w *MinuteWatcher) applyPendingSettings() []CandidateSource {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.hasPending {
+		w.priorities = w.pendingPriorities
+		w.settings = w.pendingSettings
+		w.hasPending = false
+	}
+	return append([]CandidateSource(nil), w.sources...)
 }
 
 func (w *MinuteWatcher) randomizedDelay(base time.Duration) time.Duration {
 	jitter := (rand.Float64() - 0.5) * 0.4
 	return time.Duration(float64(base) * (1.0 + jitter))
+}
+
+// pace waits between two per-slot sends, spreading them across the tick
+// interval (with ±20% jitter) while remaining responsive to shutdown. Returns
+// false if the context was cancelled during the wait, so the send loop stops.
+func (w *MinuteWatcher) pace(d time.Duration) bool {
+	if w.pacer != nil {
+		return w.pacer(d)
+	}
+	select {
+	case <-w.ctx.Done():
+		return false
+	case <-time.After(w.randomizedDelay(d)):
+		return true
+	}
 }
 
 func (w *MinuteWatcher) loop() {
@@ -167,35 +261,50 @@ func (w *MinuteWatcher) loop() {
 }
 
 func (w *MinuteWatcher) processWatching() {
+	sources := w.applyPendingSettings()
+
 	w.selectionReasons = make(map[int]string)
 	w.selectionMode = ModeIdle
+	now := time.Now()
 
 	onlineStreamers := w.getOnlineStreamers()
-	if len(onlineStreamers) == 0 {
-		w.publishDebugState(nil, ModeIdle)
-		return
-	}
 
+	// Re-verify stale streams (network) before selecting.
 	for _, idx := range onlineStreamers {
-		if w.streamers[idx].Stream.UpdateElapsed() > 10*time.Minute {
+		if w.client != nil && w.streamers[idx].Stream.UpdateElapsed() > 10*time.Minute {
 			w.client.CheckStreamerOnline(w.streamers[idx])
 		}
 	}
 
-	watching := w.selectStreamersToWatch(onlineStreamers)
-	w.publishDebugState(watching, w.selectionMode)
-	if len(watching) == 0 {
+	// Phase A: pick from the configured streamer list with the unchanged
+	// priority/rotation logic. Phase B: layer external candidates (directory
+	// discovery) on top and enforce the global MaxSimultaneousStreams cap.
+	var configuredWatch []int
+	if len(onlineStreamers) > 0 {
+		configuredWatch = w.selectStreamersToWatch(onlineStreamers)
+	}
+	extra := w.gatherCandidates(sources)
+	slots, waiting := w.arbitrate(configuredWatch, extra, now)
+
+	// The per-streamer debug state reflects the FINAL configured-watched set
+	// (a pick displaced by a higher-priority discovery drop is reported as not
+	// watched); the broker snapshot is the explainable slot allocation.
+	w.publishDebugState(configuredWatchedIndexes(slots), w.selectionMode)
+	w.publishBrokerSnapshot(slots, waiting, now)
+	w.logSlotChanges(slots)
+
+	if len(slots) == 0 {
 		return
 	}
 
 	var watchingNames []string
-	for _, idx := range watching {
-		watchingNames = append(watchingNames, w.streamers[idx].Username)
+	for _, sl := range slots {
+		watchingNames = append(watchingNames, sl.streamer.Username)
 	}
-	slog.Debug("Watching streams", "count", len(watching), "max", constants.MaxSimultaneousStreams, "streamers", watchingNames)
+	slog.Debug("Watching streams", "count", len(slots), "max", constants.MaxSimultaneousStreams, "streamers", watchingNames)
 
 	interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
-	sleepBetween := interval / time.Duration(len(watching))
+	sleepBetween := interval / time.Duration(len(slots))
 
 	// A continuously-watched streamer is reported once per loop, so consecutive
 	// reports land ~interval apart. Anything past twice that means it lost its
@@ -204,27 +313,36 @@ func (w *MinuteWatcher) processWatching() {
 	maxContinuousGap := 2 * interval
 
 	reported := false
-	for _, idx := range watching {
-		streamer := w.streamers[idx]
+	for _, sl := range slots {
+		streamer := sl.streamer
 
 		if err := w.sendMinuteWatched(streamer); err != nil {
-			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "error", err)
+			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "origin", sl.origin, "error", err)
+			// A failed send usually means the stream just ended; re-check the
+			// online state so the next tick drops or switches it (and, for a
+			// discovery channel, so discovery's own maintenance abandons it).
+			if w.client != nil {
+				w.client.CheckStreamerOnline(streamer)
+			}
 		} else {
 			reported = true
-			slog.Debug("Sent minute watched", "streamer", streamer.Username, "minutesWatched", streamer.Stream.MinuteWatched)
+			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.MinuteWatched)
 			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
-			if w.store != nil && delta > 0 {
-				if err := w.store.RecordMinutes(streamer.Username, delta, time.Now()); err != nil {
-					slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
+			if sl.idx >= 0 {
+				// Configured channel: credit fair-rotation watch time and track
+				// streak pursuit. Discovery channels are intentionally excluded
+				// from the fairness store and streak accounting.
+				if w.store != nil && delta > 0 {
+					if err := w.store.RecordMinutes(streamer.Username, delta, time.Now()); err != nil {
+						slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
+					}
 				}
+				w.noteStreakProgress(sl.idx)
 			}
-			w.noteStreakProgress(idx)
 		}
 
-		select {
-		case <-w.ctx.Done():
+		if !w.pace(sleepBetween) {
 			return
-		case <-time.After(w.randomizedDelay(sleepBetween)):
 		}
 	}
 
@@ -239,6 +357,39 @@ func (w *MinuteWatcher) processWatching() {
 			hook()
 		}
 	}
+}
+
+// gatherCandidates collects the proposed channels from every registered
+// source, dropping any channel that is on the configured streamer list (the
+// broker is the single owner of duplicate-channel prevention across all
+// sources) or already proposed by an earlier source.
+func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource) []Candidate {
+	if len(sources) == 0 {
+		return nil
+	}
+	configured := make(map[string]bool, len(w.streamers))
+	for _, s := range w.streamers {
+		configured[s.Username] = true
+	}
+	var out []Candidate
+	seen := make(map[string]bool)
+	for _, src := range sources {
+		for _, c := range src.WatchCandidates() {
+			if c.Streamer == nil {
+				continue
+			}
+			login := c.Streamer.Username
+			if configured[login] || seen[login] {
+				continue
+			}
+			seen[login] = true
+			if c.Origin == "" {
+				c.Origin = src.SourceName()
+			}
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (w *MinuteWatcher) getOnlineStreamers() []int {

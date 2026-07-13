@@ -502,9 +502,27 @@ Generate a sample config with all options:
 
 </details>
 
+### Watch Slot Architecture
+
+**All configured and discovered channels compete for the same maximum of two
+Twitch watch slots. Directory Discovery never creates an independent third
+watch session.**
+
+A single **unified slot broker** owns the (at most 2) Twitch watch slots and
+is the only thing that reports watched minutes. Every source — the configured
+streamer list, directory discovery, channel-restricted drops, in-progress
+watch streaks, and fair rotation — only *proposes* channels; the broker
+decides who gets a slot and why. Priority order when they compete
+(high→low): a channel-restricted drop (only earnable on that exact channel) →
+an in-progress watch streak → an active drop → a fair-rotation/priority pick.
+A channel about to complete a watch streak is never bumped, and one channel
+can never hold both slots. The Overview "Now watching" block, the Drops page,
+and `/debug/snapshot` show which channel holds each slot and the reason.
+
 ### Priority System
 
-The miner watches up to 2 streams simultaneously, selected by priority order:
+Within the configured streamer list, up to 2 streams are watched
+simultaneously, selected by priority order:
 
 | Priority | Behavior |
 |----------|----------|
@@ -520,16 +538,19 @@ The miner watches up to 2 streams simultaneously, selected by priority order:
 Independently of the streamer list, `directoryGames` (also editable on the
 Settings page) enables drops farming by game: while a listed game has an
 active unclaimed drop campaign, the miner queries the game's Twitch directory
-for live drops-enabled channels, watches the most-viewed one in an **extra
-watch slot** (the 2-slot streamer rotation above is not affected), and
-automatically switches to the next-best channel when the current one goes
-offline, changes game, or its drops end. Discovered channels appear in the
-**Discovered Channels** section of the Drops page. An empty list (the
-default) disables the feature entirely.
+for live drops-enabled channels and **proposes the most-viewed one to the
+slot broker**, which watches it whenever a slot is free or the channel
+out-prioritizes a configured pick (see *Watch Slot Architecture* — discovery
+competes for the two slots, it does not add a third). It automatically
+switches to the next-best channel when the current one goes offline, changes
+game, or its drops end. Discovered channels appear in the **Discovered
+Channels** section of the Drops page, marked `watching` only while they
+actually hold a slot. An empty list (the default) disables the feature
+entirely.
 
-Note: Twitch credits watch time for at most 2 concurrent streams, so the
-discovery slot is most effective when fewer than two of your configured
-streamers are live.
+Note: Twitch credits watch time for at most 2 concurrent streams. Discovery
+is most effective when fewer than two of your configured streamers are live
+(e.g. overnight), where it fills the otherwise-idle slots.
 
 ### Streamer Settings
 

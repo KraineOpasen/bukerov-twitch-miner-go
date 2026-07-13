@@ -28,10 +28,6 @@ func (f *safeClient) GetDirectoryStreams(string, int) ([]api.DirectoryStream, er
 	return f.streams, nil
 }
 
-type safeSender struct{}
-
-func (safeSender) Send(*models.Streamer) (error, error) { return nil, nil }
-
 func newRaceManager(t *testing.T) *Manager {
 	t.Helper()
 	provider := &safeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
@@ -41,7 +37,9 @@ func newRaceManager(t *testing.T) *Manager {
 
 	m := NewManager(nil, provider, &fakeTracked{}, testRateLimits(), []string{"World of Tanks"})
 	m.client = client
-	m.sender = safeSender{}
+	// A broker whose slot status is always "watching" — State() consults it,
+	// exercising that path concurrently with the sync and prepare loops.
+	m.slotStatus = &fakeSlotStatus{watching: map[string]bool{"chan_a": true}}
 
 	m.syncOnce() // build the initial pool; chan_a's *Channel is shared from here on
 	if len(m.pool) != 1 {
@@ -72,7 +70,7 @@ func TestRaceSyncVsState(t *testing.T) {
 	wg.Wait()
 }
 
-// syncOnce (sync loop goroutine) vs processWatch (watch loop goroutine).
+// syncOnce (sync loop goroutine) vs prepareCurrent (broker loop goroutine).
 func TestRaceSyncVsWatch(t *testing.T) {
 	m := newRaceManager(t)
 
@@ -85,18 +83,18 @@ func TestRaceSyncVsWatch(t *testing.T) {
 			m.syncOnce()
 		}
 	}()
-	go func() { // watch loop
+	go func() { // broker loop (prepareCurrent)
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			m.processWatch()
+			m.prepareCurrent()
 		}
 	}()
 	wg.Wait()
 }
 
 // TestConcurrentSyncStateWatch runs all three real access patterns at once:
-// the sync loop (syncOnce), an HTTP/debug reader (State), and the watch loop
-// (processWatch) — exactly the goroutines Start() + the web server create in
+// the sync loop (syncOnce), an HTTP/debug reader (State), and the broker loop
+// (prepareCurrent) — exactly the goroutines Start() + the web server create in
 // production. Run under -race (the repo's standard test invocation) it
 // guards the mu discipline around shared *Channel entries.
 func TestConcurrentSyncStateWatch(t *testing.T) {
@@ -117,10 +115,10 @@ func TestConcurrentSyncStateWatch(t *testing.T) {
 			_ = m.State()
 		}
 	}()
-	go func() { // watch loop
+	go func() { // broker loop (prepareCurrent)
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			m.processWatch()
+			m.prepareCurrent()
 		}
 	}()
 	wg.Wait()

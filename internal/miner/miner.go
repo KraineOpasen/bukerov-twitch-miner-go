@@ -378,6 +378,14 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.DirectoryGames,
 	)
 
+	// Discovery is a candidate source for the unified slot broker, not an
+	// independent watch slot: it proposes channels and the broker decides
+	// whether they occupy one of the two Twitch watch slots (competing with the
+	// configured list). SetSlotStatus lets discovery report whether its
+	// proposal actually got a slot.
+	m.watcher.AddSource(m.discovery)
+	m.discovery.SetSlotStatus(m.watcher)
+
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
 		m.webServer.SetDiscoveryProvider(m.discovery)

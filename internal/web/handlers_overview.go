@@ -426,15 +426,20 @@ func (s *Server) buildNowWatching(
 			continue
 		}
 		seen[name] = true
+		slot := WatchSlotView{Name: name, Origin: slots.Origin[name]}
+
 		st := byName[name]
 		if st == nil {
+			// A discovery-occupied slot: the channel is not on the configured
+			// streamer list, so only the name, its game, and the discovery
+			// badge are available (no points/streak/gain history).
+			slot.Game = slots.Games[name]
+			view.Slots = append(view.Slots, slot)
 			continue
 		}
-		slot := WatchSlotView{
-			Name:   name,
-			Points: util.FormatNumber(st.GetChannelPoints()),
-			Game:   st.Stream.GameName(),
-		}
+
+		slot.Points = util.FormatNumber(st.GetChannelPoints())
+		slot.Game = st.Stream.GameName()
 		if st.GetSettings().WatchStreak && st.Stream.GetWatchStreakMissing() {
 			mins := int(st.Stream.GetMinuteWatched())
 			slot.StreakPending = true

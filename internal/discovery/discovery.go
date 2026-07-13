@@ -1,17 +1,20 @@
 // Package discovery implements directory-based channel discovery: for each
 // configured game it periodically lists live, drops-enabled channels from the
 // Twitch directory (the same listing twitch.tv/directory shows), keeps them
-// as a candidate pool sorted by viewer count, and farms the best candidate in
-// ONE extra watch slot.
+// as a candidate pool sorted by viewer count, and proposes the best candidate
+// to the unified slot broker.
 //
-// This subsystem is deliberately independent from the fixed streamer list and
-// its 2-slot watch rotation (internal/watcher): discovered channels are
-// ephemeral models.Streamer objects that never enter the streamer manager,
-// the pubsub pool, chat, or the rotation's fairness store. They exist only to
-// make drop-campaign progress for the configured games. When the watched
-// channel goes offline, switches game, loses its drops, or the game's last
-// campaign is fully claimed, the slot automatically moves to the next-best
-// candidate — mirroring the auto-channel-switching of reference drop miners.
+// Discovery is a candidate SOURCE for the watcher's slot broker
+// (internal/watcher), not an independent watch slot: it never sends
+// minute-watched itself. It maintains a "current" best candidate (verifying it
+// online and switching when it goes offline, changes game, loses its drops, or
+// the game's last campaign is claimed) and hands it to the broker via
+// WatchCandidates; the broker decides whether that candidate actually occupies
+// one of the (at most constants.MaxSimultaneousStreams) Twitch watch slots,
+// competing on equal footing with the configured streamer list. Discovered
+// channels are ephemeral models.Streamer objects that never enter the streamer
+// manager, the pubsub pool, chat, or the rotation's fairness store; they exist
+// only to make drop-campaign progress for the configured games.
 //
 // The subsystem is fully disabled (no goroutine work, no API calls) while the
 // configured game list is empty.
@@ -20,7 +23,6 @@ package discovery
 import (
 	"context"
 	"log/slog"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -73,9 +75,12 @@ type twitchAPI interface {
 	GetDirectoryStreams(gameName string, limit int) ([]api.DirectoryStream, error)
 }
 
-// minuteSender abstracts watcher.MinuteSender for tests.
-type minuteSender interface {
-	Send(streamer *models.Streamer) (simulateErr error, err error)
+// SlotStatus lets discovery ask the slot broker whether its proposed channel
+// actually holds a watch slot, so the dashboard reports it as "watching" only
+// when it really is (the broker may keep both slots on configured streamers).
+// Satisfied by *watcher.MinuteWatcher.
+type SlotStatus interface {
+	IsWatching(login string) bool
 }
 
 // TrackedLoginsProvider exposes the logins of the configured streamer list so
@@ -115,13 +120,13 @@ type Channel struct {
 	offline bool
 }
 
-// Manager owns the discovery pool and the extra watch slot.
+// Manager owns the discovery candidate pool and the current best proposal.
 type Manager struct {
-	client    twitchAPI
-	sender    minuteSender
-	campaigns CampaignsProvider
-	tracked   TrackedLoginsProvider
-	settings  config.RateLimitSettings
+	client     twitchAPI
+	campaigns  CampaignsProvider
+	tracked    TrackedLoginsProvider
+	slotStatus SlotStatus
+	settings   config.RateLimitSettings
 
 	games []string
 
@@ -150,7 +155,6 @@ func NewManager(
 ) *Manager {
 	return &Manager{
 		client:    client,
-		sender:    watcher.NewMinuteSender(client),
 		campaigns: campaigns,
 		tracked:   tracked,
 		settings:  settings,
@@ -158,6 +162,17 @@ func NewManager(
 		resync:    make(chan struct{}, 1),
 	}
 }
+
+// SetSlotStatus wires the slot broker so State() can report whether the
+// proposed channel actually holds a watch slot. Call before Start.
+func (m *Manager) SetSlotStatus(s SlotStatus) {
+	m.mu.Lock()
+	m.slotStatus = s
+	m.mu.Unlock()
+}
+
+// SourceName identifies discovery as a candidate source to the slot broker.
+func (m *Manager) SourceName() string { return "discovery" }
 
 // trackedLogins returns the configured streamer logins as a lowercase set.
 func (m *Manager) trackedLogins() map[string]bool {
@@ -191,8 +206,10 @@ func (m *Manager) Start(ctx context.Context) {
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	m.mu.Unlock()
 
+	// Only the directory sync loop runs here. The slot broker drives candidate
+	// preparation (and the actual minute-watched reporting) on its own loop by
+	// calling WatchCandidates, so discovery has no independent watch loop.
 	go m.syncLoop()
-	go m.watchLoop()
 }
 
 func (m *Manager) Stop() {
@@ -241,13 +258,6 @@ func (m *Manager) channelFacts(ch *Channel) (game, gameID string, viewers int, o
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return ch.Game, ch.GameID, ch.Viewers, ch.offline
-}
-
-// randomizedDelay applies the same ±20% jitter the minute watcher uses, so
-// the extra slot's reporting cadence is as human-looking as the main one.
-func randomizedDelay(base time.Duration) time.Duration {
-	jitter := (rand.Float64() - 0.5) * 0.4
-	return time.Duration(float64(base) * (1.0 + jitter))
 }
 
 // ---------------------------------------------------------------------------
@@ -525,34 +535,36 @@ func newEphemeralStreamer(login, channelID string) *models.Streamer {
 }
 
 // ---------------------------------------------------------------------------
-// Watch loop (the extra slot)
+// Candidate proposal (driven by the slot broker)
 
-func (m *Manager) watchLoop() {
-	for {
-		select {
-		case <-m.ctx.Done():
-			return
-		default:
-		}
-
-		m.processWatch()
-
-		m.mu.RLock()
-		interval := time.Duration(m.settings.MinuteWatchedInterval) * time.Second
-		m.mu.RUnlock()
-
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-time.After(randomizedDelay(interval)):
-		}
+// WatchCandidates implements watcher.CandidateSource: it returns discovery's
+// current best channel (if any) for the slot broker to consider, without ever
+// sending minute-watched itself. It is only ever called from the broker's loop
+// goroutine, so — like the old watch loop — it may do its own online
+// verification with no lock held during the network calls; the sync loop and
+// State() coordinate with it through mu exactly as before.
+func (m *Manager) WatchCandidates() []watcher.Candidate {
+	ch := m.prepareCurrent()
+	if ch == nil {
+		return nil
 	}
+	game, _, _, _ := m.channelFacts(ch)
+	return []watcher.Candidate{{
+		Streamer: ch.Streamer,
+		Origin:   watcher.OriginDiscovery,
+		Reason:   "best available drops-enabled channel for " + game,
+	}}
 }
 
-func (m *Manager) processWatch() {
+// prepareCurrent selects and validates the current best discovered channel and
+// returns it (or nil when nothing is watchable). It performs exactly the
+// selection, stale re-verification, and auto-switching the old watch loop did,
+// but never reports a watched minute — that is the slot broker's job once it
+// places the channel in a slot. Runs on the broker's loop goroutine.
+func (m *Manager) prepareCurrent() *Channel {
 	games := m.getGames()
 	if len(games) == 0 {
-		return
+		return nil
 	}
 
 	m.mu.RLock()
@@ -568,7 +580,7 @@ func (m *Manager) processWatch() {
 			// ask for an early re-query instead of waiting out the full
 			// campaign-sync interval. Rate-limited inside maybeResync.
 			m.maybeResync()
-			return
+			return nil
 		}
 		m.setCurrent(next)
 		game, _, viewers, _ := m.channelFacts(next)
@@ -578,7 +590,7 @@ func (m *Manager) processWatch() {
 			"viewers", viewers,
 			"reason", "best available drops-enabled channel by viewer count")
 		events.Record(events.TypeDiscoverySelected, next.Streamer.Username,
-			"directory slot: "+game)
+			"directory candidate: "+game)
 		current = next
 	}
 
@@ -606,7 +618,7 @@ func (m *Manager) processWatch() {
 				"game", game, "reason", reason)
 			m.logPoolEmpty(games)
 			m.triggerResync()
-			return
+			return nil
 		}
 		m.setCurrent(next)
 		game, _, viewers, _ := m.channelFacts(next)
@@ -621,32 +633,15 @@ func (m *Manager) processWatch() {
 		current = next
 	}
 
-	simulateErr, err := m.sender.Send(current.Streamer)
-	if simulateErr != nil {
-		slog.Debug("Discovery: failed to simulate watching",
-			"channel", current.Streamer.Username, "error", simulateErr)
-	}
-	if err != nil {
-		slog.Debug("Discovery: failed to send minute watched",
-			"channel", current.Streamer.Username, "error", err)
-		// A failed send usually means the stream just ended; re-check now so
-		// the next tick switches instead of failing again.
-		m.client.CheckStreamerOnline(current.Streamer)
-		return
-	}
-
-	m.mu.RLock()
-	maxContinuousGap := 2 * time.Duration(m.settings.MinuteWatchedInterval) * time.Second
-	m.mu.RUnlock()
-	current.Streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
+	// Keep the displayed viewer count fresh from the last online check even
+	// though the broker, not discovery, does the actual minute-watched send.
 	if v := current.Streamer.Stream.GetViewersCount(); v > 0 {
 		m.mu.Lock()
 		current.Viewers = v
 		m.mu.Unlock()
 	}
-	slog.Debug("Discovery: sent minute watched",
-		"channel", current.Streamer.Username,
-		"minutesWatched", current.Streamer.Stream.GetMinuteWatched())
+
+	return current
 }
 
 // invalidReason reports whether the currently watched discovered channel
@@ -826,7 +821,14 @@ func (m *Manager) State() State {
 		LastSync: m.lastSync,
 	}
 
-	if m.current != nil {
+	// A channel is "watching" only when the slot broker has actually placed the
+	// current proposal in a watch slot — the broker may keep both slots on
+	// configured streamers, in which case discovery's current is merely
+	// waiting.
+	watched := func(login string) bool {
+		return m.slotStatus != nil && m.slotStatus.IsWatching(login)
+	}
+	if m.current != nil && watched(m.current.Streamer.Username) {
 		st.Watching = m.current.Streamer.Username
 	}
 
@@ -843,7 +845,7 @@ func (m *Manager) State() State {
 			Viewers: ch.Viewers,
 		}
 		switch {
-		case m.current == ch:
+		case m.current == ch && watched(ch.Streamer.Username):
 			cs.Status = "watching"
 			cs.MinutesWatched = ch.Streamer.Stream.GetMinuteWatched()
 		case ch.offline:
