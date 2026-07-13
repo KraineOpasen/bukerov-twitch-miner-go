@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 type Logger struct {
 	file    *os.File
+	console *consoleWriter
 	handler slog.Handler
 }
 
@@ -28,15 +30,10 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 
 	l := &Logger{}
 
-	// The console handler colorizes each line for stdout (what Docker/Portainer
-	// display), keyed off the record's level and msg category. Coloring is driven
-	// solely by the explicit settings.Colored toggle — never by TTY autodetection,
-	// because the primary consumer is a web log viewer (Portainer/Dozzle) reading
-	// the container's stdout over the Docker API without a TTY. The file handler
-	// deliberately stays a plain slog.TextHandler so the on-disk log — served
-	// verbatim by the /debug/log endpoint — contains no ANSI escape codes.
-	handlers := []slog.Handler{newConsoleHandler(os.Stdout, consoleLevel, settings.Colored)}
-
+	// Set up the optional file handler first: it can fail (mkdir/open), and the
+	// console handler below starts a background writer goroutine, so creating the
+	// console last means an early return here never leaks that goroutine.
+	var fileHandler slog.Handler
 	if settings.Save {
 		if err := os.MkdirAll("logs", 0755); err != nil {
 			return nil, err
@@ -54,9 +51,24 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 		}
 		l.file = file
 
-		handlers = append(handlers, slog.NewTextHandler(file, &slog.HandlerOptions{
+		fileHandler = slog.NewTextHandler(file, &slog.HandlerOptions{
 			Level: fileLevel,
-		}))
+		})
+	}
+
+	// The console handler colorizes each line for stdout (what Docker/Portainer
+	// display), keyed off the record's level and msg category. Coloring is driven
+	// solely by the explicit settings.Colored toggle — never by TTY autodetection,
+	// because the primary consumer is a web log viewer (Portainer/Dozzle) reading
+	// the container's stdout over the Docker API without a TTY. The file handler
+	// deliberately stays a plain slog.TextHandler so the on-disk log — served
+	// verbatim by the /debug/log endpoint — contains no ANSI escape codes.
+	console := newConsoleHandler(os.Stdout, consoleLevel, settings.Colored)
+	l.console = console.cw
+
+	handlers := []slog.Handler{console}
+	if fileHandler != nil {
+		handlers = append(handlers, fileHandler)
 	}
 
 	handler := fanoutHandler{handlers: handlers}
@@ -84,16 +96,20 @@ func (h fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Every enabled handler must get the record even if an earlier one fails —
+	// a stdout write error must not cost the on-disk log its copy of the line.
+	// Errors are collected and joined rather than short-circuiting.
+	var errs []error
 	for _, hh := range h.handlers {
 		if !hh.Enabled(ctx, r.Level) {
 			continue
 		}
 		// Clone because handlers may retain or mutate the record.
 		if err := hh.Handle(ctx, r.Clone()); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (h fanoutHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -113,6 +129,11 @@ func (h fanoutHandler) WithGroup(name string) slog.Handler {
 }
 
 func (l *Logger) Close() {
+	// Flush any lines still queued for stdout before dropping the writer, then
+	// close the log file.
+	if l.console != nil {
+		l.console.Close()
+	}
 	if l.file != nil {
 		_ = l.file.Close()
 	}
