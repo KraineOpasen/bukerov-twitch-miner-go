@@ -216,6 +216,13 @@ func (cw *consoleWriter) run(w io.Writer) {
 // has run it drops the line (counting it); otherwise it enqueues, or drops if
 // the buffer is full. It never sends on a closed channel because lines is never
 // closed.
+//
+// Known limitation: between the closed check and the send there is a narrow
+// window where a line can be enqueued just after run() has already drained and
+// exited on Close. Such a line (at most one or two, only at the instant of
+// shutdown) neither panics nor blocks, but goes unwritten and is not counted in
+// Dropped(); the file log is unaffected. Left as-is by design, like the
+// cold-start victim-by-index tie-break in internal/watcher/broker.go.
 func (cw *consoleWriter) write(line []byte) {
 	if cw.closed.Load() {
 		cw.dropped.Add(1)
