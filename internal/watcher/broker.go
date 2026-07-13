@@ -258,23 +258,66 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 			victim = i
 		}
 	}
+	if victim >= 0 && w.coldStartTie(slots, victim) {
+		// The victim was chosen purely by the cold-start alternation branch of
+		// betterDisplaceVictim; advance the parity so the next such displacement
+		// evicts the other channel instead of pinning one for the whole uptime.
+		w.displaceParity++
+	}
 	return victim
+}
+
+// coldStartTie reports whether the chosen victim was decided by the cold-start
+// alternation branch: it has no rotation recency and at least one other
+// eligible configured occupant shares its rank and (zero) recency. Only then is
+// the choice an alternation decision worth advancing; a rank- or recency-decided
+// victim, or a lone eligible occupant, must not perturb the parity.
+func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
+	v := slots[victim]
+	if !w.rotation.lastWatched[v.idx].IsZero() {
+		return false
+	}
+	tied := 0
+	for _, s := range slots {
+		if s.origin != OriginConfigured {
+			continue
+		}
+		if s.idx >= 0 && w.nearStreakCompletion(s.idx) {
+			continue
+		}
+		if slotRank(s.reasonCode) != slotRank(v.reasonCode) {
+			continue
+		}
+		if !w.rotation.lastWatched[s.idx].IsZero() {
+			continue
+		}
+		tied++
+	}
+	return tied >= 2
 }
 
 // betterDisplaceVictim reports whether configured occupant a is a better
 // eviction target than the current best b. The choice must depend only on
-// channel identity, never on the occupants' order in the slots slice: that
-// order is inherited from configuredWatch, which in direct mode comes from
-// selectByPriority's map iteration and is therefore non-deterministic across
-// ticks. Ranking, most-evictable first:
+// channel identity (and the loop-owned alternation parity), never on the
+// occupants' order in the slots slice: that order is inherited from
+// configuredWatch, which in direct mode comes from selectByPriority's map
+// iteration and is therefore non-deterministic across ticks. Ranking,
+// most-evictable first:
 //
 //  1. lowest rank — evict the least-valuable pick (unchanged cross-rank rule);
-//  2. among equal ranks, most-recently-watched — so the least-recently-watched
-//     keeps its slot, mirroring applyPriorityBoost's fair-rotation victim rule
-//     (rotation recency lives in w.rotation.lastWatched; direct mode does not
-//     update it, so the signal is stable tick-to-tick and produces no flips);
-//  3. exact ties broken by streamer index, a deterministic last resort (e.g.
-//     cold start, when nobody has any recorded recency yet).
+//  2. among equal ranks with real rotation recency, most-recently-watched — so
+//     the least-recently-watched keeps its slot, mirroring applyPriorityBoost's
+//     fair-rotation victim rule (rotation recency lives in
+//     w.rotation.lastWatched);
+//  3. cold-start tie (equal rank, no recorded recency at all — e.g. the bot
+//     never enters rotation because configured streamers are always ≤2 online):
+//     alternate the victim between the tied channels across displacements via
+//     displaceParity, so neither is pinned for the whole uptime. Within a single
+//     selection pass the parity is constant, so this stays a consistent total
+//     order; pickDisplaceable advances it only after a cold-start-tie eviction.
+//
+// Rotation mode always has real (equal, non-zero) recency for the pair, so it
+// takes branch 2 and never alternates — its behaviour is unchanged.
 func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
 	if ra, rb := slotRank(a.reasonCode), slotRank(b.reasonCode); ra != rb {
 		return ra < rb
@@ -283,7 +326,15 @@ func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
 	if !la.Equal(lb) {
 		return la.After(lb)
 	}
-	return a.idx < b.idx
+	if !la.IsZero() {
+		// Equal, real recency (rotation mode): deterministic, no alternation.
+		return a.idx < b.idx
+	}
+	// Cold-start tie: alternate the evicted index across displacements.
+	if w.displaceParity%2 == 0 {
+		return a.idx < b.idx
+	}
+	return a.idx > b.idx
 }
 
 // publishBrokerSnapshot stores the immutable slot allocation for the dashboard,
