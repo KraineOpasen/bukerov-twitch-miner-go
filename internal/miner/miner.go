@@ -239,6 +239,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				m.webServer.SetSettingsUpdateCallback(m.ApplySettings)
 				m.webServer.SetNextStreamCheckProvider(m)
 				m.webServer.SetRewardsProvider(m)
+				m.webServer.SetOverviewProvider(m)
 			}
 		} else {
 			svc, err := analytics.NewService(m.db, m.dbBasePath)
@@ -260,6 +261,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				m.webServer.SetSettingsUpdateCallback(m.ApplySettings)
 				m.webServer.SetNextStreamCheckProvider(m)
 				m.webServer.SetRewardsProvider(m)
+				m.webServer.SetOverviewProvider(m)
 			}
 		}
 	}

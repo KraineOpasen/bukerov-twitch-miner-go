@@ -55,17 +55,37 @@ func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
 	p.onAuthError = handler
 }
 
+// PredictionOutcomeSnapshot is a read-only view of one prediction outcome,
+// carrying everything the dashboard's live-predictions board renders.
+type PredictionOutcomeSnapshot struct {
+	ID              string
+	Title           string
+	Color           string
+	TotalUsers      int
+	TotalPoints     int
+	PercentageUsers float64
+	Odds            float64
+	OddsPercentage  float64
+	// Chosen marks the outcome the bot bet on (matches Decision), so the board
+	// can highlight it. Only meaningful once BetPlaced is true.
+	Chosen bool
+}
+
 // PredictionSnapshot is a read-only view of a tracked prediction event,
-// exposed for the debug endpoint.
+// exposed for the debug endpoint and the dashboard live-predictions board.
 type PredictionSnapshot struct {
-	Streamer     string
-	EventID      string
-	Title        string
-	Status       string
-	CreatedAt    time.Time
-	BetPlaced    bool
-	BetConfirmed bool
-	BetAmount    int
+	Streamer                string
+	EventID                 string
+	Title                   string
+	Status                  string
+	CreatedAt               time.Time
+	PredictionWindowSeconds float64
+	BetPlaced               bool
+	BetConfirmed            bool
+	BetAmount               int
+	TotalPoints             int
+	TotalUsers              int
+	Outcomes                []PredictionOutcomeSnapshot
 }
 
 // PredictionsSnapshot returns a view of every prediction event the pool is
@@ -76,16 +96,36 @@ func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
 
 	snapshots := make([]PredictionSnapshot, 0, len(p.predictions))
 	for _, e := range p.predictions {
-		snapshots = append(snapshots, PredictionSnapshot{
-			Streamer:     e.Streamer.Username,
-			EventID:      e.EventID,
-			Title:        e.Title,
-			Status:       string(e.Status),
-			CreatedAt:    e.CreatedAt,
-			BetPlaced:    e.BetPlaced,
-			BetConfirmed: e.BetConfirmed,
-			BetAmount:    e.Bet.Decision.Amount,
-		})
+		snap := PredictionSnapshot{
+			Streamer:                e.Streamer.Username,
+			EventID:                 e.EventID,
+			Title:                   e.Title,
+			Status:                  string(e.Status),
+			CreatedAt:               e.CreatedAt,
+			PredictionWindowSeconds: e.PredictionWindowSeconds,
+			BetPlaced:               e.BetPlaced,
+			BetConfirmed:            e.BetConfirmed,
+			BetAmount:               e.Bet.Decision.Amount,
+			TotalPoints:             e.Bet.TotalPoints,
+			TotalUsers:              e.Bet.TotalUsers,
+		}
+		for i, o := range e.Bet.Outcomes {
+			if o == nil {
+				continue
+			}
+			snap.Outcomes = append(snap.Outcomes, PredictionOutcomeSnapshot{
+				ID:              o.ID,
+				Title:           o.Title,
+				Color:           o.Color,
+				TotalUsers:      o.TotalUsers,
+				TotalPoints:     o.TotalPoints,
+				PercentageUsers: o.PercentageUsers,
+				Odds:            o.Odds,
+				OddsPercentage:  o.OddsPercentage,
+				Chosen:          e.BetPlaced && i == e.Bet.Decision.Choice,
+			})
+		}
+		snapshots = append(snapshots, snap)
 	}
 	return snapshots
 }

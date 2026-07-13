@@ -20,6 +20,7 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 		CommunityGoalsMaxAmount:  &s.CommunityGoalsMaxAmount,
 		Chat:                     &chat,
 		Preference:               &preference,
+		DisableWatch:             &s.DisableWatch,
 		Bet: &BetSettingsJSON{
 			Strategy:      &strategy,
 			Percentage:    &s.Bet.Percentage,
@@ -89,6 +90,9 @@ func ApplyStreamerSettingsFromDTO(dst *models.StreamerSettings, src StreamerSett
 	}
 	if src.Preference != nil {
 		dst.Preference = models.Preference(*src.Preference)
+	}
+	if src.DisableWatch != nil {
+		dst.DisableWatch = *src.DisableWatch
 	}
 	if src.Bet != nil {
 		ApplyBetSettingsFromDTO(&dst.Bet, src.Bet)

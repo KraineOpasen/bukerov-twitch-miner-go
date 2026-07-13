@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,6 +48,12 @@ type StreamerSettings struct {
 	ChatLogs                *bool        `json:"chatLogs,omitempty"`
 	Bet                     BetSettings  `json:"bet"`
 	Preference              Preference   `json:"preference,omitempty"`
+	// DisableWatch is a hard opt-out from the watch rotation: when true the bot
+	// never sends minute-watched events for this streamer, even when it's the
+	// only online channel (unlike PreferenceAvoid, which is only a soft
+	// exclusion). The streamer is still tracked (points, pubsub, status) - it
+	// just never occupies one of the two Twitch watch slots.
+	DisableWatch bool `json:"disableWatch,omitempty"`
 }
 
 func DefaultStreamerSettings() StreamerSettings {
@@ -270,6 +277,48 @@ func (s *Streamer) ActiveCampaignProgress() *CampaignProgress {
 		progress.Game = best.Game.Name
 	}
 	return progress
+}
+
+// CommunityGoalProgress is a compact, read-only view of an in-progress
+// community goal on this streamer, sized for the dashboard.
+type CommunityGoalProgress struct {
+	GoalID            string
+	Title             string
+	PointsContributed int
+	GoalAmount        int
+	Percent           int
+}
+
+// ActiveCommunityGoals returns compact progress views of this streamer's
+// community goals that are currently running and in stock, sorted by highest
+// completion first. Returns nil when there are none, so callers can hide the
+// section entirely. Read-locked; safe from any goroutine.
+func (s *Streamer) ActiveCommunityGoals() []CommunityGoalProgress {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []CommunityGoalProgress
+	for _, g := range s.CommunityGoals {
+		if g == nil || g.Status != CommunityGoalStarted || !g.IsInStock {
+			continue
+		}
+		percent := 0
+		if g.GoalAmount > 0 {
+			percent = (g.PointsContributed * 100) / g.GoalAmount
+			if percent > 100 {
+				percent = 100
+			}
+		}
+		out = append(out, CommunityGoalProgress{
+			GoalID:            g.GoalID,
+			Title:             g.Title,
+			PointsContributed: g.PointsContributed,
+			GoalAmount:        g.GoalAmount,
+			Percent:           percent,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Percent > out[j].Percent })
+	return out
 }
 
 func (s *Streamer) ViewerHasPointsMultiplier() bool {

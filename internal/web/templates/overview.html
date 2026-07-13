@@ -1,0 +1,117 @@
+{{define "title"}}Overview - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s" hx-swap="innerHTML">
+    {{template "overview_live" .}}
+</div>
+
+<dialog id="events-drawer" class="modal-dialog">
+    <div id="events-drawer-body" class="p-0"></div>
+</dialog>
+
+<div id="toast-container"></div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // Live countdown timers for prediction cards and the rotation counter.
+    // Ticks purely client-side from data already delivered — no server hits.
+    function pad(n) { return n.toString().padStart(2, '0'); }
+    function fmtDuration(totalSec) {
+        if (totalSec < 0) totalSec = 0;
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        return m + ':' + pad(s);
+    }
+    function tickCountdowns() {
+        const now = Date.now();
+        document.querySelectorAll('[data-countdown-to]').forEach(el => {
+            const to = parseInt(el.getAttribute('data-countdown-to'), 10) * 1000;
+            const remaining = Math.round((to - now) / 1000);
+            el.textContent = fmtDuration(remaining);
+            el.classList.toggle('text-danger', remaining <= 10 && remaining >= 0);
+        });
+        document.querySelectorAll('[data-window-end]').forEach(el => {
+            const to = parseInt(el.getAttribute('data-window-end'), 10) * 1000;
+            const remaining = Math.round((to - now) / 1000);
+            el.textContent = fmtDuration(remaining);
+        });
+    }
+    setInterval(tickCountdowns, 1000);
+    tickCountdowns();
+
+    // Toasts.
+    function showToast(message, type) {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + (type === 'error' ? 'toast-error' : 'toast-success');
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 2600);
+    }
+
+    // Card quick actions (priority cycle / watch toggle). Uses the same
+    // settings pipeline as the Settings page; never opens the card.
+    async function quickAction(btn, name, action) {
+        btn.disabled = true;
+        try {
+            const res = await fetch('/api/streamer-action/' + encodeURIComponent(name), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action })
+            });
+            const data = await res.json();
+            if (!data.success) throw new Error(data.message || 'failed');
+            if (action === 'cycle-preference') {
+                const label = data.preference === 'prefer' ? 'Preferred' : (data.preference === 'avoid' ? 'Avoided' : 'Neutral');
+                showToast(name + ' → ' + label);
+            } else {
+                showToast(name + (data.disableWatch ? ' → watching disabled' : ' → watching enabled'));
+            }
+            // Refresh the live grid so badges/state reflect the change.
+            if (window.htmx) htmx.trigger('#overview-live', 'refresh');
+        } catch (e) {
+            showToast('Action failed', 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    // Card body click → recent-events drawer (no navigation).
+    function openEvents(name) {
+        const drawer = document.getElementById('events-drawer');
+        const body = document.getElementById('events-drawer-body');
+        body.innerHTML = '<div class="p-5 text-neutral-400 text-sm">Loading…</div>';
+        if (typeof drawer.showModal === 'function') drawer.showModal();
+        fetch('/api/overview/events/' + encodeURIComponent(name))
+            .then(r => r.text())
+            .then(html => { body.innerHTML = html; })
+            .catch(() => { body.innerHTML = '<div class="p-5 text-danger text-sm">Failed to load events.</div>'; });
+    }
+
+    document.addEventListener('click', (e) => {
+        const qa = e.target.closest('[data-action]');
+        if (qa) {
+            e.stopPropagation();
+            e.preventDefault();
+            quickAction(qa, qa.getAttribute('data-streamer'), qa.getAttribute('data-action'));
+            return;
+        }
+        const closeBtn = e.target.closest('[data-drawer-close]');
+        if (closeBtn) { document.getElementById('events-drawer').close(); return; }
+        if (e.target.id === 'events-drawer') { e.target.close(); return; }
+        const card = e.target.closest('[data-card-streamer]');
+        if (card) { openEvents(card.getAttribute('data-card-streamer')); }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const card = e.target.closest('[data-card-streamer]');
+        if (card) { e.preventDefault(); openEvents(card.getAttribute('data-card-streamer')); }
+    });
+
+    // Re-run countdowns right after each htmx swap of the live region.
+    document.body.addEventListener('htmx:afterSwap', tickCountdowns);
+</script>
+{{end}}

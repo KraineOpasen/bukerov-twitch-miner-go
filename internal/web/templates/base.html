@@ -9,28 +9,27 @@
     <script src="/static/js/apexcharts.min.js" defer></script>
     <style>
         #health-banner {
-            position: sticky;
-            top: 3.5rem;
-            z-index: 40;
-            padding: 0.75rem 1rem;
+            padding: 0.6rem 1rem;
             font-size: 0.875rem;
             font-weight: 500;
             text-align: center;
-            border-bottom: 1px solid transparent;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+            border: 1px solid transparent;
         }
         #health-banner.health-banner-reauth {
-            background-color: rgba(239, 68, 68, 0.1);
-            border-bottom-color: #ef4444;
-            color: #f87171;
+            background-color: rgba(201, 123, 99, 0.12);
+            border-color: #c97b63;
+            color: #d99680;
         }
         #health-banner.health-banner-lost {
-            background-color: rgba(234, 179, 8, 0.1);
-            border-bottom-color: #eab308;
-            color: #facc15;
+            background-color: rgba(217, 162, 92, 0.12);
+            border-color: #d9a25c;
+            color: #e0b074;
         }
     </style>
 </head>
-<body class="min-h-screen bg-neutral-900 text-neutral-100 pb-16">
+<body class="min-h-screen bg-neutral-900 text-neutral-100">
     <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-neutral-900/95 flex items-center justify-center z-[1000]">
         <div class="bg-neutral-800 border border-neutral-700 rounded-xl p-8 max-w-md w-[90%] text-center">
             <h2 id="status-title" class="text-purple-500 text-xl font-semibold mb-4">Initializing...</h2>
@@ -40,72 +39,95 @@
         </div>
     </div>
 
-    <nav class="bg-neutral-800 sticky top-0 z-50">
-        <div class="max-w-6xl mx-auto px-4">
-            <div class="flex h-14 items-center justify-between">
-                <a href="/" class="flex items-center gap-2 text-lg font-semibold text-white">
-                    <img src="/static/images/icon.svg" alt="Twitch Points Miner" class="w-8 h-8">
-                    Twitch Points Miner
-                </a>
-                <div class="flex items-center gap-1">
-                    <a href="/" class="px-3 py-2 text-sm font-medium text-neutral-300 hover:bg-neutral-700 hover:text-white rounded-md transition-colors">
-                        Dashboard
-                    </a>
-                    <a href="/drops" class="px-3 py-2 text-sm font-medium text-neutral-300 hover:bg-neutral-700 hover:text-white rounded-md transition-colors">
-                        Drops
-                    </a>
-                    {{if .DiscordEnabled}}
-                    <a href="/notifications" class="px-3 py-2 text-sm font-medium text-neutral-300 hover:bg-neutral-700 hover:text-white rounded-md transition-colors">
-                        Notifications
-                    </a>
-                    {{end}}
-                    <a href="/settings" class="px-3 py-2 text-sm font-medium text-neutral-300 hover:bg-neutral-700 hover:text-white rounded-md transition-colors">
-                        Settings
-                    </a>
-                    {{if .DebugURL}}
-                    <a href="{{.DebugURL}}" target="_blank" rel="noopener" title="Diagnostic snapshot (only reachable from the machine running the miner)" class="px-3 py-2 text-sm font-medium text-neutral-300 hover:bg-neutral-700 hover:text-white rounded-md transition-colors">
-                        Debug
-                    </a>
-                    {{end}}
-                </div>
-                <div class="flex items-center gap-2 text-sm text-neutral-400">
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
-                        <circle cx="12" cy="7" r="4"/>
-                    </svg>
-                    {{.Username}}
-                </div>
-            </div>
-        </div>
-    </nav>
+    <div class="app-shell">
+        <aside class="app-sidebar" id="app-sidebar">
+            <a href="/" class="flex items-center gap-2 px-4 py-4 text-base font-semibold text-neutral-100">
+                <img src="/static/images/icon.svg" alt="" class="w-7 h-7">
+                <span>Points Miner</span>
+            </a>
 
-    <div id="health-banner" class="hidden" role="alert">
-        <div class="max-w-6xl mx-auto" id="health-banner-text"></div>
+            <nav class="flex flex-col py-1" aria-label="Primary">
+                <a href="/" data-nav="/" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+                    Overview
+                </a>
+                <a href="/#grid" data-nav="#grid" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    Стримеры
+                </a>
+                <a href="/drops" data-nav="/drops" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
+                    Дропы
+                </a>
+                <a href="/#predictions" data-nav="#predictions" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>
+                    Предикшены
+                </a>
+                {{if .DiscordEnabled}}
+                <a href="/notifications" data-nav="/notifications" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+                    Уведомления
+                </a>
+                {{end}}
+                <a href="{{if .DebugURL}}{{.DebugURL}}{{else}}/settings#logger{{end}}" data-nav="/logs" class="sidebar-link" {{if .DebugURL}}target="_blank" rel="noopener" title="Diagnostic snapshot (localhost only)"{{end}}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+                    Логи
+                </a>
+                <a href="/settings" data-nav="/settings" class="sidebar-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    Настройки
+                </a>
+            </nav>
+
+            <div class="now-watching" id="now-watching"
+                 hx-get="/api/now-watching" hx-trigger="load, every 30s" hx-swap="innerHTML">
+                <div class="text-xs uppercase tracking-wide text-neutral-400 mb-2">Сейчас смотрим</div>
+                <div class="skeleton h-16"></div>
+            </div>
+
+            <div class="px-4 py-3 border-t border-neutral-700 text-xs text-neutral-400 flex items-center justify-between">
+                <span class="inline-flex items-center gap-1.5">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
+                    {{.Username}}
+                </span>
+                {{if .Version}}<span class="num">{{.Version}}</span>{{end}}
+            </div>
+        </aside>
+
+        <main class="app-main">
+            <button type="button" id="sidebar-toggle" class="md:hidden mb-3 qa-btn" aria-label="Toggle menu">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+            </button>
+
+            <div id="health-banner" class="hidden" role="alert">
+                <span id="health-banner-text"></span>
+            </div>
+
+            {{block "content" .}}{{end}}
+        </main>
     </div>
 
-    <main class="max-w-6xl mx-auto px-4 py-8">
-        {{block "content" .}}{{end}}
-    </main>
-    
-    <footer class="fixed bottom-0 left-0 right-0 bg-neutral-900 border-t border-neutral-800 z-50">
-        <div class="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
-        <small class="text-neutral-400">
-            Auto-refresh: {{.RefreshMinutes}} min | 
-            <span hx-get="/api/status" hx-trigger="every 30s" hx-swap="innerHTML">
-                Connected
-            </span>
-        </small>
-        <a href="https://github.com/KraineOpasen/bukerov-twitch-miner-go" target="_blank" rel="noopener" title="View on GitHub" class="text-neutral-400 hover:text-purple-400 transition-colors">
-            <svg class="w-6 h-6" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-            </svg>
-        </a>
-        {{if .Version}}<small class="text-neutral-400">{{.Version}}</small>{{end}}
-        </div>
-    </footer>
-    
     {{block "scripts" .}}{{end}}
-    
+
+    <script>
+        // Highlight the active sidebar link by pathname (hash links stay
+        // inactive so Overview keeps its highlight on the home page).
+        (function() {
+            const path = window.location.pathname;
+            document.querySelectorAll('[data-nav]').forEach(a => {
+                const nav = a.getAttribute('data-nav');
+                if (nav.startsWith('#')) return;
+                if (nav === '/logs') return;
+                if (nav === path || (nav === '/' && path === '/')) a.classList.add('is-active');
+            });
+            const toggle = document.getElementById('sidebar-toggle');
+            const sidebar = document.getElementById('app-sidebar');
+            if (toggle && sidebar) {
+                toggle.addEventListener('click', () => sidebar.classList.toggle('is-open'));
+            }
+        })();
+    </script>
+
     <script>
         (function() {
             const overlay = document.getElementById('status-overlay');
@@ -141,11 +163,10 @@
                     }
                     return;
                 }
-                
+
                 sessionStorage.removeItem('miner_loaded_' + window.location.pathname);
-                
                 overlay.classList.remove('hidden');
-                
+
                 switch (status.status) {
                     case 'initializing':
                         title.textContent = 'Initializing...';
@@ -153,7 +174,6 @@
                         message.textContent = status.message || 'Starting up...';
                         spinner.style.display = 'block';
                         break;
-                        
                     case 'auth_required':
                         title.textContent = 'Twitch Login Required';
                         spinner.style.display = 'none';
@@ -161,20 +181,18 @@
                             content.innerHTML = `
                                 <p class="text-neutral-400">Open <a href="${status.auth.verificationUri}" target="_blank" class="text-purple-500 font-medium">${status.auth.verificationUri}</a></p>
                                 <p class="text-neutral-400 mt-2">Enter this code:</p>
-                                <div class="font-mono text-3xl font-bold text-purple-500 bg-neutral-900 px-6 py-4 rounded-lg my-4 tracking-widest select-all">${status.auth.userCode}</div>
+                                <div class="num text-3xl font-bold text-purple-500 bg-neutral-900 px-6 py-4 rounded-lg my-4 tracking-widest select-all">${status.auth.userCode}</div>
                                 <p class="text-neutral-400 text-sm">Code expires in ${Math.floor(status.auth.expiresIn / 60)} minutes</p>
                             `;
                         }
                         message.textContent = 'Waiting for authorization...';
                         break;
-                        
                     case 'loading_streamers':
                         title.textContent = 'Loading Streamers';
                         content.innerHTML = status.streamerInfo ? `<p class="text-neutral-400">Loading: <strong class="text-neutral-100">${status.streamerInfo}</strong></p>` : '';
                         message.textContent = status.message || 'Please wait...';
                         spinner.style.display = 'block';
                         break;
-                        
                     case 'error':
                         title.textContent = 'Error';
                         content.innerHTML = '';
@@ -183,39 +201,22 @@
                         break;
                 }
             }
-            
-            fetch('/api/miner-status')
-                .then(r => r.json())
-                .then(updateStatus)
-                .catch(() => {});
-            
+
+            fetch('/api/miner-status').then(r => r.json()).then(updateStatus).catch(() => {});
+
             let evtSource = null;
-            
             function connectSSE() {
                 if (evtSource) return;
                 evtSource = new EventSource('/api/miner-status/stream');
                 evtSource.onmessage = function(event) {
-                    try {
-                        const status = JSON.parse(event.data);
-                        updateStatus(status);
-                    } catch (e) {}
+                    try { updateStatus(JSON.parse(event.data)); } catch (e) {}
                 };
                 evtSource.onerror = function() {
-                    setTimeout(() => {
-                        overlay.classList.add('hidden');
-                    }, 5000);
+                    setTimeout(() => { overlay.classList.add('hidden'); }, 5000);
                 };
             }
-            
-            function disconnectSSE() {
-                if (evtSource) {
-                    evtSource.close();
-                    evtSource = null;
-                }
-            }
-            
+            function disconnectSSE() { if (evtSource) { evtSource.close(); evtSource = null; } }
             connectSSE();
-            
             window.addEventListener('pagehide', disconnectSSE);
             window.addEventListener('beforeunload', disconnectSSE);
         })();
