@@ -1,0 +1,19 @@
+{
+  "name": "Twitch Points Miner",
+  "short_name": "Points Miner",
+  "icons": [
+    {
+      "src": "/static/images/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/images/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#15161c",
+  "background_color": "#1a1b22",
+  "display": "standalone"
+}
