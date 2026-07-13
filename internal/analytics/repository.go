@@ -14,6 +14,9 @@ type Repository interface {
 	RecordAnnotation(streamer string, eventType, text, color string) error
 	GetStreamerData(streamer string) (*StreamerData, error)
 	GetStreamerDataFiltered(streamer string, startTime, endTime time.Time) (*StreamerData, error)
+	GetPointSamples(streamer string, startTime, endTime time.Time, limit int) ([]PointSample, error)
+	GetAnnotationRecords(streamer string, startTime, endTime time.Time) ([]AnnotationRecord, error)
+	PruneBefore(cutoff time.Time) (int64, error)
 	ListStreamers() ([]StreamerInfo, error)
 	RecordChatMessage(streamer string, msg ChatMessage) error
 	GetChatMessages(streamer string, limit, offset int) (*ChatLogData, error)
@@ -86,6 +89,13 @@ func (m *AnalyticsModule) Migrations() []database.Migration {
 				CREATE INDEX IF NOT EXISTS idx_chat_streamer_time ON chat_messages(streamer_id, timestamp);
 			`,
 		},
+		{
+			Version:     3,
+			Description: "Add machine-readable event_type to annotations",
+			SQL: `
+				ALTER TABLE annotations ADD COLUMN event_type TEXT;
+			`,
+		},
 	}
 }
 
@@ -156,8 +166,8 @@ func (r *SQLiteRepository) RecordAnnotation(streamer string, eventType, text, co
 	}
 
 	_, err = r.db.Exec(
-		"INSERT INTO annotations (streamer_id, timestamp, text, color) VALUES (?, ?, ?, ?)",
-		streamerID, time.Now().UnixMilli(), text, color,
+		"INSERT INTO annotations (streamer_id, timestamp, text, color, event_type) VALUES (?, ?, ?, ?, ?)",
+		streamerID, time.Now().UnixMilli(), text, color, eventType,
 	)
 	return err
 }
@@ -196,7 +206,7 @@ func (r *SQLiteRepository) GetStreamerDataFiltered(streamer string, startTime, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var p SeriesPoint
@@ -223,7 +233,7 @@ func (r *SQLiteRepository) GetStreamerDataFiltered(streamer string, startTime, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var a Annotation
@@ -242,6 +252,135 @@ func (r *SQLiteRepository) GetStreamerDataFiltered(streamer string, startTime, e
 	return data, nil
 }
 
+// GetPointSamples returns the balance-over-time readings for a streamer within
+// [startTime, endTime] (zero bounds are open-ended), ordered oldest-first. When
+// limit > 0 it caps the number of rows fetched (a memory/timeout guard); the
+// caller downsamples the result for display. An unknown streamer yields nil.
+func (r *SQLiteRepository) GetPointSamples(streamer string, startTime, endTime time.Time, limit int) ([]PointSample, error) {
+	var streamerID int64
+	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	query := "SELECT timestamp, points, COALESCE(event_type, '') FROM points WHERE streamer_id = ?"
+	args := []interface{}{streamerID}
+	if !startTime.IsZero() {
+		query += " AND timestamp >= ?"
+		args = append(args, startTime.UnixMilli())
+	}
+	if !endTime.IsZero() {
+		query += " AND timestamp <= ?"
+		args = append(args, endTime.UnixMilli())
+	}
+	query += " ORDER BY timestamp ASC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var samples []PointSample
+	for rows.Next() {
+		var s PointSample
+		if err := rows.Scan(&s.T, &s.Balance, &s.Reason); err != nil {
+			return nil, err
+		}
+		samples = append(samples, s)
+	}
+	return samples, rows.Err()
+}
+
+// GetAnnotationRecords returns the event markers for a streamer within
+// [startTime, endTime] (zero bounds are open-ended), ordered oldest-first. The
+// event type falls back to the label text for rows written before the
+// event_type column existed. An unknown streamer yields nil.
+func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endTime time.Time) ([]AnnotationRecord, error) {
+	var streamerID int64
+	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	query := "SELECT timestamp, COALESCE(event_type, ''), text FROM annotations WHERE streamer_id = ?"
+	args := []interface{}{streamerID}
+	if !startTime.IsZero() {
+		query += " AND timestamp >= ?"
+		args = append(args, startTime.UnixMilli())
+	}
+	if !endTime.IsZero() {
+		query += " AND timestamp <= ?"
+		args = append(args, endTime.UnixMilli())
+	}
+	query += " ORDER BY timestamp ASC"
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []AnnotationRecord
+	for rows.Next() {
+		var rec AnnotationRecord
+		if err := rows.Scan(&rec.T, &rec.Type, &rec.Reason); err != nil {
+			return nil, err
+		}
+		if rec.Type == "" {
+			rec.Type = rec.Reason
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
+// PruneBefore deletes points and annotation rows older than cutoff, returning
+// the total number of rows removed. Used by the retention sweep; the single-
+// connection DB serializes it against concurrent writes.
+func (r *SQLiteRepository) PruneBefore(cutoff time.Time) (int64, error) {
+	c := cutoff.UnixMilli()
+	var total int64
+	for _, table := range []string{"points", "annotations"} {
+		res, err := r.db.Exec("DELETE FROM "+table+" WHERE timestamp < ?", c)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, nil
+}
+
+// Downsample uniformly reduces samples to at most max points, always keeping
+// the first and last reading so the chart's endpoints stay accurate. It returns
+// the input unchanged when max <= 0 or the series is already within budget.
+func Downsample(samples []PointSample, max int) []PointSample {
+	if max <= 0 || len(samples) <= max {
+		return samples
+	}
+	if max == 1 {
+		return samples[len(samples)-1:]
+	}
+	out := make([]PointSample, 0, max)
+	step := float64(len(samples)-1) / float64(max-1)
+	for i := 0; i < max-1; i++ {
+		out = append(out, samples[int(float64(i)*step)])
+	}
+	return append(out, samples[len(samples)-1])
+}
+
 func (r *SQLiteRepository) ListStreamers() ([]StreamerInfo, error) {
 	query := `
 		SELECT s.name, 
@@ -255,7 +394,7 @@ func (r *SQLiteRepository) ListStreamers() ([]StreamerInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var streamers []StreamerInfo
 	for rows.Next() {
@@ -316,7 +455,7 @@ func (r *SQLiteRepository) GetChatMessages(streamer string, limit, offset int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var messages []ChatMessage
 	for rows.Next() {
@@ -374,7 +513,7 @@ func (r *SQLiteRepository) SearchChatMessages(streamer string, query string, lim
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var messages []ChatMessage
 	for rows.Next() {

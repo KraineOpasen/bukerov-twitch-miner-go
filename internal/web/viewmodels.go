@@ -291,6 +291,17 @@ type DropsPageData struct {
 	DebugURL       string
 }
 
+type StatisticsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+	// Streamers is the list of streamer names with recorded history, used to
+	// populate the page's streamer selector.
+	Streamers []string
+}
+
 // DropDetailView is one drop within a campaign, rendered in the Drops-page
 // modal so every reward in the campaign is visible individually (not just the
 // current/final one shown on the card).

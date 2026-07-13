@@ -485,6 +485,22 @@
 }
 .drawer-row:last-child { border-bottom: 0; }
 
+/* Statistics page: segmented range-preset toggle (24ч / 7д / 30д). */
+.stat-range-btn {
+  padding: 0.5rem 0.95rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-neutral-300);
+  background: var(--color-neutral-800);
+  border-right: 1px solid var(--color-neutral-700);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.stat-range-btn:last-child { border-right: 0; }
+.stat-range-btn:hover { background: rgba(139, 127, 209, 0.12); color: var(--color-neutral-100); }
+.stat-range-btn.is-active { background: var(--color-purple-600); color: #fff; }
+.stat-range-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
+
 /* Respect reduced-motion: no marquee, no transforms, static shimmer. */
 @media (prefers-reduced-motion: reduce) {
   .ticker-track { animation: none; padding-left: 0; flex-wrap: wrap; white-space: normal; }
@@ -492,6 +508,7 @@
   .skeleton { animation: none; }
   .s-card, .s-card:hover { transition: none; transform: none; }
   .app-sidebar { transition: none; }
+  .stat-range-btn { transition: none; }
   * { scroll-behavior: auto !important; }
 }
 

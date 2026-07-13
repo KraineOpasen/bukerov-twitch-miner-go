@@ -272,7 +272,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				m.webServer.SetPredictionControlProvider(m)
 			}
 		} else {
-			svc, err := analytics.NewService(m.db, m.dbBasePath)
+			svc, err := analytics.NewService(m.db, m.dbBasePath, m.config.Analytics.RetentionDays)
 			if err != nil {
 				slog.Error("Failed to create analytics service", "error", err)
 			} else {
@@ -624,9 +624,14 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 						if m.analyticsSvc != nil {
 							m.analyticsSvc.RecordPoints(s, reasonCode)
 
-							if reasonCode == "WATCH_STREAK" {
+							switch reasonCode {
+							case "WATCH_STREAK":
 								if earned, ok := pointGain["total_points"].(float64); ok {
 									m.analyticsSvc.RecordAnnotation(s, "WATCH_STREAK", fmt.Sprintf("+%d - Watch Streak", int(earned)))
+								}
+							case "RAID":
+								if earned, ok := pointGain["total_points"].(float64); ok {
+									m.analyticsSvc.RecordAnnotation(s, "RAID", fmt.Sprintf("+%d - Raid", int(earned)))
 								}
 							}
 						}

@@ -133,6 +133,11 @@ type AnalyticsSettings struct {
 	Refresh        int    `json:"refresh"`
 	DaysAgo        int    `json:"daysAgo"`
 	EnableChatLogs bool   `json:"enableChatLogs"`
+
+	// RetentionDays bounds how long per-event points/annotation history is
+	// kept before automatic pruning. 0 disables pruning (keep forever); values
+	// are clamped to [0, 365] by ValidateConfig. Default 60.
+	RetentionDays int `json:"retentionDays"`
 }
 
 // DebugSettings configures the localhost-only diagnostic HTTP server
@@ -274,6 +279,7 @@ func DefaultAnalyticsSettings() AnalyticsSettings {
 		Refresh:        5,
 		DaysAgo:        7,
 		EnableChatLogs: false,
+		RetentionDays:  60,
 	}
 }
 
@@ -407,5 +413,11 @@ func ValidateConfig(config *Config) {
 
 	if config.Debug.Port < 1 || config.Debug.Port > 65535 {
 		config.Debug.Port = DefaultDebugSettings().Port
+	}
+
+	if config.Analytics.RetentionDays < 0 {
+		config.Analytics.RetentionDays = 0
+	} else if config.Analytics.RetentionDays > 365 {
+		config.Analytics.RetentionDays = 365
 	}
 }
