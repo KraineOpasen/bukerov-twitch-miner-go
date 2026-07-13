@@ -33,7 +33,7 @@ func newOverviewTestServer(t *testing.T) (*Server, *models.Streamer, *bool) {
 		t.Fatalf("open db: %v", err)
 	}
 
-	svc, err := analytics.NewService(db, t.TempDir())
+	svc, err := analytics.NewService(db, t.TempDir(), 0)
 	if err != nil {
 		t.Fatalf("analytics service: %v", err)
 	}

@@ -153,7 +153,7 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 func loadTemplates() map[string]*template.Template {
 	templates := make(map[string]*template.Template)
 
-	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html"}
+	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html"}
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(templatesFS,
 			"templates/base.html",
@@ -360,6 +360,13 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
 	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)
+
+	// Statistics routes: the dedicated points-history page, its JSON data
+	// endpoint (range-filtered, downsampled for the chart), and a full-fidelity
+	// export endpoint for external tools.
+	mux.HandleFunc("/statistics", s.handleStatisticsPage)
+	mux.HandleFunc("/api/points-history", s.handleAPIPointsHistory)
+	mux.HandleFunc("/api/points-history/export", s.handleAPIPointsHistoryExport)
 
 	// Status routes
 	mux.HandleFunc("/api/status", s.handleAPIStatus)

@@ -1,0 +1,262 @@
+{{define "title"}}Статистика - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="text-3xl font-bold">Статистика</h1>
+    <div id="stat-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
+</div>
+<p class="text-neutral-400 text-sm mb-6">История баланса channel points во времени с аннотациями ключевых событий (выигрыш/проигрыш ставок, watch streak, рейды).</p>
+
+<div class="card mb-6">
+    <div class="flex flex-wrap items-end gap-5">
+        <div class="flex flex-col gap-1">
+            <label for="stat-streamer" class="text-xs uppercase tracking-wide text-neutral-400">Стример</label>
+            <select id="stat-streamer" class="input-field min-w-[12rem]" {{if not .Streamers}}disabled{{end}}>
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="">— нет данных —</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <span class="text-xs uppercase tracking-wide text-neutral-400">Период</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="Период">
+                <button type="button" class="stat-range-btn" data-range="24h">24ч</button>
+                <button type="button" class="stat-range-btn is-active" data-range="7d">7д</button>
+                <button type="button" class="stat-range-btn" data-range="30d">30д</button>
+            </div>
+        </div>
+        <div class="ml-auto">
+            <a id="stat-export" class="btn-secondary inline-block" href="#" download>Экспорт JSON</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div id="stat-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ Данные могут быть устаревшими — последнее обновление не удалось.</div>
+
+    <div id="stat-loading">
+        <div class="skeleton h-[400px] w-full rounded-lg"></div>
+    </div>
+
+    <div id="stat-empty" class="hidden text-center py-24 text-neutral-400">
+        <p class="text-lg font-medium text-neutral-300 mb-1">Нет данных</p>
+        <p class="text-sm">Для выбранного стримера и периода ещё нет записей истории поинтов.</p>
+    </div>
+
+    <div id="stat-error" class="hidden text-center py-24">
+        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">Ошибка загрузки</p>
+        <p class="text-sm text-neutral-400 mb-4" id="stat-error-msg"></p>
+        <button type="button" id="stat-retry" class="btn-secondary">Повторить</button>
+    </div>
+
+    <div id="stat-chart-wrap" class="hidden">
+        <div id="stat-chart"></div>
+        <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">Показана прореженная выборка. Полные данные — через «Экспорт JSON».</p>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+(function () {
+    const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Palette tokens read from CSS custom properties so the chart stays in sync
+    // with the single dark theme (no hardcoded colours).
+    const css = getComputedStyle(document.documentElement);
+    const tok = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
+    const C = {
+        accent:  tok('--color-purple-500', '#8b7fd1'),
+        grid:    tok('--color-neutral-700', '#3a3b47'),
+        text:    tok('--color-neutral-400', '#9c9aab'),
+        success: tok('--color-success', '#7fa88c'),
+        danger:  tok('--color-danger', '#c97b63'),
+        event:   tok('--color-event', '#d9a25c'),
+    };
+
+    // Event type -> annotation colour, using accepted palette tokens only.
+    function annColor(type) {
+        switch ((type || '').toUpperCase()) {
+            case 'WIN':
+            case 'PREDICTION_WIN': return C.success;
+            case 'LOSE':
+            case 'PREDICTION_LOSE': return C.danger;
+            case 'RAID': return C.event;
+            default: return C.accent; // WATCH_STREAK, PREDICTION_MADE, etc.
+        }
+    }
+
+    const els = {
+        streamer:  document.getElementById('stat-streamer'),
+        updated:   document.getElementById('stat-updated'),
+        stale:     document.getElementById('stat-stale'),
+        loading:   document.getElementById('stat-loading'),
+        empty:     document.getElementById('stat-empty'),
+        error:     document.getElementById('stat-error'),
+        errorMsg:  document.getElementById('stat-error-msg'),
+        retry:     document.getElementById('stat-retry'),
+        chartWrap: document.getElementById('stat-chart-wrap'),
+        truncated: document.getElementById('stat-truncated'),
+        export:    document.getElementById('stat-export'),
+        rangeBtns: Array.from(document.querySelectorAll('.stat-range-btn')),
+    };
+
+    let chart = null;
+    let currentRange = '7d';
+    let refreshTimer = null;
+    let inFlight = null;
+
+    function show(state) {
+        els.loading.classList.toggle('hidden', state !== 'loading');
+        els.empty.classList.toggle('hidden', state !== 'empty');
+        els.error.classList.toggle('hidden', state !== 'error');
+        els.chartWrap.classList.toggle('hidden', state !== 'chart');
+    }
+
+    function apiURL(base) {
+        const s = els.streamer.value;
+        return base + '?streamer=' + encodeURIComponent(s) + '&range=' + encodeURIComponent(currentRange);
+    }
+
+    function updateExportLink() {
+        els.export.href = apiURL('/api/points-history/export');
+    }
+
+    function buildOptions(data) {
+        const series = (data.points || []).map(p => ({ x: p.t, y: p.balance }));
+        const reasons = (data.points || []).map(p => p.reason || '');
+        const annotations = (data.annotations || []).map(a => ({
+            x: a.t,
+            borderColor: annColor(a.type),
+            strokeDashArray: 0,
+            label: {
+                borderColor: annColor(a.type),
+                style: { color: '#15161c', background: annColor(a.type), fontSize: '10px' },
+                text: a.reason || a.type,
+                orientation: 'horizontal',
+            },
+        }));
+
+        return {
+            series: [{ name: 'Баланс', data: series }],
+            chart: {
+                type: 'area',
+                height: 400,
+                background: 'transparent',
+                foreColor: C.text,
+                fontFamily: 'Inter, sans-serif',
+                toolbar: { show: true, tools: { download: false, selection: true, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
+                animations: { enabled: !reducedMotion, speed: 300 },
+            },
+            colors: [C.accent],
+            fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.05, stops: [0, 100] } },
+            stroke: { curve: 'smooth', width: 2 },
+            dataLabels: { enabled: false },
+            xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+            yaxis: { labels: { formatter: v => new Intl.NumberFormat().format(Math.round(v)) } },
+            grid: { borderColor: C.grid, strokeDashArray: 4 },
+            tooltip: {
+                theme: 'dark',
+                x: { format: 'dd MMM yyyy HH:mm' },
+                y: {
+                    formatter: function (val, opts) {
+                        let label = new Intl.NumberFormat().format(val) + ' поинтов';
+                        const r = reasons[opts.dataPointIndex];
+                        if (r) label += ' · ' + r;
+                        return label;
+                    },
+                },
+            },
+            annotations: { xaxis: annotations },
+            noData: { text: 'Нет данных' },
+        };
+    }
+
+    function render(data) {
+        const options = buildOptions(data);
+        if (chart) {
+            chart.updateOptions(options, false, !reducedMotion);
+        } else {
+            chart = new ApexCharts(document.getElementById('stat-chart'), options);
+            chart.render();
+        }
+    }
+
+    function setUpdated() {
+        const now = new Date();
+        els.updated.textContent = 'Обновлено ' + now.toLocaleTimeString();
+    }
+
+    async function load(isRefresh) {
+        if (!els.streamer.value) { show('empty'); return; }
+        updateExportLink();
+        if (inFlight) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+
+        if (!isRefresh && chart === null) show('loading');
+
+        try {
+            const resp = await fetch(apiURL('/api/points-history'), { signal: ctrl.signal });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            inFlight = null;
+
+            els.stale.classList.add('hidden');
+
+            if (!data.points || data.points.length === 0) {
+                if (chart) { chart.destroy(); chart = null; }
+                show('empty');
+                setUpdated();
+                return;
+            }
+
+            show('chart');
+            render(data);
+            els.truncated.classList.toggle('hidden', !data.truncated);
+            setUpdated();
+        } catch (err) {
+            if (ctrl.signal.aborted) return;
+            inFlight = null;
+            // On a background refresh with an existing chart, keep showing the
+            // last good data and flag it stale rather than blanking the view.
+            if (isRefresh && chart) {
+                els.stale.classList.remove('hidden');
+                return;
+            }
+            els.errorMsg.textContent = String(err.message || err);
+            show('error');
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        if (REFRESH_MS > 0) refreshTimer = setInterval(() => load(true), REFRESH_MS);
+    }
+
+    // --- wiring ---
+    els.rangeBtns.forEach(btn => btn.addEventListener('click', () => {
+        els.rangeBtns.forEach(b => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        currentRange = btn.dataset.range;
+        load(false);
+    }));
+    els.streamer.addEventListener('change', () => load(false));
+    els.retry.addEventListener('click', () => load(false));
+
+    function waitForApexCharts(cb, maxWait) {
+        const start = Date.now();
+        (function check() {
+            if (typeof ApexCharts !== 'undefined') cb();
+            else if (Date.now() - start < (maxWait || 10000)) setTimeout(check, 50);
+            else { els.errorMsg.textContent = 'Не удалось загрузить библиотеку графиков.'; show('error'); }
+        })();
+    }
+
+    updateExportLink();
+    waitForApexCharts(function () {
+        load(false);
+        scheduleRefresh();
+    });
+})();
+</script>
+{{end}}

@@ -89,7 +89,7 @@ func main() {
 		}
 		defer func() { _ = db.Close() }()
 
-		analyticsSvc, err = analytics.NewService(db, dbBasePath)
+		analyticsSvc, err = analytics.NewService(db, dbBasePath, cfg.Analytics.RetentionDays)
 		if err != nil {
 			slog.Error("Failed to create analytics service", "error", err)
 			os.Exit(1)
