@@ -167,6 +167,84 @@ func TestGatherCandidatesDropsConfiguredLogins(t *testing.T) {
 	}
 }
 
+// TestArbitrateDirectModeVictimStableAcrossTicks is the regression for the
+// non-deterministic displacement victim: with two equal-rank configured
+// channels in direct mode and one strictly-higher-rank external candidate, the
+// surviving configured channel must be identical on every tick even though
+// selectByPriority returns configuredWatch in a randomized (map-iteration)
+// order. Before the fix this flipped tick-to-tick.
+func TestArbitrateDirectModeVictimStableAcrossTicks(t *testing.T) {
+	w, _ := newTestWatcher(2)
+	for _, s := range w.streamers {
+		s.Settings.WatchStreak = false // isolate from streak protection
+	}
+	disco := discoveryStreamer("disco", false) // active_drop, rank 2 > configured rank 1
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+
+	survivor := ""
+	for tick := 0; tick < 3000; tick++ {
+		w.selectionReasons = make(map[int]string)
+		w.selectionMode = ModeIdle
+		cw := w.selectStreamersToWatch([]int{0, 1}) // direct mode: map-order varies
+		slots, _ := w.arbitrate(cw, extra, time.Now())
+
+		got, discoSlotted := "", false
+		for _, s := range slots {
+			if s.origin == OriginConfigured {
+				got = s.streamer.Username
+			}
+			if s.streamer.Username == "disco" {
+				discoSlotted = true
+			}
+		}
+		if !discoSlotted {
+			t.Fatalf("tick %d: the rank-2 discovery drop must always hold a slot", tick)
+		}
+		if tick == 0 {
+			survivor = got
+			continue
+		}
+		if got != survivor {
+			t.Fatalf("tick %d: surviving configured channel flipped from %q to %q — victim is not deterministic", tick, survivor, got)
+		}
+	}
+}
+
+// TestArbitrateEvictsMostRecentlyWatchedAmongEqualRank pins the tie-break rule
+// itself: among equal-rank configured occupants the most-recently-watched is
+// evicted (so the least-recently-watched, most "owed" a turn, keeps its slot),
+// independent of the configuredWatch order.
+func TestArbitrateEvictsMostRecentlyWatchedAmongEqualRank(t *testing.T) {
+	w, _ := newTestWatcher(2)
+	for _, s := range w.streamers {
+		s.Settings.WatchStreak = false
+	}
+	now := time.Now()
+	// streamer 0 was watched most recently; streamer 1 longer ago.
+	w.rotation.lastWatched = map[int]time.Time{
+		0: now,
+		1: now.Add(-time.Hour),
+	}
+	disco := discoveryStreamer("disco", false)
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+
+	// Both possible configuredWatch orders must evict the same (most-recent)
+	// channel and keep streamer 1.
+	for _, cw := range [][]int{{0, 1}, {1, 0}} {
+		slots, _ := w.arbitrate(cw, extra, now)
+		survivor := ""
+		for _, s := range slots {
+			if s.origin == OriginConfigured {
+				survivor = s.streamer.Username
+			}
+		}
+		if survivor != w.streamers[1].Username {
+			t.Fatalf("cw=%v: expected the least-recently-watched channel %q to keep its slot, got %q",
+				cw, w.streamers[1].Username, survivor)
+		}
+	}
+}
+
 func TestSlotRankOrdering(t *testing.T) {
 	restricted := slotRank(ReasonRestrictedDrop)
 	streak := slotRank(ReasonStreak)

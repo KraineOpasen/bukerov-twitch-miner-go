@@ -160,9 +160,11 @@ func defaultReason(reasonCode, origin string) string {
 // constants.MaxSimultaneousStreams cap:
 //
 //   - a candidate fills any free slot;
-//   - otherwise it may displace the lowest-ranked configured occupant it
-//     strictly outranks, except one within minutes of completing a watch
-//     streak (which is never interrupted — mirrors applyPriorityBoost);
+//   - otherwise it may displace a configured occupant it strictly outranks,
+//     picking the eviction target by betterDisplaceVictim (lowest rank, then
+//     most-recently-watched among equals — a stable, order-independent choice),
+//     except one within minutes of completing a watch streak (which is never
+//     interrupted — mirrors applyPriorityBoost);
 //   - a channel already occupying a slot is never given a second one.
 //
 // With no external candidates this is a pure pass-through of the configured
@@ -234,10 +236,11 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 }
 
 // pickDisplaceable returns the index into slots of the configured occupant the
-// incoming candidate may displace: the lowest-ranked one it strictly outranks
-// that is not protected by a near-complete watch streak. Returns -1 if none.
-// Discovery occupants are never displaced (there is at most one, and it never
-// out-prioritizes a configured slot into a swap war).
+// incoming candidate may displace: the one it strictly outranks that is the
+// best eviction target per betterDisplaceVictim, and is not protected by a
+// near-complete watch streak. Returns -1 if none. Discovery occupants are never
+// displaced (there is at most one, and it never out-prioritizes a configured
+// slot into a swap war).
 func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccupant) int {
 	incomingRank := slotRank(incoming.reasonCode)
 	victim := -1
@@ -251,11 +254,36 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 		if incomingRank <= slotRank(s.reasonCode) {
 			continue
 		}
-		if victim < 0 || slotRank(s.reasonCode) < slotRank(slots[victim].reasonCode) {
+		if victim < 0 || w.betterDisplaceVictim(s, slots[victim]) {
 			victim = i
 		}
 	}
 	return victim
+}
+
+// betterDisplaceVictim reports whether configured occupant a is a better
+// eviction target than the current best b. The choice must depend only on
+// channel identity, never on the occupants' order in the slots slice: that
+// order is inherited from configuredWatch, which in direct mode comes from
+// selectByPriority's map iteration and is therefore non-deterministic across
+// ticks. Ranking, most-evictable first:
+//
+//  1. lowest rank — evict the least-valuable pick (unchanged cross-rank rule);
+//  2. among equal ranks, most-recently-watched — so the least-recently-watched
+//     keeps its slot, mirroring applyPriorityBoost's fair-rotation victim rule
+//     (rotation recency lives in w.rotation.lastWatched; direct mode does not
+//     update it, so the signal is stable tick-to-tick and produces no flips);
+//  3. exact ties broken by streamer index, a deterministic last resort (e.g.
+//     cold start, when nobody has any recorded recency yet).
+func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
+	if ra, rb := slotRank(a.reasonCode), slotRank(b.reasonCode); ra != rb {
+		return ra < rb
+	}
+	la, lb := w.rotation.lastWatched[a.idx], w.rotation.lastWatched[b.idx]
+	if !la.Equal(lb) {
+		return la.After(lb)
+	}
+	return a.idx < b.idx
 }
 
 // publishBrokerSnapshot stores the immutable slot allocation for the dashboard,
