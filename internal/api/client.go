@@ -43,6 +43,17 @@ var (
 	// or revoked). Callers should treat this as "reauthorization required"
 	// rather than a transient failure.
 	ErrUnauthorized = errors.New("twitch: unauthorized (token expired or revoked)")
+
+	// ErrPersistedQueryNotFound indicates every candidate Twitch client ID
+	// returned PersistedQueryNotFound for an operation — i.e. the persisted-query
+	// hash the code ships (or the client metadata) is stale because Twitch
+	// rotated it server-side. It is deliberately distinct from
+	// ErrStreamerDoesNotExist / ErrStreamerIsOffline so a stale-hash outage is
+	// never misreported as "streamer does not exist" and so callers can keep the
+	// last-known state (points, campaigns, online flag) instead of wiping it on
+	// what is a temporary, Twitch-side failure. Recovery is a hash update in
+	// internal/constants/gql.go (see the per-operation client-ID fallback below).
+	ErrPersistedQueryNotFound = errors.New("twitch: persisted query not found (stale query hash or client metadata)")
 )
 
 const (
@@ -66,9 +77,13 @@ type TwitchClient struct {
 	deviceID      string
 	clientSession string
 	clientVersion string
-	clientID      string
 	userAgent     string
 	client        *http.Client
+
+	// gqlURL is the GraphQL endpoint. It defaults to constants.GQLURL in
+	// production and is only overridden by tests (setGQLEndpoint) to point at a
+	// local httptest server.
+	gqlURL string
 
 	twilightBuildIDPattern *regexp.Regexp
 	spadeURLPattern        *regexp.Regexp
@@ -78,6 +93,21 @@ type TwitchClient struct {
 
 	healthMu    sync.RWMutex
 	lastSuccess time.Time
+
+	// clientIDMu guards the GQL client-ID fallback state below. The same
+	// *TwitchClient is shared across goroutines (watcher, drops sync, discovery,
+	// and the health canary all call it concurrently), so this state must be
+	// synchronized rather than left as a plain map.
+	//
+	//   - defaultClientID is the client ID uncached operations start with and the
+	//     one ActiveClientID reports. It is promoted to a working fallback only
+	//     when a PersistedQueryNotFound is actually resolved by switching IDs.
+	//   - opClientID caches, per operation name, the last client ID that served
+	//     it without PersistedQueryNotFound, so a recovered operation tries its
+	//     known-good ID first instead of re-walking the whole candidate list.
+	clientIDMu      sync.RWMutex
+	defaultClientID string
+	opClientID      map[string]string
 
 	// gameSlugs caches game display name (lowercased) -> directory slug
 	// lookups for the discovery subsystem; slugs are stable, so caching
@@ -94,14 +124,23 @@ func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient
 		deviceID:               deviceID,
 		clientSession:          util.RandomHex(16),
 		clientVersion:          constants.DefaultClientVersion,
-		clientID:               constants.ClientIDTV,
 		userAgent:              constants.TVUserAgent,
 		client:                 &http.Client{Timeout: 30 * time.Second},
+		gqlURL:                 constants.GQLURL,
+		defaultClientID:        constants.ClientIDTV,
+		opClientID:             make(map[string]string),
 		twilightBuildIDPattern: regexp.MustCompile(`window\.__twilightBuildID\s*=\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`),
 		spadeURLPattern:        regexp.MustCompile(`"spade_url":"(.*?)"`),
 		settingsURLPattern:     regexp.MustCompile(`(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)`),
 		lastSuccess:            time.Now(),
 	}
+}
+
+// setGQLEndpoint overrides the GraphQL endpoint URL. It exists for tests, which
+// point the client at a local httptest server; production always uses
+// constants.GQLURL set by NewTwitchClient.
+func (c *TwitchClient) setGQLEndpoint(url string) {
+	c.gqlURL = url
 }
 
 // SetAuthErrorHandler registers a callback invoked the first time (and every
@@ -176,12 +215,20 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 
 	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, operation.OperationName)
 	if err != nil {
+		// Includes ErrPersistedQueryNotFound when every candidate client ID
+		// returned PersistedQueryNotFound. Returning it here (instead of an empty
+		// map) is what stops callers from misreading a stale hash as "streamer
+		// does not exist" or wiping their last-known state.
 		return nil, err
+	}
+
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil, fmt.Errorf("twitch GQL %s: empty response body", operation.OperationName)
 	}
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal %s response: %w", operation.OperationName, err)
 	}
 
 	if isAuthError(statusCode, result) {
@@ -204,14 +251,19 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		names[i] = op.OperationName
 	}
 
-	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, strings.Join(names, ","))
+	label := strings.Join(names, ",")
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, label)
 	if err != nil {
 		return nil, err
 	}
 
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil, fmt.Errorf("twitch GQL %s: empty response body", label)
+	}
+
 	var result []map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal %s response: %w", label, err)
 	}
 
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
@@ -240,17 +292,74 @@ func isPersistedQueryNotFound(respBody []byte) bool {
 	return bytes.Contains(respBody, []byte("PersistedQueryNotFound"))
 }
 
-// clientIDCandidates returns the ordered list of client IDs to try for a GQL
-// request: the currently-active one first, followed by the remaining known
-// public client IDs from constants.GQLClientIDFallbacks (de-duplicated).
-func clientIDCandidates(active string) []string {
-	candidates := []string{active}
-	for _, id := range constants.GQLClientIDFallbacks {
-		if id != active {
-			candidates = append(candidates, id)
+// candidateClientIDs returns the ordered client IDs to try for operation, most
+// likely to work first: the operation's cached known-good ID (if any), then the
+// promoted global default, then the remaining public IDs from
+// constants.GQLClientIDFallbacks — de-duplicated. In steady state the first
+// candidate already works, so no fallback requests are made.
+func (c *TwitchClient) candidateClientIDs(operation string) []string {
+	c.clientIDMu.RLock()
+	cached := c.opClientID[operation]
+	def := c.defaultClientID
+	c.clientIDMu.RUnlock()
+
+	out := make([]string, 0, len(constants.GQLClientIDFallbacks)+2)
+	seen := make(map[string]bool)
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
 		}
 	}
-	return candidates
+	add(cached)
+	add(def)
+	for _, id := range constants.GQLClientIDFallbacks {
+		add(id)
+	}
+	return out
+}
+
+// rememberWorkingClientID records clientID as the known-good ID for operation.
+// viaFallback is true when clientID was not the first candidate tried (i.e. an
+// earlier candidate returned PersistedQueryNotFound and this one resolved it).
+//
+// The global default is promoted only when a fallback actually rotates it, and
+// promoted is computed under the lock — so when many goroutines recover
+// concurrently exactly one promotes and logs the WARN; the rest observe the
+// already-promoted default and stay quiet. A steady state (each operation's
+// cached ID works on the first try) never logs and never churns the default, so
+// there is no log-spam loop. Safe for concurrent callers.
+func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFallback bool) {
+	c.clientIDMu.Lock()
+	if c.opClientID == nil {
+		c.opClientID = make(map[string]string)
+	}
+	c.opClientID[operation] = clientID
+	prevDefault := c.defaultClientID
+	promoted := viaFallback && clientID != prevDefault
+	if promoted {
+		c.defaultClientID = clientID
+	}
+	c.clientIDMu.Unlock()
+
+	switch {
+	case promoted:
+		// The moment the global default rotates: log once at WARN so the
+		// operator knows the shipped hashes are stale and should be updated.
+		slog.Warn("GQL PersistedQueryNotFound resolved by switching Twitch client ID; the persisted-query hashes in internal/constants/gql.go are likely stale and should be updated",
+			"operation", operation,
+			"workingClientID", clientID,
+			"previousDefault", prevDefault,
+		)
+	case viaFallback:
+		// Recovered onto the already-promoted default — the rotation was already
+		// logged once at WARN; keep the follow-ups at DEBUG so one rotation never
+		// becomes a WARN burst.
+		slog.Debug("GQL operation recovered on the promoted fallback client ID",
+			"operation", operation,
+			"clientID", clientID,
+		)
+	}
 }
 
 // doGQLRequestWithClientIDFallback sends a GQL request and, on a
@@ -260,17 +369,17 @@ func clientIDCandidates(active string) []string {
 // hashes tied to a hardcoded client ID, which would otherwise break every GQL
 // call at once. Transient network/HTTP failures are handled one layer down by
 // doGQLRequestWithRetry — this layer deals only with the stale
-// client-ID/query-hash case, and its returned error is passed straight
-// through.
+// client-ID/query-hash case.
 //
-// It starts with the currently-active client ID and, on PersistedQueryNotFound,
-// walks the remaining candidates. When an alternate client ID succeeds it is
-// promoted to the active default (so subsequent requests use it directly) and
-// logged at WARN level so the rotation is visible and the hardcoded default can
-// be updated.
+// Candidate order is per-operation (candidateClientIDs): the operation's cached
+// known-good ID first, then the promoted default, then the rest. On success the
+// working ID is cached for the operation (rememberWorkingClientID). When every
+// candidate returns PersistedQueryNotFound the request has genuinely failed
+// because the hash itself is stale — one ERROR is logged and
+// ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
+// instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel string) ([]byte, int, error) {
-	activeClientID := c.getClientID()
-	candidates := clientIDCandidates(activeClientID)
+	candidates := c.candidateClientIDs(operationLabel)
 
 	var (
 		respBody   []byte
@@ -285,14 +394,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 		}
 
 		if !isPersistedQueryNotFound(respBody) {
-			if clientID != activeClientID {
-				c.setClientID(clientID)
-				slog.Warn("GQL PersistedQueryNotFound resolved by switching Twitch client ID; consider updating the default client ID",
-					"operation", operationLabel,
-					"previousClientID", activeClientID,
-					"newClientID", clientID,
-				)
-			}
+			c.rememberWorkingClientID(operationLabel, clientID, i > 0)
 			return respBody, statusCode, nil
 		}
 
@@ -303,15 +405,12 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 		)
 	}
 
-	slog.Error("GQL request returned PersistedQueryNotFound on all known client IDs; persisted-query hashes are likely stale and need updating",
+	slog.Error("GQL request returned PersistedQueryNotFound on all known client IDs; persisted-query hashes are stale and need updating in internal/constants/gql.go",
 		"operation", operationLabel,
 		"clientIDsTried", len(candidates),
 	)
 
-	// Return the last response so the caller parses it as usual and fails
-	// downstream gracefully (missing data) rather than treating this as a
-	// hard transport error.
-	return respBody, statusCode, nil
+	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
 }
 
 // doGQLRequestWithRetry sends the given already-marshaled GQL request body
@@ -323,7 +422,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 	var lastErr error
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
-		req, err := http.NewRequest("POST", constants.GQLURL, bytes.NewReader(body))
+		req, err := http.NewRequest("POST", c.gqlURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -409,21 +508,16 @@ func (c *TwitchClient) setGQLHeaders(req *http.Request, clientID string) {
 	req.Header.Set("X-Device-Id", c.deviceID)
 }
 
-// getClientID returns the currently-active Twitch client ID used for GQL
-// requests. It starts as constants.ClientIDTV and may be swapped to a fallback
-// by doGQLRequestWithClientIDFallback when Twitch invalidates the default.
-func (c *TwitchClient) getClientID() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.clientID
-}
-
-// ActiveClientID returns a human label for the GQL client ID currently in use
-// ("TV", "Browser", "Mobile", or "Unknown"), for the Health Center. The active
-// ID can change at runtime when doGQLRequestWithClientIDFallback promotes a
-// working alternate after a PersistedQueryNotFound.
+// ActiveClientID returns a human label for the promoted default GQL client ID
+// ("TV", "Browser", "Mobile", or "Unknown"), for the Health Center. The default
+// can change at runtime when doGQLRequestWithClientIDFallback promotes a working
+// alternate after a PersistedQueryNotFound.
 func (c *TwitchClient) ActiveClientID() string {
-	switch c.getClientID() {
+	c.clientIDMu.RLock()
+	id := c.defaultClientID
+	c.clientIDMu.RUnlock()
+
+	switch id {
 	case constants.ClientIDTV:
 		return "TV"
 	case constants.ClientIDBrowser:
@@ -433,12 +527,6 @@ func (c *TwitchClient) ActiveClientID() string {
 	default:
 		return "Unknown"
 	}
-}
-
-func (c *TwitchClient) setClientID(id string) {
-	c.mu.Lock()
-	c.clientID = id
-	c.mu.Unlock()
 }
 
 func (c *TwitchClient) getClientVersion() string {
@@ -452,7 +540,7 @@ func (c *TwitchClient) UpdateClientVersion() string {
 	if err != nil {
 		return c.getClientVersion()
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return c.getClientVersion()
@@ -737,7 +825,7 @@ func (c *TwitchClient) GetSpadeURL(streamer *models.Streamer) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -784,6 +872,16 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
 		}
 
 		if err := c.UpdateStream(streamer); err != nil {
+			// A stale persisted-query hash (PersistedQueryNotFound) is a
+			// temporary Twitch-side outage, not evidence the channel is offline.
+			// Leave the current state untouched and let PubSub (video-playback
+			// stream-up/down) or the next check settle it, rather than locking
+			// the streamer offline for the whole outage.
+			if errors.Is(err, ErrPersistedQueryNotFound) {
+				slog.Warn("Cannot confirm stream status: stale Twitch query metadata; leaving state unchanged",
+					"streamer", streamer.Username, "error", err)
+				return
+			}
 			slog.Debug("Failed to update stream", "streamer", streamer.Username, "error", err)
 			streamer.SetOffline()
 			return
@@ -793,6 +891,15 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
 		slog.Info("Streamer is online", "streamer", streamer.Username)
 	} else {
 		if err := c.UpdateStream(streamer); err != nil {
+			// Don't flap an online streamer offline because Twitch rotated a
+			// query hash — keep it online; a genuine offline still arrives via
+			// the PubSub stream-down event (and the next successful refresh
+			// corrects stale stream data).
+			if errors.Is(err, ErrPersistedQueryNotFound) {
+				slog.Warn("Cannot refresh stream info: stale Twitch query metadata; keeping streamer online",
+					"streamer", streamer.Username, "error", err)
+				return
+			}
 			slog.Info("Streamer went offline", "streamer", streamer.Username)
 			streamer.SetOffline()
 		}
@@ -1095,12 +1202,17 @@ func (c *TwitchClient) GetDropCampaignDetails(campaignID string) (map[string]int
 }
 
 func (c *TwitchClient) GetPlaybackAccessToken(username string) (string, string, error) {
+	// platform:"web" is required by the current PlaybackAccessToken persisted
+	// query (the hash and this variable set are kept in lockstep — see
+	// constants.PlaybackAccessToken). Omitting it against the new hash yields an
+	// empty/invalid token.
 	op := constants.PlaybackAccessToken.WithVariables(map[string]interface{}{
 		"login":      username,
 		"isLive":     true,
 		"isVod":      false,
 		"vodID":      "",
 		"playerType": "site",
+		"platform":   "web",
 	})
 
 	resp, err := c.postGQLRequest(op)

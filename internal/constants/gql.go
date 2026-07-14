@@ -38,14 +38,26 @@ var (
 		"04e46329a6786ff3a81c01c50bfa5d725902507a0deb83b0edbf7abe7a3716ea",
 	)
 
+	// PlaybackAccessToken returns the signed stream playback token used to fetch
+	// the HLS playlist for minute-watched reporting. Twitch rotated this
+	// operation's persisted-query hash (the old hash started returning
+	// PersistedQueryNotFound); the value below is the current web-client hash,
+	// cross-checked against DevilXD/TwitchDropsMiner's constants.py (the canonical
+	// tracker this project already follows for DirectoryPage_Game). The current
+	// query document also requires a "platform" variable — see
+	// api.GetPlaybackAccessToken, which sends platform:"web".
 	PlaybackAccessToken = NewGQLOperation(
 		"PlaybackAccessToken",
-		"3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce",
+		"ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
 	)
 
+	// VideoPlayerStreamInfoOverlayChannel returns stream + broadcast-settings
+	// info used for online detection. Hash refreshed to the current web-client
+	// value (source: DevilXD/TwitchDropsMiner); variable shape ({channel: login})
+	// is unchanged.
 	VideoPlayerStreamInfoOverlayChannel = NewGQLOperation(
 		"VideoPlayerStreamInfoOverlayChannel",
-		"a5f2e34d626a9f4f5c0204f910bab2194948a9502089be558bb6e779a9e1b3d2",
+		"198492e0857f6aedead9665c81c5a06d67b25b58034649687124083ff288597d",
 	)
 
 	ClaimCommunityPoints = NewGQLOperation(
@@ -63,9 +75,16 @@ var (
 		"a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930",
 	)
 
+	// ChannelPointsContext carries the viewer's channel-points balance,
+	// multipliers, community goals, custom rewards and any available bonus for a
+	// channel. Twitch rotated this operation's persisted-query hash; the old hash
+	// began returning PersistedQueryNotFound (which previously surfaced as a
+	// misleading "streamer does not exist" — see api.LoadChannelPointsContext and
+	// api.ErrPersistedQueryNotFound). Value below is the current web-client hash
+	// (source: DevilXD/TwitchDropsMiner); variables ({channelLogin}) unchanged.
 	ChannelPointsContext = NewGQLOperation(
 		"ChannelPointsContext",
-		"1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024",
+		"374314de591e69925fce3ddc2bcf085796f56ebb8cad67a0daa3165c03adc345",
 	)
 
 	JoinRaid = NewGQLOperation(
@@ -83,19 +102,32 @@ var (
 		"b44682ecc88358817009f20e69d75081b1e58825bb40aa53d5dbadcc17c881d8",
 	)
 
+	// ViewerDropsDashboard lists the account's active drop campaigns. Verified
+	// current against DevilXD/TwitchDropsMiner (hash unchanged in the 2026-07
+	// rotation that invalidated ChannelPointsContext / PlaybackAccessToken /
+	// DropsHighlightService_AvailableDrops).
 	ViewerDropsDashboard = NewGQLOperation(
 		"ViewerDropsDashboard",
 		"5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619",
 	).WithVariables(map[string]interface{}{"fetchRewardCampaigns": true})
 
+	// DropCampaignDetails fetches a single campaign's full details (timeBasedDrops
+	// with per-drop dates/minutes/benefit). Hash refreshed to the current
+	// web-client value (source: DevilXD/TwitchDropsMiner); variables
+	// ({dropID, channelLogin}) unchanged.
 	DropCampaignDetails = NewGQLOperation(
 		"DropCampaignDetails",
-		"f6396f5ffdde867a8f6f6da18286e4baf02e5b98d14689a69b5af320a4c7b7b8",
+		"039277bf98f3130929262cc7c6efd9c141ca3749cb6dca442fc8ead9a53f77c1",
 	)
 
+	// DropsHighlightServiceAvailableDrops lists the drop campaigns available on a
+	// specific channel (per-channel campaign IDs). Twitch rotated this operation's
+	// persisted-query hash; the old hash began returning PersistedQueryNotFound.
+	// Value below is the current web-client hash (source:
+	// DevilXD/TwitchDropsMiner); variables ({channelID}) unchanged.
 	DropsHighlightServiceAvailableDrops = NewGQLOperation(
 		"DropsHighlightService_AvailableDrops",
-		"9a62a09bce5b53e26e64a671e530bc599cb6aab1e5ba3cbd5d85966d3940716f",
+		"782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20",
 	)
 
 	GetIDFromLogin = NewGQLOperation(

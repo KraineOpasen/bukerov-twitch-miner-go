@@ -94,16 +94,15 @@ func TestIsPersistedQueryNotFound(t *testing.T) {
 	}
 }
 
-func TestClientIDCandidatesStartsWithActive(t *testing.T) {
-	active := constants.ClientIDBrowser
-	got := clientIDCandidates(active)
+func TestCandidateClientIDsDefaultOrder(t *testing.T) {
+	// With no per-operation cache entry, candidates start with the promoted
+	// default and cover every known fallback exactly once.
+	c := &TwitchClient{defaultClientID: constants.ClientIDTV, opClientID: map[string]string{}}
+	got := c.candidateClientIDs("ChannelPointsContext")
 
-	if len(got) == 0 || got[0] != active {
-		t.Fatalf("expected active client ID %q first, got %v", active, got)
+	if len(got) == 0 || got[0] != constants.ClientIDTV {
+		t.Fatalf("expected default client ID %q first, got %v", constants.ClientIDTV, got)
 	}
-
-	// The active ID must not be duplicated, and every known fallback must be
-	// present exactly once.
 	seen := map[string]int{}
 	for _, id := range got {
 		seen[id]++
@@ -118,16 +117,54 @@ func TestClientIDCandidatesStartsWithActive(t *testing.T) {
 	}
 }
 
-func TestClientIDCandidatesUnknownActive(t *testing.T) {
-	// An active client ID not present in the fallback list should still be
-	// tried first, followed by every known fallback.
-	active := "some-unknown-client-id"
-	got := clientIDCandidates(active)
-
-	if got[0] != active {
-		t.Fatalf("expected active client ID %q first, got %v", active, got)
+func TestCandidateClientIDsCachedFirst(t *testing.T) {
+	// A per-operation cached ID is tried first, ahead of the default, and never
+	// duplicated.
+	c := &TwitchClient{
+		defaultClientID: constants.ClientIDTV,
+		opClientID:      map[string]string{"ChannelPointsContext": constants.ClientIDMobile},
 	}
-	if len(got) != len(constants.GQLClientIDFallbacks)+1 {
-		t.Errorf("expected %d candidates, got %d (%v)", len(constants.GQLClientIDFallbacks)+1, len(got), got)
+	got := c.candidateClientIDs("ChannelPointsContext")
+
+	if got[0] != constants.ClientIDMobile {
+		t.Fatalf("expected cached client ID %q first, got %v", constants.ClientIDMobile, got)
+	}
+	seen := map[string]int{}
+	for _, id := range got {
+		seen[id]++
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("client ID %q appears %d times, want exactly 1 (candidates: %v)", id, n, got)
+		}
+	}
+	// A different operation with no cache entry still starts from the default.
+	other := c.candidateClientIDs("Inventory")
+	if other[0] != constants.ClientIDTV {
+		t.Errorf("uncached operation should start from the default %q, got %v", constants.ClientIDTV, other)
+	}
+}
+
+func TestRememberWorkingClientIDPromotesOnlyViaFallback(t *testing.T) {
+	c := &TwitchClient{defaultClientID: constants.ClientIDTV, opClientID: map[string]string{}}
+
+	// Success on the first candidate (viaFallback=false) caches per-op but does
+	// NOT promote the global default.
+	c.rememberWorkingClientID("ChannelPointsContext", constants.ClientIDTV, false)
+	if got := c.ActiveClientID(); got != "TV" {
+		t.Errorf("default should stay TV after a first-candidate success, got %q", got)
+	}
+	if c.opClientID["ChannelPointsContext"] != constants.ClientIDTV {
+		t.Errorf("expected per-op cache to record TV")
+	}
+
+	// A fallback success (viaFallback=true) promotes the default so uncached
+	// operations follow the rotation, and the health label reflects it.
+	c.rememberWorkingClientID("ChannelPointsContext", constants.ClientIDBrowser, true)
+	if got := c.ActiveClientID(); got != "Browser" {
+		t.Errorf("default should be promoted to Browser after a fallback success, got %q", got)
+	}
+	if c.opClientID["ChannelPointsContext"] != constants.ClientIDBrowser {
+		t.Errorf("expected per-op cache to record Browser after fallback")
 	}
 }

@@ -398,24 +398,55 @@ All Twitch API interactions use persisted GraphQL queries with SHA256 hashes.
 | Operation | SHA256 Hash | Purpose |
 |-----------|-------------|---------|
 | `WithIsStreamLiveQuery` | `04e46329a6786ff3a81c01c50bfa5d725902507a0deb83b0edbf7abe7a3716ea` | Check if stream is live |
-| `PlaybackAccessToken` | `3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce` | Get stream playback token |
-| `VideoPlayerStreamInfoOverlayChannel` | `a5f2e34d626a9f4f5c0204f910bab2194948a9502089be558bb6e779a9e1b3d2` | Get stream info |
+| `PlaybackAccessToken` | `ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9` | Get stream playback token (requires `platform: "web"` variable) |
+| `VideoPlayerStreamInfoOverlayChannel` | `198492e0857f6aedead9665c81c5a06d67b25b58034649687124083ff288597d` | Get stream info |
 | `ClaimCommunityPoints` | `46aaeebe02c99afdf4fc97c7c0cba964124bf6b0af229395f1f6d1feed05b3d0` | Claim bonus points |
 | `CommunityMomentCallout_Claim` | `e2d67415aead910f7f9ceb45a77b750a1e1d9622c936d832328a0689e054db62` | Claim moments |
 | `DropsPage_ClaimDropRewards` | `a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930` | Claim drops |
-| `ChannelPointsContext` | `1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024` | Get channel points |
+| `ChannelPointsContext` | `374314de591e69925fce3ddc2bcf085796f56ebb8cad67a0daa3165c03adc345` | Get channel points |
 | `JoinRaid` | `c6a332a86d1087fbbb1a8623aa01bd1313d2386e7c63be60fdb2d1901f01a4ae` | Join a raid |
 | `Inventory` | `d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b` | Get user inventory |
 | `MakePrediction` | `b44682ecc88358817009f20e69d75081b1e58825bb40aa53d5dbadcc17c881d8` | Place prediction bet |
 | `ViewerDropsDashboard` | `5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619` | Get drop campaigns |
-| `DropCampaignDetails` | `f6396f5ffdde867a8f6f6da18286e4baf02e5b98d14689a69b5af320a4c7b7b8` | Get campaign details |
-| `DropsHighlightService_AvailableDrops` | `9a62a09bce5b53e26e64a671e530bc599cb6aab1e5ba3cbd5d85966d3940716f` | Get available drops |
+| `DropCampaignDetails` | `039277bf98f3130929262cc7c6efd9c141ca3749cb6dca442fc8ead9a53f77c1` | Get campaign details |
+| `DropsHighlightService_AvailableDrops` | `782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20` | Get available drops |
 | `GetIDFromLogin` | `94e82a7b1e3c21e186daa73ee2afc4b8f23bade1fbbff6fe8ac133f50a2f58ca` | Get user ID from username |
 | `ChannelFollows` | `eecf815273d3d949e5cf0085cc5084cd8a1b5b7b6f7990cf43cb0beadf546907` | Get followed channels |
 | `ContributeCommunityPointsCommunityGoal` | `5774f0ea5d89587d73021a2e03c3c44777d903840c608754a1be519f51e37bb6` | Contribute to goals |
 | `RedeemCustomReward` | `d56249a7adb4978898ea3412e196688d4ac3cea1c0c2dfd65561d229ea5dcc42` | Redeem custom channel-points reward (renamed server-side from `RedeemCommunityPointsCustomReward`) |
 | `DirectoryPage_Game` | `cb5dc816e139dcb8a118f14b4b677d59abc224a4b016c4bc2bb00a47fe0ddec4` | List live channels in a game directory (drops-only via `options.systemFilters: ["DROPS_ENABLED"]`); hash rotates every few months — track DevilXD/TwitchDropsMiner's constants.py |
 | `DirectoryGameRedirect` | `1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc` | Resolve a game display name to its directory slug (`game(name:) { id slug }`) |
+
+#### Stale-hash handling (`PersistedQueryNotFound`)
+
+Twitch periodically rotates the persisted-query hashes (and occasionally the
+variable shape) of these operations server-side. When the hash the code ships no
+longer matches, Twitch answers **HTTP 200** with an
+`errors[].message = "PersistedQueryNotFound"` body and no `data`. The GQL client
+(`internal/api/client.go`) handles this so a Twitch-side rotation degrades
+gracefully instead of corrupting local state:
+
+- **Per-operation client-ID fallback.** Each request is tried against an ordered
+  list of public client IDs (`constants.GQLClientIDFallbacks`: TV → Browser →
+  Mobile). The order is per-operation: the last client ID that worked for that
+  operation is tried first (cached in a mutex-guarded map, `opClientID`), then
+  the promoted default, then the rest. A client ID that resolves a
+  `PersistedQueryNotFound` is cached for the operation and promoted to the global
+  default, logged **once** on the actual promotion (no per-request spam, even
+  under concurrent recovery). The active default is surfaced in the Health Center
+  as the *Active GQL Client ID*.
+- **Distinct error, not "streamer does not exist".** When *every* candidate
+  client ID still returns `PersistedQueryNotFound`, the hash itself is stale:
+  `postGQLRequest` returns `api.ErrPersistedQueryNotFound` (one `ERROR` log naming
+  the operation and the count of client IDs tried). Callers treat this as a
+  temporary outage — they keep the last-known channel points, tracked drop
+  campaigns and online flag (`CheckStreamerOnline` does not flap a streamer
+  offline on this error), and never report the channel as non-existent. The fix
+  for a confirmed rotation is a hash update in `internal/constants/gql.go`
+  (cross-check DevilXD/TwitchDropsMiner's `constants.py`).
+- **Robust parsing.** Empty bodies, malformed JSON, missing `data`, and Twitch
+  error responses are all handled with `, ok` type assertions and explicit
+  guards — a changed Twitch response shape yields a clean error, never a panic.
 
 ---
 
