@@ -2,10 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
 
 type Priority string
@@ -31,8 +34,15 @@ type Config struct {
 	Analytics           AnalyticsSettings       `json:"analytics"`
 	Discord             DiscordSettings         `json:"discord"`
 	Notifications       NotificationsSettings   `json:"notifications"`
-	Debug               DebugSettings           `json:"debug"`
-	Health              HealthSettings          `json:"health"`
+
+	// DiscordTokenFromEnv records that Discord.BotToken was supplied via the
+	// DISCORD_BOT_TOKEN environment variable at load time. While set, the
+	// environment is the source of truth: SaveConfig clears the on-disk
+	// token, and the Settings page neither shows nor overwrites it. Never
+	// serialized.
+	DiscordTokenFromEnv bool           `json:"-"`
+	Debug               DebugSettings  `json:"debug"`
+	Health              HealthSettings `json:"health"`
 
 	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
 	// whose drop or reward name contains one of them is skipped during drop
@@ -408,7 +418,40 @@ func LoadConfig(path string) (*Config, error) {
 	migrateRotationInterval(data, &config)
 
 	ValidateConfig(&config)
+	applyEnvOverrides(&config)
+	tightenConfigPermissions(path)
 	return &config, nil
+}
+
+// applyEnvOverrides layers environment-supplied secrets over the loaded
+// config. DISCORD_BOT_TOKEN wins over the file's discord.botToken and is
+// never written back to disk (see SaveConfig) — the same env-over-config,
+// never-persisted precedence DASHBOARD_HOST uses for the bind address.
+func applyEnvOverrides(cfg *Config) {
+	if token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); token != "" {
+		cfg.Discord.BotToken = token
+		cfg.DiscordTokenFromEnv = true
+	}
+}
+
+// tightenConfigPermissions migrates a pre-hardening config file (written
+// 0644 by older versions) to owner-only permissions on load, so the fix
+// takes effect on the first start of the new code instead of waiting for
+// the next save. Best-effort: a failed chmod only warns — this is
+// hardening, not a correctness gate.
+func tightenConfigPermissions(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if info.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn("Could not tighten config file permissions to 0600", "path", path, "error", err)
+		return
+	}
+	slog.Info("Tightened config file permissions to 0600 (it may contain the Discord bot token)", "path", path)
 }
 
 // migrateRotationInterval provides backward compatibility for config.json
@@ -448,11 +491,23 @@ func migrateRotationInterval(data []byte, config *Config) {
 }
 
 func SaveConfig(path string, config *Config) error {
-	data, err := json.MarshalIndent(config, "", "  ")
+	// With DISCORD_BOT_TOKEN set the environment is the source of truth and
+	// the token is deliberately NOT persisted: the on-disk copy is cleared.
+	// Documented in README — removing the env var later does not restore a
+	// file value; the token must be re-entered.
+	toWrite := *config
+	if config.DiscordTokenFromEnv {
+		toWrite.Discord.BotToken = ""
+	}
+
+	data, err := json.MarshalIndent(&toWrite, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// config.json may carry the Discord bot token, and it is rewritten at
+	// runtime by dashboard saves: owner-only permissions, and an atomic
+	// temp+rename swap so a crash mid-save can never truncate the live file.
+	return util.WriteFileAtomic(path, data, 0o600)
 }
 
 // ValidateConfig enforces min/max bounds on rate limits and other configurable values.

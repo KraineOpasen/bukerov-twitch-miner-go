@@ -70,12 +70,22 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		},
 		Discord: DiscordUIConfig{
 			Enabled:  cfg.Discord.Enabled,
-			BotToken: cfg.Discord.BotToken,
+			BotToken: uiBotToken(cfg),
 			GuildID:  cfg.Discord.GuildID,
 		},
 		DropBlacklist:  cfg.DropBlacklist,
 		DirectoryGames: cfg.DirectoryGames,
 	}
+}
+
+// uiBotToken hides an env-managed Discord token from the Settings UI: with
+// DISCORD_BOT_TOKEN set the secret never travels to the browser, and the
+// empty value round-tripping back is ignored by ApplyToConfig.
+func uiBotToken(cfg *config.Config) string {
+	if cfg.DiscordTokenFromEnv {
+		return ""
+	}
+	return cfg.Discord.BotToken
 }
 
 // BuildDefaultSettings constructs a RuntimeSettings DTO from defaults, preserving current streamers.
@@ -172,7 +182,12 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.Analytics.EnableChatLogs = s.Analytics.EnableChatLogs
 
 	cfg.Discord.Enabled = s.Discord.Enabled
-	cfg.Discord.BotToken = s.Discord.BotToken
+	// While DISCORD_BOT_TOKEN is set, the environment is the source of truth
+	// for the token: the UI never sees the real value (uiBotToken), so
+	// whatever comes back here must not overwrite the env-supplied one.
+	if !cfg.DiscordTokenFromEnv {
+		cfg.Discord.BotToken = s.Discord.BotToken
+	}
 	cfg.Discord.GuildID = s.Discord.GuildID
 
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)

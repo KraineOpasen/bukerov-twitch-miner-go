@@ -1918,6 +1918,26 @@ PointRule
 - Uses TV client to appear as legitimate device
 - Discord bot tokens should be kept secret and not shared
 
+### Config File Hardening (`internal/config`, `internal/util`)
+
+`config.json` may contain the Discord bot token and is rewritten at runtime
+by dashboard saves (settings, auto-redeem, policy, health), so `SaveConfig`
+writes it via `util.WriteFileAtomic` — temp file in the same directory +
+rename (the same swap pattern the self-updater uses for the binary) — with
+owner-only `0600` permissions. `LoadConfig` migrates a pre-hardening `0644`
+file to `0600` on load (best-effort chmod; a failure only warns), so the fix
+applies on the first start of the new code rather than the next save.
+
+`DISCORD_BOT_TOKEN` env var optionally supplies the token instead of the
+file (same env-over-config, never-persisted precedence as `DASHBOARD_HOST`):
+while set, `Config.DiscordTokenFromEnv` is flagged, the Settings UI neither
+receives nor overwrites the real value, and **every** `SaveConfig` — from
+any dashboard save path, not only Discord settings — serializes an empty
+`botToken`, permanently clearing the on-disk copy. Removing the env var
+later does NOT restore the file value; the token must be re-entered. This is
+deliberate (the environment is the source of truth while set) and documented
+in the README.
+
 ### Auto-Update Integrity (`internal/updater`)
 
 Binary self-update is fail-closed: `verifyChecksum` refuses the install when

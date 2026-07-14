@@ -26,6 +26,10 @@ services:
       # Alternative (NOT recommended): explicitly accept an unauthenticated
       # dashboard on a trusted network instead of setting credentials.
       # DASHBOARD_INSECURE_NO_AUTH: "true"
+      # Optional: supply the Discord bot token via env instead of config.json.
+      # CAUTION: while set, any config save permanently clears the token in
+      # config.json (env is the source of truth) - see README, Discord section.
+      # DISCORD_BOT_TOKEN: "your-bot-token"
     volumes:
       - ./config:/config
       - ./cookies:/cookies

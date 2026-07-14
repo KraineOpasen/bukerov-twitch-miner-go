@@ -77,3 +77,50 @@ func TestBuildRuntimeSettingsRoundTripsDirectoryGames(t *testing.T) {
 		t.Errorf("expected directory games to survive the round trip, got %v", rt.DirectoryGames)
 	}
 }
+
+// --- Env-managed Discord token semantics (Stage C hardening) ---
+
+// With DISCORD_BOT_TOKEN managing the token, the Settings UI must never see
+// the real value, and the empty value round-tripping back must not clobber it.
+func TestEnvManagedBotTokenHiddenAndPreserved(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.Enabled = true
+	cfg.Discord.BotToken = "env-token"
+	cfg.DiscordTokenFromEnv = true
+
+	rs := BuildRuntimeSettings(&cfg)
+	if rs.Discord.BotToken != "" {
+		t.Errorf("UI DTO must hide the env-managed token, got %q", rs.Discord.BotToken)
+	}
+
+	// Round-trip the DTO back (as the Settings save flow does).
+	ApplyToConfig(&cfg, rs)
+	if cfg.Discord.BotToken != "env-token" {
+		t.Errorf("ApplyToConfig clobbered the env-managed token: %q", cfg.Discord.BotToken)
+	}
+
+	// Even an explicit UI value must not override the env-managed token.
+	rs.Discord.BotToken = "typed-in-ui"
+	ApplyToConfig(&cfg, rs)
+	if cfg.Discord.BotToken != "env-token" {
+		t.Errorf("UI value overrode the env-managed token: %q", cfg.Discord.BotToken)
+	}
+}
+
+// Without env management the existing behavior is unchanged: the UI sees the
+// token and its value is applied.
+func TestFileManagedBotTokenRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.BotToken = "file-token"
+
+	rs := BuildRuntimeSettings(&cfg)
+	if rs.Discord.BotToken != "file-token" {
+		t.Errorf("UI DTO should carry the file-managed token, got %q", rs.Discord.BotToken)
+	}
+
+	rs.Discord.BotToken = "updated-token"
+	ApplyToConfig(&cfg, rs)
+	if cfg.Discord.BotToken != "updated-token" {
+		t.Errorf("file-managed token not applied: %q", cfg.Discord.BotToken)
+	}
+}
