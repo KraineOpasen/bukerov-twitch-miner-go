@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
 // canaryDisclaimer is the honest limitation shown on the Health Center: the
@@ -28,6 +29,15 @@ type HealthSignalView struct {
 
 // HealthView is the Health Center page/partial view model.
 type HealthView struct {
+	// Base-layout fields expected by base.html on every full-page view model
+	// (sidebar links, footer). Populated for the full-page render; harmless for
+	// the htmx partial, which doesn't reference them.
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+
 	ActiveClientID          string
 	Signals                 []HealthSignalView
 	CanaryEnabled           bool
@@ -95,9 +105,20 @@ func formatHealthAgo(t time.Time) string {
 func (s *Server) buildHealthView() HealthView {
 	s.mu.RLock()
 	provider := s.healthProvider
+	username := s.username
+	refresh := s.refresh
+	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
 	s.mu.RUnlock()
 
-	view := HealthView{Disclaimer: canaryDisclaimer}
+	view := HealthView{
+		Disclaimer:     canaryDisclaimer,
+		Username:       username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+	}
 	if provider == nil {
 		return view
 	}
