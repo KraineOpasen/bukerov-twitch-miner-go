@@ -22,7 +22,7 @@ func TestDevPredictionsEndToEnd(t *testing.T) {
 		t.Fatalf("overview status = %d", rr.Code)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"data-manual", "Place bet", "Will they clutch", "data-skip"} {
+	for _, want := range []string{"data-manual", "Сделать ставку", "Will they clutch", "data-skip"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dev overview missing %q", want)
 		}

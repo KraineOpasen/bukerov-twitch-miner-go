@@ -22,10 +22,16 @@ func testLoadTemplates(t *testing.T) (map[string]map[string]*template.Template, 
 // ExecuteTemplate calls in tests.
 func testPartials(t *testing.T) *template.Template {
 	t.Helper()
+	return testPartialsLang(t, i18n.DefaultLang)
+}
+
+// testPartialsLang returns the partial set for a specific language.
+func testPartialsLang(t *testing.T, lang string) *template.Template {
+	t.Helper()
 	_, partials := testLoadTemplates(t)
-	p := partials[i18n.DefaultLang]
+	p := partials[lang]
 	if p == nil {
-		t.Fatal("default-language partials not loaded")
+		t.Fatalf("partials for lang %q not loaded", lang)
 	}
 	return p
 }

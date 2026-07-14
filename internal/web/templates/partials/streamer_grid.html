@@ -1,9 +1,9 @@
 {{define "streamer_grid"}}
 {{if or .TrackedLive .TrackedOffline}}
 <div class="mb-8">
-    <h2 class="section-title">Tracked</h2>
+    <h2 class="section-title">{{ t "grid.tracked" }}</h2>
     {{if .TrackedLive}}
-    <h3 class="subsection-title">Live</h3>
+    <h3 class="subsection-title">{{ t "grid.live" }}</h3>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
         {{range .TrackedLive}}
         {{template "streamer_card" .}}
@@ -11,7 +11,7 @@
     </div>
     {{end}}
     {{if .TrackedOffline}}
-    <h3 class="subsection-title">Offline</h3>
+    <h3 class="subsection-title">{{ t "grid.offline" }}</h3>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {{range .TrackedOffline}}
         {{template "streamer_card" .}}
@@ -23,7 +23,7 @@
 
 {{if .Untracked}}
 <div class="mb-8">
-    <h2 class="section-title">Untracked</h2>
+    <h2 class="section-title">{{ t "grid.untracked" }}</h2>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {{range .Untracked}}
         {{template "streamer_card" .}}
@@ -33,6 +33,6 @@
 {{end}}
 
 {{if not (or .TrackedLive .TrackedOffline .Untracked)}}
-<p class="text-neutral-400">No streamers tracked yet. Points will appear here as they are earned.</p>
+<p class="text-neutral-400">{{ t "grid.empty" }}</p>
 {{end}}
 {{end}}
