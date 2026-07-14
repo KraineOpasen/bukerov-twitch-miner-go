@@ -872,6 +872,11 @@ previous local day. Opt-in — off by default.
 | `enabled` | `false` | Turn the daily summary on (also requires the notification system channel to be configured). |
 | `time` | `09:00` | Local wall-clock send time, `HH:MM` (24h). Uses the container/host timezone (`TZ`). Invalid values fall back to `09:00`. |
 
+> **Note:** the daily-summary schedule is read once at startup — changing
+> `enabled` or `time` takes effect on the **next restart** (it is not hot-reloaded
+> like the runtime Settings page fields). This keeps the schedule field immutable
+> for the loop's lifetime, so no locking is needed.
+
 The digest reports, for the previous full local day:
 
 - **Net points** — the day's net channel-point change. The prediction result is

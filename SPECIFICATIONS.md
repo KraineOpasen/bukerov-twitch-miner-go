@@ -1881,6 +1881,12 @@ number, and labels the best-effort figures as such. Earned points is a global
 sum across all streamers; net delta already includes betting outcomes, which is
 why the prediction line is a component of it rather than additive.
 
+**Known limitation:** `dailySummary.enabled`/`time` are read once at startup, not
+hot-reloaded like the runtime Settings-page fields. Changing them requires a
+restart. Because the field is never reassigned after start, the loop reads it
+lock-free with no data race (other config fields that *are* mutated at runtime
+live at different struct offsets and do not race with these reads).
+
 ## Notification System
 
 The miner supports Discord notifications for various events. The notification system is designed with a provider interface allowing future extension to other notification services (Telegram, Slack, etc.).
