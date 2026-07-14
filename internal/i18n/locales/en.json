@@ -566,7 +566,7 @@
   "streamer.rewards_heading": "Channel Point Rewards",
   "streamer.manage_rewards": "Manage Rewards",
   "streamer.rewards_desc": "Redeem this streamer's custom channel-point rewards manually, or let the miner auto-redeem selected rewards within a points budget. Rewards that require a typed message can only be redeemed manually.",
-  "streamer.rewards.modal_title": "Rewards —",
+  "streamer.rewards.modal_title": "Rewards",
   "streamer.balance": "Balance:",
   "streamer.points_word": "points",
   "streamer.loading_rewards": "Loading rewards…",

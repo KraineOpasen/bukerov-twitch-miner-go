@@ -566,7 +566,7 @@
   "streamer.rewards_heading": "Награды за очки канала",
   "streamer.manage_rewards": "Управление наградами",
   "streamer.rewards_desc": "Активируйте пользовательские награды за очки канала этого стримера вручную или позвольте майнеру автоматически активировать выбранные награды в пределах бюджета очков. Награды, требующие ввода сообщения, можно активировать только вручную.",
-  "streamer.rewards.modal_title": "Награды —",
+  "streamer.rewards.modal_title": "Награды",
   "streamer.balance": "Баланс:",
   "streamer.points_word": "очков",
   "streamer.loading_rewards": "Загрузка наград…",
