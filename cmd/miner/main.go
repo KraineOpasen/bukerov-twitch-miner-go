@@ -23,14 +23,19 @@ import (
 )
 
 var (
-	configFile = flag.String("config", "config.json", "Path to configuration file")
-	debug      = flag.Bool("debug", false, "Enable debug logging")
-	genConfig  = flag.Bool("generate-config", false, "Generate a sample configuration file")
-	autoUpdate = flag.Bool("auto-update", false, "Automatically download and apply new GitHub releases, then restart")
+	configFile  = flag.String("config", "config.json", "Path to configuration file")
+	debug       = flag.Bool("debug", false, "Enable debug logging")
+	genConfig   = flag.Bool("generate-config", false, "Generate a sample configuration file")
+	autoUpdate  = flag.Bool("auto-update", false, "Automatically download and apply new GitHub releases, then restart")
+	healthcheck = flag.Bool("healthcheck", false, "Probe the running miner's dashboard and exit 0 (healthy) or 1 (unhealthy); used by the container HEALTHCHECK")
 )
 
 func main() {
 	flag.Parse()
+
+	if *healthcheck {
+		os.Exit(runHealthcheck(*configFile))
+	}
 
 	if *genConfig {
 		setupBasicLogger(*debug)

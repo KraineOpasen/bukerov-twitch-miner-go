@@ -551,6 +551,7 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 		Enabled:        m.autoUpdate.enabled,
 		CheckInterval:  m.autoUpdate.interval,
 		Notify:         m.notifyUpdateAvailable,
+		NotifyFailure:  m.notifyUpdateFailed,
 		OnUpdate: func() {
 			// Cancel the run context so every component shuts down cleanly and
 			// the process exits 0; the container/service supervisor then
@@ -576,6 +577,21 @@ func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
 
 	if notifMgr != nil {
 		notifMgr.NotifyUpdateAvailable(current, latest, releaseURL)
+	}
+}
+
+// notifyUpdateFailed logs and, when Discord is enabled, dispatches an
+// update-failed notification (fail-closed checksum refusal, download error,
+// or a failed binary swap). Mirrors notifyUpdateAvailable.
+func (m *Miner) notifyUpdateFailed(current, latest, reason string) {
+	events.Record(events.TypeUpdateFailed, "", fmt.Sprintf("%s -> %s: %s", current, latest, reason))
+
+	m.mu.RLock()
+	notifMgr := m.notifications
+	m.mu.RUnlock()
+
+	if notifMgr != nil {
+		notifMgr.NotifyUpdateFailed(current, latest, reason)
 	}
 }
 

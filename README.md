@@ -220,6 +220,7 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 | `-debug` | Enable debug logging |
 | `-generate-config` | Generate a sample configuration file |
 | `-auto-update` | Automatically download and apply new GitHub releases, then restart (see [Automatic Updates](#automatic-updates)) |
+| `-healthcheck` | Probe the running miner's dashboard and exit `0` (healthy) or `1` (unhealthy); used by the container `HEALTHCHECK` |
 
 ---
 
@@ -333,10 +334,16 @@ Both are equivalent; the flag takes precedence. When enabled the miner:
 - Only self-replaces when the running binary is a **clean release build**
   (`vX.Y.Z`). Local/dev builds (`dev`, `git describe` output like
   `v1.2.3-4-gabcdef`) are never rolled back to a release.
-- Verifies the download against the release `checksums.txt` before installing it.
-- **Never crashes on failure.** If the download or the binary swap fails (for
-  example a read-only filesystem), it logs the error and keeps mining on the
-  current version.
+- Verifies the download against the release `checksums.txt` before installing
+  it — **fail-closed**: a release without `checksums.txt`, an unfetchable
+  checksums file, or a missing/mismatching entry all **refuse** the install.
+  An unverified binary is never swapped in. (Every release built by the
+  Release workflow ships `checksums.txt`, so a refusal means a broken or
+  tampered release, or a transient network failure — the next check retries.)
+- **Never crashes on failure.** If the install is refused or the binary swap
+  fails (for example a read-only filesystem), it logs the error, sends a
+  Discord *system* notification (once per version, when configured), and keeps
+  mining on the current version.
 
 If auto-update is **disabled** but a newer release is found, the miner just logs
 it once per check interval (and sends a Discord *system* notification if Discord
@@ -994,6 +1001,23 @@ panel.
 - **Headers & timeouts:** responses carry `X-Content-Type-Options`,
   `X-Frame-Options`, `Referrer-Policy` and a Content-Security-Policy; the
   HTTP server enforces header/idle timeouts against slow-client exhaustion.
+- **Auto-update is fail-closed:** a downloaded binary is installed only after
+  its sha256 is verified against the release's `checksums.txt`; a release
+  without usable checksums is refused and reported, never installed
+  unverified (see [Automatic Updates](#automatic-updates)).
+- **Container user:** the image does not set a `USER` and runs as root by
+  default so the built-in self-update can replace `/twitch-miner-go` and
+  existing root-owned data volumes keep working. To run non-root, set the
+  user in your runtime (docker `--user 65532:65532`, compose `user:`, or the
+  app's user/group setting in the TrueNAS SCALE / unraid UI) **and** `chown`
+  the mounted `config/`, `cookies/`, `logs/`, `database/` directories to that
+  UID on the host. Note: as non-root the self-updater cannot replace the
+  root-owned binary — it will refuse gracefully and keep running; update by
+  pulling a new image instead (e.g. re-enable Watchtower for this container).
+- **Container healthcheck:** the image ships a `HEALTHCHECK` that runs
+  `/twitch-miner-go -healthcheck` (the scratch image has no shell/curl): it
+  probes the dashboard's `/api/status`, attaching Basic Auth credentials from
+  the environment when set, and reports healthy when analytics is disabled.
 
 ### Deploying via TrueNAS SCALE Apps (and similar app catalogs)
 

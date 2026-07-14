@@ -102,6 +102,13 @@ ENV AUTO_UPDATE_CHECK_INTERVAL=8h
 # releases, so Watchtower must not also try to recreate it.
 LABEL com.centurylinklabs.watchtower.enable=false
 
+# Liveness probe: the scratch image has no shell or curl, so the miner binary
+# doubles as its own probe (-healthcheck GETs the dashboard's /api/status,
+# attaching DASHBOARD_USERNAME/PASSWORD when set; with analytics disabled it
+# reports healthy). start-period covers Twitch auth on first boot.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+  CMD ["/twitch-miner-go", "-healthcheck", "-config", "/config/config.json"]
+
 # Run the binary
 ENTRYPOINT ["/twitch-miner-go"]
 CMD ["-config", "/config/config.json"]

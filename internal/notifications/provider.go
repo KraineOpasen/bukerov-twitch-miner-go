@@ -14,6 +14,7 @@ const (
 	NotificationTypeConnectionLost     NotificationType = "connection_lost"
 	NotificationTypeConnectionRestored NotificationType = "connection_restored"
 	NotificationTypeUpdateAvailable    NotificationType = "update_available"
+	NotificationTypeUpdateFailed       NotificationType = "update_failed"
 	NotificationTypeHealthDegraded     NotificationType = "health_degraded"
 	NotificationTypeHealthRecovered    NotificationType = "health_recovered"
 	NotificationTypeDropStalled        NotificationType = "drop_stalled"

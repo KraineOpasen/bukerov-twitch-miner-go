@@ -848,6 +848,44 @@ func (m *Manager) NotifyUpdateAvailable(current, latest, releaseURL string) {
 	}()
 }
 
+// NotifyUpdateFailed sends a notification that installing an available miner
+// update failed (fail-closed checksum refusal, download error, swap failure).
+// Same system-notifications channel and gating as NotifyUpdateAvailable.
+func (m *Manager) NotifyUpdateFailed(current, latest, reason string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	if !enabled || discord == nil {
+		return
+	}
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+
+	if !cfg.SystemEnabled || cfg.SystemChannelID == "" {
+		slog.Debug("Update-failed notification skipped: system notifications not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      NotificationTypeUpdateFailed,
+		Title:     "⚠️ Miner update failed",
+		Message:   fmt.Sprintf("Updating **%s** → **%s** was refused/failed and the miner keeps running on the current version.\nReason: %s", current, latest, reason),
+		ChannelID: cfg.SystemChannelID,
+	}
+
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send update-failed notification", "error", err)
+		}
+	}()
+}
+
 // GetDiscordChannels returns available Discord channels.
 func (m *Manager) GetDiscordChannels(ctx context.Context, forceRefresh bool) ([]Channel, error) {
 	m.mu.RLock()
