@@ -20,7 +20,7 @@ func TestGetOnlineStreamersExcludesDisabled(t *testing.T) {
 	ds.DisableWatch = true
 	w.streamers[1].SetSettings(ds)
 
-	online := w.getOnlineStreamers()
+	online := w.getOnlineStreamers(nil)
 	if len(online) != 2 {
 		t.Fatalf("expected 2 watch candidates, got %d (%v)", len(online), online)
 	}
@@ -43,7 +43,7 @@ func TestDisabledExcludedEvenWhenOnlyOnline(t *testing.T) {
 	ds.DisableWatch = true
 	w.streamers[0].SetSettings(ds)
 
-	if online := w.getOnlineStreamers(); len(online) != 0 {
+	if online := w.getOnlineStreamers(nil); len(online) != 0 {
 		t.Fatalf("expected no watch candidates, got %v", online)
 	}
 }

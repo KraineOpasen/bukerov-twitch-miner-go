@@ -16,6 +16,8 @@ const (
 	NotificationTypeUpdateAvailable    NotificationType = "update_available"
 	NotificationTypeHealthDegraded     NotificationType = "health_degraded"
 	NotificationTypeHealthRecovered    NotificationType = "health_recovered"
+	NotificationTypeDropStalled        NotificationType = "drop_stalled"
+	NotificationTypeDropRecovered      NotificationType = "drop_recovered"
 )
 
 // Notification represents a notification to be sent.

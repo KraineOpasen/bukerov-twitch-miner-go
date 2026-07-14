@@ -41,19 +41,21 @@ type Miner struct {
 
 	streamers *streamer.Manager
 
-	db            *database.DB
-	dbBasePath    string
-	wsPool        *pubsub.WebSocketPool
-	chatManager   *chat.ChatManager
-	watcher       *watcher.MinuteWatcher
-	dropsTracker  *drops.DropsTracker
-	discovery     *discovery.Manager
-	healthCenter  *health.Center
-	canary        *health.Canary
-	analyticsSvc  *analytics.Service
-	webServer     *web.Server
-	notifications *notifications.Manager
-	debugServer   *debug.Server
+	db               *database.DB
+	dbBasePath       string
+	wsPool           *pubsub.WebSocketPool
+	chatManager      *chat.ChatManager
+	watcher          *watcher.MinuteWatcher
+	dropsTracker     *drops.DropsTracker
+	discovery        *discovery.Manager
+	healthCenter     *health.Center
+	canary           *health.Canary
+	avoidList        *health.AvoidList
+	progressWatchdog *health.ProgressWatchdog
+	analyticsSvc     *analytics.Service
+	webServer        *web.Server
+	notifications    *notifications.Manager
+	debugServer      *debug.Server
 
 	deviceID          string
 	externalAnalytics bool
@@ -403,10 +405,32 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		healthCanaryConfig(m.config.Health),
 	)
 
+	// The drop-progress watchdog detects a tracked drop whose minutes stop
+	// accruing despite healthy-looking plumbing and runs the staged recovery
+	// pipeline. Its channel-switch stage works through the avoid list — the
+	// broker and discovery stop selecting an excluded channel — so the broker
+	// keeps sole authority over slots, and its session-repair stages are staged
+	// INTO the broker loop (RequestSessionRefresh), so the loop goroutine stays
+	// the single writer of live watch sessions.
+	m.avoidList = health.NewAvoidList()
+	m.watcher.SetAvoidChecker(m.avoidList)
+	m.discovery.SetAvoidChecker(m.avoidList)
+	m.progressWatchdog = health.NewProgressWatchdog(
+		m.healthCenter,
+		m.dropsTracker,
+		m.watcher,
+		watcher.NewMinuteSender(m.client),
+		minerDropNotifier{m}, // reads m.notifications at call time
+		m.avoidList,
+		m.resolveStreamer,
+		healthWatchdogConfig(m.config.Health),
+	)
+
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
 		m.webServer.SetDiscoveryProvider(m.discovery)
 		m.webServer.SetHealthProvider(m)
+		m.webServer.SetDropProgressProvider(m)
 	}
 
 	if m.config.ClaimDropsOnStartup {
@@ -484,6 +508,9 @@ func (m *Miner) startMining(ctx context.Context) {
 	m.discovery.Start(ctx)
 	if m.canary != nil {
 		m.canary.Start(ctx)
+	}
+	if m.progressWatchdog != nil {
+		m.progressWatchdog.Start(ctx)
 	}
 
 	if m.webServer != nil {
@@ -817,6 +844,9 @@ func (m *Miner) stop() {
 	m.discovery.Stop()
 	if m.canary != nil {
 		m.canary.Stop()
+	}
+	if m.progressWatchdog != nil {
+		m.progressWatchdog.Stop()
 	}
 
 	if m.webServer != nil {

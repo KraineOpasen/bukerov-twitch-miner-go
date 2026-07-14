@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -295,6 +296,41 @@ func TestPrepareCurrentAbandonsChannelAddedToStreamerList(t *testing.T) {
 
 	if got != backup || m.current != backup {
 		t.Fatalf("expected switch to backup_channel after promotion to the streamer list, got %+v", m.current)
+	}
+}
+
+// staticAvoidChecker is a fixed avoid set for exercising the watchdog's
+// channel-switch exclusion inside discovery.
+type staticAvoidChecker struct{ avoided map[string]bool }
+
+func (a *staticAvoidChecker) IsAvoided(login string) bool { return a.avoided[login] }
+
+// TestDiscoveryHonorsAvoidList: the watchdog's channel-switch stage only works
+// for discovery-held slots if discovery itself abandons an avoided current
+// channel (invalidReason) and refuses to select an avoided candidate
+// (selectBest) — otherwise it would keep proposing the excluded channel and
+// no replacement would ever be picked.
+func TestDiscoveryHonorsAvoidList(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+	avoid := &staticAvoidChecker{avoided: map[string]bool{"avoided_chan": true}}
+	m.SetAvoidChecker(avoid)
+
+	avoided := onlineCandidate("avoided_chan", "1", "World of Tanks", "g1", 500)
+	if reason, invalid := m.invalidReason(avoided); !invalid || !strings.Contains(reason, "watchdog") {
+		t.Fatalf("expected the avoided current channel to be abandoned, got invalid=%v reason=%q", invalid, reason)
+	}
+
+	backup := onlineCandidate("backup_chan", "2", "World of Tanks", "g1", 100)
+	m.pool = []*Channel{avoided, backup}
+	if got := m.selectBest(nil); got != backup {
+		t.Fatalf("expected selectBest to skip the avoided channel and pick backup, got %+v", got)
+	}
+
+	// Exclusion lifted: the higher-viewer channel becomes selectable again.
+	avoid.avoided = map[string]bool{}
+	if got := m.selectBest(nil); got != avoided {
+		t.Fatalf("expected the channel to be selectable after the exclusion lifts, got %+v", got)
 	}
 }
 

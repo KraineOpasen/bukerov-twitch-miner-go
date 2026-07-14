@@ -91,6 +91,15 @@ type TrackedLoginsProvider interface {
 	Names() []string
 }
 
+// AvoidChecker reports whether the drop-progress watchdog has temporarily
+// excluded a channel (its drop progress stalled there despite session
+// recovery). Discovery must neither keep nor select such a channel — the
+// exclusion is what makes the watchdog's channel-switch stage actually switch.
+// Satisfied by *health.AvoidList; may be nil.
+type AvoidChecker interface {
+	IsAvoided(login string) bool
+}
+
 // Channel is one discovered directory candidate. All fields except Streamer
 // are guarded by the owning Manager's mu — they are written by the sync loop
 // and read by the watch loop and State() concurrently. Streamer has its own
@@ -126,6 +135,7 @@ type Manager struct {
 	campaigns  CampaignsProvider
 	tracked    TrackedLoginsProvider
 	slotStatus SlotStatus
+	avoid      AvoidChecker
 	settings   config.RateLimitSettings
 
 	games []string
@@ -169,6 +179,22 @@ func (m *Manager) SetSlotStatus(s SlotStatus) {
 	m.mu.Lock()
 	m.slotStatus = s
 	m.mu.Unlock()
+}
+
+// SetAvoidChecker wires the progress watchdog's temporary channel exclusions.
+// Call before Start. Safe for concurrent use.
+func (m *Manager) SetAvoidChecker(a AvoidChecker) {
+	m.mu.Lock()
+	m.avoid = a
+	m.mu.Unlock()
+}
+
+// isAvoided reports whether the watchdog currently excludes the login.
+func (m *Manager) isAvoided(login string) bool {
+	m.mu.RLock()
+	a := m.avoid
+	m.mu.RUnlock()
+	return a != nil && a.IsAvoided(login)
 }
 
 // SourceName identifies discovery as a candidate source to the slot broker.
@@ -456,7 +482,7 @@ func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
 		return false
 	}
 
-	ids := ch.Streamer.Stream.CampaignIDs
+	ids := ch.Streamer.Stream.GetCampaignIDs()
 	if len(ids) == 0 {
 		return false
 	}
@@ -487,6 +513,19 @@ func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
 // findExistingLocked looks up a pool/current entry by login so its ephemeral
 // Streamer (carrying online state and the watch payload) survives pool
 // rebuilds. Caller must hold mu.
+// StreamerFor returns the ephemeral streamer object of a discovered channel
+// (current proposal or pool member), or nil when the login is unknown to
+// discovery. The progress watchdog uses it to resolve the farming channel for
+// read-only checks; all mutation still goes through the slot broker.
+func (m *Manager) StreamerFor(login string) *models.Streamer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if ch := m.findExistingLocked(login); ch != nil {
+		return ch.Streamer
+	}
+	return nil
+}
+
 func (m *Manager) findExistingLocked(login string) *Channel {
 	for _, ch := range m.pool {
 		if ch.Streamer.Username == login {
@@ -670,6 +709,9 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	if !m.channelCarriesActiveCampaign(ch) {
 		return "channel no longer carries an active unclaimed drop campaign", true
 	}
+	if m.isAvoided(ch.Streamer.Username) {
+		return "temporarily excluded by the drop-progress watchdog (stalled progress)", true
+	}
 	return "", false
 }
 
@@ -702,6 +744,9 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 			continue
 		}
 		if m.isTracked(ch.Streamer.Username) {
+			continue
+		}
+		if m.isAvoided(ch.Streamer.Username) {
 			continue
 		}
 		if !m.gameStillActive(gameID) {

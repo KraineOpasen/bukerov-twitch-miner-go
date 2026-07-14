@@ -171,6 +171,70 @@ func TestValidateConfigPreservesStalenessWhenItCoversInterval(t *testing.T) {
 	}
 }
 
+func TestValidateConfigClampsWatchdogSettings(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Health.WatchdogStallDelayMinutes = 1       // below 10
+	cfg.Health.WatchdogStallConfirmations = 99     // above 10
+	cfg.Health.WatchdogRecoveryCooldownMinutes = 0 // below 1
+	cfg.Health.WatchdogAvoidTTLMinutes = 5000      // above 360
+	cfg.Health.WatchdogRearmHours = 0              // below 1
+	ValidateConfig(&cfg)
+
+	if cfg.Health.WatchdogStallDelayMinutes != 10 {
+		t.Errorf("expected stall delay clamped to 10, got %d", cfg.Health.WatchdogStallDelayMinutes)
+	}
+	if cfg.Health.WatchdogStallConfirmations != 10 {
+		t.Errorf("expected confirmations clamped to 10, got %d", cfg.Health.WatchdogStallConfirmations)
+	}
+	if cfg.Health.WatchdogRecoveryCooldownMinutes != 1 {
+		t.Errorf("expected cooldown clamped to 1, got %d", cfg.Health.WatchdogRecoveryCooldownMinutes)
+	}
+	if cfg.Health.WatchdogAvoidTTLMinutes != 360 {
+		t.Errorf("expected avoid TTL clamped to 360, got %d", cfg.Health.WatchdogAvoidTTLMinutes)
+	}
+	if cfg.Health.WatchdogRearmHours != 1 {
+		t.Errorf("expected rearm clamped to 1, got %d", cfg.Health.WatchdogRearmHours)
+	}
+}
+
+// TestLoadConfigWatchdogDefaultsOnForExistingConfigs guards the opt-out
+// default: a pre-Stage-3 config.json — even one that already carries a canary
+// health block — must load with the watchdog enabled and its conservative
+// thresholds populated, while an explicit "watchdogEnabled": false is honored.
+func TestLoadConfigWatchdogDefaultsOnForExistingConfigs(t *testing.T) {
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"health": {"canaryEnabled": true, "canaryChannel": "somechan"}
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if !cfg.Health.WatchdogEnabled {
+		t.Error("expected the watchdog enabled by default for configs without the field")
+	}
+	if cfg.Health.WatchdogStallDelayMinutes != 20 || cfg.Health.WatchdogStallConfirmations != 3 {
+		t.Errorf("expected conservative defaults 20/3, got %d/%d",
+			cfg.Health.WatchdogStallDelayMinutes, cfg.Health.WatchdogStallConfirmations)
+	}
+	if !cfg.Health.CanaryEnabled || cfg.Health.CanaryChannel != "somechan" {
+		t.Error("expected the existing canary settings to be preserved")
+	}
+
+	pathOff := writeTestConfig(t, `{
+		"username": "test",
+		"health": {"watchdogEnabled": false}
+	}`)
+	cfgOff, err := LoadConfig(pathOff)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfgOff.Health.WatchdogEnabled {
+		t.Error("expected an explicit watchdogEnabled=false to be honored")
+	}
+}
+
 func TestLoadConfigDirectoryGamesDefaultEmpty(t *testing.T) {
 	// Backward compatibility: configs written before directory discovery
 	// existed must load with the subsystem fully disabled.

@@ -25,6 +25,7 @@
     <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">Watch-transport canary</div>
 
     <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML" class="flex flex-col gap-3">
+        <input type="hidden" name="section" value="canary">
         <label class="flex items-center gap-2 text-sm text-neutral-300">
             <input type="checkbox" name="canaryEnabled" {{if .CanaryEnabled}}checked{{end}}>
             Enable scheduled canary
@@ -53,6 +54,53 @@
             {{else}}
             <span class="text-xs text-neutral-500">Set a channel to enable "Run canary now".</span>
             {{end}}
+        </div>
+    </form>
+</div>
+
+<div class="rounded-lg border border-neutral-800 p-4 mb-3">
+    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">Drop-progress watchdog</div>
+
+    <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML" class="flex flex-col gap-3">
+        <input type="hidden" name="section" value="watchdog">
+        <label class="flex items-center gap-2 text-sm text-neutral-300">
+            <input type="checkbox" name="watchdogEnabled" {{if .WatchdogEnabled}}checked{{end}}>
+            Enable stall detection and automatic recovery
+        </label>
+        <div class="flex flex-wrap gap-4">
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Stall delay (minutes, 10–120)
+                <input type="number" name="watchdogStallDelayMinutes" value="{{.WatchdogStallDelayMinutes}}" min="10" max="120"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Confirmations (2–10)
+                <input type="number" name="watchdogStallConfirmations" value="{{.WatchdogStallConfirmations}}" min="2" max="10"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Recovery cooldown (minutes, 1–60)
+                <input type="number" name="watchdogRecoveryCooldownMinutes" value="{{.WatchdogRecoveryCooldownMinutes}}" min="1" max="60"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Channel-switch exclusion (minutes, 10–360)
+                <input type="number" name="watchdogAvoidTTLMinutes" value="{{.WatchdogAvoidTTLMinutes}}" min="10" max="360"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+            <label class="flex flex-col gap-1 text-xs text-neutral-400">
+                Re-arm after exhaustion (hours, 1–48)
+                <input type="number" name="watchdogRearmHours" value="{{.WatchdogRearmHours}}" min="1" max="48"
+                       class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
+            </label>
+        </div>
+        <div class="text-xs text-neutral-500">
+            A stall is confirmed only when every gate holds at once: the channel is really being watched,
+            watch reports are delivered, inventory checks complete without progress, and Twitch itself is
+            not degraded. Recovery runs one bounded, cooldown-limited stage at a time and never loops.
+        </div>
+        <div>
+            <button type="submit" class="badge badge-queued">Save watchdog settings</button>
         </div>
     </form>
 </div>

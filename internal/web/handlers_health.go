@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 )
 
@@ -38,6 +37,14 @@ type HealthView struct {
 	CanaryConfigured        bool
 	Disclaimer              string
 	Available               bool
+
+	// Drop-progress watchdog settings (Stage 3).
+	WatchdogEnabled                 bool
+	WatchdogStallDelayMinutes       int
+	WatchdogStallConfirmations      int
+	WatchdogRecoveryCooldownMinutes int
+	WatchdogAvoidTTLMinutes         int
+	WatchdogRearmHours              int
 }
 
 var healthSignalLabels = map[string]string{
@@ -121,6 +128,12 @@ func (s *Server) buildHealthView() HealthView {
 	view.CanaryIntervalMinutes = cfg.CanaryIntervalMinutes
 	view.CanaryMaxStalenessHours = cfg.CanaryMaxStalenessHours
 	view.CanaryConfigured = cfg.CanaryChannel != ""
+	view.WatchdogEnabled = cfg.WatchdogEnabled
+	view.WatchdogStallDelayMinutes = cfg.WatchdogStallDelayMinutes
+	view.WatchdogStallConfirmations = cfg.WatchdogStallConfirmations
+	view.WatchdogRecoveryCooldownMinutes = cfg.WatchdogRecoveryCooldownMinutes
+	view.WatchdogAvoidTTLMinutes = cfg.WatchdogAvoidTTLMinutes
+	view.WatchdogRearmHours = cfg.WatchdogRearmHours
 	return view
 }
 
@@ -168,12 +181,30 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// The canary and watchdog settings live on separate forms; each posts only
+	// its own fields (identified by a hidden "section" input), so saving one
+	// section never clobbers unsaved edits — or checkbox state — of the other.
+	// healthFormMu makes the read-patch-apply sequence atomic across requests:
+	// without it, two concurrent section saves could write a stale copy of one
+	// section over the other's just-applied values.
+	s.healthFormMu.Lock()
+	defer s.healthFormMu.Unlock()
+
 	cur := provider.CurrentHealthSettings()
-	cfg := config.HealthSettings{
-		CanaryEnabled:           r.FormValue("canaryEnabled") == "on" || r.FormValue("canaryEnabled") == "true",
-		CanaryChannel:           r.FormValue("canaryChannel"),
-		CanaryIntervalMinutes:   atoiDefault(r.FormValue("canaryIntervalMinutes"), cur.CanaryIntervalMinutes),
-		CanaryMaxStalenessHours: atoiDefault(r.FormValue("canaryMaxStalenessHours"), cur.CanaryMaxStalenessHours),
+	cfg := cur
+	switch r.FormValue("section") {
+	case "watchdog":
+		cfg.WatchdogEnabled = r.FormValue("watchdogEnabled") == "on" || r.FormValue("watchdogEnabled") == "true"
+		cfg.WatchdogStallDelayMinutes = atoiDefault(r.FormValue("watchdogStallDelayMinutes"), cur.WatchdogStallDelayMinutes)
+		cfg.WatchdogStallConfirmations = atoiDefault(r.FormValue("watchdogStallConfirmations"), cur.WatchdogStallConfirmations)
+		cfg.WatchdogRecoveryCooldownMinutes = atoiDefault(r.FormValue("watchdogRecoveryCooldownMinutes"), cur.WatchdogRecoveryCooldownMinutes)
+		cfg.WatchdogAvoidTTLMinutes = atoiDefault(r.FormValue("watchdogAvoidTTLMinutes"), cur.WatchdogAvoidTTLMinutes)
+		cfg.WatchdogRearmHours = atoiDefault(r.FormValue("watchdogRearmHours"), cur.WatchdogRearmHours)
+	default:
+		cfg.CanaryEnabled = r.FormValue("canaryEnabled") == "on" || r.FormValue("canaryEnabled") == "true"
+		cfg.CanaryChannel = r.FormValue("canaryChannel")
+		cfg.CanaryIntervalMinutes = atoiDefault(r.FormValue("canaryIntervalMinutes"), cur.CanaryIntervalMinutes)
+		cfg.CanaryMaxStalenessHours = atoiDefault(r.FormValue("canaryMaxStalenessHours"), cur.CanaryMaxStalenessHours)
 	}
 	provider.ApplyHealthSettings(cfg)
 	s.renderHealthPartial(w)

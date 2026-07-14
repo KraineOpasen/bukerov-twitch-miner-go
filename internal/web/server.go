@@ -53,6 +53,13 @@ type HealthProvider interface {
 	ApplyHealthSettings(config.HealthSettings)
 }
 
+// DropProgressProvider exposes the drop-progress watchdog's published per-drop
+// state so the Drops page can render HEALTHY/RECOVERING/STALLED badges.
+// Satisfied by the miner.
+type DropProgressProvider interface {
+	DropProgress() health.ProgressSnapshot
+}
+
 // RewardsProvider exposes custom channel-points reward listing/redemption and
 // per-streamer auto-redeem configuration to the dashboard. It's satisfied by
 // the miner, which owns the API client and streamer state.
@@ -104,6 +111,7 @@ type Server struct {
 	campaignsProvider       CampaignsProvider
 	discoveryProvider       DiscoveryProvider
 	healthProvider          HealthProvider
+	dropProgressProvider    DropProgressProvider
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
 	predictionControl       PredictionControlProvider
@@ -115,6 +123,12 @@ type Server struct {
 	// SQLite on every request; it is refreshed at most once per statsTTL.
 	statsCache map[string]streamerStats
 	statsAt    time.Time
+
+	// healthFormMu serializes the read-modify-write in handleAPIHealthSettings:
+	// the canary and watchdog forms each patch their own section over the
+	// current settings, and two concurrent section saves without this lock
+	// could write one section's stale copy over the other's fresh save.
+	healthFormMu sync.Mutex
 
 	mu sync.RWMutex
 }
@@ -244,6 +258,12 @@ func (s *Server) SetHealthProvider(provider HealthProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.healthProvider = provider
+}
+
+func (s *Server) SetDropProgressProvider(provider DropProgressProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropProgressProvider = provider
 }
 
 func (s *Server) SetRewardsProvider(provider RewardsProvider) {

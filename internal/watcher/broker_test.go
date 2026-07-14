@@ -159,7 +159,7 @@ func TestGatherCandidatesDropsConfiguredLogins(t *testing.T) {
 		{Streamer: w.streamers[0]},                          // duplicate of a configured login
 		{Streamer: discoveryStreamer("fresh_disco", false)}, // genuinely new
 	}}
-	got := w.gatherCandidates([]CandidateSource{src})
+	got := w.gatherCandidates([]CandidateSource{src}, nil)
 	if len(got) != 1 || got[0].Streamer.Username != "fresh_disco" {
 		t.Fatalf("expected only the non-configured candidate, got %v", got)
 	}

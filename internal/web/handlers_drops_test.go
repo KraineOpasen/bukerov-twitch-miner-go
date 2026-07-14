@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -33,7 +34,7 @@ func TestBuildDropCampaignViewsOrdering(t *testing.T) {
 
 	views := buildDropCampaignViews([]*models.Campaign{
 		claimed, behindUnrestricted, aheadUnrestricted, restricted,
-	})
+	}, nil)
 
 	got := make([]string, len(views))
 	for i, v := range views {
@@ -115,6 +116,78 @@ func TestBuildDropDetailViews(t *testing.T) {
 	}
 }
 
+// TestDropHealthBadgeViews pins the Drops-page watchdog badge content for all
+// three states, matching the Stage 3 UI spec: HEALTHY shows last progress +
+// channel, RECOVERING shows the flat spell + delivered reports + stage,
+// STALLED shows the exhausted-recovery message + last attempt.
+func TestDropHealthBadgeViews(t *testing.T) {
+	tenMinAgo := time.Now().Add(-10 * time.Minute)
+
+	healthy := buildDropHealthView(health.DropProgress{
+		Status: health.ProgressHealthy, Channel: "streamer-name", LastProgressAt: tenMinAgo,
+	})
+	if healthy.Label != "HEALTHY" || len(healthy.Lines) != 2 {
+		t.Fatalf("unexpected healthy badge: %+v", healthy)
+	}
+	if !strings.Contains(healthy.Lines[0], "Last progress:") || !strings.Contains(healthy.Lines[1], "streamer-name") {
+		t.Fatalf("healthy badge lines wrong: %+v", healthy.Lines)
+	}
+
+	recovering := buildDropHealthView(health.DropProgress{
+		Status: health.ProgressRecovering, Channel: "chan", LastProgressAt: tenMinAgo,
+		ReportsSinceProgress: 17, RecoveryStageName: "session_recreate",
+	})
+	if recovering.Label != "RECOVERING" || len(recovering.Lines) != 3 {
+		t.Fatalf("unexpected recovering badge: %+v", recovering)
+	}
+	if !strings.Contains(recovering.Lines[0], "No progress for") ||
+		!strings.Contains(recovering.Lines[1], "17 delivered") ||
+		!strings.Contains(recovering.Lines[2], "watch session recreate") {
+		t.Fatalf("recovering badge lines wrong: %+v", recovering.Lines)
+	}
+
+	stalled := buildDropHealthView(health.DropProgress{
+		Status: health.ProgressStalled, LastProgressAt: tenMinAgo, RecoveryStageName: "channel_switch",
+	})
+	if stalled.Label != "STALLED" || len(stalled.Lines) != 3 {
+		t.Fatalf("unexpected stalled badge: %+v", stalled)
+	}
+	if stalled.Lines[0] != "Automatic recovery did not help" || !strings.Contains(stalled.Lines[1], "channel switch") {
+		t.Fatalf("stalled badge lines wrong: %+v", stalled.Lines)
+	}
+}
+
+// TestBuildDropCampaignViewsMergesHealth verifies the watchdog snapshot is
+// merged onto the right campaign card by ID, and campaigns without watchdog
+// state keep a nil badge.
+func TestBuildDropCampaignViewsMergesHealth(t *testing.T) {
+	tracked := &models.Campaign{ID: "camp-1", Name: "Tracked",
+		Drops: []*models.Drop{{Name: "A", MinutesRequired: 100, CurrentMinutesWatched: 50}}}
+	other := &models.Campaign{ID: "camp-2", Name: "Other",
+		Drops: []*models.Drop{{Name: "B", MinutesRequired: 100, CurrentMinutesWatched: 90}}}
+
+	snap := health.ProgressSnapshot{Enabled: true, Drops: []health.DropProgress{
+		{CampaignID: "camp-1", DropID: "d1", Status: health.ProgressRecovering, RecoveryStageName: "full_resync"},
+	}}
+	views := buildDropCampaignViews([]*models.Campaign{tracked, other}, dropHealthByCampaign(snap))
+
+	byName := map[string]DropCampaignView{}
+	for _, v := range views {
+		byName[v.Name] = v
+	}
+	if byName["Tracked"].Health == nil || byName["Tracked"].Health.Label != "RECOVERING" {
+		t.Fatalf("expected a RECOVERING badge on the tracked campaign, got %+v", byName["Tracked"].Health)
+	}
+	if byName["Other"].Health != nil {
+		t.Fatalf("expected no badge on the untracked campaign, got %+v", byName["Other"].Health)
+	}
+
+	// Disabled watchdog: no badges at all.
+	if m := dropHealthByCampaign(health.ProgressSnapshot{Enabled: false, Drops: snap.Drops}); m != nil {
+		t.Fatalf("disabled watchdog must yield no badges, got %+v", m)
+	}
+}
+
 // TestTemplatesRenderDropsAndCards ensures the new templates parse and execute
 // against their view models (embedded via the same globs the server uses).
 func TestTemplatesRenderDropsAndCards(t *testing.T) {
@@ -130,6 +203,8 @@ func TestTemplatesRenderDropsAndCards(t *testing.T) {
 		{ID: "camp-1", Name: "C", GameName: "Rust", BoxArtURL: "x", DropName: "Skin", ChannelRestricted: true,
 			StatusLabel: "In progress", OverallPercent: 25, HasMinuteProgress: true,
 			MinutesWatched: 30, MinutesRequired: 120, MinutesRemaining: 90, MinutePercent: 25,
+			Health: &DropHealthView{Status: health.ProgressRecovering, Label: "RECOVERING", BadgeColor: "#f59e0b",
+				Lines: []string{"No progress for 18m", "Watch reports: 17 delivered", "Stage: watch session recreate"}},
 			Drops: []DropDetailView{
 				{Name: "Emote Pack", Benefit: "5 Emotes", StatusLabel: "In progress", Percent: 25,
 					HasMinuteProgress: true, MinutesWatched: 30, MinutesRequired: 120},
@@ -143,6 +218,14 @@ func TestTemplatesRenderDropsAndCards(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "Channel-only drop") || !strings.Contains(out, "90 min remaining") {
 		t.Errorf("drops_list output missing expected content:\n%s", out)
+	}
+	// The watchdog badge renders with its label, explanation lines, and the
+	// inline color surviving html/template's CSS sanitizer.
+	if !strings.Contains(out, "RECOVERING") || !strings.Contains(out, "Watch reports: 17 delivered") {
+		t.Errorf("drops_list output missing the watchdog badge:\n%s", out)
+	}
+	if !strings.Contains(out, "#f59e0b") || strings.Contains(out, "ZgotmplZ") {
+		t.Errorf("badge color did not survive CSS sanitization:\n%s", out)
 	}
 	// The per-campaign modal and its individual drops must render.
 	if !strings.Contains(out, `id="drop-modal-0"`) || !strings.Contains(out, `data-drop-modal="drop-modal-0"`) {

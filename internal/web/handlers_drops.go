@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
@@ -38,6 +40,7 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	provider := s.campaignsProvider
+	progressProvider := s.dropProgressProvider
 	s.mu.RUnlock()
 
 	var campaigns []*models.Campaign
@@ -45,7 +48,12 @@ func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 		campaigns = provider.Campaigns()
 	}
 
-	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns)}
+	var progress health.ProgressSnapshot
+	if progressProvider != nil {
+		progress = progressProvider.DropProgress()
+	}
+
+	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress))}
 
 	w.Header().Set("Content-Type", "text/html")
 	tmpl := s.templates["partials"]
@@ -65,7 +73,7 @@ func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 // progress can only ever be earned on their own channel) outrank unrestricted
 // ones, and within those groups the campaign closest to its reward — then the
 // one ending soonest — comes first.
-func buildDropCampaignViews(campaigns []*models.Campaign) []DropCampaignView {
+func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]*DropHealthView) []DropCampaignView {
 	ordered := make([]*models.Campaign, len(campaigns))
 	copy(ordered, campaigns)
 
@@ -94,9 +102,93 @@ func buildDropCampaignViews(campaigns []*models.Campaign) []DropCampaignView {
 
 	views := make([]DropCampaignView, 0, len(ordered))
 	for _, c := range ordered {
-		views = append(views, buildDropCampaignView(c))
+		view := buildDropCampaignView(c)
+		view.Health = healthByID[c.ID]
+		views = append(views, view)
 	}
 	return views
+}
+
+// dropHealthByCampaign turns the watchdog snapshot into per-campaign badge
+// views, keyed by campaign ID for the queue builder to merge.
+func dropHealthByCampaign(snap health.ProgressSnapshot) map[string]*DropHealthView {
+	if !snap.Enabled || len(snap.Drops) == 0 {
+		return nil
+	}
+	out := make(map[string]*DropHealthView, len(snap.Drops))
+	for i := range snap.Drops {
+		d := snap.Drops[i]
+		out[d.CampaignID] = buildDropHealthView(d)
+	}
+	return out
+}
+
+// healthDurationSince renders how long something has lasted ("8m", "1h 5m").
+func healthDurationSince(t time.Time) string {
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// recoveryStageLabels maps the watchdog's stable stage names to the short
+// human labels shown on the Drops-page badge.
+var recoveryStageLabels = map[string]string{
+	"progress_sync":    "inventory sync",
+	"full_resync":      "full campaign resync",
+	"stream_info":      "stream info refresh",
+	"transport_probe":  "watch transport probe",
+	"session_recreate": "watch session recreate",
+	"channel_switch":   "channel switch",
+	"notify":           "operator notification",
+}
+
+// buildDropHealthView renders one watchdog drop state as the card badge plus
+// its explanatory lines (mirroring the Health Center's honest, redacted style).
+func buildDropHealthView(d health.DropProgress) *DropHealthView {
+	view := &DropHealthView{Status: d.Status}
+
+	stageLabel := recoveryStageLabels[d.RecoveryStageName]
+	if stageLabel == "" {
+		stageLabel = d.RecoveryStageName
+	}
+
+	switch d.Status {
+	case health.ProgressStalled:
+		view.Label = "STALLED"
+		view.BadgeColor = "#ef4444"
+		view.Lines = append(view.Lines, "Automatic recovery did not help")
+		if stageLabel != "" {
+			view.Lines = append(view.Lines, "Last attempt: "+stageLabel)
+		}
+		if !d.LastProgressAt.IsZero() {
+			view.Lines = append(view.Lines, "No progress for "+healthDurationSince(d.LastProgressAt))
+		}
+	case health.ProgressRecovering:
+		view.Label = "RECOVERING"
+		view.BadgeColor = "#f59e0b"
+		if !d.LastProgressAt.IsZero() {
+			view.Lines = append(view.Lines, "No progress for "+healthDurationSince(d.LastProgressAt))
+		}
+		view.Lines = append(view.Lines, fmt.Sprintf("Watch reports: %d delivered", d.ReportsSinceProgress))
+		if stageLabel != "" {
+			view.Lines = append(view.Lines, "Stage: "+stageLabel)
+		}
+	default:
+		view.Label = "HEALTHY"
+		view.BadgeColor = "#22c55e"
+		if !d.LastProgressAt.IsZero() {
+			view.Lines = append(view.Lines, "Last progress: "+formatHealthAgo(d.LastProgressAt))
+		}
+		if d.Channel != "" {
+			view.Lines = append(view.Lines, "Channel: "+d.Channel)
+		}
+	}
+	return view
 }
 
 func buildDropCampaignView(c *models.Campaign) DropCampaignView {

@@ -97,6 +97,32 @@ type MinuteWatcher struct {
 	brokerSnapshot atomic.Pointer[BrokerSnapshot]
 	watchingLogins atomic.Pointer[map[string]bool]
 
+	// refresher rebuilds a slotted channel's watch session (spade URL, stream
+	// info, beacon payload) for the staged session-refresh requests. Set once at
+	// construction; nil only in tests that never exercise refreshes.
+	refresher sessionRefresher
+
+	// pendingRefresh stages watch-session refresh requests from
+	// RequestSessionRefresh (any goroutine) under mu, coalesced per login; the
+	// loop drains and executes them at the start of each tick, keeping the loop
+	// goroutine the single writer of slotted channels' watch sessions.
+	pendingRefresh map[string]pendingRefresh
+
+	// refreshOutcomes publishes the last session-refresh outcome per login for
+	// the progress watchdog and the debug snapshot to read lock-free.
+	refreshOutcomes atomic.Pointer[map[string]SessionRefreshOutcome]
+
+	// reportStats is the loop-owned per-channel minute-watched delivery
+	// accounting for currently slotted channels; reportStatsSnap is its
+	// published immutable copy (see session.go).
+	reportStats     map[string]ReportStats
+	reportStatsSnap atomic.Pointer[map[string]ReportStats]
+
+	// avoid, when set, temporarily excludes channels from watch selection (the
+	// progress watchdog's channel-switch recovery stage). Guarded by mu;
+	// snapshotted at the start of each tick.
+	avoid AvoidChecker
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -162,6 +188,7 @@ func NewMinuteWatcher(
 		settings:   settings,
 		store:      store,
 		sender:     NewMinuteSender(client),
+		refresher:  client,
 	}
 }
 
@@ -215,8 +242,8 @@ func (w *MinuteWatcher) UpdateSettings(priorities []config.Priority, settings co
 
 // applyPendingSettings moves any staged runtime settings into the loop-owned
 // priorities/settings fields. Runs on the loop goroutine at the start of each
-// tick; also snapshots the registered sources.
-func (w *MinuteWatcher) applyPendingSettings() []CandidateSource {
+// tick; also snapshots the registered sources and the avoid checker.
+func (w *MinuteWatcher) applyPendingSettings() ([]CandidateSource, AvoidChecker) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.hasPending {
@@ -224,7 +251,7 @@ func (w *MinuteWatcher) applyPendingSettings() []CandidateSource {
 		w.settings = w.pendingSettings
 		w.hasPending = false
 	}
-	return append([]CandidateSource(nil), w.sources...)
+	return append([]CandidateSource(nil), w.sources...), w.avoid
 }
 
 func (w *MinuteWatcher) randomizedDelay(base time.Duration) time.Duration {
@@ -267,13 +294,13 @@ func (w *MinuteWatcher) loop() {
 }
 
 func (w *MinuteWatcher) processWatching() {
-	sources := w.applyPendingSettings()
+	sources, avoid := w.applyPendingSettings()
 
 	w.selectionReasons = make(map[int]string)
 	w.selectionMode = ModeIdle
 	now := time.Now()
 
-	onlineStreamers := w.getOnlineStreamers()
+	onlineStreamers := w.getOnlineStreamers(avoid)
 
 	// Re-verify stale streams (network) before selecting.
 	for _, idx := range onlineStreamers {
@@ -289,7 +316,7 @@ func (w *MinuteWatcher) processWatching() {
 	if len(onlineStreamers) > 0 {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers)
 	}
-	extra := w.gatherCandidates(sources)
+	extra := w.gatherCandidates(sources, avoid)
 	slots, waiting := w.arbitrate(configuredWatch, extra, now)
 
 	// The per-streamer debug state reflects the FINAL configured-watched set
@@ -299,7 +326,13 @@ func (w *MinuteWatcher) processWatching() {
 	w.publishBrokerSnapshot(slots, waiting, now)
 	w.logSlotChanges(slots)
 
+	// Execute any staged watch-session refreshes before the sends, so a
+	// successful refresh takes effect for this very tick. Requests for channels
+	// that lost their slot complete as skipped.
+	w.executeSessionRefreshes(slots)
+
 	if len(slots) == 0 {
+		w.publishReportStats(slots)
 		return
 	}
 
@@ -323,6 +356,7 @@ func (w *MinuteWatcher) processWatching() {
 		streamer := sl.streamer
 
 		if err := w.sendMinuteWatched(streamer); err != nil {
+			w.noteReportOutcome(streamer.Username, false, time.Now())
 			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "origin", sl.origin, "error", err)
 			// A failed send usually means the stream just ended; re-check the
 			// online state so the next tick drops or switches it (and, for a
@@ -332,6 +366,7 @@ func (w *MinuteWatcher) processWatching() {
 			}
 		} else {
 			reported = true
+			w.noteReportOutcome(streamer.Username, true, time.Now())
 			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.MinuteWatched)
 			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
 			if sl.idx >= 0 {
@@ -352,6 +387,8 @@ func (w *MinuteWatcher) processWatching() {
 		}
 	}
 
+	w.publishReportStats(slots)
+
 	// A watched minute means real drop progress was just made; nudge any
 	// listener (the drops tracker) to refresh promptly instead of waiting out
 	// its sync interval.
@@ -368,8 +405,11 @@ func (w *MinuteWatcher) processWatching() {
 // gatherCandidates collects the proposed channels from every registered
 // source, dropping any channel that is on the configured streamer list (the
 // broker is the single owner of duplicate-channel prevention across all
-// sources) or already proposed by an earlier source.
-func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource) []Candidate {
+// sources), already proposed by an earlier source, or temporarily avoided by
+// the progress watchdog (defense in depth - discovery filters avoided
+// channels itself, but the broker enforces the exclusion regardless of
+// source behavior).
+func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidChecker) []Candidate {
 	if len(sources) == 0 {
 		return nil
 	}
@@ -388,6 +428,9 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource) []Candidate 
 			if configured[login] || seen[login] {
 				continue
 			}
+			if avoid != nil && avoid.IsAvoided(login) {
+				continue
+			}
 			seen[login] = true
 			if c.Origin == "" {
 				c.Origin = src.SourceName()
@@ -398,7 +441,7 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource) []Candidate 
 	return out
 }
 
-func (w *MinuteWatcher) getOnlineStreamers() []int {
+func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 	var online []int
 	for i, s := range w.streamers {
 		if s.GetIsOnline() {
@@ -407,6 +450,14 @@ func (w *MinuteWatcher) getOnlineStreamers() []int {
 			// even when it's the only online channel (unlike PreferenceAvoid).
 			if s.GetSettings().DisableWatch {
 				w.noteSelection(i, "watching disabled for this streamer in its settings")
+				continue
+			}
+			// A temporary watchdog avoid works like DisableWatch, but expires on
+			// its own: the progress watchdog excludes a channel whose drop
+			// progress stalled despite session recovery, so the broker switches
+			// to the next eligible channel instead.
+			if avoid != nil && avoid.IsAvoided(s.Username) {
+				w.noteSelection(i, "temporarily avoided by the drop-progress watchdog (stalled progress recovery)")
 				continue
 			}
 			if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {

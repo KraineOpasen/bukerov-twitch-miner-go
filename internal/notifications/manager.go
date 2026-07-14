@@ -731,9 +731,83 @@ func healthSignalLabel(signal string) string {
 		return "PubSub"
 	case "oauth":
 		return "OAuth"
+	case "drops_inventory":
+		return "Drops inventory sync"
+	case "drops_progress":
+		return "Drops progress"
 	default:
 		return signal
 	}
+}
+
+// NotifyDropStalled is the drop-progress watchdog's critical alert: a
+// specific drop's progress is confirmed stalled and the whole automatic
+// recovery pipeline (forced syncs, session recreation, channel switch) is
+// exhausted. Sent once per stall episode — the watchdog only calls this on
+// the transition into the terminal STALLED state.
+func (m *Manager) NotifyDropStalled(campaign, drop, channel, detail string) {
+	title := fmt.Sprintf("🛑 Drop stalled: %q", drop)
+	message := fmt.Sprintf("Progress of %q (%s) is not advancing and automatic recovery is exhausted.", drop, campaign)
+	if channel != "" {
+		message += fmt.Sprintf(" Last farmed on %s.", channel)
+	}
+	if detail != "" {
+		message += " Last recovery step: " + detail
+	}
+	m.notifyDropTransition(NotificationTypeDropStalled, title, message)
+}
+
+// NotifyDropRecovered reports that a previously stall-notified drop is
+// accruing minutes again. Only sent when a stalled notification went out for
+// the same episode, so the pair never spams.
+func (m *Manager) NotifyDropRecovered(campaign, drop, channel, detail string) {
+	title := fmt.Sprintf("✅ Drop progressing again: %q", drop)
+	message := fmt.Sprintf("Progress of %q (%s) resumed.", drop, campaign)
+	if channel != "" {
+		message += fmt.Sprintf(" Farming on %s.", channel)
+	}
+	if detail != "" {
+		message += " " + detail
+	}
+	m.notifyDropTransition(NotificationTypeDropRecovered, title, message)
+}
+
+// notifyDropTransition shares the system-channel dispatch used by the other
+// operator alerts (connection, health transitions): push providers plus the
+// Discord system channel, gated on SystemEnabled.
+func (m *Manager) notifyDropTransition(evType NotificationType, title, message string) {
+	m.mu.RLock()
+	discord := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.RUnlock()
+
+	cfg, err := m.repo.GetConfig()
+	if err != nil {
+		slog.Error("Failed to get notification config", "error", err)
+		return
+	}
+	if !cfg.SystemEnabled {
+		return
+	}
+
+	m.dispatchPush(evType, "", title+" — "+message)
+
+	if !enabled || discord == nil || cfg.SystemChannelID == "" {
+		slog.Debug("Drop-transition Discord notification skipped: system channel not configured")
+		return
+	}
+
+	notification := Notification{
+		Type:      evType,
+		Title:     title,
+		Message:   message,
+		ChannelID: cfg.SystemChannelID,
+	}
+	go func() {
+		if err := discord.Send(context.Background(), notification); err != nil {
+			slog.Error("Failed to send drop-transition notification", "error", err)
+		}
+	}()
 }
 
 // NotifyUpdateAvailable sends a notification that a newer miner release is

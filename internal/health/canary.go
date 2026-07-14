@@ -248,7 +248,7 @@ func (c *Canary) probe(ctx context.Context, channel string) Signal {
 	if !streamer.GetIsOnline() {
 		return c.failSignal("stream_info", "the canary channel is offline", "channel_offline", start)
 	}
-	if streamer.Stream.SpadeURL == "" {
+	if streamer.Stream.GetSpadeURL() == "" {
 		return c.failSignal("spade_url", "spade URL was not discovered", "spade_url_missing", start)
 	}
 

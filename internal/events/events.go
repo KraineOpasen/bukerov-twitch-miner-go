@@ -36,6 +36,14 @@ const (
 	// channel), recorded only when the allocation actually changes.
 	TypeSlotAssigned Type = "slot_assigned"
 	TypeSlotReleased Type = "slot_released"
+
+	// TypeDropStalled/TypeDropRecovered/TypeDropRecoveryStep track the drop
+	// progress watchdog: a confirmed stall that exhausted automatic recovery,
+	// a stalled/recovering drop whose progress resumed, and each executed
+	// recovery-pipeline stage.
+	TypeDropStalled      Type = "drop_stalled"
+	TypeDropRecovered    Type = "drop_recovered"
+	TypeDropRecoveryStep Type = "drop_recovery_step"
 )
 
 type Event struct {

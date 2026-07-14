@@ -586,7 +586,7 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 
 	if game != nil && game.Name != "" && game.ID != "" && streamer.Settings.ClaimDrops {
 		campaignIDs, _ := c.GetCampaignIDsFromStreamer(streamer)
-		streamer.Stream.CampaignIDs = campaignIDs
+		streamer.Stream.SetCampaignIDs(campaignIDs)
 	}
 
 	streamer.Stream.SetPayload(
@@ -641,7 +641,7 @@ func (c *TwitchClient) GetSpadeURL(streamer *models.Streamer) error {
 		return fmt.Errorf("failed to find spade URL")
 	}
 
-	streamer.Stream.SpadeURL = string(spadeMatches[1])
+	streamer.Stream.SetSpadeURL(string(spadeMatches[1]))
 	return nil
 }
 

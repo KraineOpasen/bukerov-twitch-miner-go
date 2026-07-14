@@ -7,6 +7,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // healthCanaryConfig maps the persisted health settings to the canary's config.
@@ -17,6 +18,34 @@ func healthCanaryConfig(s config.HealthSettings) health.CanaryConfig {
 		Interval:     time.Duration(s.CanaryIntervalMinutes) * time.Minute,
 		MaxStaleness: time.Duration(s.CanaryMaxStalenessHours) * time.Hour,
 	}
+}
+
+// healthWatchdogConfig maps the persisted health settings to the drop-progress
+// watchdog's config.
+func healthWatchdogConfig(s config.HealthSettings) health.WatchdogConfig {
+	return health.WatchdogConfig{
+		Enabled:            s.WatchdogEnabled,
+		StallDelay:         time.Duration(s.WatchdogStallDelayMinutes) * time.Minute,
+		StallConfirmations: s.WatchdogStallConfirmations,
+		RecoveryCooldown:   time.Duration(s.WatchdogRecoveryCooldownMinutes) * time.Minute,
+		AvoidTTL:           time.Duration(s.WatchdogAvoidTTLMinutes) * time.Minute,
+		Rearm:              time.Duration(s.WatchdogRearmHours) * time.Hour,
+	}
+}
+
+// resolveStreamer maps a channel login to its live streamer object for the
+// progress watchdog: the configured list first, then discovery's ephemeral
+// channels. Returns nil when unknown.
+func (m *Miner) resolveStreamer(login string) *models.Streamer {
+	if m.streamers != nil {
+		if s := m.streamers.Get(login); s != nil {
+			return s
+		}
+	}
+	if m.discovery != nil {
+		return m.discovery.StreamerFor(login)
+	}
+	return nil
 }
 
 // minerHealthNotifier adapts the miner's (possibly late-created) notification
@@ -30,6 +59,28 @@ func (n minerHealthNotifier) NotifyHealthTransition(signal string, healthy bool,
 	n.m.mu.RUnlock()
 	if mgr != nil {
 		mgr.NotifyHealthTransition(signal, healthy, detail)
+	}
+}
+
+// minerDropNotifier adapts the (possibly late-created) notification manager to
+// health.DropNotifier for the progress watchdog's stall/recovery alerts.
+type minerDropNotifier struct{ m *Miner }
+
+func (n minerDropNotifier) NotifyDropStalled(campaign, drop, channel, detail string) {
+	n.m.mu.RLock()
+	mgr := n.m.notifications
+	n.m.mu.RUnlock()
+	if mgr != nil {
+		mgr.NotifyDropStalled(campaign, drop, channel, detail)
+	}
+}
+
+func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail string) {
+	n.m.mu.RLock()
+	mgr := n.m.notifications
+	n.m.mu.RUnlock()
+	if mgr != nil {
+		mgr.NotifyDropRecovered(campaign, drop, channel, detail)
 	}
 }
 
@@ -85,15 +136,32 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 		}
 		m.healthCenter.Record(inv)
 
-		// Drops progress is OK while campaigns are tracked, IDLE when none.
-		// Confirmed STALLED detection is the Stage 3 drop-progress watchdog.
-		prog := health.Signal{Name: health.SignalDropsProgress, CheckedAt: now, Status: health.StatusIdle, Detail: "no active drop campaign"}
-		if st.TrackedCampaigns > 0 {
-			prog.Status = health.StatusOK
-			prog.Detail = fmt.Sprintf("%d active campaign(s) tracked", st.TrackedCampaigns)
+		// Drops progress: the progress watchdog owns the semantics (healthy /
+		// recovering / confirmed STALLED); composing the signal here keeps the
+		// health center single-writer per signal. When the watchdog is disabled
+		// (or was never constructed) the signal falls back to the passive
+		// tracked-campaigns view — a disabled watchdog must not misreport "no
+		// active drop campaign" while campaigns are tracked and progressing.
+		if m.progressWatchdog != nil && m.progressWatchdog.Snapshot().Enabled {
+			m.healthCenter.Record(m.progressWatchdog.ProgressSignal(now))
+		} else {
+			prog := health.Signal{Name: health.SignalDropsProgress, CheckedAt: now, Status: health.StatusIdle, Detail: "no active drop campaign"}
+			if st.TrackedCampaigns > 0 {
+				prog.Status = health.StatusOK
+				prog.Detail = fmt.Sprintf("%d active campaign(s) tracked (stall watchdog disabled)", st.TrackedCampaigns)
+			}
+			m.healthCenter.Record(prog)
 		}
-		m.healthCenter.Record(prog)
 	}
+}
+
+// DropProgress exposes the progress watchdog's published per-drop state for
+// the Drops page badges (web.DropProgressProvider).
+func (m *Miner) DropProgress() health.ProgressSnapshot {
+	if m.progressWatchdog == nil {
+		return health.ProgressSnapshot{}
+	}
+	return m.progressWatchdog.Snapshot()
 }
 
 // stalenessSignal builds an OK/failed/unknown signal from a last-success
@@ -157,5 +225,10 @@ func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
 	if m.canary != nil {
 		m.canary.UpdateSettings(healthCanaryConfig(applied))
 	}
-	slog.Info("Health canary settings updated", "enabled", applied.CanaryEnabled, "channel", applied.CanaryChannel)
+	if m.progressWatchdog != nil {
+		m.progressWatchdog.UpdateSettings(healthWatchdogConfig(applied))
+	}
+	slog.Info("Health settings updated",
+		"canaryEnabled", applied.CanaryEnabled, "canaryChannel", applied.CanaryChannel,
+		"watchdogEnabled", applied.WatchdogEnabled)
 }

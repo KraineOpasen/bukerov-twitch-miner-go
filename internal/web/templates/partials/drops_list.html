@@ -66,6 +66,17 @@
             </div>
             {{end}}
 
+            {{with $c.Health}}
+            <!-- Drop-progress watchdog badge: HEALTHY / RECOVERING / STALLED
+                 with the honest, redacted explanation lines. -->
+            <div class="mt-3 text-xs" style="border-top: 1px solid #27272a; padding-top: 0.5rem;">
+                <span class="status-pill" style="color: {{.BadgeColor}}; border: 1px solid currentColor; background: transparent;">{{.Label}}</span>
+                {{range .Lines}}
+                <div class="text-neutral-400 mt-1">{{.}}</div>
+                {{end}}
+            </div>
+            {{end}}
+
             {{if $c.Drops}}
             <div class="text-xs text-purple-400 mt-3">View all {{len $c.Drops}} drop{{if ne (len $c.Drops) 1}}s{{end}} →</div>
             {{end}}

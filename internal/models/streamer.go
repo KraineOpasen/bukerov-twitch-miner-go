@@ -176,7 +176,7 @@ func (s *Streamer) DropsCondition() bool {
 
 	return s.Settings.ClaimDrops &&
 		s.IsOnline &&
-		len(s.Stream.CampaignIDs) > 0
+		len(s.Stream.GetCampaignIDs()) > 0
 }
 
 // HasChannelRestrictedCampaign reports whether this streamer currently has
@@ -188,7 +188,7 @@ func (s *Streamer) HasChannelRestrictedCampaign() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, c := range s.Stream.Campaigns {
+	for _, c := range s.Stream.GetCampaigns() {
 		if c.IsChannelRestricted() {
 			return true
 		}
@@ -212,8 +212,9 @@ func (s *Streamer) ActiveCampaignsSummary() []CampaignSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	summaries := make([]CampaignSummary, 0, len(s.Stream.Campaigns))
-	for _, c := range s.Stream.Campaigns {
+	campaigns := s.Stream.GetCampaigns()
+	summaries := make([]CampaignSummary, 0, len(campaigns))
+	for _, c := range campaigns {
 		summary := CampaignSummary{
 			Name:              c.Name,
 			EndAt:             c.EndAt,
@@ -251,7 +252,7 @@ func (s *Streamer) ActiveCampaignProgress() *CampaignProgress {
 
 	var best *Campaign
 	bestPct := -1
-	for _, c := range s.Stream.Campaigns {
+	for _, c := range s.Stream.GetCampaigns() {
 		if c.CurrentDrop() == nil {
 			continue
 		}
