@@ -455,6 +455,25 @@ or strategy.
 
 Instead of editing `config.json` manually, you can change most settings through the **Settings** page in the dashboard. Changes take effect immediately without restarting the miner.
 
+#### Import from followed channels
+
+The **Streamers** section of the Settings page has an **Import from followed**
+button that pulls the channels your Twitch account follows and offers to add
+them to the tracked streamer list. It uses the miner's existing token — no extra
+scope is required. Clicking it opens a picker where:
+
+- channels you already track are listed but disabled (they can't be re-added),
+- everything else is selectable with checkboxes (with a select-all toggle), and
+- imported channels are added with the **global default settings** (no
+  per-streamer overrides), which you can tweak afterwards like any other
+  streamer.
+
+This is a **one-shot import**, not a background sync: it reflects your follows at
+the moment you click. The follow list is fetched with pagination up to a cap of
+1000 channels; if your account follows more than that, the picker shows a
+"showing first 1000 of more" banner so the list is never silently truncated.
+Imported channels are subscribed and persisted to `config.json` immediately.
+
 ---
 
 ## Configuration Reference

@@ -504,6 +504,120 @@ func (c *TwitchClient) GetChannelID(username string) (string, error) {
 	return id, nil
 }
 
+// FollowedChannel is one channel the authenticated user follows, as returned by
+// GetFollowedChannels. Only the login and display name are captured — no tokens,
+// ids, or other account data.
+type FollowedChannel struct {
+	Login       string
+	DisplayName string
+}
+
+const (
+	// followedPageSize is the per-request page size for the ChannelFollows query.
+	followedPageSize = 100
+	// maxFollowedFetch caps how many followed channels GetFollowedChannels will
+	// pull, so an account following thousands can't turn one import into an
+	// unbounded paginated crawl. When the cap is hit with more still available,
+	// the method reports truncated=true so the UI can say the list is partial.
+	maxFollowedFetch = 1000
+)
+
+// GetFollowedChannels returns the channels the authenticated user follows
+// (login + display name), paginated up to maxFollowedFetch. truncated is true
+// when the cap was reached while Twitch still reported more pages, so the caller
+// can surface "showing first N of more" instead of silently cutting the list.
+func (c *TwitchClient) GetFollowedChannels() (channels []FollowedChannel, truncated bool, err error) {
+	return collectFollowedChannels(func(cursor string) (map[string]interface{}, error) {
+		vars := map[string]interface{}{"limit": followedPageSize, "order": "ASC"}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+		return c.postGQLRequest(constants.ChannelFollows.WithVariables(vars))
+	})
+}
+
+// collectFollowedChannels drives the ChannelFollows pagination: it calls fetch
+// with the running cursor, parses each page, dedups logins, and stops at the end
+// or the maxFollowedFetch cap (reporting truncated when the cap is hit with more
+// available). The network is injected as fetch so the loop is unit-testable.
+func collectFollowedChannels(fetch func(cursor string) (map[string]interface{}, error)) (channels []FollowedChannel, truncated bool, err error) {
+	seen := make(map[string]bool)
+	cursor := ""
+
+	for {
+		resp, err := fetch(cursor)
+		if err != nil {
+			return nil, false, err
+		}
+
+		follows := followsNode(resp)
+		if follows == nil {
+			return channels, false, nil
+		}
+		edges, _ := follows["edges"].([]interface{})
+		if len(edges) == 0 {
+			return channels, false, nil
+		}
+
+		lastCursor := ""
+		for _, e := range edges {
+			edge, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if cur, ok := edge["cursor"].(string); ok && cur != "" {
+				lastCursor = cur
+			}
+			node, ok := edge["node"].(map[string]interface{})
+			if !ok || node == nil {
+				continue
+			}
+			login, _ := node["login"].(string)
+			login = strings.ToLower(strings.TrimSpace(login))
+			if login == "" || seen[login] {
+				continue
+			}
+			seen[login] = true
+			display, _ := node["displayName"].(string)
+			channels = append(channels, FollowedChannel{Login: login, DisplayName: display})
+
+			if len(channels) >= maxFollowedFetch {
+				// Cap reached: report truncation only if more remain.
+				return channels, hasNextPage(follows), nil
+			}
+		}
+
+		if !hasNextPage(follows) || lastCursor == "" {
+			return channels, false, nil
+		}
+		cursor = lastCursor
+	}
+}
+
+// followsNode digs out data.user.follows from a ChannelFollows response.
+func followsNode(resp map[string]interface{}) map[string]interface{} {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	user, ok := data["user"].(map[string]interface{})
+	if !ok || user == nil {
+		return nil
+	}
+	follows, _ := user["follows"].(map[string]interface{})
+	return follows
+}
+
+// hasNextPage reads follows.pageInfo.hasNextPage (false when absent).
+func hasNextPage(follows map[string]interface{}) bool {
+	pageInfo, ok := follows["pageInfo"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	next, _ := pageInfo["hasNextPage"].(bool)
+	return next
+}
+
 func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]interface{}, error) {
 	op := constants.VideoPlayerStreamInfoOverlayChannel.WithVariables(map[string]interface{}{
 		"channel": streamer.Username,
