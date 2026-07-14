@@ -4,15 +4,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 )
+
+// plaintextWarnOnce ensures the "token stored unencrypted" warning is logged at
+// most once per process, whether it is first hit on save or on load.
+var plaintextWarnOnce sync.Once
+
+func warnPlaintextOnce() {
+	plaintextWarnOnce.Do(func() {
+		slog.Warn("Twitch auth token is stored UNENCRYPTED at rest; set "+
+			EnvEncryptionKey+" to a passphrase to encrypt it (AES-256-GCM)",
+			"file", "cookies/*.json")
+	})
+}
 
 var (
 	ErrBadCredentials       = errors.New("bad credentials")
@@ -114,23 +128,83 @@ func (a *TwitchAuth) cookiesPath() string {
 	return filepath.Join("cookies", fmt.Sprintf("%s.json", a.username))
 }
 
+// LoadStoredAuth reads the persisted auth for this user. It transparently
+// handles both on-disk formats:
+//
+//   - Encrypted envelope (version >= 2): decrypted with the passphrase from
+//     TWITCH_AUTH_ENCRYPTION_KEY. If the passphrase is missing, changed, or the
+//     file was tampered with, decryption fails and this returns an error — the
+//     caller (Login) then falls back to a fresh device login. This is the only
+//     situation that forces a re-login.
+//   - Legacy plaintext (no version field): loaded as-is. If a passphrase is now
+//     set, the file is migrated in place to the encrypted format on load (no
+//     re-login needed); if not, a one-time warning is logged and it stays
+//     plaintext.
 func (a *TwitchAuth) LoadStoredAuth() error {
 	data, err := os.ReadFile(a.cookiesPath())
 	if err != nil {
 		return err
 	}
 
+	// Detect the format: the encrypted envelope carries a "version" field, the
+	// legacy plaintext record does not.
+	var probe struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+
+	secret := encryptionSecret()
+
+	if probe.Version >= envelopeVersion {
+		var env encryptedEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			return err
+		}
+		plaintext, err := decryptBlob(env, secret)
+		if err != nil {
+			return err
+		}
+		var stored StoredAuth
+		if err := json.Unmarshal(plaintext, &stored); err != nil {
+			return err
+		}
+		a.applyStored(stored)
+		return nil
+	}
+
+	// Legacy plaintext.
 	var stored StoredAuth
 	if err := json.Unmarshal(data, &stored); err != nil {
 		return err
 	}
+	a.applyStored(stored)
 
-	a.token = stored.AuthToken
-	a.userID = stored.UserID
-	a.username = stored.Username
+	if secret != "" {
+		// A passphrase is now configured but the file is still plaintext:
+		// migrate it in place to the encrypted format without forcing a login.
+		if err := a.SaveAuth(); err != nil {
+			slog.Warn("Failed to migrate plaintext auth token to encrypted form", "error", err)
+		} else {
+			slog.Info("Migrated stored auth token to encrypted form (AES-256-GCM)")
+		}
+	} else {
+		warnPlaintextOnce()
+	}
 	return nil
 }
 
+func (a *TwitchAuth) applyStored(stored StoredAuth) {
+	a.token = stored.AuthToken
+	a.userID = stored.UserID
+	a.username = stored.Username
+}
+
+// SaveAuth persists the current auth for this user. When
+// TWITCH_AUTH_ENCRYPTION_KEY is set, the record is AES-256-GCM encrypted at rest;
+// otherwise it is written in plaintext (with a one-time warning). The file is
+// always mode 0600 regardless of format.
 func (a *TwitchAuth) SaveAuth() error {
 	if err := os.MkdirAll("cookies", 0755); err != nil {
 		return err
@@ -142,9 +216,30 @@ func (a *TwitchAuth) SaveAuth() error {
 		Username:  a.username,
 	}
 
-	data, err := json.MarshalIndent(stored, "", "  ")
+	inner, err := json.Marshal(stored)
 	if err != nil {
 		return err
+	}
+
+	secret := encryptionSecret()
+
+	var data []byte
+	if secret != "" {
+		env, err := encryptBlob(inner, secret)
+		if err != nil {
+			return err
+		}
+		data, err = json.MarshalIndent(env, "", "  ")
+		if err != nil {
+			return err
+		}
+	} else {
+		warnPlaintextOnce()
+		// Preserve the historical human-readable plaintext layout.
+		data, err = json.MarshalIndent(stored, "", "  ")
+		if err != nil {
+			return err
+		}
 	}
 
 	return os.WriteFile(a.cookiesPath(), data, 0600)
