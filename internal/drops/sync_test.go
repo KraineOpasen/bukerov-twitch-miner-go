@@ -1,6 +1,7 @@
 package drops
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -22,11 +23,23 @@ type fakeDropsClient struct {
 	inventory    map[string]interface{}
 	inventoryErr error
 	details      map[string]map[string]interface{}
+
+	// fullSyncSignal, when non-nil, receives one non-blocking signal per full
+	// sync (each ViewerDropsDashboard call), letting a test observe the
+	// background loop's cadence. Set before Start; the maps are read-only after
+	// construction, so the loop goroutine touches no mutable shared state.
+	fullSyncSignal chan struct{}
 }
 
 func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
 	switch op.OperationName {
 	case "ViewerDropsDashboard":
+		if f.fullSyncSignal != nil {
+			select {
+			case f.fullSyncSignal <- struct{}{}:
+			default:
+			}
+		}
 		return f.dashboard, nil
 	case "Inventory":
 		if f.inventoryErr != nil {
@@ -87,6 +100,70 @@ func inventoryWithInProgress(campaigns ...map[string]interface{}) map[string]int
 				},
 			},
 		},
+	}
+}
+
+// TestLoopAdoptsRuntimeCampaignSyncInterval is the regression guard for the
+// dead runtime-interval bug: the full-sync loop used to create a time.Ticker
+// once at startup, so a CampaignSyncInterval change via UpdateSettings (the
+// Settings page path) never reached it — contradicting UpdateSettings' own doc
+// contract. The loop must re-read the interval each cycle. Uses a sub-second
+// intervalUnit so the cadence is observable without waiting real minutes.
+func TestLoopAdoptsRuntimeCampaignSyncInterval(t *testing.T) {
+	signal := make(chan struct{}, 64)
+	client := &fakeDropsClient{
+		dashboard:      dashboardResponse(),
+		inventory:      emptyInventoryResponse(),
+		details:        map[string]map[string]interface{}{},
+		fullSyncSignal: signal,
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{
+		CampaignSyncInterval:     50,      // × ms unit below = 50ms fast startup cadence
+		DropProgressSyncInterval: 100_000, // keep the lightweight loop quiet during the test
+	}, nil)
+	tracker.intervalUnit = time.Millisecond // set before Start (happens-before the loop goroutine)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tracker.Start(ctx)
+
+	// The loop is cycling at the fast startup interval: several full syncs land
+	// quickly (proves the loop is actually running before we change anything).
+	for i := 0; i < 3; i++ {
+		select {
+		case <-signal:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("startup interval did not drive repeated full syncs (saw %d)", i)
+		}
+	}
+
+	// Runtime change to a very slow cadence via the same path the Settings page
+	// uses. A fixed-ticker loop would ignore this entirely.
+	tracker.UpdateSettings(config.RateLimitSettings{
+		CampaignSyncInterval:     100_000, // 100s in ms units
+		DropProgressSyncInterval: 100_000,
+	})
+
+	// The fixed loop re-reads the interval each cycle, so after the single
+	// already-in-flight old-interval sync it adopts the slow cadence. Absorb the
+	// in-flight sync plus any backlog for a bounded window, then drain.
+	drainDeadline := time.After(250 * time.Millisecond)
+drain:
+	for {
+		select {
+		case <-signal:
+		case <-drainDeadline:
+			break drain
+		}
+	}
+
+	// The slow interval must now be in effect: no further full sync for a window
+	// spanning many old intervals. The buggy fixed-ticker loop would fire ~12
+	// times here.
+	select {
+	case <-signal:
+		t.Fatal("full-sync loop kept firing at the startup interval — the runtime CampaignSyncInterval change was ignored")
+	case <-time.After(600 * time.Millisecond):
 	}
 }
 
