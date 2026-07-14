@@ -19,6 +19,7 @@ const (
 	NotificationTypeHealthRecovered    NotificationType = "health_recovered"
 	NotificationTypeDropStalled        NotificationType = "drop_stalled"
 	NotificationTypeDropRecovered      NotificationType = "drop_recovered"
+	NotificationTypeDailySummary       NotificationType = "daily_summary"
 )
 
 // Notification represents a notification to be sent.

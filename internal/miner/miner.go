@@ -371,6 +371,13 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.DropBlacklist,
 	)
 
+	// Durably record each drop claim (under a hidden analytics bucket) so the
+	// daily summary can count claims across restarts, not just from the
+	// in-memory event ring buffer.
+	if m.analyticsSvc != nil {
+		m.dropsTracker.SetDropClaimedHook(m.recordDropClaimed)
+	}
+
 	// A reported watched minute is real drop progress; nudge the drops tracker
 	// to refresh its lightweight progress view promptly so the Drops page stays
 	// within seconds of Twitch instead of lagging up to a full sync interval.
@@ -534,6 +541,9 @@ func (m *Miner) startMining(ctx context.Context) {
 	go m.streamCheckLoop(ctx)
 	go m.healthWatchdogLoop(ctx)
 	go m.bonusPollLoop(ctx)
+	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
+		go m.dailySummaryLoop(ctx)
+	}
 	m.startAutoUpdater(ctx)
 }
 

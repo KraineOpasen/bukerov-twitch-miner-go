@@ -1853,6 +1853,34 @@ Defaults are tuned to match the Python miner. Random jitter is applied to avoid 
 
 ---
 
+## Daily Summary
+
+An optional once-a-day operator digest for the previous full local day, sent via
+the notification system channel (`NotifyDailySummary`, `NotificationType =
+daily_summary`). Config block `dailySummary { enabled bool, time "HH:MM" }` —
+opt-in (off by default); the time is canonicalized in `ValidateConfig` (invalid →
+09:00). Scheduling is a dedicated `dailySummaryLoop` in the miner: it arms a
+`time.Timer` to the next local `HH:MM`, recomputes on each fire (so it survives
+DST), is idempotent per date, and exits on context cancellation. It never fires
+for a partial day on startup.
+
+Metric sources — durable (SQLite) vs best-effort (in-memory, reset on restart):
+
+| Metric | Source | Durable? |
+|--------|--------|----------|
+| Net points (earned) | `EarnedPointsBetween` — sum over streamers of (last − first) balance in the window | yes |
+| Prediction net | `GetBets` → `ComputeROI().NetProfit` (Prediction ROI engine) | yes |
+| Watch streaks | `CountAnnotationsByType("WATCH_STREAK", …)` | yes |
+| Drops claimed | `CountAnnotationsByType("DROP_CLAIMED", …)` — recorded on each claim under the hidden `(drops)` analytics bucket, which `ListStreamers` excludes | yes |
+| Recovery incidents | count of drop-watchdog events in the in-memory event ring buffer within the window | best-effort |
+| Lost mining time | watcher accumulator: per tick `max(0, min(MaxSlots, fillable) − watchedOK) × interval` — slots that were fillable (a live candidate existed) but produced no watched minute; drained on send | best-effort |
+
+The rendered message presents the prediction net as a **component** of net points
+(e.g. `Net points: +910 (of which +390 from predictions)`), never as a parallel
+number, and labels the best-effort figures as such. Earned points is a global
+sum across all streamers; net delta already includes betting outcomes, which is
+why the prediction line is a component of it rather than additive.
+
 ## Notification System
 
 The miner supports Discord notifications for various events. The notification system is designed with a provider interface allowing future extension to other notification services (Telegram, Slack, etc.).

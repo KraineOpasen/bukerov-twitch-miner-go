@@ -25,6 +25,8 @@ type Repository interface {
 	RecordBet(b BetRecord) error
 	GetBets(streamer, strategy string, startTime, endTime time.Time) ([]BetRecord, error)
 	DistinctBetStrategies() ([]string, error)
+	EarnedPointsBetween(start, end time.Time) (int, error)
+	CountAnnotationsByType(eventType string, start, end time.Time) (int, error)
 	Close() error
 }
 
@@ -418,14 +420,15 @@ func Downsample(samples []PointSample, max int) []PointSample {
 
 func (r *SQLiteRepository) ListStreamers() ([]StreamerInfo, error) {
 	query := `
-		SELECT s.name, 
+		SELECT s.name,
 			COALESCE((SELECT points FROM points WHERE streamer_id = s.id ORDER BY timestamp DESC LIMIT 1), 0) as points,
 			COALESCE((SELECT timestamp FROM points WHERE streamer_id = s.id ORDER BY timestamp DESC LIMIT 1), 0) as last_activity
 		FROM streamers s
+		WHERE s.name != ?
 		ORDER BY points DESC
 	`
 
-	rows, err := r.db.Query(query)
+	rows, err := r.db.Query(query, DropsBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -662,6 +665,76 @@ func (r *SQLiteRepository) GetBets(streamer, strategy string, startTime, endTime
 		bets = append(bets, b)
 	}
 	return bets, rows.Err()
+}
+
+// DropsBucket is a synthetic streamer name under which drop-claim annotations
+// are recorded (drop claims are not tied to a single watched channel). It is
+// hidden from ListStreamers so it never shows up in the Statistics selector; it
+// exists only so the daily summary can count DROP_CLAIMED annotations durably.
+// The parenthesis makes it an impossible real Twitch login.
+const DropsBucket = "(drops)"
+
+// EarnedPointsBetween returns the net channel-point change across all streamers
+// within [start, end]: the sum over streamers of (last balance − first balance)
+// in the window. Because the points table stores absolute balance snapshots,
+// this is the honest "net points change" (it includes claims, watch gains, and
+// betting outcomes alike). A window with no samples yields 0.
+func (r *SQLiteRepository) EarnedPointsBetween(start, end time.Time) (int, error) {
+	rows, err := r.db.Query(
+		`SELECT streamer_id, points FROM points
+		 WHERE timestamp >= ? AND timestamp <= ?
+		 ORDER BY streamer_id, timestamp ASC`,
+		start.UnixMilli(), end.UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type span struct {
+		first, last int
+		seen        bool
+	}
+	perStreamer := map[int64]*span{}
+	for rows.Next() {
+		var sid int64
+		var pts int
+		if err := rows.Scan(&sid, &pts); err != nil {
+			return 0, err
+		}
+		s := perStreamer[sid]
+		if s == nil {
+			s = &span{}
+			perStreamer[sid] = s
+		}
+		if !s.seen {
+			s.first = pts
+			s.seen = true
+		}
+		s.last = pts // rows are timestamp-ascending, so this ends on the latest
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for _, s := range perStreamer {
+		total += s.last - s.first
+	}
+	return total, nil
+}
+
+// CountAnnotationsByType counts annotations of the given event type across all
+// streamers within [start, end]. Used by the daily summary for durable counts
+// of typed events (WATCH_STREAK streaks, DROP_CLAIMED drop claims).
+func (r *SQLiteRepository) CountAnnotationsByType(eventType string, start, end time.Time) (int, error) {
+	var n int
+	err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM annotations
+		 WHERE event_type = ? AND timestamp >= ? AND timestamp <= ?`,
+		eventType, start.UnixMilli(), end.UnixMilli(),
+	).Scan(&n)
+	return n, err
 }
 
 // DistinctBetStrategies returns the strategies that actually appear in recorded

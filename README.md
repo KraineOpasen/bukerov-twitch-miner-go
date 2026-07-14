@@ -852,6 +852,40 @@ The server binds strictly to `127.0.0.1` and is never reachable from other machi
 
 ---
 
+## Daily Summary
+
+An optional once-a-day operator digest, sent through the notification **system
+channel** (the same channel as connection/health/drop alerts), summarizing the
+previous local day. Opt-in — off by default.
+
+```json
+{
+  "dailySummary": {
+    "enabled": true,
+    "time": "09:00"
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `false` | Turn the daily summary on (also requires the notification system channel to be configured). |
+| `time` | `09:00` | Local wall-clock send time, `HH:MM` (24h). Uses the container/host timezone (`TZ`). Invalid values fall back to `09:00`. |
+
+The digest reports, for the previous full local day:
+
+- **Net points** — the day's net channel-point change. The prediction result is
+  shown as a *component* of this figure — e.g. `Net points: +910 (of which +390
+  from predictions)` — never as an independent number, so it never reads as
+  double-counted.
+- **Drops claimed**, **Watch streaks** — durable counts (survive restarts).
+- **Predictions** — wins / losses (and refunds) for the day.
+- **Recovery incidents**, **Lost mining time** — **best-effort** figures kept in
+  memory; a mid-day restart resets them, and the message labels them as such.
+  "Lost mining time" estimates watch slots that were fillable (a live candidate
+  existed) but produced no watched minute — it does not count time when nothing
+  was online.
+
 ## Discord Notifications
 
 The miner supports Discord notifications for chat mentions, point goals, and stream status changes.

@@ -15,6 +15,52 @@ func writeTestConfig(t *testing.T, contents string) string {
 	return path
 }
 
+func TestNormalizeDailySummaryTime(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"09:00", "09:00", true},
+		{"9:5", "09:05", true}, // zero-padded canonical form
+		{"23:59", "23:59", true},
+		{" 08:30 ", "08:30", true}, // trimmed
+		{"", "09:00", false},
+		{"25:00", "09:00", false},
+		{"nonsense", "09:00", false},
+	}
+	for _, tc := range cases {
+		got, ok := NormalizeDailySummaryTime(tc.in)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("NormalizeDailySummaryTime(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+func TestValidateConfigCanonicalizesDailySummaryTime(t *testing.T) {
+	c := &Config{DailySummary: DailySummarySettings{Enabled: true, Time: "7:5"}}
+	ValidateConfig(c)
+	if c.DailySummary.Time != "07:05" {
+		t.Errorf("daily summary time = %q, want 07:05", c.DailySummary.Time)
+	}
+
+	c = &Config{DailySummary: DailySummarySettings{Enabled: true, Time: "banana"}}
+	ValidateConfig(c)
+	if c.DailySummary.Time != "09:00" {
+		t.Errorf("invalid time must fall back to 09:00, got %q", c.DailySummary.Time)
+	}
+}
+
+func TestDefaultDailySummaryIsOptIn(t *testing.T) {
+	d := DefaultDailySummarySettings()
+	if d.Enabled {
+		t.Error("daily summary must default to disabled (opt-in)")
+	}
+	if d.Time != "09:00" {
+		t.Errorf("default time = %q, want 09:00", d.Time)
+	}
+}
+
 func TestLoadConfigDefaultsRotationRange(t *testing.T) {
 	path := writeTestConfig(t, `{"username": "test"}`)
 

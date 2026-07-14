@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -40,9 +42,10 @@ type Config struct {
 	// environment is the source of truth: SaveConfig clears the on-disk
 	// token, and the Settings page neither shows nor overwrites it. Never
 	// serialized.
-	DiscordTokenFromEnv bool           `json:"-"`
-	Debug               DebugSettings  `json:"debug"`
-	Health              HealthSettings `json:"health"`
+	DiscordTokenFromEnv bool                 `json:"-"`
+	Debug               DebugSettings        `json:"debug"`
+	Health              HealthSettings       `json:"health"`
+	DailySummary        DailySummarySettings `json:"dailySummary"`
 
 	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
 	// whose drop or reward name contains one of them is skipped during drop
@@ -244,6 +247,20 @@ type HealthSettings struct {
 	WatchdogRearmHours int `json:"watchdogRearmHours"`
 }
 
+// DailySummarySettings configures the once-a-day operator digest sent through
+// the notification system's system channel (earned points, drops, prediction
+// net, streaks, recovery incidents, lost mining time for the previous local
+// day). Opt-in: off by default so it never surprises existing installs.
+type DailySummarySettings struct {
+	// Enabled turns the daily summary on. It additionally requires the
+	// notification system channel to be configured (same gate as the other
+	// operator alerts).
+	Enabled bool `json:"enabled"`
+	// Time is the local wall-clock time to send the summary, "HH:MM" (24h).
+	// Invalid values fall back to the default (09:00).
+	Time string `json:"time"`
+}
+
 // DiscordSettings contains Discord integration configuration.
 // Only connection settings are stored in config; notification rules are in the database.
 type DiscordSettings struct {
@@ -318,7 +335,34 @@ func DefaultConfig() Config {
 		Notifications:       DefaultNotificationsSettings(),
 		Debug:               DefaultDebugSettings(),
 		Health:              DefaultHealthSettings(),
+		DailySummary:        DefaultDailySummarySettings(),
 	}
+}
+
+// DefaultDailySummarySettings returns the opt-in daily summary defaults: off,
+// scheduled for 09:00 local time.
+func DefaultDailySummarySettings() DailySummarySettings {
+	return DailySummarySettings{
+		Enabled: false,
+		Time:    "09:00",
+	}
+}
+
+// NormalizeDailySummaryTime validates an "H:M"/"HH:MM" 24-hour string and returns
+// it canonicalized as zero-padded "HH:MM". Invalid input yields the default
+// "09:00" and ok=false so the caller can log the fallback. Parsing is manual
+// (not time.Parse) so single-digit fields like "9:5" are accepted and padded.
+func NormalizeDailySummaryTime(s string) (canonical string, ok bool) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 2 {
+		return "09:00", false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return "09:00", false
+	}
+	return fmt.Sprintf("%02d:%02d", h, m), true
 }
 
 func DefaultDebugSettings() DebugSettings {
@@ -645,4 +689,8 @@ func ValidateConfig(config *Config) {
 	// unknown → GAME_ORDER, the behavior-preserving default). Reuses the
 	// engine's own validator so the valid-mode set has a single source.
 	config.CampaignPolicy = string(policy.Normalize(config.CampaignPolicy))
+
+	// Daily summary: canonicalize the send time to a valid "HH:MM"; anything
+	// unparseable falls back to the 09:00 default.
+	config.DailySummary.Time, _ = NormalizeDailySummaryTime(config.DailySummary.Time)
 }

@@ -105,6 +105,12 @@ type DropsTracker struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// onDropClaimed, if set, is invoked with the drop name each time a drop is
+	// successfully claimed, so a listener (the miner) can durably record the
+	// claim for the daily summary without the tracker importing analytics. Set
+	// once at wiring time before the loops start; read lock-free.
+	onDropClaimed func(dropName string)
+
 	// intervalUnit scales the configured sync intervals (minutes in
 	// production). Set once at construction and never mutated, so both loops
 	// read it without the lock; tests set it to a sub-second unit to exercise
@@ -813,8 +819,23 @@ func (d *DropsTracker) claimDropFn() func(*models.Drop) bool {
 		}
 		if claimed {
 			events.Record(events.TypeDropClaimed, "", drop.Name)
+			d.noteDropClaimed(drop.Name)
 		}
 		return claimed
+	}
+}
+
+// SetDropClaimedHook registers a listener invoked with the drop name on each
+// successful claim (for durable daily-summary counting). Set once before the
+// loops start.
+func (d *DropsTracker) SetDropClaimedHook(fn func(dropName string)) {
+	d.onDropClaimed = fn
+}
+
+// noteDropClaimed fires the claim hook if one is set.
+func (d *DropsTracker) noteDropClaimed(dropName string) {
+	if d.onDropClaimed != nil {
+		d.onDropClaimed(dropName)
 	}
 }
 
@@ -997,6 +1018,7 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 				} else if claimed {
 					slog.Info("Claimed drop", "drop", drop.Name)
 					events.Record(events.TypeDropClaimed, "", drop.Name)
+					d.noteDropClaimed(drop.Name)
 				}
 				time.Sleep(5 * time.Second)
 			}
