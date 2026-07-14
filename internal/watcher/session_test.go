@@ -166,6 +166,57 @@ func TestSessionRefreshCoalescesToStrongestMode(t *testing.T) {
 	if len(spade) != 1 {
 		t.Fatalf("the stronger session mode must win the coalesce, got spade=%v", spade)
 	}
+
+	// Reverse arrival order: a later, stronger request must UPGRADE the
+	// pending one (a first-request-wins regression would silently execute the
+	// watchdog's stage-5 session recreate as a mere stream-info refresh).
+	ref2 := &fakeRefresher{}
+	w.refresher = ref2
+	w.RequestSessionRefresh(login, RefreshStreamInfo)
+	w.RequestSessionRefresh(login, RefreshSession)
+	w.executeSessionRefreshes(occupantsFor(w, 0))
+
+	spade2, stream2 := ref2.calls()
+	if len(stream2) != 1 {
+		t.Fatalf("coalesced request must execute exactly once, got %v", stream2)
+	}
+	if len(spade2) != 1 {
+		t.Fatalf("a later stronger mode must upgrade the pending request, got spade=%v", spade2)
+	}
+}
+
+// TestProcessWatchingPopulatesReportStats guards the loop wiring the stall
+// detector depends on: a real processWatching pass must feed the published
+// per-channel delivery accounting from its send outcomes — the watchdog's
+// ">=N delivered reports" gate is dead if this wiring disappears.
+func TestProcessWatchingPopulatesReportStats(t *testing.T) {
+	sender := &countingSender{sent: make(chan string, 16)}
+	checker := &staticChecker{checked: make(chan string, 16)}
+	w, streamers := newLoopWatcher(2, sender, checker)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.ctx = ctx
+
+	w.processWatching()
+
+	for _, s := range streamers {
+		stats, ok := w.ReportStats(s.Username)
+		if !ok || stats.Successes != 1 {
+			t.Fatalf("expected one recorded success for %s after a tick, got ok=%v %+v", s.Username, ok, stats)
+		}
+		if stats.LastSuccess.IsZero() {
+			t.Fatalf("expected a last-success timestamp for %s", s.Username)
+		}
+	}
+
+	// Failures must be accounted too.
+	sender.err = errors.New("send failed")
+	w.processWatching()
+	stats, ok := w.ReportStats(streamers[0].Username)
+	if !ok || stats.Failures != 1 || stats.Successes != 1 {
+		t.Fatalf("expected the failed tick to be recorded, got ok=%v %+v", ok, stats)
+	}
 }
 
 // TestSessionRefreshFailureOutcomes: failures at either step publish a not-OK

@@ -682,6 +682,244 @@ func TestWatchdogChannelSwitchRebaselines(t *testing.T) {
 	}
 }
 
+// --- stall-evidence window (adversarial-review findings) ---
+
+// TestWatchdogGateFailureResetsStallEvidence reproduces review scenario A: the
+// farming channel is offline for 40 minutes while clean inventory syncs keep
+// completing. Pre-fix, the accrued observations and stale delay clock survived
+// the gap and a stall confirmed ~5 minutes after farming resumed — inside
+// Twitch's ~15-minute crediting batch. The evidence window must instead
+// restart on resume, and a genuine stall must still confirm once a FULL fresh
+// window (delay + observations + reports) accrues.
+func TestWatchdogGateFailureResetsStallEvidence(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+
+	// 40 offline minutes: gates fail, clean observations keep completing.
+	h.watch.mu.Lock()
+	h.watch.slots = nil
+	h.watch.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		h.tick(10*time.Minute, true, 0)
+	}
+
+	// The slot returns and five reports land almost immediately — the exact
+	// pre-fix false-positive moment.
+	h.watch.mu.Lock()
+	h.watch.slots = []string{"chan"}
+	h.watch.mu.Unlock()
+	h.tick(5*time.Minute, true, 5)
+	assertNoRecovery(t, h, "")
+	if st := h.state(t); st.Status != ProgressHealthy || st.NoProgressObs != 0 {
+		t.Fatalf("evidence must restart on farming resume, got %+v", st)
+	}
+
+	// Fresh evidence accrues: two more observed ticks are still short of the
+	// confirmation count...
+	h.tick(10*time.Minute, true, 3)
+	h.tick(10*time.Minute, true, 3)
+	assertNoRecovery(t, h, "")
+	// ...and the third completes delay+observations+reports: the true positive
+	// is preserved, just measured from the resume.
+	h.tick(10*time.Minute, true, 3)
+	if _, triggered := h.drops.counts(); triggered != 1 {
+		t.Fatalf("a genuine stall with fresh evidence must still confirm, got triggered=%d", triggered)
+	}
+}
+
+// TestWatchdogIneligibleWindowEvidenceDiscarded reproduces review scenario B
+// (the sticky-channel variant): the SAME channel keeps its slot while playing
+// another game for 40 minutes with reports flowing. Pre-fix the delivery
+// counter never re-baselined (channel unchanged), so a stall confirmed on the
+// first pass after eligibility returned with zero minutes actually farmed.
+func TestWatchdogIneligibleWindowEvidenceDiscarded(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+
+	game := h.campaign.Game
+	h.streamer.Stream.Update("b1", "t", &models.Game{ID: "other", Name: "Other Game"}, nil, 100)
+	for i := 0; i < 4; i++ {
+		h.tick(10*time.Minute, true, 3) // 12 reports delivered while ineligible
+	}
+
+	// The game returns: the first eligible pass must not confirm, and the
+	// reports delivered during the ineligible window must be discarded.
+	h.streamer.Stream.Update("b1", "t", game, nil, 100)
+	h.tick(10*time.Minute, true, 3)
+	assertNoRecovery(t, h, "")
+	if st := h.state(t); st.ReportsSinceProgress != 0 {
+		t.Fatalf("reports accrued while ineligible must not survive, got %+v", st)
+	}
+}
+
+// TestWatchdogObservationCursorSeeding pins the phantom-observation fixes: a
+// sync completed before tracking began, the sync whose data showed the last
+// progress, and an unchanged sync timestamp must each count zero times.
+func TestWatchdogObservationCursorSeeding(t *testing.T) {
+	h := newWatchdogHarness(t)
+
+	// A sync completed BEFORE tracking began must not become the first
+	// no-progress observation.
+	h.drops.observe(h.now, "")
+	h.w.evaluate(h.now)
+	h.tick(time.Minute, false, 1)
+	if st := h.state(t); st.NoProgressObs != 0 {
+		t.Fatalf("pre-tracking sync counted as an observation: %+v", st)
+	}
+
+	// Dedup: the SAME sync timestamp seen on several passes counts once.
+	h.tick(time.Minute, true, 1)
+	h.tick(time.Minute, false, 1)
+	h.tick(time.Minute, false, 1)
+	if st := h.state(t); st.NoProgressObs != 1 {
+		t.Fatalf("one sync must count exactly once, got %+v", st)
+	}
+
+	// After a progress reset, the sync that SHOWED the progress must not be
+	// re-counted against the fresh episode.
+	h.campaign.Drops[0].CurrentMinutesWatched = 130
+	h.tick(time.Minute, true, 1) // progress observed and reset
+	h.tick(time.Minute, false, 1)
+	if st := h.state(t); st.NoProgressObs != 0 {
+		t.Fatalf("the progress-showing sync was re-counted after the reset: %+v", st)
+	}
+}
+
+// TestWatchdogGateInventoryObservability: while inventory reads fail — or none
+// complete within the stall-delay window — the drop's progress is unobservable
+// and a stall must not confirm no matter how much earlier evidence existed.
+func TestWatchdogGateInventoryObservability(t *testing.T) {
+	t.Run("failing reads", func(t *testing.T) {
+		h := newWatchdogHarness(t)
+		h.w.evaluate(h.now)
+		for i := 0; i < 3; i++ {
+			h.tick(4*time.Minute, true, 2) // 3 clean observations early
+		}
+		for i := 0; i < 4; i++ { // then the inventory starts erroring
+			h.now = h.now.Add(5 * time.Minute)
+			h.drops.observe(h.now, "inventory 502")
+			h.watch.addSuccesses("chan", 3)
+			h.w.evaluate(h.now)
+		}
+		assertNoRecovery(t, h, "unobservable")
+	})
+
+	t.Run("stale reads", func(t *testing.T) {
+		h := newWatchdogHarness(t)
+		h.w.evaluate(h.now)
+		h.tick(2*time.Minute, true, 2)
+		for i := 0; i < 5; i++ { // syncs stop entirely while time passes the delay
+			h.tick(10*time.Minute, false, 3)
+		}
+		assertNoRecovery(t, h, "no inventory observation")
+	})
+}
+
+// TestWatchdogTransientGateBlipPausesButKeepsStage: a one-tick gate failure
+// mid-recovery must pause the pipeline (stage survives — no restart from
+// stage 1) while discarding the evidence, so the next stage runs only after a
+// full fresh window.
+func TestWatchdogTransientGateBlipPausesButKeepsStage(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.driveToStall(t) // stage 1 executed
+
+	h.watch.mu.Lock()
+	h.watch.watching = map[string]bool{"chan": false}
+	h.watch.mu.Unlock()
+	h.tick(10*time.Minute, true, 3) // gate blip
+	if st := h.state(t); st.RecoveryStage != 1 {
+		t.Fatalf("a gate blip must not reset the recovery stage, got %+v", st)
+	}
+
+	h.watch.mu.Lock()
+	h.watch.watching = nil
+	h.watch.mu.Unlock()
+
+	// Evidence restarts on the first restored pass (its sync seeds the cursor,
+	// counting as observation zero); stage 2 must wait out the full fresh
+	// window: three further observed ticks (delay 30m ≥ 20m, obs 3, reports 9).
+	h.tick(10*time.Minute, true, 3) // evidence window starts
+	h.tick(10*time.Minute, true, 3) // obs=1
+	h.tick(10*time.Minute, true, 3) // obs=2, delay 20m — still short
+	if syncNow, _ := h.drops.counts(); syncNow != 0 {
+		t.Fatalf("stage 2 must wait for fresh evidence after a blip, got syncNow=%d", syncNow)
+	}
+	h.tick(10*time.Minute, true, 3) // obs=3 — window complete
+	if syncNow, _ := h.drops.counts(); syncNow != 1 {
+		t.Fatalf("stage 2 must run once fresh evidence accrues, got syncNow=%d", syncNow)
+	}
+	if st := h.state(t); st.RecoveryStage != 2 {
+		t.Fatalf("pipeline must resume from stage 2, got %+v", st)
+	}
+}
+
+// TestWatchdogCleanupClosesEscalatedEpisode: an escalated episode whose drop
+// leaves the tracked set (e.g. Twitch credited invisibly and it jumped to
+// claimable) must not leave dangling effects — the avoided channel is
+// unblocked and the standing critical alert is closed exactly once.
+func TestWatchdogCleanupClosesEscalatedEpisode(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.driveToStall(t)
+	for i := 0; i < 6; i++ {
+		h.tick(10*time.Minute, true, 3) // exhaust: stalled notified, channel avoided
+	}
+	if !h.w.avoid.IsAvoided("chan") || len(h.notifier.byKind("stalled")) != 1 {
+		t.Fatal("setup: expected an exhausted, notified, avoided episode")
+	}
+
+	h.campaign.Drops[0].CurrentMinutesWatched = 240
+	h.campaign.Drops[0].IsClaimable = true
+	h.tick(time.Minute, true, 0)
+
+	if snap := h.w.Snapshot(); len(snap.Drops) != 0 {
+		t.Fatalf("claimable drop must leave the tracked set, got %+v", snap.Drops)
+	}
+	if h.w.avoid.IsAvoided("chan") {
+		t.Fatal("the avoid entry must be cleared when the episode closes")
+	}
+	if rec := h.notifier.byKind("recovered"); len(rec) != 1 {
+		t.Fatalf("the standing stall alert must be closed exactly once, got %+v", rec)
+	}
+	h.tick(time.Minute, true, 0)
+	if rec := h.notifier.byKind("recovered"); len(rec) != 1 {
+		t.Fatalf("the close notification must not repeat, got %d", len(rec))
+	}
+}
+
+// TestWatchdogGateTwitchOutageAllSignals: every outage input — OAuth, GQL,
+// PubSub, watch transport — must individually block confirmation.
+func TestWatchdogGateTwitchOutageAllSignals(t *testing.T) {
+	for _, signal := range []string{SignalOAuth, SignalGQLAPI, SignalPubSub, SignalWatchTransport} {
+		t.Run(signal, func(t *testing.T) {
+			h := newWatchdogHarness(t)
+			stallReady(t, h)
+			h.center.Record(Signal{Name: signal, Status: StatusFailed})
+			h.tick(10*time.Minute, true, 3)
+			assertNoRecovery(t, h, "connectivity is degraded")
+		})
+	}
+}
+
+// TestWatchdogSkipsInactiveStatusAndClosedDropWindow: a campaign whose status
+// is not ACTIVE (even with a future end date) and a drop outside its own time
+// window must not be tracked at all.
+func TestWatchdogSkipsInactiveStatusAndClosedDropWindow(t *testing.T) {
+	h := newWatchdogHarness(t)
+
+	h.campaign.Status = models.CampaignExpired // EndAt still in the future
+	h.tick(time.Minute, true, 3)
+	if snap := h.w.Snapshot(); len(snap.Drops) != 0 {
+		t.Fatalf("non-ACTIVE campaign must not be tracked, got %+v", snap.Drops)
+	}
+	h.campaign.Status = models.CampaignActive
+
+	h.campaign.Drops[0].StartAt = h.now.Add(time.Hour) // window not open yet
+	h.tick(time.Minute, true, 3)
+	if snap := h.w.Snapshot(); len(snap.Drops) != 0 {
+		t.Fatalf("a drop outside its time window must not be tracked, got %+v", snap.Drops)
+	}
+}
+
 // --- signal composition ---
 
 func TestWatchdogProgressSignal(t *testing.T) {

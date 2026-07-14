@@ -124,6 +124,12 @@ type Server struct {
 	statsCache map[string]streamerStats
 	statsAt    time.Time
 
+	// healthFormMu serializes the read-modify-write in handleAPIHealthSettings:
+	// the canary and watchdog forms each patch their own section over the
+	// current settings, and two concurrent section saves without this lock
+	// could write one section's stale copy over the other's fresh save.
+	healthFormMu sync.Mutex
+
 	mu sync.RWMutex
 }
 

@@ -405,12 +405,11 @@ func (d *DropsTracker) syncProgress() {
 		}
 	}
 
-	// The inventory read completed: this is a valid progress observation
-	// whether or not anything moved — "checked and unchanged" is exactly the
-	// signal the progress watchdog counts stalls with.
-	d.recordProgressSync(nil)
-
 	if !changed {
+		// The inventory read completed and nothing moved — "checked and
+		// unchanged" is exactly the observation the progress watchdog counts
+		// stalls with.
+		d.recordProgressSync(nil)
 		return
 	}
 
@@ -421,6 +420,12 @@ func (d *DropsTracker) syncProgress() {
 	// Re-point the streamers at the refreshed campaigns so watch-priority
 	// decisions see the new progress too, exactly as the full sync does.
 	d.updateStreamerCampaigns()
+
+	// Stamp the observation only AFTER the refreshed campaigns are published:
+	// a reader (the progress watchdog) that sees the new observation timestamp
+	// must also see the new minutes, or a progress-carrying read could be
+	// miscounted as a no-progress observation.
+	d.recordProgressSync(nil)
 
 	slog.Debug("Drops progress sync: refreshed tracked campaign progress from inventory",
 		"campaigns", len(updated))

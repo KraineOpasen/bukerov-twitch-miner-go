@@ -1077,7 +1077,16 @@ no-progress observations, status (`healthy`/`recovering`/`stalled`), and the
 recovery stage reached.
 
 **Stall confirmation is conjunctive** — every gate must hold simultaneously,
-and any failing gate is named in the published state (explainability):
+and any failing gate is named in the published state (explainability). All
+three thresholds (delay, observations, delivered reports) count only inside
+the current **evidence window**: it opens when every gate starts holding and
+is discarded whenever any gate fails, so a confirmed stall always represents
+at least `watchdogStallDelayMinutes` of *demonstrable* farming without credit.
+Evidence accrued while the channel was offline, rotated out, or ineligible
+never carries over — otherwise a stall would confirm minutes after farming
+resumes, inside Twitch's ~15-minute crediting batch. A gate failure pauses
+the recovery pipeline (the reached stage survives) but each next stage
+requires a fresh, complete evidence window:
 
 1. campaign `ACTIVE`, not past `endAt`; drop inside its date window;
 2. drop not claimable and not claimed (claimable = fully progressed — the
@@ -1091,10 +1100,17 @@ and any failing gate is named in the published state (explainability):
 7. ≥ `watchdogStallConfirmations` consecutive inventory observations completed
    **successfully** without progress ("checked and unchanged", never "could not
    check" — the tracker's progress sync now records
-   `ProgressLastSyncAt`/`ProgressLastError`, and errored reads never count);
-8. more than `watchdogStallDelayMinutes` of wall time since the last advance;
-9. no Twitch outage evidence (OAuth/GQL/PubSub/watch-transport signals not
-   FAILED in the health center).
+   `ProgressLastSyncAt`/`ProgressLastError`, errored reads never count, one
+   observation is never counted twice, and the observation cursor is seeded on
+   episode start so the read whose data *showed* the last progress — or one
+   completed before tracking began — can never count);
+8. more than `watchdogStallDelayMinutes` of evidence-window time;
+9. inventory currently observable: the last progress-sync attempt did not
+   error, and a successful observation completed within the stall-delay window
+   (an invisible Twitch-side credit during an inventory outage must not be
+   declared a stall);
+10. no Twitch outage evidence (OAuth/GQL/PubSub/watch-transport signals not
+    FAILED in the health center).
 
 **Recovery pipeline** — finite, ordered, at most one stage execution per
 evaluation pass (≈1 min, jittered), each stage cooldown-bounded

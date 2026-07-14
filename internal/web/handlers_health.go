@@ -184,6 +184,12 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 	// The canary and watchdog settings live on separate forms; each posts only
 	// its own fields (identified by a hidden "section" input), so saving one
 	// section never clobbers unsaved edits — or checkbox state — of the other.
+	// healthFormMu makes the read-patch-apply sequence atomic across requests:
+	// without it, two concurrent section saves could write a stale copy of one
+	// section over the other's just-applied values.
+	s.healthFormMu.Lock()
+	defer s.healthFormMu.Unlock()
+
 	cur := provider.CurrentHealthSettings()
 	cfg := cur
 	switch r.FormValue("section") {

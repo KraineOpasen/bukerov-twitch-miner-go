@@ -117,12 +117,33 @@ type ProgressSnapshot struct {
 type dropState struct {
 	DropProgress
 
+	// evidenceSince is when the current uninterrupted stall-evidence window
+	// began: the moment every confirmation gate started holding. Zero while any
+	// gate fails. All three stall thresholds (delay, observations, reports)
+	// count only inside this window, so a confirmed stall always represents at
+	// least StallDelay of DEMONSTRABLE farming without credit — evidence
+	// accrued while the channel was offline, rotated out, or ineligible never
+	// carries over (that would confirm a stall minutes after farming resumes,
+	// well inside Twitch's ~15-minute crediting batch).
+	evidenceSince      time.Time
 	lastObservedSyncAt time.Time // ProgressLastSyncAt already counted as an observation
 	baselineReports    int       // farming channel's success count at last progress
 	statsChannel       string    // channel the baseline belongs to
 	avoidedChannel     string    // channel this episode's switch stage excluded ("" if none)
 	exhaustedAt        time.Time // when the pipeline ran out of stages
 	notifiedStalled    bool      // critical notification already sent this episode
+}
+
+// resetEvidence discards the stall-evidence window (a gate failed): the delay
+// clock, observation counter, and delivery baseline all restart once farming
+// is demonstrably active again. The recovery stage and notification flags
+// survive — a transient gate blip must not restart the pipeline, only pause it
+// and demand fresh evidence before the next stage.
+func (st *dropState) resetEvidence() {
+	st.evidenceSince = time.Time{}
+	st.NoProgressObs = 0
+	st.ReportsSinceProgress = 0
+	st.statsChannel = "" // force a delivery re-baseline even for the same channel
 }
 
 // recoveryStage is one step of the staged recovery pipeline. run executes on
@@ -409,17 +430,21 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 	var stageBudget bool // at most one recovery-stage execution per pass
 
 	for _, campaign := range w.drops.Campaigns() {
-		st, key, drop := w.trackDrop(campaign, now)
+		st, key, drop := w.trackDrop(campaign, sync, now)
 		if st == nil {
 			continue
 		}
 		seen[key] = true
 		w.observeProgress(st, campaign, drop, sync, now)
 
-		if hold, why := w.gatesHold(st, campaign, drop, outage, outageSignal, now); !hold {
-			// A gate failing means a stall cannot be *confirmed* right now; the
-			// episode's counters and stage survive (a one-tick slot rotation must
-			// not restart the pipeline), but nothing advances.
+		if hold, why := w.gatesHold(st, campaign, drop, sync, outage, outageSignal, cfg, now); !hold {
+			// A gate failing means a stall cannot be *confirmed* right now. The
+			// recovery stage and notification flags survive (a one-tick slot
+			// rotation must not restart the pipeline), but the stall EVIDENCE is
+			// discarded: whatever accrued while the gate failed does not prove
+			// farming-without-credit, and carrying it over would confirm a stall
+			// minutes after farming resumes.
+			st.resetEvidence()
 			if st.Status != ProgressStalled {
 				st.Status = ProgressHealthy
 			}
@@ -427,14 +452,32 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 			continue
 		}
 
-		stalled := now.Sub(st.LastProgressAt) >= cfg.StallDelay &&
+		if st.evidenceSince.IsZero() {
+			// Every gate holds again: a fresh evidence window starts here. Seed
+			// the observation cursor at the CURRENT sync timestamp so inventory
+			// reads that completed before this moment (including the one whose
+			// data showed the last progress) are never counted as no-progress
+			// observations.
+			st.evidenceSince = now
+			st.lastObservedSyncAt = sync.ProgressLastSyncAt
+			st.NoProgressObs = 0
+		} else if sync.ProgressLastError == "" && !sync.ProgressLastSyncAt.IsZero() && sync.ProgressLastSyncAt.After(st.lastObservedSyncAt) {
+			// A NEW inventory observation completed successfully inside the
+			// evidence window without progress — "checked and unchanged", never
+			// "could not check".
+			st.lastObservedSyncAt = sync.ProgressLastSyncAt
+			st.NoProgressObs++
+		}
+
+		stalled := now.Sub(st.evidenceSince) >= cfg.StallDelay &&
 			st.NoProgressObs >= cfg.StallConfirmations &&
 			st.ReportsSinceProgress >= stallMinReports
 		if !stalled {
 			if st.Status != ProgressStalled {
 				st.Status = ProgressHealthy
-				st.Detail = fmt.Sprintf("progress monitored: last advance %s ago, %d clean observations, %d reports since",
-					now.Sub(st.LastProgressAt).Round(time.Minute), st.NoProgressObs, st.ReportsSinceProgress)
+				st.Detail = fmt.Sprintf("progress monitored: last advance %s ago, %s of farming evidence, %d clean observations, %d reports",
+					now.Sub(st.LastProgressAt).Round(time.Minute), now.Sub(st.evidenceSince).Round(time.Minute),
+					st.NoProgressObs, st.ReportsSinceProgress)
 			}
 			continue
 		}
@@ -444,13 +487,25 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 		}
 	}
 
-	// Drop state for campaigns/drops no longer tracked (claimed, expired,
-	// campaign gone) — their episodes are over.
+	// Drop state for campaigns/drops no longer tracked (claimed, claimable,
+	// expired, campaign gone) — their episodes are over. An episode that
+	// escalated must not leave dangling effects behind: the avoided channel
+	// gets a clean slate, and a standing critical alert is explicitly closed
+	// (a claimable/claimed drop means the stall resolved; an ended campaign
+	// makes the alert moot either way).
 	w.mu.Lock()
-	for key := range w.states {
-		if !seen[key] {
-			delete(w.states, key)
+	for key, st := range w.states {
+		if seen[key] {
+			continue
 		}
+		if st.avoidedChannel != "" && w.avoid != nil {
+			w.avoid.Clear(st.avoidedChannel)
+		}
+		if st.notifiedStalled && w.notifier != nil {
+			w.notifier.NotifyDropRecovered(st.CampaignName, st.DropName, st.Channel,
+				"the drop left the tracked set (claimed, claimable, or campaign ended) — the stall alert no longer applies")
+		}
+		delete(w.states, key)
 	}
 	w.mu.Unlock()
 
@@ -459,7 +514,7 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 
 // trackDrop finds (or creates) the watchdog state for the campaign's current
 // drop. Returns nil when the campaign has nothing the watchdog should track.
-func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, now time.Time) (*dropState, string, *models.Drop) {
+func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, sync drops.SyncStatus, now time.Time) (*dropState, string, *models.Drop) {
 	if campaign.Status != models.CampaignActive || now.After(campaign.EndAt) {
 		return nil, "", nil
 	}
@@ -484,7 +539,12 @@ func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, now time.Time) (
 			LastProgressAt: now,
 			Status:         ProgressHealthy,
 			Detail:         "tracking started",
-		}}
+		},
+			// Seed the observation cursor so an inventory read that completed
+			// BEFORE tracking began can never count as the first no-progress
+			// observation.
+			lastObservedSyncAt: sync.ProgressLastSyncAt,
+		}
 		w.states[key] = st
 	}
 	return st, key, drop
@@ -544,7 +604,14 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 			LastProgressAt: now,
 			Status:         ProgressHealthy,
 			Detail:         fmt.Sprintf("progress advancing: %d/%d minutes", drop.CurrentMinutesWatched, drop.MinutesRequired),
-		}, statsChannel: channel}
+		},
+			statsChannel: channel,
+			// Seed the observation cursor so the very sync whose data showed
+			// this progress can never be re-counted as a no-progress
+			// observation of the fresh episode. The evidence window itself
+			// restarts in evaluate once the gates hold.
+			lastObservedSyncAt: sync.ProgressLastSyncAt,
+		}
 		if stats, ok := w.watch.ReportStats(channel); ok {
 			st.baselineReports = stats.Successes
 		}
@@ -552,23 +619,28 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 	}
 
 	st.LastMinutes = drop.CurrentMinutesWatched
-
-	// A no-progress interval only counts when a NEW inventory observation
-	// completed successfully since the last one we counted — "checked and
-	// unchanged", never "could not check".
-	if sync.ProgressLastError == "" && !sync.ProgressLastSyncAt.IsZero() && sync.ProgressLastSyncAt.After(st.lastObservedSyncAt) {
-		st.lastObservedSyncAt = sync.ProgressLastSyncAt
-		st.NoProgressObs++
-	}
+	// No-progress observations are counted in evaluate, and only inside an
+	// active evidence window (every gate holding) — see dropState.evidenceSince.
 }
 
 // gatesHold checks every stall-confirmation gate that is not a threshold:
 // all must hold simultaneously or the stall is unconfirmable by design (the
 // conservative, false-positive-averse core of the watchdog). Returns the
 // human-readable reason of the first failing gate for explainability.
-func (w *ProgressWatchdog) gatesHold(st *dropState, campaign *models.Campaign, drop *models.Drop, outage bool, outageSignal string, now time.Time) (bool, string) {
+func (w *ProgressWatchdog) gatesHold(st *dropState, campaign *models.Campaign, drop *models.Drop, sync drops.SyncStatus, outage bool, outageSignal string, cfg WatchdogConfig, now time.Time) (bool, string) {
 	if outage {
 		return false, fmt.Sprintf("not counting a stall: Twitch connectivity is degraded (%s failing)", outageSignal)
+	}
+	// Inventory observability: a stall can only be confirmed while we can
+	// actually SEE the drop's progress. A currently-failing progress sync, or
+	// none completing within the stall-delay window, means "cannot check" —
+	// Twitch may have credited the drop invisibly, so confirmation (and the
+	// evidence clock) must wait for observability to return.
+	if sync.ProgressLastError != "" {
+		return false, "not counting a stall: inventory reads are currently failing, drop progress is unobservable"
+	}
+	if !sync.ProgressLastSyncAt.IsZero() && now.Sub(sync.ProgressLastSyncAt) > cfg.StallDelay {
+		return false, "not counting a stall: no inventory observation completed within the stall-delay window"
 	}
 	if st.Channel == "" {
 		return false, "no slotted channel is farming this campaign right now (rotation, offline, or waiting)"

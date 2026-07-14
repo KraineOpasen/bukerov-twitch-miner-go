@@ -138,15 +138,17 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 
 		// Drops progress: the progress watchdog owns the semantics (healthy /
 		// recovering / confirmed STALLED); composing the signal here keeps the
-		// health center single-writer per signal. The legacy OK/IDLE fallback
-		// only applies if the watchdog was never constructed.
-		if m.progressWatchdog != nil {
+		// health center single-writer per signal. When the watchdog is disabled
+		// (or was never constructed) the signal falls back to the passive
+		// tracked-campaigns view — a disabled watchdog must not misreport "no
+		// active drop campaign" while campaigns are tracked and progressing.
+		if m.progressWatchdog != nil && m.progressWatchdog.Snapshot().Enabled {
 			m.healthCenter.Record(m.progressWatchdog.ProgressSignal(now))
 		} else {
 			prog := health.Signal{Name: health.SignalDropsProgress, CheckedAt: now, Status: health.StatusIdle, Detail: "no active drop campaign"}
 			if st.TrackedCampaigns > 0 {
 				prog.Status = health.StatusOK
-				prog.Detail = fmt.Sprintf("%d active campaign(s) tracked", st.TrackedCampaigns)
+				prog.Detail = fmt.Sprintf("%d active campaign(s) tracked (stall watchdog disabled)", st.TrackedCampaigns)
 			}
 			m.healthCenter.Record(prog)
 		}
