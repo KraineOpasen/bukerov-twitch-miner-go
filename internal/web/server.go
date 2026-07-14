@@ -17,6 +17,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
@@ -58,6 +59,15 @@ type HealthProvider interface {
 // Satisfied by the miner.
 type DropProgressProvider interface {
 	DropProgress() health.ProgressSnapshot
+}
+
+// PolicyProvider exposes the campaign-policy engine's ranked decisions and the
+// mode/per-drop-rule controls to the Drops page. Satisfied by the miner.
+type PolicyProvider interface {
+	PolicySnapshot() (policy.Mode, []policy.Decision)
+	CurrentCampaignPolicy() (string, map[string]config.DropRule)
+	ApplyCampaignPolicy(mode string)
+	SetDropRule(rewardKey string, rule config.DropRule)
 }
 
 // RewardsProvider exposes custom channel-points reward listing/redemption and
@@ -112,6 +122,7 @@ type Server struct {
 	discoveryProvider       DiscoveryProvider
 	healthProvider          HealthProvider
 	dropProgressProvider    DropProgressProvider
+	policyProvider          PolicyProvider
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
 	predictionControl       PredictionControlProvider
@@ -266,6 +277,12 @@ func (s *Server) SetDropProgressProvider(provider DropProgressProvider) {
 	s.dropProgressProvider = provider
 }
 
+func (s *Server) SetPolicyProvider(provider PolicyProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policyProvider = provider
+}
+
 func (s *Server) SetRewardsProvider(provider RewardsProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -404,6 +421,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
 	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)
+	mux.HandleFunc("/api/policy/mode", s.handleAPIPolicyMode)
+	mux.HandleFunc("/api/policy/drop-rule", s.handleAPIPolicyDropRule)
 
 	// Statistics routes: the dedicated points-history page, its JSON data
 	// endpoint (range-filtered, downsampled for the chart), and a full-fidelity

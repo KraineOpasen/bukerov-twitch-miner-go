@@ -123,6 +123,14 @@ type MinuteWatcher struct {
 	// snapshotted at the start of each tick.
 	avoid AvoidChecker
 
+	// campaignScores publishes the campaign-policy engine's per-login score
+	// (higher = higher priority). The DROPS priority picker reads it lock-free
+	// to break ties among competing drop streamers by the active policy mode;
+	// nil (or an absent login) means no policy preference, preserving the
+	// pre-policy order. Advisory only — it never overrides the slot cap or the
+	// restricted-drop-first rule.
+	campaignScores atomic.Pointer[map[string]int]
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -1036,12 +1044,16 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			}
 
 		case config.PriorityDrops:
-			// Streamers holding a channel-restricted campaign go first:
-			// that progress can only ever be earned by watching this exact
-			// channel, whereas an unrestricted campaign's progress could in
-			// principle also be picked up by watching a different streamer
-			// with the same game.
-			for _, idx := range onlineIndexes {
+			// Within each DROPS pass, order competing streamers by the campaign
+			// policy engine's score (highest first) so the active mode
+			// (SMART/ENDING_SOONEST/…) decides between several farmable
+			// campaigns. With no policy scores published (GAME_ORDER/disabled)
+			// this is a no-op and the configured order is preserved. The
+			// restricted-first pass below is kept regardless, so the
+			// "channel-restricted drop only progresses here" invariant holds in
+			// every mode.
+			dropsOrder := w.orderByCampaignScore(onlineIndexes)
+			for _, idx := range dropsOrder {
 				if w.streamers[idx].DropsCondition() && w.streamers[idx].HasChannelRestrictedCampaign() {
 					if !watching[idx] {
 						watching[idx] = true
@@ -1052,7 +1064,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 					}
 				}
 			}
-			for _, idx := range onlineIndexes {
+			for _, idx := range dropsOrder {
 				if remainingSlots() <= 0 {
 					break
 				}

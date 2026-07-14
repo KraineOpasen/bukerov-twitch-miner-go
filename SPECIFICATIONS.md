@@ -1166,6 +1166,77 @@ farming" would alert on ordinary rotation/offline gaps.
 
 ---
 
+## Campaign Policy Engine
+
+`internal/policy` is a pure, deterministic, side-effect-free ranker (no I/O, no
+globals, no `time.Now()` — the caller passes `now` and pre-assembled
+`CampaignInput` snapshots). It never allocates a watch slot; it only orders
+candidates and produces an explainable decision per campaign. No opaque model.
+
+### Feasibility (estimate, not a guarantee)
+
+Per campaign: `timeUntilEnd`, `minutesToNextReward` (the lowest-threshold
+unmet drop's remaining), `minutesToCompleteAll` (the furthest milestone's
+remaining — the codebase's cumulative model), `canCompleteNextReward`,
+`canCompleteAll` (both against `timeUntilEnd − safetyReserve`), and a status:
+`SAFE` (finishes the chain with margin), `AT_RISK` (finishes but the margin is
+thin), `NEXT_REWARD_ONLY` (only the next reward is reachable), `IMPOSSIBLE`
+(not even the next reward, or already ended). The `NextRewardOnly` rule reduces
+the goal to just the next reward.
+
+### Modes
+
+`GAME_ORDER` (default, orders by configured game index — bit-identical to the
+pre-engine behavior), `ENDING_SOONEST`, `CLOSEST_TO_REWARD`, `LOW_AVAILABILITY`
+(fewest eligible live channels first), and `SMART`. `Normalize` upper-cases and
+falls back to `GAME_ORDER`; `ValidateConfig` canonicalizes the persisted value
+via the same validator (single source of the valid-mode set).
+
+### SMART scoring (itemized)
+
+A weighted sum of named factors, each rendered as a breakdown line: high
+priority (+200), channel-restricted (+100), ends within 6h (+80), reward
+closeness (tiered +60/+40/+20), sole eligible channel (+30), already-started
+(+40), already-in-a-slot stickiness (+10), unstable channel (up to −50), and a
+−40 penalty when only the next reward is reachable. Ranking ties break on
+campaign ID, so identical inputs always produce identical output.
+
+**Channel-stability sample gate.** The instability penalty is derived from the
+Stage 3 per-slot delivery accounting (`watcher.ReportStats`: successes/failures
+of minute-watched sends), but only participates once the sample count reaches a
+minimum; below it the factor is neutral (0 points) and labeled *insufficient
+data* — the same cold-start guard as the Stage 1 displacement tie-break, so a
+one- or two-observation window never masquerades as a confident 0%/100% signal.
+
+### Per-drop controls
+
+Keyed by `models.NormalizeRewardKey` (lowercased `gameID::dropName`), not a
+transient Twitch drop ID, so a rule survives recurring/regional variants that
+grant the identical reward. Flags: `Skip` (exclude), `HighPriority` (float to
+top in every mode), `AlwaysFinishStarted`, `NextRewardOnly`,
+`IgnoreSubscriberOnly` (a no-op — surfaced honestly in the UI — unless Twitch
+reports the subscriber-only flag, which it does not reliably expose on
+time-based drops). Stored in the top-level `dropRules` config map (like
+`autoRedeem`) so it round-trips through Settings untouched; the zero value
+resets the rule.
+
+### Integration (broker keeps slot authority)
+
+On the health-watchdog tick (no new goroutine, no Twitch calls — inputs come
+from already-synced state) the miner assembles inputs, ranks them, and
+publishes: per-login best scores to the watcher (`SetCampaignScores`, read
+lock-free) and per-game ranks to discovery (`SetGameRanks`). The watcher's
+`DROPS` priority orders competing drop streamers by score **within** its
+existing restricted-first passes — the channel-restricted-first invariant is
+never overridden — and discovery builds its cross-game pool in policy order.
+With no scores/ranks published (GAME_ORDER default, no rules) both paths are
+bit-identical to before. Config (`campaignPolicy`, `dropRules`) is
+runtime-updatable via the Drops page; the ranked decisions surface on the Drops
+page (feasibility badge + breakdown + per-drop controls) and in
+`/debug/snapshot` (`policy` section — mode, scores, factors; no secrets).
+
+---
+
 ## Chat Integration
 
 ### IRC Protocol

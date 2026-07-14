@@ -2,7 +2,19 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">Drops</h1>
-<p class="text-neutral-400 text-sm mb-6">Active Twitch Drop campaigns, ordered by current watch priority. Channel-only campaigns and those closest to their reward come first.</p>
+<p class="text-neutral-400 text-sm mb-4">Active Twitch Drop campaigns, ordered by the campaign policy. Feasibility badges are an estimate from current data, not a guaranteed drop.</p>
+
+<form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
+      class="flex items-center gap-2 text-sm mb-6">
+    <label class="text-neutral-400">Campaign policy</label>
+    <select name="mode" onchange="this.form.requestSubmit()"
+            class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+        {{range .PolicyModes}}
+        <option value="{{.}}" {{if eq . $.PolicyMode}}selected{{end}}>{{.}}</option>
+        {{end}}
+    </select>
+    <span class="text-xs text-neutral-500">GAME_ORDER keeps the configured game order (default).</span>
+</form>
 
 <!--
     Polls every 30 seconds (not the dashboard-wide RefreshMinutes) so the fresher
@@ -11,7 +23,7 @@
     re-renders campaign data the server already holds in memory; it does not
     trigger a Twitch sync.
 -->
-<section
+<section id="drops-queue"
     hx-get="/api/drops"
     hx-trigger="load, every 30s"
     hx-swap="innerHTML"

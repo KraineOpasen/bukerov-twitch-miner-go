@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
 
 func TestBuildDropCampaignViewsOrdering(t *testing.T) {
@@ -34,7 +36,7 @@ func TestBuildDropCampaignViewsOrdering(t *testing.T) {
 
 	views := buildDropCampaignViews([]*models.Campaign{
 		claimed, behindUnrestricted, aheadUnrestricted, restricted,
-	}, nil)
+	}, nil, nil)
 
 	got := make([]string, len(views))
 	for i, v := range views {
@@ -169,7 +171,7 @@ func TestBuildDropCampaignViewsMergesHealth(t *testing.T) {
 	snap := health.ProgressSnapshot{Enabled: true, Drops: []health.DropProgress{
 		{CampaignID: "camp-1", DropID: "d1", Status: health.ProgressRecovering, RecoveryStageName: "full_resync"},
 	}}
-	views := buildDropCampaignViews([]*models.Campaign{tracked, other}, dropHealthByCampaign(snap))
+	views := buildDropCampaignViews([]*models.Campaign{tracked, other}, dropHealthByCampaign(snap), nil)
 
 	byName := map[string]DropCampaignView{}
 	for _, v := range views {
@@ -250,5 +252,41 @@ func TestTemplatesRenderDropsAndCards(t *testing.T) {
 	// Drops page must parse against its base layout too.
 	if templates["drops.html"] == nil {
 		t.Fatal("drops.html page template not loaded")
+	}
+}
+
+// TestBuildDropPolicyByCampaign verifies the policy decision + per-drop rule
+// merge, including the reward key and the subscriber-only "known" flag that
+// drives the "no effect" marker.
+func TestBuildDropPolicyByCampaign(t *testing.T) {
+	game := &models.Game{ID: "g1", Name: "Game One"}
+	c := &models.Campaign{
+		ID: "c1", Name: "Camp", Game: game,
+		Drops: []*models.Drop{{Name: "Cool Skin", MinutesRequired: 60, CurrentMinutesWatched: 10}},
+	}
+	decisions := []policy.Decision{{
+		CampaignID: "c1", Name: "Camp", Total: 180, Status: policy.StatusAtRisk,
+		Factors: []policy.Factor{{Label: "channel-restricted campaign", Points: 100}},
+	}}
+	rules := map[string]config.DropRule{
+		"g1::cool skin": {Skip: true},
+	}
+	views := buildDropPolicyByCampaign([]*models.Campaign{c}, decisions, rules)
+
+	v := views["c1"]
+	if v == nil {
+		t.Fatal("expected a policy view for c1")
+	}
+	if v.Total != 180 || v.StatusLabel != "AT RISK" {
+		t.Fatalf("unexpected badge: %+v", v)
+	}
+	if v.RewardKey != "g1::cool skin" || !v.Skip {
+		t.Fatalf("expected the reward key and Skip rule merged, got key=%q skip=%v", v.RewardKey, v.Skip)
+	}
+	if v.SubscriberOnlyKnown {
+		t.Error("subscriber-only should be unknown (Twitch reported no flag)")
+	}
+	if len(v.Factors) != 1 || v.Factors[0].Points != 100 {
+		t.Fatalf("expected the breakdown factor merged, got %+v", v.Factors)
 	}
 }

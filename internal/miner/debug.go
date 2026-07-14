@@ -257,6 +257,30 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		snap.ProgressWatchdog = info
 	}
 
+	if mode, decisions := m.PolicySnapshot(); len(decisions) > 0 {
+		info := &debug.PolicyInfo{Mode: string(mode)}
+		for _, d := range decisions {
+			pd := debug.PolicyDecision{
+				Campaign:      d.Name,
+				Status:        string(d.Status),
+				Total:         d.Total,
+				Excluded:      d.Excluded,
+				ExcludeReason: d.ExcludeReason,
+				Feasibility: debug.PolicyFeasib{
+					MinutesToNextReward:   d.Feasibility.MinutesToNextReward,
+					MinutesToCompleteAll:  d.Feasibility.MinutesToCompleteAll,
+					CanCompleteNextReward: d.Feasibility.CanCompleteNextReward,
+					CanCompleteAll:        d.Feasibility.CanCompleteAll,
+				},
+			}
+			for _, f := range d.Factors {
+				pd.Factors = append(pd.Factors, debug.PolicyLine{Label: f.Label, Points: f.Points})
+			}
+			info.Decisions = append(info.Decisions, pd)
+		}
+		snap.Policy = info
+	}
+
 	snap.RecentEvents = events.Recent(snapshotRecentEvents)
 	return snap
 }

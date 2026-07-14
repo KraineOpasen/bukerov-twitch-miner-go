@@ -235,6 +235,68 @@ func TestLoadConfigWatchdogDefaultsOnForExistingConfigs(t *testing.T) {
 	}
 }
 
+func TestValidateConfigNormalizesCampaignPolicy(t *testing.T) {
+	cases := map[string]string{
+		"":                  "GAME_ORDER", // unset → behavior-preserving default
+		"smart":             "SMART",      // lower-cased normalizes
+		"  ending_soonest ": "ENDING_SOONEST",
+		"nonsense":          "GAME_ORDER", // unknown falls back
+	}
+	for in, want := range cases {
+		cfg := DefaultConfig()
+		cfg.CampaignPolicy = in
+		ValidateConfig(&cfg)
+		if cfg.CampaignPolicy != want {
+			t.Errorf("policy %q normalized to %q, want %q", in, cfg.CampaignPolicy, want)
+		}
+	}
+}
+
+func TestLoadConfigParsesDropRules(t *testing.T) {
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"campaignPolicy": "SMART",
+		"dropRules": {
+			"g1::cool skin": {"skip": true},
+			"g2::rare emote": {"highPriority": true, "nextRewardOnly": true}
+		}
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfg.CampaignPolicy != "SMART" {
+		t.Errorf("expected SMART policy preserved, got %q", cfg.CampaignPolicy)
+	}
+	if len(cfg.DropRules) != 2 {
+		t.Fatalf("expected 2 drop rules, got %d", len(cfg.DropRules))
+	}
+	if !cfg.DropRules["g1::cool skin"].Skip {
+		t.Error("expected the skip rule to parse")
+	}
+	r := cfg.DropRules["g2::rare emote"]
+	if !r.HighPriority || !r.NextRewardOnly || r.Skip {
+		t.Errorf("unexpected rule parse: %+v", r)
+	}
+}
+
+func TestLoadConfigDropRulesDefaultEmpty(t *testing.T) {
+	// Backward compatibility: a config written before per-drop rules existed
+	// loads with no rules and the behavior-preserving default policy.
+	path := writeTestConfig(t, `{"username": "test"}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if len(cfg.DropRules) != 0 {
+		t.Errorf("expected no drop rules by default, got %v", cfg.DropRules)
+	}
+	if cfg.CampaignPolicy != "GAME_ORDER" {
+		t.Errorf("expected default GAME_ORDER policy, got %q", cfg.CampaignPolicy)
+	}
+}
+
 func TestLoadConfigDirectoryGamesDefaultEmpty(t *testing.T) {
 	// Backward compatibility: configs written before directory discovery
 	// existed must load with the subsystem fully disabled.
