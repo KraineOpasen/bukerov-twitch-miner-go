@@ -597,6 +597,52 @@ signal reports the same as `OK`/`STALLED`.
 > conservatively confirmed stall. Accrual correctness is the miner's first
 > priority, so it self-monitors out of the box.
 
+### Campaign Policy Engine
+
+When several drop campaigns are farmable at once, the **campaign policy engine**
+(`internal/policy`, pure and deterministic — no opaque model) decides which to
+prioritize, and explains every decision. Modes:
+
+- `GAME_ORDER` — the configured game order (**default**; behavior-preserving).
+- `ENDING_SOONEST` — campaigns closest to ending first.
+- `CLOSEST_TO_REWARD` — fewest minutes to the next reward first.
+- `LOW_AVAILABILITY` — campaigns with the fewest eligible live channels first
+  (grab the scarce ones before they vanish).
+- `SMART` — a weighted, fully itemized score.
+
+Every campaign card on the Drops page shows a **feasibility** badge —
+`SAFE` / `AT_RISK` / `NEXT_REWARD_ONLY` / `IMPOSSIBLE`, computed from time left
+vs. minutes to the next reward and to the whole chain, with a safety reserve —
+and, in SMART mode, an expandable score breakdown:
+
+```
++100 channel-restricted campaign
+ +80 ends in under 6h
+ +60 next reward in 22 min
+ +30 only one eligible live channel
+ -50 unstable channel (0% delivery)
+Total: 220
+```
+
+> Feasibility is an **estimate** from current data, never a guaranteed drop.
+
+The "unstable channel" factor draws on the Stage 3 per-slot delivery accounting,
+and — like the Stage 1 cold-start tie-break — only participates once it has a
+minimum number of watch reports; below that it is neutral and labeled
+*insufficient data* rather than swinging to a confident extreme on one or two
+observations.
+
+**Per-drop controls** (Drops-page modal, keyed by normalized reward identity so
+they survive recurring/regional campaign variants): *Skip*, *High priority*,
+*Always finish started*, *Next reward only*, *Ignore subscriber-only*, and
+*Reset rule*. Ignore subscriber-only shows a visible "no effect" marker when
+Twitch never reported the flag.
+
+The engine only **ranks** candidates; the unified slot broker keeps sole
+authority over the two watch slots, and the channel-restricted-first rule is
+never overridden. In `GAME_ORDER` with no per-drop rules the ordering is
+bit-identical to before the engine existed.
+
 ### Priority System
 
 Within the configured streamer list, up to 2 streams are watched

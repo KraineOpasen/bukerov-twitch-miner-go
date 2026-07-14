@@ -27,7 +27,37 @@ type Snapshot struct {
 	Discovery        *DiscoveryInfo        `json:"discovery,omitempty"`
 	Health           *HealthInfo           `json:"health,omitempty"`
 	ProgressWatchdog *ProgressWatchdogInfo `json:"progressWatchdog,omitempty"`
+	Policy           *PolicyInfo           `json:"policy,omitempty"`
 	RecentEvents     []events.Event        `json:"recentEvents"`
+}
+
+// PolicyInfo is the campaign-policy engine's ranked decisions in the debug
+// snapshot. Contains no secrets — mode, campaign names, scores, and factors.
+type PolicyInfo struct {
+	Mode      string           `json:"mode"`
+	Decisions []PolicyDecision `json:"decisions"`
+}
+
+type PolicyDecision struct {
+	Campaign      string       `json:"campaign"`
+	Status        string       `json:"status"`
+	Total         int          `json:"total"`
+	Excluded      bool         `json:"excluded,omitempty"`
+	ExcludeReason string       `json:"excludeReason,omitempty"`
+	Factors       []PolicyLine `json:"factors,omitempty"`
+	Feasibility   PolicyFeasib `json:"feasibility"`
+}
+
+type PolicyLine struct {
+	Label  string `json:"label"`
+	Points int    `json:"points"`
+}
+
+type PolicyFeasib struct {
+	MinutesToNextReward   int  `json:"minutesToNextReward"`
+	MinutesToCompleteAll  int  `json:"minutesToCompleteAll"`
+	CanCompleteNextReward bool `json:"canCompleteNextReward"`
+	CanCompleteAll        bool `json:"canCompleteAll"`
 }
 
 // ProgressWatchdogInfo is the drop-progress watchdog's per-drop state plus

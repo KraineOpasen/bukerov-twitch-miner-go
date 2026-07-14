@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -52,6 +53,7 @@ type Miner struct {
 	canary           *health.Canary
 	avoidList        *health.AvoidList
 	progressWatchdog *health.ProgressWatchdog
+	policySnap       atomic.Pointer[policySnapshot]
 	analyticsSvc     *analytics.Service
 	webServer        *web.Server
 	notifications    *notifications.Manager
@@ -431,6 +433,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.webServer.SetDiscoveryProvider(m.discovery)
 		m.webServer.SetHealthProvider(m)
 		m.webServer.SetDropProgressProvider(m)
+		m.webServer.SetPolicyProvider(m)
 	}
 
 	if m.config.ClaimDropsOnStartup {
@@ -771,6 +774,7 @@ func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 
 			now := time.Now()
 			m.refreshHealthCenter(now)
+			m.refreshPolicy(now)
 			apiStale := m.client != nil && now.Sub(m.client.LastSuccessAt()) > threshold
 			pubsubStale := m.wsPool != nil && !m.wsPool.LastActivity().IsZero() && now.Sub(m.wsPool.LastActivity()) > threshold
 

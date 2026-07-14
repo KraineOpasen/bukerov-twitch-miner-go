@@ -10,6 +10,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -23,7 +24,13 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
 	debugURL := s.debugURL
+	policyProvider := s.policyProvider
 	s.mu.RUnlock()
+
+	mode := string(policy.DefaultMode)
+	if policyProvider != nil {
+		mode, _ = policyProvider.CurrentCampaignPolicy()
+	}
 
 	data := DropsPageData{
 		Username:       s.username,
@@ -31,6 +38,11 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 		Version:        version.Version,
 		DiscordEnabled: discordEnabled,
 		DebugURL:       debugURL,
+		PolicyMode:     mode,
+		PolicyModes: []string{
+			string(policy.ModeGameOrder), string(policy.ModeEndingSoonest),
+			string(policy.ModeClosestToReward), string(policy.ModeLowAvailability), string(policy.ModeSmart),
+		},
 	}
 	s.renderPage(w, "drops.html", data)
 }
@@ -38,9 +50,17 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 // handleAPIDrops renders the campaign-queue partial (also used for htmx
 // auto-refresh so progress stays live without a full page reload).
 func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
+	s.renderDropsList(w)
+}
+
+// renderDropsList builds and renders the campaign-queue partial, merging the
+// progress-watchdog health badges and the campaign-policy decisions. Shared by
+// the drops poll and the policy mode / per-drop-rule POST handlers.
+func (s *Server) renderDropsList(w http.ResponseWriter) {
 	s.mu.RLock()
 	provider := s.campaignsProvider
 	progressProvider := s.dropProgressProvider
+	policyProvider := s.policyProvider
 	s.mu.RUnlock()
 
 	var campaigns []*models.Campaign
@@ -53,7 +73,14 @@ func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 		progress = progressProvider.DropProgress()
 	}
 
-	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress))}
+	var policyByID map[string]*DropPolicyView
+	if policyProvider != nil {
+		_, decisions := policyProvider.PolicySnapshot()
+		_, rules := policyProvider.CurrentCampaignPolicy()
+		policyByID = buildDropPolicyByCampaign(campaigns, decisions, rules)
+	}
+
+	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress), policyByID)}
 
 	w.Header().Set("Content-Type", "text/html")
 	tmpl := s.templates["partials"]
@@ -73,7 +100,7 @@ func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 // progress can only ever be earned on their own channel) outrank unrestricted
 // ones, and within those groups the campaign closest to its reward — then the
 // one ending soonest — comes first.
-func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]*DropHealthView) []DropCampaignView {
+func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]*DropHealthView, policyByID map[string]*DropPolicyView) []DropCampaignView {
 	ordered := make([]*models.Campaign, len(campaigns))
 	copy(ordered, campaigns)
 
@@ -104,6 +131,7 @@ func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]
 	for _, c := range ordered {
 		view := buildDropCampaignView(c)
 		view.Health = healthByID[c.ID]
+		view.Policy = policyByID[c.ID]
 		views = append(views, view)
 	}
 	return views

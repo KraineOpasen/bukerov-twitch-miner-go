@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
@@ -136,6 +137,7 @@ type Manager struct {
 	tracked    TrackedLoginsProvider
 	slotStatus SlotStatus
 	avoid      AvoidChecker
+	gameRanks  atomic.Pointer[map[string]int]
 	settings   config.RateLimitSettings
 
 	games []string
@@ -187,6 +189,43 @@ func (m *Manager) SetAvoidChecker(a AvoidChecker) {
 	m.mu.Lock()
 	m.avoid = a
 	m.mu.Unlock()
+}
+
+// SetGameRanks publishes the campaign-policy engine's cross-game ordering
+// (keyed by lowercase game name; lower rank = higher priority) so the
+// discovered-channel pool is built in policy order rather than the raw
+// configured list order. nil (GAME_ORDER/disabled) preserves the configured
+// order exactly. Lock-free for the reader; safe for concurrent use.
+func (m *Manager) SetGameRanks(ranks map[string]int) {
+	if ranks == nil {
+		m.gameRanks.Store(nil)
+		return
+	}
+	m.gameRanks.Store(&ranks)
+}
+
+// orderGamesByPolicy returns games reordered by the published policy ranks
+// (stable; games absent from the map keep their configured relative order,
+// sorted after ranked ones). With no ranks published it returns games
+// unchanged, so the configured order is bit-identical.
+func (m *Manager) orderGamesByPolicy(games []string) []string {
+	ranksPtr := m.gameRanks.Load()
+	if ranksPtr == nil {
+		return games
+	}
+	ranks := *ranksPtr
+	rank := func(g string) int {
+		if r, ok := ranks[strings.ToLower(g)]; ok {
+			return r
+		}
+		return 1 << 30 // unranked games sort last, keeping their relative order
+	}
+	ordered := make([]string, len(games))
+	copy(ordered, games)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return rank(ordered[i]) < rank(ordered[j])
+	})
+	return ordered
 }
 
 // isAvoided reports whether the watchdog currently excludes the login.
@@ -307,7 +346,7 @@ func (m *Manager) syncLoop() {
 // the pool comes up empty it returns a short retry interval; otherwise the
 // campaign-sync cadence applies.
 func (m *Manager) syncOnce() time.Duration {
-	games := m.getGames()
+	games := m.orderGamesByPolicy(m.getGames())
 
 	m.mu.RLock()
 	regularInterval := time.Duration(m.settings.CampaignSyncInterval) * time.Minute

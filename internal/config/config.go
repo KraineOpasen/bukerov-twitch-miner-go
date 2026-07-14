@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
 
 type Priority string
@@ -53,6 +54,42 @@ type Config struct {
 	// the streamer-page Rewards panel. Absent/disabled entries mean no
 	// auto-redeem.
 	AutoRedeem map[string]AutoRedeemConfig `json:"autoRedeem,omitempty"`
+
+	// CampaignPolicy selects the drop-campaign prioritization strategy
+	// (GAME_ORDER / ENDING_SOONEST / CLOSEST_TO_REWARD / LOW_AVAILABILITY /
+	// SMART). Empty or unknown normalizes to GAME_ORDER, which preserves the
+	// pre-policy behavior (configured game order), so the engine changes
+	// nothing until the operator opts into another mode.
+	CampaignPolicy string `json:"campaignPolicy,omitempty"`
+
+	// DropRules holds per-drop operator overrides keyed by the NORMALIZED
+	// reward identity (models.NormalizeRewardKey = lowercased "gameID::dropName"),
+	// not a transient Twitch drop ID, so a rule survives recurring/regional
+	// campaign variants that grant the identical reward. Top-level map (like
+	// AutoRedeem) so it round-trips through Settings untouched and is edited
+	// from the Drops-page per-drop controls. Absent key = no override.
+	DropRules map[string]DropRule `json:"dropRules,omitempty"`
+}
+
+// DropRule is the per-drop operator override, keyed by normalized reward
+// identity. The zero value (all false) is a no-op, so an absent or reset rule
+// leaves the policy engine's defaults in force.
+type DropRule struct {
+	// Skip excludes the reward from farming entirely (like a targeted
+	// blacklist entry, but keyed by reward identity rather than a keyword).
+	Skip bool `json:"skip,omitempty"`
+	// HighPriority floats the campaign to the top under every policy mode.
+	HighPriority bool `json:"highPriority,omitempty"`
+	// AlwaysFinishStarted keeps an already-started campaign prioritized so it
+	// is carried to completion instead of being abandoned mid-chain.
+	AlwaysFinishStarted bool `json:"alwaysFinishStarted,omitempty"`
+	// NextRewardOnly limits the feasibility goal (and farming intent) to the
+	// next reward rather than the whole drop chain.
+	NextRewardOnly bool `json:"nextRewardOnly,omitempty"`
+	// IgnoreSubscriberOnly opts into farming a subscriber-only reward. It has
+	// no effect unless Twitch reports the subscriber-only flag for the drop
+	// (surfaced honestly in the UI as "no effect" when the data is absent).
+	IgnoreSubscriberOnly bool `json:"ignoreSubscriberOnly,omitempty"`
 }
 
 // AutoRedeemConfig is the per-streamer opt-in for automatically redeeming
@@ -542,4 +579,9 @@ func ValidateConfig(config *Config) {
 	} else if config.Health.WatchdogRearmHours > 48 {
 		config.Health.WatchdogRearmHours = 48
 	}
+
+	// Campaign policy: canonicalize to a known mode (upper-cased; empty or
+	// unknown → GAME_ORDER, the behavior-preserving default). Reuses the
+	// engine's own validator so the valid-mode set has a single source.
+	config.CampaignPolicy = string(policy.Normalize(config.CampaignPolicy))
 }

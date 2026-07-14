@@ -19,6 +19,14 @@ type Drop struct {
 	IsClaimed             bool
 	StartAt               time.Time
 	EndAt                 time.Time
+
+	// SubscriberOnly is Twitch's best-effort subscriber-only flag for the drop;
+	// SubscriberOnlyKnown records whether Twitch actually reported it. The
+	// campaign policy's "Ignore subscriber-only" control honestly shows "no
+	// effect" when the flag is not known, rather than pretending to gate on
+	// data the API never provided.
+	SubscriberOnly      bool
+	SubscriberOnlyKnown bool
 }
 
 func NewDropFromGQL(data map[string]interface{}) *Drop {
@@ -59,6 +67,17 @@ func NewDropFromGQL(data map[string]interface{}) *Drop {
 	if endAt, ok := data["endAt"].(string); ok {
 		if t, err := time.Parse(time.RFC3339, endAt); err == nil {
 			drop.EndAt = t
+		}
+	}
+
+	// Best-effort subscriber-only flag: Twitch does not reliably expose it on
+	// time-based drops, so try a couple of plausible keys and only mark it
+	// "known" when one is actually present.
+	for _, key := range []string{"isSubscriberOnly", "isSubscriptionOnly", "subscriberOnly"} {
+		if v, ok := data[key].(bool); ok {
+			drop.SubscriberOnly = v
+			drop.SubscriberOnlyKnown = true
+			break
 		}
 	}
 

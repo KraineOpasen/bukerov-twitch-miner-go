@@ -301,6 +301,11 @@ type DropsPageData struct {
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
+
+	// PolicyMode is the active campaign-policy mode; PolicyModes are the
+	// selectable options for the mode selector.
+	PolicyMode  string
+	PolicyModes []string
 }
 
 type StatisticsPageData struct {
@@ -376,6 +381,44 @@ type DropCampaignView struct {
 	// Health is the progress watchdog's state for the campaign's current drop
 	// (nil when the watchdog is disabled or does not track this campaign).
 	Health *DropHealthView
+
+	// Policy is the campaign-policy engine's decision + per-drop controls for
+	// this campaign's current drop (nil when no decision was published).
+	Policy *DropPolicyView
+}
+
+// PolicyFactorView is one line of a policy decision's score breakdown.
+type PolicyFactorView struct {
+	Points int
+	Label  string
+}
+
+// DropPolicyView is the campaign-policy badge and per-drop controls on a Drops
+// card. Feasibility is an ESTIMATE, never a guaranteed drop.
+type DropPolicyView struct {
+	Status        string // SAFE / AT_RISK / NEXT_REWARD_ONLY / IMPOSSIBLE
+	StatusColor   string // inline hex
+	StatusLabel   string // human label
+	Total         int
+	Excluded      bool
+	ExcludeReason string
+	Factors       []PolicyFactorView
+
+	TimeUntilEnd          string
+	MinutesToNextReward   int
+	CanCompleteNextReward bool
+	CanCompleteAll        bool
+
+	// Per-drop controls for the campaign's current drop, keyed by reward key.
+	RewardKey            string
+	Skip                 bool
+	HighPriority         bool
+	AlwaysFinishStarted  bool
+	NextRewardOnly       bool
+	IgnoreSubscriberOnly bool
+	// SubscriberOnlyKnown is false when Twitch never reported the flag, so the
+	// UI shows the "Ignore subscriber-only" control as having no effect.
+	SubscriberOnlyKnown bool
 }
 
 type DropsListData struct {

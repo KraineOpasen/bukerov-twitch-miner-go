@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -89,6 +90,35 @@ func (w *MinuteWatcher) SetAvoidChecker(a AvoidChecker) {
 	w.mu.Lock()
 	w.avoid = a
 	w.mu.Unlock()
+}
+
+// SetCampaignScores publishes the campaign-policy engine's per-login scores
+// (higher = higher priority) for the DROPS priority tie-break. Lock-free for
+// the reader (the loop goroutine); pass nil to clear. Safe for concurrent use.
+func (w *MinuteWatcher) SetCampaignScores(scores map[string]int) {
+	if scores == nil {
+		w.campaignScores.Store(nil)
+		return
+	}
+	w.campaignScores.Store(&scores)
+}
+
+// orderByCampaignScore returns a copy of the streamer indexes ordered by the
+// published campaign-policy score (highest first, stable). With no scores
+// published it returns the input order unchanged, so the pre-policy DROPS
+// order is bit-identical. Runs on the loop goroutine.
+func (w *MinuteWatcher) orderByCampaignScore(indexes []int) []int {
+	scoresPtr := w.campaignScores.Load()
+	if scoresPtr == nil {
+		return indexes
+	}
+	scores := *scoresPtr
+	ordered := make([]int, len(indexes))
+	copy(ordered, indexes)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return scores[w.streamers[ordered[i]].Username] > scores[w.streamers[ordered[j]].Username]
+	})
+	return ordered
 }
 
 // RequestSessionRefresh stages a watch-session refresh for a channel. The
