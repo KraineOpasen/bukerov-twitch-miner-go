@@ -105,6 +105,12 @@ type DropsTracker struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// intervalUnit scales the configured sync intervals (minutes in
+	// production). Set once at construction and never mutated, so both loops
+	// read it without the lock; tests set it to a sub-second unit to exercise
+	// the cadence without waiting real minutes.
+	intervalUnit time.Duration
+
 	mu sync.RWMutex
 }
 
@@ -120,6 +126,7 @@ func NewDropsTracker(
 		settings:      settings,
 		dropBlacklist: dropBlacklist,
 		resync:        make(chan struct{}, 1),
+		intervalUnit:  time.Minute,
 	}
 }
 
@@ -254,18 +261,27 @@ func (d *DropsTracker) recordProgressSync(err error) {
 }
 
 func (d *DropsTracker) loop() {
-	syncInterval := d.campaignSyncInterval()
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
 
 	d.syncCampaigns()
 
-	ticker := time.NewTicker(syncInterval)
-	defer ticker.Stop()
-
 	for {
+		// Re-read the interval each cycle (fresh timer per iteration) so a
+		// runtime UpdateSettings change to CampaignSyncInterval is adopted on the
+		// next sync, instead of being pinned to the value read once at startup.
+		// This mirrors progressLoop below and the "snapshot the current settings
+		// at the start of each cycle" pattern the watcher (applyPendingSettings)
+		// and the health loops already use. A fixed time.Ticker created once at
+		// startup — the previous implementation — silently ignored the change,
+		// contradicting UpdateSettings' documented contract.
+		timer := time.NewTimer(d.campaignSyncInterval())
 		select {
-		case <-d.ctx.Done():
+		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			d.syncCampaigns()
 		}
 	}
@@ -306,7 +322,7 @@ func (d *DropsTracker) campaignSyncInterval() time.Duration {
 	if mins <= 0 {
 		mins = 60
 	}
-	return time.Duration(mins) * time.Minute
+	return time.Duration(mins) * d.intervalUnit
 }
 
 // progressSyncInterval returns the configured lightweight progress-sync
@@ -319,7 +335,7 @@ func (d *DropsTracker) progressSyncInterval() time.Duration {
 	if mins <= 0 {
 		mins = 2
 	}
-	return time.Duration(mins) * time.Minute
+	return time.Duration(mins) * d.intervalUnit
 }
 
 // syncProgress runs a lightweight, inventory-only refresh of the watched-minute
