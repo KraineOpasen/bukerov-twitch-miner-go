@@ -76,6 +76,18 @@ WORKDIR /
 # Default config path
 ENV CONFIG_PATH=/config/config.json
 
+# The miner binds its dashboard to 127.0.0.1 by default, which inside a
+# container would make published ports (-p 5000:5000) unreachable, so the
+# image explicitly binds all container interfaces. Actual network exposure is
+# then decided by the container runtime's port publishing (docker -p /
+# compose ports / the TrueNAS SCALE or unraid app UI). Because this is a
+# non-loopback bind, the miner REQUIRES DASHBOARD_USERNAME and
+# DASHBOARD_PASSWORD to be set and refuses to start without them; set
+# DASHBOARD_INSECURE_NO_AUTH=true instead to explicitly accept an
+# unauthenticated dashboard on a trusted network.
+ENV DASHBOARD_HOST=0.0.0.0
+EXPOSE 5000
+
 # Auto-update is enabled by default for the container image: this image is
 # excluded from Watchtower (label com.centurylinklabs.watchtower.enable=false),
 # so the miner keeps itself current by downloading new GitHub releases and

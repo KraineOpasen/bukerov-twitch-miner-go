@@ -377,9 +377,15 @@ func DefaultLoggerSettings() LoggerSettings {
 	}
 }
 
+// DefaultAnalyticsSettings binds the dashboard to loopback by default:
+// exposing it beyond the local machine must be an explicit choice (set
+// analytics.host in config.json or the DASHBOARD_HOST env var), and a
+// non-loopback bind additionally requires DASHBOARD_USERNAME/
+// DASHBOARD_PASSWORD (or the explicit DASHBOARD_INSECURE_NO_AUTH=true
+// opt-out) - see internal/web.
 func DefaultAnalyticsSettings() AnalyticsSettings {
 	return AnalyticsSettings{
-		Host:           "0.0.0.0",
+		Host:           "127.0.0.1",
 		Port:           5000,
 		Refresh:        5,
 		DaysAgo:        7,

@@ -243,7 +243,7 @@ internal/
 | `watcher` | Minute-watched simulation. Reports viewing activity to Twitch. Context-based cancellation. |
 | `drops` | Game drops tracking. Campaign sync and drop claiming. Context-based cancellation. |
 | `analytics` | Data layer for points, annotations, chat messages. No HTTP. |
-| `web` | HTTP server for dashboard UI. Optional basic auth via environment variables. |
+| `web` | HTTP server for dashboard UI. Loopback bind by default; fail-closed startup on non-loopback bind without Basic Auth; same-origin (CSRF) middleware and security headers. See "Dashboard Security Model". |
 | `notifications` | Discord bot integration. Mentions, point goals, online/offline alerts. |
 | `database` | SQLite database layer. Connection management, migrations. |
 | `config` | Configuration loading/saving. Defaults and validation. |
@@ -1831,3 +1831,47 @@ PointRule
 - Bot detection possible via integrity token
 - Uses TV client to appear as legitimate device
 - Discord bot tokens should be kept secret and not shared
+
+### Dashboard Security Model (`internal/web/security.go`)
+
+The dashboard is an admin surface (it can spend channel points and change
+persisted settings), so the web server enforces a fail-closed exposure model:
+
+**Bind resolution.** Default bind is `127.0.0.1` (config default in
+`DefaultAnalyticsSettings`). Effective host = `DASHBOARD_HOST` env var if set,
+else `analytics.host` from config.json. The env override is never persisted
+back into config.json. The Docker image sets `DASHBOARD_HOST=0.0.0.0` so
+published container ports keep working; actual LAN exposure is then governed
+by the container runtime's port publishing (Docker `-p`, TrueNAS SCALE /
+unraid app UI).
+
+**Startup gate.** `Server.Start()` returns an error — and `cmd/miner` exits —
+when the resolved bind is non-loopback and `DASHBOARD_USERNAME`/
+`DASHBOARD_PASSWORD` are unset, unless `DASHBOARD_INSECURE_NO_AUTH=true`
+explicitly (and loudly, via a startup warning) opts out. Loopback binds never
+require auth.
+
+**Middleware chain** (outermost first), built in `Server.handler()`:
+
+1. `securityHeadersMiddleware` — `X-Content-Type-Options: nosniff`,
+   `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, and a CSP
+   (`'self'` + `'unsafe-inline'` for the inline template scripts and vendored
+   htmx/ApexCharts; `img-src` additionally allows `https:` for Twitch CDN
+   art; `connect-src 'self'` covers fetch + SSE).
+2. `basicAuthMiddleware` (only when credentials are configured) — HTTP Basic
+   over the entire mux, constant-time credential comparison
+   (`crypto/subtle`).
+3. `csrfProtectMiddleware` — same-origin enforcement for every non-GET/HEAD/
+   OPTIONS request: `Sec-Fetch-Site` when present must be
+   `same-origin`/`none`; otherwise `Origin` (then `Referer`) must match the
+   request `Host` or an entry in `DASHBOARD_TRUSTED_ORIGINS`
+   (comma-separated, for reverse proxies that rewrite `Host`); requests with
+   none of these headers pass (non-browser clients — browsers always attach
+   origin provenance to cross-site state-changing requests). `Origin: null`
+   is rejected. GETs — including the SSE stream — are untouched.
+
+**Server timeouts.** `ReadHeaderTimeout: 10s`, `IdleTimeout: 120s`,
+`MaxHeaderBytes: 64KB`. `ReadTimeout`/`WriteTimeout` are deliberately unset:
+`/api/miner-status/stream` is a long-lived SSE response a blanket deadline
+would kill. The localhost-only debug server gets the same header/idle
+timeouts.

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/subtle"
 	"embed"
 	"fmt"
 	"html/template"
@@ -333,7 +334,9 @@ func basicAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != expectedUser || pass != expectedPass {
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(expectedUser)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(expectedPass)) == 1
+		if !ok || !userOK || !passOK {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Twitch Miner Dashboard"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -343,17 +346,34 @@ func basicAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) Start() {
+// Start resolves the effective bind address, enforces the fail-closed
+// exposure rules (see security.go), and begins serving in the background.
+// A non-loopback bind without credentials is a startup error, not a warning.
+func (s *Server) Start() error {
+	host, source := resolveBindHost(s.host)
+	s.host = host
+	if err := validateBindSecurity(host); err != nil {
+		return err
+	}
+
 	handler := s.handler()
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	slog.Info("Web server bind resolved", "host", host, "source", source, "authEnabled", authEnabled())
 	if authEnabled() {
 		slog.Info("Web server authentication enabled")
 	}
 
+	// No ReadTimeout/WriteTimeout: /api/miner-status/stream is a long-lived
+	// SSE response that a blanket connection deadline would kill.
+	// ReadHeaderTimeout and IdleTimeout still shut down slow-header and idle
+	// connections (slowloris protection).
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	slog.Info("Web server starting", "url", "http://"+addr+"/")
@@ -363,6 +383,7 @@ func (s *Server) Start() {
 			slog.Error("Web server error", "error", err)
 		}
 	}()
+	return nil
 }
 
 // handler builds the full route mux (and wraps it in basic-auth middleware
@@ -462,10 +483,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/notifications/test", s.handleAPINotificationsTest)
 	mux.HandleFunc("/api/test-notification", s.handleAPITestNotification)
 
+	// Middleware chain (outermost first): security headers on every
+	// response, then Basic Auth when configured, then the same-origin check
+	// guarding all state-changing requests.
+	h := http.Handler(csrfProtectMiddleware(mux))
 	if authEnabled() {
-		return basicAuthMiddleware(mux)
+		h = basicAuthMiddleware(h)
 	}
-	return mux
+	return securityHeadersMiddleware(h)
 }
 
 func (s *Server) Stop() {

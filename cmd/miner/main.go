@@ -97,7 +97,12 @@ func main() {
 
 		webServer = web.NewServerEarly(cfg.Analytics, cfg.Username, dbBasePath, analyticsSvc)
 		if webServer != nil {
-			webServer.Start()
+			// Fail-closed: a non-loopback bind without credentials aborts
+			// startup instead of silently serving an open dashboard.
+			if err := webServer.Start(); err != nil {
+				slog.Error("Refusing to start", "error", err)
+				os.Exit(1)
+			}
 			defer webServer.Stop()
 		}
 	}
