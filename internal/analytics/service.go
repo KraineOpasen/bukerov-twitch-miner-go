@@ -107,6 +107,15 @@ func (s *Service) maybePrune() {
 	}
 }
 
+// RecordBet persists a resolved prediction bet for ROI analytics. Errors are
+// logged rather than propagated: a failed analytics write must never disrupt the
+// betting/pubsub path that produced the result.
+func (s *Service) RecordBet(b BetRecord) {
+	if err := s.repo.RecordBet(b); err != nil {
+		slog.Error("Failed to record prediction bet", "streamer", b.Streamer, "event", b.EventID, "error", err)
+	}
+}
+
 func (s *Service) RecordChatMessage(streamer string, username, displayName, message, emotes, badges, color string) error {
 	msg := ChatMessage{
 		Username:    username,

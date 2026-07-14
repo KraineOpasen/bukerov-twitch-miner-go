@@ -376,10 +376,31 @@ When `enableAnalytics` is true, the miner provides a web dashboard at http://loc
 
 - **Dashboard**: Overview of all streamers with current points and today's earnings
 - **Streamer Pages**: Historical point data with interactive charts
+- **Statistics**: Points-history chart plus **Prediction ROI analytics** (see below)
 - **Drops**: Drop campaign queue with dual progress bars (per-drop and per-campaign) and a per-campaign detail modal
 - **Settings**: Runtime configuration that can be changed without restart
 - **Notifications**: Discord notification management (when Discord is enabled)
 - **Chat Logs**: Searchable chat history per streamer (when enabled)
+
+### Prediction ROI Analytics
+
+The **Statistics** page includes a read-only ROI report for prediction betting
+(both auto-bets and manual dashboard bets). Every resolved bet is persisted with
+its stake, payout, net, strategy, and the chosen outcome's odds, so the metrics
+survive restarts and cover any window.
+
+Metrics: bet count, wins, losses, refunds, win rate, total wagered, net profit,
+ROI, average wager, average win, and maximum drawdown, plus breakdowns of net
+profit / ROI **by streamer**, **by strategy**, and **by odds range**
+(`<1.5 / 1.5–2 / 2–3 / 3–5 / 5+`). Filter by streamer, strategy, and period
+(**7 / 30 / 90 days** or **lifetime**), and export the raw bets as JSON.
+
+Conventions: win rate, average wager, and total wagered count **settled** bets
+only (win + loss); a refund returns the stake, so it is counted separately and
+excluded from those denominators. ROI = net profit ÷ total wagered. Maximum
+drawdown is the largest peak-to-trough drop of the cumulative net-profit curve.
+The report is **read-only** — it never places, changes, or auto-disables a bet
+or strategy.
 
 ### Managing Settings via Web Dashboard
 

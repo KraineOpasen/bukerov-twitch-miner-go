@@ -317,6 +317,9 @@ type StatisticsPageData struct {
 	// Streamers is the list of streamer names with recorded history, used to
 	// populate the page's streamer selector.
 	Streamers []string
+	// BetStrategies are the strategies that appear in recorded prediction bets,
+	// used to populate the ROI strategy filter (empty when no bets exist yet).
+	BetStrategies []string
 }
 
 // DropDetailView is one drop within a campaign, rendered in the Drops-page

@@ -266,6 +266,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.wsPool.SetMessageHandler(m.handlePubSubMessage)
 	m.wsPool.SetStatusHandler(m.handleStatusChange)
 	m.wsPool.SetAuthErrorHandler(func(error) { m.handleAuthError() })
+	if m.analyticsSvc != nil {
+		m.wsPool.SetBetResultHandler(m.recordBetResult)
+	}
 
 	if m.config.EnableAnalytics {
 		if m.externalAnalytics && m.analyticsSvc != nil {
@@ -726,6 +729,28 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 			}
 		}
 	}
+}
+
+// recordBetResult persists a settled prediction bet emitted by the pubsub pool
+// into analytics for ROI reporting. It maps the pool's transport-local BetResult
+// to analytics.BetRecord; the analytics write logs its own errors and never
+// blocks the pool.
+func (m *Miner) recordBetResult(r pubsub.BetResult) {
+	if m.analyticsSvc == nil {
+		return
+	}
+	m.analyticsSvc.RecordBet(analytics.BetRecord{
+		EventID:    r.EventID,
+		Streamer:   r.Streamer,
+		Timestamp:  r.Timestamp.UnixMilli(),
+		Strategy:   r.Strategy,
+		ResultType: r.ResultType,
+		Placed:     r.Placed,
+		Won:        r.Won,
+		Gained:     r.Gained,
+		Odds:       r.Odds,
+		Manual:     r.Manual,
+	})
 }
 
 // handleAuthError is called the first time a Twitch API request or PubSub

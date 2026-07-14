@@ -52,12 +52,16 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	var names []string
+	var strategies []string
 	if s.analytics != nil {
 		if streamers, err := s.analytics.Repository().ListStreamers(); err == nil {
 			for _, st := range streamers {
 				names = append(names, st.Name)
 			}
 			sort.Strings(names)
+		}
+		if strats, err := s.analytics.Repository().DistinctBetStrategies(); err == nil {
+			strategies = strats
 		}
 	}
 
@@ -68,6 +72,7 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 		DiscordEnabled: discordEnabled,
 		DebugURL:       debugURL,
 		Streamers:      names,
+		BetStrategies:  strategies,
 	}
 	s.renderPage(w, "statistics.html", data)
 }

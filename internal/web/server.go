@@ -431,6 +431,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/points-history", s.handleAPIPointsHistory)
 	mux.HandleFunc("/api/points-history/export", s.handleAPIPointsHistoryExport)
 
+	// Prediction ROI analytics: summary (filtered by streamer/strategy/period)
+	// and a full-fidelity raw-bets export. Read-only; never places a bet.
+	mux.HandleFunc("/api/predictions/roi", s.handleAPIPredictionsROI)
+	mux.HandleFunc("/api/predictions/roi/export", s.handleAPIPredictionsROIExport)
+
 	// Status routes
 	mux.HandleFunc("/api/status", s.handleAPIStatus)
 	mux.HandleFunc("/api/miner-status", s.handleAPIMinerStatus)

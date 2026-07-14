@@ -3,6 +3,7 @@ package analytics
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
@@ -21,6 +22,9 @@ type Repository interface {
 	RecordChatMessage(streamer string, msg ChatMessage) error
 	GetChatMessages(streamer string, limit, offset int) (*ChatLogData, error)
 	SearchChatMessages(streamer string, query string, limit, offset int) (*ChatLogData, error)
+	RecordBet(b BetRecord) error
+	GetBets(streamer, strategy string, startTime, endTime time.Time) ([]BetRecord, error)
+	DistinctBetStrategies() ([]string, error)
 	Close() error
 }
 
@@ -94,6 +98,37 @@ func (m *AnalyticsModule) Migrations() []database.Migration {
 			Description: "Add machine-readable event_type to annotations",
 			SQL: `
 				ALTER TABLE annotations ADD COLUMN event_type TEXT;
+			`,
+		},
+		{
+			Version:     4,
+			Description: "Create prediction_bets table for ROI analytics",
+			// Additive only: a new table, no ALTER of points/annotations/chat_messages,
+			// so existing statistics history is untouched and this migration is safe on
+			// a populated database. UNIQUE(event_id) makes RecordBet idempotent against
+			// a re-delivered prediction-result (PubSub reconnect). No FOREIGN KEY clause:
+			// this codebase never enables PRAGMA foreign_keys, so an FK would be
+			// decorative and misleading — integrity of streamer_id is instead guaranteed
+			// by RecordBet always resolving the parent row via getOrCreateStreamer first,
+			// exactly as every other table here already relies on. This table is
+			// deliberately excluded from the retention sweep (PruneBefore) so lifetime
+			// ROI stays exact; it grows by one row per resolved prediction.
+			SQL: `
+				CREATE TABLE IF NOT EXISTS prediction_bets (
+					id           INTEGER PRIMARY KEY AUTOINCREMENT,
+					streamer_id  INTEGER NOT NULL,
+					event_id     TEXT NOT NULL UNIQUE,
+					timestamp    INTEGER NOT NULL,
+					strategy     TEXT NOT NULL,
+					result_type  TEXT NOT NULL,
+					placed       INTEGER NOT NULL,
+					won          INTEGER NOT NULL,
+					gained       INTEGER NOT NULL,
+					odds         REAL NOT NULL,
+					manual       INTEGER NOT NULL DEFAULT 0
+				);
+
+				CREATE INDEX IF NOT EXISTS idx_predbets_streamer_time ON prediction_bets(streamer_id, timestamp);
 			`,
 		},
 	}
@@ -533,6 +568,120 @@ func (r *SQLiteRepository) SearchChatMessages(streamer string, query string, lim
 		TotalCount: totalCount,
 		HasMore:    offset+len(messages) < totalCount,
 	}, nil
+}
+
+// RecordBet persists one resolved prediction bet. It is idempotent: UNIQUE(event_id)
+// plus INSERT OR IGNORE means a re-delivered prediction-result (PubSub reconnect,
+// duplicate push) neither errors nor double-counts — the second write is a no-op
+// that is logged, not silently swallowed. streamer_id integrity is guaranteed by
+// resolving/creating the parent streamer row first.
+func (r *SQLiteRepository) RecordBet(b BetRecord) error {
+	streamerID, err := r.getOrCreateStreamer(b.Streamer)
+	if err != nil {
+		return err
+	}
+
+	manual := 0
+	if b.Manual {
+		manual = 1
+	}
+
+	res, err := r.db.Exec(
+		`INSERT OR IGNORE INTO prediction_bets
+		   (streamer_id, event_id, timestamp, strategy, result_type, placed, won, gained, odds, manual)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		streamerID, b.EventID, b.Timestamp, b.Strategy, b.ResultType,
+		b.Placed, b.Won, b.Gained, b.Odds, manual,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		// UNIQUE(event_id) rejected the row: this exact prediction result was
+		// already recorded. Expected on a PubSub reconnect; log so it is visible
+		// but never treat it as an error or a second bet.
+		slog.Info("Duplicate prediction result ignored", "event", b.EventID, "streamer", b.Streamer)
+	}
+	return nil
+}
+
+// GetBets returns resolved bets for the given filters ordered oldest-first (the
+// order the ROI aggregator needs for its drawdown curve). An empty streamer or
+// strategy means "no filter on that field"; zero start/end are open-ended (used
+// for the lifetime period). An unknown streamer name yields nil, not an error —
+// mirroring GetPointSamples.
+func (r *SQLiteRepository) GetBets(streamer, strategy string, startTime, endTime time.Time) ([]BetRecord, error) {
+	query := `SELECT s.name, b.event_id, b.timestamp, b.strategy, b.result_type,
+	                 b.placed, b.won, b.gained, b.odds, b.manual
+	          FROM prediction_bets b
+	          JOIN streamers s ON s.id = b.streamer_id
+	          WHERE 1=1`
+	var args []interface{}
+
+	if streamer != "" {
+		var streamerID int64
+		err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		query += " AND b.streamer_id = ?"
+		args = append(args, streamerID)
+	}
+	if strategy != "" {
+		query += " AND b.strategy = ?"
+		args = append(args, strategy)
+	}
+	if !startTime.IsZero() {
+		query += " AND b.timestamp >= ?"
+		args = append(args, startTime.UnixMilli())
+	}
+	if !endTime.IsZero() {
+		query += " AND b.timestamp <= ?"
+		args = append(args, endTime.UnixMilli())
+	}
+	query += " ORDER BY b.timestamp ASC"
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var bets []BetRecord
+	for rows.Next() {
+		var b BetRecord
+		var manual int
+		if err := rows.Scan(&b.Streamer, &b.EventID, &b.Timestamp, &b.Strategy, &b.ResultType,
+			&b.Placed, &b.Won, &b.Gained, &b.Odds, &manual); err != nil {
+			return nil, err
+		}
+		b.Manual = manual != 0
+		bets = append(bets, b)
+	}
+	return bets, rows.Err()
+}
+
+// DistinctBetStrategies returns the strategies that actually appear in recorded
+// bets, sorted, so the ROI filter only offers strategies that have data.
+func (r *SQLiteRepository) DistinctBetStrategies() ([]string, error) {
+	rows, err := r.db.Query("SELECT DISTINCT strategy FROM prediction_bets ORDER BY strategy ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 func (r *SQLiteRepository) Close() error {

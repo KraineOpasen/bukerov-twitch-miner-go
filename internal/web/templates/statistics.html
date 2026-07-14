@@ -1,6 +1,26 @@
 {{define "title"}}Статистика - Twitch Points Miner{{end}}
 
 {{define "content"}}
+<style>
+/* Scoped ROI styles — reuse the existing design tokens. Kept inline because the
+   Tailwind build is not re-run for template-only changes. */
+.roi-period-btn{color:var(--color-neutral-300);background:var(--color-neutral-800);border-right:1px solid var(--color-neutral-700);cursor:pointer;padding:.5rem .95rem;font-size:.85rem;font-weight:500;transition:background .15s,color .15s}
+.roi-period-btn:last-child{border-right:0}
+.roi-period-btn:hover{color:var(--color-neutral-100);background:#8b7fd11f}
+.roi-period-btn.is-active{background:var(--color-purple-600);color:#fff}
+.roi-period-btn:focus-visible{outline:2px solid var(--color-online);outline-offset:-2px}
+.stat-tile{display:flex;flex-direction:column;gap:.25rem;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-700);background:var(--color-neutral-800);padding:.85rem 1rem}
+.stat-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:var(--color-neutral-400)}
+.stat-value{font-size:1.35rem;font-weight:600;color:var(--color-neutral-100)}
+.stat-value.pos{color:var(--color-success)}
+.stat-value.neg{color:var(--color-danger)}
+.roi-table{width:100%;font-size:.85rem;border-collapse:collapse}
+.roi-table th,.roi-table td{text-align:right;padding:.35rem .5rem;border-bottom:1px solid var(--color-neutral-700)}
+.roi-table th:first-child,.roi-table td:first-child{text-align:left}
+.roi-table th{color:var(--color-neutral-400);font-weight:500;font-size:.72rem;text-transform:uppercase;letter-spacing:.03em}
+.roi-table td.pos{color:var(--color-success)}
+.roi-table td.neg{color:var(--color-danger)}
+</style>
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">Статистика</h1>
     <div id="stat-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
@@ -50,6 +70,98 @@
     <div id="stat-chart-wrap" class="hidden">
         <div id="stat-chart"></div>
         <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">Показана прореженная выборка. Полные данные — через «Экспорт JSON».</p>
+    </div>
+</div>
+
+<!-- ===================== Prediction ROI ===================== -->
+<div class="flex items-center justify-between flex-wrap gap-3 mt-10 mb-2">
+    <h2 class="text-2xl font-bold">ROI по ставкам (предсказания)</h2>
+    <div id="roi-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
+</div>
+<p class="text-neutral-400 text-sm mb-6">Аналитика автоматических и ручных ставок на предсказания: доходность, win rate, просадка, разбивка по стримеру, стратегии и коэффициентам. Только чтение — стратегии не меняются и не отключаются.</p>
+
+<div class="card mb-6">
+    <div class="flex flex-wrap items-end gap-5">
+        <div class="flex flex-col gap-1">
+            <label for="roi-streamer" class="text-xs uppercase tracking-wide text-neutral-400">Стример</label>
+            <select id="roi-streamer" class="input-field min-w-[12rem]">
+                <option value="">Все стримеры</option>
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <label for="roi-strategy" class="text-xs uppercase tracking-wide text-neutral-400">Стратегия</label>
+            <select id="roi-strategy" class="input-field min-w-[10rem]">
+                <option value="">Все стратегии</option>
+                {{range .BetStrategies}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <span class="text-xs uppercase tracking-wide text-neutral-400">Период</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="Период ROI">
+                <button type="button" class="roi-period-btn" data-period="7d">7д</button>
+                <button type="button" class="roi-period-btn is-active" data-period="30d">30д</button>
+                <button type="button" class="roi-period-btn" data-period="90d">90д</button>
+                <button type="button" class="roi-period-btn" data-period="lifetime">Всё время</button>
+            </div>
+        </div>
+        <div class="ml-auto">
+            <a id="roi-export" class="btn-secondary inline-block" href="#" download>Экспорт JSON</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div id="roi-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ Данные могут быть устаревшими — последнее обновление не удалось.</div>
+
+    <div id="roi-loading">
+        <div class="skeleton h-40 w-full rounded-lg"></div>
+    </div>
+
+    <div id="roi-empty" class="hidden text-center py-16 text-neutral-400">
+        <p class="text-lg font-medium text-neutral-300 mb-1">Нет ставок</p>
+        <p class="text-sm">За выбранный период и фильтры ещё нет сыгравших ставок на предсказания.</p>
+    </div>
+
+    <div id="roi-error" class="hidden text-center py-16">
+        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">Ошибка загрузки</p>
+        <p class="text-sm text-neutral-400 mb-4" id="roi-error-msg"></p>
+        <button type="button" id="roi-retry" class="btn-secondary">Повторить</button>
+    </div>
+
+    <div id="roi-content" class="hidden">
+        <!-- KPI tiles -->
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
+            <div class="stat-tile"><span class="stat-label">Ставок</span><span id="roi-count" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Win rate</span><span id="roi-winrate" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Чистый профит</span><span id="roi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">ROI</span><span id="roi-roi" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Поставлено</span><span id="roi-wagered" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Средняя ставка</span><span id="roi-avgwager" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Средний выигрыш</span><span id="roi-avgwin" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">Макс. просадка</span><span id="roi-drawdown" class="stat-value num"></span></div>
+        </div>
+        <p class="text-xs text-neutral-500 mb-6">
+            <span id="roi-wins" class="num"></span> выигрышей ·
+            <span id="roi-losses" class="num"></span> проигрышей ·
+            <span id="roi-refunds" class="num"></span> возвратов.
+            Win rate, средняя ставка и «поставлено» считаются по сыгравшим ставкам (выигрыш+проигрыш); возвраты возвращают ставку и в них не входят.
+        </p>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По стримеру</h3>
+                <div class="overflow-x-auto"><table class="roi-table" id="roi-by-streamer"></table></div>
+            </div>
+            <div>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По стратегии</h3>
+                <div class="overflow-x-auto"><table class="roi-table" id="roi-by-strategy"></table></div>
+            </div>
+            <div>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По коэффициенту</h3>
+                <div class="overflow-x-auto"><table class="roi-table" id="roi-by-odds"></table></div>
+            </div>
+        </div>
     </div>
 </div>
 {{end}}
@@ -257,6 +369,155 @@
         load(false);
         scheduleRefresh();
     });
+})();
+
+// ===================== Prediction ROI =====================
+(function () {
+    const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
+    const nf = new Intl.NumberFormat();
+    const fmtInt = v => nf.format(Math.round(v));
+    const fmtSigned = v => (v > 0 ? '+' : '') + nf.format(Math.round(v));
+    const fmtPct = v => (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+
+    const els = {
+        streamer: document.getElementById('roi-streamer'),
+        strategy: document.getElementById('roi-strategy'),
+        updated:  document.getElementById('roi-updated'),
+        stale:    document.getElementById('roi-stale'),
+        loading:  document.getElementById('roi-loading'),
+        empty:    document.getElementById('roi-empty'),
+        error:    document.getElementById('roi-error'),
+        errorMsg: document.getElementById('roi-error-msg'),
+        retry:    document.getElementById('roi-retry'),
+        content:  document.getElementById('roi-content'),
+        export:   document.getElementById('roi-export'),
+        periodBtns: Array.from(document.querySelectorAll('.roi-period-btn')),
+    };
+    if (!els.content) return; // ROI section not present
+
+    let currentPeriod = '30d';
+    let refreshTimer = null;
+    let inFlight = null;
+    let hasData = false;
+
+    function show(state) {
+        els.loading.classList.toggle('hidden', state !== 'loading');
+        els.empty.classList.toggle('hidden', state !== 'empty');
+        els.error.classList.toggle('hidden', state !== 'error');
+        els.content.classList.toggle('hidden', state !== 'content');
+    }
+
+    function apiURL(base) {
+        const p = new URLSearchParams({
+            streamer: els.streamer.value || '',
+            strategy: els.strategy.value || '',
+            period: currentPeriod,
+        });
+        return base + '?' + p.toString();
+    }
+
+    function updateExportLink() { els.export.href = apiURL('/api/predictions/roi/export'); }
+
+    function signClass(v) { return v > 0 ? 'pos' : (v < 0 ? 'neg' : ''); }
+
+    function setTile(id, text, sign) {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        el.classList.remove('pos', 'neg');
+        if (sign) el.classList.add(sign);
+    }
+
+    function renderTable(tableId, rows) {
+        const t = document.getElementById(tableId);
+        if (!rows || rows.length === 0) {
+            t.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
+            return;
+        }
+        let html = '<thead><tr><th>Ключ</th><th>N</th><th>Профит</th><th>ROI</th></tr></thead><tbody>';
+        for (const r of rows) {
+            html += '<tr>' +
+                '<td>' + escapeHTML(r.key) + '</td>' +
+                '<td class="num">' + r.count + '</td>' +
+                '<td class="num ' + signClass(r.netProfit) + '">' + fmtSigned(r.netProfit) + '</td>' +
+                '<td class="num ' + signClass(r.roi) + '">' + fmtPct(r.roi) + '</td>' +
+                '</tr>';
+        }
+        html += '</tbody>';
+        t.innerHTML = html;
+    }
+
+    function escapeHTML(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+    }
+
+    function render(d) {
+        setTile('roi-count', fmtInt(d.count));
+        setTile('roi-winrate', d.winRate.toFixed(1) + '%');
+        setTile('roi-net', fmtSigned(d.netProfit), signClass(d.netProfit));
+        setTile('roi-roi', fmtPct(d.roi), signClass(d.roi));
+        setTile('roi-wagered', fmtInt(d.totalWagered));
+        setTile('roi-avgwager', fmtInt(d.avgWager));
+        setTile('roi-avgwin', fmtSigned(d.avgWin), signClass(d.avgWin));
+        setTile('roi-drawdown', d.maxDrawdown > 0 ? '-' + fmtInt(d.maxDrawdown) : '0', d.maxDrawdown > 0 ? 'neg' : '');
+        document.getElementById('roi-wins').textContent = fmtInt(d.wins);
+        document.getElementById('roi-losses').textContent = fmtInt(d.losses);
+        document.getElementById('roi-refunds').textContent = fmtInt(d.refunds);
+        renderTable('roi-by-streamer', d.byStreamer);
+        renderTable('roi-by-strategy', d.byStrategy);
+        renderTable('roi-by-odds', d.byOddsBucket);
+    }
+
+    function setUpdated() { els.updated.textContent = 'Обновлено ' + new Date().toLocaleTimeString(); }
+
+    async function load(isRefresh) {
+        updateExportLink();
+        if (inFlight) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+        if (!isRefresh && !hasData) show('loading');
+
+        try {
+            const resp = await fetch(apiURL('/api/predictions/roi'), { signal: ctrl.signal });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const d = await resp.json();
+            inFlight = null;
+            els.stale.classList.add('hidden');
+
+            if (d.empty) { hasData = false; show('empty'); setUpdated(); return; }
+            render(d);
+            hasData = true;
+            show('content');
+            setUpdated();
+        } catch (err) {
+            if (ctrl.signal.aborted) return;
+            inFlight = null;
+            // Background refresh failed but we already have data: keep it, flag stale.
+            if (isRefresh && hasData) { els.stale.classList.remove('hidden'); return; }
+            els.errorMsg.textContent = String(err.message || err);
+            show('error');
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        if (REFRESH_MS > 0) refreshTimer = setInterval(() => load(true), REFRESH_MS);
+    }
+
+    els.periodBtns.forEach(btn => btn.addEventListener('click', () => {
+        els.periodBtns.forEach(b => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        currentPeriod = btn.dataset.period;
+        load(false);
+    }));
+    els.streamer.addEventListener('change', () => load(false));
+    els.strategy.addEventListener('change', () => load(false));
+    els.retry.addEventListener('click', () => load(false));
+
+    updateExportLink();
+    load(false);
+    scheduleRefresh();
 })();
 </script>
 {{end}}
