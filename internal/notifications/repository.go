@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -56,10 +57,16 @@ func (m *NotificationsModule) Migrations() []database.Migration {
 		{
 			Version:     2,
 			Description: "Add system channel columns for reauth/connection-health notifications",
-			SQL: `
-				ALTER TABLE notification_config ADD COLUMN system_channel_id TEXT DEFAULT '';
-				ALTER TABLE notification_config ADD COLUMN system_enabled INTEGER DEFAULT 1;
-			`,
+			// Run (not SQL): two non-idempotent ALTERs. Each column is
+			// guarded independently so a DB where only the first ALTER
+			// landed (pre-transactional-migrations crash window between the
+			// two statements) self-heals by adding just the missing column.
+			Run: func(tx *sql.Tx) error {
+				if err := database.AddColumnIfMissing(tx, "notification_config", "system_channel_id", "TEXT DEFAULT ''"); err != nil {
+					return err
+				}
+				return database.AddColumnIfMissing(tx, "notification_config", "system_enabled", "INTEGER DEFAULT 1")
+			},
 		},
 	}
 }

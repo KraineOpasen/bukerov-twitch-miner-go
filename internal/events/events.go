@@ -26,6 +26,13 @@ const (
 	TypeUpdateAvailable Type = "update_available"
 	TypeUpdateFailed    Type = "update_failed"
 
+	// TypeModuleInitFailed records a DB-backed module (notifications,
+	// watch-time store, drops catalog) failing to initialize/migrate at
+	// startup: the miner degrades gracefully but the module stays down until
+	// the underlying schema problem is fixed, so the failure must stay
+	// visible on every start rather than being one scrollback log line.
+	TypeModuleInitFailed Type = "module_init_failed"
+
 	// TypeDiscoverySelected/TypeDiscoverySwitched track the directory
 	// discovery slot picking its first channel and auto-switching between
 	// pool candidates.

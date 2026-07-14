@@ -115,6 +115,10 @@ type DropsTracker struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	// loopsDone is closed when BOTH loops (sync + progress) have exited;
+	// Stop waits on it (bounded by stopJoinTimeout) so in-flight catalog and
+	// claim-annotation writes drain before the database is closed.
+	loopsDone chan struct{}
 
 	// onDropClaimed, if set, is invoked with the drop name each time a drop is
 	// successfully claimed, so a listener (the miner) can durably record the
@@ -165,13 +169,33 @@ func (d *DropsTracker) UpdateSettings(settings config.RateLimitSettings) {
 	d.mu.Unlock()
 }
 
+// stopJoinTimeout bounds how long Stop waits for the sync/progress loops to
+// drain their in-flight iteration (which may be writing the drops catalog or
+// claim annotations) before giving up, so a hung loop can never block
+// shutdown indefinitely. Package variable so tests can shrink it.
+var stopJoinTimeout = 5 * time.Second
+
 func (d *DropsTracker) Start(ctx context.Context) {
 	d.mu.Lock()
 	d.ctx, d.cancel = context.WithCancel(ctx)
+	done := make(chan struct{})
+	d.loopsDone = done
 	d.mu.Unlock()
 
-	go d.loop()
-	go d.progressLoop()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.loop()
+	}()
+	go func() {
+		defer wg.Done()
+		d.progressLoop()
+	}()
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 }
 
 // TriggerProgressSync asks the progress-sync loop to run an immediate
@@ -196,12 +220,25 @@ func (d *DropsTracker) SyncNow() {
 	d.syncCampaigns()
 }
 
+// Stop cancels both loops and waits (bounded by stopJoinTimeout) for them to
+// finish, so in-flight catalog/annotation writes complete before the caller
+// proceeds to close the database.
 func (d *DropsTracker) Stop() {
 	d.mu.Lock()
 	if d.cancel != nil {
 		d.cancel()
 	}
+	done := d.loopsDone
 	d.mu.Unlock()
+
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(stopJoinTimeout):
+		slog.Warn("Drops tracker loops did not finish within the stop timeout; proceeding with shutdown", "timeout", stopJoinTimeout)
+	}
 }
 
 // Campaigns returns a snapshot of the currently tracked active drop

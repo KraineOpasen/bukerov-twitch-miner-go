@@ -98,9 +98,15 @@ func (m *AnalyticsModule) Migrations() []database.Migration {
 		{
 			Version:     3,
 			Description: "Add machine-readable event_type to annotations",
-			SQL: `
-				ALTER TABLE annotations ADD COLUMN event_type TEXT;
-			`,
+			// Run (not SQL): ALTER TABLE ADD COLUMN is not idempotent in
+			// SQLite, and DBs that crashed between this migration and its
+			// version bump (pre-transactional-migrations builds) already have
+			// the column with a stale version. The per-column guard lets such
+			// a DB self-heal instead of failing with "duplicate column name"
+			// on every startup.
+			Run: func(tx *sql.Tx) error {
+				return database.AddColumnIfMissing(tx, "annotations", "event_type", "TEXT")
+			},
 		},
 		{
 			Version:     4,
