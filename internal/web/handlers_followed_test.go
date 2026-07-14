@@ -170,7 +170,9 @@ func TestSettingsPageRendersImportButton(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"import-followed-btn", "followed-import-modal", "Import from followed"} {
+	// The settings page renders the default language (RU); assert the localized
+	// import-button label rather than the English source string.
+	for _, want := range []string{"import-followed-btn", "followed-import-modal", "Импорт из подписок"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("settings page missing %q", want)
 		}

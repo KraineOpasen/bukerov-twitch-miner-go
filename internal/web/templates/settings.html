@@ -1,19 +1,19 @@
-{{define "title"}}Settings - Twitch Points Miner{{end}}
+{{define "title"}}{{ t "set.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<h1 class="text-3xl font-bold mb-2">Settings</h1>
-<p class="text-neutral-400 text-sm mb-6">Configure runtime settings. Changes take effect immediately.</p>
+<h1 class="text-3xl font-bold mb-2">{{ t "set.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "set.subtitle" }}</p>
 
 <form id="settings-form" class="space-y-4">
     <details id="streamers" class="details-panel">
-        <summary class="text-lg">Streamers</summary>
+        <summary class="text-lg">{{ t "set.streamers.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Manage streamers to track. Drag to reorder. Click to expand per-streamer settings.</p>
-            
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.streamers.desc" }}</p>
+
             <div class="flex gap-3 mb-4">
-                <input type="text" id="new-streamer-input" placeholder="Enter streamer username" class="input-field flex-1">
-                <button type="button" id="add-streamer-btn" class="btn-secondary whitespace-nowrap">Add Streamer</button>
-                <button type="button" id="import-followed-btn" class="btn-secondary whitespace-nowrap">Import from followed</button>
+                <input type="text" id="new-streamer-input" placeholder="{{ t "set.streamers.input_placeholder" }}" class="input-field flex-1">
+                <button type="button" id="add-streamer-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.add" }}</button>
+                <button type="button" id="import-followed-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.import" }}</button>
             </div>
 
             <ul class="space-y-2" id="streamer-list">
@@ -28,51 +28,51 @@
         <dialog id="followed-import-modal" class="rounded-lg p-0 bg-neutral-800 border border-neutral-700 text-neutral-100">
             <div class="p-5">
                 <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-lg font-semibold">Import followed channels</h3>
+                    <h3 class="text-lg font-semibold">{{ t "set.followed.title" }}</h3>
                     <button type="button" data-followed-close class="text-neutral-400 hover:text-neutral-100 text-xl leading-none">&times;</button>
                 </div>
-                <p class="text-neutral-400 text-sm mb-3">Pick channels you follow on Twitch to add to the tracked list. They are added with the default per-streamer settings. Already-tracked channels are disabled.</p>
+                <p class="text-neutral-400 text-sm mb-3">{{ t "set.followed.desc" }}</p>
 
                 <div id="followed-truncated" class="hidden mb-3 text-xs text-amber-500" role="status"></div>
-                <div id="followed-loading" class="py-8 text-center text-neutral-400">Loading followed channels…</div>
+                <div id="followed-loading" class="py-8 text-center text-neutral-400">{{ t "set.followed.loading" }}</div>
                 <div id="followed-error" class="hidden py-8 text-center">
                     <p class="text-sm mb-3" style="color: var(--color-danger)" id="followed-error-msg"></p>
-                    <button type="button" id="followed-retry" class="btn-secondary">Retry</button>
+                    <button type="button" id="followed-retry" class="btn-secondary">{{ t "set.followed.retry" }}</button>
                 </div>
-                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">You don't follow any channels that aren't already tracked.</div>
+                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">{{ t "set.followed.empty" }}</div>
 
                 <div id="followed-list-wrap" class="hidden">
                     <div class="flex items-center justify-between mb-2 text-xs text-neutral-400">
-                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">Select all</button>
-                        <span id="followed-selected-count">0 selected</span>
+                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">{{ t "set.followed.select_all" }}</button>
+                        <span id="followed-selected-count">{{ t "set.followed.selected_zero" }}</span>
                     </div>
                     <ul id="followed-list" class="overflow-y-auto space-y-1 border border-neutral-700 rounded-md p-2"></ul>
                 </div>
 
                 <div class="flex justify-end gap-2 mt-4">
-                    <button type="button" data-followed-close class="btn-secondary">Cancel</button>
-                    <button type="button" id="followed-add-btn" class="btn-primary" disabled>Add selected</button>
+                    <button type="button" data-followed-close class="btn-secondary">{{ t "common.cancel" }}</button>
+                    <button type="button" id="followed-add-btn" class="btn-primary" disabled>{{ t "set.followed.add_selected" }}</button>
                 </div>
             </div>
         </dialog>
     </details>
 
     <details id="preferences" class="details-panel">
-        <summary class="text-lg">Channel Preferences</summary>
+        <summary class="text-lg">{{ t "set.preferences.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">A read-only summary of each streamer's rotation preference, gathered in one place. Set a streamer's preference under <span class="text-neutral-100">Streamers → custom settings → Rotation Preference</span>; the lists below refresh after you save.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.preferences.desc_pre" }}<span class="text-neutral-100">{{ t "set.preferences.desc_path" }}</span>{{ t "set.preferences.desc_post" }}</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
                     <div class="flex items-center gap-2 mb-3">
-                        <span class="prefer-badge">★ Prefer</span>
-                        <span class="text-neutral-100 font-medium">Preferred channels</span>
+                        <span class="prefer-badge">{{ t "card.prefer" }}</span>
+                        <span class="text-neutral-100 font-medium">{{ t "set.preferences.preferred_label" }}</span>
                     </div>
                     <ul id="preferred-list" class="space-y-1 text-sm"></ul>
                 </div>
                 <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
                     <div class="flex items-center gap-2 mb-3">
-                        <span class="avoid-badge">Avoid</span>
-                        <span class="text-neutral-100 font-medium">Avoided channels</span>
+                        <span class="avoid-badge">{{ t "card.avoid" }}</span>
+                        <span class="text-neutral-100 font-medium">{{ t "set.preferences.avoided_label" }}</span>
                     </div>
                     <ul id="avoided-list" class="space-y-1 text-sm"></ul>
                 </div>
@@ -81,29 +81,29 @@
     </details>
 
     <details id="defaults" class="details-panel">
-        <summary class="text-lg">Default Streamer Settings</summary>
+        <summary class="text-lg">{{ t "set.defaults.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">These settings apply to all streamers unless overridden individually.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
             <div id="default-settings-container"></div>
         </div>
     </details>
 
     <details id="priority" class="details-panel">
-        <summary class="text-lg">Priority Order</summary>
+        <summary class="text-lg">{{ t "set.priority.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Drag to reorder. Higher priority items are checked first when selecting which stream to watch.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.priority.desc" }}</p>
             <ul class="space-y-2" id="priority-list">
             </ul>
         </div>
     </details>
 
     <details id="drops" class="details-panel">
-        <summary class="text-lg">Drops</summary>
+        <summary class="text-lg">{{ t "set.drops.title" }}</summary>
         <div class="details-content">
             <div class="setting-row items-start">
                 <div class="pr-4">
-                    <div class="setting-label">Drop Name Blacklist</div>
-                    <div class="setting-description">Keywords (one per line, or comma-separated). Any drop campaign whose drop or reward name contains one of these words (case-insensitive) is skipped during drop rotation prioritization — an additional exclusion on top of the already-claimed dedup.</div>
+                    <div class="setting-label">{{ t "set.drops.blacklist_label" }}</div>
+                    <div class="setting-description">{{ t "set.drops.blacklist_desc" }}</div>
                 </div>
                 <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropBlacklist" placeholder="beta&#10;league of legends&#10;emote"></textarea>
             </div>
@@ -111,13 +111,13 @@
     </details>
 
     <details id="directory-discovery" class="details-panel">
-        <summary class="text-lg">Directory Discovery</summary>
+        <summary class="text-lg">{{ t "set.directory.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Games for which the miner discovers live drops-enabled channels via the Twitch directory and farms the most-viewed one in an extra watch slot. This never touches the streamer list or its watch rotation. Use the exact game name as shown on Twitch (e.g. <span class="text-neutral-100">World of Tanks</span>). Leave the list empty to keep discovery off.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-neutral-100">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
 
             <div class="flex gap-3 mb-4">
-                <input type="text" id="new-directory-game-input" placeholder="Enter game name" class="input-field flex-1">
-                <button type="button" id="add-directory-game-btn" class="btn-secondary whitespace-nowrap">Add Game</button>
+                <input type="text" id="new-directory-game-input" placeholder="{{ t "set.directory.input_placeholder" }}" class="input-field flex-1">
+                <button type="button" id="add-directory-game-btn" class="btn-secondary whitespace-nowrap">{{ t "set.directory.add" }}</button>
             </div>
 
             <ul class="space-y-2" id="directory-game-list">
@@ -126,84 +126,84 @@
     </details>
 
     <details id="ratelimits" class="details-panel">
-        <summary class="text-lg">Rate Limits</summary>
+        <summary class="text-lg">{{ t "set.ratelimits.title" }}</summary>
         <div class="details-content space-y-0">
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Websocket Ping Interval</div>
-                    <div class="setting-description">Seconds between websocket ping messages (20-60)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.ws_ping_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.ws_ping_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="websocketPingInterval" min="20" max="60">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Campaign Sync Interval</div>
-                    <div class="setting-description">Minutes between full drop campaign syncs (5-120)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.campaign_sync_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.campaign_sync_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="campaignSyncInterval" min="5" max="120">
             </div>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Drop Progress Sync Interval</div>
-                    <div class="setting-description">Minutes between lightweight drop-progress refreshes shown on the Drops page (1-60)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.drop_progress_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.drop_progress_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="dropProgressSyncInterval" min="1" max="60">
             </div>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Minute Watched Interval</div>
-                    <div class="setting-description">Base seconds between minute watched cycles (30-120, divided by # of streamers)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.minute_watched_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.minute_watched_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="minuteWatchedInterval" min="30" max="120">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Request Delay</div>
-                    <div class="setting-description">Seconds delay between API requests (0.1-2.0)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.request_delay_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.request_delay_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="requestDelay" min="0.1" max="2.0" step="0.1">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Reconnect Delay</div>
-                    <div class="setting-description">Seconds to wait before reconnecting (30-300)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.reconnect_delay_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.reconnect_delay_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="reconnectDelay" min="30" max="300">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Stream Check Interval</div>
-                    <div class="setting-description">Seconds between stream online checks (60-900)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.stream_check_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.stream_check_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="streamCheckInterval" min="60" max="900">
             </div>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Connection Timeout</div>
-                    <div class="setting-description">Minutes without any successful API or PubSub activity before the dashboard shows "connection lost" (5-60)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.conn_timeout_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.conn_timeout_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="connectionTimeoutMinutes" min="5" max="60">
             </div>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Rotation Interval (Min)</div>
-                    <div class="setting-description">Minimum minutes the watch pair dwells before rotating, when more than 2 tracked streamers are online (5-180)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.rotation_min_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.rotation_min_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="rotationIntervalMinMinutes" min="5" max="180">
             </div>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Rotation Interval (Max)</div>
-                    <div class="setting-description">Maximum minutes the watch pair dwells before rotating; a random value in [Min, Max] is drawn on every rotation (5-240)</div>
+                    <div class="setting-label">{{ t "set.ratelimits.rotation_max_label" }}</div>
+                    <div class="setting-description">{{ t "set.ratelimits.rotation_max_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="rotationIntervalMaxMinutes" min="5" max="240">
             </div>
@@ -211,12 +211,12 @@
     </details>
 
     <details id="logger" class="details-panel">
-        <summary class="text-lg">Logger</summary>
+        <summary class="text-lg">{{ t "set.logger.title" }}</summary>
         <div class="details-content space-y-0">
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Console Log Level</div>
-                    <div class="setting-description">Minimum log level shown in console</div>
+                    <div class="setting-label">{{ t "set.logger.console_label" }}</div>
+                    <div class="setting-description">{{ t "set.logger.console_desc" }}</div>
                 </div>
                 <select class="input-field w-36" id="consoleLevel">
                     <option value="DEBUG">DEBUG</option>
@@ -228,8 +228,8 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">File Log Level</div>
-                    <div class="setting-description">Minimum log level saved to file</div>
+                    <div class="setting-label">{{ t "set.logger.file_label" }}</div>
+                    <div class="setting-description">{{ t "set.logger.file_desc" }}</div>
                 </div>
                 <select class="input-field w-36" id="fileLevel">
                     <option value="DEBUG">DEBUG</option>
@@ -241,16 +241,16 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Less Verbose</div>
-                    <div class="setting-description">Reduce log output verbosity</div>
+                    <div class="setting-label">{{ t "set.logger.less_label" }}</div>
+                    <div class="setting-description">{{ t "set.logger.less_desc" }}</div>
                 </div>
                 <input type="checkbox" id="less" class="w-5 h-5 accent-purple-600">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Colored Output</div>
-                    <div class="setting-description">Enable colored console output</div>
+                    <div class="setting-label">{{ t "set.logger.colored_label" }}</div>
+                    <div class="setting-description">{{ t "set.logger.colored_desc" }}</div>
                 </div>
                 <input type="checkbox" id="colored" class="w-5 h-5 accent-purple-600">
             </div>
@@ -258,28 +258,28 @@
     </details>
 
     <details id="analytics" class="details-panel">
-        <summary class="text-lg">Analytics</summary>
+        <summary class="text-lg">{{ t "set.analytics.title" }}</summary>
         <div class="details-content space-y-0">
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Refresh Interval</div>
-                    <div class="setting-description">Minutes between dashboard auto-refresh</div>
+                    <div class="setting-label">{{ t "set.analytics.refresh_label" }}</div>
+                    <div class="setting-description">{{ t "set.analytics.refresh_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="refresh" min="1" max="60">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Days of History</div>
-                    <div class="setting-description">Number of days to show in charts</div>
+                    <div class="setting-label">{{ t "set.analytics.days_label" }}</div>
+                    <div class="setting-description">{{ t "set.analytics.days_desc" }}</div>
                 </div>
                 <input type="number" class="input-field w-28" id="daysAgo" min="1" max="365">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Enable Chat Logs</div>
-                    <div class="setting-description">Log chat messages to database</div>
+                    <div class="setting-label">{{ t "set.analytics.chatlogs_label" }}</div>
+                    <div class="setting-description">{{ t "set.analytics.chatlogs_desc" }}</div>
                 </div>
                 <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-purple-600">
             </div>
@@ -287,56 +287,56 @@
     </details>
 
     <details id="discord-settings" class="details-panel">
-        <summary class="text-lg">Discord Integration</summary>
+        <summary class="text-lg">{{ t "set.discord.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Configure Discord notifications. You'll need to create a Discord bot and add it to your server.</p>
-            
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.discord.desc" }}</p>
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Enable Discord Notifications</div>
-                    <div class="setting-description">Turn on Discord integration (requires restart after enabling)</div>
+                    <div class="setting-label">{{ t "set.discord.enable_label" }}</div>
+                    <div class="setting-description">{{ t "set.discord.enable_desc" }}</div>
                 </div>
                 <input type="checkbox" id="discordEnabled" class="w-5 h-5 accent-purple-600">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Bot Token</div>
-                    <div class="setting-description">Your Discord bot token (keep this secret!)</div>
+                    <div class="setting-label">{{ t "set.discord.token_label" }}</div>
+                    <div class="setting-description">{{ t "set.discord.token_desc" }}</div>
                 </div>
                 <input type="password" class="input-field w-72" id="discordBotToken" placeholder="••••••••">
             </div>
-            
+
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Guild ID</div>
-                    <div class="setting-description">Your Discord server ID</div>
+                    <div class="setting-label">{{ t "set.discord.guild_label" }}</div>
+                    <div class="setting-description">{{ t "set.discord.guild_desc" }}</div>
                 </div>
                 <input type="text" class="input-field w-52" id="discordGuildId" placeholder="123456789012345678">
             </div>
-            
+
             <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4 mt-4">
-                <div class="text-neutral-100 font-medium mb-3">How to create a Discord bot:</div>
+                <div class="text-neutral-100 font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
                 <ol class="text-neutral-400 text-sm space-y-1 list-decimal pl-5">
-                    <li>Go to the <a href="https://discord.com/developers/applications" target="_blank" class="text-purple-500 hover:underline">Discord Developer Portal</a></li>
-                    <li>Click <strong class="text-neutral-100">New Application</strong> and give it a name</li>
-                    <li>Go to <strong class="text-neutral-100">Bot</strong> section → Click <strong class="text-neutral-100">Reset Token</strong> and copy it</li>
-                    <li>Enable <strong class="text-neutral-100">Message Content Intent</strong> under Privileged Gateway Intents</li>
-                    <li>Go to <strong class="text-neutral-100">OAuth2 → URL Generator</strong></li>
-                    <li>Select <strong class="text-neutral-100">bot</strong> scope with <strong class="text-neutral-100">Send Messages</strong> and <strong class="text-neutral-100">Read Message History</strong> permissions</li>
-                    <li>Copy the generated URL and open it to add the bot to your server</li>
+                    <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.portal" }}</a></li>
+                    <li>{{ t "set.discord.s2_pre" }}<strong class="text-neutral-100">New Application</strong>{{ t "set.discord.s2_post" }}</li>
+                    <li>{{ t "set.discord.s3_pre" }}<strong class="text-neutral-100">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-neutral-100">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
+                    <li>{{ t "set.discord.s4_pre" }}<strong class="text-neutral-100">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
+                    <li>{{ t "set.discord.s5_pre" }}<strong class="text-neutral-100">OAuth2 → URL Generator</strong></li>
+                    <li>{{ t "set.discord.s6_pre" }}<strong class="text-neutral-100">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-neutral-100">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-neutral-100">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
+                    <li>{{ t "set.discord.s7" }}</li>
                 </ol>
-                <div class="text-neutral-100 font-medium mt-4 mb-2">How to find your Guild (Server) ID:</div>
+                <div class="text-neutral-100 font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
                 <p class="text-neutral-400 text-sm">
-                    See <a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-purple-500 hover:underline">Discord's guide</a> on finding your Server ID.
+                    {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
                 </p>
             </div>
         </div>
     </details>
 
     <div class="flex gap-4 justify-end pt-4">
-        <button type="button" class="btn-secondary" id="reset-btn">Reset to Defaults</button>
-        <button type="submit" class="btn-primary" id="save-btn">Save Settings</button>
+        <button type="button" class="btn-secondary" id="reset-btn">{{ t "set.reset" }}</button>
+        <button type="submit" class="btn-primary" id="save-btn">{{ t "set.save" }}</button>
     </div>
 </form>
 
@@ -397,7 +397,7 @@
         }
         function refreshCount() {
             const n = selectedLogins().length;
-            els.count.textContent = n + ' selected';
+            els.count.textContent = t('js.set.followed.selected', { n: n });
             els.addBtn.disabled = n === 0;
         }
 
@@ -412,14 +412,14 @@
             const selectable = channels.filter(c => !c.alreadyTracked);
             els.truncated.classList.toggle('hidden', !data.truncated);
             if (data.truncated) {
-                els.truncated.textContent = '⚠ Showing the first ' + data.cap + ' of more followed channels — the list is partial.';
+                els.truncated.textContent = t('js.set.followed.truncated', { cap: data.cap });
             }
             if (selectable.length === 0) { show('empty'); return; }
 
             els.list.innerHTML = channels.map(c => {
                 const disabled = c.alreadyTracked ? 'disabled' : '';
                 const cls = c.alreadyTracked ? 'opacity-50' : '';
-                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">(already tracked)</span>' : '';
+                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">' + t('js.set.followed.already_tracked') + '</span>' : '';
                 return '<li class="flex items-center gap-2 ' + cls + '">' +
                     '<input type="checkbox" value="' + escapeHTML(c.login) + '" ' + disabled + ' class="followed-cb">' +
                     '<span class="text-sm">' + escapeHTML(c.displayName) + tag + '</span>' +
@@ -458,7 +458,7 @@
             const logins = selectedLogins();
             if (logins.length === 0) return;
             els.addBtn.disabled = true;
-            els.addBtn.textContent = 'Adding…';
+            els.addBtn.textContent = t('js.set.followed.adding');
             try {
                 const resp = await fetch('/api/followed/import', {
                     method: 'POST',
@@ -473,48 +473,48 @@
                 els.errorMsg.textContent = String(err.message || err);
                 show('error');
             } finally {
-                els.addBtn.textContent = 'Add selected';
+                els.addBtn.textContent = t('js.set.followed.add_selected');
                 els.addBtn.disabled = false;
             }
         });
     })();
 
     const priorityLabels = {
-        'STREAK': 'Watch Streak',
-        'DROPS': 'Drops',
-        'ORDER': 'Config Order',
-        'SUBSCRIBED': 'Subscribed Channels',
-        'POINTS_ASCENDING': 'Points (Lowest First)',
-        'POINTS_DESCENDING': 'Points (Highest First)'
+        'STREAK': t('js.set.opt.priority.streak'),
+        'DROPS': t('js.set.opt.priority.drops'),
+        'ORDER': t('js.set.opt.priority.order'),
+        'SUBSCRIBED': t('js.set.opt.priority.subscribed'),
+        'POINTS_ASCENDING': t('js.set.opt.priority.points_asc'),
+        'POINTS_DESCENDING': t('js.set.opt.priority.points_desc')
     };
 
     const chatOptions = [
-        { value: 'ONLINE', label: 'When Online' },
-        { value: 'OFFLINE', label: 'When Offline' },
-        { value: 'ALWAYS', label: 'Always' },
-        { value: 'NEVER', label: 'Never' }
+        { value: 'ONLINE', label: t('js.set.opt.chat.online') },
+        { value: 'OFFLINE', label: t('js.set.opt.chat.offline') },
+        { value: 'ALWAYS', label: t('js.set.opt.chat.always') },
+        { value: 'NEVER', label: t('js.set.opt.chat.never') }
     ];
 
     const preferenceOptions = [
-        { value: '', label: 'None' },
-        { value: 'prefer', label: 'Prefer' },
-        { value: 'avoid', label: 'Avoid' }
+        { value: '', label: t('js.set.opt.pref.none') },
+        { value: 'prefer', label: t('js.set.opt.pref.prefer') },
+        { value: 'avoid', label: t('js.set.opt.pref.avoid') }
     ];
 
     const strategyOptions = [
-        { value: 'SMART', label: 'Smart' },
-        { value: 'MOST_VOTED', label: 'Most Voted' },
-        { value: 'HIGH_ODDS', label: 'High Odds' },
-        { value: 'PERCENTAGE', label: 'Percentage' },
-        { value: 'SMART_MONEY', label: 'Smart Money' },
-        { value: 'NUMBER_1', label: 'Always #1' },
-        { value: 'NUMBER_2', label: 'Always #2' }
+        { value: 'SMART', label: t('js.set.opt.strategy.smart') },
+        { value: 'MOST_VOTED', label: t('js.set.opt.strategy.most_voted') },
+        { value: 'HIGH_ODDS', label: t('js.set.opt.strategy.high_odds') },
+        { value: 'PERCENTAGE', label: t('js.set.opt.strategy.percentage') },
+        { value: 'SMART_MONEY', label: t('js.set.opt.strategy.smart_money') },
+        { value: 'NUMBER_1', label: t('js.set.opt.strategy.number_1') },
+        { value: 'NUMBER_2', label: t('js.set.opt.strategy.number_2') }
     ];
 
     const delayModeOptions = [
-        { value: 'FROM_END', label: 'From End' },
-        { value: 'FROM_START', label: 'From Start' },
-        { value: 'PERCENTAGE', label: 'Percentage' }
+        { value: 'FROM_END', label: t('js.set.opt.delay.from_end') },
+        { value: 'FROM_START', label: t('js.set.opt.delay.from_start') },
+        { value: 'PERCENTAGE', label: t('js.set.opt.delay.percentage') }
     ];
 
     let currentSettings = null;
@@ -522,11 +522,11 @@
     async function loadSettings() {
         try {
             const response = await fetch('/api/settings');
-            if (!response.ok) throw new Error('Failed to load settings');
+            if (!response.ok) throw new Error(t('js.set.toast.load_failed'));
             currentSettings = await response.json();
             populateForm(currentSettings);
         } catch (error) {
-            showToast('Failed to load settings', 'error');
+            showToast(t('js.set.toast.load_failed'), 'error');
             console.error(error);
         }
     }
@@ -605,7 +605,7 @@
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', () => {
             li.remove();
-            showToast(`Removed ${game}`);
+            showToast(t('js.set.toast.game_removed', { game: game }));
         });
 
         header.appendChild(name);
@@ -618,20 +618,20 @@
         const input = document.getElementById('new-directory-game-input');
         const game = input.value.trim();
         if (!game) {
-            showToast('Please enter a game name', 'error');
+            showToast(t('js.set.toast.game_name_required'), 'error');
             return;
         }
 
         const exists = Array.from(document.querySelectorAll('#directory-game-list .streamer-item'))
             .some(item => item.dataset.game.toLowerCase() === game.toLowerCase());
         if (exists) {
-            showToast('Game already in the list', 'error');
+            showToast(t('js.set.toast.game_exists'), 'error');
             return;
         }
 
         document.getElementById('directory-game-list').appendChild(createDirectoryGameItem(game));
         input.value = '';
-        showToast(`Added ${game}`);
+        showToast(t('js.set.toast.game_added', { game: game }));
     }
 
     function gatherDirectoryGames() {
@@ -681,8 +681,8 @@
             }
         });
 
-        if (!preferred.children.length) preferred.appendChild(emptyItem('No preferred channels'));
-        if (!avoided.children.length) avoided.appendChild(emptyItem('No avoided channels'));
+        if (!preferred.children.length) preferred.appendChild(emptyItem(t('js.set.pref.none_preferred')));
+        if (!avoided.children.length) avoided.appendChild(emptyItem(t('js.set.pref.none_avoided')));
     }
 
     function populateStreamerList(streamers) {
@@ -708,7 +708,7 @@
             <div class="streamer-header" onclick="toggleStreamerExpand(this.parentElement)">
                 <div class="text-neutral-400 text-lg cursor-grab">☰</div>
                 <span class="flex-1 text-neutral-100 font-medium">${streamer.username}</span>
-                ${hasOverrides ? '<span class="override-badge">Custom</span>' : ''}
+                ${hasOverrides ? '<span class="override-badge">' + t('js.set.streamer.custom') + '</span>' : ''}
                 <span class="text-neutral-400 text-xs transition-transform duration-200 expand-icon">▼</span>
                 <button type="button" class="ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors" onclick="event.stopPropagation(); removeStreamer('${streamer.username}')">✕</button>
             </div>
@@ -717,7 +717,7 @@
                     <label class="flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" class="w-5 h-5 accent-purple-600 use-override-checkbox" ${hasOverrides ? 'checked' : ''} 
                                onchange="toggleOverride(this, '${streamer.username}')">
-                        <span class="text-neutral-100">Use custom settings for this streamer</span>
+                        <span class="text-neutral-100">${t('js.set.streamer.use_custom')}</span>
                     </label>
                 </div>
                 <div class="p-4 settings-content" style="${hasOverrides ? '' : 'display: none;'}">
@@ -740,64 +740,64 @@
             <div class="space-y-0">
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Make Predictions</div>
-                        <div class="setting-description">Automatically bet on predictions</div>
+                        <div class="setting-label">${t('js.set.form.make_predictions')}</div>
+                        <div class="setting-description">${t('js.set.form.make_predictions.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs('makePredictions', settings.makePredictions)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Follow Raid</div>
-                        <div class="setting-description">Follow when streamer raids another channel</div>
+                        <div class="setting-label">${t('js.set.form.follow_raid')}</div>
+                        <div class="setting-description">${t('js.set.form.follow_raid.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs('followRaid', settings.followRaid)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Claim Drops</div>
-                        <div class="setting-description">Automatically claim drop rewards</div>
+                        <div class="setting-label">${t('js.set.form.claim_drops')}</div>
+                        <div class="setting-description">${t('js.set.form.claim_drops.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs('claimDrops', settings.claimDrops)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Claim Moments</div>
-                        <div class="setting-description">Claim channel moments</div>
+                        <div class="setting-label">${t('js.set.form.claim_moments')}</div>
+                        <div class="setting-description">${t('js.set.form.claim_moments.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs('claimMoments', settings.claimMoments)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Watch Streak</div>
-                        <div class="setting-description">Maintain watch streak bonus</div>
+                        <div class="setting-label">${t('js.set.form.watch_streak')}</div>
+                        <div class="setting-description">${t('js.set.form.watch_streak.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs('watchStreak', settings.watchStreak)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Community Goals</div>
-                        <div class="setting-description">Contribute to community goals</div>
+                        <div class="setting-label">${t('js.set.form.community_goals')}</div>
+                        <div class="setting-description">${t('js.set.form.community_goals.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs('communityGoals', settings.communityGoals)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Max Contribution %</div>
-                        <div class="setting-description">Max % of current balance to contribute to a goal at once (0 = no limit). Applies only when Community Goals is enabled.</div>
+                        <div class="setting-label">${t('js.set.form.max_contribution_percent')}</div>
+                        <div class="setting-description">${t('js.set.form.max_contribution_percent.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="communityGoalsMaxPercent" data-prefix="${prefix}" min="0" max="100" value="${settings.communityGoalsMaxPercent !== undefined ? settings.communityGoalsMaxPercent : 10}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Max Contribution Amount</div>
-                        <div class="setting-description">Absolute point cap per contribution (0 = no limit). The lower of this and Max Contribution % is used. Applies only when Community Goals is enabled.</div>
+                        <div class="setting-label">${t('js.set.form.max_contribution_amount')}</div>
+                        <div class="setting-description">${t('js.set.form.max_contribution_amount.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="communityGoalsMaxAmount" data-prefix="${prefix}" min="0" value="${settings.communityGoalsMaxAmount !== undefined ? settings.communityGoalsMaxAmount : 0}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Chat Presence</div>
-                        <div class="setting-description">When to join chat</div>
+                        <div class="setting-label">${t('js.set.form.chat_presence')}</div>
+                        <div class="setting-description">${t('js.set.form.chat_presence.desc')}</div>
                     </div>
                     <select class="input-field w-36" data-field="chat" data-prefix="${prefix}">
                         ${chatOptions.map(o => `<option value="${o.value}" ${selectValue('chat', settings.chat, 'ONLINE') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
@@ -806,8 +806,8 @@
                 ${isOverride ? `
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Rotation Preference</div>
-                        <div class="setting-description">Prefer: favored when picking who to watch. Avoid: never watched unless it's the only online channel. Neither overrides DROPS/STREAK priority or fair rotation.</div>
+                        <div class="setting-label">${t('js.set.form.rotation_preference')}</div>
+                        <div class="setting-description">${t('js.set.form.rotation_preference.desc')}</div>
                     </div>
                     <select class="input-field w-36" data-field="preference" data-prefix="${prefix}">
                         ${preferenceOptions.map(o => `<option value="${o.value}" ${selectValue('preference', settings.preference, '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
@@ -815,12 +815,12 @@
                 </div>
                 ` : ''}
 
-                <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">Betting Settings</h4>
+                <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
                 
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Strategy</div>
-                        <div class="setting-description">How to choose prediction outcome</div>
+                        <div class="setting-label">${t('js.set.form.strategy')}</div>
+                        <div class="setting-description">${t('js.set.form.strategy.desc')}</div>
                     </div>
                     <select class="input-field w-36" data-field="bet.strategy" data-prefix="${prefix}">
                         ${strategyOptions.map(o => `<option value="${o.value}" ${selectValue('strategy', bet.strategy, 'SMART') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
@@ -828,50 +828,50 @@
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Bet Percentage</div>
-                        <div class="setting-description">Percentage of points to bet (1-100)</div>
+                        <div class="setting-label">${t('js.set.form.bet_percentage')}</div>
+                        <div class="setting-description">${t('js.set.form.bet_percentage.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="bet.percentage" data-prefix="${prefix}" min="1" max="100" value="${bet.percentage !== undefined ? bet.percentage : 5}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Percentage Gap</div>
-                        <div class="setting-description">Gap threshold for smart strategy</div>
+                        <div class="setting-label">${t('js.set.form.percentage_gap')}</div>
+                        <div class="setting-description">${t('js.set.form.percentage_gap.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="bet.percentageGap" data-prefix="${prefix}" min="0" max="100" value="${bet.percentageGap !== undefined ? bet.percentageGap : 20}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Max Points</div>
-                        <div class="setting-description">Maximum points to bet</div>
+                        <div class="setting-label">${t('js.set.form.max_points')}</div>
+                        <div class="setting-description">${t('js.set.form.max_points.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="bet.maxPoints" data-prefix="${prefix}" min="0" value="${bet.maxPoints !== undefined ? bet.maxPoints : 50000}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Minimum Points</div>
-                        <div class="setting-description">Minimum balance required to bet</div>
+                        <div class="setting-label">${t('js.set.form.minimum_points')}</div>
+                        <div class="setting-description">${t('js.set.form.minimum_points.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="bet.minimumPoints" data-prefix="${prefix}" min="0" value="${bet.minimumPoints !== undefined ? bet.minimumPoints : 0}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Stealth Mode</div>
-                        <div class="setting-description">Bet slightly less than top predictor</div>
+                        <div class="setting-label">${t('js.set.form.stealth_mode')}</div>
+                        <div class="setting-description">${t('js.set.form.stealth_mode.desc')}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs('stealthMode', bet.stealthMode)}>
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Delay</div>
-                        <div class="setting-description">Seconds to wait before betting</div>
+                        <div class="setting-label">${t('js.set.form.delay')}</div>
+                        <div class="setting-description">${t('js.set.form.delay.desc')}</div>
                     </div>
                     <input type="number" class="input-field w-28" data-field="bet.delay" data-prefix="${prefix}" min="0" step="0.5" value="${bet.delay !== undefined ? bet.delay : 6}">
                 </div>
                 <div class="setting-row">
                     <div>
-                        <div class="setting-label">Delay Mode</div>
-                        <div class="setting-description">How delay is calculated</div>
+                        <div class="setting-label">${t('js.set.form.delay_mode')}</div>
+                        <div class="setting-description">${t('js.set.form.delay_mode.desc')}</div>
                     </div>
                     <select class="input-field w-36" data-field="bet.delayMode" data-prefix="${prefix}">
                         ${delayModeOptions.map(o => `<option value="${o.value}" ${selectValue('delayMode', bet.delayMode, 'FROM_END') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
@@ -898,13 +898,13 @@
         const input = document.getElementById('new-streamer-input');
         const username = input.value.trim().toLowerCase();
         if (!username) {
-            showToast('Please enter a username', 'error');
+            showToast(t('js.set.toast.username_required'), 'error');
             return;
         }
 
         const existing = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
         if (existing) {
-            showToast('Streamer already exists', 'error');
+            showToast(t('js.set.toast.streamer_exists'), 'error');
             return;
         }
 
@@ -914,15 +914,15 @@
         list.appendChild(li);
         setupStreamerDragAndDrop();
         input.value = '';
-        showToast(`Added ${username}`);
+        showToast(t('js.set.toast.streamer_added', { username: username }));
     }
 
     function removeStreamer(username) {
-        if (!confirm(`Remove ${username}?`)) return;
+        if (!confirm(t('js.set.confirm.remove_streamer', { username: username }))) return;
         const item = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
         if (item) {
             item.remove();
-            showToast(`Removed ${username}`);
+            showToast(t('js.set.toast.streamer_removed', { username: username }));
         }
     }
 
@@ -1083,7 +1083,7 @@
         e.preventDefault();
         const saveBtn = document.getElementById('save-btn');
         saveBtn.disabled = true;
-        saveBtn.textContent = 'Saving...';
+        saveBtn.textContent = t('js.set.toast.saving');
 
         const oldDiscordEnabled = currentSettings?.discord?.enabled || false;
 
@@ -1103,34 +1103,34 @@
             const newDiscordEnabled = data.discord?.enabled || false;
             
             if (oldDiscordEnabled !== newDiscordEnabled) {
-                showToast('Settings saved! Reloading...');
+                showToast(t('js.set.toast.saved_reloading'));
                 sessionStorage.removeItem('miner_loaded_' + window.location.pathname);
                 setTimeout(() => window.location.reload(), 500);
                 return;
             }
 
-            showToast('Settings saved successfully!');
+            showToast(t('js.set.toast.saved'));
             currentSettings = data;
         } catch (error) {
-            showToast(error.message || 'Failed to save settings', 'error');
+            showToast(error.message || t('js.set.toast.save_failed'), 'error');
         } finally {
             saveBtn.disabled = false;
-            saveBtn.textContent = 'Save Settings';
+            saveBtn.textContent = t('js.set.save');
         }
     });
 
     document.getElementById('reset-btn').addEventListener('click', async () => {
-        if (!confirm('Reset all settings to defaults? This will NOT remove streamers.')) return;
+        if (!confirm(t('js.set.confirm.reset'))) return;
 
         try {
             const response = await fetch('/api/settings/reset', { method: 'POST' });
-            if (!response.ok) throw new Error('Failed to reset');
-            
+            if (!response.ok) throw new Error(t('js.set.toast.reset_failed'));
+
             const settings = await response.json();
             populateForm(settings);
-            showToast('Settings reset to defaults');
+            showToast(t('js.set.toast.reset_done'));
         } catch (error) {
-            showToast('Failed to reset settings', 'error');
+            showToast(t('js.set.toast.reset_failed'), 'error');
         }
     });
 
