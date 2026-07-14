@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -392,5 +393,160 @@ func TestCheckAndMaybeUpdateUpToDate(t *testing.T) {
 	}
 	if restarted {
 		t.Error("OnUpdate called when already up to date")
+	}
+}
+
+// --- Fail-closed checksum verification (Stage B hardening) ---
+
+// A release WITHOUT checksums.txt must be refused, not installed unverified.
+func TestApplyUpdateRefusedWithoutChecksums(t *testing.T) {
+	srv := newReleaseServer(t, "v9.9.9", []byte("new binary"), false /* no checksums.txt */, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+	})
+	rel, err := u.latestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = u.applyUpdate(context.Background(), rel)
+	if err == nil {
+		t.Fatal("expected fail-closed error for a release without checksums.txt, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to install unverified binary") {
+		t.Errorf("error should state the fail-closed refusal, got: %v", err)
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary was replaced despite missing checksums.txt: %q", got)
+	}
+}
+
+// A checksums.txt that exists but cannot be downloaded must also refuse.
+func TestApplyUpdateRefusedWhenChecksumsFetchFails(t *testing.T) {
+	binary := []byte("new binary")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		rel := release{
+			TagName: "v9.9.9",
+			Assets: []asset{
+				{Name: assetName(), URL: srvURL(r) + "/bin"},
+				{Name: "checksums.txt", URL: srvURL(r) + "/sums"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(rel)
+	})
+	mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(binary) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+	})
+	rel, err := u.latestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.applyUpdate(context.Background(), rel); err == nil {
+		t.Fatal("expected fail-closed error when checksums.txt cannot be fetched, got nil")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary was replaced despite unfetchable checksums.txt: %q", got)
+	}
+}
+
+// A checksums.txt without an entry for this platform's asset must refuse.
+func TestApplyUpdateRefusedWhenChecksumEntryMissing(t *testing.T) {
+	binary := []byte("new binary")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		rel := release{
+			TagName: "v9.9.9",
+			Assets: []asset{
+				{Name: assetName(), URL: srvURL(r) + "/bin"},
+				{Name: "checksums.txt", URL: srvURL(r) + "/sums"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(rel)
+	})
+	mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(binary) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+		// Valid file, but for a different asset name.
+		_, _ = w.Write([]byte("deadbeef  some-other-asset\n"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+	})
+	rel, err := u.latestRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.applyUpdate(context.Background(), rel); err == nil {
+		t.Fatal("expected fail-closed error when checksums.txt lacks the asset entry, got nil")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary was replaced despite missing checksum entry: %q", got)
+	}
+}
+
+// A failed install surfaces via NotifyFailure exactly once per version.
+func TestCheckAndMaybeUpdateNotifiesFailureOnce(t *testing.T) {
+	srv := newReleaseServer(t, "v9.9.9", []byte("new binary"), false /* no checksums -> refuse */, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	failures := 0
+	var failReason string
+	restarted := false
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		NotifyFailure: func(cur, latest, reason string) {
+			failures++
+			failReason = reason
+		},
+		OnUpdate: func() { restarted = true },
+	})
+
+	u.checkAndMaybeUpdate(context.Background())
+	// Second cycle: same broken version, must not re-notify.
+	u.checkAndMaybeUpdate(context.Background())
+
+	if failures != 1 {
+		t.Errorf("NotifyFailure called %d times, want exactly 1 (deduped per version)", failures)
+	}
+	if !strings.Contains(failReason, "refusing to install unverified binary") {
+		t.Errorf("failure reason should carry the refusal, got: %q", failReason)
+	}
+	if restarted {
+		t.Error("OnUpdate called even though the update was refused")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary replaced despite refusal: %q", got)
 	}
 }

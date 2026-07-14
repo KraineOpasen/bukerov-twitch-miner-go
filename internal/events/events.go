@@ -24,6 +24,7 @@ const (
 	TypeRaidJoined      Type = "raid_joined"
 	TypeRewardRedeemed  Type = "reward_redeemed"
 	TypeUpdateAvailable Type = "update_available"
+	TypeUpdateFailed    Type = "update_failed"
 
 	// TypeDiscoverySelected/TypeDiscoverySwitched track the directory
 	// discovery slot picking its first channel and auto-switching between

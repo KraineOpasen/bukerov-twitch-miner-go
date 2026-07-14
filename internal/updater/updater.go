@@ -6,11 +6,15 @@
 // shut down cleanly so the container/service supervisor restarts it on the
 // new build.
 //
-// The whole subsystem is best-effort: any failure (network error, read-only
-// filesystem, checksum mismatch, ...) is logged and the miner keeps running
-// on its current version. When self-update is disabled it still checks and
-// logs/notifies that an update is available, so operators who have opted out
-// of automatic replacement are not left in the dark.
+// The whole subsystem is best-effort for the MINER: any failure (network
+// error, read-only filesystem, checksum problem, ...) is logged/notified and
+// the miner keeps running on its current version. Installation itself is
+// fail-closed: a binary is only ever swapped in after its sha256 has been
+// verified against the release's checksums.txt — a release without usable
+// checksums is refused, never installed unverified. When self-update is
+// disabled it still checks and logs/notifies that an update is available, so
+// operators who have opted out of automatic replacement are not left in the
+// dark.
 package updater
 
 import (
@@ -59,6 +63,12 @@ const (
 // distinct latest version so it does not spam every check interval.
 type NotifyFunc func(current, latest, releaseURL string)
 
+// NotifyFailureFunc is invoked (best-effort) when applying an available
+// update fails — download error, missing/unfetchable checksums, checksum
+// mismatch, or a failed binary swap. Called at most once per distinct latest
+// version so a persistently broken release does not spam every interval.
+type NotifyFailureFunc func(current, latest, reason string)
+
 // Options configures an Updater.
 type Options struct {
 	// Repo is the "owner/name" GitHub repository to check for releases.
@@ -72,6 +82,9 @@ type Options struct {
 	CheckInterval time.Duration
 	// Notify, if set, is called when a newer release is found.
 	Notify NotifyFunc
+	// NotifyFailure, if set, is called when applying an available update
+	// fails (fail-closed refusal, download error, swap failure).
+	NotifyFailure NotifyFailureFunc
 	// OnUpdate, if set, is invoked after the binary has been successfully
 	// replaced. It should trigger a clean shutdown so the process exits 0 and
 	// the supervisor restarts it on the new binary.
@@ -92,6 +105,10 @@ type Updater struct {
 	// notifiedVersion is the latest version already surfaced via Notify, so a
 	// pending update isn't announced on every interval.
 	notifiedVersion string
+	// failedVersion is the latest version whose failed installation was
+	// already surfaced via NotifyFailure, so a persistently broken release
+	// isn't re-announced on every interval.
+	failedVersion string
 }
 
 // release/asset mirror the subset of the GitHub Releases API the updater uses.
@@ -200,10 +217,14 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 
 	if err := u.applyUpdate(ctx, rel); err != nil {
 		// A read-only filesystem (common in hardened Docker setups) or any
-		// other write failure must not take the miner down - log and carry on
-		// with the current version.
+		// other failure must not take the miner down - log, notify once per
+		// version, and carry on with the current version.
 		slog.Error("Auto-update: failed to apply update, continuing on current version",
 			"current", u.opts.CurrentVersion, "latest", rel.TagName, "error", err)
+		if u.opts.NotifyFailure != nil && u.failedVersion != rel.TagName {
+			u.failedVersion = rel.TagName
+			u.opts.NotifyFailure(u.opts.CurrentVersion, rel.TagName, err.Error())
+		}
 		return
 	}
 
@@ -316,26 +337,26 @@ func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 }
 
 // verifyChecksum checks data against the sha256 listed for name in the
-// release's checksums.txt asset. A missing checksums asset is tolerated (the
-// download simply goes unverified); a present-but-mismatching checksum is a
-// hard failure so a corrupt/tampered binary is never installed.
+// release's checksums.txt asset. Verification is FAIL-CLOSED: a missing
+// checksums.txt, a failed checksums download, or a checksums file without an
+// entry for the asset all refuse the install, exactly like a mismatching
+// checksum — an unverified binary is never swapped in. The release workflow
+// publishes checksums.txt for every release, so these paths only trigger on
+// a tampered/broken release or a network failure (and the next check retries).
 func (u *Updater) verifyChecksum(ctx context.Context, rel *release, name string, data []byte) error {
 	sums := findAsset(rel, "checksums.txt")
 	if sums == nil {
-		slog.Debug("Auto-update: no checksums.txt in release, skipping verification", "version", rel.TagName)
-		return nil
+		return fmt.Errorf("release %s has no checksums.txt asset; refusing to install unverified binary", rel.TagName)
 	}
 
 	body, err := u.get(ctx, sums.URL, apiTimeout)
 	if err != nil {
-		slog.Warn("Auto-update: could not fetch checksums, skipping verification", "error", err)
-		return nil
+		return fmt.Errorf("fetch checksums.txt for %s: %w; refusing to install unverified binary", rel.TagName, err)
 	}
 
 	want, ok := checksumFor(string(body), name)
 	if !ok {
-		slog.Warn("Auto-update: checksums.txt has no entry for asset, skipping verification", "asset", name)
-		return nil
+		return fmt.Errorf("checksums.txt of %s has no entry for %s; refusing to install unverified binary", rel.TagName, name)
 	}
 
 	sum := sha256.Sum256(data)

@@ -1918,6 +1918,25 @@ PointRule
 - Uses TV client to appear as legitimate device
 - Discord bot tokens should be kept secret and not shared
 
+### Auto-Update Integrity (`internal/updater`)
+
+Binary self-update is fail-closed: `verifyChecksum` refuses the install when
+the release has no `checksums.txt` asset, when the checksums file cannot be
+downloaded, when it has no entry for the platform asset, or when the sha256
+mismatches — an unverified binary is never swapped in (`replaceExecutable` is
+only reached after verification succeeds). The miner itself stays best-effort:
+a refused/failed update is logged, recorded as an `update_failed` event, and
+surfaced once per version via the Discord system channel
+(`Options.NotifyFailure` → `Manager.NotifyUpdateFailed`), and mining continues
+on the current version. The Release workflow publishes `checksums.txt`
+(sha256sum over all binaries) with every release.
+
+The container image also defines a `HEALTHCHECK` executing
+`/twitch-miner-go -healthcheck` (scratch has no shell): it loads the same
+config, probes `GET /api/status` on the resolved dashboard address (loopback
+for wildcard binds), attaches `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` when
+set, and exits 0/1. With `enableAnalytics=false` it reports healthy.
+
 ### Dashboard Security Model (`internal/web/security.go`)
 
 The dashboard is an admin surface (it can spend channel points and change
