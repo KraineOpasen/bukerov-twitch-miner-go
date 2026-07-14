@@ -62,6 +62,10 @@ type Miner struct {
 
 	deviceID          string
 	externalAnalytics bool
+	// ownsDB is true only when initialize() opened the database itself
+	// (library use); cmd/miner injects the handle via SetDatabase and keeps
+	// ownership of its Close.
+	ownsDB bool
 
 	// autoUpdate holds the auto-update watcher configuration set via
 	// ConfigureAutoUpdate before Run. When nil the watcher is not started.
@@ -145,6 +149,14 @@ func (m *Miner) SetAnalyticsService(svc *analytics.Service) {
 	m.externalAnalytics = true
 }
 
+// SetDatabase injects an externally-owned database handle (cmd/miner opens
+// it and closes it after Run returns). When set, the miner neither opens nor
+// closes the DB; without it (library use) initialize() opens the handle and
+// stop() closes it — exactly one owner either way.
+func (m *Miner) SetDatabase(db *database.DB) {
+	m.db = db
+}
+
 func (m *Miner) SetWebServer(server *web.Server) {
 	m.webServer = server
 }
@@ -197,15 +209,18 @@ func (m *Miner) initialize() error {
 	}
 
 	m.dbBasePath = filepath.Join("database", m.config.Username)
-	if err := os.MkdirAll(m.dbBasePath, 0755); err != nil {
-		return fmt.Errorf("failed to create database directory: %w", err)
-	}
 
-	db, err := database.Open(m.dbBasePath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+	// cmd/miner injects the DB via SetDatabase and keeps ownership (its
+	// deferred Close runs after stop()). Opening here is the library-use
+	// fallback, and only then does the miner own the close in stop().
+	if m.db == nil {
+		db, err := database.Open(m.dbBasePath)
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		m.db = db
+		m.ownsDB = true
 	}
-	m.db = db
 
 	return nil
 }
@@ -324,7 +339,8 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if m.config.Discord.Enabled || notifications.AnyMessageProviderConfigured(m.config.Username) {
 		notifMgr, err := notifications.NewManager(&m.config.Discord, &m.config.Notifications, m.db, streamerNames, m.config.Username)
 		if err != nil {
-			slog.Error("Failed to create notification manager", "error", err)
+			slog.Error("Failed to create notification manager; notifications stay DISABLED until the underlying problem is fixed", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "notifications: "+err.Error())
 		} else {
 			m.notifications = notifMgr
 			m.notifications.InitializePointsTracking(m.streamers.PointsMap())
@@ -363,6 +379,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		store, err := watcher.NewWatchTimeStore(m.db)
 		if err != nil {
 			slog.Error("Failed to create watch-time store, rotation fairness will not persist across restarts", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "watch_time: "+err.Error())
 		} else {
 			watchTimeStore = store
 		}
@@ -394,7 +411,8 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	// every observed campaign is recorded and survives its expiry.
 	if m.db != nil {
 		if catalog, err := drops.NewCampaignCatalog(m.db); err != nil {
-			slog.Error("Failed to initialize drop campaign catalog", "error", err)
+			slog.Error("Failed to initialize drop campaign catalog; the Past-campaigns catalog stays DISABLED", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "drop_catalog: "+err.Error())
 		} else {
 			m.dropsTracker.SetCatalog(catalog)
 			m.dropCatalog = catalog
@@ -950,7 +968,11 @@ func (m *Miner) stop() {
 		m.notifications.Stop()
 	}
 
-	if m.db != nil {
+	// Close the DB only when the miner opened it itself (library use). In
+	// the cmd/miner path main owns the handle and closes it after Run
+	// returns — closing here would cut off writers that stop() does not
+	// join (see Stage E) earlier than necessary.
+	if m.db != nil && m.ownsDB {
 		_ = m.db.Close()
 	}
 
@@ -1051,6 +1073,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		newNotifMgr, err := notifications.NewManager(&discordCfg, &notifCfg, m.db, m.streamers.Names(), notifUsername)
 		if err != nil {
 			slog.Error("Failed to create notification manager", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "notifications: "+err.Error())
 		} else {
 			m.mu.Lock()
 			m.notifications = newNotifMgr

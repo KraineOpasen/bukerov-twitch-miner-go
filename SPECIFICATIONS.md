@@ -1345,6 +1345,34 @@ This design allows:
 - **Future-proof extensibility**: New modules can be added without modifying existing migration code
 - **Clear version tracking**: Easy to see which version each module is at
 
+#### Transactional Migrations & Ownership
+
+Each migration's body and its `schema_versions` bump are applied in **one
+transaction** (`applyMigration`): a crash or failure rolls back everything,
+so a migration can never end up applied with a stale version, or (for
+multi-statement bodies) applied halfway. SQLite DDL is transactional; the
+modernc driver executes multi-statement bodies on the transaction's
+connection. A `Migration` may define `Run func(*sql.Tx) error` instead of
+`SQL` for bodies needing per-statement guards: the two historical
+`ALTER TABLE ADD COLUMN` migrations (analytics v3, notifications v2) use
+`database.AddColumnIfMissing`, checked per column against
+`pragma_table_info`, so databases poisoned by the pre-transactional crash
+window (columns present, version stale — previously a fatal
+"duplicate column name" loop on every start) self-heal on the next start.
+
+Lifecycle: `database.Open` is a process-wide singleton guarded by a mutex
+(not `sync.Once`) — a failed initialization returns the error and is
+retryable instead of poisoning later calls with `(nil, nil)`. Ownership is
+single: `cmd/miner` opens the DB (always, regardless of `enableAnalytics`),
+injects it into the miner via `SetDatabase`, and its deferred `Close` runs
+after `Run`/`stop()` return; the miner opens/closes only in library use
+(`ownsDB`). `watcher.Stop`/`DropsTracker.Stop` join their loops (bounded by
+a 5s `stopJoinTimeout`) so in-flight `watch_time`/catalog writes drain
+before the close; the remaining writer joins (pubsub/chat/web) are Stage E
+scope. Failures initializing DB-backed modules (notifications, watch-time,
+drop catalog) are recorded as `module_init_failed` events on every start in
+addition to the error log.
+
 #### Analytics Module Schema
 
 ```sql

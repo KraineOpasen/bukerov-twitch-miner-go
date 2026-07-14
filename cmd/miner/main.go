@@ -78,22 +78,22 @@ func main() {
 
 	slog.Info("Twitch Channel Points Miner", "version", version.Version)
 
+	// main owns the database: it is needed regardless of EnableAnalytics
+	// (notifications rules, watch-time fairness, drops catalog), so it is
+	// opened here once and closed only by the deferred Close, which runs
+	// AFTER m.Run (and therefore after Miner.stop()) returns. The Miner
+	// receives the handle via SetDatabase and never closes it itself.
+	dbBasePath := filepath.Join("database", cfg.Username)
+	db, err := database.Open(dbBasePath)
+	if err != nil {
+		slog.Error("Failed to open database", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = db.Close() }()
+
 	var analyticsSvc *analytics.Service
 	var webServer *web.Server
-	var db *database.DB
 	if cfg.EnableAnalytics {
-		dbBasePath := filepath.Join("database", cfg.Username)
-		if err := os.MkdirAll(dbBasePath, 0755); err != nil {
-			slog.Error("Failed to create database directory", "error", err)
-			os.Exit(1)
-		}
-		db, err = database.Open(dbBasePath)
-		if err != nil {
-			slog.Error("Failed to open database", "error", err)
-			os.Exit(1)
-		}
-		defer func() { _ = db.Close() }()
-
 		analyticsSvc, err = analytics.NewService(db, dbBasePath, cfg.Analytics.RetentionDays)
 		if err != nil {
 			slog.Error("Failed to create analytics service", "error", err)
@@ -117,6 +117,7 @@ func main() {
 
 	m := miner.New(cfg, *configFile)
 	m.ConfigureAutoUpdate(autoUpdateEnabled(), updater.ParseCheckInterval(os.Getenv("AUTO_UPDATE_CHECK_INTERVAL")))
+	m.SetDatabase(db)
 	if analyticsSvc != nil {
 		m.SetAnalyticsService(analyticsSvc)
 	}

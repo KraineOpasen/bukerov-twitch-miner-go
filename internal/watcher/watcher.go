@@ -133,6 +133,10 @@ type MinuteWatcher struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	// loopDone is closed when the watch loop goroutine exits; Stop waits on
+	// it (bounded by stopJoinTimeout) so in-flight watch_time writes drain
+	// before the database is closed.
+	loopDone chan struct{}
 
 	// sender performs the actual watch-minute reporting (playback token,
 	// playlist touch, spade event). The broker is the sole caller of it.
@@ -223,20 +227,44 @@ func (w *MinuteWatcher) AddSource(src CandidateSource) {
 	w.mu.Unlock()
 }
 
+// stopJoinTimeout bounds how long Stop waits for the watch loop to drain its
+// in-flight tick (which may be writing watch_time rows) before giving up so a
+// hung loop can never block shutdown indefinitely. Package variable so tests
+// can shrink it.
+var stopJoinTimeout = 5 * time.Second
+
 func (w *MinuteWatcher) Start(ctx context.Context) {
 	w.mu.Lock()
 	w.ctx, w.cancel = context.WithCancel(ctx)
+	done := make(chan struct{})
+	w.loopDone = done
 	w.mu.Unlock()
 
-	go w.loop()
+	go func() {
+		defer close(done)
+		w.loop()
+	}()
 }
 
+// Stop cancels the watch loop and waits (bounded by stopJoinTimeout) for it
+// to finish, so an in-flight tick's watch_time write completes before the
+// caller proceeds to close the database.
 func (w *MinuteWatcher) Stop() {
 	w.mu.Lock()
 	if w.cancel != nil {
 		w.cancel()
 	}
+	done := w.loopDone
 	w.mu.Unlock()
+
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(stopJoinTimeout):
+		slog.Warn("Watcher loop did not finish within the stop timeout; proceeding with shutdown", "timeout", stopJoinTimeout)
+	}
 }
 
 // SetOnMinuteWatched registers a callback invoked after each watch tick that
