@@ -521,7 +521,12 @@ func (m *Miner) startMining(ctx context.Context) {
 
 	if m.webServer != nil {
 		if !m.externalAnalytics {
-			m.webServer.Start()
+			// Fail-closed: on a non-loopback bind without credentials the
+			// dashboard stays down (mining continues); the primary
+			// cmd/miner path aborts the whole process for the same error.
+			if err := m.webServer.Start(); err != nil {
+				slog.Error("Web server NOT started", "error", err)
+			}
 		}
 		m.webServer.GetStatusBroadcaster().SetStatus(web.StatusRunning, "Mining active")
 	}

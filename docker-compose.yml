@@ -16,9 +16,16 @@ services:
       # How often to check GitHub Releases for a newer version. Accepts a Go
       # duration ("12h", "6h30m") or a bare number of hours ("12"). Default 8h.
       AUTO_UPDATE_CHECK_INTERVAL: "8h"
-      # Optional: protect the dashboard with HTTP Basic Auth.
+      # REQUIRED for the dashboard: the image binds the dashboard to all
+      # container interfaces (DASHBOARD_HOST=0.0.0.0) so the published port
+      # works, and a non-loopback bind refuses to start without credentials.
+      # Uncomment and set both, or the container will exit at startup with an
+      # explanatory error.
       # DASHBOARD_USERNAME: "admin"
       # DASHBOARD_PASSWORD: "change-me"
+      # Alternative (NOT recommended): explicitly accept an unauthenticated
+      # dashboard on a trusted network instead of setting credentials.
+      # DASHBOARD_INSECURE_NO_AUTH: "true"
     volumes:
       - ./config:/config
       - ./cookies:/cookies

@@ -78,6 +78,8 @@ Edit `~/twitch-miner/config/config.json` with your Twitch username and the strea
 ```bash
 docker run -d \
   --name twitch-miner \
+  -e DASHBOARD_USERNAME=admin \
+  -e DASHBOARD_PASSWORD=your-secure-password \
   -v ~/twitch-miner/config:/config \
   -v ~/twitch-miner/cookies:/cookies \
   -v ~/twitch-miner/logs:/logs \
@@ -85,6 +87,12 @@ docker run -d \
   -p 5000:5000 \
   ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
 ```
+
+> **Note:** dashboard credentials are **required** in containers. The image
+> binds the dashboard to all container interfaces (`DASHBOARD_HOST=0.0.0.0`)
+> so the published port works, and the miner refuses to start on a
+> non-loopback bind without `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (see
+> [Security defaults](#security-defaults)).
 
 ### Step 3: Authenticate with Twitch
 
@@ -103,19 +111,15 @@ docker logs -f twitch-miner
 
 Once authenticated, the dashboard shows all your streamers, points, and earnings.
 
-### Optional: Protect the dashboard with authentication
+### Dashboard authentication
+
+Containers must set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` (already shown
+in Step 2). If you consciously want an **unauthenticated** dashboard on a
+trusted network instead, opt out explicitly — otherwise the container exits
+at startup with an explanatory error:
 
 ```bash
-docker run -d \
-  --name twitch-miner \
-  -e DASHBOARD_USERNAME=admin \
-  -e DASHBOARD_PASSWORD=your-secure-password \
-  -v ~/twitch-miner/config:/config \
-  -v ~/twitch-miner/cookies:/cookies \
-  -v ~/twitch-miner/logs:/logs \
-  -v ~/twitch-miner/database:/database \
-  -p 5000:5000 \
-  ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
+  -e DASHBOARD_INSECURE_NO_AUTH=true \
 ```
 
 ### About the image
@@ -474,7 +478,7 @@ Generate a sample config with all options:
     }
   ],
   "analytics": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5000,
     "refresh": 5,
     "daysAgo": 7,
@@ -760,7 +764,7 @@ Applied globally via `streamerSettings`, can be overridden per-streamer:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `host` | 0.0.0.0 | Server bind address |
+| `host` | 127.0.0.1 | Server bind address. Loopback by default; a non-loopback value (e.g. `0.0.0.0`) requires dashboard credentials — see [Security defaults](#security-defaults). Overridable with the `DASHBOARD_HOST` env var (the Docker image sets it to `0.0.0.0`). |
 | `port` | 5000 | Server port |
 | `refresh` | 5 | Dashboard auto-refresh interval (minutes) |
 | `daysAgo` | 7 | Default chart date range |
@@ -959,6 +963,50 @@ curl -X POST http://localhost:5000/api/test-notification
 `status` is `ok` when every provider succeeded and `partial` when at least one
 failed (the failing provider's `error` field explains why). If the dashboard is
 protected with HTTP Basic Auth, pass `-u username:password` to `curl`.
+
+---
+
+## Security defaults
+
+The dashboard can place prediction bets, redeem rewards (both spend channel
+points), and change settings/notification config — treat it like an admin
+panel.
+
+- **Bind address:** the dashboard binds to `127.0.0.1` by default and is only
+  reachable from the machine running the miner. Exposing it is an explicit
+  choice: set `analytics.host` in `config.json` or the `DASHBOARD_HOST`
+  environment variable (env takes precedence and is never written back to the
+  config file). The Docker image sets `DASHBOARD_HOST=0.0.0.0` because a
+  loopback bind inside a container would make published ports unreachable.
+- **Authentication:** on a non-loopback bind, `DASHBOARD_USERNAME` and
+  `DASHBOARD_PASSWORD` (HTTP Basic Auth over the whole dashboard) are
+  **required** — the miner refuses to start without them and tells you
+  exactly what to set. `DASHBOARD_INSECURE_NO_AUTH=true` is the explicit,
+  logged opt-out for trusted networks. On a loopback bind auth stays
+  optional.
+- **CSRF protection:** all state-changing endpoints (bets, redemptions,
+  settings, quick actions, canary runs, notification config) reject
+  cross-origin browser requests based on `Sec-Fetch-Site`/`Origin`/`Referer`.
+  Non-browser clients (`curl`, scripts) are unaffected. If you serve the
+  dashboard behind a reverse proxy that rewrites the `Host` header, list the
+  public origin(s) in `DASHBOARD_TRUSTED_ORIGINS` (comma-separated, e.g.
+  `https://miner.example.com`).
+- **Headers & timeouts:** responses carry `X-Content-Type-Options`,
+  `X-Frame-Options`, `Referrer-Policy` and a Content-Security-Policy; the
+  HTTP server enforces header/idle timeouts against slow-client exhaustion.
+
+### Deploying via TrueNAS SCALE Apps (and similar app catalogs)
+
+When installed through an app catalog (TrueNAS SCALE Apps, unraid Community
+Applications, etc.), the port the dashboard is actually reachable on is
+decided by the **app's network settings in the platform UI**, not by this
+repository's Dockerfile. If the app publishes the port on the host IP, the
+dashboard is visible to your whole local network — review the app's network
+configuration, and set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` in the app's
+environment variables (the container refuses to start without them unless
+you explicitly opt out). That network boundary is infrastructure you control
+on the NAS side; the miner's fail-closed startup check is the code-side
+safety net.
 
 ---
 

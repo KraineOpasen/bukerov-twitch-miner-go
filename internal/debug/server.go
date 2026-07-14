@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 )
 
 const (
@@ -62,7 +63,11 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to bind debug server on %s: %w", addr, err)
 	}
 
-	s.srv = &http.Server{Handler: mux}
+	s.srv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	s.addr = listener.Addr().String()
 
 	slog.Info("Debug server listening (localhost only)",

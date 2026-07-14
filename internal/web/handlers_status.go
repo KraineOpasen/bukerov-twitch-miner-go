@@ -26,7 +26,6 @@ func (s *Server) handleAPIMinerStatusStream(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ch := s.status.Subscribe()
 	defer s.status.Unsubscribe(ch)
