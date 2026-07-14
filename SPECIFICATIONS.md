@@ -1600,6 +1600,8 @@ The report never places, modifies, or auto-disables a bet or strategy.
 | `/api/miner-status/stream` | GET | SSE stream for miner status updates |
 | `/api/settings` | GET/POST | Get or update runtime settings |
 | `/api/settings/reset` | POST | Reset settings to defaults |
+| `/api/followed` | GET | List the authenticated user's followed channels for the import picker (each flagged `alreadyTracked`; `truncated`/`cap` report the pagination limit) |
+| `/api/followed/import` | POST | Add selected followed channels (`{"logins":[...]}`) to the tracked streamer list with default settings; returns `added` count |
 
 #### Query Parameters for `/json/{streamer}`
 - `startDate`: Filter start (YYYY-MM-DD)
@@ -1609,6 +1611,26 @@ The report never places, modifies, or auto-disables a bet or strategy.
 - `limit`: Max messages to return (default: 50, max: 200)
 - `offset`: Pagination offset
 - `q`: Search query (searches message, username, display name)
+
+#### Followed-Channel Import
+
+The Settings page can seed the tracked streamer list from the account's Twitch
+follows. `GET /api/followed` calls the `ChannelFollows` persisted query through
+the miner's existing token (no extra OAuth scope), paginating on
+`edges[].cursor` / `pageInfo.hasNextPage`:
+
+- The paginator (`api.collectFollowedChannels`, network injected as a `fetch`
+  closure so it is unit-testable) dedups logins case-insensitively and stops at
+  `maxFollowedFetch = 1000` (`followedPageSize = 100` per request). Hitting the
+  cap while Twitch still reports more pages returns `truncated=true`, which the
+  UI surfaces as "showing first 1000 of more" rather than silently cutting.
+- The handler marks each channel `alreadyTracked` against the current streamer
+  list and sorts untracked-first-then-alphabetical so the actionable rows lead.
+- `POST /api/followed/import` appends the selected logins via the miner's
+  standard `ApplySettings` path — **default settings, no per-streamer
+  overrides** — skipping any already tracked, then resolves channel IDs,
+  subscribes PubSub topics, and persists `config.json`. It returns the number of
+  **newly** added entries. This is a one-shot import, not a background sync.
 
 ---
 

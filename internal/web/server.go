@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
@@ -45,6 +46,16 @@ type CampaignsProvider interface {
 type DropCatalogProvider interface {
 	UpcomingCampaigns() []*models.Campaign
 	PastCampaigns() ([]drops.CatalogRecord, error)
+}
+
+// FollowedProvider backs the Settings-page "import followed channels" picker:
+// list the authenticated user's followed channels, know which are already
+// tracked, and add selected ones to the tracked streamer list. Satisfied by the
+// miner.
+type FollowedProvider interface {
+	FollowedChannels() ([]api.FollowedChannel, bool, error)
+	TrackedUsernames() []string
+	ImportStreamers(logins []string) (int, error)
 }
 
 // DiscoveryProvider exposes the directory-discovery subsystem's state so the
@@ -130,6 +141,7 @@ type Server struct {
 	nextStreamCheckProvider NextStreamCheckProvider
 	campaignsProvider       CampaignsProvider
 	dropCatalogProvider     DropCatalogProvider
+	followedProvider        FollowedProvider
 	discoveryProvider       DiscoveryProvider
 	healthProvider          HealthProvider
 	dropProgressProvider    DropProgressProvider
@@ -274,6 +286,12 @@ func (s *Server) SetDropCatalogProvider(provider DropCatalogProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dropCatalogProvider = provider
+}
+
+func (s *Server) SetFollowedProvider(provider FollowedProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.followedProvider = provider
 }
 
 func (s *Server) SetDiscoveryProvider(provider DiscoveryProvider) {
@@ -485,6 +503,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/settings", s.handleSettingsPage)
 	mux.HandleFunc("/api/settings", s.handleAPISettings)
 	mux.HandleFunc("/api/settings/reset", s.handleAPISettingsReset)
+	mux.HandleFunc("/api/followed", s.handleAPIFollowed)
+	mux.HandleFunc("/api/followed/import", s.handleAPIFollowedImport)
 
 	mux.HandleFunc("/health", s.handleHealthPage)
 	mux.HandleFunc("/api/health", s.handleAPIHealth)

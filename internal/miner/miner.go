@@ -453,6 +453,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
 		m.webServer.SetDropCatalogProvider(m)
+		m.webServer.SetFollowedProvider(m)
 		m.webServer.SetDiscoveryProvider(m.discovery)
 		m.webServer.SetHealthProvider(m)
 		m.webServer.SetDropProgressProvider(m)

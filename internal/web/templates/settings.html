@@ -13,11 +13,48 @@
             <div class="flex gap-3 mb-4">
                 <input type="text" id="new-streamer-input" placeholder="Enter streamer username" class="input-field flex-1">
                 <button type="button" id="add-streamer-btn" class="btn-secondary whitespace-nowrap">Add Streamer</button>
+                <button type="button" id="import-followed-btn" class="btn-secondary whitespace-nowrap">Import from followed</button>
             </div>
-            
+
             <ul class="space-y-2" id="streamer-list">
             </ul>
         </div>
+
+        <style>
+            #followed-import-modal { width: min(90vw, 32rem); }
+            #followed-import-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
+            #followed-list { max-height: 45vh; }
+        </style>
+        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-neutral-800 border border-neutral-700 text-neutral-100">
+            <div class="p-5">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-lg font-semibold">Import followed channels</h3>
+                    <button type="button" data-followed-close class="text-neutral-400 hover:text-neutral-100 text-xl leading-none">&times;</button>
+                </div>
+                <p class="text-neutral-400 text-sm mb-3">Pick channels you follow on Twitch to add to the tracked list. They are added with the default per-streamer settings. Already-tracked channels are disabled.</p>
+
+                <div id="followed-truncated" class="hidden mb-3 text-xs text-amber-500" role="status"></div>
+                <div id="followed-loading" class="py-8 text-center text-neutral-400">Loading followed channels…</div>
+                <div id="followed-error" class="hidden py-8 text-center">
+                    <p class="text-sm mb-3" style="color: var(--color-danger)" id="followed-error-msg"></p>
+                    <button type="button" id="followed-retry" class="btn-secondary">Retry</button>
+                </div>
+                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">You don't follow any channels that aren't already tracked.</div>
+
+                <div id="followed-list-wrap" class="hidden">
+                    <div class="flex items-center justify-between mb-2 text-xs text-neutral-400">
+                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">Select all</button>
+                        <span id="followed-selected-count">0 selected</span>
+                    </div>
+                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-neutral-700 rounded-md p-2"></ul>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-4">
+                    <button type="button" data-followed-close class="btn-secondary">Cancel</button>
+                    <button type="button" id="followed-add-btn" class="btn-primary" disabled>Add selected</button>
+                </div>
+            </div>
+        </dialog>
     </details>
 
     <details id="preferences" class="details-panel">
@@ -308,6 +345,119 @@
 
 {{define "scripts"}}
 <script>
+    // --- Import followed channels ---
+    (function () {
+        const modal = document.getElementById('followed-import-modal');
+        if (!modal) return;
+        const els = {
+            openBtn: document.getElementById('import-followed-btn'),
+            truncated: document.getElementById('followed-truncated'),
+            loading: document.getElementById('followed-loading'),
+            error: document.getElementById('followed-error'),
+            errorMsg: document.getElementById('followed-error-msg'),
+            retry: document.getElementById('followed-retry'),
+            empty: document.getElementById('followed-empty'),
+            listWrap: document.getElementById('followed-list-wrap'),
+            list: document.getElementById('followed-list'),
+            selectAll: document.getElementById('followed-select-all'),
+            count: document.getElementById('followed-selected-count'),
+            addBtn: document.getElementById('followed-add-btn'),
+        };
+
+        function show(state) {
+            els.loading.classList.toggle('hidden', state !== 'loading');
+            els.error.classList.toggle('hidden', state !== 'error');
+            els.empty.classList.toggle('hidden', state !== 'empty');
+            els.listWrap.classList.toggle('hidden', state !== 'list');
+        }
+
+        function selectedLogins() {
+            return Array.from(els.list.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+        }
+        function refreshCount() {
+            const n = selectedLogins().length;
+            els.count.textContent = n + ' selected';
+            els.addBtn.disabled = n === 0;
+        }
+
+        function escapeHTML(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+                { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+            ));
+        }
+
+        function renderList(data) {
+            const channels = data.channels || [];
+            const selectable = channels.filter(c => !c.alreadyTracked);
+            els.truncated.classList.toggle('hidden', !data.truncated);
+            if (data.truncated) {
+                els.truncated.textContent = '⚠ Showing the first ' + data.cap + ' of more followed channels — the list is partial.';
+            }
+            if (selectable.length === 0) { show('empty'); return; }
+
+            els.list.innerHTML = channels.map(c => {
+                const disabled = c.alreadyTracked ? 'disabled' : '';
+                const cls = c.alreadyTracked ? 'opacity-50' : '';
+                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">(already tracked)</span>' : '';
+                return '<li class="flex items-center gap-2 ' + cls + '">' +
+                    '<input type="checkbox" value="' + escapeHTML(c.login) + '" ' + disabled + ' class="followed-cb">' +
+                    '<span class="text-sm">' + escapeHTML(c.displayName) + tag + '</span>' +
+                    '</li>';
+            }).join('');
+            els.list.querySelectorAll('.followed-cb').forEach(cb => cb.addEventListener('change', refreshCount));
+            refreshCount();
+            show('list');
+        }
+
+        async function load() {
+            show('loading');
+            try {
+                const resp = await fetch('/api/followed');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                renderList(await resp.json());
+            } catch (err) {
+                els.errorMsg.textContent = String(err.message || err);
+                show('error');
+            }
+        }
+
+        function open() { if (typeof modal.showModal === 'function') modal.showModal(); load(); }
+        function close() { modal.close(); }
+
+        if (els.openBtn) els.openBtn.addEventListener('click', open);
+        modal.querySelectorAll('[data-followed-close]').forEach(b => b.addEventListener('click', close));
+        modal.addEventListener('click', e => { if (e.target === modal) close(); });
+        els.retry.addEventListener('click', load);
+        els.selectAll.addEventListener('click', () => {
+            els.list.querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(cb => { cb.checked = true; });
+            refreshCount();
+        });
+
+        els.addBtn.addEventListener('click', async () => {
+            const logins = selectedLogins();
+            if (logins.length === 0) return;
+            els.addBtn.disabled = true;
+            els.addBtn.textContent = 'Adding…';
+            try {
+                const resp = await fetch('/api/followed/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ logins }),
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                close();
+                // Reload so the newly-tracked streamers appear in the list.
+                location.reload();
+            } catch (err) {
+                els.errorMsg.textContent = String(err.message || err);
+                show('error');
+            } finally {
+                els.addBtn.textContent = 'Add selected';
+                els.addBtn.disabled = false;
+            }
+        });
+    })();
+
     const priorityLabels = {
         'STREAK': 'Watch Streak',
         'DROPS': 'Drops',
