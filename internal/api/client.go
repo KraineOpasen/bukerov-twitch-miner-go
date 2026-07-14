@@ -699,8 +699,18 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 	streamer.Stream.Update(broadcastID, strings.TrimSpace(title), game, tags, viewersCount)
 
 	if game != nil && game.Name != "" && game.ID != "" && streamer.Settings.ClaimDrops {
-		campaignIDs, _ := c.GetCampaignIDsFromStreamer(streamer)
-		streamer.Stream.SetCampaignIDs(campaignIDs)
+		// On a transient fetch failure, keep the channel's previously-known
+		// campaign IDs instead of wiping them: SetCampaignIDs(nil) would drop
+		// the streamer out of DropsCondition() and make its Overview drop
+		// indicator vanish until the next successful refresh (the indicator
+		// then flaps between syncs). A successful fetch — including a
+		// legitimately empty list — still updates the list as before.
+		if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
+			slog.Warn("Failed to fetch channel drop campaign IDs; keeping previous list",
+				"streamer", streamer.Username, "error", err)
+		} else {
+			streamer.Stream.SetCampaignIDs(campaignIDs)
+		}
 	}
 
 	streamer.Stream.SetPayload(

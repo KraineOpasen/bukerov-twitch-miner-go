@@ -345,6 +345,27 @@
 
 {{define "scripts"}}
 <script>
+    // --- Reveal a settings panel from the URL hash ---
+    // The sidebar "Логи" link points at /settings#logger (its prod fallback when
+    // no localhost debug snapshot is available). The panels are collapsed
+    // <details>, so a bare anchor jump lands on Settings without opening the
+    // target section. Open the matching <details> and scroll it into view so the
+    // deep-link (logger or any other panel id) actually reveals its section.
+    (function () {
+        function revealHashPanel() {
+            const id = decodeURIComponent(window.location.hash.replace(/^#/, ''));
+            if (!id) return;
+            const el = document.getElementById(id);
+            if (el && el.tagName === 'DETAILS') {
+                el.open = true;
+                const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+            }
+        }
+        revealHashPanel();
+        window.addEventListener('hashchange', revealHashPanel);
+    })();
+
     // --- Import followed channels ---
     (function () {
         const modal = document.getElementById('followed-import-modal');
