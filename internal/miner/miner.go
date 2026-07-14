@@ -89,6 +89,17 @@ type Miner struct {
 	autoRedeemState map[string]*autoRedeemRuntime
 
 	mu sync.RWMutex
+
+	// importMu serializes the read-modify-write in ImportStreamers so two
+	// concurrent imports can't both read the pre-write snapshot and lose one
+	// another's additions. GetRuntimeSettings (RLock) and ApplySettings (Lock)
+	// are separate acquisitions, so mu alone does not make that pair atomic.
+	importMu sync.Mutex
+	// importApply is the apply step ImportStreamers runs after merging; nil in
+	// production (falls back to ApplySettings). It exists only as a test seam so
+	// the serialization can be exercised without the network/pubsub side effects
+	// of the real apply path.
+	importApply func(settings.RuntimeSettings)
 }
 
 // autoRedeemRuntime is the per-streamer in-memory budget/window bookkeeping for
