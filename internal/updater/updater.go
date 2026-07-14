@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
 
 const (
@@ -384,45 +386,15 @@ func (u *Updater) executablePath() (string, error) {
 	return p, nil
 }
 
-// replaceExecutable atomically swaps the file at execPath for data. It writes
-// a temp file in the same directory (so the final rename is atomic and stays
-// on one filesystem) and renames it into place. On Linux the running process
+// replaceExecutable atomically swaps the file at execPath for data via
+// util.WriteFileAtomic (temp file in the same directory + rename, so the
+// swap is atomic and stays on one filesystem). On Linux the running process
 // keeps executing the old, now-unlinked inode, so replacing itself is safe.
+// 0755 matches a normal executable's permissions.
 func replaceExecutable(execPath string, data []byte) error {
-	dir := filepath.Dir(execPath)
-
-	tmp, err := os.CreateTemp(dir, filepath.Base(execPath)+".new-*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	// Clean up the temp file on any failure before the rename succeeds.
-	success := false
-	defer func() {
-		if !success {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-
-	// Match a normal executable's permissions before swapping it in.
-	if err := os.Chmod(tmpName, 0755); err != nil {
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpName, execPath); err != nil {
+	if err := util.WriteFileAtomic(execPath, data, 0755); err != nil {
 		return fmt.Errorf("replace executable: %w", err)
 	}
-
-	success = true
 	return nil
 }
 

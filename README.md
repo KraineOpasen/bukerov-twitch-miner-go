@@ -891,6 +891,24 @@ See [Discord's official guide](https://support.discord.com/hc/en-us/articles/206
 }
 ```
 
+`config.json` is written with owner-only permissions (`0600`) and atomic
+saves, so keeping the token here is reasonable for a single-user host.
+
+**Alternative: keep the token out of the config file.** Set the
+`DISCORD_BOT_TOKEN` environment variable (e.g. in the container's env, next
+to `DASHBOARD_*`). While it is set, the environment is the **source of
+truth**: the file's `botToken` is ignored, the Settings page no longer shows
+or edits the token, and the secret never travels to the browser.
+
+> ⚠️ **Irreversible side effect — read before setting the env var.** While
+> `DISCORD_BOT_TOKEN` is set, **any** config save — changing *any* setting
+> from the dashboard (streamers, rate limits, health, policy, auto-redeem…),
+> not just Discord settings — rewrites `config.json` **without** the token:
+> the on-disk `botToken` is permanently cleared. If you later remove the env
+> var expecting the file value to come back, it will be empty — you must
+> re-enter the token in the config file or on the Settings page. This is by
+> design (the env var is the source of truth while set), but plan for it.
+
 ### Step 5: Configure Notifications
 
 After restarting with Discord enabled, a **Notifications** page appears in the dashboard where you can:
@@ -1043,6 +1061,14 @@ panel.
   its sha256 is verified against the release's `checksums.txt`; a release
   without usable checksums is refused and reported, never installed
   unverified (see [Automatic Updates](#automatic-updates)).
+- **Config file:** `config.json` (which may contain the Discord bot token) is
+  saved atomically (temp file + rename, a crash mid-save can't truncate it)
+  with owner-only `0600` permissions. A pre-existing `0644` file is tightened
+  to `0600` automatically on the first start — no manual action needed. The
+  token can be kept out of the file entirely via `DISCORD_BOT_TOKEN` — see
+  [Discord Notifications](#discord-notifications), including the **warning
+  about the on-disk token being permanently cleared** while the env var is
+  set.
 - **Container user:** the image does not set a `USER` and runs as root by
   default so the built-in self-update can replace `/twitch-miner-go` and
   existing root-owned data volumes keep working. To run non-root, set the
