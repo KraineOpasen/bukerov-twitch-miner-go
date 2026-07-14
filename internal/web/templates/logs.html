@@ -1,0 +1,42 @@
+{{define "title"}}{{ t "logs.heading" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<style>
+    .log-scroll { max-height: 72vh; overflow: auto; }
+    .log-view { font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; }
+    .log-line { display: block; white-space: pre-wrap; word-break: break-word; padding: 0.02rem 0; }
+    .log-info { color: var(--color-neutral-300); }
+    .log-warn { color: var(--color-amber-500); }
+    .log-error { color: var(--color-danger); }
+</style>
+
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="text-3xl font-bold">{{ t "logs.heading" }}</h1>
+    {{if .DebugURL}}<a href="{{.DebugURL}}" target="_blank" rel="noopener" class="btn-secondary text-sm">{{ t "logs.debug_snapshot" }}</a>{{end}}
+</div>
+<p class="text-neutral-400 text-sm mb-6">{{ t "logs.description" }}</p>
+
+<div class="card">
+    <div id="logs-scroll" class="log-scroll log-view">
+        <div id="logs-lines" hx-get="/api/logs" hx-trigger="every 10s" hx-swap="innerHTML">
+            {{template "logs_lines" .}}
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // Keep the log view pinned to the newest line on load and after each refresh.
+    (function () {
+        function toBottom() {
+            const el = document.getElementById('logs-scroll');
+            if (el) el.scrollTop = el.scrollHeight;
+        }
+        toBottom();
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (e.target && e.target.id === 'logs-lines') toBottom();
+        });
+    })();
+</script>
+{{end}}

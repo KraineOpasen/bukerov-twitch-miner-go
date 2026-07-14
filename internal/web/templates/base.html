@@ -111,7 +111,7 @@
                     {{ t "nav.notifications" }}
                 </a>
                 {{end}}
-                <a href="{{if .DebugURL}}{{.DebugURL}}{{else}}/settings#logger{{end}}" data-nav="/logs" class="sidebar-link" {{if .DebugURL}}target="_blank" rel="noopener" title="{{ t "logs.debug_title" }}"{{end}}>
+                <a href="/logs" data-nav="/logs" class="sidebar-link">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
                     {{ t "nav.logs" }}
                 </a>
@@ -162,16 +162,36 @@
     {{block "scripts" .}}{{end}}
 
     <script>
-        // Highlight the active sidebar link by pathname (hash links stay
-        // inactive so Overview keeps its highlight on the home page).
+        // Highlight the active sidebar link. Real routes match by pathname; the
+        // in-page section links (#grid, #predictions) highlight when their
+        // section hash is active on the home page.
         (function() {
             const path = window.location.pathname;
+            const hash = window.location.hash;
             document.querySelectorAll('[data-nav]').forEach(a => {
                 const nav = a.getAttribute('data-nav');
-                if (nav.startsWith('#')) return;
-                if (nav === '/logs') return;
-                if (nav === path || (nav === '/' && path === '/')) a.classList.add('is-active');
+                if (nav.startsWith('#')) {
+                    if (path === '/' && nav === hash) a.classList.add('is-active');
+                    return;
+                }
+                if (nav === path || (nav === '/' && path === '/' && !hash)) a.classList.add('is-active');
             });
+
+            // Scroll to the section named by the URL hash. The in-page section
+            // links (#grid/#predictions) rely on this: arriving from another page
+            // lands on Overview, but the status-overlay's one-time reload drops the
+            // browser's native hash-scroll, so it never reaches the section. Doing
+            // it explicitly (and again on the reload pass) makes those tabs work,
+            // and covers any future in-page anchor uniformly.
+            function scrollToHash() {
+                if (!window.location.hash) return;
+                let el;
+                try { el = document.querySelector(window.location.hash); } catch (e) { return; }
+                if (el) el.scrollIntoView({ block: 'start' });
+            }
+            requestAnimationFrame(scrollToHash);
+            window.addEventListener('hashchange', scrollToHash);
+
             const toggle = document.getElementById('sidebar-toggle');
             const sidebar = document.getElementById('app-sidebar');
             if (toggle && sidebar) {
