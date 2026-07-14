@@ -149,6 +149,17 @@ type MinuteWatcher struct {
 	// was just made) instead of waiting out its sync interval. Guarded by mu.
 	onMinuteWatched func()
 
+	// lostMiningMinutes accumulates estimated "idle slot" watch time for the
+	// daily summary: per tick, wall-clock minutes for slots that were fillable
+	// (a live eligible candidate existed) but produced no watched minute this
+	// tick. It counts only genuine lost capacity — a slot left empty because
+	// nothing was online is NOT counted. It is an in-memory, process-lifetime
+	// best-effort figure: LostMiningMinutes drains it, and a restart resets it.
+	// Guarded by lostMu (a distinct lock so the daily-summary goroutine's drain
+	// never contends with the loop's mu-protected state).
+	lostMu            sync.Mutex
+	lostMiningMinutes float64
+
 	mu sync.RWMutex
 }
 
@@ -339,7 +350,15 @@ func (w *MinuteWatcher) processWatching() {
 	// that lost their slot complete as skipped.
 	w.executeSessionRefreshes(slots)
 
+	interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
+
+	// Slots that could have been productively filled this tick (granted slots
+	// plus channels that contended for one). Used to estimate lost mining time.
+	fillable := len(slots) + len(waiting)
+
 	if len(slots) == 0 {
+		// No slots granted: any contender that didn't get one is lost capacity.
+		w.accrueLostMining(fillable, 0, interval)
 		w.publishReportStats(slots)
 		return
 	}
@@ -350,7 +369,6 @@ func (w *MinuteWatcher) processWatching() {
 	}
 	slog.Debug("Watching streams", "count", len(slots), "max", constants.MaxSimultaneousStreams, "streamers", watchingNames)
 
-	interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
 	sleepBetween := interval / time.Duration(len(slots))
 
 	// A continuously-watched streamer is reported once per loop, so consecutive
@@ -360,6 +378,7 @@ func (w *MinuteWatcher) processWatching() {
 	maxContinuousGap := 2 * interval
 
 	reported := false
+	watchedOK := 0
 	for _, sl := range slots {
 		streamer := sl.streamer
 
@@ -374,6 +393,7 @@ func (w *MinuteWatcher) processWatching() {
 			}
 		} else {
 			reported = true
+			watchedOK++
 			w.noteReportOutcome(streamer.Username, true, time.Now())
 			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.MinuteWatched)
 			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
@@ -396,6 +416,11 @@ func (w *MinuteWatcher) processWatching() {
 	}
 
 	w.publishReportStats(slots)
+
+	// Estimate lost mining time for this tick: of the fillable slots, how many
+	// produced no watched minute (a granted slot whose send failed while a live
+	// candidate existed). Empty slots with no candidate are not counted.
+	w.accrueLostMining(fillable, watchedOK, interval)
 
 	// A watched minute means real drop progress was just made; nudge any
 	// listener (the drops tracker) to refresh promptly instead of waiting out
@@ -1121,4 +1146,36 @@ func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) error {
 		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", simulateErr)
 	}
 	return err
+}
+
+// accrueLostMining credits this tick's idle-slot time to the lost-mining
+// accumulator. fillable is how many slots could have been productively used
+// this tick (bounded by the slot cap), watchedOK is how many actually reported
+// a minute, and interval is the tick length. Lost = the shortfall × interval;
+// zero when every fillable slot was watched (or nothing was fillable).
+func (w *MinuteWatcher) accrueLostMining(fillable, watchedOK int, interval time.Duration) {
+	capacity := fillable
+	if capacity > constants.MaxSimultaneousStreams {
+		capacity = constants.MaxSimultaneousStreams
+	}
+	lost := capacity - watchedOK
+	if lost <= 0 {
+		return
+	}
+	w.lostMu.Lock()
+	w.lostMiningMinutes += float64(lost) * interval.Minutes()
+	w.lostMu.Unlock()
+}
+
+// LostMiningMinutes returns the accumulated estimated lost mining minutes and
+// resets the accumulator to zero (drain semantics). Called once per daily
+// summary; the returned value covers the period since the previous drain. It is
+// in-memory and process-lifetime: a restart resets it, so a summary after a
+// mid-day restart only reflects post-restart idle time.
+func (w *MinuteWatcher) LostMiningMinutes() float64 {
+	w.lostMu.Lock()
+	defer w.lostMu.Unlock()
+	v := w.lostMiningMinutes
+	w.lostMiningMinutes = 0
+	return v
 }
