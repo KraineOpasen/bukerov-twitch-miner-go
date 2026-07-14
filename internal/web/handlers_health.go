@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -160,12 +159,12 @@ func (s *Server) buildHealthView() HealthView {
 
 // handleHealthPage renders the full Health Center page.
 func (s *Server) handleHealthPage(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, "health.html", s.buildHealthView())
+	s.renderPage(w, r, "health.html", s.buildHealthView())
 }
 
 // handleAPIHealth renders the Health Center partial (htmx auto-refresh).
 func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
-	s.renderHealthPartial(w)
+	s.renderHealthPartial(w, r)
 }
 
 // handleAPIHealthCanaryRun triggers an on-demand canary probe and re-renders.
@@ -180,7 +179,7 @@ func (s *Server) handleAPIHealthCanaryRun(w http.ResponseWriter, r *http.Request
 	if provider != nil {
 		provider.RunCanaryNow()
 	}
-	s.renderHealthPartial(w)
+	s.renderHealthPartial(w, r)
 }
 
 // handleAPIHealthSettings applies canary settings changes at runtime.
@@ -198,7 +197,7 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 	provider := s.healthProvider
 	s.mu.RUnlock()
 	if provider == nil {
-		s.renderHealthPartial(w)
+		s.renderHealthPartial(w, r)
 		return
 	}
 
@@ -228,20 +227,11 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 		cfg.CanaryMaxStalenessHours = atoiDefault(r.FormValue("canaryMaxStalenessHours"), cur.CanaryMaxStalenessHours)
 	}
 	provider.ApplyHealthSettings(cfg)
-	s.renderHealthPartial(w)
+	s.renderHealthPartial(w, r)
 }
 
-func (s *Server) renderHealthPartial(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/html")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "health_center", s.buildHealthView()); err != nil {
-		slog.Error("Failed to render health center", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+func (s *Server) renderHealthPartial(w http.ResponseWriter, r *http.Request) {
+	s.renderPartial(w, r, "health_center", s.buildHealthView())
 }
 
 func atoiDefault(s string, def int) int {

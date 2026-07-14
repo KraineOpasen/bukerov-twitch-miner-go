@@ -1,0 +1,46 @@
+{
+  "nav.overview": "Overview",
+  "nav.streamers": "Streamers",
+  "nav.drops": "Drops",
+  "nav.predictions": "Predictions",
+  "nav.statistics": "Statistics",
+  "nav.notifications": "Notifications",
+  "nav.logs": "Logs",
+  "nav.health": "Health",
+  "nav.settings": "Settings",
+
+  "a11y.primary_nav": "Primary",
+  "a11y.toggle_menu": "Toggle menu",
+  "a11y.language": "Language",
+  "a11y.logo_alt": "Twitch Points Miner logo",
+
+  "logs.debug_title": "Diagnostic snapshot (localhost only)",
+
+  "sidebar.now_watching": "Now watching",
+
+  "now.stale": "stale",
+  "now.discovery": "discovery",
+  "now.nothing_watching": "Nothing being watched right now.",
+  "now.in_queue": "In queue",
+  "now.next_rotation": "Next rotation",
+  "now.discovered_title": "Discovered channel (directory discovery)",
+  "now.discovery_slot_title": "Filling a watch slot via directory discovery",
+  "now.streak_title": "Watch-streak progress",
+
+  "js.overlay.initializing": "Initializing...",
+  "js.overlay.starting_up": "Starting up...",
+  "js.overlay.login_required": "Twitch Login Required",
+  "js.overlay.open": "Open",
+  "js.overlay.enter_code": "Enter this code:",
+  "js.overlay.code_expires": "Code expires in {minutes} min",
+  "js.overlay.waiting_auth": "Waiting for authorization...",
+  "js.overlay.loading_streamers": "Loading Streamers",
+  "js.overlay.loading": "Loading:",
+  "js.overlay.please_wait": "Please wait...",
+  "js.overlay.error": "Error",
+  "js.overlay.error_generic": "An error occurred",
+
+  "js.banner.reauth": "⚠ Twitch authorization required — ",
+  "js.banner.reauth_default": "please log in again.",
+  "js.banner.conn_lost": "⚠ Connection lost — harvesting paused. "
+}

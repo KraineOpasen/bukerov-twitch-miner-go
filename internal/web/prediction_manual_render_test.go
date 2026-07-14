@@ -68,7 +68,7 @@ func TestBuildPredictionViewsManualGating(t *testing.T) {
 // TestRenderPredictionCardManualControls renders the prediction card in each of
 // its key states and asserts the right controls appear.
 func TestRenderPredictionCardManualControls(t *testing.T) {
-	partials := loadTemplates()["partials"]
+	partials := testPartials(t)
 	if partials == nil {
 		t.Fatal("partials failed to load")
 	}

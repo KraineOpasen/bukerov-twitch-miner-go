@@ -59,11 +59,7 @@ func sampleOverview() OverviewData {
 }
 
 func TestRenderOverviewTemplates(t *testing.T) {
-	tmpls := loadTemplates()
-	partials := tmpls["partials"]
-	if partials == nil {
-		t.Fatal("partials template set failed to load")
-	}
+	partials := testPartials(t)
 
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "overview_live", sampleOverview()); err != nil {
@@ -86,7 +82,7 @@ func TestRenderOverviewTemplates(t *testing.T) {
 }
 
 func TestRenderNowWatching(t *testing.T) {
-	partials := loadTemplates()["partials"]
+	partials := testPartials(t)
 	view := NowWatchingView{
 		Slots: []WatchSlotView{
 			{Name: "shroud", Points: "100,000", Game: "VALORANT", HasGain: true, GainPerHour: "1,200", StreakPending: true, StreakMinutes: 5, StreakPercent: 71},
@@ -100,7 +96,8 @@ func TestRenderNowWatching(t *testing.T) {
 		t.Fatalf("render now_watching: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"shroud", "VALORANT", "1,200/h", "pokimane", "Next rotation", "data-countdown-to"} {
+	// now_watching is localized (PR 0); testPartials renders the default language (RU).
+	for _, want := range []string{"shroud", "VALORANT", "1,200/h", "pokimane", "Следующая ротация", "data-countdown-to"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("now_watching output missing %q", want)
 		}
@@ -108,18 +105,18 @@ func TestRenderNowWatching(t *testing.T) {
 }
 
 func TestRenderNowWatchingEmpty(t *testing.T) {
-	partials := loadTemplates()["partials"]
+	partials := testPartials(t)
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "now_watching", NowWatchingView{Stale: true}); err != nil {
 		t.Fatalf("render empty now_watching: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Nothing being watched") {
+	if !strings.Contains(buf.String(), "Сейчас ничего не смотрим") {
 		t.Error("empty now_watching should show empty-state text")
 	}
 }
 
 func TestRenderEventsDrawer(t *testing.T) {
-	partials := loadTemplates()["partials"]
+	partials := testPartials(t)
 	var buf bytes.Buffer
 	data := map[string]interface{}{
 		"Name": "shroud",

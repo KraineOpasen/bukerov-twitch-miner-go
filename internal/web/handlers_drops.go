@@ -45,19 +45,19 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 			string(policy.ModeClosestToReward), string(policy.ModeLowAvailability), string(policy.ModeSmart),
 		},
 	}
-	s.renderPage(w, "drops.html", data)
+	s.renderPage(w, r, "drops.html", data)
 }
 
 // handleAPIDrops renders the campaign-queue partial (also used for htmx
 // auto-refresh so progress stays live without a full page reload).
 func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
-	s.renderDropsList(w)
+	s.renderDropsList(w, r)
 }
 
 // renderDropsList builds and renders the campaign-queue partial, merging the
 // progress-watchdog health badges and the campaign-policy decisions. Shared by
 // the drops poll and the policy mode / per-drop-rule POST handlers.
-func (s *Server) renderDropsList(w http.ResponseWriter) {
+func (s *Server) renderDropsList(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	provider := s.campaignsProvider
 	progressProvider := s.dropProgressProvider
@@ -83,16 +83,7 @@ func (s *Server) renderDropsList(w http.ResponseWriter) {
 
 	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress), policyByID)}
 
-	w.Header().Set("Content-Type", "text/html")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "drops_list", data); err != nil {
-		slog.Error("Failed to render drops list", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "drops_list", data)
 }
 
 // handleAPIDropsUpcoming renders the "Upcoming" tab: campaigns Twitch announced
@@ -116,7 +107,7 @@ func (s *Server) handleAPIDropsUpcoming(w http.ResponseWriter, r *http.Request) 
 		views = append(views, v)
 	}
 
-	s.renderPartial(w, "drops_list", DropsListData{Campaigns: views})
+	s.renderPartial(w, r, "drops_list", DropsListData{Campaigns: views})
 }
 
 // handleAPIDropsPast renders the "Past" tab: expired campaigns from the durable
@@ -137,22 +128,7 @@ func (s *Server) handleAPIDropsPast(w http.ResponseWriter, r *http.Request) {
 		records = recs
 	}
 
-	s.renderPartial(w, "drops_past", DropsPastData{Groups: buildPastGroups(records)})
-}
-
-// renderPartial executes a named partial template with data, writing an HTML
-// response (the shared path for the drops tabs).
-func (s *Server) renderPartial(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
-		slog.Error("Failed to render partial", "partial", name, "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "drops_past", DropsPastData{Groups: buildPastGroups(records)})
 }
 
 // startsInLabel renders how far in the future a campaign starts.

@@ -98,7 +98,7 @@ func (s *Server) handleAPIPolicyMode(w http.ResponseWriter, r *http.Request) {
 	if provider != nil {
 		provider.ApplyCampaignPolicy(r.FormValue("mode"))
 	}
-	s.renderDropsList(w)
+	s.renderDropsList(w, r)
 }
 
 // handleAPIPolicyDropRule sets or resets the per-drop rule for a reward key and
@@ -131,7 +131,7 @@ func (s *Server) handleAPIPolicyDropRule(w http.ResponseWriter, r *http.Request)
 		}
 		provider.SetDropRule(key, rule)
 	}
-	s.renderDropsList(w)
+	s.renderDropsList(w, r)
 }
 
 func checked(r *http.Request, name string) bool {

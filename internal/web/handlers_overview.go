@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -27,16 +26,7 @@ const statsTTL = 60 * time.Second
 func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
 	data := s.buildOverviewData()
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "overview_live", data); err != nil {
-		slog.Error("Failed to render overview", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "overview_live", data)
 }
 
 // handleAPINowWatching renders just the pinned sidebar "Now Watching" block.
@@ -61,16 +51,7 @@ func (s *Server) handleAPINowWatching(w http.ResponseWriter, r *http.Request) {
 	}
 	view := s.buildNowWatching(streamers, slots, stats, status.ConnectionLost)
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "now_watching", view); err != nil {
-		slog.Error("Failed to render now-watching", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "now_watching", view)
 }
 
 // snapshotStreamers returns a stable slice of the tracked streamers under the
@@ -568,17 +549,8 @@ func (s *Server) handleAPIOverviewEvents(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "events_drawer", map[string]interface{}{
+	s.renderPartial(w, r, "events_drawer", map[string]interface{}{
 		"Name":   name,
 		"Events": rows,
-	}); err != nil {
-		slog.Error("Failed to render events drawer", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	})
 }

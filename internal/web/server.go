@@ -18,6 +18,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
@@ -132,9 +133,15 @@ type Server struct {
 	discordEnabled bool
 	debugURL       string
 
-	analytics               *analytics.Service
-	server                  *http.Server
-	templates               map[string]*template.Template
+	analytics *analytics.Service
+	server    *http.Server
+	i18n      *i18n.Localizer
+	// templates maps a page name to its per-language parsed template (page ->
+	// lang -> template); partials maps a language to the standalone partial set
+	// used by the htmx endpoints. Both are pre-cloned per language at start-up
+	// so requests never clone or mutate a shared template.
+	templates               map[string]map[string]*template.Template
+	partials                map[string]*template.Template
 	settingsProvider        settings.SettingsProvider
 	onSettingsUpdate        settings.SettingsUpdateCallback
 	notificationManager     *notifications.Manager
@@ -175,7 +182,8 @@ type streamerStats struct {
 }
 
 func NewServer(analyticsSettings config.AnalyticsSettings, username string, basePath string, analyticsSvc *analytics.Service, streamers []*models.Streamer) *Server {
-	templates := loadTemplates()
+	loc := mustLocalizer()
+	pages, partials := loadTemplates(loc)
 
 	return &Server{
 		host:      analyticsSettings.Host,
@@ -186,14 +194,17 @@ func NewServer(analyticsSettings config.AnalyticsSettings, username string, base
 		basePath:  basePath,
 		streamers: streamers,
 		analytics: analyticsSvc,
-		templates: templates,
+		i18n:      loc,
+		templates: pages,
+		partials:  partials,
 		status:    NewStatusBroadcaster(),
 		ready:     len(streamers) > 0,
 	}
 }
 
 func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string, basePath string, analyticsSvc *analytics.Service) *Server {
-	templates := loadTemplates()
+	loc := mustLocalizer()
+	pages, partials := loadTemplates(loc)
 
 	return &Server{
 		host:      analyticsSettings.Host,
@@ -204,18 +215,27 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 		basePath:  basePath,
 		streamers: nil,
 		analytics: analyticsSvc,
-		templates: templates,
+		i18n:      loc,
+		templates: pages,
+		partials:  partials,
 		status:    NewStatusBroadcaster(),
 		ready:     false,
 	}
 }
 
-func loadTemplates() map[string]*template.Template {
-	templates := make(map[string]*template.Template)
+// loadTemplates parses each page (base + page + partials) and the standalone
+// partial set once, then clones a language-bound copy per supported language.
+// The localization funcs (t/lang/jsMessages) are defined as placeholders at
+// parse time and overridden with real, language-specific implementations on each
+// clone, so every request executes an already-escaped, immutable template.
+func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Template, map[string]*template.Template) {
+	langs := i18n.SupportedLangs()
+	placeholder := placeholderFuncMap()
 
-	pages := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html"}
-	for _, page := range pages {
-		tmpl, err := template.ParseFS(templatesFS,
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html"}
+	pages := make(map[string]map[string]*template.Template, len(pageList))
+	for _, page := range pageList {
+		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
 			"templates/base.html",
 			"templates/"+page,
 			"templates/partials/*.html",
@@ -224,17 +244,35 @@ func loadTemplates() map[string]*template.Template {
 			slog.Error("Failed to parse template", "page", page, "error", err)
 			continue
 		}
-		templates[page] = tmpl
+		perLang := make(map[string]*template.Template, len(langs))
+		for _, lang := range langs {
+			clone, err := base.Clone()
+			if err != nil {
+				slog.Error("Failed to clone template", "page", page, "lang", lang, "error", err)
+				continue
+			}
+			clone.Funcs(funcMapFor(loc, lang))
+			perLang[lang] = clone
+		}
+		pages[page] = perLang
 	}
 
-	partials, err := template.ParseFS(templatesFS, "templates/partials/*.html")
-	if err != nil {
+	partials := make(map[string]*template.Template, len(langs))
+	if base, err := template.New("partials").Funcs(placeholder).ParseFS(templatesFS, "templates/partials/*.html"); err != nil {
 		slog.Error("Failed to parse partials", "error", err)
 	} else {
-		templates["partials"] = partials
+		for _, lang := range langs {
+			clone, err := base.Clone()
+			if err != nil {
+				slog.Error("Failed to clone partials", "lang", lang, "error", err)
+				continue
+			}
+			clone.Funcs(funcMapFor(loc, lang))
+			partials[lang] = clone
+		}
 	}
 
-	return templates
+	return pages, partials
 }
 
 func (s *Server) AttachStreamers(streamers []*models.Streamer) {
@@ -526,6 +564,11 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/notifications/test", s.handleAPINotificationsTest)
 	mux.HandleFunc("/api/test-notification", s.handleAPITestNotification)
 
+	// Language switch: state-changing (sets the language cookie), so it is
+	// POST-only and, being on this mux, inherits csrfProtectMiddleware below
+	// like every other mutating endpoint.
+	mux.HandleFunc("/api/lang", s.handleAPILang)
+
 	// Middleware chain (outermost first): security headers on every
 	// response, then Basic Auth when configured, then the same-origin check
 	// guarding all state-changing requests.
@@ -542,12 +585,23 @@ func (s *Server) Stop() {
 	}
 }
 
-func (s *Server) renderPage(w http.ResponseWriter, page string, data interface{}) {
+func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, page string, data interface{}) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	tmpl, ok := s.templates[page]
+	perLang, ok := s.templates[page]
 	if !ok {
 		slog.Error("Template not found", "page", page)
+		writeInternalError(w, "Template not found")
+		return
+	}
+
+	lang := s.langFromRequest(r)
+	tmpl := perLang[lang]
+	if tmpl == nil {
+		tmpl = perLang[i18n.DefaultLang]
+	}
+	if tmpl == nil {
+		slog.Error("Template language variant not found", "page", page, "lang", lang)
 		writeInternalError(w, "Template not found")
 		return
 	}
@@ -555,5 +609,27 @@ func (s *Server) renderPage(w http.ResponseWriter, page string, data interface{}
 	if err := tmpl.ExecuteTemplate(w, "base.html", data); err != nil {
 		slog.Error("Failed to render page", "page", page, "error", err)
 		writeInternalError(w, "Failed to render page")
+	}
+}
+
+// renderPartial executes a named partial in the request's language, for the htmx
+// endpoints that swap fragments without a full page render.
+func (s *Server) renderPartial(w http.ResponseWriter, r *http.Request, name string, data interface{}) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	lang := s.langFromRequest(r)
+	tmpl := s.partials[lang]
+	if tmpl == nil {
+		tmpl = s.partials[i18n.DefaultLang]
+	}
+	if tmpl == nil {
+		slog.Error("Partials unavailable", "partial", name)
+		writeInternalError(w, "Failed to render partial")
+		return
+	}
+
+	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+		slog.Error("Failed to render partial", "partial", name, "error", err)
+		writeInternalError(w, "Failed to render partial")
 	}
 }

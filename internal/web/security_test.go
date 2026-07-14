@@ -1,7 +1,6 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -251,7 +250,7 @@ func TestBasicAuthMiddleware(t *testing.T) {
 func TestHandlerChainCSRFAndHeaders(t *testing.T) {
 	clearSecurityEnv(t)
 
-	s := &Server{templates: map[string]*template.Template{}}
+	s := newRenderServer(t)
 	handler := s.handler()
 
 	// A plain GET (same method the SSE stream uses) passes untouched even
