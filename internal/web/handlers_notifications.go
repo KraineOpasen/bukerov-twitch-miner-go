@@ -46,7 +46,7 @@ func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request)
 		Streamers:      streamers,
 	}
 
-	s.renderPage(w, "notifications.html", data)
+	s.renderPage(w, r, "notifications.html", data)
 }
 
 func (s *Server) handleAPINotificationsConfig(w http.ResponseWriter, r *http.Request) {

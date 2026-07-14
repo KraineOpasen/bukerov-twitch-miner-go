@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -23,7 +22,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// predictions board, streamer grid) from the /api/overview partial on
 	// load; the page shell just needs the chrome data.
 	data := s.buildOverviewData()
-	s.renderPage(w, "overview.html", data)
+	s.renderPage(w, r, "overview.html", data)
 }
 
 func (s *Server) handleStreamerPage(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +80,7 @@ func (s *Server) handleStreamerPage(w http.ResponseWriter, r *http.Request) {
 		DebugURL:       debugURL,
 	}
 
-	s.renderPage(w, "streamer.html", pageData)
+	s.renderPage(w, r, "streamer.html", pageData)
 }
 
 func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
@@ -152,14 +151,5 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 		Untracked:      untracked,
 	}
 
-	w.Header().Set("Content-Type", "text/html")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "streamer_grid", gridData); err != nil {
-		slog.Error("Failed to render streamer grid", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "streamer_grid", gridData)
 }

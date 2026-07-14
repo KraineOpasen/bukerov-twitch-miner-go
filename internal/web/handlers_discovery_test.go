@@ -56,11 +56,7 @@ func TestBuildDiscoveryViewOrdersByStatusThenViewers(t *testing.T) {
 // TestDiscoveryListTemplateRenders exercises the three states of the
 // discovery_list partial: disabled, empty pool, and a populated pool.
 func TestDiscoveryListTemplateRenders(t *testing.T) {
-	templates := loadTemplates()
-	partials := templates["partials"]
-	if partials == nil {
-		t.Fatal("partials template not loaded")
-	}
+	partials := testPartials(t)
 
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "discovery_list", DiscoveryListData{Enabled: false}); err != nil {
@@ -102,7 +98,7 @@ func TestDiscoveryListTemplateRenders(t *testing.T) {
 }
 
 func TestHandleAPIDiscovery(t *testing.T) {
-	s := &Server{templates: loadTemplates()}
+	s := newRenderServer(t)
 	s.SetDiscoveryProvider(&fakeDiscoveryProvider{state: discovery.State{
 		Enabled:  true,
 		Games:    []string{"World of Tanks"},
@@ -123,10 +119,10 @@ func TestHandleAPIDiscovery(t *testing.T) {
 // TestDropsPageRendersDiscoverySection executes the full Drops page (through
 // base.html) to prove the new Discovered Channels section parses and renders.
 func TestDropsPageRendersDiscoverySection(t *testing.T) {
-	s := &Server{templates: loadTemplates()}
+	s := newRenderServer(t)
 
 	rec := httptest.NewRecorder()
-	s.renderPage(rec, "drops.html", DropsPageData{Username: "tester", RefreshMinutes: 5})
+	s.renderPage(rec, httptest.NewRequest("GET", "/drops", nil), "drops.html", DropsPageData{Username: "tester", RefreshMinutes: 5})
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -138,7 +134,7 @@ func TestDropsPageRendersDiscoverySection(t *testing.T) {
 }
 
 func TestHandleAPIDiscoveryWithoutProvider(t *testing.T) {
-	s := &Server{templates: loadTemplates()}
+	s := newRenderServer(t)
 
 	rec := httptest.NewRecorder()
 	s.handleAPIDiscovery(rec, httptest.NewRequest("GET", "/api/discovery", nil))

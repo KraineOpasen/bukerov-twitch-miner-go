@@ -1,0 +1,46 @@
+{
+  "nav.overview": "Обзор",
+  "nav.streamers": "Стримеры",
+  "nav.drops": "Дропы",
+  "nav.predictions": "Предикшены",
+  "nav.statistics": "Статистика",
+  "nav.notifications": "Уведомления",
+  "nav.logs": "Логи",
+  "nav.health": "Состояние",
+  "nav.settings": "Настройки",
+
+  "a11y.primary_nav": "Основная навигация",
+  "a11y.toggle_menu": "Переключить меню",
+  "a11y.language": "Язык",
+  "a11y.logo_alt": "Логотип Twitch Points Miner",
+
+  "logs.debug_title": "Диагностический снимок (только localhost)",
+
+  "sidebar.now_watching": "Сейчас смотрим",
+
+  "now.stale": "устарело",
+  "now.discovery": "поиск",
+  "now.nothing_watching": "Сейчас ничего не смотрим.",
+  "now.in_queue": "В очереди",
+  "now.next_rotation": "Следующая ротация",
+  "now.discovered_title": "Найденный канал (поиск по каталогу)",
+  "now.discovery_slot_title": "Слот заполняется через поиск по каталогу",
+  "now.streak_title": "Прогресс watch-streak",
+
+  "js.overlay.initializing": "Инициализация...",
+  "js.overlay.starting_up": "Запуск...",
+  "js.overlay.login_required": "Требуется вход в Twitch",
+  "js.overlay.open": "Откройте",
+  "js.overlay.enter_code": "Введите этот код:",
+  "js.overlay.code_expires": "Код истекает через {minutes} мин.",
+  "js.overlay.waiting_auth": "Ожидание авторизации...",
+  "js.overlay.loading_streamers": "Загрузка стримеров",
+  "js.overlay.loading": "Загрузка:",
+  "js.overlay.please_wait": "Пожалуйста, подождите...",
+  "js.overlay.error": "Ошибка",
+  "js.overlay.error_generic": "Произошла ошибка",
+
+  "js.banner.reauth": "⚠ Требуется авторизация Twitch — ",
+  "js.banner.reauth_default": "войдите снова.",
+  "js.banner.conn_lost": "⚠ Соединение потеряно — сбор приостановлен. "
+}

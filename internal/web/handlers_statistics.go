@@ -74,7 +74,7 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 		Streamers:      names,
 		BetStrategies:  strategies,
 	}
-	s.renderPage(w, "statistics.html", data)
+	s.renderPage(w, r, "statistics.html", data)
 }
 
 // handleAPIPointsHistory returns the balance series + event annotations for one

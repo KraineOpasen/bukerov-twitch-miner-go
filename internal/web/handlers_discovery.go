@@ -1,7 +1,6 @@
 package web
 
 import (
-	"log/slog"
 	"net/http"
 	"sort"
 
@@ -23,16 +22,7 @@ func (s *Server) handleAPIDiscovery(w http.ResponseWriter, r *http.Request) {
 
 	data := buildDiscoveryView(state)
 
-	w.Header().Set("Content-Type", "text/html")
-	tmpl := s.templates["partials"]
-	if tmpl == nil {
-		writeInternalError(w, "Partials not loaded")
-		return
-	}
-	if err := tmpl.ExecuteTemplate(w, "discovery_list", data); err != nil {
-		slog.Error("Failed to render discovery list", "error", err)
-		writeInternalError(w, "Failed to render")
-	}
+	s.renderPartial(w, r, "discovery_list", data)
 }
 
 // buildDiscoveryView orders the pool the way the slot actually picks from it

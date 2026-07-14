@@ -22,7 +22,7 @@ func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		DiscordEnabled: discordEnabled,
 		DebugURL:       debugURL,
 	}
-	s.renderPage(w, "settings.html", data)
+	s.renderPage(w, r, "settings.html", data)
 }
 
 func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {

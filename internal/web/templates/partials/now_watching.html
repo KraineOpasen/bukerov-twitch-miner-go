@@ -1,7 +1,7 @@
 {{define "now_watching"}}
 <div class="flex items-center justify-between mb-2">
-    <div class="text-xs uppercase tracking-wide text-neutral-400">Сейчас смотрим</div>
-    {{if .Stale}}<span class="stale-pill">stale</span>{{end}}
+    <div class="text-xs uppercase tracking-wide text-neutral-400">{{ t "sidebar.now_watching" }}</div>
+    {{if .Stale}}<span class="stale-pill">{{ t "now.stale" }}</span>{{end}}
 </div>
 
 {{if .Slots}}
@@ -10,8 +10,8 @@
     <div class="flex items-center gap-2 mb-1">
         <span class="watch-dot on"></span>
         {{if eq .Origin "discovery"}}
-        <span class="s-name text-sm truncate flex-1" title="Discovered channel (directory discovery)">{{.Name}}</span>
-        <span class="badge badge-queued" title="Filling a watch slot via directory discovery">discovery</span>
+        <span class="s-name text-sm truncate flex-1" title="{{ t "now.discovered_title" }}">{{.Name}}</span>
+        <span class="badge badge-queued" title="{{ t "now.discovery_slot_title" }}">{{ t "now.discovery" }}</span>
         {{else}}
         <a href="/streamer/{{.Name}}" class="s-name text-sm truncate flex-1 hover:underline">{{.Name}}</a>
         <span class="num text-xs text-neutral-100">{{.Points}}</span>
@@ -21,18 +21,18 @@
     {{if ne .Origin "discovery"}}
     <div class="flex items-center justify-between text-xs">
         {{if .HasGain}}<span class="badge-gain num">+{{.GainPerHour}}/h</span>{{else}}<span class="text-neutral-500">—</span>{{end}}
-        {{if .StreakPending}}<span class="num text-online" title="Watch-streak progress">🔥 {{.StreakMinutes}}/7</span>{{end}}
+        {{if .StreakPending}}<span class="num text-online" title="{{ t "now.streak_title" }}">🔥 {{.StreakMinutes}}/7</span>{{end}}
     </div>
     {{if .StreakPending}}<div class="bar bar-streak mt-1"><span style="width: {{.StreakPercent}}%"></span></div>{{end}}
     {{end}}
 </div>
 {{end}}
 {{else}}
-<div class="watch-slot is-queued text-xs text-neutral-400">Nothing being watched right now.</div>
+<div class="watch-slot is-queued text-xs text-neutral-400">{{ t "now.nothing_watching" }}</div>
 {{end}}
 
 {{if .QueuedNames}}
-<div class="text-[0.7rem] uppercase tracking-wide text-neutral-500 mt-2 mb-1">In queue</div>
+<div class="text-[0.7rem] uppercase tracking-wide text-neutral-500 mt-2 mb-1">{{ t "now.in_queue" }}</div>
 <div class="flex flex-wrap gap-1">
     {{range .QueuedNames}}
     <span class="badge badge-queued"><span class="watch-dot queue"></span>{{.}}</span>
@@ -42,7 +42,7 @@
 
 {{if .HasNextRotation}}
 <div class="text-xs text-neutral-400 mt-3 flex items-center justify-between">
-    <span>Next rotation</span>
+    <span>{{ t "now.next_rotation" }}</span>
     <span class="num text-neutral-100" data-countdown-to="{{.NextRotationUnix}}">--:--</span>
 </div>
 {{end}}

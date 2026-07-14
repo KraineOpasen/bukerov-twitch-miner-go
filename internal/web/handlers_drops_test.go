@@ -193,12 +193,7 @@ func TestBuildDropCampaignViewsMergesHealth(t *testing.T) {
 // TestTemplatesRenderDropsAndCards ensures the new templates parse and execute
 // against their view models (embedded via the same globs the server uses).
 func TestTemplatesRenderDropsAndCards(t *testing.T) {
-	templates := loadTemplates()
-
-	partials := templates["partials"]
-	if partials == nil {
-		t.Fatal("partials template not loaded")
-	}
+	partials := testPartials(t)
 
 	var buf bytes.Buffer
 	dropsData := DropsListData{Campaigns: []DropCampaignView{
@@ -250,7 +245,8 @@ func TestTemplatesRenderDropsAndCards(t *testing.T) {
 	}
 
 	// Drops page must parse against its base layout too.
-	if templates["drops.html"] == nil {
+	pages, _ := testLoadTemplates(t)
+	if pages["drops.html"] == nil {
 		t.Fatal("drops.html page template not loaded")
 	}
 }
