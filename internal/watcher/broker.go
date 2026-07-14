@@ -101,6 +101,13 @@ func (w *MinuteWatcher) classify(s *models.Streamer, origin string, idx int) (re
 		reasonCode = ReasonActiveDrop
 	case origin == OriginDiscovery:
 		reasonCode = ReasonDiscoveryFill
+	case origin == OriginConfigured && w.selectionMode == ModeRotation:
+		// A plain configured slot held under the fair watch-pair rotation (more
+		// online streamers than watch slots). Labelling it ReasonPriority here was
+		// misleading — the pair really is chosen by fair rotation, not by a
+		// configured priority — so "Watch slot assigned reason=fair_rotation"
+		// now matches the documented behaviour operators expect at 3+ online.
+		reasonCode = ReasonFairRotation
 	default:
 		reasonCode = ReasonPriority
 	}
@@ -149,6 +156,8 @@ func defaultReason(reasonCode, origin string) string {
 		return "active drop campaign"
 	case ReasonDiscoveryFill:
 		return "discovered channel filling an otherwise-idle watch slot"
+	case ReasonFairRotation:
+		return "holds a fair-rotation watch slot (least accumulated watch time when the pair was last recomputed)"
 	default:
 		return "holds a watch slot"
 	}

@@ -179,6 +179,27 @@ type rotationState struct {
 
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 	deferredFor map[int]bool      // streamers whose scheduled swap-out was already postponed once
+
+	// Boost latch: keep the SAME channel in the ephemeral DROPS/STREAK boost
+	// seat (and displace the SAME base-pair member) across ticks, instead of
+	// re-picking the least-recently-watched eligible channel every tick. Without
+	// it, whenever 3+ online channels are boost-eligible the boost churned the
+	// watched set on every tick, so no channel was ever watched on consecutive
+	// ticks; the continuous viewing a watch streak (and drop progress) needs
+	// never accumulated and MinuteWatched was perpetually reset to 0. The latch
+	// yields immediately to a strictly higher-priority candidate (see
+	// strictlyHigherBoost), so a channel-restricted drop can still preempt it.
+	boostLatched bool
+	boostTarget  int // off-pair streamer index currently holding the boost seat
+	boostVictim  int // base-pair streamer index the boost displaced
+}
+
+// clearBoostLatch drops any sticky boost so the next tick re-picks a boost seat
+// from scratch. Called whenever the base pair changes or rotation is left.
+func (r *rotationState) clearBoostLatch() {
+	r.boostLatched = false
+	r.boostTarget = -1
+	r.boostVictim = -1
 }
 
 // streakDiagState records which watch-streak pursuit log lines have already
@@ -549,6 +570,7 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 		// Not enough online streamers to need rotation; drop any stale pair
 		// so a fresh one is computed next time we go above the limit.
 		w.rotation.hasPair = false
+		w.rotation.clearBoostLatch()
 		w.selectionMode = ModeDirect
 		return w.selectByPriority(candidates)
 	}
@@ -618,12 +640,22 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // Priority as weight, not exclusivity:
 // On top of the ranked base pair, any online streamer with an active drop
 // (DropsCondition) or a watch streak in progress (mirroring the existing
-// STREAK/DROPS priority conditions) can take over one seat in the pair for
-// the current tick - ephemerally, without affecting the ranking above. The
-// seat sacrificed is whichever of the two base-pair members was watched
-// most recently, so the other keeps its slot. The displaced member simply
-// ranks for its turn again next time the base pair is recomputed, so no
-// channel is permanently exclusive and no channel is ever locked out.
+// STREAK/DROPS priority conditions) can take over one seat in the pair -
+// without affecting the ranking above. The seat sacrificed is whichever of the
+// two base-pair members was watched most recently, so the other keeps its slot.
+// The displaced member simply ranks for its turn again next time the base pair
+// is recomputed, so no channel is permanently exclusive and no channel is ever
+// locked out.
+//
+// Continuity latch: the boosted channel and the seat it displaces are held
+// across ticks (see applyPriorityBoost), NOT re-chosen every tick. A watch
+// streak (and unrestricted drop progress) is only credited for continuous
+// viewing, so the watched set must stay stable minute-over-minute for it to
+// accumulate. Re-picking the least-recently-watched eligible channel every
+// tick rotated the watched set on every tick whenever 3+ channels were
+// eligible, breaking that continuity so no streak ever completed; the latch
+// keeps the same channel boosted until it stops being eligible or a strictly
+// higher-priority candidate appears, then hands the seat off.
 //
 // Avoiding last-second interruptions:
 // When the base pair is about to rotate a streamer out, if that streamer is
@@ -742,6 +774,9 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 	w.rotation.nextInterval = w.randomRotationInterval()
 
 	if changed {
+		// A fresh base pair invalidates the sticky boost seat/victim, which
+		// referenced the previous pair; recompute the boost from scratch.
+		w.rotation.clearBoostLatch()
 		w.logPairChange(oldPair, hadPair, newPair)
 	}
 }
@@ -857,10 +892,82 @@ func containsPair(online []int, pair [2]int) bool {
 	return a && b
 }
 
-// applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take
-// over the pair seat most recently watched, without affecting the base
-// ranking computed by rotateToLeastWatchedPair.
+// applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take over a
+// base-pair seat for the current tick, without affecting the base ranking
+// computed by rotateToLeastWatchedPair.
+//
+// Continuity latch: the boosted channel (and the base-pair seat it displaces)
+// are held across ticks rather than re-picked every tick. A watch streak — and
+// unrestricted drop progress — is only credited for CONTINUOUS viewing, so the
+// watched set has to stay stable minute-over-minute for it to accumulate.
+// Before the latch, the boost re-selected the least-recently-watched eligible
+// channel every tick, which (whenever 3+ channels were eligible) rotated the
+// watched set on every single tick: no channel was ever watched on consecutive
+// ticks, MinuteWatched was perpetually reset to 0, and no streak ever
+// completed. The latch keeps the same channel in the boost seat until it stops
+// being eligible (streak earned, drop done, went offline) or a STRICTLY
+// higher-priority candidate appears (e.g. a channel-restricted drop), at which
+// point it hands the seat off and the previously-displaced base member is
+// re-evaluated so it is no longer starved.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
+	best := w.selectBoostTarget(pair, onlineIndexes)
+	if best == -1 {
+		w.rotation.clearBoostLatch()
+		return pair
+	}
+
+	keepHeld := false
+	if w.rotation.boostLatched {
+		held := w.rotation.boostTarget
+		if held >= 0 && held != pair[0] && held != pair[1] &&
+			containsIndex(onlineIndexes, held) && w.isBoostEligible(held) &&
+			!w.strictlyHigherBoost(best, held) {
+			best = held
+			keepHeld = true
+		}
+	}
+
+	// While the same channel is held, keep displacing the same base seat so the
+	// surviving base member also stays continuously watched. On a hand-off to a
+	// new target, re-evaluate the victim so a base member that was displaced for
+	// the whole previous boost gets its turn instead of staying starved.
+	var victim int
+	if keepHeld && (w.rotation.boostVictim == pair[0] || w.rotation.boostVictim == pair[1]) &&
+		!w.nearStreakCompletion(w.rotation.boostVictim) {
+		victim = w.rotation.boostVictim
+	} else {
+		victim = w.selectBoostVictim(pair)
+	}
+	if victim == -1 {
+		w.rotation.clearBoostLatch()
+		return pair
+	}
+
+	switch {
+	case w.streamers[best].HasChannelRestrictedCampaign():
+		w.noteSelection(best, "watched: boosted into a slot - channel-restricted drop campaign only progresses on this exact channel")
+	case w.streamers[best].DropsCondition():
+		w.noteSelection(best, "watched: boosted into a slot - active drop campaign")
+	default:
+		w.noteSelection(best, "watched: boosted into a slot - watch streak not yet earned this stream")
+	}
+	w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost (keeps its rotation slot and returns when the boost ends)")
+
+	w.rotation.boostLatched = true
+	w.rotation.boostTarget = best
+	w.rotation.boostVictim = victim
+
+	if pair[0] == victim {
+		pair[0] = best
+	} else {
+		pair[1] = best
+	}
+	return pair
+}
+
+// selectBoostTarget returns the highest-priority off-pair boost-eligible
+// streamer per betterBoostCandidate, or -1 if none is eligible.
+func (w *MinuteWatcher) selectBoostTarget(pair [2]int, onlineIndexes []int) int {
 	best := -1
 	for _, idx := range onlineIndexes {
 		if idx == pair[0] || idx == pair[1] {
@@ -873,11 +980,14 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 			best = idx
 		}
 	}
-	if best == -1 {
-		return pair
-	}
-	bestRestricted := w.streamers[best].HasChannelRestrictedCampaign()
+	return best
+}
 
+// selectBoostVictim returns the base-pair seat the boost should displace: the
+// most-recently-watched member not seconds from completing its streak (so the
+// least-recently-watched member keeps its slot), or -1 when both members are
+// protected.
+func (w *MinuteWatcher) selectBoostVictim(pair [2]int) int {
 	victim := -1
 	for _, slot := range pair {
 		if w.nearStreakCompletion(slot) {
@@ -887,26 +997,41 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 			victim = slot
 		}
 	}
-	if victim == -1 {
-		return pair
-	}
+	return victim
+}
 
-	switch {
-	case bestRestricted:
-		w.noteSelection(best, "watched: boosted into a slot - channel-restricted drop campaign only progresses on this exact channel")
-	case w.streamers[best].DropsCondition():
-		w.noteSelection(best, "watched: boosted into a slot - active drop campaign")
-	default:
-		w.noteSelection(best, "watched: boosted into a slot - watch streak not yet earned this stream")
+// strictlyHigherBoost reports whether candidate cand belongs to a strictly
+// higher boost tier than the currently-held boost target held. It mirrors
+// betterBoostCandidate's priority tiers WITHOUT its least-recently-watched
+// tiebreak: a channel-restricted drop outranks everything, and between two
+// streaks-in-progress the one with more banked minutes wins. Same-tier
+// candidates are NOT strictly higher, so the continuity latch keeps holding the
+// current channel instead of thrashing to an equal-priority alternative.
+func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
+	cr := w.streamers[cand].HasChannelRestrictedCampaign()
+	hr := w.streamers[held].HasChannelRestrictedCampaign()
+	if cr != hr {
+		return cr
 	}
-	w.noteSelection(victim, "not watched this tick: displaced by a DROPS/STREAK boost (keeps its rotation slot and returns when the boost ends)")
+	cp := w.streakInProgress(cand)
+	hp := w.streakInProgress(held)
+	if cp != hp {
+		return cp
+	}
+	if cp && hp {
+		return w.streamers[cand].Stream.MinuteWatched > w.streamers[held].Stream.MinuteWatched
+	}
+	return false
+}
 
-	if pair[0] == victim {
-		pair[0] = best
-	} else {
-		pair[1] = best
+// containsIndex reports whether idx is present in the online index slice.
+func containsIndex(online []int, idx int) bool {
+	for _, o := range online {
+		if o == idx {
+			return true
+		}
 	}
-	return pair
+	return false
 }
 
 func (w *MinuteWatcher) isBoostEligible(idx int) bool {
