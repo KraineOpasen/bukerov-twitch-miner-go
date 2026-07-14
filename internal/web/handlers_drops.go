@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
@@ -92,6 +93,132 @@ func (s *Server) renderDropsList(w http.ResponseWriter) {
 		slog.Error("Failed to render drops list", "error", err)
 		writeInternalError(w, "Failed to render")
 	}
+}
+
+// handleAPIDropsUpcoming renders the "Upcoming" tab: campaigns Twitch announced
+// that have not started yet. Display-only — these are never farmed.
+func (s *Server) handleAPIDropsUpcoming(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	provider := s.dropCatalogProvider
+	s.mu.RUnlock()
+
+	var upcoming []*models.Campaign
+	if provider != nil {
+		upcoming = provider.UpcomingCampaigns()
+	}
+
+	views := make([]DropCampaignView, 0, len(upcoming))
+	now := time.Now()
+	for _, c := range upcoming {
+		v := buildDropCampaignView(c)
+		v.Upcoming = true
+		v.StartsInLabel = startsInLabel(c.StartAt, now)
+		views = append(views, v)
+	}
+
+	s.renderPartial(w, "drops_list", DropsListData{Campaigns: views})
+}
+
+// handleAPIDropsPast renders the "Past" tab: expired campaigns from the durable
+// catalog, grouped by recurring identity.
+func (s *Server) handleAPIDropsPast(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	provider := s.dropCatalogProvider
+	s.mu.RUnlock()
+
+	var records []drops.CatalogRecord
+	if provider != nil {
+		recs, err := provider.PastCampaigns()
+		if err != nil {
+			slog.Error("Failed to load past drop campaigns", "error", err)
+			writeInternalError(w, "Failed to load past campaigns")
+			return
+		}
+		records = recs
+	}
+
+	s.renderPartial(w, "drops_past", DropsPastData{Groups: buildPastGroups(records)})
+}
+
+// renderPartial executes a named partial template with data, writing an HTML
+// response (the shared path for the drops tabs).
+func (s *Server) renderPartial(w http.ResponseWriter, name string, data any) {
+	w.Header().Set("Content-Type", "text/html")
+	tmpl := s.templates["partials"]
+	if tmpl == nil {
+		writeInternalError(w, "Partials not loaded")
+		return
+	}
+	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+		slog.Error("Failed to render partial", "partial", name, "error", err)
+		writeInternalError(w, "Failed to render")
+	}
+}
+
+// startsInLabel renders how far in the future a campaign starts.
+func startsInLabel(startAt, now time.Time) string {
+	if startAt.IsZero() {
+		return ""
+	}
+	d := startAt.Sub(now)
+	if d <= 0 {
+		return "starting now"
+	}
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("starts in %dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("starts in %dh", int(d.Hours()))
+	default:
+		return "starts " + startAt.Format("2 Jan")
+	}
+}
+
+// buildPastGroups turns catalog records (already ordered by campaign_key, then
+// end_at DESC) into recurring-grouped view models for the "Past" tab.
+func buildPastGroups(records []drops.CatalogRecord) []PastCampaignGroup {
+	var groups []PastCampaignGroup
+	byKey := map[string]int{} // campaign_key -> index in groups
+
+	for _, rec := range records {
+		idx, ok := byKey[rec.CampaignKey]
+		if !ok {
+			idx = len(groups)
+			byKey[rec.CampaignKey] = idx
+			g := PastCampaignGroup{
+				CampaignKey: rec.CampaignKey,
+				Name:        rec.Name,
+				GameName:    rec.Game,
+				BoxArtURL:   boxArtURL(rec.Game),
+			}
+			if !rec.EndAt.IsZero() {
+				g.LastEnded = rec.EndAt.Format("2 Jan 2006")
+			}
+			groups = append(groups, g)
+		}
+		g := &groups[idx]
+		g.Count++
+		if rec.Claimed {
+			g.ClaimedCount++
+		}
+		inst := PastInstanceView{
+			CampaignID: rec.CampaignID,
+			Claimed:    rec.Claimed,
+		}
+		if !rec.StartAt.IsZero() {
+			inst.StartLabel = rec.StartAt.Format("2 Jan 2006")
+		}
+		if !rec.EndAt.IsZero() {
+			inst.EndLabel = rec.EndAt.Format("2 Jan 2006")
+		}
+		if rec.Claimed {
+			inst.StatusLabel = "Claimed"
+		} else {
+			inst.StatusLabel = "Not claimed"
+		}
+		g.Instances = append(g.Instances, inst)
+	}
+	return groups
 }
 
 // buildDropCampaignViews turns tracked campaigns into the Drops-page queue,

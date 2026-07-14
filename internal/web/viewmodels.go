@@ -388,6 +388,39 @@ type DropCampaignView struct {
 	// Policy is the campaign-policy engine's decision + per-drop controls for
 	// this campaign's current drop (nil when no decision was published).
 	Policy *DropPolicyView
+
+	// Upcoming marks a display-only campaign that has not started yet;
+	// StartsInLabel is its "starts in Xh" / "starts on <date>" text.
+	Upcoming      bool
+	StartsInLabel string
+}
+
+// PastCampaignGroup is a recurring campaign identity in the "Past" tab: all
+// expired instances that share a campaign_key (game + campaign name), grouped
+// under one heading with a per-instance breakdown.
+type PastCampaignGroup struct {
+	CampaignKey  string
+	Name         string
+	GameName     string
+	BoxArtURL    string
+	Count        int
+	ClaimedCount int
+	LastEnded    string // date the most recent instance ended
+	Instances    []PastInstanceView
+}
+
+// PastInstanceView is one expired campaign instance within a group.
+type PastInstanceView struct {
+	CampaignID  string
+	StartLabel  string
+	EndLabel    string
+	Claimed     bool
+	StatusLabel string
+}
+
+// DropsPastData is the payload for the "Past" tab partial.
+type DropsPastData struct {
+	Groups []PastCampaignGroup
 }
 
 // PolicyFactorView is one line of a policy decision's score breakdown.

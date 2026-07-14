@@ -56,6 +56,17 @@ type DropsTracker struct {
 
 	campaigns []*models.Campaign
 
+	// upcomingCampaigns holds campaigns Twitch's dashboard returned that have not
+	// started yet (start_at in the future). They are display-only for the Drops
+	// page "Upcoming" tab and NEVER enter the active farm set — they cannot be
+	// farmed before their official start. Guarded by mu.
+	upcomingCampaigns []*models.Campaign
+
+	// catalog, when set, durably records every observed campaign (current +
+	// upcoming) so the "Past" tab can show campaigns that have since expired.
+	// Set once at wiring time before the loops start; nil disables cataloging.
+	catalog *CampaignCatalog
+
 	// Sync bookkeeping for SyncStatus (and LastSync); all guarded by mu.
 	syncRuns           int
 	lastSyncAt         time.Time
@@ -203,6 +214,23 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 	campaigns := make([]*models.Campaign, len(d.campaigns))
 	copy(campaigns, d.campaigns)
 	return campaigns
+}
+
+// UpcomingCampaigns returns a snapshot of the campaigns Twitch's dashboard
+// listed that have not started yet (display-only; never farmed).
+func (d *DropsTracker) UpcomingCampaigns() []*models.Campaign {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	out := make([]*models.Campaign, len(d.upcomingCampaigns))
+	copy(out, d.upcomingCampaigns)
+	return out
+}
+
+// SetCatalog wires the durable campaign catalog. Set once before the sync loops
+// start; when nil, cataloging is a no-op.
+func (d *DropsTracker) SetCatalog(catalog *CampaignCatalog) {
+	d.catalog = catalog
 }
 
 // LastSync reports when the campaign-sync pipeline last completed (zero if it
@@ -484,12 +512,16 @@ func (d *DropsTracker) syncCampaigns() {
 
 	d.claimAllDropsFromInventory()
 
-	campaigns, dashboardCount, err := d.getActiveCampaigns()
+	campaigns, upcoming, dashboardCount, err := d.getActiveCampaigns()
 	if err != nil {
 		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch", "error", err)
 		d.recordSync(0, 0, 0, err)
 		return
 	}
+
+	d.mu.Lock()
+	d.upcomingCampaigns = upcoming
+	d.mu.Unlock()
 
 	// Campaigns produced by the dashboard -> DropCampaignDetails path, before
 	// syncWithInventory folds in any in-progress campaign that path missed.
@@ -506,6 +538,11 @@ func (d *DropsTracker) syncCampaigns() {
 
 	campaigns = d.applyClaimHistory(campaigns)
 	afterClaimHistory := len(campaigns)
+
+	// Record every observed campaign (claim-enriched active set + upcoming) into
+	// the durable catalog for the "Past" tab. Done before the blacklist filter so
+	// blacklisted-but-real campaigns are still catalogued as having existed.
+	d.recordCatalog(campaigns, upcoming)
 
 	campaigns = d.applyBlacklist(campaigns)
 	afterBlacklist := len(campaigns)
@@ -549,10 +586,15 @@ func (d *DropsTracker) syncCampaigns() {
 	d.updateStreamerCampaigns()
 }
 
-func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, int, error) {
-	dashboardCampaigns, err := d.getDropsDashboard("ACTIVE")
+func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign, dashboardTotal int, err error) {
+	// Fetch every campaign the dashboard lists (a single ViewerDropsDashboard
+	// call, no status filter) so not-yet-started (UPCOMING) campaigns reach the
+	// date-window classification below instead of being dropped at the source;
+	// the active farm set is still gated by DateMatch, so this changes nothing
+	// about what gets farmed — it only additionally surfaces the upcoming ones.
+	dashboardCampaigns, err := d.getDropsDashboard("")
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	dashboardCount := len(dashboardCampaigns)
 
@@ -560,6 +602,8 @@ func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, int, error) {
 		"dashboardCount", dashboardCount)
 
 	var campaigns []*models.Campaign
+	var upcomingCampaigns []*models.Campaign
+	now := time.Now()
 	for _, summary := range dashboardCampaigns {
 		campaignID, _ := summary["id"].(string)
 		summaryName, _ := summary["name"].(string)
@@ -585,9 +629,19 @@ func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, int, error) {
 		campaign, dropsFromDetails, skip := buildTrackedCampaign(summary, detail)
 		switch skip {
 		case skipOutsideDateWindow:
-			slog.Debug("Drops sync: skipping campaign outside its active date window",
-				"campaign", campaign.Name, "campaignID", campaign.ID,
-				"startAt", campaign.StartAt, "endAt", campaign.EndAt)
+			// A campaign outside its window is either upcoming (start in the
+			// future) or already ended. Upcoming ones are kept for the display-
+			// only "Upcoming" tab; they never enter the active farm set.
+			if !campaign.StartAt.IsZero() && campaign.StartAt.After(now) {
+				upcomingCampaigns = append(upcomingCampaigns, campaign)
+				slog.Debug("Drops sync: campaign is upcoming (not yet started)",
+					"campaign", campaign.Name, "campaignID", campaign.ID,
+					"startAt", campaign.StartAt)
+			} else {
+				slog.Debug("Drops sync: skipping campaign outside its active date window",
+					"campaign", campaign.Name, "campaignID", campaign.ID,
+					"startAt", campaign.StartAt, "endAt", campaign.EndAt)
+			}
 			continue
 		case skipNoActiveDrops:
 			slog.Debug("Drops sync: skipping campaign with no active unclaimed drops",
@@ -600,9 +654,9 @@ func (d *DropsTracker) getActiveCampaigns() ([]*models.Campaign, int, error) {
 	}
 
 	slog.Debug("Drops sync: active campaigns after detail fetch and filtering",
-		"trackedCount", len(campaigns))
+		"trackedCount", len(campaigns), "upcomingCount", len(upcomingCampaigns))
 
-	return campaigns, dashboardCount, nil
+	return campaigns, upcomingCampaigns, dashboardCount, nil
 }
 
 // campaignSkipReason explains why buildTrackedCampaign declined to track a

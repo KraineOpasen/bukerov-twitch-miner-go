@@ -48,6 +48,7 @@ type Miner struct {
 	chatManager      *chat.ChatManager
 	watcher          *watcher.MinuteWatcher
 	dropsTracker     *drops.DropsTracker
+	dropCatalog      *drops.CampaignCatalog
 	discovery        *discovery.Manager
 	healthCenter     *health.Center
 	canary           *health.Canary
@@ -378,6 +379,17 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.dropsTracker.SetDropClaimedHook(m.recordDropClaimed)
 	}
 
+	// Wire the durable drop-campaign catalog (the "Past" tab's data source) so
+	// every observed campaign is recorded and survives its expiry.
+	if m.db != nil {
+		if catalog, err := drops.NewCampaignCatalog(m.db); err != nil {
+			slog.Error("Failed to initialize drop campaign catalog", "error", err)
+		} else {
+			m.dropsTracker.SetCatalog(catalog)
+			m.dropCatalog = catalog
+		}
+	}
+
 	// A reported watched minute is real drop progress; nudge the drops tracker
 	// to refresh its lightweight progress view promptly so the Drops page stays
 	// within seconds of Twitch instead of lagging up to a full sync interval.
@@ -440,6 +452,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	if m.webServer != nil {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
+		m.webServer.SetDropCatalogProvider(m)
 		m.webServer.SetDiscoveryProvider(m.discovery)
 		m.webServer.SetHealthProvider(m)
 		m.webServer.SetDropProgressProvider(m)
