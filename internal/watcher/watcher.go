@@ -909,6 +909,29 @@ func containsPair(online []int, pair [2]int) bool {
 // higher-priority candidate appears (e.g. a channel-restricted drop), at which
 // point it hands the seat off and the previously-displaced base member is
 // re-evaluated so it is no longer starved.
+//
+// Hold duration is deliberately UNBOUNDED in time — a known, intentional
+// property, not a bug. The latch ends only on loss of eligibility
+// (isBoostEligible → false) or a strictly-higher candidate; base-pair rotation
+// clears it but immediately re-latches the same channel next tick if it is
+// still the best. A streak self-limits to ~7 minutes (crossing
+// watchStreakThresholdMinutes drops its eligibility), but a live drop campaign
+// (DropsCondition, no minute cap) can hold ONE of the two watch slots for as
+// long as it stays farmable. That does not starve the other online streamers:
+//   - the OTHER slot is the base pair, which keeps rotating normally via the
+//     deficit-based fair rotation (rotateToLeastWatchedPair runs on its own
+//     30-80 min timer, untouched by the boost), so the most-owed non-boosted
+//     channel is still surfaced each window;
+//   - the boosted channel records its own watch time (RecordMinutes), so the
+//     fair-rotation ranking naturally keeps it OUT of the base pair — no
+//     double-dipping — which de-starves the rest;
+//   - the only channel not watched while the latch holds is the current victim,
+//     deliberately the LESS-owed of the two base-pair members, and its identity
+//     moves as the base pair recomputes, so no single channel is locked out.
+//
+// The cost is throughput: while one slot is held long-term, the remaining
+// channels share the single rotating slot instead of two — the accepted price
+// of finishing a long drop campaign on the channel that needs it.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
 	best := w.selectBoostTarget(pair, onlineIndexes)
 	if best == -1 {
