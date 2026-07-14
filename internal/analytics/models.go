@@ -80,3 +80,26 @@ type ChatLogData struct {
 	TotalCount int           `json:"total_count"`
 	HasMore    bool          `json:"has_more"`
 }
+
+// BetRecord is one resolved prediction bet, persisted so ROI analytics survive
+// restarts (the in-memory streamer.History and the lossy WIN/LOSE annotation
+// string are not enough — neither carries the stake, payout, strategy, or
+// odds). One row per event_id; a reconnect that re-delivers the same
+// prediction-result must not double-count it.
+//
+// Placed is the raw stake put on the round (kept even for REFUND, where the
+// stake is returned); Won is the payout (0 for LOSE/REFUND); Gained is the net
+// (Won-Placed for WIN/LOSE, 0 for REFUND). Odds is the chosen outcome's odds at
+// resolution. Manual marks a bet placed via the dashboard rather than auto-bet.
+type BetRecord struct {
+	EventID    string  `json:"eventId"`
+	Streamer   string  `json:"streamer"`
+	Timestamp  int64   `json:"t"`
+	Strategy   string  `json:"strategy"`
+	ResultType string  `json:"result"` // WIN | LOSE | REFUND
+	Placed     int     `json:"placed"`
+	Won        int     `json:"won"`
+	Gained     int     `json:"gained"`
+	Odds       float64 `json:"odds"`
+	Manual     bool    `json:"manual"`
+}

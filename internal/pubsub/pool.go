@@ -19,6 +19,29 @@ type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
 type StatusHandler func(streamer string, online bool)
 type AuthErrorHandler func(err error)
 
+// BetResult is the settled-bet record the pool emits once, when a prediction
+// resolves, for downstream ROI analytics. It carries the full context the pool
+// has and the raw annotation string does not: the stake actually placed (kept
+// even for a REFUND, which returns the stake), the payout, the net, the chosen
+// outcome's odds, the strategy used ("MANUAL" for a dashboard bet), and whether
+// it was manual. It is a pubsub-local type so the pool never imports analytics
+// and stays independently testable; the miner maps it to analytics.BetRecord.
+type BetResult struct {
+	EventID    string
+	Streamer   string
+	Timestamp  time.Time
+	Strategy   string
+	ResultType string // WIN | LOSE | REFUND
+	Placed     int
+	Won        int
+	Gained     int
+	Odds       float64
+	Manual     bool
+}
+
+// BetResultHandler receives one BetResult per resolved, confirmed bet.
+type BetResultHandler func(BetResult)
+
 // Manual-bet / round-control sentinel errors. Their messages are already
 // user-safe, so the dashboard can surface them verbatim without leaking raw Go
 // or Twitch internals.
@@ -92,6 +115,7 @@ type WebSocketPool struct {
 	onMessage      MessageHandler
 	onStatusChange StatusHandler
 	onAuthError    AuthErrorHandler
+	onBetResult    BetResultHandler
 
 	mu sync.RWMutex
 }
@@ -118,6 +142,12 @@ func (p *WebSocketPool) SetStatusHandler(handler StatusHandler) {
 
 func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
 	p.onAuthError = handler
+}
+
+// SetBetResultHandler registers the sink for settled-bet records (ROI analytics).
+// Like the other handlers it is set once at wiring time before the pool starts.
+func (p *WebSocketPool) SetBetResultHandler(handler BetResultHandler) {
+	p.onBetResult = handler
 }
 
 // PredictionOutcomeSnapshot is a read-only view of one prediction outcome,
@@ -552,6 +582,21 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 	}
 }
 
+// chosenOutcomeOdds returns the odds of the outcome the bot bet on, as known at
+// resolution (outcomes stop updating once the round locks). Returns 0 when no
+// outcome was chosen or the index is out of range.
+func chosenOutcomeOdds(event *models.EventPrediction) float64 {
+	choice := event.Bet.Decision.Choice
+	if choice < 0 || choice >= len(event.Bet.Outcomes) {
+		return 0
+	}
+	o := event.Bet.Outcomes[choice]
+	if o == nil {
+		return 0
+	}
+	return o.Odds
+}
+
 func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) {
 	if msg.Data == nil {
 		return
@@ -595,11 +640,24 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		}
 
 		p.mu.Lock()
+		// The raw stake must be read before ParseResult, which zeroes `placed`
+		// for a REFUND; ROI analytics still want to know a stake was put up.
+		stake := event.Bet.Decision.Amount
+		strategy := string(event.Bet.Settings.Strategy)
+		odds := chosenOutcomeOdds(event)
+		manual := false
+		if rc := p.control[eventID]; rc != nil {
+			manual = rc.manualBet
+		}
 		placed, won, gained := event.ParseResult(result)
 		resultType := event.Result.Type
 		p.mu.Unlock()
 		_ = placed
 		_ = won
+
+		if manual {
+			strategy = "MANUAL"
+		}
 
 		slog.Info("Prediction result",
 			"event", event.Title,
@@ -615,6 +673,23 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			streamer.UpdateHistoryWithCounter("REFUND", -placed, -1)
 		case models.ResultWin:
 			streamer.UpdateHistoryWithCounter("PREDICTION", -won, -1)
+		}
+
+		// Emit the settled bet for ROI analytics. Done outside the pool lock (no
+		// SQLite call under mu); the handler is the miner's analytics recorder.
+		if p.onBetResult != nil {
+			p.onBetResult(BetResult{
+				EventID:    eventID,
+				Streamer:   streamer.Username,
+				Timestamp:  time.Now(),
+				Strategy:   strategy,
+				ResultType: string(resultType),
+				Placed:     stake,
+				Won:        won,
+				Gained:     gained,
+				Odds:       odds,
+				Manual:     manual,
+			})
 		}
 
 		// The round is over; drop its tracked + transient state promptly.

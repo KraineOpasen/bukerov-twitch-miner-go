@@ -1360,11 +1360,37 @@ CREATE TABLE chat_messages (
     FOREIGN KEY (streamer_id) REFERENCES streamers(id)
 );
 
+-- Prediction bets (migration v4) — one row per resolved prediction, powering
+-- ROI analytics. UNIQUE(event_id) makes recording idempotent against a
+-- re-delivered prediction-result (PubSub reconnect). No FOREIGN KEY: this
+-- codebase never enables PRAGMA foreign_keys, so an FK would be decorative;
+-- streamer_id integrity is instead guaranteed by resolving/creating the parent
+-- streamer row before insert (as every table here already does).
+CREATE TABLE prediction_bets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    streamer_id  INTEGER NOT NULL,
+    event_id     TEXT NOT NULL UNIQUE,
+    timestamp    INTEGER NOT NULL,
+    strategy     TEXT NOT NULL,       -- SMART/HIGH_ODDS/…/MANUAL
+    result_type  TEXT NOT NULL,       -- WIN | LOSE | REFUND
+    placed       INTEGER NOT NULL,    -- raw stake (kept even for REFUND)
+    won          INTEGER NOT NULL,    -- payout (0 for LOSE/REFUND)
+    gained       INTEGER NOT NULL,    -- net (won-placed for WIN/LOSE, 0 for REFUND)
+    odds         REAL NOT NULL,       -- chosen outcome's odds at resolution
+    manual       INTEGER NOT NULL DEFAULT 0
+);
+
 -- Indexes for performance
 CREATE INDEX idx_points_streamer_time ON points(streamer_id, timestamp);
 CREATE INDEX idx_annotations_streamer_time ON annotations(streamer_id, timestamp);
 CREATE INDEX idx_chat_streamer_time ON chat_messages(streamer_id, timestamp);
+CREATE INDEX idx_predbets_streamer_time ON prediction_bets(streamer_id, timestamp);
 ```
+
+`prediction_bets` is deliberately **excluded** from the retention sweep
+(`PruneBefore` only prunes `points` and `annotations`), so lifetime ROI stays
+exact; it grows by one row per resolved prediction. Migration v4 is additive
+(no `ALTER` of existing tables), so it is safe to apply to a populated database.
 
 #### Notifications Module Schema
 
@@ -1439,6 +1465,37 @@ Both must be set to enable authentication. When enabled, all dashboard routes re
 ### Data Storage
 
 Analytics data is stored in the unified database (`database/{username}/miner.db`) under the analytics module.
+
+### Prediction ROI Analytics
+
+Resolved prediction bets are persisted to `prediction_bets` and aggregated into a
+read-only ROI report on the Statistics page. The data flow avoids touching the
+betting engine:
+
+1. **Emit** — When a confirmed prediction resolves, `pubsub.WebSocketPool`
+   (`handlePredictionUser`, the same place that already updates streamer history)
+   builds a `pubsub.BetResult` and hands it to the `SetBetResultHandler` sink.
+   The raw stake is read from `event.Bet.Decision.Amount` **before**
+   `ParseResult` (which zeroes `placed` on a REFUND), the strategy from
+   `event.Bet.Settings.Strategy` (or `"MANUAL"` for a dashboard bet), and the
+   odds from the chosen outcome. The handler is invoked outside the pool lock.
+2. **Persist** — The miner maps `BetResult` to `analytics.BetRecord` and calls
+   `Service.RecordBet`, which does an idempotent `INSERT OR IGNORE`
+   (UNIQUE(event_id)); a re-delivered result is logged, not double-counted.
+3. **Aggregate** — `analytics.ComputeROI([]BetRecord) ROISummary` is a pure,
+   deterministic function (no I/O, no `time.Now`): the caller supplies the
+   period-filtered records, it computes counts, win rate, wagered, net profit,
+   ROI, averages, maximum drawdown, and the by-streamer/by-strategy/by-odds
+   breakdowns. Buckets: `<1.5 / 1.5–2 / 2–3 / 3–5 / 5+` (upper bound exclusive).
+4. **Serve** — `GET /api/predictions/roi?streamer=&strategy=&period=` returns the
+   summary; `GET /api/predictions/roi/export` returns the raw bets as a JSON
+   attachment. Periods: `7d / 30d / 90d / lifetime` (lifetime = open-ended).
+
+Metric conventions: win rate, average wager, and total wagered are over settled
+bets (WIN + LOSE); refunds return the stake and are counted separately. Net
+profit is the sum of `gained`; ROI = net profit ÷ total wagered × 100. Maximum
+drawdown is the largest peak-to-trough drop of the cumulative net-profit curve.
+The report never places, modifies, or auto-disables a bet or strategy.
 
 ### Event Types for Series
 
