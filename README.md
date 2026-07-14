@@ -426,7 +426,7 @@ When `enableAnalytics` is true, the miner provides a web dashboard at http://loc
 - **Dashboard**: Overview of all streamers with current points and today's earnings
 - **Streamer Pages**: Historical point data with interactive charts
 - **Statistics**: Points-history chart plus **Prediction ROI analytics** (see below)
-- **Drops**: Drop campaign queue with dual progress bars (per-drop and per-campaign) and a per-campaign detail modal
+- **Drops**: Tabbed campaign catalog — **Current** (the active queue with dual progress bars and a per-campaign detail modal), **Upcoming** (campaigns Twitch has announced but that have not started, display-only), and **Past** (a durable catalog of expired campaigns, recurring ones grouped, with claimed/dates)
 - **Settings**: Runtime configuration that can be changed without restart
 - **Notifications**: Discord notification management (when Discord is enabled)
 - **Chat Logs**: Searchable chat history per streamer (when enabled)

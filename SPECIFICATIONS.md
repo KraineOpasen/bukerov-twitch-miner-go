@@ -1470,6 +1470,42 @@ CREATE INDEX idx_watch_time_streamer_time ON watch_time_events(streamer, timesta
 
 Rows older than 2x the 8-hour ranking window are opportunistically pruned on write, keeping the table bounded over long uptimes. This data persists across restarts (same `/database` volume, same modular migration system as the other modules above).
 
+#### Drop Catalog Module Schema
+
+```sql
+-- Durable catalog of every drop campaign the miner has observed (current +
+-- upcoming), so the Drops-page "Past" tab can show campaigns that have expired
+-- and dropped off Twitch's dashboard (which only returns active + upcoming).
+-- One row per campaign INSTANCE (campaign_id is unique); a recurring campaign
+-- accumulates one row per occurrence, grouped in the UI by campaign_key
+-- (NormalizeRewardKey(gameID, campaignName)).
+CREATE TABLE drop_campaigns (
+    campaign_id   TEXT PRIMARY KEY,
+    campaign_key  TEXT NOT NULL,   -- game + campaign name, for recurring grouping
+    name          TEXT NOT NULL,
+    game          TEXT,
+    start_at      INTEGER NOT NULL DEFAULT 0,  -- Unix millis (0 = unknown)
+    end_at        INTEGER NOT NULL DEFAULT 0,
+    status        TEXT,
+    claimed       INTEGER NOT NULL DEFAULT 0,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at  INTEGER NOT NULL
+);
+
+CREATE INDEX idx_drop_campaigns_key_end ON drop_campaigns(campaign_key, end_at);
+```
+
+Upsert semantics (`ON CONFLICT(campaign_id) DO UPDATE`): `last_seen_at`, `status`,
+`claimed`, `name`, and `game` refresh on each observation; `start_at`/`end_at`
+refresh only when the new observation actually carries a date (a `CASE … > 0`
+guard, so a later date-less Twitch response can't zero out good dates); and
+`first_seen_at` is never in the SET list, so it keeps the first-observed moment.
+The catalog is **excluded from the retention sweep** (`PruneBefore`) — its whole
+point is long memory, and it grows only one row per campaign instance. Upcoming
+campaigns are captured display-only from the same `ViewerDropsDashboard` response
+already fetched each sync (no new Twitch calls) and are **never** entered into the
+active farm set — a campaign cannot be farmed before its official start.
+
 **Note**: All timestamps are Unix timestamps in milliseconds, except `watch_time_events.timestamp` which is Unix seconds.
 
 ---

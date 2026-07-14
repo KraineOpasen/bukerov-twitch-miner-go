@@ -30,7 +30,9 @@
                     {{if $c.ChannelRestricted}}
                     <span class="drop-exclusive-badge" title="This drop campaign only counts progress on a specific channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
                     {{end}}
-                    {{if $c.Claimed}}
+                    {{if $c.Upcoming}}
+                    <span class="status-pill status-pill-progress" title="This campaign has not started yet; the miner never farms it before its official start">{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}Upcoming{{end}}</span>
+                    {{else if $c.Claimed}}
                     <span class="status-pill status-pill-claimed">{{$c.StatusLabel}}</span>
                     {{else}}
                     <span class="status-pill status-pill-progress">{{$c.StatusLabel}}</span>

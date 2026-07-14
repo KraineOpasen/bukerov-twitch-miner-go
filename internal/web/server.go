@@ -15,6 +15,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
@@ -36,6 +37,14 @@ type NextStreamCheckProvider interface {
 // the Drops page can render them. It's satisfied by the drops tracker.
 type CampaignsProvider interface {
 	Campaigns() []*models.Campaign
+}
+
+// DropCatalogProvider exposes the Drops-page catalog tabs: upcoming campaigns
+// (display-only, not-yet-started) and the durable "past" catalog of expired
+// campaigns. Satisfied by the miner.
+type DropCatalogProvider interface {
+	UpcomingCampaigns() []*models.Campaign
+	PastCampaigns() ([]drops.CatalogRecord, error)
 }
 
 // DiscoveryProvider exposes the directory-discovery subsystem's state so the
@@ -120,6 +129,7 @@ type Server struct {
 	notificationManager     *notifications.Manager
 	nextStreamCheckProvider NextStreamCheckProvider
 	campaignsProvider       CampaignsProvider
+	dropCatalogProvider     DropCatalogProvider
 	discoveryProvider       DiscoveryProvider
 	healthProvider          HealthProvider
 	dropProgressProvider    DropProgressProvider
@@ -258,6 +268,12 @@ func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.campaignsProvider = provider
+}
+
+func (s *Server) SetDropCatalogProvider(provider DropCatalogProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropCatalogProvider = provider
 }
 
 func (s *Server) SetDiscoveryProvider(provider DiscoveryProvider) {
@@ -441,6 +457,8 @@ func (s *Server) handler() http.Handler {
 	// Drops routes
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
+	mux.HandleFunc("/api/drops/upcoming", s.handleAPIDropsUpcoming)
+	mux.HandleFunc("/api/drops/past", s.handleAPIDropsPast)
 	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)
 	mux.HandleFunc("/api/policy/mode", s.handleAPIPolicyMode)
 	mux.HandleFunc("/api/policy/drop-rule", s.handleAPIPolicyDropRule)
