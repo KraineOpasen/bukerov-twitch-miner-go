@@ -374,6 +374,44 @@ notifications are configured) instead of updating.
 
 ---
 
+## Token Encryption at Rest
+
+The Twitch OAuth token is stored under `cookies/{username}.json`. By default it is
+written in **plaintext** (mode `0600`), and the miner logs a one-time warning at
+startup. To encrypt it at rest with **AES-256-GCM**, set a passphrase in the
+environment:
+
+| Variable | Description |
+|----------|-------------|
+| `TWITCH_AUTH_ENCRYPTION_KEY` | Passphrase used to derive the encryption key (PBKDF2-HMAC-SHA256). When set, the stored token file is encrypted; when unset, it stays plaintext. |
+
+```bash
+# Docker
+-e TWITCH_AUTH_ENCRYPTION_KEY='a long random passphrase'
+# Binary
+export TWITCH_AUTH_ENCRYPTION_KEY='a long random passphrase'
+```
+
+It is an environment variable on purpose — never a `config.json` field, since the
+config file is itself plaintext on disk.
+
+**Behaviour and migration:**
+
+- **No passphrase set** → the token stays plaintext (existing installs and
+  headless auto-restart are unaffected). A one-time warning is logged.
+- **Passphrase set on an existing plaintext token** → the file is migrated to the
+  encrypted format automatically on the next load; **no re-login is required**.
+- **Passphrase changed or removed while the file is encrypted** → the token can no
+  longer be decrypted, so the miner falls back to a normal device login. This is
+  the **only** case that forces re-authentication. Keep the passphrase stable
+  (and backed up) across restarts.
+
+**Scope:** this protects the token against casual disk/backup/repository exposure.
+With the passphrase available in the runtime environment, it does not defend
+against an attacker who already has both the file and that environment.
+
+---
+
 ## Web Dashboard
 
 When `enableAnalytics` is true, the miner provides a web dashboard at http://localhost:5000 with:

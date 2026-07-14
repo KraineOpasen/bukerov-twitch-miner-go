@@ -321,9 +321,38 @@ The application uses the TV device OAuth flow for authentication.
 ```
 
 #### Token Storage
-- Tokens persisted locally between sessions
-- Contains: `auth-token`, `user_id`, session metadata
-- Format: Application-specific (cookies, JSON, etc.)
+- Tokens persisted locally between sessions at `cookies/{username}.json` (mode `0600`)
+- Contains: `auth_token`, `user_id`, `username`
+- Only the access token is persisted (there is no refresh flow)
+
+##### Encryption at Rest
+
+The stored token can be encrypted with AES-256-GCM. Encryption is controlled by
+the `TWITCH_AUTH_ENCRYPTION_KEY` environment variable (an env var, never a
+config-file field — `config.json` is itself plaintext):
+
+- **Unset** → the record is written in the legacy plaintext JSON layout
+  (`{auth_token, user_id, username}`), and a one-time warning is logged.
+- **Set** → the inner record is AES-256-GCM sealed and stored as a versioned
+  envelope; the key is derived with PBKDF2-HMAC-SHA256 (600k iterations):
+
+  ```json
+  { "version": 2, "kdf": "pbkdf2-sha256", "iter": 600000,
+    "salt": "<b64>", "nonce": "<b64>", "ciphertext": "<b64>" }
+  ```
+
+Format detection is by the `version` field (absent = legacy plaintext). Salt and
+nonce are random per save; the derived key is zeroed after use; the passphrase and
+token are never logged.
+
+**Migration / failure modes:**
+- Plaintext file + passphrase now set → migrated to the encrypted envelope in
+  place on load (`SaveAuth` re-write), **no re-login**.
+- Encrypted file + missing/changed passphrase, or a tampered ciphertext →
+  `LoadStoredAuth` returns an error and `Login()` falls back to the device flow.
+  This is the only condition that forces re-authentication.
+- Encryption touches only `SaveAuth`/`LoadStoredAuth`; the in-memory token
+  (`GetAuthToken`) and all consumers (API/PubSub/IRC) are unchanged.
 
 #### Required Request Headers
 ```
