@@ -1,7 +1,7 @@
 {{define "drops_list"}}
 {{if not .Campaigns}}
 <div class="card text-center text-neutral-400">
-    No active drop campaigns right now. Campaigns appear here once the miner syncs them from Twitch.
+    {{ t "drops.list.empty" }}
 </div>
 {{else}}
 <div class="space-y-4">
@@ -9,7 +9,7 @@
     <article class="card flex gap-4 cursor-pointer hover:border-purple-500 transition-colors"
              role="button" tabindex="0"
              data-drop-modal="drop-modal-{{$i}}"
-             aria-label="Show all drops for {{$c.Name}}">
+             aria-label="{{ t "drops.card.show_all_aria" }} {{$c.Name}}">
         <div class="flex-shrink-0 w-16 h-[5.5rem] rounded-md overflow-hidden bg-neutral-900 border border-neutral-700 flex items-center justify-center">
             {{if $c.BoxArtURL}}
             <img src="{{$c.BoxArtURL}}" alt="{{$c.GameName}}" class="w-full h-full object-cover" loading="lazy"
@@ -28,10 +28,10 @@
                 </div>
                 <div class="flex items-center gap-1.5 flex-shrink-0">
                     {{if $c.ChannelRestricted}}
-                    <span class="drop-exclusive-badge" title="This drop campaign only counts progress on a specific channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
+                    <span class="drop-exclusive-badge" title="{{ t "drops.badge.channel_only_title" }}">{{ t "drops.badge.channel_only" }}</span>
                     {{end}}
                     {{if $c.Upcoming}}
-                    <span class="status-pill status-pill-progress" title="This campaign has not started yet; the miner never farms it before its official start">{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}Upcoming{{end}}</span>
+                    <span class="status-pill status-pill-progress" title="{{ t "drops.badge.upcoming_title" }}">{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}{{ t "drops.tab.upcoming" }}{{end}}</span>
                     {{else if $c.Claimed}}
                     <span class="status-pill status-pill-claimed">{{$c.StatusLabel}}</span>
                     {{else}}
@@ -42,13 +42,13 @@
 
             {{if $c.DropName}}
             <div class="text-sm text-neutral-300 mt-2 truncate" title="{{$c.DropName}}">
-                {{if $c.Claimed}}Reward: {{else}}Current drop: {{end}}<span class="text-neutral-100">{{$c.DropName}}</span>
+                {{if $c.Claimed}}{{ t "drops.reward_label" }}{{else}}{{ t "drops.current_drop_label" }}{{end}}<span class="text-neutral-100">{{$c.DropName}}</span>
             </div>
             {{end}}
 
             <div class="mt-3">
                 <div class="flex justify-between text-xs text-neutral-400 mb-1">
-                    <span>Campaign progress</span>
+                    <span>{{ t "drops.progress.campaign" }}</span>
                     <span>{{$c.OverallPercent}}%</span>
                 </div>
                 <div class="progress-track">
@@ -59,8 +59,8 @@
             {{if $c.HasMinuteProgress}}
             <div class="mt-3">
                 <div class="flex justify-between text-xs text-neutral-400 mb-1">
-                    <span>{{$c.MinutesWatched}}/{{$c.MinutesRequired}} min watched</span>
-                    <span>{{$c.MinutesRemaining}} min remaining</span>
+                    <span>{{$c.MinutesWatched}}/{{$c.MinutesRequired}} {{ t "drops.min_watched_suffix" }}</span>
+                    <span>{{$c.MinutesRemaining}} {{ t "drops.min_remaining_suffix" }}</span>
                 </div>
                 <div class="progress-track">
                     <div class="progress-fill-minute" style="width: {{$c.MinutePercent}}%"></div>
@@ -86,14 +86,14 @@
                 <div class="flex items-center gap-2">
                     <span class="status-pill" style="color: {{.StatusColor}}; border: 1px solid currentColor; background: transparent;">{{.StatusLabel}}</span>
                     {{if .Excluded}}<span class="text-neutral-500">{{.ExcludeReason}}</span>
-                    {{else}}<span class="text-neutral-400">score {{.Total}}</span>{{end}}
+                    {{else}}<span class="text-neutral-400">{{ t "drops.policy.score" }} {{.Total}}</span>{{end}}
                 </div>
                 {{if .Factors}}
                 <details class="mt-1">
-                    <summary class="text-purple-400 cursor-pointer">Why this score</summary>
+                    <summary class="text-purple-400 cursor-pointer">{{ t "drops.policy.why_score" }}</summary>
                     <div class="mt-1 font-mono text-neutral-400">
                         {{range .Factors}}<div>{{printf "%+d" .Points}} {{.Label}}</div>{{end}}
-                        <div class="text-neutral-300">Total: {{.Total}}</div>
+                        <div class="text-neutral-300">{{ t "drops.policy.total" }} {{.Total}}</div>
                     </div>
                 </details>
                 {{end}}
@@ -101,7 +101,7 @@
             {{end}}
 
             {{if $c.Drops}}
-            <div class="text-xs text-purple-400 mt-3">View all {{len $c.Drops}} drop{{if ne (len $c.Drops) 1}}s{{end}} →</div>
+            <div class="text-xs text-purple-400 mt-3">{{ t "drops.view_all" }} {{len $c.Drops}} {{ t "drops.view_all_suffix" }} →</div>
             {{end}}
         </div>
     </article>
@@ -112,12 +112,12 @@
                 <h3 class="text-neutral-100 font-semibold truncate">{{$c.Name}}</h3>
                 {{if $c.GameName}}<div class="text-xs text-neutral-400 truncate">{{$c.GameName}}</div>{{end}}
             </div>
-            <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" data-drop-modal-close aria-label="Close">✕</button>
+            <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" data-drop-modal-close aria-label="{{ t "common.close" }}">✕</button>
         </div>
 
         <div class="px-5 py-4 space-y-3 max-h-[70vh] overflow-y-auto">
             {{if not $c.Drops}}
-            <div class="text-neutral-400 text-sm">No individual drops to show for this campaign.</div>
+            <div class="text-neutral-400 text-sm">{{ t "drops.modal.no_drops" }}</div>
             {{else}}
             {{range $c.Drops}}
             <div class="flex gap-3 items-center bg-neutral-900 border border-neutral-700 rounded-lg p-3">
@@ -149,7 +149,7 @@
                             <div class="{{if .Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{.Percent}}%"></div>
                         </div>
                         {{if .HasMinuteProgress}}
-                        <div class="text-[0.7rem] text-neutral-400 mt-1">{{.MinutesWatched}}/{{.MinutesRequired}} min watched</div>
+                        <div class="text-[0.7rem] text-neutral-400 mt-1">{{.MinutesWatched}}/{{.MinutesRequired}} {{ t "drops.min_watched_suffix" }}</div>
                         {{end}}
                     </div>
                 </div>
@@ -163,20 +163,20 @@
                  recurring/regional campaign variants. -->
             <form hx-post="/api/policy/drop-rule" hx-target="#drops-queue" hx-swap="innerHTML"
                   class="mt-3 pt-3 border-t border-neutral-700 space-y-2 text-sm">
-                <div class="text-xs uppercase tracking-wide text-neutral-400">Per-drop rules</div>
+                <div class="text-xs uppercase tracking-wide text-neutral-400">{{ t "drops.rule.heading" }}</div>
                 <input type="hidden" name="rewardKey" value="{{.RewardKey}}">
-                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="skip" {{if .Skip}}checked{{end}}> Skip this reward</label>
-                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="highPriority" {{if .HighPriority}}checked{{end}}> High priority</label>
-                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="alwaysFinishStarted" {{if .AlwaysFinishStarted}}checked{{end}}> Always finish started</label>
-                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="nextRewardOnly" {{if .NextRewardOnly}}checked{{end}}> Next reward only</label>
+                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="skip" {{if .Skip}}checked{{end}}> {{ t "drops.rule.skip" }}</label>
+                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="highPriority" {{if .HighPriority}}checked{{end}}> {{ t "drops.rule.high_priority" }}</label>
+                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="alwaysFinishStarted" {{if .AlwaysFinishStarted}}checked{{end}}> {{ t "drops.rule.always_finish" }}</label>
+                <label class="flex items-center gap-2 text-neutral-300"><input type="checkbox" name="nextRewardOnly" {{if .NextRewardOnly}}checked{{end}}> {{ t "drops.rule.next_reward_only" }}</label>
                 <label class="flex items-center gap-2 text-neutral-300">
                     <input type="checkbox" name="ignoreSubscriberOnly" {{if .IgnoreSubscriberOnly}}checked{{end}}>
-                    Ignore subscriber-only
-                    {{if not .SubscriberOnlyKnown}}<span class="text-xs text-amber-500">(no effect — Twitch didn't report this flag)</span>{{end}}
+                    {{ t "drops.rule.ignore_sub_only" }}
+                    {{if not .SubscriberOnlyKnown}}<span class="text-xs text-amber-500">{{ t "drops.rule.no_effect" }}</span>{{end}}
                 </label>
                 <div class="flex gap-2 pt-1">
-                    <button type="submit" class="badge badge-queued">Save rules</button>
-                    <button type="submit" name="reset" value="1" class="badge">Reset rule</button>
+                    <button type="submit" class="badge badge-queued">{{ t "drops.rule.save" }}</button>
+                    <button type="submit" name="reset" value="1" class="badge">{{ t "drops.rule.reset" }}</button>
                 </div>
             </form>
             {{end}}{{end}}

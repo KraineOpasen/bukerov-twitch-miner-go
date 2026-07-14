@@ -1,7 +1,7 @@
 {{define "drops_past"}}
 {{if not .Groups}}
 <div class="card text-center text-neutral-400">
-    No past campaigns recorded yet. Campaigns are catalogued as the miner observes them, and appear here once they end.
+    {{ t "drops.past.empty" }}
 </div>
 {{else}}
 <div class="space-y-4">
@@ -24,22 +24,22 @@
                     {{if $g.GameName}}<div class="text-xs text-neutral-400 truncate">{{$g.GameName}}</div>{{end}}
                 </div>
                 <div class="flex items-center gap-1.5 flex-shrink-0">
-                    {{if gt $g.Count 1}}<span class="status-pill status-pill-progress" title="Recurring campaign — ran multiple times">ran {{$g.Count}}×</span>{{end}}
-                    <span class="status-pill status-pill-claimed" title="Instances whose reward you claimed">{{$g.ClaimedCount}}/{{$g.Count}} claimed</span>
+                    {{if gt $g.Count 1}}<span class="status-pill status-pill-progress" title="{{ t "drops.past.ran_title" }}">{{ t "drops.past.ran_prefix" }} {{$g.Count}}×</span>{{end}}
+                    <span class="status-pill status-pill-claimed" title="{{ t "drops.past.claimed_title" }}">{{$g.ClaimedCount}}/{{$g.Count}} {{ t "drops.past.claimed_suffix" }}</span>
                 </div>
             </div>
 
-            {{if $g.LastEnded}}<div class="text-xs text-neutral-500 mt-2">Last ended {{$g.LastEnded}}</div>{{end}}
+            {{if $g.LastEnded}}<div class="text-xs text-neutral-500 mt-2">{{ t "drops.past.last_ended" }} {{$g.LastEnded}}</div>{{end}}
 
             <details class="mt-2">
-                <summary class="text-xs text-neutral-400 cursor-pointer select-none">Show {{$g.Count}} instance{{if gt $g.Count 1}}s{{end}}</summary>
+                <summary class="text-xs text-neutral-400 cursor-pointer select-none">{{ t "drops.past.show_prefix" }} {{$g.Count}} {{ t "drops.past.instances_suffix" }}</summary>
                 <div class="overflow-x-auto mt-2">
                     <table class="w-full text-xs">
                         <thead>
                             <tr class="text-neutral-500 text-left">
-                                <th class="py-1 pr-3 font-medium">Started</th>
-                                <th class="py-1 pr-3 font-medium">Ended</th>
-                                <th class="py-1 font-medium">Reward</th>
+                                <th class="py-1 pr-3 font-medium">{{ t "drops.past.col.started" }}</th>
+                                <th class="py-1 pr-3 font-medium">{{ t "drops.past.col.ended" }}</th>
+                                <th class="py-1 font-medium">{{ t "drops.past.col.reward" }}</th>
                             </tr>
                         </thead>
                         <tbody>

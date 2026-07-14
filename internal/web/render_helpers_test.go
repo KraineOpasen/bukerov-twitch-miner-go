@@ -36,6 +36,17 @@ func testPartialsLang(t *testing.T, lang string) *template.Template {
 	return p
 }
 
+// enTR returns an English translation closure for testing Go-built labels,
+// so assertions can pin the (stable) English source strings.
+func enTR(t *testing.T) func(string) string {
+	t.Helper()
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	return func(key string) string { return loc.T(i18n.LangEN, key) }
+}
+
 // newRenderServer builds a minimal Server wired with localized templates, for
 // tests that exercise renderPage/renderPartial or handlers directly.
 func newRenderServer(t *testing.T) *Server {

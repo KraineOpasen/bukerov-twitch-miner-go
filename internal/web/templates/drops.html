@@ -1,4 +1,4 @@
-{{define "title"}}Drops - Twitch Points Miner{{end}}
+{{define "title"}}{{ t "drops.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
 <style>
@@ -8,27 +8,27 @@
 .drops-tab:focus-visible{outline:2px solid var(--color-online);outline-offset:-2px}
 </style>
 
-<h1 class="text-3xl font-bold mb-2">Drops</h1>
-<p class="text-neutral-400 text-sm mb-4">Twitch Drop campaigns — current, upcoming, and past. Feasibility badges are an estimate from current data, not a guaranteed drop.</p>
+<h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-4">{{ t "drops.subtitle" }}</p>
 
-<div class="flex gap-1 border-b border-neutral-700 mb-5" role="tablist" aria-label="Drop campaign catalog">
-    <button type="button" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true">Current</button>
-    <button type="button" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false">Upcoming</button>
-    <button type="button" class="drops-tab" data-tab="past" role="tab" aria-selected="false">Past</button>
+<div class="flex gap-1 border-b border-neutral-700 mb-5" role="tablist" aria-label="{{ t "drops.tablist_aria" }}">
+    <button type="button" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true">{{ t "drops.tab.current" }}</button>
+    <button type="button" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false">{{ t "drops.tab.upcoming" }}</button>
+    <button type="button" class="drops-tab" data-tab="past" role="tab" aria-selected="false">{{ t "drops.tab.past" }}</button>
 </div>
 
 <!-- Current -->
 <div id="tab-current" class="drops-panel">
     <form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
           class="flex items-center gap-2 text-sm mb-6">
-        <label class="text-neutral-400">Campaign policy</label>
+        <label class="text-neutral-400">{{ t "drops.policy.label" }}</label>
         <select name="mode" onchange="this.form.requestSubmit()"
                 class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
             {{range .PolicyModes}}
             <option value="{{.}}" {{if eq . $.PolicyMode}}selected{{end}}>{{.}}</option>
             {{end}}
         </select>
-        <span class="text-xs text-neutral-500">GAME_ORDER keeps the configured game order (default).</span>
+        <span class="text-xs text-neutral-500">{{ t "drops.policy.hint" }}</span>
     </form>
 
     <!--
@@ -43,34 +43,34 @@
         hx-trigger="load, every 30s"
         hx-swap="innerHTML"
     >
-        <div class="animate-pulse text-neutral-400">Loading drop campaigns...</div>
+        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.campaigns" }}</div>
     </section>
 
-    <h2 class="text-xl font-bold mt-10 mb-2">Discovered Channels</h2>
-    <p class="text-neutral-400 text-sm mb-4">Live drops-enabled channels found in the Twitch directory for your configured games. The most-viewed available channel is farmed in an extra watch slot, separate from the streamer rotation; it switches automatically when a channel goes offline or its drops end.</p>
+    <h2 class="text-xl font-bold mt-10 mb-2">{{ t "drops.discovered.heading" }}</h2>
+    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.discovered.subtitle" }}</p>
 
     <section
         hx-get="/api/discovery"
         hx-trigger="load, every 1m"
         hx-swap="innerHTML"
     >
-        <div class="animate-pulse text-neutral-400">Loading discovered channels...</div>
+        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.discovered" }}</div>
     </section>
 </div>
 
 <!-- Upcoming -->
 <div id="tab-upcoming" class="drops-panel hidden">
-    <p class="text-neutral-400 text-sm mb-4">Campaigns Twitch has announced that have not started yet. Read-only — the miner never farms a campaign before its official start.</p>
+    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
     <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load" hx-swap="innerHTML">
-        <div class="animate-pulse text-neutral-400">Loading upcoming campaigns...</div>
+        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.upcoming" }}</div>
     </section>
 </div>
 
 <!-- Past -->
 <div id="tab-past" class="drops-panel hidden">
-    <p class="text-neutral-400 text-sm mb-4">Campaigns that have ended, from the miner's own catalog (Twitch stops listing expired campaigns). Recurring campaigns are grouped; expand a card for each instance.</p>
+    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
     <section id="drops-past" hx-get="/api/drops/past" hx-trigger="load" hx-swap="innerHTML">
-        <div class="animate-pulse text-neutral-400">Loading past campaigns...</div>
+        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.past" }}</div>
     </section>
 </div>
 {{end}}
