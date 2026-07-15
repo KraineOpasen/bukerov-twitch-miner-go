@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 )
 
 type fakeDiscoveryProvider struct {
@@ -62,7 +63,7 @@ func TestDiscoveryListTemplateRenders(t *testing.T) {
 	if err := partials.ExecuteTemplate(&buf, "discovery_list", DiscoveryListData{Enabled: false}); err != nil {
 		t.Fatalf("disabled render failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Directory discovery is off") {
+	if !strings.Contains(buf.String(), "Поиск по каталогу выключен") {
 		t.Errorf("disabled state should point at Settings:\n%s", buf.String())
 	}
 
@@ -72,7 +73,7 @@ func TestDiscoveryListTemplateRenders(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("empty-pool render failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "No live drops-enabled channels") || !strings.Contains(buf.String(), "World of Tanks") {
+	if !strings.Contains(buf.String(), "не найдено прямых эфиров с дропами") || !strings.Contains(buf.String(), "World of Tanks") {
 		t.Errorf("empty-pool state should list configured games:\n%s", buf.String())
 	}
 
@@ -90,10 +91,38 @@ func TestDiscoveryListTemplateRenders(t *testing.T) {
 		t.Fatalf("populated render failed: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"watched_channel", "Watching", "12 min watched", "5,400", "Available", "Offline", "twitch.tv/backup_channel"} {
+	for _, want := range []string{"watched_channel", "Смотрим", "12 мин просмотрено", "5,400", "Доступен", "Оффлайн", "twitch.tv/backup_channel"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("populated output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestDiscoveryListTemplateRendersEnglish renders the discovery partial in
+// English to prove it localizes both ways, not just the default RU.
+func TestDiscoveryListTemplateRendersEnglish(t *testing.T) {
+	partials := testPartialsLang(t, i18n.LangEN)
+
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "discovery_list", DiscoveryListData{
+		Enabled: true,
+		Games:   []string{"World of Tanks"},
+		Channels: []DiscoveredChannelView{
+			{Login: "watched_channel", Game: "World of Tanks", Status: "watching", ViewersFormatted: "5,400",
+				Watching: true, HasMinutesWatched: true, MinutesWatched: 12},
+			{Login: "gone_channel", Game: "World of Tanks", Status: "offline", ViewersFormatted: "99", Offline: true},
+		},
+	}); err != nil {
+		t.Fatalf("populated english render failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Watching", "12 min watched", "Offline", "Drops enabled"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("english discovery_list missing %q", want)
+		}
+	}
+	if strings.Contains(out, "Смотрим") {
+		t.Errorf("english render leaked Russian text:\n%s", out)
 	}
 }
 
@@ -128,7 +157,7 @@ func TestDropsPageRendersDiscoverySection(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Discovered Channels") || !strings.Contains(body, "/api/discovery") {
+	if !strings.Contains(body, "Найденные каналы") || !strings.Contains(body, "/api/discovery") {
 		t.Errorf("drops page missing the discovery section:\n%s", body)
 	}
 }
@@ -142,7 +171,7 @@ func TestHandleAPIDiscoveryWithoutProvider(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("expected 200 with the disabled-state body, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Directory discovery is off") {
+	if !strings.Contains(rec.Body.String(), "Поиск по каталогу выключен") {
 		t.Errorf("expected disabled-state body without a provider:\n%s", rec.Body.String())
 	}
 }

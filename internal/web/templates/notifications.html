@@ -1,38 +1,38 @@
-{{define "title"}}Notifications - Twitch Points Miner{{end}}
+{{define "title"}}{{ t "notif.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<h1 class="text-3xl font-bold mb-6">Notifications</h1>
+<h1 class="text-3xl font-bold mb-6">{{ t "notif.title" }}</h1>
 
 {{if not .ConfigValid}}
 <article class="card border-red-500 bg-red-500/10 mb-6">
     <div class="flex items-center gap-2 mb-2">
-        <span class="text-red-500 font-semibold">⚠️ Configuration Error</span>
+        <span class="text-red-500 font-semibold">⚠️ {{ t "notif.config_error" }}</span>
     </div>
     <p class="text-neutral-400 mb-2">{{.ConfigError}}</p>
-    <p><a href="/settings" class="text-purple-500 hover:underline">Go to Settings</a> to configure Discord integration.</p>
+    <p><a href="/settings" class="text-purple-500 hover:underline">{{ t "notif.go_to_settings" }}</a>{{ t "notif.config_error_post" }}</p>
 </article>
 {{end}}
 
 <div id="notifications-app" class="space-y-4 {{if not .ConfigValid}}opacity-50 pointer-events-none{{end}}">
     <details id="notif-channels" class="details-panel">
-        <summary class="text-lg">Discord Channels</summary>
+        <summary class="text-lg">{{ t "notif.channels.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Select which Discord channel each notification type should be sent to.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.channels.desc" }}</p>
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Mentions Channel</div>
-                    <div class="setting-description">Channel for chat mention notifications</div>
+                    <div class="setting-label">{{ t "notif.ch.mentions" }}</div>
+                    <div class="setting-description">{{ t "notif.ch.mentions.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="Reload channels" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                     </button>
                     <select class="input-field w-64 channel-select" id="mentions-channel" {{if not .ConfigValid}}disabled{{end}}>
-                        <option value="">-- Select Channel --</option>
+                        <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
                     <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
                 </div>
@@ -40,18 +40,18 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Points Channel</div>
-                    <div class="setting-description">Channel for point threshold notifications</div>
+                    <div class="setting-label">{{ t "notif.ch.points" }}</div>
+                    <div class="setting-description">{{ t "notif.ch.points.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="Reload channels" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                     </button>
                     <select class="input-field w-64 channel-select" id="points-channel" {{if not .ConfigValid}}disabled{{end}}>
-                        <option value="">-- Select Channel --</option>
+                        <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
                     <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
                 </div>
@@ -59,18 +59,18 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Online Channel</div>
-                    <div class="setting-description">Channel for streamer online notifications</div>
+                    <div class="setting-label">{{ t "notif.ch.online" }}</div>
+                    <div class="setting-description">{{ t "notif.ch.online.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="Reload channels" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                     </button>
                     <select class="input-field w-64 channel-select" id="online-channel" {{if not .ConfigValid}}disabled{{end}}>
-                        <option value="">-- Select Channel --</option>
+                        <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
                     <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
                 </div>
@@ -78,18 +78,18 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Offline Channel</div>
-                    <div class="setting-description">Channel for streamer offline notifications</div>
+                    <div class="setting-label">{{ t "notif.ch.offline" }}</div>
+                    <div class="setting-description">{{ t "notif.ch.offline.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="Reload channels" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                     </button>
                     <select class="input-field w-64 channel-select" id="offline-channel" {{if not .ConfigValid}}disabled{{end}}>
-                        <option value="">-- Select Channel --</option>
+                        <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
                     <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
                 </div>
@@ -97,18 +97,18 @@
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">System / Connection Health Channel</div>
-                    <div class="setting-description">Channel for reauthorization-required and connection-lost/restored alerts</div>
+                    <div class="setting-label">{{ t "notif.ch.system" }}</div>
+                    <div class="setting-description">{{ t "notif.ch.system.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="Reload channels" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                         </svg>
                     </button>
                     <select class="input-field w-64 channel-select" id="system-channel" {{if not .ConfigValid}}disabled{{end}}>
-                        <option value="">-- Select Channel --</option>
+                        <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
                     <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
                 </div>
@@ -117,14 +117,14 @@
     </details>
 
     <details id="notif-system" class="details-panel">
-        <summary class="text-lg">System Alerts</summary>
+        <summary class="text-lg">{{ t "notif.system.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Get notified when Twitch authorization expires or the miner loses connectivity for an extended period.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.system.desc" }}</p>
 
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Enable System Alerts</div>
-                    <div class="setting-description">Receive reauthorization-required and connection-lost/restored notifications</div>
+                    <div class="setting-label">{{ t "notif.system.enable" }}</div>
+                    <div class="setting-description">{{ t "notif.system.enable.desc" }}</div>
                 </div>
                 <input type="checkbox" class="w-5 h-5 accent-purple-600" id="system-enabled" {{if not .ConfigValid}}disabled{{end}}>
             </div>
@@ -132,30 +132,30 @@
     </details>
 
     <details id="notif-mentions" class="details-panel">
-        <summary class="text-lg">Chat Mentions</summary>
+        <summary class="text-lg">{{ t "notif.mentions.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Get notified when someone mentions you in chat.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.mentions.desc" }}</p>
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">Enable Mention Notifications</div>
-                    <div class="setting-description">Receive notifications when mentioned in chat</div>
+                    <div class="setting-label">{{ t "notif.mentions.enable" }}</div>
+                    <div class="setting-description">{{ t "notif.mentions.enable.desc" }}</div>
                 </div>
                 <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-enabled" {{if not .ConfigValid}}disabled{{end}}>
             </div>
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">All Chats</div>
-                    <div class="setting-description">Notify for mentions in all tracked streams</div>
+                    <div class="setting-label">{{ t "notif.mentions.all_chats" }}</div>
+                    <div class="setting-description">{{ t "notif.mentions.all_chats.desc" }}</div>
                 </div>
                 <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-all-chats" {{if not .ConfigValid}}disabled{{end}}>
             </div>
             
             <div class="setting-row flex-col items-start gap-2 hidden" id="mentions-streamers-row">
                 <div>
-                    <div class="setting-label">Selected Streamers</div>
-                    <div class="setting-description">Only notify for mentions in these chats</div>
+                    <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
+                    <div class="setting-description">{{ t "notif.mentions.selected.desc" }}</div>
                 </div>
                 <div class="flex flex-wrap gap-2 mt-2" id="mentions-streamers">
                     {{range .Streamers}}
@@ -170,9 +170,9 @@
     </details>
 
     <details id="notif-points" class="details-panel">
-        <summary class="text-lg">Point Goals</summary>
+        <summary class="text-lg">{{ t "notif.points.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Get notified when you reach a point threshold in a channel.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.points.desc" }}</p>
             
             <div class="flex flex-wrap gap-3 items-center mb-4">
                 <select id="point-rule-streamer" class="input-field w-52" {{if not .ConfigValid}}disabled{{end}}>
@@ -180,21 +180,21 @@
                     <option value="{{.}}">{{.}}</option>
                     {{end}}
                 </select>
-                <input type="number" id="point-rule-threshold" placeholder="Point threshold" min="1" class="input-field w-48" {{if not .ConfigValid}}disabled{{end}}>
+                <input type="number" id="point-rule-threshold" placeholder="{{ t "notif.points.threshold_ph" }}" min="1" class="input-field w-48" {{if not .ConfigValid}}disabled{{end}}>
                 <label class="flex items-center gap-2 text-neutral-400 text-sm whitespace-nowrap">
                     <input type="checkbox" class="w-4 h-4 accent-purple-600" id="point-rule-delete" {{if not .ConfigValid}}disabled{{end}}>
-                    <span>Delete after trigger</span>
+                    <span>{{ t "notif.points.delete_after" }}</span>
                 </label>
-                <button type="button" id="add-point-rule-btn" class="btn-secondary" {{if not .ConfigValid}}disabled{{end}}>Add Rule</button>
+                <button type="button" id="add-point-rule-btn" class="btn-secondary" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.points.add_rule" }}</button>
             </div>
             
             <table class="w-full" id="point-rules-table">
                 <thead>
                     <tr>
-                        <th>Streamer</th>
-                        <th>Threshold</th>
-                        <th>One-time</th>
-                        <th>Status</th>
+                        <th>{{ t "notif.points.col.streamer" }}</th>
+                        <th>{{ t "notif.points.col.threshold" }}</th>
+                        <th>{{ t "notif.points.col.one_time" }}</th>
+                        <th>{{ t "notif.points.col.status" }}</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -205,15 +205,15 @@
     </details>
 
     <details id="notif-stream-status" class="details-panel">
-        <summary class="text-lg">Stream Status</summary>
+        <summary class="text-lg">{{ t "notif.stream.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">Get notified when streamers go online or offline.</p>
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.stream.desc" }}</p>
             
             <div class="bg-neutral-900 rounded-lg p-4 mb-4">
                 <div class="setting-row border-b-0">
                     <div>
-                        <div class="setting-label">Enable Online Notifications</div>
-                        <div class="setting-description">Receive notifications when streamers go live</div>
+                        <div class="setting-label">{{ t "notif.stream.online_enable" }}</div>
+                        <div class="setting-description">{{ t "notif.stream.online_enable.desc" }}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-enabled" {{if not .ConfigValid}}disabled{{end}}>
                 </div>
@@ -221,16 +221,16 @@
                 <div id="online-options" class="hidden mt-3 pl-4 border-l-2 border-purple-500/30 space-y-3">
                     <div class="setting-row border-b-0 py-2">
                         <div>
-                            <div class="setting-label">All Streamers</div>
-                            <div class="setting-description">Notify for all tracked streamers</div>
+                            <div class="setting-label">{{ t "notif.all_streamers" }}</div>
+                            <div class="setting-description">{{ t "notif.all_streamers.desc" }}</div>
                         </div>
                         <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
                     </div>
                     
                     <div class="hidden py-2" id="online-streamers-row">
                         <div class="mb-2">
-                            <div class="setting-label">Selected Streamers</div>
-                            <div class="setting-description">Only notify for these streamers</div>
+                            <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
+                            <div class="setting-description">{{ t "notif.selected_streamers.desc" }}</div>
                         </div>
                         <div class="flex flex-wrap gap-2" id="online-streamers">
                             {{range .Streamers}}
@@ -247,8 +247,8 @@
             <div class="bg-neutral-900 rounded-lg p-4">
                 <div class="setting-row border-b-0">
                     <div>
-                        <div class="setting-label">Enable Offline Notifications</div>
-                        <div class="setting-description">Receive notifications when streamers go offline</div>
+                        <div class="setting-label">{{ t "notif.stream.offline_enable" }}</div>
+                        <div class="setting-description">{{ t "notif.stream.offline_enable.desc" }}</div>
                     </div>
                     <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-enabled" {{if not .ConfigValid}}disabled{{end}}>
                 </div>
@@ -256,16 +256,16 @@
                 <div id="offline-options" class="hidden mt-3 pl-4 border-l-2 border-purple-500/30 space-y-3">
                     <div class="setting-row border-b-0 py-2">
                         <div>
-                            <div class="setting-label">All Streamers</div>
-                            <div class="setting-description">Notify for all tracked streamers</div>
+                            <div class="setting-label">{{ t "notif.all_streamers" }}</div>
+                            <div class="setting-description">{{ t "notif.all_streamers.desc" }}</div>
                         </div>
                         <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
                     </div>
                     
                     <div class="hidden py-2" id="offline-streamers-row">
                         <div class="mb-2">
-                            <div class="setting-label">Selected Streamers</div>
-                            <div class="setting-description">Only notify for these streamers</div>
+                            <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
+                            <div class="setting-description">{{ t "notif.selected_streamers.desc" }}</div>
                         </div>
                         <div class="flex flex-wrap gap-2" id="offline-streamers">
                             {{range .Streamers}}
@@ -282,8 +282,8 @@
     </details>
 
     <div class="flex gap-4 justify-end pt-4">
-        <button type="button" class="btn-secondary" id="test-notifications-btn" onclick="testNotifications()" {{if not .ConfigValid}}disabled{{end}}>Test All Notifications</button>
-        <button type="button" class="btn-primary" id="save-notifications-btn" {{if not .ConfigValid}}disabled{{end}}>Save Settings</button>
+        <button type="button" class="btn-secondary" id="test-notifications-btn" onclick="testNotifications()" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.test_all" }}</button>
+        <button type="button" class="btn-primary" id="save-notifications-btn" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.save" }}</button>
     </div>
 </div>
 
@@ -365,7 +365,7 @@
         const selects = document.querySelectorAll('.channel-select');
         selects.forEach(select => {
             const currentValue = select.value;
-            select.innerHTML = '<option value="">-- Select Channel --</option>';
+            select.innerHTML = '<option value="">{{ t "notif.select_channel" }}</option>';
             channels.forEach(ch => {
                 const option = document.createElement('option');
                 option.value = ch.id;
@@ -483,7 +483,7 @@
         tbody.innerHTML = '';
 
         if (pointRules.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-neutral-400 py-4">No point rules configured</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-neutral-400 py-4">' + t('js.notif.no_rules') + '</td></tr>';
             return;
         }
 
@@ -492,8 +492,8 @@
             tr.innerHTML = `
                 <td>${rule.streamer}</td>
                 <td>${formatNumber(rule.threshold)}</td>
-                <td>${rule.deleteOnTrigger ? 'Yes' : 'No'}</td>
-                <td class="${rule.triggered ? 'text-green-500' : 'text-neutral-400'}">${rule.triggered ? 'Triggered' : 'Waiting'}</td>
+                <td>${rule.deleteOnTrigger ? t('js.notif.yes') : t('js.notif.no')}</td>
+                <td class="${rule.triggered ? 'text-green-500' : 'text-neutral-400'}">${rule.triggered ? t('js.notif.triggered') : t('js.notif.waiting')}</td>
                 <td><button class="px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors" onclick="deletePointRule(${rule.id})">✕</button></td>
             `;
             tbody.appendChild(tr);
@@ -510,7 +510,7 @@
         const deleteOnTrigger = document.getElementById('point-rule-delete').checked;
 
         if (!streamer || !threshold || threshold < 1) {
-            showToast('Please enter a valid streamer and threshold', 'error');
+            showToast(t('js.notif.invalid_rule'), 'error');
             return;
         }
 
@@ -525,28 +525,28 @@
                 document.getElementById('point-rule-threshold').value = '';
                 document.getElementById('point-rule-delete').checked = false;
                 await loadPointRules();
-                showToast('Point rule added');
+                showToast(t('js.notif.rule_added'));
             } else {
-                showToast('Failed to add rule', 'error');
+                showToast(t('js.notif.rule_add_failed'), 'error');
             }
         } catch (error) {
-            showToast('Failed to add rule', 'error');
+            showToast(t('js.notif.rule_add_failed'), 'error');
         }
     }
 
     async function deletePointRule(id) {
-        if (!confirm('Delete this point rule?')) return;
+        if (!confirm(t('js.notif.rule_delete_confirm'))) return;
 
         try {
             const response = await fetch(`/api/notifications/points/${id}`, { method: 'DELETE' });
             if (response.ok) {
                 await loadPointRules();
-                showToast('Rule deleted');
+                showToast(t('js.notif.rule_deleted'));
             } else {
-                showToast('Failed to delete rule', 'error');
+                showToast(t('js.notif.rule_delete_failed'), 'error');
             }
         } catch (error) {
-            showToast('Failed to delete rule', 'error');
+            showToast(t('js.notif.rule_delete_failed'), 'error');
         }
     }
 
@@ -577,12 +577,12 @@
             });
 
             if (response.ok) {
-                showToast('Settings saved!');
+                showToast(t('js.notif.saved'));
             } else {
-                showToast('Failed to save settings', 'error');
+                showToast(t('js.notif.save_failed'), 'error');
             }
         } catch (error) {
-            showToast('Failed to save settings', 'error');
+            showToast(t('js.notif.save_failed'), 'error');
         }
     }
 
@@ -599,19 +599,19 @@
         const btn = document.getElementById('test-notifications-btn');
         const originalText = btn.textContent;
         btn.disabled = true;
-        btn.textContent = 'Sending...';
+        btn.textContent = t('js.notif.sending');
         
         try {
             const response = await fetch('/api/notifications/test', { method: 'POST' });
             if (response.ok) {
                 const result = await response.json();
-                showToast(`Sent ${result.sent} test notifications`);
+                showToast(t('js.notif.test_sent', { n: result.sent }));
             } else {
                 const error = await response.text();
-                showToast('Failed: ' + error, 'error');
+                showToast(t('js.notif.test_failed_prefix') + ' ' + error, 'error');
             }
         } catch (error) {
-            showToast('Failed to send test notifications', 'error');
+            showToast(t('js.notif.test_failed'), 'error');
         } finally {
             btn.disabled = false;
             btn.textContent = originalText;

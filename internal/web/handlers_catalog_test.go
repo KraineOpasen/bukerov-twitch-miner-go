@@ -23,12 +23,12 @@ func TestStartsInLabel(t *testing.T) {
 		{now.Add(-time.Minute), "starting now"},
 	}
 	for _, tc := range cases {
-		if got := startsInLabel(tc.start, now); got != tc.want {
+		if got := startsInLabel(tc.start, now, enTR(t)); got != tc.want {
 			t.Errorf("startsInLabel(%v) = %q, want %q", tc.start, got, tc.want)
 		}
 	}
 	// A multi-day-out start renders a date.
-	if got := startsInLabel(now.Add(72*time.Hour), now); !strings.HasPrefix(got, "starts ") {
+	if got := startsInLabel(now.Add(72*time.Hour), now, enTR(t)); !strings.HasPrefix(got, "starts ") {
 		t.Errorf("far-future start should render a date, got %q", got)
 	}
 }
@@ -41,7 +41,7 @@ func TestBuildPastGroupsGroupsByKey(t *testing.T) {
 		{CampaignID: "wk-1", CampaignKey: "g::weekly", Name: "Weekly", Game: "Game", EndAt: base.Add(-13 * 24 * time.Hour), Claimed: false},
 		{CampaignID: "one", CampaignKey: "g::once", Name: "Once", Game: "Game", EndAt: base.Add(-2 * 24 * time.Hour), Claimed: true},
 	}
-	groups := buildPastGroups(records)
+	groups := buildPastGroups(records, enTR(t))
 
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups, got %d: %+v", len(groups), groups)
@@ -100,7 +100,7 @@ func TestDropsPastEndpointEmptyState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "No past campaigns") {
+	if !strings.Contains(rec.Body.String(), "Прошедших кампаний пока нет") {
 		t.Errorf("empty past tab must show the empty state, got:\n%s", rec.Body.String())
 	}
 }

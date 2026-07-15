@@ -74,14 +74,16 @@ func (s *Server) renderDropsList(w http.ResponseWriter, r *http.Request) {
 		progress = progressProvider.DropProgress()
 	}
 
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+
 	var policyByID map[string]*DropPolicyView
 	if policyProvider != nil {
 		_, decisions := policyProvider.PolicySnapshot()
 		_, rules := policyProvider.CurrentCampaignPolicy()
-		policyByID = buildDropPolicyByCampaign(campaigns, decisions, rules)
+		policyByID = buildDropPolicyByCampaign(campaigns, decisions, rules, tr)
 	}
 
-	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress), policyByID)}
+	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress, tr), policyByID, tr)}
 
 	s.renderPartial(w, r, "drops_list", data)
 }
@@ -98,12 +100,13 @@ func (s *Server) handleAPIDropsUpcoming(w http.ResponseWriter, r *http.Request) 
 		upcoming = provider.UpcomingCampaigns()
 	}
 
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
 	views := make([]DropCampaignView, 0, len(upcoming))
 	now := time.Now()
 	for _, c := range upcoming {
-		v := buildDropCampaignView(c)
+		v := buildDropCampaignView(c, tr)
 		v.Upcoming = true
-		v.StartsInLabel = startsInLabel(c.StartAt, now)
+		v.StartsInLabel = startsInLabel(c.StartAt, now, tr)
 		views = append(views, v)
 	}
 
@@ -128,31 +131,32 @@ func (s *Server) handleAPIDropsPast(w http.ResponseWriter, r *http.Request) {
 		records = recs
 	}
 
-	s.renderPartial(w, r, "drops_past", DropsPastData{Groups: buildPastGroups(records)})
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+	s.renderPartial(w, r, "drops_past", DropsPastData{Groups: buildPastGroups(records, tr)})
 }
 
 // startsInLabel renders how far in the future a campaign starts.
-func startsInLabel(startAt, now time.Time) string {
+func startsInLabel(startAt, now time.Time, tr func(string) string) string {
 	if startAt.IsZero() {
 		return ""
 	}
 	d := startAt.Sub(now)
 	if d <= 0 {
-		return "starting now"
+		return tr("drops.starts.now")
 	}
 	switch {
 	case d < time.Hour:
-		return fmt.Sprintf("starts in %dm", int(d.Minutes()))
+		return fmt.Sprintf(tr("drops.starts.in_minutes"), int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("starts in %dh", int(d.Hours()))
+		return fmt.Sprintf(tr("drops.starts.in_hours"), int(d.Hours()))
 	default:
-		return "starts " + startAt.Format("2 Jan")
+		return tr("drops.starts.on_date") + " " + startAt.Format("2 Jan")
 	}
 }
 
 // buildPastGroups turns catalog records (already ordered by campaign_key, then
 // end_at DESC) into recurring-grouped view models for the "Past" tab.
-func buildPastGroups(records []drops.CatalogRecord) []PastCampaignGroup {
+func buildPastGroups(records []drops.CatalogRecord, tr func(string) string) []PastCampaignGroup {
 	var groups []PastCampaignGroup
 	byKey := map[string]int{} // campaign_key -> index in groups
 
@@ -188,9 +192,9 @@ func buildPastGroups(records []drops.CatalogRecord) []PastCampaignGroup {
 			inst.EndLabel = rec.EndAt.Format("2 Jan 2006")
 		}
 		if rec.Claimed {
-			inst.StatusLabel = "Claimed"
+			inst.StatusLabel = tr("drops.past.claimed")
 		} else {
-			inst.StatusLabel = "Not claimed"
+			inst.StatusLabel = tr("drops.past.not_claimed")
 		}
 		g.Instances = append(g.Instances, inst)
 	}
@@ -203,7 +207,7 @@ func buildPastGroups(records []drops.CatalogRecord) []PastCampaignGroup {
 // progress can only ever be earned on their own channel) outrank unrestricted
 // ones, and within those groups the campaign closest to its reward — then the
 // one ending soonest — comes first.
-func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]*DropHealthView, policyByID map[string]*DropPolicyView) []DropCampaignView {
+func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]*DropHealthView, policyByID map[string]*DropPolicyView, tr func(string) string) []DropCampaignView {
 	ordered := make([]*models.Campaign, len(campaigns))
 	copy(ordered, campaigns)
 
@@ -232,7 +236,7 @@ func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]
 
 	views := make([]DropCampaignView, 0, len(ordered))
 	for _, c := range ordered {
-		view := buildDropCampaignView(c)
+		view := buildDropCampaignView(c, tr)
 		view.Health = healthByID[c.ID]
 		view.Policy = policyByID[c.ID]
 		views = append(views, view)
@@ -242,14 +246,14 @@ func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]
 
 // dropHealthByCampaign turns the watchdog snapshot into per-campaign badge
 // views, keyed by campaign ID for the queue builder to merge.
-func dropHealthByCampaign(snap health.ProgressSnapshot) map[string]*DropHealthView {
+func dropHealthByCampaign(snap health.ProgressSnapshot, tr func(string) string) map[string]*DropHealthView {
 	if !snap.Enabled || len(snap.Drops) == 0 {
 		return nil
 	}
 	out := make(map[string]*DropHealthView, len(snap.Drops))
 	for i := range snap.Drops {
 		d := snap.Drops[i]
-		out[d.CampaignID] = buildDropHealthView(d)
+		out[d.CampaignID] = buildDropHealthView(d, tr)
 	}
 	return out
 }
@@ -280,7 +284,7 @@ var recoveryStageLabels = map[string]string{
 
 // buildDropHealthView renders one watchdog drop state as the card badge plus
 // its explanatory lines (mirroring the Health Center's honest, redacted style).
-func buildDropHealthView(d health.DropProgress) *DropHealthView {
+func buildDropHealthView(d health.DropProgress, tr func(string) string) *DropHealthView {
 	view := &DropHealthView{Status: d.Status}
 
 	stageLabel := recoveryStageLabels[d.RecoveryStageName]
@@ -290,7 +294,7 @@ func buildDropHealthView(d health.DropProgress) *DropHealthView {
 
 	switch d.Status {
 	case health.ProgressStalled:
-		view.Label = "STALLED"
+		view.Label = tr("health.status.stalled")
 		view.BadgeColor = "#ef4444"
 		view.Lines = append(view.Lines, "Automatic recovery did not help")
 		if stageLabel != "" {
@@ -300,7 +304,7 @@ func buildDropHealthView(d health.DropProgress) *DropHealthView {
 			view.Lines = append(view.Lines, "No progress for "+healthDurationSince(d.LastProgressAt))
 		}
 	case health.ProgressRecovering:
-		view.Label = "RECOVERING"
+		view.Label = tr("health.status.recovering")
 		view.BadgeColor = "#f59e0b"
 		if !d.LastProgressAt.IsZero() {
 			view.Lines = append(view.Lines, "No progress for "+healthDurationSince(d.LastProgressAt))
@@ -310,7 +314,7 @@ func buildDropHealthView(d health.DropProgress) *DropHealthView {
 			view.Lines = append(view.Lines, "Stage: "+stageLabel)
 		}
 	default:
-		view.Label = "HEALTHY"
+		view.Label = tr("health.status.healthy")
 		view.BadgeColor = "#22c55e"
 		if !d.LastProgressAt.IsZero() {
 			view.Lines = append(view.Lines, "Last progress: "+formatHealthAgo(d.LastProgressAt))
@@ -322,14 +326,14 @@ func buildDropHealthView(d health.DropProgress) *DropHealthView {
 	return view
 }
 
-func buildDropCampaignView(c *models.Campaign) DropCampaignView {
+func buildDropCampaignView(c *models.Campaign, tr func(string) string) DropCampaignView {
 	view := DropCampaignView{
 		ID:                c.ID,
 		Name:              c.Name,
 		ChannelRestricted: c.IsChannelRestricted(),
 		Claimed:           c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed,
 		OverallPercent:    c.OverallProgressPercent(),
-		Drops:             buildDropDetailViews(c),
+		Drops:             buildDropDetailViews(c, tr),
 	}
 
 	if c.Game != nil {
@@ -338,9 +342,9 @@ func buildDropCampaignView(c *models.Campaign) DropCampaignView {
 	}
 
 	if view.Claimed {
-		view.StatusLabel = "Already claimed"
+		view.StatusLabel = tr("drops.status.claimed")
 	} else {
-		view.StatusLabel = "In progress"
+		view.StatusLabel = tr("drops.status.in_progress")
 	}
 
 	if drop := c.CurrentDrop(); drop != nil {
@@ -364,7 +368,7 @@ func buildDropCampaignView(c *models.Campaign) DropCampaignView {
 // from Campaign.ClaimedDropNames, which the claim-history pass populated after
 // stripping those drops from Campaign.Drops. Together they list every drop in
 // the campaign with its own status, not just the current/final one.
-func buildDropDetailViews(c *models.Campaign) []DropDetailView {
+func buildDropDetailViews(c *models.Campaign, tr func(string) string) []DropDetailView {
 	ordered := make([]*models.Drop, len(c.Drops))
 	copy(ordered, c.Drops)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -377,7 +381,7 @@ func buildDropDetailViews(c *models.Campaign) []DropDetailView {
 			Name:        d.Name,
 			Benefit:     d.Benefit,
 			ImageURL:    d.ImageURL,
-			StatusLabel: "In progress",
+			StatusLabel: tr("drops.status.in_progress"),
 			Percent:     d.ClampedProgress(),
 		}
 		if d.MinutesRequired > 0 {
@@ -392,7 +396,7 @@ func buildDropDetailViews(c *models.Campaign) []DropDetailView {
 		views = append(views, DropDetailView{
 			Name:        name,
 			Claimed:     true,
-			StatusLabel: "Already claimed",
+			StatusLabel: tr("drops.status.claimed"),
 			Percent:     100,
 		})
 	}

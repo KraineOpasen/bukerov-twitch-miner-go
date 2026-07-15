@@ -11,16 +11,16 @@ import (
 
 // policyStatusDisplay maps a feasibility status to a label and inline color
 // (mirroring the Health Center palette).
-func policyStatusDisplay(status policy.FeasStatus) (label, color string) {
+func policyStatusDisplay(status policy.FeasStatus, tr func(string) string) (label, color string) {
 	switch status {
 	case policy.StatusSafe:
-		return "SAFE", "#22c55e"
+		return tr("drops.policy.status.safe"), "#22c55e"
 	case policy.StatusAtRisk:
-		return "AT RISK", "#f59e0b"
+		return tr("drops.policy.status.at_risk"), "#f59e0b"
 	case policy.StatusNextRewardOnly:
-		return "NEXT REWARD ONLY", "#f59e0b"
+		return tr("drops.policy.status.next_reward_only"), "#f59e0b"
 	case policy.StatusImpossible:
-		return "IMPOSSIBLE", "#ef4444"
+		return tr("drops.policy.status.impossible"), "#ef4444"
 	default:
 		return string(status), "#a1a1aa"
 	}
@@ -28,7 +28,7 @@ func policyStatusDisplay(status policy.FeasStatus) (label, color string) {
 
 // buildDropPolicyByCampaign turns the published policy decisions + current
 // per-drop rules into per-campaign badge views, keyed by campaign ID.
-func buildDropPolicyByCampaign(campaigns []*models.Campaign, decisions []policy.Decision, rules map[string]config.DropRule) map[string]*DropPolicyView {
+func buildDropPolicyByCampaign(campaigns []*models.Campaign, decisions []policy.Decision, rules map[string]config.DropRule, tr func(string) string) map[string]*DropPolicyView {
 	if len(decisions) == 0 {
 		return nil
 	}
@@ -43,7 +43,7 @@ func buildDropPolicyByCampaign(campaigns []*models.Campaign, decisions []policy.
 		if !ok {
 			continue
 		}
-		label, color := policyStatusDisplay(d.Status)
+		label, color := policyStatusDisplay(d.Status, tr)
 		v := &DropPolicyView{
 			Status:                string(d.Status),
 			StatusColor:           color,
