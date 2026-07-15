@@ -17,6 +17,9 @@ type RuntimeSettings struct {
 	// true, directory-discovered channels never displace a tracked streamer's
 	// watch slot (they only fill idle ones).
 	DiscoveryPreferTracked bool `json:"discoveryPreferTracked"`
+	// DiscoveryMode mirrors config.Config.DiscoveryMode ("all" / "tracked_only").
+	// Empty ("") is treated as the behavior-preserving default "all".
+	DiscoveryMode string `json:"discoveryMode"`
 }
 
 // DiscordUIConfig contains Discord integration settings for the UI.

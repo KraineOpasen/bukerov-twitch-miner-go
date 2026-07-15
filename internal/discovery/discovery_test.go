@@ -40,12 +40,25 @@ func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]api.Dire
 
 // fakeSlotStatus reports a fixed set of logins as holding a watch slot, so
 // State() (which asks the broker whether a proposed channel really is being
-// watched) can be exercised without a live broker.
+// watched) can be exercised without a live broker. origin optionally overrides
+// the reported slot origin per login; a watching login with no explicit origin
+// defaults to "discovery" (the broker placed discovery's own proposal).
 type fakeSlotStatus struct {
 	watching map[string]bool
+	origin   map[string]string
 }
 
 func (f *fakeSlotStatus) IsWatching(login string) bool { return f.watching[login] }
+
+func (f *fakeSlotStatus) WatchingOrigin(login string) string {
+	if o, ok := f.origin[login]; ok {
+		return o
+	}
+	if f.watching[login] {
+		return "discovery"
+	}
+	return ""
+}
 
 func activeCampaign(gameID, gameName string) *models.Campaign {
 	return &models.Campaign{
@@ -78,7 +91,15 @@ type fakeTracked struct {
 func (f *fakeTracked) Names() []string { return f.names }
 
 func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
-	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games)
+	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games, config.DiscoveryModeAll)
+	m.client = client
+	return m
+}
+
+// newTrackedOnlyManager builds a manager in tracked_only mode with the given
+// configured streamer list, for exercising the inverted exclusion gates.
+func newTrackedOnlyManager(games, tracked []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
+	m := NewManager(nil, campaigns, &fakeTracked{names: tracked}, testRateLimits(), games, config.DiscoveryModeTrackedOnly)
 	m.client = client
 	return m
 }
@@ -277,6 +298,87 @@ func TestSyncOnceExcludesTrackedStreamers(t *testing.T) {
 			names[i] = ch.Streamer.Username
 		}
 		t.Fatalf("expected only free_channel in the pool, got %v", names)
+	}
+}
+
+func TestSyncOnceTrackedOnlyKeepsOnlyTracked(t *testing.T) {
+	// tracked_only inverts the syncOnce exclusion gate: the pool keeps ONLY
+	// channels on the configured streamer list and drops everything else.
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	client := &fakeClient{streams: []api.DirectoryStream{
+		{ChannelID: "1", Login: "tracked_streamer", Viewers: 9000, GameID: "g1", DropsEnabled: true},
+		{ChannelID: "2", Login: "free_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
+	}}
+	m := newTrackedOnlyManager([]string{"World of Tanks"}, []string{"tracked_streamer"}, provider, client)
+
+	m.syncOnce()
+
+	if len(m.pool) != 1 || m.pool[0].Streamer.Username != "tracked_streamer" {
+		names := make([]string, len(m.pool))
+		for i, ch := range m.pool {
+			names[i] = ch.Streamer.Username
+		}
+		t.Fatalf("expected only tracked_streamer in the tracked-only pool, got %v", names)
+	}
+}
+
+func TestSelectBestTrackedOnlySkipsWatchedAndNonTracked(t *testing.T) {
+	// tracked_only: a non-tracked candidate is never eligible, and a tracked one
+	// the rotation already watches is skipped so discovery fills an idle slot
+	// with a different tracked channel instead of duplicating the watch.
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTrackedOnlyManager([]string{"World of Tanks"},
+		[]string{"watched_tracked", "idle_tracked"}, provider, &fakeClient{})
+	// The rotation already watches watched_tracked (highest viewers).
+	m.SetSlotStatus(&fakeSlotStatus{watching: map[string]bool{"watched_tracked": true}})
+
+	watched := onlineCandidate("watched_tracked", "1", "World of Tanks", "g1", 9000)
+	notTracked := onlineCandidate("not_tracked", "2", "World of Tanks", "g1", 5000)
+	idle := onlineCandidate("idle_tracked", "3", "World of Tanks", "g1", 100)
+	m.pool = []*Channel{watched, notTracked, idle}
+
+	got := m.selectBest(nil)
+	if got != idle {
+		var login string
+		if got != nil {
+			login = got.Streamer.Username
+		}
+		t.Fatalf("expected idle_tracked (tracked, not already watched), got %q", login)
+	}
+}
+
+func TestInvalidReasonTrackedOnly(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTrackedOnlyManager([]string{"World of Tanks"},
+		[]string{"tracked_chan", "rotation_chan", "self_chan"}, provider, &fakeClient{})
+	m.SetSlotStatus(&fakeSlotStatus{
+		watching: map[string]bool{"rotation_chan": true, "self_chan": true},
+		origin:   map[string]string{"rotation_chan": "configured", "self_chan": "discovery"},
+	})
+
+	// Not on the configured list any more → yielded.
+	notTracked := onlineCandidate("dropped_chan", "9", "World of Tanks", "g1", 100)
+	if reason, invalid := m.invalidReason(notTracked); !invalid || !strings.Contains(reason, "no longer on the configured") {
+		t.Fatalf("expected a de-tracked channel abandoned, got invalid=%v reason=%q", invalid, reason)
+	}
+
+	// Tracked and watched by the rotation itself → yielded (no duplicate watch).
+	rotation := onlineCandidate("rotation_chan", "1", "World of Tanks", "g1", 100)
+	if reason, invalid := m.invalidReason(rotation); !invalid || !strings.Contains(reason, "already watched by the rotation") {
+		t.Fatalf("expected a rotation-held channel abandoned, got invalid=%v reason=%q", invalid, reason)
+	}
+
+	// Tracked and watched because the broker placed discovery's own proposal
+	// (origin == discovery) → kept, so the slot does not flap.
+	self := onlineCandidate("self_chan", "2", "World of Tanks", "g1", 100)
+	if reason, invalid := m.invalidReason(self); invalid {
+		t.Fatalf("expected discovery's own placed channel to stay valid, got reason=%q", reason)
+	}
+
+	// Tracked and not watched at all → valid.
+	free := onlineCandidate("tracked_chan", "3", "World of Tanks", "g1", 100)
+	if reason, invalid := m.invalidReason(free); invalid {
+		t.Fatalf("expected an unwatched tracked channel to stay valid, got reason=%q", reason)
 	}
 }
 
@@ -526,7 +628,7 @@ func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 	m.pool = []*Channel{wotChannel, rustChannel}
 	m.current = wotChannel
 
-	m.UpdateSettings([]string{"Rust"}, testRateLimits())
+	m.UpdateSettings([]string{"Rust"}, config.DiscoveryModeAll, testRateLimits())
 	<-m.resync // drain so the assertion below checks prepareCurrent, not UpdateSettings
 
 	got := m.prepareCurrent()
@@ -539,7 +641,7 @@ func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 func TestUpdateSettingsTriggersResync(t *testing.T) {
 	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
 
-	m.UpdateSettings([]string{"World of Tanks"}, testRateLimits())
+	m.UpdateSettings([]string{"World of Tanks"}, config.DiscoveryModeAll, testRateLimits())
 
 	if got := m.getGames(); len(got) != 1 || got[0] != "World of Tanks" {
 		t.Errorf("expected games updated, got %v", got)
@@ -559,7 +661,7 @@ func TestSyncOnceDisabledClearsPoolAndCurrent(t *testing.T) {
 	m.pool = []*Channel{current}
 	m.current = current
 
-	m.UpdateSettings(nil, testRateLimits())
+	m.UpdateSettings(nil, config.DiscoveryModeAll, testRateLimits())
 	m.syncOnce()
 
 	if m.current != nil || len(m.pool) != 0 {

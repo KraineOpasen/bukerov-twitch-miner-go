@@ -510,6 +510,7 @@ Generate a sample config with all options:
   "priority": ["STREAK", "DROPS", "ORDER"],
   "dropBlacklist": ["keyword to skip"],
   "directoryGames": ["World of Tanks"],
+  "discoveryMode": "all",
   "discoveryPreferTracked": false,
   "streamerSettings": {
     "makePredictions": true,
@@ -765,6 +766,19 @@ entirely.
 Note: Twitch credits watch time for at most 2 concurrent streams. Discovery
 is most effective when fewer than two of your configured streamers are live
 (e.g. overnight), where it fills the otherwise-idle slots.
+
+`discoveryMode` (also a "Discovery scope" dropdown in the Directory Discovery
+panel; `"all"` by default) controls which channels discovery may farm. `"all"`
+picks the best drops-enabled channel from the Twitch directory, excluding your
+tracked streamers (the watch rotation already covers those). `"tracked_only"`
+restricts discovery to your own configured streamers: it fills an idle slot with
+a tracked channel that has an active drop and isn't already being watched by the
+rotation — never a random directory channel, and never duplicating a watch. An
+empty or unknown value normalizes to `"all"`, so the default preserves the prior
+behavior. This is independent of `discoveryPreferTracked` below: `discoveryMode`
+decides *candidacy* (which channels discovery considers), while
+`discoveryPreferTracked` decides *slot arbitration* (whether a discovered
+candidate may displace a tracked streamer).
 
 `discoveryPreferTracked` (also a checkbox in the Directory Discovery panel,
 default off) controls slot competition: when on, a discovered channel never

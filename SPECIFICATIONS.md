@@ -1052,6 +1052,24 @@ Discovery is most effective when fewer than two configured streamers are live
 channel is reported as `watching` only when the broker actually placed it in a
 slot; its per-channel watch-minute accounting is visible on the Drops page.
 
+The optional `discoveryMode` enum (config key, also a "Discovery scope" dropdown
+in the Directory Discovery settings panel; `"all"` or `"tracked_only"`, default
+`"all"`) selects which channels discovery is allowed to farm — a *candidacy*
+decision, orthogonal to the *arbitration* decision `discoveryPreferTracked` makes
+below. In `"all"` mode the exclusion gates in `internal/discovery` (`syncOnce`,
+`selectBest`, `invalidReason`) skip channels already on the configured streamer
+list, so discovery only proposes non-tracked directory channels (the original
+behavior). `"tracked_only"` **inverts** those gates: the candidate pool keeps
+*only* configured-list channels, and an extra `SlotStatus.IsWatching` gate skips
+(and `WatchingOrigin`-based check yields) any tracked channel the rotation is
+already watching, so discovery never duplicates the watch minutes of an
+already-watched channel — it fills an idle slot with a tracked channel carrying
+an active drop that the rotation isn't covering. `config.ValidateConfig`
+canonicalizes the value (empty/unknown → `"all"`, the behavior-preserving
+default, mirroring `campaignPolicy`), and the mode flows config → DTO →
+`Build*`/`ApplyToConfig` → `Miner.ApplySettings` → `discovery.UpdateSettings`,
+so it applies at runtime without a restart.
+
 The optional `discoveryPreferTracked` flag (config key, also a checkbox in the
 Directory Discovery settings panel; default `false`) narrows this competition:
 when set, a discovery candidate may fill an idle slot but may **never** displace

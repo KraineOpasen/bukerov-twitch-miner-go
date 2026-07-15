@@ -24,6 +24,44 @@ const (
 	PriorityPointsDescending Priority = "POINTS_DESCENDING"
 )
 
+// DiscoveryMode selects which channels directory discovery may farm.
+type DiscoveryMode string
+
+const (
+	// DiscoveryModeAll (the zero value "" normalizes here) preserves the original
+	// behavior: farm any live drops-enabled directory channel EXCEPT ones already
+	// on the configured streamer list (the rotation covers those).
+	DiscoveryModeAll DiscoveryMode = "all"
+	// DiscoveryModeTrackedOnly inverts the exclusion: farm ONLY channels that are
+	// on the configured streamer list, and never one the rotation is already
+	// watching (avoids a duplicate watch of an already-watched channel).
+	DiscoveryModeTrackedOnly DiscoveryMode = "tracked_only"
+)
+
+// DefaultDiscoveryMode is the behavior-preserving default.
+const DefaultDiscoveryMode = DiscoveryModeAll
+
+// Valid reports whether d is a known mode.
+func (d DiscoveryMode) Valid() bool {
+	switch d {
+	case DiscoveryModeAll, DiscoveryModeTrackedOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeDiscoveryMode lower-cases/trims s and validates it, falling back to
+// DefaultDiscoveryMode so an empty or unknown value means the current "all"
+// behavior. Mirrors policy.Normalize's contract for CampaignPolicy.
+func NormalizeDiscoveryMode(s string) DiscoveryMode {
+	d := DiscoveryMode(strings.ToLower(strings.TrimSpace(s)))
+	if d.Valid() {
+		return d
+	}
+	return DefaultDiscoveryMode
+}
+
 type Config struct {
 	Username            string                  `json:"username"`
 	ClaimDropsOnStartup bool                    `json:"claimDropsOnStartup"`
@@ -68,6 +106,15 @@ type Config struct {
 	// where a discovered channel farming an active drop could bump a configured
 	// streamer held only by points or fair-rotation priority.
 	DiscoveryPreferTracked bool `json:"discoveryPreferTracked,omitempty"`
+
+	// DiscoveryMode selects which channels directory discovery farms: "all"
+	// (default) farms any drops-enabled directory channel except ones already on
+	// the configured streamer list; "tracked_only" inverts this — it farms only
+	// configured-list channels, and never one the rotation is already watching
+	// (no duplicate watch). Empty/unknown normalizes to "all" in ValidateConfig,
+	// so an unset field preserves the prior behavior. Independent of
+	// DiscoveryPreferTracked, which governs slot arbitration, not candidacy.
+	DiscoveryMode DiscoveryMode `json:"discoveryMode,omitempty"`
 
 	// AutoRedeem holds per-streamer auto-redeem configuration for custom
 	// channel-points rewards, keyed by lowercase streamer username. It is a
@@ -698,6 +745,10 @@ func ValidateConfig(config *Config) {
 	// unknown → GAME_ORDER, the behavior-preserving default). Reuses the
 	// engine's own validator so the valid-mode set has a single source.
 	config.CampaignPolicy = string(policy.Normalize(config.CampaignPolicy))
+
+	// Directory discovery mode: canonicalize to a known value; empty or unknown
+	// → "all", the behavior-preserving default (mirrors CampaignPolicy above).
+	config.DiscoveryMode = NormalizeDiscoveryMode(string(config.DiscoveryMode))
 
 	// Daily summary: canonicalize the send time to a valid "HH:MM"; anything
 	// unparseable falls back to the 09:00 default.
