@@ -1,4 +1,4 @@
-{{define "title"}}Статистика - Twitch Points Miner{{end}}
+{{define "title"}}{{ t "stat.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
 <style>
@@ -22,143 +22,143 @@
 .roi-table td.neg{color:var(--color-danger)}
 </style>
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
-    <h1 class="text-3xl font-bold">Статистика</h1>
+    <h1 class="text-3xl font-bold">{{ t "stat.title" }}</h1>
     <div id="stat-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
 </div>
-<p class="text-neutral-400 text-sm mb-6">История баланса channel points во времени с аннотациями ключевых событий (выигрыш/проигрыш ставок, watch streak, рейды).</p>
+<p class="text-neutral-400 text-sm mb-6">{{ t "stat.subtitle" }}</p>
 
 <div class="card mb-6">
     <div class="flex flex-wrap items-end gap-5">
         <div class="flex flex-col gap-1">
-            <label for="stat-streamer" class="text-xs uppercase tracking-wide text-neutral-400">Стример</label>
+            <label for="stat-streamer" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.streamer" }}</label>
             <select id="stat-streamer" class="input-field min-w-[12rem]" {{if not .Streamers}}disabled{{end}}>
-                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="">— нет данных —</option>{{end}}
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="">{{ t "stat.no_streamers" }}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <span class="text-xs uppercase tracking-wide text-neutral-400">Период</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="Период">
-                <button type="button" class="stat-range-btn" data-range="24h">24ч</button>
-                <button type="button" class="stat-range-btn is-active" data-range="7d">7д</button>
-                <button type="button" class="stat-range-btn" data-range="30d">30д</button>
+            <span class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.period" }}</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.period" }}">
+                <button type="button" class="stat-range-btn" data-range="24h">{{ t "stat.range.24h" }}</button>
+                <button type="button" class="stat-range-btn is-active" data-range="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="stat-range-btn" data-range="30d">{{ t "stat.range.30d" }}</button>
             </div>
         </div>
         <div class="ml-auto">
-            <a id="stat-export" class="btn-secondary inline-block" href="#" download>Экспорт JSON</a>
+            <a id="stat-export" class="btn-secondary inline-block" href="#" download>{{ t "stat.export" }}</a>
         </div>
     </div>
 </div>
 
 <div class="card">
-    <div id="stat-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ Данные могут быть устаревшими — последнее обновление не удалось.</div>
+    <div id="stat-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.stale" }}</div>
 
     <div id="stat-loading">
         <div class="skeleton h-[400px] w-full rounded-lg"></div>
     </div>
 
     <div id="stat-empty" class="hidden text-center py-24 text-neutral-400">
-        <p class="text-lg font-medium text-neutral-300 mb-1">Нет данных</p>
-        <p class="text-sm">Для выбранного стримера и периода ещё нет записей истории поинтов.</p>
+        <p class="text-lg font-medium text-neutral-300 mb-1">{{ t "stat.empty.title" }}</p>
+        <p class="text-sm">{{ t "stat.empty.desc" }}</p>
     </div>
 
     <div id="stat-error" class="hidden text-center py-24">
-        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">Ошибка загрузки</p>
+        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">{{ t "stat.error.title" }}</p>
         <p class="text-sm text-neutral-400 mb-4" id="stat-error-msg"></p>
-        <button type="button" id="stat-retry" class="btn-secondary">Повторить</button>
+        <button type="button" id="stat-retry" class="btn-secondary">{{ t "stat.retry" }}</button>
     </div>
 
     <div id="stat-chart-wrap" class="hidden">
         <div id="stat-chart"></div>
-        <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">Показана прореженная выборка. Полные данные — через «Экспорт JSON».</p>
+        <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">{{ t "stat.truncated" }}</p>
     </div>
 </div>
 
 <!-- ===================== Prediction ROI ===================== -->
 <div class="flex items-center justify-between flex-wrap gap-3 mt-10 mb-2">
-    <h2 class="text-2xl font-bold">ROI по ставкам (предсказания)</h2>
+    <h2 class="text-2xl font-bold">{{ t "stat.roi.title" }}</h2>
     <div id="roi-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
 </div>
-<p class="text-neutral-400 text-sm mb-6">Аналитика автоматических и ручных ставок на предсказания: доходность, win rate, просадка, разбивка по стримеру, стратегии и коэффициентам. Только чтение — стратегии не меняются и не отключаются.</p>
+<p class="text-neutral-400 text-sm mb-6">{{ t "stat.roi.subtitle" }}</p>
 
 <div class="card mb-6">
     <div class="flex flex-wrap items-end gap-5">
         <div class="flex flex-col gap-1">
-            <label for="roi-streamer" class="text-xs uppercase tracking-wide text-neutral-400">Стример</label>
+            <label for="roi-streamer" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.streamer" }}</label>
             <select id="roi-streamer" class="input-field min-w-[12rem]">
-                <option value="">Все стримеры</option>
+                <option value="">{{ t "stat.all_streamers" }}</option>
                 {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <label for="roi-strategy" class="text-xs uppercase tracking-wide text-neutral-400">Стратегия</label>
+            <label for="roi-strategy" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.strategy" }}</label>
             <select id="roi-strategy" class="input-field min-w-[10rem]">
-                <option value="">Все стратегии</option>
+                <option value="">{{ t "stat.all_strategies" }}</option>
                 {{range .BetStrategies}}<option value="{{.}}">{{.}}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <span class="text-xs uppercase tracking-wide text-neutral-400">Период</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="Период ROI">
-                <button type="button" class="roi-period-btn" data-period="7d">7д</button>
-                <button type="button" class="roi-period-btn is-active" data-period="30d">30д</button>
-                <button type="button" class="roi-period-btn" data-period="90d">90д</button>
-                <button type="button" class="roi-period-btn" data-period="lifetime">Всё время</button>
+            <span class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.period" }}</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
+                <button type="button" class="roi-period-btn" data-period="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="roi-period-btn is-active" data-period="30d">{{ t "stat.range.30d" }}</button>
+                <button type="button" class="roi-period-btn" data-period="90d">{{ t "stat.range.90d" }}</button>
+                <button type="button" class="roi-period-btn" data-period="lifetime">{{ t "stat.range.lifetime" }}</button>
             </div>
         </div>
         <div class="ml-auto">
-            <a id="roi-export" class="btn-secondary inline-block" href="#" download>Экспорт JSON</a>
+            <a id="roi-export" class="btn-secondary inline-block" href="#" download>{{ t "stat.export" }}</a>
         </div>
     </div>
 </div>
 
 <div class="card">
-    <div id="roi-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ Данные могут быть устаревшими — последнее обновление не удалось.</div>
+    <div id="roi-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.stale" }}</div>
 
     <div id="roi-loading">
         <div class="skeleton h-40 w-full rounded-lg"></div>
     </div>
 
     <div id="roi-empty" class="hidden text-center py-16 text-neutral-400">
-        <p class="text-lg font-medium text-neutral-300 mb-1">Нет ставок</p>
-        <p class="text-sm">За выбранный период и фильтры ещё нет сыгравших ставок на предсказания.</p>
+        <p class="text-lg font-medium text-neutral-300 mb-1">{{ t "stat.roi.empty.title" }}</p>
+        <p class="text-sm">{{ t "stat.roi.empty.desc" }}</p>
     </div>
 
     <div id="roi-error" class="hidden text-center py-16">
-        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">Ошибка загрузки</p>
+        <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">{{ t "stat.error.title" }}</p>
         <p class="text-sm text-neutral-400 mb-4" id="roi-error-msg"></p>
-        <button type="button" id="roi-retry" class="btn-secondary">Повторить</button>
+        <button type="button" id="roi-retry" class="btn-secondary">{{ t "stat.retry" }}</button>
     </div>
 
     <div id="roi-content" class="hidden">
         <!-- KPI tiles -->
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
-            <div class="stat-tile"><span class="stat-label">Ставок</span><span id="roi-count" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.bets" }}</span><span id="roi-count" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">Win rate</span><span id="roi-winrate" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">Чистый профит</span><span id="roi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net" }}</span><span id="roi-net" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">ROI</span><span id="roi-roi" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">Поставлено</span><span id="roi-wagered" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">Средняя ставка</span><span id="roi-avgwager" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">Средний выигрыш</span><span id="roi-avgwin" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">Макс. просадка</span><span id="roi-drawdown" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.wagered" }}</span><span id="roi-wagered" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.avg_wager" }}</span><span id="roi-avgwager" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.avg_win" }}</span><span id="roi-avgwin" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.drawdown" }}</span><span id="roi-drawdown" class="stat-value num"></span></div>
         </div>
         <p class="text-xs text-neutral-500 mb-6">
-            <span id="roi-wins" class="num"></span> выигрышей ·
-            <span id="roi-losses" class="num"></span> проигрышей ·
-            <span id="roi-refunds" class="num"></span> возвратов.
-            Win rate, средняя ставка и «поставлено» считаются по сыгравшим ставкам (выигрыш+проигрыш); возвраты возвращают ставку и в них не входят.
+            <span id="roi-wins" class="num"></span> {{ t "stat.roi.wins" }} ·
+            <span id="roi-losses" class="num"></span> {{ t "stat.roi.losses" }} ·
+            <span id="roi-refunds" class="num"></span> {{ t "stat.roi.refunds" }}
+            {{ t "stat.roi.wins_note" }}
         </p>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По стримеру</h3>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_streamer" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-streamer"></table></div>
             </div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По стратегии</h3>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_strategy" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-strategy"></table></div>
             </div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">По коэффициенту</h3>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_odds" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-odds"></table></div>
             </div>
         </div>
@@ -249,7 +249,7 @@
         }));
 
         return {
-            series: [{ name: 'Баланс', data: series }],
+            series: [{ name: t('js.stat.balance'), data: series }],
             chart: {
                 type: 'area',
                 height: 400,
@@ -271,7 +271,7 @@
                 x: { format: 'dd MMM yyyy HH:mm' },
                 y: {
                     formatter: function (val, opts) {
-                        let label = new Intl.NumberFormat().format(val) + ' поинтов';
+                        let label = new Intl.NumberFormat().format(val) + ' ' + t('js.stat.points_suffix');
                         const r = reasons[opts.dataPointIndex];
                         if (r) label += ' · ' + r;
                         return label;
@@ -279,7 +279,7 @@
                 },
             },
             annotations: { xaxis: annotations },
-            noData: { text: 'Нет данных' },
+            noData: { text: t('js.stat.no_data') },
         };
     }
 
@@ -295,7 +295,7 @@
 
     function setUpdated() {
         const now = new Date();
-        els.updated.textContent = 'Обновлено ' + now.toLocaleTimeString();
+        els.updated.textContent = t('js.stat.updated_prefix') + ' ' + now.toLocaleTimeString();
     }
 
     async function load(isRefresh) {
@@ -360,7 +360,7 @@
         (function check() {
             if (typeof ApexCharts !== 'undefined') cb();
             else if (Date.now() - start < (maxWait || 10000)) setTimeout(check, 50);
-            else { els.errorMsg.textContent = 'Не удалось загрузить библиотеку графиков.'; show('error'); }
+            else { els.errorMsg.textContent = t('js.stat.chart_lib_failed'); show('error'); }
         })();
     }
 
@@ -433,7 +433,7 @@
             t.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
             return;
         }
-        let html = '<thead><tr><th>Ключ</th><th>N</th><th>Профит</th><th>ROI</th></tr></thead><tbody>';
+        let html = '<thead><tr><th>' + t('js.stat.col.key') + '</th><th>N</th><th>' + t('js.stat.col.profit') + '</th><th>ROI</th></tr></thead><tbody>';
         for (const r of rows) {
             html += '<tr>' +
                 '<td>' + escapeHTML(r.key) + '</td>' +
@@ -469,7 +469,7 @@
         renderTable('roi-by-odds', d.byOddsBucket);
     }
 
-    function setUpdated() { els.updated.textContent = 'Обновлено ' + new Date().toLocaleTimeString(); }
+    function setUpdated() { els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString(); }
 
     async function load(isRefresh) {
         updateExportLink();

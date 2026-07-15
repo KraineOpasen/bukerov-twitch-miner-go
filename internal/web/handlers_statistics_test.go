@@ -193,6 +193,30 @@ func TestStatisticsPageRenders(t *testing.T) {
 	}
 }
 
+// TestStatisticsPageLocalized verifies the page renders the default RU strings
+// and switches to English when the lang cookie is set (it was RU-only before).
+func TestStatisticsPageLocalized(t *testing.T) {
+	srv := newStatsTestServer(t)
+
+	ru := httptest.NewRecorder()
+	srv.handler().ServeHTTP(ru, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if !contains(ru.Body.String(), "Статистика") {
+		t.Errorf("default statistics page should render Russian heading")
+	}
+
+	en := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/statistics", nil)
+	req.AddCookie(&http.Cookie{Name: "lang", Value: "en"})
+	srv.handler().ServeHTTP(en, req)
+	body := en.Body.String()
+	if !contains(body, "Betting ROI") || !contains(body, "By streamer") {
+		t.Errorf("english statistics page missing translated strings")
+	}
+	if contains(body, "ROI по ставкам") {
+		t.Errorf("english render leaked Russian text")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

@@ -10,11 +10,6 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
-// canaryDisclaimer is the honest limitation shown on the Health Center: the
-// canary proves transport acceptance, not accrual of a specific drop.
-const canaryDisclaimer = "The canary confirms Twitch accepts the watch transport and beacon requests. " +
-	"Without an active drop campaign it does not prove accrual of a specific drop."
-
 // HealthSignalView is one row in the Health Center table.
 type HealthSignalView struct {
 	Label       string
@@ -65,18 +60,18 @@ var healthSignalLabels = map[string]string{
 	health.SignalDropsProgress:  "Drops Progress",
 }
 
-func healthStatusDisplay(status string) (string, string) {
+func healthStatusDisplay(status string, tr func(string) string) (string, string) {
 	switch status {
 	case health.StatusOK:
-		return "OK", "#22c55e"
+		return tr("health.status.ok"), "#22c55e"
 	case health.StatusFailed:
-		return "FAILED", "#ef4444"
+		return tr("health.status.failed"), "#ef4444"
 	case health.StatusStalled:
-		return "STALLED", "#ef4444"
+		return tr("health.status.stalled"), "#ef4444"
 	case health.StatusIdle:
-		return "IDLE", "#a1a1aa"
+		return tr("health.status.idle"), "#a1a1aa"
 	default:
-		return "UNKNOWN", "#a1a1aa"
+		return tr("health.status.unknown"), "#a1a1aa"
 	}
 }
 
@@ -101,7 +96,7 @@ func formatHealthAgo(t time.Time) string {
 	}
 }
 
-func (s *Server) buildHealthView() HealthView {
+func (s *Server) buildHealthView(tr func(string) string) HealthView {
 	s.mu.RLock()
 	provider := s.healthProvider
 	username := s.username
@@ -111,7 +106,7 @@ func (s *Server) buildHealthView() HealthView {
 	s.mu.RUnlock()
 
 	view := HealthView{
-		Disclaimer:     canaryDisclaimer,
+		Disclaimer:     tr("health.disclaimer"),
 		Username:       username,
 		RefreshMinutes: refresh,
 		Version:        version.Version,
@@ -130,7 +125,7 @@ func (s *Server) buildHealthView() HealthView {
 		if label == "" {
 			label = sig.Name
 		}
-		text, color := healthStatusDisplay(sig.Status)
+		text, color := healthStatusDisplay(sig.Status, tr)
 		view.Signals = append(view.Signals, HealthSignalView{
 			Label:       label,
 			Status:      text,
@@ -159,7 +154,8 @@ func (s *Server) buildHealthView() HealthView {
 
 // handleHealthPage renders the full Health Center page.
 func (s *Server) handleHealthPage(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "health.html", s.buildHealthView())
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+	s.renderPage(w, r, "health.html", s.buildHealthView(tr))
 }
 
 // handleAPIHealth renders the Health Center partial (htmx auto-refresh).
@@ -231,7 +227,8 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) renderHealthPartial(w http.ResponseWriter, r *http.Request) {
-	s.renderPartial(w, r, "health_center", s.buildHealthView())
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+	s.renderPartial(w, r, "health_center", s.buildHealthView(tr))
 }
 
 func atoiDefault(s string, def int) int {

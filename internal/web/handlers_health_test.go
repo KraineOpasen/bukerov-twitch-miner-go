@@ -28,7 +28,7 @@ func TestHealthPageRendersThroughBaseLayout(t *testing.T) {
 	// The content block is invoked by base.html *after* the sidebar that
 	// references .DiscordEnabled/.DebugURL — so its presence proves base.html
 	// executed the whole way through with a valid HealthView.
-	if !strings.Contains(body, "Health Center") {
+	if !strings.Contains(body, "Центр состояния") {
 		t.Errorf("content block did not render through base.html (base likely aborted on a missing field); body=%d bytes", len(body))
 	}
 	// Base-layout markers that only appear once the sidebar/footer render fully.
@@ -47,7 +47,7 @@ func TestHealthPageRendersThroughBaseLayout(t *testing.T) {
 // layout needs are set even when no health provider is attached.
 func TestBuildHealthViewPopulatesBaseFields(t *testing.T) {
 	srv := newStatsTestServer(t)
-	v := srv.buildHealthView()
+	v := srv.buildHealthView(enTR(t))
 
 	if v.Username != "tester" {
 		t.Errorf("Username = %q, want tester", v.Username)

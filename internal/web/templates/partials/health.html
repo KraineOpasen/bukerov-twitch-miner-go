@@ -1,6 +1,6 @@
 {{define "health_center"}}
 {{if not .Available}}
-<div class="text-neutral-400 text-sm">Health monitoring is not available yet.</div>
+<div class="text-neutral-400 text-sm">{{ t "health.unavailable" }}</div>
 {{else}}
 <div class="rounded-lg border border-neutral-800 overflow-hidden mb-4">
     <table class="w-full text-sm">
@@ -19,88 +19,86 @@
     </table>
 </div>
 
-<div class="text-xs text-neutral-500 mb-4">Active GQL Client ID: <span class="text-neutral-300">{{if .ActiveClientID}}{{.ActiveClientID}}{{else}}Unknown{{end}}</span></div>
+<div class="text-xs text-neutral-500 mb-4">{{ t "health.active_client_id" }} <span class="text-neutral-300">{{if .ActiveClientID}}{{.ActiveClientID}}{{else}}{{ t "health.unknown" }}{{end}}</span></div>
 
 <div class="rounded-lg border border-neutral-800 p-4 mb-3">
-    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">Watch-transport canary</div>
+    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">{{ t "health.canary.title" }}</div>
 
     <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML" class="flex flex-col gap-3">
         <input type="hidden" name="section" value="canary">
         <label class="flex items-center gap-2 text-sm text-neutral-300">
             <input type="checkbox" name="canaryEnabled" {{if .CanaryEnabled}}checked{{end}}>
-            Enable scheduled canary
+            {{ t "health.canary.enable" }}
         </label>
         <label class="flex flex-col gap-1 text-xs text-neutral-400">
-            Canary channel (a reliable, near-always-live channel)
-            <input type="text" name="canaryChannel" value="{{.CanaryChannel}}" placeholder="e.g. a 24/7 channel login"
+            {{ t "health.canary.channel" }}
+            <input type="text" name="canaryChannel" value="{{.CanaryChannel}}" placeholder="{{ t "health.canary.channel_ph" }}"
                    class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100">
         </label>
         <div class="flex gap-4">
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Interval (minutes, 60–1440)
+                {{ t "health.canary.interval" }}
                 <input type="number" name="canaryIntervalMinutes" value="{{.CanaryIntervalMinutes}}" min="60" max="1440"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Max staleness (hours, 1–168)
+                {{ t "health.canary.max_staleness" }}
                 <input type="number" name="canaryMaxStalenessHours" value="{{.CanaryMaxStalenessHours}}" min="1" max="168"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
         </div>
         <div class="flex items-center gap-3">
-            <button type="submit" class="badge badge-queued">Save canary settings</button>
+            <button type="submit" class="badge badge-queued">{{ t "health.canary.save" }}</button>
             {{if .CanaryConfigured}}
-            <button type="button" hx-post="/api/health/canary/run" hx-target="#health-center" hx-swap="innerHTML" class="badge badge-queued">Run canary now</button>
+            <button type="button" hx-post="/api/health/canary/run" hx-target="#health-center" hx-swap="innerHTML" class="badge badge-queued">{{ t "health.canary.run_now" }}</button>
             {{else}}
-            <span class="text-xs text-neutral-500">Set a channel to enable "Run canary now".</span>
+            <span class="text-xs text-neutral-500">{{ t "health.canary.run_hint" }}</span>
             {{end}}
         </div>
     </form>
 </div>
 
 <div class="rounded-lg border border-neutral-800 p-4 mb-3">
-    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">Drop-progress watchdog</div>
+    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">{{ t "health.watchdog.title" }}</div>
 
     <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML" class="flex flex-col gap-3">
         <input type="hidden" name="section" value="watchdog">
         <label class="flex items-center gap-2 text-sm text-neutral-300">
             <input type="checkbox" name="watchdogEnabled" {{if .WatchdogEnabled}}checked{{end}}>
-            Enable stall detection and automatic recovery
+            {{ t "health.watchdog.enable" }}
         </label>
         <div class="flex flex-wrap gap-4">
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Stall delay (minutes, 10–120)
+                {{ t "health.watchdog.stall_delay" }}
                 <input type="number" name="watchdogStallDelayMinutes" value="{{.WatchdogStallDelayMinutes}}" min="10" max="120"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Confirmations (2–10)
+                {{ t "health.watchdog.confirmations" }}
                 <input type="number" name="watchdogStallConfirmations" value="{{.WatchdogStallConfirmations}}" min="2" max="10"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Recovery cooldown (minutes, 1–60)
+                {{ t "health.watchdog.recovery_cooldown" }}
                 <input type="number" name="watchdogRecoveryCooldownMinutes" value="{{.WatchdogRecoveryCooldownMinutes}}" min="1" max="60"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Channel-switch exclusion (minutes, 10–360)
+                {{ t "health.watchdog.channel_switch_excl" }}
                 <input type="number" name="watchdogAvoidTTLMinutes" value="{{.WatchdogAvoidTTLMinutes}}" min="10" max="360"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
             <label class="flex flex-col gap-1 text-xs text-neutral-400">
-                Re-arm after exhaustion (hours, 1–48)
+                {{ t "health.watchdog.rearm" }}
                 <input type="number" name="watchdogRearmHours" value="{{.WatchdogRearmHours}}" min="1" max="48"
                        class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm text-neutral-100 w-32">
             </label>
         </div>
         <div class="text-xs text-neutral-500">
-            A stall is confirmed only when every gate holds at once: the channel is really being watched,
-            watch reports are delivered, inventory checks complete without progress, and Twitch itself is
-            not degraded. Recovery runs one bounded, cooldown-limited stage at a time and never loops.
+            {{ t "health.watchdog.explain" }}
         </div>
         <div>
-            <button type="submit" class="badge badge-queued">Save watchdog settings</button>
+            <button type="submit" class="badge badge-queued">{{ t "health.watchdog.save" }}</button>
         </div>
     </form>
 </div>
