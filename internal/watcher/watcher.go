@@ -131,6 +131,14 @@ type MinuteWatcher struct {
 	// restricted-drop-first rule.
 	campaignScores atomic.Pointer[map[string]int]
 
+	// preferConfigured, when true, forbids a non-configured (discovery)
+	// candidate from displacing a configured streamer that already holds a slot,
+	// so tracked streamers always keep their slot and discovery only fills idle
+	// ones. Set from any goroutine, read lock-free by the loop's pickDisplaceable.
+	// Default false preserves the pre-existing rank-based arbitration. Advisory
+	// only — it never lets discovery exceed the slot cap or take an occupied slot.
+	preferConfigured atomic.Bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	// loopDone is closed when the watch loop goroutine exits; Stop waits on

@@ -392,6 +392,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.RateLimits,
 		watchTimeStore,
 	)
+	// When enabled, tracked streamers keep their watch slot ahead of any
+	// directory-discovered channel (discovery only fills idle slots).
+	m.watcher.SetPreferConfiguredOverDiscovery(m.config.DiscoveryPreferTracked)
 
 	m.dropsTracker = drops.NewDropsTracker(
 		m.client,
@@ -1000,6 +1003,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 
 	if m.watcher != nil {
 		m.watcher.UpdateSettings(m.config.Priority, m.config.RateLimits)
+		m.watcher.SetPreferConfiguredOverDiscovery(m.config.DiscoveryPreferTracked)
 	}
 
 	if m.dropsTracker != nil {

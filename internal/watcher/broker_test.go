@@ -105,6 +105,69 @@ func TestArbitrateRestrictedDiscoveryDisplacesPlainConfigured(t *testing.T) {
 	}
 }
 
+// TestArbitratePreferConfiguredBlocksDiscoveryDisplacement covers the
+// "prefer tracked streamers" toggle (SetPreferConfiguredOverDiscovery): with
+// both slots held by plain (rank-1) configured picks and a discovery
+// active-drop candidate (rank 2) competing, the default arbitration lets
+// discovery displace one configured pick, but with the toggle on the
+// configured streamers keep both slots and discovery is left waiting.
+func TestArbitratePreferConfiguredBlocksDiscoveryDisplacement(t *testing.T) {
+	newFullWatcher := func() *MinuteWatcher {
+		w, _ := newTestWatcher(2) // two plain configured picks, both slots full
+		for _, s := range w.streamers {
+			s.Settings.WatchStreak = false // keep them rank 1 (no streak protection)
+		}
+		return w
+	}
+
+	// Baseline (toggle off): an active-drop discovery channel displaces one
+	// configured pick — the behavior the toggle exists to override.
+	w := newFullWatcher()
+	disco := discoveryStreamer("disco", false) // active_drop, rank 2 > configured rank 1
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+	slots, waiting := w.arbitrate([]int{0, 1}, extra, time.Now())
+	if !loginsOf(slots)["disco"] {
+		t.Fatalf("baseline: expected the discovery active-drop to displace a configured pick, got %v", loginsOf(slots))
+	}
+	if len(waiting) != 1 {
+		t.Fatalf("baseline: expected one displaced configured channel waiting, got %d", len(waiting))
+	}
+
+	// Toggle on: the same discovery candidate may not evict a configured slot.
+	w = newFullWatcher()
+	w.SetPreferConfiguredOverDiscovery(true)
+	slots, waiting = w.arbitrate([]int{0, 1}, extra, time.Now())
+	if len(slots) != constants.MaxSimultaneousStreams {
+		t.Fatalf("expected slots to stay at the cap, got %d", len(slots))
+	}
+	if loginsOf(slots)["disco"] {
+		t.Fatalf("prefer-tracked: discovery must not displace a configured streamer, got %v", loginsOf(slots))
+	}
+	for _, s := range slots {
+		if s.origin != OriginConfigured {
+			t.Fatalf("prefer-tracked: both slots must stay configured, got a %q slot", s.origin)
+		}
+	}
+	if len(waiting) != 1 || waiting[0].Channel != "disco" {
+		t.Fatalf("prefer-tracked: expected the discovery channel reported waiting, got %v", waiting)
+	}
+}
+
+// TestArbitratePreferConfiguredStillFillsIdleSlot pins the toggle's scope: it
+// only blocks displacement, never idle-fill. With a free slot the discovery
+// channel still takes it even when prefer-tracked is on.
+func TestArbitratePreferConfiguredStillFillsIdleSlot(t *testing.T) {
+	w, _ := newTestWatcher(1) // one configured pick leaves a free slot
+	w.SetPreferConfiguredOverDiscovery(true)
+	disco := discoveryStreamer("disco", false)
+	extra := []Candidate{{Streamer: disco, Origin: OriginDiscovery}}
+
+	slots, _ := w.arbitrate([]int{0}, extra, time.Now())
+	if len(slots) != 2 || !loginsOf(slots)["disco"] {
+		t.Fatalf("prefer-tracked must still fill an idle slot with discovery, got %v", loginsOf(slots))
+	}
+}
+
 // TestArbitrateDoesNotDisplaceNearStreakCompletion covers acceptance criterion
 // #5: a channel within minutes of finishing its watch streak is never
 // displaced, even by a channel-restricted discovery drop.
