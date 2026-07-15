@@ -199,6 +199,17 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 	return false
 }
 
+// hasTopLevelGQLErrors reports whether a decoded GQL response carries a
+// non-empty top-level "errors" array — Twitch's signal that the operation
+// failed at the GQL layer (including PersistedQueryNotFound) and returned no
+// authoritative data, regardless of HTTP status. Mirrors the same shape check
+// GetDirectoryStreams / GetGameSlug / redeemResponseError already use, and is
+// used to keep such responses from refreshing the connection-health timestamp.
+func hasTopLevelGQLErrors(result map[string]interface{}) bool {
+	errs, ok := result["errors"].([]interface{})
+	return ok && len(errs) > 0
+}
+
 func (c *TwitchClient) PostGQL(operation constants.GQLOperation) (map[string]interface{}, error) {
 	return c.postGQLRequest(operation)
 }
@@ -236,7 +247,17 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 	}
 
-	c.markSuccess()
+	// A top-level "errors" array means Twitch rejected the operation at the GQL
+	// layer (PersistedQueryNotFound after client-ID exhaustion, service error,
+	// etc.) and returned no authoritative data, even when the HTTP status is
+	// 200. Such a response must NOT refresh the connection-health timestamp, or
+	// the watchdog/canary would read a total GQL outage as "GQL API ok".
+	// Checked explicitly here rather than via isAuthError, which only covers
+	// token rejection. The result is returned unchanged so per-operation
+	// parsing behaves exactly as before.
+	if !hasTopLevelGQLErrors(result) {
+		c.markSuccess()
+	}
 	return result, nil
 }
 
@@ -274,6 +295,15 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 		if isAuthError(statusCode, item) {
 			c.handleUnauthorized()
 			return nil, ErrUnauthorized
+		}
+	}
+
+	// Same GQL-layer-error gate as postGQLRequest: a batch entry carrying a
+	// top-level "errors" array returned no authoritative data and must not
+	// refresh the connection-health timestamp.
+	for _, item := range result {
+		if hasTopLevelGQLErrors(item) {
+			return result, nil
 		}
 	}
 
