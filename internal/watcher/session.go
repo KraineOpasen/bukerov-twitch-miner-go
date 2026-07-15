@@ -103,6 +103,17 @@ func (w *MinuteWatcher) SetCampaignScores(scores map[string]int) {
 	w.campaignScores.Store(&scores)
 }
 
+// SetPreferConfiguredOverDiscovery controls whether a directory-discovered
+// candidate may displace a configured (tracked) streamer that already holds a
+// watch slot. When true, discovery never evicts the configured list — it only
+// fills otherwise-idle slots; when false (the default) the pre-existing
+// rank-based arbitration applies, so a discovered active-drop channel can bump
+// a configured streamer held only by points or fair rotation. Lock-free for the
+// reader (the loop goroutine). Safe for concurrent use.
+func (w *MinuteWatcher) SetPreferConfiguredOverDiscovery(prefer bool) {
+	w.preferConfigured.Store(prefer)
+}
+
 // orderByCampaignScore returns a copy of the streamer indexes ordered by the
 // published campaign-policy score (highest first, stable). With no scores
 // published it returns the input order unchanged, so the pre-policy DROPS

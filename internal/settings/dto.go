@@ -13,6 +13,10 @@ type RuntimeSettings struct {
 	Discord         DiscordUIConfig        `json:"discord"`
 	DropBlacklist   []string               `json:"dropBlacklist"`
 	DirectoryGames  []string               `json:"directoryGames"`
+	// DiscoveryPreferTracked mirrors config.Config.DiscoveryPreferTracked: when
+	// true, directory-discovered channels never displace a tracked streamer's
+	// watch slot (they only fill idle ones).
+	DiscoveryPreferTracked bool `json:"discoveryPreferTracked"`
 }
 
 // DiscordUIConfig contains Discord integration settings for the UI.

@@ -1052,6 +1052,18 @@ Discovery is most effective when fewer than two configured streamers are live
 channel is reported as `watching` only when the broker actually placed it in a
 slot; its per-channel watch-minute accounting is visible on the Drops page.
 
+The optional `discoveryPreferTracked` flag (config key, also a checkbox in the
+Directory Discovery settings panel; default `false`) narrows this competition:
+when set, a discovery candidate may fill an idle slot but may **never** displace
+a configured streamer that already holds one (`pickDisplaceable` returns "no
+victim" for any non-configured incoming candidate via
+`MinuteWatcher.SetPreferConfiguredOverDiscovery`). With the default `false`, the
+pre-existing rank-based arbitration stands: a discovered channel farming an
+active drop (rank `active_drop`) can displace a configured streamer held only by
+points/fair-rotation priority (rank below `active_drop`). Either way, and
+regardless of the flag, a channel-restricted discovery drop keeps its normal
+rank because it can only be farmed on that one channel.
+
 ---
 
 ## Health Signals (`internal/health`)

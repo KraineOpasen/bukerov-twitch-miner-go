@@ -122,6 +122,14 @@
 
             <ul class="space-y-2" id="directory-game-list">
             </ul>
+
+            <div class="setting-row mt-4">
+                <div>
+                    <div class="setting-label">{{ t "set.directory.prefer_tracked_label" }}</div>
+                    <div class="setting-description">{{ t "set.directory.prefer_tracked_desc" }}</div>
+                </div>
+                <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-purple-600">
+            </div>
         </div>
     </details>
 
@@ -579,6 +587,7 @@
         document.getElementById('dropBlacklist').value = (settings.dropBlacklist || []).join('\n');
 
         populateDirectoryGameList(settings.directoryGames || []);
+        document.getElementById('discoveryPreferTracked').checked = !!settings.discoveryPreferTracked;
     }
 
     function populateDirectoryGameList(games) {
@@ -1010,7 +1019,8 @@
                 guildId: document.getElementById('discordGuildId').value
             },
             dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
-            directoryGames: gatherDirectoryGames()
+            directoryGames: gatherDirectoryGames(),
+            discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked
         };
     }
 

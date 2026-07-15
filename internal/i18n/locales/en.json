@@ -181,6 +181,8 @@
   "set.directory.desc_post": "). Leave the list empty to keep discovery off.",
   "set.directory.input_placeholder": "Enter game name",
   "set.directory.add": "Add Game",
+  "set.directory.prefer_tracked_label": "Prefer tracked streamers over discovered channels",
+  "set.directory.prefer_tracked_desc": "When on, a directory-discovered channel never takes a watch slot away from one of your tracked streamers — discovery only fills otherwise-idle slots. When off, a discovered channel farming an active drop can displace a tracked streamer that is watched only for points or fair rotation.",
   "set.ratelimits.title": "Rate Limits",
   "set.ratelimits.ws_ping_label": "Websocket Ping Interval",
   "set.ratelimits.ws_ping_desc": "Seconds between websocket ping messages (20-60)",

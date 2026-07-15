@@ -60,6 +60,15 @@ type Config struct {
 	// (the default) disables the whole subsystem.
 	DirectoryGames []string `json:"directoryGames,omitempty"`
 
+	// DiscoveryPreferTracked, when true, forbids a directory-discovered channel
+	// from displacing a configured (tracked) streamer that already holds a watch
+	// slot: your tracked streamers always keep their slot and discovery only
+	// fills otherwise-idle ones. It has no effect while DirectoryGames is empty
+	// (discovery off). The default (false) preserves the prior slot arbitration,
+	// where a discovered channel farming an active drop could bump a configured
+	// streamer held only by points or fair-rotation priority.
+	DiscoveryPreferTracked bool `json:"discoveryPreferTracked,omitempty"`
+
 	// AutoRedeem holds per-streamer auto-redeem configuration for custom
 	// channel-points rewards, keyed by lowercase streamer username. It is a
 	// top-level map (rather than a StreamerSettings field) so it survives the

@@ -250,7 +250,18 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 // near-complete watch streak. Returns -1 if none. Discovery occupants are never
 // displaced (there is at most one, and it never out-prioritizes a configured
 // slot into a swap war).
+//
+// When the operator opts into "prefer tracked" (SetPreferConfiguredOverDiscovery),
+// a non-configured (discovery) candidate is never allowed to displace a
+// configured streamer at all: it may still fill a genuinely idle slot upstream
+// in arbitrate, but it can never evict one of the tracked list. This is what
+// guarantees your streamers keep their slots ahead of a random directory
+// channel, at the cost of not bumping a points/rotation pick for a game-wide
+// drop the discovery channel happens to carry.
 func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccupant) int {
+	if incoming.origin != OriginConfigured && w.preferConfigured.Load() {
+		return -1
+	}
 	incomingRank := slotRank(incoming.reasonCode)
 	victim := -1
 	for i, s := range slots {

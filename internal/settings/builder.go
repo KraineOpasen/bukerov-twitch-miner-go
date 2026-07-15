@@ -73,8 +73,9 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			BotToken: uiBotToken(cfg),
 			GuildID:  cfg.Discord.GuildID,
 		},
-		DropBlacklist:  cfg.DropBlacklist,
-		DirectoryGames: cfg.DirectoryGames,
+		DropBlacklist:          cfg.DropBlacklist,
+		DirectoryGames:         cfg.DirectoryGames,
+		DiscoveryPreferTracked: cfg.DiscoveryPreferTracked,
 	}
 }
 
@@ -138,8 +139,9 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			BotToken: defaults.Discord.BotToken,
 			GuildID:  defaults.Discord.GuildID,
 		},
-		DropBlacklist:  defaults.DropBlacklist,
-		DirectoryGames: defaults.DirectoryGames,
+		DropBlacklist:          defaults.DropBlacklist,
+		DirectoryGames:         defaults.DirectoryGames,
+		DiscoveryPreferTracked: defaults.DiscoveryPreferTracked,
 	}
 }
 
@@ -192,6 +194,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
 	cfg.DirectoryGames = normalizeGameList(s.DirectoryGames)
+	cfg.DiscoveryPreferTracked = s.DiscoveryPreferTracked
 
 	config.ValidateConfig(cfg)
 }

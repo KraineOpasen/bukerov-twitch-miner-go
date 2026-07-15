@@ -78,6 +78,31 @@ func TestBuildRuntimeSettingsRoundTripsDirectoryGames(t *testing.T) {
 	}
 }
 
+func TestDiscoveryPreferTrackedRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.DiscoveryPreferTracked {
+		t.Fatalf("default config must leave DiscoveryPreferTracked off (behavior-preserving)")
+	}
+
+	// Enabling via the DTO must reach the config.
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryPreferTracked: true})
+	if !cfg.DiscoveryPreferTracked {
+		t.Errorf("expected ApplyToConfig to enable DiscoveryPreferTracked")
+	}
+
+	// And the enabled value must survive the round trip back to the DTO.
+	rt := BuildRuntimeSettings(&cfg)
+	if !rt.DiscoveryPreferTracked {
+		t.Errorf("expected DiscoveryPreferTracked to survive the round trip, got false")
+	}
+
+	// Disabling via the DTO must reach the config too (not a one-way latch).
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryPreferTracked: false})
+	if cfg.DiscoveryPreferTracked {
+		t.Errorf("expected ApplyToConfig to disable DiscoveryPreferTracked")
+	}
+}
+
 // --- Env-managed Discord token semantics (Stage C hardening) ---
 
 // With DISCORD_BOT_TOKEN managing the token, the Settings UI must never see
