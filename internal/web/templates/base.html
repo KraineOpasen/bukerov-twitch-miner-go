@@ -201,6 +201,40 @@
     </script>
 
     <script>
+        // Live client-side countdown timers, shared across every page so the
+        // pinned sidebar "Next rotation" counter (and any prediction/window
+        // counters on the Overview page) tick everywhere. Reads timestamps
+        // already delivered in the markup — no server hits. Lives here rather
+        // than in a per-page scripts block so it is not Overview-only.
+        function pad(n) { return n.toString().padStart(2, '0'); }
+        function fmtDuration(totalSec) {
+            if (totalSec < 0) totalSec = 0;
+            const m = Math.floor(totalSec / 60);
+            const s = totalSec % 60;
+            return m + ':' + pad(s);
+        }
+        function tickCountdowns() {
+            const now = Date.now();
+            document.querySelectorAll('[data-countdown-to]').forEach(el => {
+                const to = parseInt(el.getAttribute('data-countdown-to'), 10) * 1000;
+                const remaining = Math.round((to - now) / 1000);
+                el.textContent = fmtDuration(remaining);
+                el.classList.toggle('text-danger', remaining <= 10 && remaining >= 0);
+            });
+            document.querySelectorAll('[data-window-end]').forEach(el => {
+                const to = parseInt(el.getAttribute('data-window-end'), 10) * 1000;
+                const remaining = Math.round((to - now) / 1000);
+                el.textContent = fmtDuration(remaining);
+            });
+        }
+        setInterval(tickCountdowns, 1000);
+        tickCountdowns();
+        // Re-run right after each htmx swap so a freshly-loaded sidebar/live
+        // region shows its countdown immediately instead of after up to 1s.
+        document.body.addEventListener('htmx:afterSwap', tickCountdowns);
+    </script>
+
+    <script>
         (function() {
             const overlay = document.getElementById('status-overlay');
             const title = document.getElementById('status-title');
