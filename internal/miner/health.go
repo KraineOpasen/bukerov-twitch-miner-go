@@ -8,6 +8,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
 )
 
 // healthCanaryConfig maps the persisted health settings to the canary's config.
@@ -113,10 +114,11 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 		m.healthCenter.SetActiveClientID(m.client.ActiveClientID())
 	}
 
-	// PubSub.
+	// PubSub. Evaluated per-connection rather than on the pool-wide max-PONG,
+	// which would be blind to a single dead or topic-less index among healthy
+	// siblings (see pubsubSignal).
 	if m.wsPool != nil {
-		last := m.wsPool.LastActivity()
-		m.healthCenter.Record(stalenessSignal(health.SignalPubSub, last, now, threshold, "no PubSub activity recently"))
+		m.healthCenter.Record(pubsubSignal(m.wsPool.ConnSnapshot(), m.wsPool.LastActivity(), now, threshold))
 	}
 
 	// Drops inventory sync + progress.
@@ -179,6 +181,57 @@ func stalenessSignal(name string, last, now time.Time, threshold time.Duration, 
 		sig.Status = health.StatusOK
 	}
 	return sig
+}
+
+// pubsubSignal composes the PubSub health signal from per-connection state
+// rather than the pool-wide max-PONG, so a single stuck connection is not masked
+// by its healthy siblings. It flags two distinct failure modes, each naming the
+// offending index:
+//
+//   - dead socket: an open, non-reconnecting connection whose last PONG is older
+//     than the staleness threshold (the socket is gone but the pool-wide max is
+//     kept fresh by other connections);
+//   - lost topics: an open, non-reconnecting connection carrying zero topics
+//     while the pool holds more than one connection. A second connection exists
+//     only because >50 topics are subscribed (MaxTopicsPerConnection), so a
+//     topic-less member has silently dropped its subscriptions — the exact
+//     zombie a failed reconnect used to produce. This one is invisible to any
+//     PONG-based check because a topic-less socket still ponds normally.
+//
+// A connection mid-reconnect is expected to be briefly quiet and is never
+// flagged. With no connections yet (no topics submitted) it falls back to the
+// pool-wide staleness view, which reports Unknown on a zero timestamp.
+func pubsubSignal(conns []pubsub.ConnState, lastActivity, now time.Time, threshold time.Duration) health.Signal {
+	if len(conns) == 0 {
+		return stalenessSignal(health.SignalPubSub, lastActivity, now, threshold, "no PubSub activity recently")
+	}
+
+	multi := len(conns) > 1
+	for _, c := range conns {
+		if c.Reconnecting || c.Closed {
+			continue
+		}
+		if !c.LastPong.IsZero() && now.Sub(c.LastPong) > threshold {
+			return health.Signal{
+				Name:      health.SignalPubSub,
+				CheckedAt: now,
+				Status:    health.StatusFailed,
+				Detail:    fmt.Sprintf("connection index=%d has received no PONG for over %s", c.Index, threshold),
+				ErrorCode: "connection_stale",
+			}
+		}
+		if multi && c.Topics == 0 {
+			return health.Signal{
+				Name:      health.SignalPubSub,
+				CheckedAt: now,
+				Status:    health.StatusStalled,
+				Detail:    fmt.Sprintf("connection index=%d is subscribed to 0 topics — subscriptions were lost", c.Index),
+				ErrorCode: "topics_lost",
+			}
+		}
+	}
+
+	return health.Signal{Name: health.SignalPubSub, CheckedAt: lastActivity, Status: health.StatusOK}
 }
 
 // --- web.HealthProvider implementation ---

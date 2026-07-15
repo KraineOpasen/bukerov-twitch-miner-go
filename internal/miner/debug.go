@@ -230,6 +230,26 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		snap.Health = info
 	}
 
+	// PubSub pool: one entry per connection index, so a single dead or
+	// topic-less connection is visible directly (the pool-wide health signal can
+	// only say "something is wrong", not which index).
+	if m.wsPool != nil {
+		if conns := m.wsPool.ConnSnapshot(); len(conns) > 0 {
+			info := &debug.PubSubInfo{}
+			for _, c := range conns {
+				info.Connections = append(info.Connections, debug.PubSubConn{
+					Index:        c.Index,
+					Topics:       c.Topics,
+					LastPong:     c.LastPong,
+					Reconnecting: c.Reconnecting,
+					Closed:       c.Closed,
+				})
+				info.TotalTopics += c.Topics
+			}
+			snap.PubSub = info
+		}
+	}
+
 	if m.progressWatchdog != nil {
 		ps := m.progressWatchdog.Snapshot()
 		info := &debug.ProgressWatchdogInfo{Enabled: ps.Enabled, EvaluatedAt: ps.EvaluatedAt}
