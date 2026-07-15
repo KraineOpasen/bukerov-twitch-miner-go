@@ -18,6 +18,7 @@ func sampleOverview() OverviewData {
 		Version:        "test",
 		BotStatusLabel: "Running",
 		Connected:      true,
+		NetState:       "ok",
 		TotalPoints:    "1,234,567",
 		PointsToday:    "12,345",
 		StreamerCount:  4,
@@ -213,6 +214,55 @@ func TestBuildPredictionViewsSortedAndMapped(t *testing.T) {
 	}
 	if a.PoolLabel != "100" {
 		t.Errorf("pool label = %q, want 100", a.PoolLabel)
+	}
+}
+
+func TestNetState(t *testing.T) {
+	cases := []struct {
+		name   string
+		status StatusInfo
+		want   string
+	}{
+		{"running clean", StatusInfo{Status: StatusRunning}, "ok"},
+		{"degraded", StatusInfo{Status: StatusRunning, ConnectionDegraded: true}, "degraded"},
+		{"lost wins over degraded", StatusInfo{Status: StatusRunning, ConnectionLost: true, ConnectionDegraded: true}, "lost"},
+		{"not running is lost", StatusInfo{Status: StatusInitializing}, "lost"},
+		{"error is lost", StatusInfo{Status: StatusError}, "lost"},
+	}
+	for _, c := range cases {
+		if got := netState(c.status); got != c.want {
+			t.Errorf("%s: netState = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRenderOverviewNetStates proves the wifi indicator colours and labels the
+// three network states from .NetState (green/yellow/red), not a fixed icon.
+func TestRenderOverviewNetStates(t *testing.T) {
+	partials := testPartialsLang(t, i18n.LangEN)
+	cases := []struct {
+		netState  string
+		wantClass string
+		wantText  string
+	}{
+		{"ok", "text-success", "Connected"},
+		{"degraded", "text-event", "Unstable"},
+		{"lost", "text-danger", "Stale data"},
+	}
+	for _, c := range cases {
+		data := sampleOverview()
+		data.NetState = c.netState
+		var buf bytes.Buffer
+		if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
+			t.Fatalf("render overview_live (%s): %v", c.netState, err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, c.wantClass) {
+			t.Errorf("net state %q: output missing class %q", c.netState, c.wantClass)
+		}
+		if !strings.Contains(out, c.wantText) {
+			t.Errorf("net state %q: output missing text %q", c.netState, c.wantText)
+		}
 	}
 }
 

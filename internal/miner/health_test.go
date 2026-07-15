@@ -40,3 +40,34 @@ func TestRefreshHealthCenterDisabledWatchdogFallsBack(t *testing.T) {
 		t.Fatalf("disabled watchdog must fall back to the tracked-campaigns view, got %+v", sig)
 	}
 }
+
+// TestStalenessSignal covers the four branches, especially the new degraded
+// tier: full staleness (failed) must win over the failCount (degraded), and a
+// zero degradeThreshold must never produce degraded.
+func TestStalenessSignal(t *testing.T) {
+	now := time.Now()
+	threshold := 15 * time.Minute
+	fresh := now.Add(-time.Minute)
+	stale := now.Add(-30 * time.Minute)
+
+	cases := []struct {
+		name       string
+		last       time.Time
+		failCount  int
+		degradeMin int
+		want       string
+	}{
+		{"never checked", time.Time{}, 5, 2, health.StatusUnknown},
+		{"fresh, no failures", fresh, 0, 2, health.StatusOK},
+		{"fresh, below degrade threshold", fresh, 1, 2, health.StatusOK},
+		{"fresh, at degrade threshold", fresh, 2, 2, health.StatusDegraded},
+		{"stale beats degrade", stale, 9, 2, health.StatusFailed},
+		{"zero threshold disables degrade", fresh, 9, 0, health.StatusOK},
+	}
+	for _, c := range cases {
+		sig := stalenessSignal("test", c.last, now, threshold, "stale detail", c.failCount, c.degradeMin, "degrade detail")
+		if sig.Status != c.want {
+			t.Errorf("%s: status = %q, want %q", c.name, sig.Status, c.want)
+		}
+	}
+}

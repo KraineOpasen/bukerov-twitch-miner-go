@@ -31,8 +31,9 @@ type WebSocketClient struct {
 	lastMsgTime time.Time
 	lastMsgID   string
 
-	onMessage func(*PubSubMessage)
-	onError   func(error)
+	onMessage   func(*PubSubMessage)
+	onError     func(error)
+	onReconnect func()
 
 	mu       sync.RWMutex
 	writeMu  sync.Mutex
@@ -119,6 +120,16 @@ func (ws *WebSocketClient) IsClosed() bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 	return ws.isClosed
+}
+
+// SetReconnectHandler registers a callback fired once each time this connection
+// begins a reconnect. It is wired once (before Connect) by the pool so it can
+// track reconnect churn. The handler is captured under ws.mu and invoked with
+// the lock released, so it may safely acquire other locks.
+func (ws *WebSocketClient) SetReconnectHandler(h func()) {
+	ws.mu.Lock()
+	ws.onReconnect = h
+	ws.mu.Unlock()
 }
 
 func (ws *WebSocketClient) TopicCount() int {
@@ -392,7 +403,16 @@ func (ws *WebSocketClient) reconnect() {
 	}
 	ws.isReconnecting = true
 	ws.isClosed = true
+	onReconnect := ws.onReconnect
 	ws.mu.Unlock()
+
+	// Report the reconnect (lock released) so the pool can count churn. Fired
+	// once per reconnect entry, including the self-retry path on a failed dial —
+	// that is intentional: repeated retries are exactly the "flapping" the
+	// degraded signal is meant to catch.
+	if onReconnect != nil {
+		onReconnect()
+	}
 
 	if ws.conn != nil {
 		_ = ws.conn.Close()

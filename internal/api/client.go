@@ -94,6 +94,13 @@ type TwitchClient struct {
 	healthMu    sync.RWMutex
 	lastSuccess time.Time
 
+	// gqlFailures records the timestamps of GQL request cycles that exhausted
+	// every retry, as a self-synchronized sliding window. It is deliberately NOT
+	// folded into healthMu (which only guards lastSuccess, not the request path).
+	// The connection-health watchdog reads RecentGQLFailures to raise a
+	// "degraded" signal when the API repeatedly gives up short of a full blackout.
+	gqlFailures eventWindow
+
 	// clientIDMu guards the GQL client-ID fallback state below. The same
 	// *TwitchClient is shared across goroutines (watcher, drops sync, discovery,
 	// and the health canary all call it concurrently), so this state must be
@@ -163,6 +170,13 @@ func (c *TwitchClient) markSuccess() {
 	c.healthMu.Lock()
 	c.lastSuccess = time.Now()
 	c.healthMu.Unlock()
+}
+
+// RecentGQLFailures returns how many GQL request cycles exhausted all retries
+// within the trailing window. Used by the connection-health watchdog to flag a
+// degraded (repeatedly failing but not fully stale) API link.
+func (c *TwitchClient) RecentGQLFailures(window time.Duration) int {
+	return c.gqlFailures.count(time.Now(), window)
 }
 
 func (c *TwitchClient) handleUnauthorized() {
@@ -486,6 +500,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 		time.Sleep(wait)
 	}
 
+	c.gqlFailures.mark(time.Now())
 	slog.Error("GQL request exhausted all retries, skipping this cycle",
 		"operation", operationLabel,
 		"attempts", gqlMaxRetries+1,

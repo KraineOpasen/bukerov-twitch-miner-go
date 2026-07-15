@@ -183,6 +183,10 @@ type OverviewData struct {
 	Stale          bool
 	ReauthRequired bool
 	ConnectionLost bool
+	// NetState drives the Overview network indicator (wifi icon): "ok" (green),
+	// "degraded" (yellow — impaired link), or "lost" (red). Computed with "lost"
+	// taking precedence so a fully-lost link never renders as merely degraded.
+	NetState string
 
 	TotalPoints   string
 	StreamerCount int

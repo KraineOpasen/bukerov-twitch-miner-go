@@ -66,6 +66,8 @@ func healthStatusDisplay(status string, tr func(string) string) (string, string)
 		return tr("health.status.ok"), "#22c55e"
 	case health.StatusFailed:
 		return tr("health.status.failed"), "#ef4444"
+	case health.StatusDegraded:
+		return tr("health.status.degraded"), "#d9a25c"
 	case health.StatusStalled:
 		return tr("health.status.stalled"), "#ef4444"
 	case health.StatusIdle:

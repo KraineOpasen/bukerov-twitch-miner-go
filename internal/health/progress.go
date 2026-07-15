@@ -384,7 +384,10 @@ func (w *ProgressWatchdog) twitchOutage() (bool, string) {
 	}
 	snap := w.center.Snapshot()
 	for _, name := range []string{SignalOAuth, SignalGQLAPI, SignalPubSub, SignalWatchTransport} {
-		if sig, ok := snap.Signal(name); ok && sig.Status == StatusFailed {
+		// A degraded (flapping/repeatedly-failing) transport counts as an outage
+		// here too: while the network is impaired, drop stalls are expected and
+		// must not be confirmed against the streamer.
+		if sig, ok := snap.Signal(name); ok && (sig.Status == StatusFailed || sig.Status == StatusDegraded) {
 			return true, name
 		}
 	}

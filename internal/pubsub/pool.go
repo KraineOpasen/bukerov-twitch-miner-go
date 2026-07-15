@@ -117,6 +117,11 @@ type WebSocketPool struct {
 	onAuthError    AuthErrorHandler
 	onBetResult    BetResultHandler
 
+	// reconnects records the timestamps of connection reconnects across the pool
+	// as a self-synchronized sliding window. The connection-health watchdog reads
+	// RecentReconnects to distinguish a flapping (degraded) link from a clean one.
+	reconnects eventWindow
+
 	mu sync.RWMutex
 }
 
@@ -298,12 +303,22 @@ func (p *WebSocketPool) ConnSnapshot() []ConnState {
 	return out
 }
 
+// RecentReconnects returns how many reconnects occurred across all pool
+// connections within the trailing window. Used by the connection-health
+// watchdog to raise a "degraded" signal on a flapping link.
+func (p *WebSocketPool) RecentReconnects(window time.Duration) int {
+	return p.reconnects.count(time.Now(), window)
+}
+
 func (p *WebSocketPool) Submit(topic Topic) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if len(p.clients) == 0 || p.clients[len(p.clients)-1].TopicCount() >= constants.MaxTopicsPerConnection {
 		ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.handleMessage, p.handleError)
+		// Wire the reconnect counter before Connect() starts the read/ping loops,
+		// so the handler is set before any reconnect can fire.
+		ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
 		if err := ws.Connect(); err != nil {
 			return err
 		}

@@ -29,11 +29,12 @@ const (
 
 // Status values a signal can report.
 const (
-	StatusOK      = "ok"      // last check succeeded
-	StatusFailed  = "failed"  // last check failed
-	StatusIdle    = "idle"    // nothing to check right now (e.g. no active drops)
-	StatusStalled = "stalled" // reserved for the Stage 3 drop-progress watchdog
-	StatusUnknown = "unknown" // never checked yet
+	StatusOK       = "ok"       // last check succeeded
+	StatusFailed   = "failed"   // last check failed
+	StatusDegraded = "degraded" // working but impaired (frequent reconnects / repeated request failures)
+	StatusIdle     = "idle"     // nothing to check right now (e.g. no active drops)
+	StatusStalled  = "stalled"  // reserved for the Stage 3 drop-progress watchdog
+	StatusUnknown  = "unknown"  // never checked yet
 )
 
 // signalOrder is the stable display order for the Health Center.
@@ -59,9 +60,19 @@ type Signal struct {
 }
 
 // Healthy reports whether the signal is in a good state (OK or IDLE — IDLE means
-// "nothing to check", not "broken"). Used for transition detection.
+// "nothing to check", not "broken"). Used for transition detection. A degraded
+// signal is deliberately NOT healthy: the transport is impaired even though it
+// has not fully failed.
 func (s Signal) Healthy() bool {
 	return s.Status == StatusOK || s.Status == StatusIdle
+}
+
+// Degraded reports whether the signal is impaired but not fully down — the
+// transport is still intermittently responding (frequent PubSub reconnects or
+// repeated GQL request failures) without having crossed the connection-lost
+// staleness threshold.
+func (s Signal) Degraded() bool {
+	return s.Status == StatusDegraded
 }
 
 // Snapshot is the immutable, published view of all health signals plus the
