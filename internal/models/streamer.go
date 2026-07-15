@@ -125,16 +125,46 @@ func (s *Streamer) SetOffline() {
 	}
 }
 
-func (s *Streamer) SetOnline() {
+// watchStreakContinuityGrace is how briefly a streamer may drop offline and
+// return while still counting as the SAME continuous broadcast for watch-streak
+// purposes. A short offline blip — an online-detection flap, e.g. a PubSub
+// stream-down (or a transient check failure) immediately followed by a viewcount
+// re-check — must not wipe accumulated watch-streak progress; only a genuinely
+// new broadcast (offline at least this long) re-arms the streak. Matches
+// StreamUpElapsed's 2-minute notion of a settled stream; the streak's own
+// per-report continuity guard (UpdateMinuteWatched's 2×interval gap check)
+// remains the backstop for whether the viewing was actually continuous.
+const watchStreakContinuityGrace = 2 * time.Minute
+
+// SetOnline marks the streamer online and reports whether this call actually
+// transitioned it from offline to online (true) or was a no-op because it was
+// already online (false). Callers use the return value to log the transition
+// exactly once even when concurrent online detections (the stream-check loop,
+// PubSub viewcount, the watcher's stale re-check, ...) race on the same streamer.
+//
+// On a genuine transition it re-arms the watch streak (InitWatchStreak) UNLESS
+// the streamer was offline only briefly (< watchStreakContinuityGrace): such a
+// blip is treated as a continuation of the same broadcast, so accumulated
+// MinuteWatched and the WatchStreakMissing flag are preserved rather than reset.
+func (s *Streamer) SetOnline() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.IsOnline {
-		s.OnlineAt = time.Now()
-		s.IsOnline = true
-		s.Stream.InitWatchStreak()
-		events.Record(events.TypeStreamerOnline, s.Username, "")
+	if s.IsOnline {
+		return false
 	}
+
+	// A brief flap (seconds) is the same broadcast; only a real new broadcast
+	// — offline for at least the grace, or never seen online before — re-arms.
+	freshBroadcast := s.OfflineAt.IsZero() || time.Since(s.OfflineAt) >= watchStreakContinuityGrace
+
+	s.OnlineAt = time.Now()
+	s.IsOnline = true
+	if freshBroadcast {
+		s.Stream.InitWatchStreak()
+	}
+	events.Record(events.TypeStreamerOnline, s.Username, "")
+	return true
 }
 
 func (s *Streamer) UpdateHistory(reasonCode string, earned int) {
