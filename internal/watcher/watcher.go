@@ -358,13 +358,29 @@ func (w *MinuteWatcher) loop() {
 		default:
 		}
 
+		tickStart := time.Now()
 		w.processWatching()
 
+		// processWatching already spreads this tick's per-slot sends across
+		// roughly one interval (pace(interval/len(slots)) after each slot), so a
+		// continuously-watched channel is reported about once per interval. Sleep
+		// only the REMAINDER of the interval here, never a second full one:
+		// otherwise the effective per-channel cadence would be ~2×interval, which
+		// sits right on the watch-streak continuity threshold
+		// (maxContinuousGap = 2×interval, see processWatching) and halves the
+		// drop-progress heartbeat rate. When processWatching returned early
+		// without pacing (no slots watched), the elapsed time is ~0 and this waits
+		// a full jittered interval, so the loop never busy-spins. Jitter is
+		// preserved — it now lives on this single wait instead of being duplicated.
 		interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
+		remaining := w.randomizedDelay(interval) - time.Since(tickStart)
+		if remaining <= 0 {
+			continue
+		}
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-time.After(w.randomizedDelay(interval)):
+		case <-time.After(remaining):
 		}
 	}
 }
