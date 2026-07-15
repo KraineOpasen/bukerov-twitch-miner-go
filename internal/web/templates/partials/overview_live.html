@@ -3,12 +3,12 @@
     <div class="flex items-center gap-4 flex-wrap">
         <h1 class="text-2xl font-bold text-neutral-100">{{ t "nav.overview" }}</h1>
         <span class="inline-flex items-center gap-2 text-sm">
-            <span class="w-2.5 h-2.5 rounded-full {{if .Connected}}bg-online{{else if .ConnectionLost}}bg-event{{else}}bg-danger{{end}}" style="{{if .Connected}}box-shadow:0 0 6px rgba(139,127,209,.8){{end}}"></span>
+            <span class="w-2.5 h-2.5 rounded-full {{if .Connected}}{{else if .ConnectionLost}}bg-event{{else}}bg-danger{{end}}" style="{{if .Connected}}background:var(--color-success);box-shadow:0 0 6px rgba(127,168,140,.8){{end}}"></span>
             <span class="text-neutral-300">{{.BotStatusLabel}}</span>
         </span>
-        <span class="inline-flex items-center gap-1.5 text-sm text-neutral-400">
+        <span class="inline-flex items-center gap-1.5 text-sm {{if eq .NetState "ok"}}text-success{{else if eq .NetState "degraded"}}text-event{{else}}text-danger{{end}}">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5a7 7 0 0 1 14 0"/><path d="M8.5 15.5a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
-            {{if .ConnectionLost}}<span class="stale-pill">{{ t "ov.stale_data" }}</span>{{else}}{{ t "ov.connected" }}{{end}}
+            {{if eq .NetState "ok"}}{{ t "ov.connected" }}{{else if eq .NetState "degraded"}}{{ t "ov.degraded" }}{{else}}<span class="stale-pill">{{ t "ov.stale_data" }}</span>{{end}}
         </span>
     </div>
     <div class="flex items-center gap-4 flex-wrap">

@@ -18,6 +18,7 @@ func TestPubsubSignal(t *testing.T) {
 		name       string
 		conns      []pubsub.ConnState
 		lastActive time.Time
+		reconnects int
 		wantStatus string
 		wantCode   string
 	}{
@@ -86,11 +87,50 @@ func TestPubsubSignal(t *testing.T) {
 			lastActive: fresh,
 			wantStatus: health.StatusOK,
 		},
+		{
+			name: "frequent reconnects with otherwise-healthy conns is degraded",
+			conns: []pubsub.ConnState{
+				{Index: 0, Topics: 50, LastPong: fresh},
+				{Index: 1, Topics: 12, LastPong: fresh},
+			},
+			lastActive: fresh,
+			reconnects: degradeReconnectThreshold,
+			wantStatus: health.StatusDegraded,
+			wantCode:   "degraded",
+		},
+		{
+			name: "a per-index hard failure beats reconnect-degraded",
+			conns: []pubsub.ConnState{
+				{Index: 0, Topics: 50, LastPong: fresh},
+				{Index: 1, Topics: 12, LastPong: stale},
+			},
+			lastActive: fresh,
+			reconnects: degradeReconnectThreshold + 5,
+			wantStatus: health.StatusFailed,
+			wantCode:   "connection_stale",
+		},
+		{
+			name:       "no connections with frequent reconnects is degraded via fallback",
+			conns:      nil,
+			lastActive: fresh,
+			reconnects: degradeReconnectThreshold,
+			wantStatus: health.StatusDegraded,
+			wantCode:   "degraded",
+		},
+		{
+			name: "reconnects below threshold stays OK",
+			conns: []pubsub.ConnState{
+				{Index: 0, Topics: 50, LastPong: fresh},
+			},
+			lastActive: fresh,
+			reconnects: degradeReconnectThreshold - 1,
+			wantStatus: health.StatusOK,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sig := pubsubSignal(tc.conns, tc.lastActive, now, threshold)
+			sig := pubsubSignal(tc.conns, tc.lastActive, now, threshold, tc.reconnects)
 			if sig.Name != health.SignalPubSub {
 				t.Errorf("Name = %q, want %q", sig.Name, health.SignalPubSub)
 			}

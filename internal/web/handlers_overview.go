@@ -173,6 +173,7 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		Stale:          status.ConnectionLost,
 		ReauthRequired: status.ReauthRequired,
 		ConnectionLost: status.ConnectionLost,
+		NetState:       netState(status),
 		TotalPoints:    util.FormatNumber(total),
 		StreamerCount:  len(streamers),
 		LiveCount:      len(live),
@@ -186,6 +187,21 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		GeneratedUnix:  time.Now().Unix(),
 	}
 	return data
+}
+
+// netState maps the miner status to the Overview network indicator's tri-state.
+// "lost" (red) takes precedence over "degraded" (yellow) so a fully-down link
+// never renders as merely impaired; a non-running miner (starting/error) also
+// reads as "lost" for the network icon.
+func netState(status StatusInfo) string {
+	switch {
+	case status.ConnectionLost || status.Status != StatusRunning:
+		return "lost"
+	case status.ConnectionDegraded:
+		return "degraded"
+	default:
+		return "ok"
+	}
 }
 
 func botStatusLabel(tr func(string) string, status MinerStatus) string {

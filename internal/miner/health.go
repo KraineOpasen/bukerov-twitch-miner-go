@@ -110,7 +110,9 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 	// GQL API + active client ID.
 	if m.client != nil {
 		last := m.client.LastSuccessAt()
-		m.healthCenter.Record(stalenessSignal(health.SignalGQLAPI, last, now, threshold, "no successful API response recently"))
+		m.healthCenter.Record(stalenessSignal(health.SignalGQLAPI, last, now, threshold,
+			"no successful API response recently",
+			m.client.RecentGQLFailures(threshold), degradeGQLFailureThreshold, "repeated API request failures"))
 		m.healthCenter.SetActiveClientID(m.client.ActiveClientID())
 	}
 
@@ -118,7 +120,7 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 	// which would be blind to a single dead or topic-less index among healthy
 	// siblings (see pubsubSignal).
 	if m.wsPool != nil {
-		m.healthCenter.Record(pubsubSignal(m.wsPool.ConnSnapshot(), m.wsPool.LastActivity(), now, threshold))
+		m.healthCenter.Record(pubsubSignal(m.wsPool.ConnSnapshot(), m.wsPool.LastActivity(), now, threshold, m.wsPool.RecentReconnects(threshold)))
 	}
 
 	// Drops inventory sync + progress.
@@ -166,9 +168,24 @@ func (m *Miner) DropProgress() health.ProgressSnapshot {
 	return m.progressWatchdog.Snapshot()
 }
 
-// stalenessSignal builds an OK/failed/unknown signal from a last-success
-// timestamp compared against a threshold.
-func stalenessSignal(name string, last, now time.Time, threshold time.Duration, staleDetail string) health.Signal {
+const (
+	// degradeReconnectThreshold / degradeGQLFailureThreshold are how many PubSub
+	// reconnects / exhausted GQL cycles within the connection-timeout window mark
+	// the link "degraded" (yellow), short of the full staleness that marks it
+	// "lost" (red). Two is deliberately above the single routine reconnect Twitch
+	// periodically requests, and above a single transient GQL cycle (which
+	// already absorbs gqlMaxRetries+1 attempts) — so it flags a genuine
+	// flapping/failing pattern, not a one-off blip.
+	degradeReconnectThreshold  = 2
+	degradeGQLFailureThreshold = 2
+)
+
+// stalenessSignal builds an OK/degraded/failed/unknown signal. It reports
+// StatusFailed once the last-success timestamp is older than threshold (full
+// blackout); otherwise, if the transport has accumulated failCount trouble
+// events (reconnects / exhausted request cycles) at or above degradeThreshold
+// within the window, it reports StatusDegraded; otherwise StatusOK.
+func stalenessSignal(name string, last, now time.Time, threshold time.Duration, staleDetail string, failCount, degradeThreshold int, degradeDetail string) health.Signal {
 	sig := health.Signal{Name: name, CheckedAt: last}
 	switch {
 	case last.IsZero():
@@ -177,6 +194,10 @@ func stalenessSignal(name string, last, now time.Time, threshold time.Duration, 
 		sig.Status = health.StatusFailed
 		sig.Detail = staleDetail
 		sig.ErrorCode = "stale"
+	case degradeThreshold > 0 && failCount >= degradeThreshold:
+		sig.Status = health.StatusDegraded
+		sig.Detail = degradeDetail
+		sig.ErrorCode = "degraded"
 	default:
 		sig.Status = health.StatusOK
 	}
@@ -201,9 +222,11 @@ func stalenessSignal(name string, last, now time.Time, threshold time.Duration, 
 // A connection mid-reconnect is expected to be briefly quiet and is never
 // flagged. With no connections yet (no topics submitted) it falls back to the
 // pool-wide staleness view, which reports Unknown on a zero timestamp.
-func pubsubSignal(conns []pubsub.ConnState, lastActivity, now time.Time, threshold time.Duration) health.Signal {
+func pubsubSignal(conns []pubsub.ConnState, lastActivity, now time.Time, threshold time.Duration, reconnects int) health.Signal {
 	if len(conns) == 0 {
-		return stalenessSignal(health.SignalPubSub, lastActivity, now, threshold, "no PubSub activity recently")
+		return stalenessSignal(health.SignalPubSub, lastActivity, now, threshold,
+			"no PubSub activity recently",
+			reconnects, degradeReconnectThreshold, "frequent PubSub reconnects")
 	}
 
 	multi := len(conns) > 1
@@ -228,6 +251,20 @@ func pubsubSignal(conns []pubsub.ConnState, lastActivity, now time.Time, thresho
 				Detail:    fmt.Sprintf("connection index=%d is subscribed to 0 topics — subscriptions were lost", c.Index),
 				ErrorCode: "topics_lost",
 			}
+		}
+	}
+
+	// No per-index hard failure, but frequent reconnects across the window mark
+	// the link impaired (yellow) — short of the full staleness that would make it
+	// failed. Sits between the per-index red checks above and the healthy path, so
+	// a dead/topic-less connection still wins.
+	if reconnects >= degradeReconnectThreshold {
+		return health.Signal{
+			Name:      health.SignalPubSub,
+			CheckedAt: lastActivity,
+			Status:    health.StatusDegraded,
+			Detail:    fmt.Sprintf("frequent reconnects (%d) in the last %s", reconnects, threshold),
+			ErrorCode: "degraded",
 		}
 	}
 

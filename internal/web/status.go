@@ -35,6 +35,14 @@ type StatusInfo struct {
 	ReauthMessage     string `json:"reauthMessage,omitempty"`
 	ConnectionLost    bool   `json:"connectionLost,omitempty"`
 	ConnectionMessage string `json:"connectionMessage,omitempty"`
+
+	// ConnectionDegraded flags an impaired-but-not-lost link (frequent PubSub
+	// reconnects or repeated GQL failures within the watchdog window). Like
+	// ConnectionLost it is a system-wide health signal, preserved across
+	// SetStatus/SetAuthRequired/SetStreamerProgress, and drives the Overview
+	// network indicator (yellow).
+	ConnectionDegraded        bool   `json:"connectionDegraded,omitempty"`
+	ConnectionDegradedMessage string `json:"connectionDegradedMessage,omitempty"`
 }
 
 type StatusBroadcaster struct {
@@ -116,6 +124,19 @@ func (b *StatusBroadcaster) SetConnectionLost(lost bool, message string) {
 	b.mu.Lock()
 	b.status.ConnectionLost = lost
 	b.status.ConnectionMessage = message
+	current := b.status
+	b.mu.Unlock()
+
+	b.broadcast(current)
+}
+
+// SetConnectionDegraded sets/clears the system-wide "connection degraded"
+// signal (impaired but not lost), independent of the startup Status. Mirrors
+// SetConnectionLost; drives the Overview network indicator's yellow state.
+func (b *StatusBroadcaster) SetConnectionDegraded(degraded bool, message string) {
+	b.mu.Lock()
+	b.status.ConnectionDegraded = degraded
+	b.status.ConnectionDegradedMessage = message
 	current := b.status
 	b.mu.Unlock()
 

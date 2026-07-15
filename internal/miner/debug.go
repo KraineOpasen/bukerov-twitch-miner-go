@@ -24,6 +24,8 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 	reauth := m.reauthRequired
 	lost := m.connectionLost
 	lostDetail := m.connectionDetail
+	degraded := m.connectionDegraded
+	degradedDetail := m.connectionDegradedDetail
 	m.mu.RUnlock()
 
 	snap := debug.Snapshot{
@@ -42,6 +44,11 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 	case lost:
 		snap.Status = debug.StatusPaused
 		snap.StatusDetail = lostDetail
+	case degraded:
+		// Still running, but the link is impaired — surface the detail without
+		// changing the top-level running state.
+		snap.Status = debug.StatusRunning
+		snap.StatusDetail = degradedDetail
 	default:
 		snap.Status = debug.StatusRunning
 	}
