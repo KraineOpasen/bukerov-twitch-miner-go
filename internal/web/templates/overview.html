@@ -14,32 +14,6 @@
 
 {{define "scripts"}}
 <script>
-    // Live countdown timers for prediction cards and the rotation counter.
-    // Ticks purely client-side from data already delivered — no server hits.
-    function pad(n) { return n.toString().padStart(2, '0'); }
-    function fmtDuration(totalSec) {
-        if (totalSec < 0) totalSec = 0;
-        const m = Math.floor(totalSec / 60);
-        const s = totalSec % 60;
-        return m + ':' + pad(s);
-    }
-    function tickCountdowns() {
-        const now = Date.now();
-        document.querySelectorAll('[data-countdown-to]').forEach(el => {
-            const to = parseInt(el.getAttribute('data-countdown-to'), 10) * 1000;
-            const remaining = Math.round((to - now) / 1000);
-            el.textContent = fmtDuration(remaining);
-            el.classList.toggle('text-danger', remaining <= 10 && remaining >= 0);
-        });
-        document.querySelectorAll('[data-window-end]').forEach(el => {
-            const to = parseInt(el.getAttribute('data-window-end'), 10) * 1000;
-            const remaining = Math.round((to - now) / 1000);
-            el.textContent = fmtDuration(remaining);
-        });
-    }
-    setInterval(tickCountdowns, 1000);
-    tickCountdowns();
-
     // Toasts.
     function showToast(message, type) {
         const container = document.getElementById('toast-container');
@@ -110,9 +84,6 @@
         const card = e.target.closest('[data-card-streamer]');
         if (card) { e.preventDefault(); openEvents(card.getAttribute('data-card-streamer')); }
     });
-
-    // Re-run countdowns right after each htmx swap of the live region.
-    document.body.addEventListener('htmx:afterSwap', tickCountdowns);
 </script>
 
 <script>
