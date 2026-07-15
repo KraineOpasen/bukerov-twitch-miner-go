@@ -26,9 +26,31 @@ type Snapshot struct {
 	Drops            *DropsSyncInfo        `json:"drops,omitempty"`
 	Discovery        *DiscoveryInfo        `json:"discovery,omitempty"`
 	Health           *HealthInfo           `json:"health,omitempty"`
+	PubSub           *PubSubInfo           `json:"pubsub,omitempty"`
 	ProgressWatchdog *ProgressWatchdogInfo `json:"progressWatchdog,omitempty"`
 	Policy           *PolicyInfo           `json:"policy,omitempty"`
 	RecentEvents     []events.Event        `json:"recentEvents"`
+}
+
+// PubSubInfo is the per-connection view of the PubSub connection pool: one entry
+// per index with its topic count and last confirmed sign of life (PONG). It
+// makes a single stuck or topic-less connection diagnosable directly, rather
+// than by inferring it from frozen per-streamer state. Redacted by construction:
+// counters, a timestamp, and lifecycle flags only — never tokens or URLs.
+type PubSubInfo struct {
+	Connections []PubSubConn `json:"connections"`
+	TotalTopics int          `json:"totalTopics"`
+}
+
+// PubSubConn is one connection (one index) in the pool. A Reconnecting entry is
+// mid-reconnect and expected to be briefly quiet; an open, non-reconnecting
+// entry with Topics == 0 while other connections exist is the topic-loss zombie.
+type PubSubConn struct {
+	Index        int       `json:"index"`
+	Topics       int       `json:"topics"`
+	LastPong     time.Time `json:"lastPong,omitzero"`
+	Reconnecting bool      `json:"reconnecting,omitempty"`
+	Closed       bool      `json:"closed,omitempty"`
 }
 
 // PolicyInfo is the campaign-policy engine's ranked decisions in the debug

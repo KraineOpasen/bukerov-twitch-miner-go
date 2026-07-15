@@ -271,6 +271,33 @@ func (p *WebSocketPool) LastActivity() time.Time {
 	return latest
 }
 
+// ConnState is a read-only, per-connection view of one pool member, for the
+// per-index health signal and the /debug/snapshot pubsub section. It carries no
+// secrets — only counters, a timestamp, and lifecycle flags.
+type ConnState struct {
+	Index        int
+	Topics       int
+	LastPong     time.Time
+	Reconnecting bool
+	Closed       bool
+}
+
+// ConnSnapshot returns a per-connection view of the pool. Unlike LastActivity
+// (which collapses the whole pool to a single max-PONG and so is blind to one
+// dead connection among healthy ones), this exposes every index individually so
+// the health watchdog can flag a single stale or topic-less connection. Safe to
+// call from any goroutine.
+func (p *WebSocketPool) ConnSnapshot() []ConnState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]ConnState, 0, len(p.clients))
+	for _, ws := range p.clients {
+		out = append(out, ws.state())
+	}
+	return out
+}
+
 func (p *WebSocketPool) Submit(topic Topic) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

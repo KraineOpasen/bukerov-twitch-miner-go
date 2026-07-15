@@ -53,15 +53,15 @@ func NewWebSocketClient(index int, authToken string, pingInterval int, onMessage
 }
 
 func (ws *WebSocketClient) Connect() error {
-	ws.mu.Lock()
-	ws.isReconnecting = false
-	ws.isClosed = false
-	ws.mu.Unlock()
-
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 30 * time.Second,
 	}
 
+	// isReconnecting/isClosed are deliberately NOT cleared here: on the reconnect
+	// path they must stay set for the entire Dial (up to HandshakeTimeout) so the
+	// reconnect guard and the ping-loop watchdog cannot spawn a second, racing
+	// reconnect while this one is still dialing. They are cleared only once the
+	// connection is actually established, below.
 	conn, _, err := dialer.Dial(constants.PubSubURL, nil)
 	if err != nil {
 		return err
@@ -70,13 +70,24 @@ func (ws *WebSocketClient) Connect() error {
 	ws.mu.Lock()
 	ws.conn = conn
 	ws.isOpened = true
+	ws.isReconnecting = false
+	ws.isClosed = false
 	ws.lastPong = time.Now()
+	pending := ws.pendingTopics
 	ws.mu.Unlock()
 
-	for _, topic := range ws.pendingTopics {
+	// Resubscribe outside the lock (Listen takes ws.mu itself). isOpened is now
+	// true, so each Listen sends its LISTEN frame immediately rather than
+	// re-parking the topic in pendingTopics.
+	for _, topic := range pending {
 		ws.Listen(topic)
 	}
+
+	ws.mu.Lock()
 	ws.pendingTopics = nil
+	ws.mu.Unlock()
+
+	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", len(pending))
 
 	go ws.readLoop()
 	go ws.pingLoop()
@@ -114,6 +125,21 @@ func (ws *WebSocketClient) TopicCount() int {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 	return len(ws.topics)
+}
+
+// state returns an atomic read-only view of this connection for the pool's
+// per-index health/debug snapshot. Taken under a single RLock so the fields are
+// mutually consistent (e.g. Topics and Reconnecting cannot straddle a reconnect).
+func (ws *WebSocketClient) state() ConnState {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ConnState{
+		Index:        ws.index,
+		Topics:       len(ws.topics),
+		LastPong:     ws.lastPong,
+		Reconnecting: ws.isReconnecting,
+		Closed:       ws.isClosed,
+	}
 }
 
 func (ws *WebSocketClient) Listen(topic Topic) {
@@ -375,26 +401,54 @@ func (ws *WebSocketClient) reconnect() {
 	slog.Info("Reconnecting WebSocket in 60 seconds", "index", ws.index)
 	time.Sleep(60 * time.Second)
 
-	ws.mu.RLock()
-	forcedClose := ws.forcedClose
-	topics := make([]Topic, len(ws.topics))
-	copy(topics, ws.topics)
-	ws.mu.RUnlock()
-
-	if forcedClose {
+	ws.mu.Lock()
+	if ws.forcedClose {
+		ws.mu.Unlock()
 		return
 	}
-
-	ws.mu.Lock()
+	// The set to resubscribe is the union of the currently-live topics and
+	// anything already parked in pendingTopics. The pendingTopics term is what
+	// makes this safe on a retry: when a previous Connect() failed at Dial it
+	// left topics=nil with the real set stranded in pendingTopics, so snapshotting
+	// topics alone (as the old code did) would clobber it with an empty slice and
+	// silently drop every subscription. Union never loses a parked topic.
+	restore := mergeTopics(ws.topics, ws.pendingTopics)
 	ws.stopChan = make(chan struct{})
-	ws.pendingTopics = topics
+	ws.pendingTopics = restore
 	ws.topics = nil
 	ws.mu.Unlock()
 
 	if err := ws.Connect(); err != nil {
 		slog.Error("Failed to reconnect", "index", ws.index, "error", err)
+		// Connect() clears isReconnecting only on success, so reopen the guard
+		// here before retrying — otherwise the retry would be swallowed by the
+		// isReconnecting check at the top of reconnect() and the connection would
+		// be stranded forever. The topics stay safe in pendingTopics across the
+		// retry (see mergeTopics above).
+		ws.mu.Lock()
+		ws.isReconnecting = false
+		ws.mu.Unlock()
 		go ws.reconnect()
 	}
+}
+
+// mergeTopics returns the union of two topic slices, de-duplicated by their
+// wire string (Topic.String()). Order is deterministic: every topic from a in
+// order, then any topic from b not already present.
+func mergeTopics(a, b []Topic) []Topic {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]Topic, 0, len(a)+len(b))
+	for _, src := range [][]Topic{a, b} {
+		for _, t := range src {
+			key := t.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func generateNonce() string {
