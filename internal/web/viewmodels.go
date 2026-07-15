@@ -308,6 +308,31 @@ type DropsPageData struct {
 	PolicyModes []string
 }
 
+// LogLineView is one rendered log line: Class is the color class
+// (log-info/log-warn/log-error), Text is the raw log line.
+type LogLineView struct {
+	Class string
+	Text  string
+}
+
+type LogsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+	Lines          []LogLineView
+	// FileLogging is false when the log file doesn't exist (file logging off),
+	// so the page can explain how to enable it.
+	FileLogging bool
+}
+
+// LogsLinesData feeds the logs_lines partial refreshed by htmx.
+type LogsLinesData struct {
+	Lines       []LogLineView
+	FileLogging bool
+}
+
 type StatisticsPageData struct {
 	Username       string
 	RefreshMinutes int

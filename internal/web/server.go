@@ -232,7 +232,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	langs := i18n.SupportedLangs()
 	placeholder := placeholderFuncMap()
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -525,6 +525,10 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/statistics", s.handleStatisticsPage)
 	mux.HandleFunc("/api/points-history", s.handleAPIPointsHistory)
 	mux.HandleFunc("/api/points-history/export", s.handleAPIPointsHistoryExport)
+
+	// Logs: a standalone log viewer (full page + htmx-refreshed line partial).
+	mux.HandleFunc("/logs", s.handleLogsPage)
+	mux.HandleFunc("/api/logs", s.handleAPILogs)
 
 	// Prediction ROI analytics: summary (filtered by streamer/strategy/period)
 	// and a full-fidelity raw-bets export. Read-only; never places a bet.

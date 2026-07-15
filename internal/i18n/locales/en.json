@@ -14,7 +14,12 @@
   "a11y.language": "Language",
   "a11y.logo_alt": "Twitch Points Miner logo",
 
-  "logs.debug_title": "Diagnostic snapshot (localhost only)",
+  "logs.heading": "Logs",
+  "logs.description": "Recent miner log entries, newest last. Auto-refreshes.",
+  "logs.empty": "No log entries yet.",
+  "logs.disabled": "File logging is disabled — enable it in Settings → Logger to view logs here.",
+  "logs.debug_snapshot": "Diagnostic snapshot (localhost only)",
+  "logs.lines_label": "lines",
 
   "sidebar.now_watching": "Now watching",
 

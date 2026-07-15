@@ -14,7 +14,12 @@
   "a11y.language": "Язык",
   "a11y.logo_alt": "Логотип Twitch Points Miner",
 
-  "logs.debug_title": "Диагностический снимок (только localhost)",
+  "logs.heading": "Логи",
+  "logs.description": "Последние записи журнала майнера, свежие снизу. Обновляется автоматически.",
+  "logs.empty": "Записей журнала пока нет.",
+  "logs.disabled": "Запись логов в файл отключена — включите её в «Настройки → Logger», чтобы видеть логи здесь.",
+  "logs.debug_snapshot": "Диагностический снимок (только localhost)",
+  "logs.lines_label": "строк",
 
   "sidebar.now_watching": "Сейчас смотрим",
 

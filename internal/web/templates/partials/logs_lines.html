@@ -1,0 +1,10 @@
+{{define "logs_lines"}}
+{{if not .FileLogging}}
+<div class="text-neutral-400 text-sm py-8 text-center">{{ t "logs.disabled" }}</div>
+{{else if not .Lines}}
+<div class="text-neutral-400 text-sm py-8 text-center">{{ t "logs.empty" }}</div>
+{{else}}
+{{range .Lines}}<span class="log-line {{.Class}}">{{.Text}}</span>
+{{end}}
+{{end}}
+{{end}}
