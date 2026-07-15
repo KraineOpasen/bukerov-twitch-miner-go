@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 )
 
 // sampleOverview builds an OverviewData exercising every card state and board
@@ -67,17 +69,40 @@ func TestRenderOverviewTemplates(t *testing.T) {
 	}
 	out := buf.String()
 
+	// Localized partial renders the default language (RU) via testPartials.
 	for _, want := range []string{
 		"shroud", "pokimane", "summit", "benched",
-		"Live Predictions", "Will they win?", "Locked",
-		"▶ Watching", "◷ Queued", "⊘ Disabled", "● Offline",
-		"★ Prefer", "Avoid",
+		"Активные предикшены", "Will they win?", "Закрыто",
+		"▶ Смотрим", "◷ В очереди", "⊘ Отключён", "● Оффлайн",
+		"★ Приоритет", "Избегать",
 		"New Emote", "72%", "1,200/h", "cycle-preference", "toggle-watch",
 		"data-window-end", "data-card-streamer",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview_live output missing %q", want)
 		}
+	}
+}
+
+// TestRenderOverviewTemplatesEnglish renders the same fixture in English to
+// prove the cards localize both ways (not just the default RU).
+func TestRenderOverviewTemplatesEnglish(t *testing.T) {
+	partials := testPartialsLang(t, i18n.LangEN)
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "overview_live", sampleOverview()); err != nil {
+		t.Fatalf("render overview_live (en): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Live Predictions", "Locked", "▶ Watching", "◷ Queued",
+		"⊘ Disabled", "● Offline", "★ Prefer", "Avoid",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("english overview_live missing %q", want)
+		}
+	}
+	if strings.Contains(out, "Смотрим") {
+		t.Errorf("english render leaked Russian text")
 	}
 }
 
@@ -192,10 +217,15 @@ func TestBuildPredictionViewsSortedAndMapped(t *testing.T) {
 }
 
 func TestBotStatusLabel(t *testing.T) {
-	if botStatusLabel(StatusRunning) != "Running" {
-		t.Error("running label wrong")
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n: %v", err)
 	}
-	if botStatusLabel(StatusAuthRequired) != "Login required" {
-		t.Error("auth label wrong")
+	tr := func(k string) string { return loc.T(i18n.LangEN, k) }
+	if got := botStatusLabel(tr, StatusRunning); got != "Running" {
+		t.Errorf("running label = %q, want Running", got)
+	}
+	if got := botStatusLabel(tr, StatusAuthRequired); got != "Login required" {
+		t.Errorf("auth label = %q, want Login required", got)
 	}
 }

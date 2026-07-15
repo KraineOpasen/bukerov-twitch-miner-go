@@ -90,8 +90,8 @@ func TestRenderPredictionCardManualControls(t *testing.T) {
 	}
 	out := render(open)
 	for _, want := range []string{
-		`data-event-id="e1"`, "data-manual", "data-amount", "data-fill", "Place bet",
-		"data-skip", "Don't auto-bet this round", `data-outcome-id="o1"`, "Available",
+		`data-event-id="e1"`, "data-manual", "data-amount", "data-fill", "Сделать ставку",
+		"data-skip", "Не делать автоставку в этом раунде", `data-outcome-id="o1"`, "Доступно",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("manual-allowed card missing %q", want)
@@ -105,7 +105,7 @@ func TestRenderPredictionCardManualControls(t *testing.T) {
 		Outcomes: []PredictionOutcomeView{{ID: "o1", Title: "Yes", Chosen: true}},
 	}
 	out = render(placed)
-	if !strings.Contains(out, "Manual bet") || !strings.Contains(out, "auto-bet locked") {
+	if !strings.Contains(out, "Ручная ставка") || !strings.Contains(out, "автоставка заблок.") {
 		t.Errorf("placed manual bet should show lock state, got:\n%s", out)
 	}
 	if strings.Contains(out, "data-manual") {
@@ -119,7 +119,7 @@ func TestRenderPredictionCardManualControls(t *testing.T) {
 		Outcomes: []PredictionOutcomeView{{ID: "o1", Title: "Yes"}},
 	}
 	out = render(skipped)
-	if !strings.Contains(out, "Auto-bet skipped") || !strings.Contains(out, "data-unskip") {
+	if !strings.Contains(out, "Автоставка пропущена") || !strings.Contains(out, "data-unskip") {
 		t.Errorf("skipped card should show skipped state + undo, got:\n%s", out)
 	}
 

@@ -24,7 +24,7 @@ const statsTTL = 60 * time.Second
 // from in-memory state; the only SQLite reads (points-today / per-hour) are
 // memoised behind statsTTL.
 func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
-	data := s.buildOverviewData()
+	data := s.buildOverviewData(s.langFromRequest(r))
 
 	s.renderPartial(w, r, "overview_live", data)
 }
@@ -129,7 +129,8 @@ func (s *Server) ensureStats(streamers []*models.Streamer) (map[string]streamerS
 // buildOverviewData assembles the full Overview view model from in-memory
 // state (streamers, watcher slots, pool predictions, the events ring) plus the
 // memoised analytics figures.
-func (s *Server) buildOverviewData() OverviewData {
+func (s *Server) buildOverviewData(lang string) OverviewData {
+	tr := func(key string) string { return s.i18n.T(lang, key) }
 	streamers := s.snapshotStreamers()
 	stats, total, today := s.ensureStats(streamers)
 
@@ -158,7 +159,7 @@ func (s *Server) buildOverviewData() OverviewData {
 		predByStreamer[p.Streamer] = true
 	}
 
-	live, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer)
+	live, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer, tr)
 
 	data := OverviewData{
 		Username:       s.username,
@@ -167,7 +168,7 @@ func (s *Server) buildOverviewData() OverviewData {
 		DiscordEnabled: discordEnabled,
 		DebugURL:       debugURL,
 		BotStatus:      string(status.Status),
-		BotStatusLabel: botStatusLabel(status.Status),
+		BotStatusLabel: botStatusLabel(tr, status.Status),
 		Connected:      status.Status == StatusRunning && !status.ConnectionLost && !status.ReauthRequired,
 		Stale:          status.ConnectionLost,
 		ReauthRequired: status.ReauthRequired,
@@ -187,18 +188,18 @@ func (s *Server) buildOverviewData() OverviewData {
 	return data
 }
 
-func botStatusLabel(status MinerStatus) string {
+func botStatusLabel(tr func(string) string, status MinerStatus) string {
 	switch status {
 	case StatusRunning:
-		return "Running"
+		return tr("status.running")
 	case StatusError:
-		return "Error"
+		return tr("status.error")
 	case StatusAuthRequired, StatusAuthWaiting:
-		return "Login required"
+		return tr("status.login_required")
 	case StatusLoadingStreamers:
-		return "Loading"
+		return tr("status.loading")
 	default:
-		return "Starting"
+		return tr("status.starting")
 	}
 }
 
@@ -210,6 +211,7 @@ func (s *Server) buildCards(
 	slots WatchSlotsView,
 	stats map[string]streamerStats,
 	predByStreamer map[string]bool,
+	tr func(string) string,
 ) (live, offline, untracked []StreamerInfo, ticker []TickerItem) {
 	watching := slots.Watching
 
@@ -233,7 +235,7 @@ func (s *Server) buildCards(
 		}
 
 		// Last notable event for this streamer from the in-memory ring.
-		if text, ago := lastEventFor(st.Username); text != "" {
+		if text, ago := lastEventFor(tr, st.Username); text != "" {
 			card.LastEventText = text
 			card.LastEventAgo = ago
 		}
@@ -335,32 +337,36 @@ func fmtSeconds(sec int) string {
 
 // lastEventFor returns a short human summary + relative time of the most recent
 // event recorded for the given streamer, or ("","") if none.
-func lastEventFor(username string) (text, ago string) {
+func lastEventFor(tr func(string) string, username string) (text, ago string) {
 	for _, e := range events.Recent(200) {
 		if !strings.EqualFold(e.Streamer, username) {
 			continue
 		}
-		return eventLabel(e), util.FormatDuration(time.Since(e.Time)) + " ago"
+		return eventLabel(tr, e), util.FormatDuration(time.Since(e.Time)) + " " + tr("common.ago")
 	}
 	return "", ""
 }
 
-// eventLabel maps an event to a compact card label.
-func eventLabel(e events.Event) string {
-	label := map[events.Type]string{
-		events.TypeStreamerOnline:  "Went live",
-		events.TypeStreamerOffline: "Went offline",
-		events.TypeBonusClaimed:    "Bonus claimed",
-		events.TypePointsEarned:    "Points earned",
-		events.TypeBetPlaced:       "Bet placed",
-		events.TypeBetResult:       "Bet result",
-		events.TypeDropClaimed:     "Drop claimed",
-		events.TypeMomentClaimed:   "Moment claimed",
-		events.TypeRaidJoined:      "Raid joined",
-		events.TypeRewardRedeemed:  "Reward redeemed",
-	}[e.Type]
-	if label == "" {
-		label = string(e.Type)
+// eventTypeKeys maps each event type to its localization key. The Detail suffix
+// (streamer/game-specific) is appended verbatim and not translated.
+var eventTypeKeys = map[events.Type]string{
+	events.TypeStreamerOnline:  "event.went_live",
+	events.TypeStreamerOffline: "event.went_offline",
+	events.TypeBonusClaimed:    "event.bonus_claimed",
+	events.TypePointsEarned:    "event.points_earned",
+	events.TypeBetPlaced:       "event.bet_placed",
+	events.TypeBetResult:       "event.bet_result",
+	events.TypeDropClaimed:     "event.drop_claimed",
+	events.TypeMomentClaimed:   "event.moment_claimed",
+	events.TypeRaidJoined:      "event.raid_joined",
+	events.TypeRewardRedeemed:  "event.reward_redeemed",
+}
+
+// eventLabel maps an event to a compact, localized card label.
+func eventLabel(tr func(string) string, e events.Event) string {
+	label := string(e.Type)
+	if key, ok := eventTypeKeys[e.Type]; ok {
+		label = tr(key)
 	}
 	if e.Detail != "" {
 		return label + " · " + e.Detail
@@ -538,12 +544,13 @@ func (s *Server) handleAPIOverviewEvents(w http.ResponseWriter, r *http.Request)
 		Label string
 		Ago   string
 	}
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
 	var rows []eventRow
 	for _, e := range events.Recent(200) {
 		if !strings.EqualFold(e.Streamer, name) {
 			continue
 		}
-		rows = append(rows, eventRow{Label: eventLabel(e), Ago: util.FormatDuration(time.Since(e.Time)) + " ago"})
+		rows = append(rows, eventRow{Label: eventLabel(tr, e), Ago: util.FormatDuration(time.Since(e.Time)) + " " + tr("common.ago")})
 		if len(rows) >= 20 {
 			break
 		}

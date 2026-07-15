@@ -1,7 +1,7 @@
 {{define "streamer_card"}}
 <article class="streamer-card relative {{if .IsLive}}is-live{{end}}" onclick="window.location='/streamer/{{.Name}}'">
     {{if .IsLive}}
-    <a href="https://twitch.tv/{{.Name}}" target="_blank" class="absolute top-3 right-3 text-neutral-400 hover:text-purple-400 transition-colors z-10" title="Watch on Twitch" onclick="event.stopPropagation();">
+    <a href="https://twitch.tv/{{.Name}}" target="_blank" class="absolute top-3 right-3 text-neutral-400 hover:text-purple-400 transition-colors z-10" title="{{ t "card.watch_on_twitch" }}" onclick="event.stopPropagation();">
         <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/>
         </svg>
@@ -11,40 +11,40 @@
         <h3 class="text-purple-500 font-semibold text-lg truncate">{{.Name}}</h3>
         <div class="flex items-center gap-1.5 flex-shrink-0">
             {{if eq .Preference "prefer"}}
-            <span class="prefer-badge" title="Preferred for watch rotation">★ Prefer</span>
+            <span class="prefer-badge" title="{{ t "card.prefer_title" }}">{{ t "card.prefer" }}</span>
             {{else if eq .Preference "avoid"}}
-            <span class="avoid-badge" title="Avoided for watch rotation, unless it's the only online channel">Avoid</span>
+            <span class="avoid-badge" title="{{ t "card.avoid_title" }}">{{ t "card.avoid" }}</span>
             {{end}}
             {{if .IsLive}}
-            <span class="live-badge">LIVE</span>
+            <span class="live-badge">{{ t "card.live_badge" }}</span>
             {{end}}
         </div>
     </div>
     {{if .ChannelRestrictedDrop}}
-    <span class="drop-exclusive-badge inline-block mb-2" title="This drop campaign only counts progress on this channel - it cannot be farmed by watching a different streamer">Channel-only drop</span>
+    <span class="drop-exclusive-badge inline-block mb-2" title="{{ t "card.channel_only_drop_title" }}">{{ t "card.channel_only_drop" }}</span>
     {{end}}
     <div class="text-3xl font-bold text-neutral-100">{{.PointsFormatted}}</div>
-    <div class="text-sm text-neutral-400">channel points</div>
+    <div class="text-sm text-neutral-400">{{ t "card.channel_points" }}</div>
     <div class="text-sm mt-2">
         {{if .IsLive}}
-        <span class="text-red-500">Streaming for {{.LiveDuration}}</span>
+        <span class="text-red-500">{{ t "card.streaming_for" }} {{.LiveDuration}}</span>
         {{else if .OfflineDuration}}
-        <span class="text-neutral-400">Offline for {{.OfflineDuration}}</span>
+        <span class="text-neutral-400">{{ t "card.offline_for" }} {{.OfflineDuration}}</span>
         {{end}}
     </div>
     {{if .IsLive}}
     {{if or .GameName .ViewersCount}}
     <div class="text-xs text-neutral-400 mt-2 truncate">
-        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} &middot; {{end}}{{if .ViewersCount}}{{.ViewersCountFormatted}} viewers{{end}}
+        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} &middot; {{end}}{{if .ViewersCount}}{{.ViewersCountFormatted}} {{ t "card.viewers" }}{{end}}
     </div>
     {{end}}
     {{if .Title}}
     <div class="text-xs text-neutral-400 mt-2 truncate" title="{{.Title}}">{{.Title}}</div>
     {{end}}
     {{if .HasCampaign}}
-    <div class="mt-3" title="Drop campaign: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
+    <div class="mt-3" title="{{ t "card.drop_campaign_title" }}: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
         <div class="flex justify-between text-xs text-neutral-400 mb-1">
-            <span class="truncate">Drop{{if .CampaignMinutesInfo}} · {{.CampaignMinutesInfo}}{{end}}</span>
+            <span class="truncate">{{ t "card.drop" }}{{if .CampaignMinutesInfo}} · {{.CampaignMinutesInfo}}{{end}}</span>
             <span class="flex-shrink-0">{{.CampaignPercent}}%</span>
         </div>
         <div class="mini-progress-track">
@@ -54,7 +54,7 @@
     {{end}}
     {{end}}
     {{if not .IsLive}}
-    <div class="text-xs text-neutral-400 mt-2">Last activity: {{.LastActivityFormatted}}</div>
+    <div class="text-xs text-neutral-400 mt-2">{{ t "card.last_activity" }}: {{.LastActivityFormatted}}</div>
     {{end}}
 </article>
 {{end}}

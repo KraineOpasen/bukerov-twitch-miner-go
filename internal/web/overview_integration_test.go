@@ -100,7 +100,7 @@ func TestHandleAPIOverview(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"shroud", "summit", "Live Predictions", "Will they win?", "▶ Watching", "● Offline", "VALORANT"} {
+	for _, want := range []string{"shroud", "summit", "Активные предикшены", "Will they win?", "▶ Смотрим", "● Оффлайн", "VALORANT"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("overview body missing %q", want)
 		}

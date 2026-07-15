@@ -21,7 +21,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// The redesigned Overview renders its live content (header stats, ticker,
 	// predictions board, streamer grid) from the /api/overview partial on
 	// load; the page shell just needs the chrome data.
-	data := s.buildOverviewData()
+	data := s.buildOverviewData(s.langFromRequest(r))
 	s.renderPage(w, r, "overview.html", data)
 }
 

@@ -1,30 +1,30 @@
 {{define "overview_live"}}
 <header class="flex flex-wrap items-center justify-between gap-3 mb-4">
     <div class="flex items-center gap-4 flex-wrap">
-        <h1 class="text-2xl font-bold text-neutral-100">Overview</h1>
+        <h1 class="text-2xl font-bold text-neutral-100">{{ t "nav.overview" }}</h1>
         <span class="inline-flex items-center gap-2 text-sm">
             <span class="w-2.5 h-2.5 rounded-full {{if .Connected}}bg-online{{else if .ConnectionLost}}bg-event{{else}}bg-danger{{end}}" style="{{if .Connected}}box-shadow:0 0 6px rgba(139,127,209,.8){{end}}"></span>
             <span class="text-neutral-300">{{.BotStatusLabel}}</span>
         </span>
         <span class="inline-flex items-center gap-1.5 text-sm text-neutral-400">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5a7 7 0 0 1 14 0"/><path d="M8.5 15.5a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
-            {{if .ConnectionLost}}<span class="stale-pill">Stale data</span>{{else}}Connected{{end}}
+            {{if .ConnectionLost}}<span class="stale-pill">{{ t "ov.stale_data" }}</span>{{else}}{{ t "ov.connected" }}{{end}}
         </span>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
         <div class="text-right">
-            <div class="num text-lg font-bold text-neutral-100" title="Total channel points">{{.TotalPoints}}</div>
-            <div class="text-xs text-neutral-400">total points</div>
+            <div class="num text-lg font-bold text-neutral-100" title="{{ t "ov.total_points_title" }}">{{.TotalPoints}}</div>
+            <div class="text-xs text-neutral-400">{{ t "ov.total_points" }}</div>
         </div>
         <div class="text-right">
             <div class="num text-lg font-bold text-success">+{{.PointsToday}}</div>
-            <div class="text-xs text-neutral-400">today</div>
+            <div class="text-xs text-neutral-400">{{ t "ov.today" }}</div>
         </div>
         <div class="text-right">
             <div class="num text-lg font-bold text-neutral-100">{{.LiveCount}}/{{.StreamerCount}}</div>
-            <div class="text-xs text-neutral-400">live</div>
+            <div class="text-xs text-neutral-400">{{ t "ov.live" }}</div>
         </div>
-        <button type="button" class="qa-btn" title="Refresh now"
+        <button type="button" class="qa-btn" title="{{ t "ov.refresh_now" }}"
                 hx-get="/api/overview" hx-target="#overview-live" hx-swap="innerHTML">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         </button>
@@ -35,7 +35,7 @@
 
 <section id="predictions" class="mb-6">
     <div class="flex items-center gap-2 mb-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400">Live Predictions</h2>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400">{{ t "pred.heading" }}</h2>
         {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}
     </div>
     {{if .Predictions}}
@@ -43,41 +43,41 @@
         {{range .Predictions}}{{template "prediction_card" .}}{{end}}
     </div>
     {{else}}
-    <div class="board-empty">No active predictions right now. This board fills in automatically when a tracked streamer opens one.</div>
+    <div class="board-empty">{{ t "pred.empty" }}</div>
     {{end}}
 </section>
 
 <section id="grid">
     {{if .TrackedLive}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">Live · {{len .TrackedLive}}</h3>
+    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.live" }} · {{len .TrackedLive}}</h3>
     <div class="card-grid mb-6">
         {{range .TrackedLive}}{{template "overview_card" .}}{{end}}
     </div>
     {{end}}
 
     {{if .TrackedOffline}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">Offline · {{len .TrackedOffline}}</h3>
+    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.offline" }} · {{len .TrackedOffline}}</h3>
     <div class="card-grid mb-6">
         {{range .TrackedOffline}}{{template "overview_card" .}}{{end}}
     </div>
     {{end}}
 
     {{if .Untracked}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">Untracked · {{len .Untracked}}</h3>
+    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.untracked" }} · {{len .Untracked}}</h3>
     <div class="card-grid mb-6">
         {{range .Untracked}}{{template "overview_card" .}}{{end}}
     </div>
     {{end}}
 
     {{if not (or .TrackedLive .TrackedOffline .Untracked)}}
-    <p class="text-neutral-400">No streamers tracked yet. Points will appear here as they are earned.</p>
+    <p class="text-neutral-400">{{ t "grid.empty" }}</p>
     {{end}}
 </section>
 {{end}}
 
 
 {{define "events_ticker"}}
-<div class="ticker mb-4" aria-label="Active streamer events">
+<div class="ticker mb-4" aria-label="{{ t "ticker.aria" }}">
     <div class="ticker-track">
         {{range .Ticker}}
         <span class="ticker-item">
@@ -110,7 +110,7 @@
         </div>
         <div class="text-right flex-shrink-0">
             {{if .Locked}}
-            <span class="badge badge-disabled">Locked</span>
+            <span class="badge badge-disabled">{{ t "pred.locked" }}</span>
             {{else}}
             <span class="num text-sm text-event" data-window-end="{{.WindowEndUnix}}">{{.SecondsLeftLabel}}</span>
             {{end}}
@@ -122,7 +122,7 @@
         <div class="pred-outcome {{if .Chosen}}chosen{{end}} {{if .Selectable}}selectable{{end}}"
              {{if .Selectable}}role="radio" aria-checked="false" tabindex="0" data-outcome-id="{{.ID}}" data-outcome-title="{{.Title}}"{{end}}>
             <span class="text-sm text-neutral-100 truncate flex items-center gap-1">
-                {{if .Chosen}}<span class="text-online" title="Chosen outcome">◆</span>{{end}}{{.Title}}
+                {{if .Chosen}}<span class="text-online" title="{{ t "pred.chosen_outcome" }}">◆</span>{{end}}{{.Title}}
             </span>
             <span class="num text-xs text-neutral-300">{{.Percent}}%{{if .Odds}} · {{.Odds}}{{end}}</span>
             <div class="pred-obar"><span style="width: {{.Percent}}%"></span></div>
@@ -131,8 +131,8 @@
     </div>
 
     <div class="flex items-center justify-between mt-2 text-xs text-neutral-400">
-        <span>{{if .PoolLabel}}<span class="num">{{.PoolLabel}}</span> pts pool{{end}}</span>
-        {{if and .BetPlaced .BetAmount}}<span class="num badge {{if .ManualBet}}badge-watching{{else if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">bet {{.BetAmount}}</span>{{end}}
+        <span>{{if .PoolLabel}}<span class="num">{{.PoolLabel}}</span> {{ t "pred.pts_pool" }}{{end}}</span>
+        {{if and .BetPlaced .BetAmount}}<span class="num badge {{if .ManualBet}}badge-watching{{else if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">{{ t "pred.bet" }} {{.BetAmount}}</span>{{end}}
     </div>
 
     {{/* Persistent, server-truth error (survives board re-renders). */}}
@@ -142,12 +142,12 @@
     {{/* A bet exists for this round — show what/how and the auto-bet lock. */}}
     <div class="pred-status" data-bet-status>
         {{if .ManualBet}}
-        <span class="badge badge-watching">✓ Manual bet</span>
-        <span class="text-xs text-neutral-300"><span class="num">{{.BetAmount}}</span>{{if .BetOutcomeTitle}} on <span class="text-neutral-100">{{.BetOutcomeTitle}}</span>{{end}}</span>
-        <span class="badge badge-disabled" title="Auto-bet is locked for this round only">auto-bet locked</span>
+        <span class="badge badge-watching">{{ t "pred.manual_bet" }}</span>
+        <span class="text-xs text-neutral-300"><span class="num">{{.BetAmount}}</span>{{if .BetOutcomeTitle}} {{ t "pred.on" }} <span class="text-neutral-100">{{.BetOutcomeTitle}}</span>{{end}}</span>
+        <span class="badge badge-disabled" title="{{ t "pred.autobet_locked_title" }}">{{ t "pred.autobet_locked" }}</span>
         {{else}}
-        <span class="badge {{if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">Auto-bet placed</span>
-        {{if .BetOutcomeTitle}}<span class="text-xs text-neutral-300">on <span class="text-neutral-100">{{.BetOutcomeTitle}}</span></span>{{end}}
+        <span class="badge {{if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">{{ t "pred.autobet_placed" }}</span>
+        {{if .BetOutcomeTitle}}<span class="text-xs text-neutral-300">{{ t "pred.on" }} <span class="text-neutral-100">{{.BetOutcomeTitle}}</span></span>{{end}}
         {{end}}
     </div>
 
@@ -157,28 +157,28 @@
     <div class="pred-manual" data-manual data-event-id="{{.EventID}}" data-balance="{{.Balance}}" data-min="{{.MinBet}}">
         <div class="pred-manual-row">
             <input type="number" class="pred-amount num" inputmode="numeric" min="{{.MinBet}}" max="{{.Balance}}"
-                   placeholder="Points" aria-label="Bet amount for {{.Title}}" data-amount>
-            <div class="pred-fills" role="group" aria-label="Quick amounts">
+                   placeholder="{{ t "pred.points_placeholder" }}" aria-label="{{ t "pred.bet_amount_aria" }} {{.Title}}" data-amount>
+            <div class="pred-fills" role="group" aria-label="{{ t "pred.quick_amounts" }}">
                 <button type="button" class="pred-chip" data-fill="25">25%</button>
                 <button type="button" class="pred-chip" data-fill="50">50%</button>
-                <button type="button" class="pred-chip" data-fill="max">Max</button>
+                <button type="button" class="pred-chip" data-fill="max">{{ t "pred.max" }}</button>
             </div>
         </div>
         <div class="pred-manual-foot">
-            <span class="text-xs text-neutral-400">Available <span class="num">{{.BalanceLabel}}</span></span>
-            <button type="button" class="btn-bet" data-place disabled>Place bet</button>
+            <span class="text-xs text-neutral-400">{{ t "pred.available" }} <span class="num">{{.BalanceLabel}}</span></span>
+            <button type="button" class="btn-bet" data-place disabled>{{ t "pred.place_bet" }}</button>
         </div>
         <div class="pred-confirm" data-confirm hidden>
             <span class="text-xs" data-confirm-text></span>
             <div class="pred-confirm-actions">
-                <button type="button" class="btn-bet-cancel" data-cancel>Cancel</button>
-                <button type="button" class="btn-bet-go" data-go>Confirm</button>
+                <button type="button" class="btn-bet-cancel" data-cancel>{{ t "common.cancel" }}</button>
+                <button type="button" class="btn-bet-go" data-go>{{ t "common.confirm" }}</button>
             </div>
         </div>
         <div class="pred-manual-controls">
             <label class="pred-skip">
                 <input type="checkbox" data-skip {{if .AutoBetSkipped}}checked{{end}}>
-                <span class="text-xs text-neutral-400">Don't auto-bet this round</span>
+                <span class="text-xs text-neutral-400">{{ t "pred.dont_autobet" }}</span>
             </label>
         </div>
         <div class="pred-msg pred-msg-error" data-live-error role="alert" hidden></div>
@@ -187,8 +187,8 @@
     {{else if .AutoBetSkipped}}
     {{/* Round not manually bettable (locked/offline/low balance) but skipped. */}}
     <div class="pred-status" data-bet-status>
-        <span class="badge badge-disabled">Auto-bet skipped</span>
-        {{if .SkipUndoable}}<button type="button" class="pred-link" data-unskip data-event-id="{{.EventID}}">Undo</button>{{end}}
+        <span class="badge badge-disabled">{{ t "pred.autobet_skipped" }}</span>
+        {{if .SkipUndoable}}<button type="button" class="pred-link" data-unskip data-event-id="{{.EventID}}">{{ t "common.undo" }}</button>{{end}}
     </div>
     {{end}}
 </article>
@@ -198,82 +198,82 @@
 {{define "overview_card"}}
 <article class="s-card state-{{.State}}" tabindex="0" role="button"
          data-card-streamer="{{.Name}}"
-         aria-label="{{.Name}} — {{.State}}. Open recent events">
+         aria-label="{{.Name}}. {{ t "card.open_events" }}">
     <div class="flex items-start justify-between gap-2 mb-1.5">
         <div class="min-w-0 flex items-center gap-2">
             <span class="s-name text-base truncate">{{.Name}}</span>
-            {{if .HasActivePrediction}}<span class="text-event" title="Live prediction">◆</span>{{end}}
+            {{if .HasActivePrediction}}<span class="text-event" title="{{ t "card.live_prediction_title" }}">◆</span>{{end}}
         </div>
         <div class="flex items-center gap-1 flex-shrink-0">
-            {{if eq .Preference "prefer"}}<span class="badge badge-prefer" title="Preferred in rotation">★ Prefer</span>
-            {{else if eq .Preference "avoid"}}<span class="badge badge-avoid" title="Avoided in rotation">Avoid</span>{{end}}
+            {{if eq .Preference "prefer"}}<span class="badge badge-prefer" title="{{ t "card.prefer_title" }}">{{ t "card.prefer" }}</span>
+            {{else if eq .Preference "avoid"}}<span class="badge badge-avoid" title="{{ t "card.avoid_title" }}">{{ t "card.avoid" }}</span>{{end}}
         </div>
     </div>
 
     <div class="flex items-center gap-2 mb-2">
         {{if eq .State "watching"}}
-        <span class="watch-dot on"></span><span class="badge badge-watching">▶ Watching</span>
+        <span class="watch-dot on"></span><span class="badge badge-watching">{{ t "card.watching" }}</span>
         {{else if eq .State "queued"}}
-        <span class="watch-dot queue"></span><span class="badge badge-queued">◷ Queued</span>
+        <span class="watch-dot queue"></span><span class="badge badge-queued">{{ t "card.queued" }}</span>
         {{else if eq .State "disabled"}}
-        <span class="badge badge-disabled" title="{{.WatchReason}}">⊘ Disabled</span>
+        <span class="badge badge-disabled" title="{{.WatchReason}}">{{ t "card.disabled" }}</span>
         {{else}}
-        <span class="badge badge-offline">● Offline</span>
+        <span class="badge badge-offline">{{ t "card.offline" }}</span>
         {{end}}
     </div>
 
     <div class="num text-2xl font-bold s-points">{{.PointsFormatted}}</div>
     <div class="text-xs text-neutral-400 flex items-center gap-2 flex-wrap">
-        <span>channel points</span>
+        <span>{{ t "card.channel_points" }}</span>
         {{if .PointsPerHour}}<span class="badge-gain num">+{{.PointsPerHour}}/h</span>{{end}}
-        {{if .PointsToday}}<span class="text-neutral-400">· <span class="num">+{{.PointsToday}}</span> today</span>{{end}}
+        {{if .PointsToday}}<span class="text-neutral-400">· <span class="num">+{{.PointsToday}}</span> {{ t "ov.today" }}</span>{{end}}
     </div>
 
     {{if .IsLive}}
     {{if or .GameName .ViewersCount}}
     <div class="text-xs text-neutral-400 mt-2 truncate">
-        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} · {{end}}{{if .ViewersCount}}<span class="num">{{.ViewersCountFormatted}}</span> viewers{{end}}
+        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} · {{end}}{{if .ViewersCount}}<span class="num">{{.ViewersCountFormatted}}</span> {{ t "card.viewers" }}{{end}}
     </div>
     {{end}}
 
     {{if .StreakPending}}
-    <div class="mt-2" title="Watch-streak progress ({{.StreakMinutes}}/7 min)">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span>Streak</span><span class="num">{{.StreakMinutes}}/7 min</span></div>
+    <div class="mt-2" title="{{ t "card.streak_title" }} ({{.StreakMinutes}}/7 {{ t "card.min" }})">
+        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span>{{ t "card.streak" }}</span><span class="num">{{.StreakMinutes}}/7 {{ t "card.min" }}</span></div>
         <div class="bar bar-streak"><span style="width: {{.StreakPercent}}%"></span></div>
     </div>
     {{end}}
 
     {{if .HasCampaign}}
-    <div class="mt-2" title="Drop: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
+    <div class="mt-2" title="{{ t "card.drop" }}: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
         <div class="flex justify-between text-xs text-neutral-400 mb-1">
-            <span class="truncate">Drop{{if .CampaignMinutesInfo}} · <span class="num">{{.CampaignMinutesInfo}}</span>{{end}}</span>
+            <span class="truncate">{{ t "card.drop" }}{{if .CampaignMinutesInfo}} · <span class="num">{{.CampaignMinutesInfo}}</span>{{end}}</span>
             <span class="num flex-shrink-0">{{.CampaignPercent}}%</span>
         </div>
         <div class="bar bar-drop"><span style="width: {{.CampaignPercent}}%"></span></div>
     </div>
     {{end}}
     {{else}}
-    <div class="text-xs text-neutral-400 mt-2">{{if .OfflineDuration}}Offline for {{.OfflineDuration}}{{end}}</div>
+    <div class="text-xs text-neutral-400 mt-2">{{if .OfflineDuration}}{{ t "card.offline_for" }} {{.OfflineDuration}}{{end}}</div>
     {{end}}
 
     {{if .HasGoal}}
-    <div class="mt-2" title="Community goal: {{.GoalTitle}}">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span class="truncate">Goal · {{.GoalTitle}}</span><span class="num">{{.GoalPercent}}%</span></div>
+    <div class="mt-2" title="{{ t "card.goal_title" }}: {{.GoalTitle}}">
+        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span class="truncate">{{ t "card.goal" }} · {{.GoalTitle}}</span><span class="num">{{.GoalPercent}}%</span></div>
         <div class="bar bar-goal"><span style="width: {{.GoalPercent}}%"></span></div>
     </div>
     {{end}}
 
     <div class="flex items-center justify-between gap-2 mt-3 pt-2 border-t border-neutral-700">
         <div class="text-xs text-neutral-400 truncate min-w-0">
-            {{if .LastEventText}}<span title="{{.LastEventText}}">{{.LastEventText}}</span> · <span class="whitespace-nowrap">{{.LastEventAgo}}</span>{{else}}No recent events{{end}}
+            {{if .LastEventText}}<span title="{{.LastEventText}}">{{.LastEventText}}</span> · <span class="whitespace-nowrap">{{.LastEventAgo}}</span>{{else}}{{ t "card.no_events" }}{{end}}
         </div>
         <div class="flex items-center gap-1 flex-shrink-0">
             <button type="button" class="qa-btn {{if eq .Preference "prefer"}}is-on{{else if eq .Preference "avoid"}}is-danger{{end}}"
                     data-action="cycle-preference" data-streamer="{{.Name}}"
-                    title="Rotation priority: {{if eq .Preference "prefer"}}Preferred{{else if eq .Preference "avoid"}}Avoided{{else}}Neutral{{end}} (click to cycle)">★</button>
+                    title="{{ t "card.rotation_priority" }}: {{if eq .Preference "prefer"}}{{ t "card.pref_preferred" }}{{else if eq .Preference "avoid"}}{{ t "card.pref_avoided" }}{{else}}{{ t "card.pref_neutral" }}{{end}} ({{ t "card.click_to_cycle" }})">★</button>
             <button type="button" class="qa-btn {{if .DisableWatch}}is-danger{{end}}"
                     data-action="toggle-watch" data-streamer="{{.Name}}"
-                    title="{{if .DisableWatch}}Watching disabled — click to enable{{else}}Watching enabled — click to disable{{end}}">
+                    title="{{if .DisableWatch}}{{ t "card.watch_disabled_hint" }}{{else}}{{ t "card.watch_enabled_hint" }}{{end}}">
                 {{if .DisableWatch}}⊘{{else}}▶{{end}}
             </button>
         </div>

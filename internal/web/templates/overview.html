@@ -64,15 +64,15 @@
             const data = await res.json();
             if (!data.success) throw new Error(data.message || 'failed');
             if (action === 'cycle-preference') {
-                const label = data.preference === 'prefer' ? 'Preferred' : (data.preference === 'avoid' ? 'Avoided' : 'Neutral');
+                const label = data.preference === 'prefer' ? t('js.ov.pref_preferred') : (data.preference === 'avoid' ? t('js.ov.pref_avoided') : t('js.ov.pref_neutral'));
                 showToast(name + ' → ' + label);
             } else {
-                showToast(name + (data.disableWatch ? ' → watching disabled' : ' → watching enabled'));
+                showToast(name + ' → ' + (data.disableWatch ? t('js.ov.watching_disabled') : t('js.ov.watching_enabled')));
             }
             // Refresh the live grid so badges/state reflect the change.
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
-            showToast('Action failed', 'error');
+            showToast(t('js.ov.action_failed'), 'error');
         } finally {
             btn.disabled = false;
         }
@@ -82,12 +82,12 @@
     function openEvents(name) {
         const drawer = document.getElementById('events-drawer');
         const body = document.getElementById('events-drawer-body');
-        body.innerHTML = '<div class="p-5 text-neutral-400 text-sm">Loading…</div>';
+        body.innerHTML = '<div class="p-5 text-neutral-400 text-sm">' + t('js.ov.loading') + '</div>';
         if (typeof drawer.showModal === 'function') drawer.showModal();
         fetch('/api/overview/events/' + encodeURIComponent(name))
             .then(r => r.text())
             .then(html => { body.innerHTML = html; })
-            .catch(() => { body.innerHTML = '<div class="p-5 text-danger text-sm">Failed to load events.</div>'; });
+            .catch(() => { body.innerHTML = '<div class="p-5 text-danger text-sm">' + t('js.ov.failed_events') + '</div>'; });
     }
 
     document.addEventListener('click', (e) => {
@@ -145,9 +145,9 @@
         const raw = (st.amount || '').trim();
         if (raw === '') return { ok: false, hint: '' };
         const n = Number(raw);
-        if (!Number.isInteger(n) || n <= 0) return { ok: false, hint: 'Enter a whole number of points' };
-        if (n < min) return { ok: false, hint: 'Minimum bet is ' + min + ' points' };
-        if (n > balance) return { ok: false, hint: 'That exceeds your balance' };
+        if (!Number.isInteger(n) || n <= 0) return { ok: false, hint: t('js.ov.enter_whole') };
+        if (n < min) return { ok: false, hint: t('js.ov.min_bet', { n: min }) };
+        if (n > balance) return { ok: false, hint: t('js.ov.exceeds_balance') };
         return { ok: true, hint: '', value: n };
     }
 
@@ -194,8 +194,11 @@
         const text = manual.querySelector('[data-confirm-text]');
         const place = manual.querySelector('[data-place]');
         const balance = parseInt(manual.dataset.balance || '0', 10);
-        if (text) text.innerHTML = 'Bet <strong>' + amt.value.toLocaleString() + '</strong> on <strong>' +
-            (st.outcomeTitle || 'selected outcome') + '</strong> · balance ' + balance.toLocaleString();
+        if (text) text.innerHTML = t('js.ov.bet_confirm', {
+            amount: '<strong>' + amt.value.toLocaleString() + '</strong>',
+            outcome: '<strong>' + (st.outcomeTitle || t('js.ov.selected_outcome')) + '</strong>',
+            balance: balance.toLocaleString()
+        });
         if (confirm) confirm.hidden = false;
         if (place) place.hidden = true;
         updateBusy();
@@ -227,23 +230,23 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ eventId: eventId, outcomeId: st.outcomeId, amount: amt.value })
             });
-            const data = await res.json().catch(() => ({ success: false, message: 'Unexpected server response' }));
-            if (res.status !== 200) throw new Error((data && data.message) || ('Request failed (' + res.status + ')'));
+            const data = await res.json().catch(() => ({ success: false, message: t('js.ov.unexpected_response') }));
+            if (res.status !== 200) throw new Error((data && data.message) || t('js.ov.request_failed', { status: res.status }));
             if (!data.success) {
                 st.inflight = false; st.confirming = false;
-                st.error = data.message || 'The bet could not be placed';
+                st.error = data.message || t('js.ov.bet_failed');
                 showToast(st.error, 'error');
                 updateBusy();
                 if (window.htmx) htmx.trigger('#overview-live', 'refresh');
                 return;
             }
             delete manualUI[eventId];
-            showToast('Bet placed: ' + (data.amount || amt.value).toLocaleString() + ' on ' + (data.outcome || st.outcomeTitle));
+            showToast(t('js.ov.bet_placed', { amount: (data.amount || amt.value).toLocaleString(), outcome: (data.outcome || st.outcomeTitle) }));
             updateBusy();
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
             st.inflight = false; st.confirming = false;
-            st.error = e.message || 'Connection lost — the bet was not placed';
+            st.error = e.message || t('js.ov.conn_lost_bet');
             showToast(st.error, 'error');
             showLiveError(manual, st.error);
             updateBusy();
@@ -258,12 +261,12 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ eventId: eventId, skip: skip })
             });
-            const data = await res.json().catch(() => ({ success: false, message: 'Unexpected server response' }));
-            if (res.status !== 200 || !data.success) throw new Error((data && data.message) || 'Could not update auto-bet');
-            showToast(data.message || (skip ? 'Auto-bet skipped' : 'Auto-bet re-enabled'));
+            const data = await res.json().catch(() => ({ success: false, message: t('js.ov.unexpected_response') }));
+            if (res.status !== 200 || !data.success) throw new Error((data && data.message) || t('js.ov.could_not_update_autobet'));
+            showToast(data.message || (skip ? t('js.ov.autobet_skipped') : t('js.ov.autobet_reenabled')));
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
-            showToast(e.message || 'Action failed', 'error');
+            showToast(e.message || t('js.ov.action_failed'), 'error');
             if (input && input.type === 'checkbox') input.checked = !skip; // revert
         } finally {
             if (input) input.disabled = false;
