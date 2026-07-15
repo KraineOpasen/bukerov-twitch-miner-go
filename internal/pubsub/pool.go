@@ -315,7 +315,7 @@ func (p *WebSocketPool) Submit(topic Topic) error {
 	defer p.mu.Unlock()
 
 	if len(p.clients) == 0 || p.clients[len(p.clients)-1].TopicCount() >= constants.MaxTopicsPerConnection {
-		ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.handleMessage, p.handleError)
+		ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
 		// Wire the reconnect counter before Connect() starts the read/ping loops,
 		// so the handler is set before any reconnect can fire.
 		ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
