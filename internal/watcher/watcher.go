@@ -358,15 +358,44 @@ func (w *MinuteWatcher) loop() {
 		default:
 		}
 
+		tickStart := time.Now()
 		w.processWatching()
 
+		// processWatching already spread this tick's per-slot sends across
+		// ~interval via pace() (interval/N between each of the N sends). Waiting a
+		// further full interval here would report each channel only once per
+		// ~2*interval — tripping the 2*interval continuity threshold roughly half
+		// the time (with jitter) even for a continuously-watched channel, so
+		// MinuteWatched keeps resetting to 0 and watch streaks never accumulate.
+		// Wait out only the remainder of this interval so a continuously-watched
+		// channel is reported ~once per interval; an idle tick that did no pacing
+		// (no slots) leaves spent≈0, so it still waits ~a full interval instead of
+		// busy-looping. interval is read after processWatching so a runtime
+		// interval change applied this tick takes effect immediately.
 		interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
+		wait := settleWait(interval, time.Since(tickStart))
+		if wait <= 0 {
+			continue
+		}
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-time.After(w.randomizedDelay(interval)):
+		case <-time.After(w.randomizedDelay(wait)):
 		}
 	}
+}
+
+// settleWait returns how long loop() should idle after a processWatching tick:
+// the part of the interval not already consumed by the tick's paced sends,
+// clamped to zero. When the send loop already spanned ~the whole interval (the
+// normal case with live slots) this is ~0, so a continuously-watched channel is
+// reported ~once per interval instead of once per 2*interval; when the tick did
+// no pacing (no slots) spent is ~0 and close to a full interval is returned.
+func settleWait(interval, spent time.Duration) time.Duration {
+	if spent >= interval {
+		return 0
+	}
+	return interval - spent
 }
 
 func (w *MinuteWatcher) processWatching() {
