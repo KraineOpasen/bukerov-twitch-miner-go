@@ -1,6 +1,7 @@
 package streamer
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -51,13 +52,30 @@ func (m *Manager) LoadFromConfig(configs []config.StreamerConfig, onProgress Pro
 
 		channelID, err := m.client.GetChannelID(streamer.Username)
 		if err != nil {
-			slog.Warn("Streamer not found, skipping", "username", sc.Username, "error", err)
+			// A stale persisted-query hash (PersistedQueryNotFound) is a
+			// temporary Twitch-side outage, not a missing channel — don't call it
+			// "not found".
+			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+				slog.Warn("Could not resolve channel ID: stale Twitch query metadata (not a missing channel); skipping for now",
+					"username", sc.Username, "error", err)
+			} else {
+				slog.Warn("Streamer not found, skipping", "username", sc.Username, "error", err)
+			}
 			continue
 		}
 		streamer.ChannelID = channelID
 
 		if err := m.client.LoadChannelPointsContext(streamer); err != nil {
-			slog.Warn("Failed to load channel points", "streamer", streamer.Username, "error", err)
+			// The streamer is kept regardless of this error, and its points are
+			// left untouched (LoadChannelPointsContext only writes points on a
+			// successful read). A PersistedQueryNotFound here must never be
+			// reported as "streamer does not exist".
+			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+				slog.Warn("Channel points context unavailable (stale Twitch query metadata); keeping streamer with last-known points",
+					"streamer", streamer.Username, "error", err)
+			} else {
+				slog.Warn("Failed to load channel points", "streamer", streamer.Username, "error", err)
+			}
 		}
 
 		m.mu.Lock()
@@ -169,13 +187,23 @@ func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models
 			streamer := models.NewStreamer(username, settings)
 			channelID, err := m.client.GetChannelID(streamer.Username)
 			if err != nil {
-				slog.Warn("Failed to add streamer", "username", username, "error", err)
+				if errors.Is(err, api.ErrPersistedQueryNotFound) {
+					slog.Warn("Could not add streamer yet: stale Twitch query metadata (not a missing channel); will retry on next settings apply",
+						"username", username, "error", err)
+				} else {
+					slog.Warn("Failed to add streamer", "username", username, "error", err)
+				}
 				continue
 			}
 			streamer.ChannelID = channelID
 
 			if err := m.client.LoadChannelPointsContext(streamer); err != nil {
-				slog.Warn("Failed to load channel points for new streamer", "streamer", username, "error", err)
+				if errors.Is(err, api.ErrPersistedQueryNotFound) {
+					slog.Warn("Channel points context unavailable for new streamer (stale Twitch query metadata); keeping streamer",
+						"streamer", username, "error", err)
+				} else {
+					slog.Warn("Failed to load channel points for new streamer", "streamer", username, "error", err)
+				}
 			}
 
 			m.streamers = append(m.streamers, streamer)
