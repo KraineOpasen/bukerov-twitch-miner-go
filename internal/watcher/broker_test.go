@@ -539,6 +539,12 @@ func TestBrokerSnapshotReflectsAllocation(t *testing.T) {
 	if !w.IsWatching("disco") {
 		t.Error("IsWatching should report the slotted discovery channel as watched")
 	}
+	if o := w.WatchingOrigin("disco"); o != OriginDiscovery {
+		t.Errorf("WatchingOrigin should report the discovery origin, got %q", o)
+	}
+	if o := w.WatchingOrigin("nobody"); o != "" {
+		t.Errorf("WatchingOrigin of an unwatched channel should be empty, got %q", o)
+	}
 }
 
 // TestProcessWatchingContextCancelStopsSends: a cancelled context aborts the

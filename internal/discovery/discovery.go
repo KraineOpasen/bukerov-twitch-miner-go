@@ -82,6 +82,13 @@ type twitchAPI interface {
 // Satisfied by *watcher.MinuteWatcher.
 type SlotStatus interface {
 	IsWatching(login string) bool
+	// WatchingOrigin returns the origin ("configured"/"discovery", i.e. one of
+	// the watcher.Origin* values) of the slot currently holding login, or "" when
+	// login is not being watched. In tracked-only mode it lets discovery tell a
+	// channel the rotation already holds (origin != discovery — yield it, it is a
+	// duplicate) from one the broker placed on discovery's own proposal (keep it),
+	// which IsWatching alone cannot distinguish.
+	WatchingOrigin(login string) string
 }
 
 // TrackedLoginsProvider exposes the logins of the configured streamer list so
@@ -140,6 +147,13 @@ type Manager struct {
 	gameRanks  atomic.Pointer[map[string]int]
 	settings   config.RateLimitSettings
 
+	// mode selects candidacy: DiscoveryModeAll farms non-tracked directory
+	// channels (the default), DiscoveryModeTrackedOnly inverts the exclusion
+	// gates to farm only configured-list channels the rotation is not already
+	// watching. Guarded by mu (written by UpdateSettings, read by the sync/watch
+	// loops).
+	mode config.DiscoveryMode
+
 	games []string
 
 	pool     []*Channel
@@ -164,12 +178,14 @@ func NewManager(
 	tracked TrackedLoginsProvider,
 	settings config.RateLimitSettings,
 	games []string,
+	mode config.DiscoveryMode,
 ) *Manager {
 	return &Manager{
 		client:    client,
 		campaigns: campaigns,
 		tracked:   tracked,
 		settings:  settings,
+		mode:      config.NormalizeDiscoveryMode(string(mode)),
 		games:     games,
 		resync:    make(chan struct{}, 1),
 	}
@@ -266,6 +282,43 @@ func (m *Manager) isTracked(login string) bool {
 	return false
 }
 
+// trackedOnly reports whether discovery is restricted to the configured
+// streamer list (DiscoveryModeTrackedOnly). The zero value is DiscoveryModeAll,
+// so an unset mode preserves the original behavior.
+func (m *Manager) trackedOnly() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mode == config.DiscoveryModeTrackedOnly
+}
+
+// isWatchingSlot reports whether the slot broker currently watches login (by any
+// source). Used by the tracked-only selection gate so discovery never proposes a
+// channel that is already being watched — proposing it would only duplicate the
+// watch and waste discovery's slot contribution.
+func (m *Manager) isWatchingSlot(login string) bool {
+	m.mu.RLock()
+	s := m.slotStatus
+	m.mu.RUnlock()
+	return s != nil && s.IsWatching(login)
+}
+
+// watchedByRotation reports whether login holds a watch slot owned by a source
+// OTHER than discovery (i.e. the configured rotation). This is the case a
+// tracked-only current must yield: the rotation already covers it, so keeping it
+// as discovery's proposal is redundant. A channel the broker placed on
+// discovery's own proposal (origin == discovery) is deliberately excluded, so
+// abandoning it here would only cause the slot to flap.
+func (m *Manager) watchedByRotation(login string) bool {
+	m.mu.RLock()
+	s := m.slotStatus
+	m.mu.RUnlock()
+	if s == nil {
+		return false
+	}
+	o := s.WatchingOrigin(login)
+	return o != "" && o != watcher.OriginDiscovery
+}
+
 func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	m.ctx, m.cancel = context.WithCancel(ctx)
@@ -285,12 +338,13 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 }
 
-// UpdateSettings replaces the configured game list (and rate limits) at
-// runtime, e.g. from the Settings page, and triggers an immediate directory
-// resync so changes apply without waiting out the current interval.
-func (m *Manager) UpdateSettings(games []string, settings config.RateLimitSettings) {
+// UpdateSettings replaces the configured game list, discovery mode, and rate
+// limits at runtime, e.g. from the Settings page, and triggers an immediate
+// directory resync so changes apply without waiting out the current interval.
+func (m *Manager) UpdateSettings(games []string, mode config.DiscoveryMode, settings config.RateLimitSettings) {
 	m.mu.Lock()
 	m.games = games
+	m.mode = config.NormalizeDiscoveryMode(string(mode))
 	m.settings = settings
 	m.mu.Unlock()
 
@@ -350,6 +404,7 @@ func (m *Manager) syncOnce() time.Duration {
 
 	m.mu.RLock()
 	regularInterval := time.Duration(m.settings.CampaignSyncInterval) * time.Minute
+	trackedOnly := m.mode == config.DiscoveryModeTrackedOnly
 	m.mu.RUnlock()
 
 	if len(games) == 0 {
@@ -410,10 +465,16 @@ func (m *Manager) syncOnce() time.Duration {
 			if !ds.DropsEnabled || ds.Login == "" || ds.ChannelID == "" {
 				continue
 			}
-			// Channels on the configured streamer list are the rotation's
-			// business — duplicating them here would double-report watch
-			// minutes for the same channel and waste the discovery slot.
-			if trackedSet[strings.ToLower(ds.Login)] {
+			// In "all" mode, channels on the configured streamer list are the
+			// rotation's business — duplicating them here would double-report
+			// watch minutes for the same channel and waste the discovery slot.
+			// "tracked_only" inverts this: it keeps ONLY configured-list channels
+			// and drops everything else from the pool.
+			if trackedOnly {
+				if !trackedSet[strings.ToLower(ds.Login)] {
+					continue
+				}
+			} else if trackedSet[strings.ToLower(ds.Login)] {
 				continue
 			}
 			ch := m.findExistingLocked(ds.Login)
@@ -729,11 +790,24 @@ func (m *Manager) prepareCurrent() *Channel {
 // claimed).
 func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	game, gameID, _, _ := m.channelFacts(ch)
+	trackedOnly := m.trackedOnly()
 
 	if !m.gameConfigured(game) {
 		return "game removed from directory discovery settings", true
 	}
-	if m.isTracked(ch.Streamer.Username) {
+	if trackedOnly {
+		// tracked_only inverts the exclusion: a channel dropped from the
+		// configured list is no longer eligible, and one the rotation is now
+		// watching itself must be yielded so discovery does not duplicate the
+		// watch (a channel the broker placed on discovery's own proposal keeps
+		// origin == discovery and is left alone by watchedByRotation).
+		if !m.isTracked(ch.Streamer.Username) {
+			return "channel is no longer on the configured streamer list (tracked-only discovery)", true
+		}
+		if m.watchedByRotation(ch.Streamer.Username) {
+			return "channel is already watched by the rotation (no duplicate watch)", true
+		}
+	} else if m.isTracked(ch.Streamer.Username) {
 		return "channel is now on the configured streamer list (rotation covers it)", true
 	}
 	if !ch.Streamer.GetIsOnline() {
@@ -767,6 +841,7 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 	copy(pool, m.pool)
 	m.mu.RUnlock()
 
+	trackedOnly := m.trackedOnly()
 	checks := 0
 	for _, ch := range pool {
 		if ch == exclude {
@@ -782,7 +857,18 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 		if !m.gameConfigured(game) {
 			continue
 		}
-		if m.isTracked(ch.Streamer.Username) {
+		if trackedOnly {
+			// tracked_only: only configured-list channels are eligible, and never
+			// one the rotation is already watching — proposing an already-watched
+			// channel would just duplicate the watch instead of filling an idle
+			// slot with a different tracked channel.
+			if !m.isTracked(ch.Streamer.Username) {
+				continue
+			}
+			if m.isWatchingSlot(ch.Streamer.Username) {
+				continue
+			}
+		} else if m.isTracked(ch.Streamer.Username) {
 			continue
 		}
 		if m.isAvoided(ch.Streamer.Username) {

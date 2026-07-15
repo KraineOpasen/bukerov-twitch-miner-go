@@ -416,6 +416,22 @@ func (w *MinuteWatcher) IsWatching(login string) bool {
 	return (*m)[login]
 }
 
+// WatchingOrigin returns the origin (OriginConfigured/OriginDiscovery) of the
+// slot currently holding login, or "" when login is not being watched. Reads
+// the published snapshot (at most constants.MaxSimultaneousStreams slots), so it
+// takes no broker lock. It lets tracked-only discovery tell a channel the
+// rotation holds from one placed on discovery's own proposal — a distinction
+// IsWatching cannot make. Satisfies the discovery subsystem's slot-status
+// interface.
+func (w *MinuteWatcher) WatchingOrigin(login string) string {
+	for _, s := range w.BrokerSnapshot().Slots {
+		if s.Channel == login {
+			return s.Origin
+		}
+	}
+	return ""
+}
+
 // logSlotChanges emits an INFO log and a recent-events entry only when the
 // allocation actually changes — a channel takes or leaves a slot, or its
 // reason changes — so a steady state does not log the same decision every

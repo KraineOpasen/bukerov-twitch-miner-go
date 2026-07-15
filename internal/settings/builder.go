@@ -76,6 +76,7 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		DropBlacklist:          cfg.DropBlacklist,
 		DirectoryGames:         cfg.DirectoryGames,
 		DiscoveryPreferTracked: cfg.DiscoveryPreferTracked,
+		DiscoveryMode:          string(cfg.DiscoveryMode),
 	}
 }
 
@@ -142,6 +143,7 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		DropBlacklist:          defaults.DropBlacklist,
 		DirectoryGames:         defaults.DirectoryGames,
 		DiscoveryPreferTracked: defaults.DiscoveryPreferTracked,
+		DiscoveryMode:          string(defaults.DiscoveryMode),
 	}
 }
 
@@ -195,6 +197,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
 	cfg.DirectoryGames = normalizeGameList(s.DirectoryGames)
 	cfg.DiscoveryPreferTracked = s.DiscoveryPreferTracked
+	cfg.DiscoveryMode = config.NormalizeDiscoveryMode(s.DiscoveryMode)
 
 	config.ValidateConfig(cfg)
 }

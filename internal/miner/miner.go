@@ -439,6 +439,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.streamers,
 		m.config.RateLimits,
 		m.config.DirectoryGames,
+		m.config.DiscoveryMode,
 	)
 
 	// Discovery is a candidate source for the unified slot broker, not an
@@ -1068,7 +1069,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	}
 
 	if m.discovery != nil {
-		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.RateLimits)
+		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.RateLimits)
 	}
 
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)

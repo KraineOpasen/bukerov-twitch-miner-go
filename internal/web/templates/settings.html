@@ -125,6 +125,17 @@
 
             <div class="setting-row mt-4">
                 <div>
+                    <div class="setting-label">{{ t "set.directory.mode_label" }}</div>
+                    <div class="setting-description">{{ t "set.directory.mode_desc" }}</div>
+                </div>
+                <select class="input-field w-48" id="discoveryMode">
+                    <option value="all">{{ t "set.directory.mode_all" }}</option>
+                    <option value="tracked_only">{{ t "set.directory.mode_tracked_only" }}</option>
+                </select>
+            </div>
+
+            <div class="setting-row mt-4">
+                <div>
                     <div class="setting-label">{{ t "set.directory.prefer_tracked_label" }}</div>
                     <div class="setting-description">{{ t "set.directory.prefer_tracked_desc" }}</div>
                 </div>
@@ -587,6 +598,7 @@
         document.getElementById('dropBlacklist').value = (settings.dropBlacklist || []).join('\n');
 
         populateDirectoryGameList(settings.directoryGames || []);
+        document.getElementById('discoveryMode').value = settings.discoveryMode || 'all';
         document.getElementById('discoveryPreferTracked').checked = !!settings.discoveryPreferTracked;
     }
 
@@ -1020,6 +1032,7 @@
             },
             dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
             directoryGames: gatherDirectoryGames(),
+            discoveryMode: document.getElementById('discoveryMode').value,
             discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked
         };
     }

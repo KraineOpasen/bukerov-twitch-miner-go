@@ -298,6 +298,24 @@ func TestValidateConfigNormalizesCampaignPolicy(t *testing.T) {
 	}
 }
 
+func TestValidateConfigNormalizesDiscoveryMode(t *testing.T) {
+	cases := map[string]DiscoveryMode{
+		"":              DiscoveryModeAll,         // unset → behavior-preserving default
+		"all":           DiscoveryModeAll,         // canonical
+		"TRACKED_ONLY":  DiscoveryModeTrackedOnly, // upper-cased normalizes
+		" tracked_only": DiscoveryModeTrackedOnly, // trimmed
+		"nonsense":      DiscoveryModeAll,         // unknown falls back
+	}
+	for in, want := range cases {
+		cfg := DefaultConfig()
+		cfg.DiscoveryMode = DiscoveryMode(in)
+		ValidateConfig(&cfg)
+		if cfg.DiscoveryMode != want {
+			t.Errorf("mode %q normalized to %q, want %q", in, cfg.DiscoveryMode, want)
+		}
+	}
+}
+
 func TestLoadConfigParsesDropRules(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"username": "test",

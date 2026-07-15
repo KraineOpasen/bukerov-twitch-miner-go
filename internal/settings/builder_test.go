@@ -103,6 +103,31 @@ func TestDiscoveryPreferTrackedRoundTrips(t *testing.T) {
 	}
 }
 
+func TestDiscoveryModeRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.DiscoveryMode != "" && cfg.DiscoveryMode != config.DiscoveryModeAll {
+		t.Fatalf("default config must leave DiscoveryMode at the behavior-preserving default, got %q", cfg.DiscoveryMode)
+	}
+
+	// Selecting tracked_only via the DTO must reach the config, canonicalized.
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryMode: "tracked_only"})
+	if cfg.DiscoveryMode != config.DiscoveryModeTrackedOnly {
+		t.Errorf("expected ApplyToConfig to set tracked_only, got %q", cfg.DiscoveryMode)
+	}
+
+	// And it must survive the round trip back to the DTO.
+	rt := BuildRuntimeSettings(&cfg)
+	if rt.DiscoveryMode != "tracked_only" {
+		t.Errorf("expected DiscoveryMode to survive the round trip, got %q", rt.DiscoveryMode)
+	}
+
+	// An empty/unknown DTO value normalizes back to "all" (not a one-way latch).
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryMode: ""})
+	if cfg.DiscoveryMode != config.DiscoveryModeAll {
+		t.Errorf("expected an empty DTO mode to normalize to all, got %q", cfg.DiscoveryMode)
+	}
+}
+
 // --- Env-managed Discord token semantics (Stage C hardening) ---
 
 // With DISCORD_BOT_TOKEN managing the token, the Settings UI must never see

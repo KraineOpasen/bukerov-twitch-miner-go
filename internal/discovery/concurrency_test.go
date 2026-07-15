@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -35,7 +36,7 @@ func newRaceManager(t *testing.T) *Manager {
 		{ChannelID: "1", Login: "chan_a", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 
-	m := NewManager(nil, provider, &fakeTracked{}, testRateLimits(), []string{"World of Tanks"})
+	m := NewManager(nil, provider, &fakeTracked{}, testRateLimits(), []string{"World of Tanks"}, config.DiscoveryModeAll)
 	m.client = client
 	// A broker whose slot status is always "watching" — State() consults it,
 	// exercising that path concurrently with the sync and prepare loops.
