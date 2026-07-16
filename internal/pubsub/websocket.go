@@ -22,15 +22,30 @@ type WebSocketClient struct {
 	pingInterval   int
 	reconnectDelay int
 
+	// url is the WebSocket endpoint to dial. Defaults to constants.PubSubURL;
+	// overridable so tests can point the client at a local server, and a seam
+	// for a future transport abstraction (PubSub -> Hermes).
+	url string
+
+	// delayUnit scales reconnectDelay (seconds in production). A test seam in
+	// the spirit of drops.intervalUnit, so reconnect pacing is observable in
+	// milliseconds instead of real seconds.
+	delayUnit time.Duration
+
 	isOpened       bool
 	isClosed       bool
 	isReconnecting bool
 	forcedClose    bool
 
-	lastPong    time.Time
-	lastPing    time.Time
-	lastMsgTime time.Time
-	lastMsgID   string
+	lastPong time.Time
+	lastPing time.Time
+	// lastConnectedAt is when the current connection was established. The
+	// read-error reconnect path uses it as an anti-flap guard: only a link
+	// that had been up for at least one reconnectDelay earns an immediate
+	// redial (see readErrorReconnectDelay).
+	lastConnectedAt time.Time
+	lastMsgTime     time.Time
+	lastMsgID       string
 
 	onMessage   func(*PubSubMessage)
 	onError     func(error)
@@ -47,6 +62,8 @@ func NewWebSocketClient(index int, authToken string, pingInterval int, reconnect
 		authToken:      authToken,
 		pingInterval:   pingInterval,
 		reconnectDelay: reconnectDelay,
+		url:            constants.PubSubURL,
+		delayUnit:      time.Second,
 		onMessage:      onMessage,
 		onError:        onError,
 		stopChan:       make(chan struct{}),
@@ -65,7 +82,7 @@ func (ws *WebSocketClient) Connect() error {
 	// reconnect guard and the ping-loop watchdog cannot spawn a second, racing
 	// reconnect while this one is still dialing. They are cleared only once the
 	// connection is actually established, below.
-	conn, _, err := dialer.Dial(constants.PubSubURL, nil)
+	conn, _, err := dialer.Dial(ws.url, nil)
 	if err != nil {
 		return err
 	}
@@ -76,6 +93,7 @@ func (ws *WebSocketClient) Connect() error {
 	ws.isReconnecting = false
 	ws.isClosed = false
 	ws.lastPong = time.Now()
+	ws.lastConnectedAt = time.Now()
 	pending := ws.pendingTopics
 	ws.mu.Unlock()
 
@@ -287,15 +305,37 @@ func (ws *WebSocketClient) readLoop() {
 
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			// Read errors on a gorilla connection are permanent (and repeated
+			// reads on a failed connection eventually panic), so this loop
+			// always exits here — exactly once. Classification is by our own
+			// state flags, never by the error's contents: transport failures
+			// aren't CloseErrors, close-code matching is toolchain-fragile,
+			// and both deliberate paths already flag themselves before
+			// closing the conn (Close sets forcedClose; reconnect sets
+			// isReconnecting under mu before Close on the old conn).
 			ws.mu.RLock()
 			forcedClose := ws.forcedClose
+			reconnecting := ws.isReconnecting
+			delay := ws.readErrorReconnectDelayLocked()
 			ws.mu.RUnlock()
 
-			if !forcedClose {
-				slog.Error("WebSocket read error", "index", ws.index, "error", err)
+			switch {
+			case forcedClose:
+				// Deliberate shutdown: silent, no reconnect.
+			case reconnecting:
+				// Our own reconnect closed the conn under this reader — an
+				// expected artifact, not an error, and the reconnect is
+				// already in flight.
+				slog.Debug("WebSocket read loop ended during reconnect", "index", ws.index)
+			default:
+				// Unexpected death (reset by peer, server close frame such as
+				// 4100, abnormal EOF): without this trigger the connection
+				// stayed deaf until the 5-minute PONG watchdog noticed.
+				slog.Error("WebSocket read error; reconnecting", "index", ws.index, "error", err, "delay", delay)
 				if ws.onError != nil {
 					ws.onError(err)
 				}
+				go ws.reconnectAfter(delay)
 			}
 			return
 		}
@@ -397,7 +437,38 @@ func (ws *WebSocketClient) pingLoop() {
 	}
 }
 
+// configuredReconnectDelay is the operator-configured pause before a redial
+// (ReconnectDelay seconds in production; delayUnit is a test seam).
+func (ws *WebSocketClient) configuredReconnectDelay() time.Duration {
+	return time.Duration(ws.reconnectDelay) * ws.delayUnit
+}
+
+// readErrorReconnectDelayLocked picks the redial pause for the unexpected
+// read-error path. A connection that had been up for at least one configured
+// reconnectDelay earns an immediate first dial — that is what closes the
+// multi-minute deaf window between a socket dying and the PONG watchdog
+// noticing. A connection that dies right after connecting is flapping and
+// waits the full configured delay, so "dial succeeds -> dies instantly"
+// cannot hot-loop at ~1s. This is an anti-flap guard, not a backoff: the
+// self-retry pacing below is unchanged. Caller must hold ws.mu (read or
+// write).
+func (ws *WebSocketClient) readErrorReconnectDelayLocked() time.Duration {
+	delay := ws.configuredReconnectDelay()
+	if time.Since(ws.lastConnectedAt) >= delay {
+		return 0
+	}
+	return delay
+}
+
+// reconnect re-establishes the connection after the operator-configured
+// delay. Used by the server RECONNECT frame, the PONG watchdog, and the
+// failed-dial self-retry; the unexpected read-error path calls
+// reconnectAfter directly with the anti-flap delay.
 func (ws *WebSocketClient) reconnect() {
+	ws.reconnectAfter(ws.configuredReconnectDelay())
+}
+
+func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	ws.mu.Lock()
 	if ws.isReconnecting || ws.forcedClose {
 		ws.mu.Unlock()
@@ -420,8 +491,8 @@ func (ws *WebSocketClient) reconnect() {
 		_ = ws.conn.Close()
 	}
 
-	slog.Info("Reconnecting WebSocket", "index", ws.index, "delaySeconds", ws.reconnectDelay)
-	time.Sleep(time.Duration(ws.reconnectDelay) * time.Second)
+	slog.Info("Reconnecting WebSocket", "index", ws.index, "delay", delay)
+	time.Sleep(delay)
 
 	ws.mu.Lock()
 	if ws.forcedClose {
