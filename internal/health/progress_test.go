@@ -682,6 +682,58 @@ func TestWatchdogChannelSwitchRebaselines(t *testing.T) {
 	}
 }
 
+// TestWatchdogRebaselineDefersUntilStatsAvailable: when the farming channel
+// changes but the watcher has not published stats for the new channel yet, the
+// re-baseline read misses. Pre-fix the baseline was fixed at 0, so a later tick
+// whose read succeeded counted the channel's entire lifetime success count as
+// progress-since-baseline (ReportsSinceProgress jumping to the full counter).
+// The baseline must instead be adopted from the first successful read.
+func TestWatchdogRebaselineDefersUntilStatsAvailable(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+	h.tick(10*time.Minute, true, 5)
+	if st := h.state(t); st.ReportsSinceProgress != 5 {
+		t.Fatalf("expected 5 reports accounted, got %+v", st)
+	}
+
+	// The campaign moves to chan2, but no stats have been published for it yet:
+	// ReportStats("chan2") misses on this tick.
+	streamer2 := models.NewStreamer("chan2", models.StreamerSettings{ClaimDrops: true})
+	streamer2.ChannelID = "cid-chan2"
+	streamer2.Stream.Update("b2", "t", h.campaign.Game, nil, 10)
+	streamer2.Stream.SetCampaigns([]*models.Campaign{h.campaign})
+	h.watch.mu.Lock()
+	h.watch.slots = []string{"chan2"}
+	h.watch.mu.Unlock()
+	prev := h.w.resolver
+	h.w.resolver = func(login string) *models.Streamer {
+		if login == "chan2" {
+			return streamer2
+		}
+		return prev(login)
+	}
+
+	h.tick(10*time.Minute, true, 0)
+	if st := h.state(t); st.Channel != "chan2" || st.ReportsSinceProgress != 0 {
+		t.Fatalf("expected re-baseline reset with the read still missing, got %+v", st)
+	}
+
+	// The watcher now surfaces chan2 with a large pre-existing lifetime counter.
+	// That whole counter must NOT be counted as progress-since-baseline.
+	h.watch.addSuccesses("chan2", 100)
+	h.tick(10*time.Minute, true, 0)
+	if st := h.state(t); st.ReportsSinceProgress != 0 {
+		t.Fatalf("first successful read must set the baseline, not count lifetime successes, got %+v", st)
+	}
+
+	// From the adopted baseline, only genuinely new successes accrue.
+	h.watch.addSuccesses("chan2", 4)
+	h.tick(10*time.Minute, true, 0)
+	if st := h.state(t); st.ReportsSinceProgress != 4 {
+		t.Fatalf("expected 4 reports past the adopted baseline, got %+v", st)
+	}
+}
+
 // --- stall-evidence window (adversarial-review findings) ---
 
 // TestWatchdogGateFailureResetsStallEvidence reproduces review scenario A: the

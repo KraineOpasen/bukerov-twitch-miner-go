@@ -2,22 +2,22 @@ package util
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
 // FormatNumber formats an integer with comma separators (e.g., 1234567 -> "1,234,567")
 func FormatNumber(n int) string {
-	if n == 0 {
-		return "0"
-	}
-
+	// Format from the decimal string rather than negating n: negation would
+	// overflow for math.MinInt (leaving it negative) and print garbage.
+	// strconv.Itoa renders the sign and magnitude correctly for every int.
+	s := strconv.Itoa(n)
 	sign := ""
-	if n < 0 {
+	if len(s) > 0 && s[0] == '-' {
 		sign = "-"
-		n = -n
+		s = s[1:]
 	}
 
-	s := fmt.Sprintf("%d", n)
 	result := ""
 	for i, c := range s {
 		if i > 0 && (len(s)-i)%3 == 0 {

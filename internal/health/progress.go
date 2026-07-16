@@ -128,6 +128,7 @@ type dropState struct {
 	evidenceSince      time.Time
 	lastObservedSyncAt time.Time // ProgressLastSyncAt already counted as an observation
 	baselineReports    int       // farming channel's success count at last progress
+	baselineValid      bool      // baselineReports reflects a real ReportStats read
 	statsChannel       string    // channel the baseline belongs to
 	avoidedChannel     string    // channel this episode's switch stage excluded ("" if none)
 	exhaustedAt        time.Time // when the pipeline ran out of stages
@@ -581,15 +582,25 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 		// switch stage): re-baseline the delivery accounting against it.
 		st.statsChannel = channel
 		st.ReportsSinceProgress = 0
-		st.baselineReports = 0
 		if stats, ok := w.watch.ReportStats(channel); ok {
-			st.baselineReports = stats.Successes
+			st.baselineReports, st.baselineValid = stats.Successes, true
+		} else {
+			// The watcher hasn't published stats for this channel yet. Leave the
+			// baseline invalid so the first successful read below adopts it,
+			// rather than fixing 0 as the base and later counting the channel's
+			// lifetime successes as progress-since-baseline.
+			st.baselineReports, st.baselineValid = 0, false
 		}
 	}
 	st.Channel = channel
 
 	if channel != "" {
 		if stats, ok := w.watch.ReportStats(channel); ok {
+			if !st.baselineValid {
+				// First successful read after a channel change whose initial
+				// read missed: adopt it as the baseline instead of a delta.
+				st.baselineReports, st.baselineValid = stats.Successes, true
+			}
 			if n := stats.Successes - st.baselineReports; n >= 0 {
 				st.ReportsSinceProgress = n
 			}
@@ -628,7 +639,9 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 			lastObservedSyncAt: sync.ProgressLastSyncAt,
 		}
 		if stats, ok := w.watch.ReportStats(channel); ok {
-			st.baselineReports = stats.Successes
+			st.baselineReports, st.baselineValid = stats.Successes, true
+		} else {
+			st.baselineValid = false
 		}
 		return
 	}
