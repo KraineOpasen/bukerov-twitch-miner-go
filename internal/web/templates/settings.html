@@ -141,6 +141,14 @@
                 </div>
                 <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-purple-600">
             </div>
+
+            <div class="setting-row mt-4">
+                <div>
+                    <div class="setting-label">{{ t "set.directory.prefer_subscribed_label" }}</div>
+                    <div class="setting-description">{{ t "set.directory.prefer_subscribed_desc" }}</div>
+                </div>
+                <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-purple-600">
+            </div>
         </div>
     </details>
 
@@ -600,6 +608,7 @@
         populateDirectoryGameList(settings.directoryGames || []);
         document.getElementById('discoveryMode').value = settings.discoveryMode || 'all';
         document.getElementById('discoveryPreferTracked').checked = !!settings.discoveryPreferTracked;
+        document.getElementById('discoveryPreferSubscribed').checked = !!settings.discoveryPreferSubscribed;
     }
 
     function populateDirectoryGameList(games) {
@@ -1033,7 +1042,8 @@
             dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
             directoryGames: gatherDirectoryGames(),
             discoveryMode: document.getElementById('discoveryMode').value,
-            discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked
+            discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked,
+            discoveryPreferSubscribed: document.getElementById('discoveryPreferSubscribed').checked
         };
     }
 

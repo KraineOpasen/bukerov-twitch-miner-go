@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -440,6 +441,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.RateLimits,
 		m.config.DirectoryGames,
 		m.config.DiscoveryMode,
+		m.config.DiscoveryPreferSubscribed,
 	)
 
 	// Discovery is a candidate source for the unified slot broker, not an
@@ -590,6 +592,7 @@ func (m *Miner) startMining(ctx context.Context) {
 	go m.streamCheckLoop(ctx)
 	go m.healthWatchdogLoop(ctx)
 	go m.bonusPollLoop(ctx)
+	go m.subscriptionProbeLoop(ctx)
 	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
 		go m.dailySummaryLoop(ctx)
 	}
@@ -857,6 +860,47 @@ func (m *Miner) handleAuthError() {
 	})
 }
 
+// subscriptionProbeInterval is the base cadence of the discovery subscription
+// probe. It is deliberately slower than the 1-minute healthWatchdogLoop and far
+// cheaper: each tick probes at most maxCandidateChecksPerTick+1 channels, and it
+// no-ops entirely while DiscoveryPreferSubscribed is off. A ±20% jitter is
+// applied so the probe cadence isn't a single predictable timer.
+const subscriptionProbeInterval = 3 * time.Minute
+
+// probeSubscribed reports whether the authenticated account is subscribed to
+// login, proxied by an active channel-points multiplier (ChannelPointsContext) —
+// the same signal the SUBSCRIBED watch priority uses. It probes a THROWAWAY
+// streamer so the unlocked ActiveMultipliers write inside LoadChannelPointsContext
+// never touches the shared discovery pool objects (which would race the broker
+// loop).
+func (m *Miner) probeSubscribed(login string) bool {
+	s := models.NewStreamer(login, models.StreamerSettings{})
+	if err := m.client.LoadChannelPointsContext(s); err != nil {
+		return false
+	}
+	return s.ViewerHasPointsMultiplier()
+}
+
+// subscriptionProbeLoop periodically refreshes discovery's subscribed set on a
+// slow, jittered cadence, kept separate from the 1-minute healthWatchdogLoop.
+// RefreshSubscribedSet self-gates: it clears the set and skips all probes while
+// the prefer-subscribed toggle is off, so this costs nothing by default.
+func (m *Miner) subscriptionProbeLoop(ctx context.Context) {
+	if m.discovery == nil {
+		return
+	}
+	for {
+		jitter := 1.0 + (rand.Float64()-0.5)*0.4 // ±20%
+		delay := time.Duration(float64(subscriptionProbeInterval) * jitter)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		m.discovery.RefreshSubscribedSet(m.probeSubscribed)
+	}
+}
+
 // healthWatchdogLoop periodically checks how long it has been since the API
 // client or the PubSub pool last had confirmed successful contact with
 // Twitch. If neither has responded within the configured threshold, it
@@ -1069,7 +1113,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	}
 
 	if m.discovery != nil {
-		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.RateLimits)
+		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.DiscoveryPreferSubscribed, m.config.RateLimits)
 	}
 
 	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)

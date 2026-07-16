@@ -1082,6 +1082,31 @@ points/fair-rotation priority (rank below `active_drop`). Either way, and
 regardless of the flag, a channel-restricted discovery drop keeps its normal
 rank because it can only be farmed on that one channel.
 
+The optional `discoveryPreferSubscribed` flag (config key, also a checkbox in the
+Directory Discovery settings panel; default `false`) adds a *tertiary* key to the
+candidate comparator in `internal/discovery`, layered over the existing
+viewer-count sort: with it on, a subscribed channel floats above a non-subscribed
+one within a game (cross-game order still dominates via listing order), so the
+per-game pick — and thus `selectBest`, which takes the first eligible in pool
+order — prefers a subscribed channel. Subscription is a **proxy**: discovery has
+no subscriptions GraphQL operation (no such persisted query exists in the
+canonical trackers), so instead a slow miner-side loop (`subscriptionProbeLoop`,
+base cadence 3 min ±20% jitter, deliberately separate from the 1-minute
+`healthWatchdogLoop`) probes a bounded, rotating slice of the pool — at most
+`maxCandidateChecksPerTick`+1 channels per tick — with the existing verified
+`ChannelPointsContext` operation and treats an active points multiplier
+(`ViewerHasPointsMultiplier`, the same signal the `SUBSCRIBED` watch priority
+uses) as "subscribed". Results accumulate across ticks in `Manager.subKnown`,
+are pruned to the live pool, and are published as a lock-free
+`atomic.Pointer[map[string]bool]` snapshot (`SetSubscribedLogins`, mirroring
+`SetGameRanks`) that `syncOnce` reads to tag each candidate's `Subscribed` flag.
+The probe uses throwaway streamer objects so `LoadChannelPointsContext`'s
+unlocked `ActiveMultipliers` write never races the broker loop's use of the pool
+streamers, and `RefreshSubscribedSet` clears the set and skips all probing while
+the toggle is off (zero cost by default). It flows through the same runtime path
+as `discoveryMode`/`discoveryPreferTracked` (config → DTO → `Build*`/
+`ApplyToConfig` → `Miner.ApplySettings` → `discovery.UpdateSettings`).
+
 ---
 
 ## Health Signals (`internal/health`)

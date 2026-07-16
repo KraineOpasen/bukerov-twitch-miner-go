@@ -20,6 +20,10 @@ type RuntimeSettings struct {
 	// DiscoveryMode mirrors config.Config.DiscoveryMode ("all" / "tracked_only").
 	// Empty ("") is treated as the behavior-preserving default "all".
 	DiscoveryMode string `json:"discoveryMode"`
+	// DiscoveryPreferSubscribed mirrors config.Config.DiscoveryPreferSubscribed:
+	// when true, discovery floats a subscribed channel above a non-subscribed one
+	// when choosing which candidate to farm.
+	DiscoveryPreferSubscribed bool `json:"discoveryPreferSubscribed"`
 }
 
 // DiscordUIConfig contains Discord integration settings for the UI.

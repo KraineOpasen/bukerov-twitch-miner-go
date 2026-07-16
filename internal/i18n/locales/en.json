@@ -188,6 +188,8 @@
   "set.directory.mode_desc": "Which channels discovery may farm. \"All channels\" (default) picks the best drops-enabled channel from the Twitch directory, excluding your tracked streamers (the rotation covers those). \"Tracked streamers only\" restricts discovery to your own configured streamers, filling an idle slot with a tracked channel that has an active drop and isn't already being watched — never a random directory channel.",
   "set.directory.mode_all": "All channels",
   "set.directory.mode_tracked_only": "Tracked streamers only",
+  "set.directory.prefer_subscribed_label": "Prefer subscribed channels",
+  "set.directory.prefer_subscribed_desc": "When on, a discovered channel you are subscribed to is preferred over a non-subscribed one when choosing which candidate to farm — a tiebreaker layered over viewer count. Subscription is detected by proxy (an active channel-points multiplier, the same signal the SUBSCRIBED watch priority uses) via a slow periodic probe, so it may take a few minutes to take effect. No effect while the game list is empty.",
   "set.ratelimits.title": "Rate Limits",
   "set.ratelimits.ws_ping_label": "Websocket Ping Interval",
   "set.ratelimits.ws_ping_desc": "Seconds between websocket ping messages (20-60)",
