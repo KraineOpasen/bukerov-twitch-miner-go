@@ -141,6 +141,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 				st.OnlineSince = s.GetOnlineAt()
 				st.Game = s.Stream.GameName()
 				st.Title = s.Stream.GetTitle()
+				st.BroadcastID = s.Stream.GetBroadcastID()
 				if st.Reason == "" {
 					st.Reason = "online - awaiting the next watch-selection tick"
 				}

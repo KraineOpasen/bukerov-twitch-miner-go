@@ -1,9 +1,37 @@
 package models
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
+
+// TestGetBroadcastID verifies the accessor returns the broadcast ID set by
+// Stream.Update and is empty before the first stream-info fetch.
+func TestGetBroadcastID(t *testing.T) {
+	s := NewStream()
+	if got := s.GetBroadcastID(); got != "" {
+		t.Fatalf("fresh stream broadcast ID = %q, want empty", got)
+	}
+	s.Update("bc-12345", "title", nil, nil, 100)
+	if got := s.GetBroadcastID(); got != "bc-12345" {
+		t.Fatalf("GetBroadcastID() = %q, want bc-12345", got)
+	}
+}
+
+// TestGetBroadcastIDConcurrent runs Update and GetBroadcastID concurrently; it
+// exists to run under -race, proving the getter takes the stream lock and never
+// reads BroadcastID unsynchronised.
+func TestGetBroadcastIDConcurrent(t *testing.T) {
+	s := NewStream()
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); s.Update("bc-concurrent", "t", nil, nil, 1) }()
+		go func() { defer wg.Done(); _ = s.GetBroadcastID() }()
+	}
+	wg.Wait()
+}
 
 // TestUpdateMinuteWatchedAccumulatesContinuous verifies that a report arriving
 // within maxGap of the previous one credits the elapsed minutes as continuous
