@@ -162,6 +162,20 @@ func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Unlock()
 }
 
+// UpdateStreamers replaces the tracked streamer list at runtime (Settings-page
+// add/remove), so campaign assignment follows the current roster without a
+// restart: an added streamer starts receiving campaigns on the next sync pass,
+// a removed one stops. The slice is copied so later caller-side mutations
+// cannot reach tracker state; readers snapshot it under mu (see
+// updateStreamerCampaigns), keeping both sync goroutines race-free against
+// a concurrent replacement.
+func (d *DropsTracker) UpdateStreamers(streamers []*models.Streamer) {
+	list := append([]*models.Streamer(nil), streamers...)
+	d.mu.Lock()
+	d.streamers = list
+	d.mu.Unlock()
+}
+
 // UpdateSettings replaces the rate-limit settings at runtime (e.g. from the
 // Settings page) so a changed CampaignSyncInterval/DropProgressSyncInterval
 // takes effect on the next tick of the respective loop without a restart.
@@ -1141,8 +1155,12 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 }
 
 func (d *DropsTracker) updateStreamerCampaigns() {
+	// Snapshot the streamer list together with the campaigns: it can be
+	// replaced at runtime by UpdateStreamers, and this runs on both sync
+	// goroutines.
 	d.mu.RLock()
 	campaigns := d.campaigns
+	streamers := d.streamers
 	d.mu.RUnlock()
 
 	// All assignment/progress logging shares the de-dup maps below, so serialize
@@ -1170,7 +1188,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	farmer := make(map[string]*models.Streamer)
 	var progressOrder []*models.Campaign
 
-	for _, streamer := range d.streamers {
+	for _, streamer := range streamers {
 		if !streamer.DropsCondition() {
 			continue
 		}

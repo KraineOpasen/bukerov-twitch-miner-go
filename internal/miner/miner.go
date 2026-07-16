@@ -1153,6 +1153,8 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	notifMgr := m.notifications
 	webServer := m.webServer
 	wsPool := m.wsPool
+	minuteWatcher := m.watcher
+	dropsTracker := m.dropsTracker
 
 	m.mu.Unlock()
 
@@ -1192,6 +1194,12 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		allStreamers := m.streamers.All()
 		if wsPool != nil {
 			wsPool.UpdateStreamers(allStreamers)
+		}
+		if minuteWatcher != nil {
+			minuteWatcher.UpdateStreamers(allStreamers)
+		}
+		if dropsTracker != nil {
+			dropsTracker.UpdateStreamers(allStreamers)
 		}
 		if webServer != nil {
 			webServer.AttachStreamers(allStreamers)
