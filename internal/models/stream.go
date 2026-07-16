@@ -180,6 +180,11 @@ func (s *Stream) EncodePayload() (string, error) {
 	return base64.StdEncoding.EncodeToString(data), nil
 }
 
+// InitWatchStreak arms a fresh watch streak: nothing watched yet, streak still
+// missing. It is the unconditional reset primitive; the decision of WHEN to arm
+// (a genuine new broadcast vs a brief online-detection blip that should preserve
+// progress) is made by the caller — see Streamer.SetOnline and
+// watchStreakContinuityGrace.
 func (s *Stream) InitWatchStreak() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

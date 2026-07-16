@@ -932,8 +932,12 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
 			return
 		}
 
-		streamer.SetOnline()
-		slog.Info("Streamer is online", "streamer", streamer.Username)
+		if streamer.SetOnline() {
+			// Log only on a real offline→online transition, so racing detectors
+			// (viewcount + the stream-check loop, two viewcount events, ...) that
+			// both reach this branch don't print a duplicate "Streamer is online".
+			slog.Info("Streamer is online", "streamer", streamer.Username)
+		}
 	} else {
 		if err := c.UpdateStream(streamer); err != nil {
 			// Don't flap an online streamer offline because Twitch rotated a
