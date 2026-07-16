@@ -220,6 +220,7 @@ internal/
 │   └── gql.go                  # GraphQL operation definitions
 │
 ├── util/                       # Shared utilities
+│   ├── file.go                 # WriteFileAtomic (temp file + fsync + rename swap)
 │   ├── format.go               # Number and time formatting (FormatNumber, FormatDuration, FormatTimeAgo)
 │   └── random.go               # Random ID generation (RandomHex, DeviceID)
 │
@@ -531,8 +532,8 @@ gracefully instead of corrupting local state:
 ### Connection Management
 - Send PING at configured interval (default 27s) with ±2.5s random jitter
 - Reconnect if no PONG received within 5 minutes
-- Auto-reconnect on disconnect with 60-second delay
-- Check internet connectivity before reconnecting
+- Auto-reconnect on disconnect after `rateLimits.reconnectDelay` seconds
+  (configurable 30-300, default 60)
 
 ---
 
@@ -706,7 +707,7 @@ allocated by the unified slot broker (see *Watch Slot Architecture*).
 - **Randomized dwell time:** every time the pair actually changes, the next dwell duration is drawn uniformly from `[rateLimits.rotationIntervalMinMinutes, rateLimits.rotationIntervalMaxMinutes]` (default 30-80 min) rather than using one fixed timer, so rotations don't happen on a single predictable period. (`rateLimits.rotationInterval`, a fixed-seconds field, is deprecated - kept only so pre-existing config.json files still parse; `LoadConfig` migrates it into the new min/max fields the first time it loads such a file.)
 - **Weighted base pair:** when the dwell time elapses (or a pair member goes offline), the pair is recomputed from each online streamer's accumulated watch minutes over the trailing 8-hour window - persisted in SQLite (`watch_time_events` table, module `watch_time`, survives container restarts) - and the two with the *least* accumulated time get the slots. Ties (e.g. cold start, nobody watched yet) are broken by in-memory recency, then index, for determinism. This is a deficit-based scheduler: whoever gets watched accumulates minutes and becomes less eligible next time, which surfaces every other online channel over time regardless of count or parity - no even/odd special-casing needed.
 - **Priority as a boost, not exclusivity:** on top of the weighted base pair, any online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat in the pair for the current tick only, without affecting the weighting above - increasing how often it's picked, never granting a permanent exclusive slot. The seat sacrificed is whichever base-pair member was watched most recently. Among competing boost candidates the seat goes, in order: to a channel-restricted drop campaign (its progress is only countable on that exact channel), then to a **watch streak already in progress, most-watched-first** (so the watcher finishes a streak it already started instead of alternating between several fresh pending-streak channels and completing none - a watch streak needs ~5-7 continuous watched minutes, so an interrupted pursuit earns nothing), then least-recently-watched.
-- **Continuous-watch accounting:** `Stream.MinuteWatched` measures *continuous* watched minutes, not wall-clock elapsed time. Each successful minute-watched report credits the gap since the previous report only if that gap is within `2 × minuteWatchedInterval`; a larger gap means the streamer lost its watch slot (rotated out, a failed cycle, a brief offline blip) and, since Twitch resets its server-side watch-streak session on such a break, the local counter is **reset to zero** and the gap is credited as nothing. Without this, `MinuteWatched` would accumulate wall-clock time across rotation gaps, cross the streak threshold on phantom minutes the viewer never continuously watched, and - because the pursuit logic stops chasing a streamer once it passes the threshold - abandon a streak that was in fact never earned.
+- **Continuous-watch accounting:** `Stream.MinuteWatched` measures *continuous* watched minutes, not wall-clock elapsed time. Each successful minute-watched report credits the gap since the previous report only if that gap is within `2 × minuteWatchedInterval`; a larger gap means the streamer lost its watch slot (rotated out, a failed cycle) and, since Twitch resets its server-side watch-streak session on such a break, the local counter is **reset to zero** and the gap is credited as nothing. A brief offline blip is forgiven separately, at the online-detection level: `Streamer.SetOnline` re-arms the watch streak only when the streamer was offline for at least `watchStreakContinuityGrace` (2 minutes) — a shorter blip (an online-detection flap, e.g. a PubSub stream-down immediately followed by a viewcount re-check) counts as the same continuous broadcast and preserves the accumulated counter and pending-streak flag, with the per-report gap check above remaining the backstop for whether viewing was actually continuous. Without this, `MinuteWatched` would accumulate wall-clock time across rotation gaps, cross the streak threshold on phantom minutes the viewer never continuously watched, and - because the pursuit logic stops chasing a streamer once it passes the threshold - abandon a streak that was in fact never earned.
 - **Watch-streak pursuit diagnostics:** because a watch streak is only ever logged once *earned* (a `points-earned` PubSub event with `reason_code = WATCH_STREAK`, `~+300-450`), a streak that is never earned is otherwise invisible. The watcher therefore logs, per streak, one INFO when it starts pursuing a streamer's pending streak and one WARN if the streamer has been watched past the streak threshold (`watchStreakThresholdMinutes`, 7) *continuously* while the streak is still missing - the WARN distinguishes "not watched enough yet" (a scheduling problem) from "watched enough but Twitch never credited it" (an upstream/authorization/viewing problem).
 - **Avoiding last-second interruptions:** a scheduled swap-out is postponed once, by a short fixed delay (2 min), if the leaving streamer is within a few minutes of completing its watch streak - but only when both current pair members are still online (an offline member is dropped immediately, regardless of streak state). This doesn't extend to imminent drop-campaign completion.
 - Predictions/bets are unaffected by this rotation: PubSub subscribes to prediction topics for every tracked online streamer regardless of its current watch-pair membership, so bets are placed independently of what's actively being watched.
@@ -1113,7 +1114,8 @@ as `discoveryMode`/`discoveryPreferTracked` (config → DTO → `Build*`/
 
 The Health Center aggregates the miner's operational signals for the dashboard
 (`/health`) and the debug snapshot (`/debug/snapshot`, `health` section). Each
-signal records only `status` (`ok`/`failed`/`idle`/`unknown`), `checkedAt`,
+signal records only `status` (`ok`/`degraded`/`failed`/`idle`/`stalled`/
+`unknown`), `checkedAt`,
 `duration`, `stage`, a short human `detail`, and a stable `errorCode` —
 **never** an OAuth token, cookies, a signed playback/spade URL (which embeds
 `sig`/`token`), or an authorization header.
@@ -1123,8 +1125,17 @@ The signals are distinct kinds of health:
 - **OAuth** — whether the account authorization is still valid (from the miner's
   reauth-required state).
 - **GQL API** — whether Twitch GraphQL calls are succeeding (from the API
-  client's last-success timestamp vs `connectionTimeoutMinutes`).
-- **PubSub** — whether the WebSocket pool has recent activity (last PONG/message).
+  client's last-success timestamp vs `connectionTimeoutMinutes`). Reports
+  `degraded` when repeated request failures (≥2 exhausted retry cycles within
+  the window) accumulate short of a full blackout.
+- **PubSub** — evaluated **per connection** rather than on the pool-wide last
+  PONG (which would let healthy siblings mask a single broken index): an open,
+  non-reconnecting connection whose last PONG is older than the staleness
+  threshold reports `failed` (dead socket, `connection_stale`); a connection
+  carrying zero topics while the pool holds more than one reports `stalled`
+  (lost subscriptions, `topics_lost` — invisible to any PONG-based check); and
+  ≥2 reconnects within the window report `degraded` (flapping). With no
+  connections yet it falls back to the pool-wide staleness view.
 - **Watch Transport** — whether Twitch *accepts the watch transport and beacon*
   (from the canary, below). This is independent of whether any drop is active.
 - **Drops Inventory Sync** — whether the periodic inventory sync is running
@@ -1963,16 +1974,15 @@ Raid
 **WebSocket:**
 1. Detect disconnect (no PONG, connection error)
 2. Set reconnecting flag
-3. Wait 60 seconds
-4. Check internet connectivity
-5. Create new connection
-6. Re-subscribe to all topics
+3. Wait `rateLimits.reconnectDelay` seconds (configurable 30-300, default 60)
+4. Create new connection
+5. Re-subscribe to all topics
 
-**HTTP Requests:**
-1. Catch connection error
-2. Check internet connectivity
-3. Wait 1-3 minutes (random)
-4. Retry request
+**HTTP Requests (GQL):**
+1. Catch a transient failure (connection error, rate limiting, 5xx)
+2. Retry with exponential backoff plus random jitter
+3. Give up after `gqlMaxRetries` = 4 retries (up to 5 attempts total per
+   client ID) and surface the error to the caller
 
 ### Graceful Shutdown
 
@@ -2134,7 +2144,10 @@ PointRule
 by dashboard saves (settings, auto-redeem, policy, health), so `SaveConfig`
 writes it via `util.WriteFileAtomic` — temp file in the same directory +
 rename (the same swap pattern the self-updater uses for the binary) — with
-owner-only `0600` permissions. `LoadConfig` migrates a pre-hardening `0644`
+owner-only `0600` permissions. The temp file is fsynced before the rename;
+the containing directory is fsynced **best-effort** after it (errors ignored —
+meaningful on Unix, a no-op elsewhere), so durability of the rename across a
+power loss is best-effort rather than strictly guaranteed. `LoadConfig` migrates a pre-hardening `0644`
 file to `0600` on load (best-effort chmod; a failure only warns), so the fix
 applies on the first start of the new code rather than the next save.
 

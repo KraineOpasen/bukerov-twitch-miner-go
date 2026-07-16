@@ -29,7 +29,7 @@ This tool passively earns Twitch channel points by simulating viewer presence ac
 - **Per-Streamer Rotation Preference**: Nudge the watch rotation to prefer or avoid specific streamers when priority is otherwise equal
 - **Multi-Streamer Support**: Monitor multiple streamers with priority-based scheduling
 - **Resilient Twitch API**: GQL retry with exponential backoff on transient errors, plus client-ID fallback on `PersistedQueryNotFound`
-- **Connection Health Watchdog**: Detects auth-token expiry and connection loss (dashboard banner, Discord alert, error log) and recovers when activity resumes
+- **Connection Health Watchdog**: Detects auth-token expiry, degraded connectivity (frequent reconnects or repeated API failures — a yellow intermediate state), and full connection loss (dashboard banner, Discord alert, error log), recovering when activity resumes
 - **Real-time Analytics**: Web-based dashboard for tracking point earnings, including a dedicated **Drops** page
 - **Notifications**: Get notified for mentions, point goals, and stream status changes via Discord, Matrix, Pushover, Gotify, or a generic webhook — with optional event batching
 - **Colored Console Logging**: Optional category-based color scheme for console output
@@ -365,6 +365,13 @@ notifications are configured) instead of updating.
 - The container's filesystem must be writable (the default). If you run with
   `--read-only`, the swap fails gracefully and the miner keeps running on the
   current version.
+- **The GitHub release must ship the exact platform asset and `checksums.txt`.**
+  The updater downloads the asset named `twitch-miner-go-<os>-<arch>` (e.g.
+  `twitch-miner-go-linux-amd64`; Windows adds `.exe`) and verifies it against
+  the release's `checksums.txt`. A release missing either file is refused
+  fail-closed — nothing is installed and the miner keeps running. Releases
+  built by this repo's Release workflow always include both; this matters
+  mainly for forks and manually assembled releases.
 
 ### Verifying manually
 
@@ -630,8 +637,8 @@ opt-in diagnostic beacon that never holds a slot and is not a candidate source.
 
 The **Health Center** (`/health`) shows the miner's operational signals — OAuth,
 GQL API, PubSub, Watch Transport, Drops Inventory Sync, Drops Progress — each as
-`OK`/`FAILED`/`IDLE` with how long ago it was checked, plus the active GQL client
-ID (TV/Browser/Mobile). It stores no tokens, cookies, signed URLs, or headers.
+`OK`/`DEGRADED`/`FAILED`/`IDLE`/`STALLED`/`UNKNOWN` with how long ago it was
+checked, plus the active GQL client ID (TV/Browser/Mobile). It stores no tokens, cookies, signed URLs, or headers.
 
 The **watch-transport accrual canary** verifies that Twitch still accepts the
 watch transport, independently of whether any drop is active. It reuses the real
