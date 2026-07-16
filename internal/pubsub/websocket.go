@@ -95,6 +95,13 @@ func (ws *WebSocketClient) Connect() error {
 	ws.lastPong = time.Now()
 	ws.lastConnectedAt = time.Now()
 	pending := ws.pendingTopics
+	// The loops below get THIS generation's stop channel and conn as
+	// parameters, snapshotted under mu. Selecting on the ws.stopChan field
+	// would race with reconnect() replacing it — and worse, an old loop
+	// iterating after the swap would silently adopt the NEW channel/conn,
+	// leaving it unstoppable (the leaked-pingLoop bug) or reading the new
+	// conn concurrently with its own reader.
+	stop := ws.stopChan
 	ws.mu.Unlock()
 
 	// Resubscribe outside the lock (Listen takes ws.mu itself). isOpened is now
@@ -110,21 +117,31 @@ func (ws *WebSocketClient) Connect() error {
 
 	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", len(pending))
 
-	go ws.readLoop()
-	go ws.pingLoop()
+	go ws.readLoop(stop, conn)
+	go ws.pingLoop(stop)
 
 	return nil
 }
 
 func (ws *WebSocketClient) Close() {
 	ws.mu.Lock()
+	// Idempotent: a second Close must not re-close the stop channel.
+	if ws.forcedClose {
+		ws.mu.Unlock()
+		return
+	}
 	ws.forcedClose = true
 	ws.isClosed = true
+	// Closing the CURRENT stop channel under mu is what makes this safe
+	// against a concurrent reconnect: reconnect's close-and-replace runs
+	// under the same lock and checks forcedClose first, so each channel
+	// value is closed exactly once.
+	close(ws.stopChan)
+	conn := ws.conn
 	ws.mu.Unlock()
 
-	close(ws.stopChan)
-	if ws.conn != nil {
-		_ = ws.conn.Close()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -265,7 +282,13 @@ func (ws *WebSocketClient) send(msg WSMessage) error {
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()
 
-	if ws.conn == nil {
+	// Snapshot the conn under mu: Connect/reconnect swap it under mu, and
+	// writeMu alone does not order this read against that write.
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+
+	if conn == nil {
 		return nil
 	}
 
@@ -275,7 +298,7 @@ func (ws *WebSocketClient) send(msg WSMessage) error {
 	}
 
 	slog.Debug("WebSocket send", "index", ws.index, "type", msg.Type)
-	return ws.conn.WriteMessage(websocket.TextMessage, data)
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (ws *WebSocketClient) ping() {
@@ -287,20 +310,16 @@ func (ws *WebSocketClient) ping() {
 	ws.mu.Unlock()
 }
 
-func (ws *WebSocketClient) readLoop() {
+// readLoop reads frames from ONE connection generation: stop and conn are
+// snapshotted by Connect under mu, so a loop outliving a reconnect can never
+// adopt the replacement channel/conn from the fields (which would leave it
+// unstoppable, or reading the new conn concurrently with its own reader).
+func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn) {
 	for {
 		select {
-		case <-ws.stopChan:
+		case <-stop:
 			return
 		default:
-		}
-
-		ws.mu.RLock()
-		conn := ws.conn
-		ws.mu.RUnlock()
-
-		if conn == nil {
-			return
 		}
 
 		_, message, err := conn.ReadMessage()
@@ -405,7 +424,9 @@ func (ws *WebSocketClient) randomPingInterval() time.Duration {
 	return time.Duration(base+jitter) * time.Second
 }
 
-func (ws *WebSocketClient) pingLoop() {
+// pingLoop drives PINGs and the PONG watchdog for ONE connection generation
+// (see readLoop on why stop is a parameter, not the field).
+func (ws *WebSocketClient) pingLoop(stop chan struct{}) {
 	checkTicker := time.NewTicker(time.Minute)
 	defer checkTicker.Stop()
 
@@ -413,7 +434,7 @@ func (ws *WebSocketClient) pingLoop() {
 		pingWait := ws.randomPingInterval()
 
 		select {
-		case <-ws.stopChan:
+		case <-stop:
 			return
 		case <-time.After(pingWait):
 			ws.mu.RLock()
@@ -477,6 +498,7 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	ws.isReconnecting = true
 	ws.isClosed = true
 	onReconnect := ws.onReconnect
+	conn := ws.conn
 	ws.mu.Unlock()
 
 	// Report the reconnect (lock released) so the pool can count churn. Fired
@@ -487,8 +509,8 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 		onReconnect()
 	}
 
-	if ws.conn != nil {
-		_ = ws.conn.Close()
+	if conn != nil {
+		_ = conn.Close()
 	}
 
 	slog.Info("Reconnecting WebSocket", "index", ws.index, "delay", delay)
@@ -506,6 +528,14 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	// topics alone (as the old code did) would clobber it with an empty slice and
 	// silently drop every subscription. Union never loses a parked topic.
 	restore := mergeTopics(ws.topics, ws.pendingTopics)
+	// Release the previous generation's loops BEFORE handing out a fresh stop
+	// channel. Without this close the old pingLoop lived forever (its next
+	// select silently adopted the replacement channel), so every reconnect
+	// leaked one more pingLoop — multiplying PINGs on the new connection and
+	// pushing it toward Twitch's 4100 "ping pong failed" close. Closing here
+	// is single-close-safe: Close() and this block both run under mu, and
+	// this block never runs once forcedClose is set (checked above).
+	close(ws.stopChan)
 	ws.stopChan = make(chan struct{})
 	ws.pendingTopics = restore
 	ws.topics = nil
