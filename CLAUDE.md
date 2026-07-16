@@ -41,7 +41,7 @@ make docker
 ./twitch-miner-go -generate-config
 ```
 
-Note: there are currently no `*_test.go` files in the repo — `go test ./...` will report "no test files" until tests are added.
+Note: the test suite covers nearly every package (`cmd/miner` and almost all of `internal/...`) — run it with the race detector as shown above before pushing.
 
 Runtime flags: `-config path/to/config.json`, `-debug`, `-generate-config`. Config, cookies, logs, and the SQLite database live under `config/`, `cookies/`, `logs/`, `database/{username}/miner.db` respectively (all Docker volumes in the `Dockerfile`).
 

@@ -7,7 +7,6 @@ const (
 	OAuthDeviceURL = "https://id.twitch.tv/oauth2/device"
 	OAuthTokenURL  = "https://id.twitch.tv/oauth2/token"
 	IRCURL         = "irc.chat.twitch.tv"
-	IRCPort        = 6667
 	IRCPortTLS     = 6697
 	UsherURL       = "https://usher.ttvnw.net"
 
