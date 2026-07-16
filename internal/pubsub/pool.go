@@ -988,6 +988,12 @@ func humanizeBetError(err error) string {
 	if errors.Is(err, api.ErrUnauthorized) {
 		return "Twitch rejected the request because the session expired — reauthorize the miner"
 	}
+	if errors.Is(err, api.ErrPersistedQueryNotFound) {
+		// Retrying cannot help here: every known client ID was already tried and
+		// the outage lasts until Twitch's rotated query hashes are updated, so
+		// the message must not suggest "try again" like the default branch does.
+		return "Twitch is temporarily rejecting the miner's requests (stale query metadata) — the bet was not placed"
+	}
 	msg := strings.ToUpper(err.Error())
 	switch {
 	case strings.Contains(msg, "NOT_ENOUGH_POINTS"), strings.Contains(msg, "INSUFFICIENT"):

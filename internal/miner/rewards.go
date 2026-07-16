@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -34,6 +35,9 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 
 	rewards, err := m.client.GetCustomRewards(s)
 	if err != nil {
+		if friendly := humanizeRewardError(err); friendly != err {
+			return friendly
+		}
 		return fmt.Errorf("could not load rewards: %w", err)
 	}
 
@@ -50,12 +54,26 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 	}
 
 	if err := m.client.RedeemCustomReward(s, reward, textInput); err != nil {
-		return err
+		return humanizeRewardError(err)
 	}
 
 	slog.Info("Redeemed custom reward", "streamer", s.Username, "reward", reward.Title, "cost", reward.Cost)
 	events.Record(events.TypeRewardRedeemed, s.Username, fmt.Sprintf("redeemed %q (-%d)", reward.Title, reward.Cost))
 	return nil
+}
+
+// humanizeRewardError maps low-level Twitch API failures to messages safe to
+// show in the rewards modal, which prints err.Error() verbatim. Only
+// ErrPersistedQueryNotFound needs translating: its raw text names internals
+// ("persisted query", client IDs) and the outage lasts until the shipped query
+// hashes are updated, so unlike other failures a retry hint would be wrong.
+// Every other error passes through unchanged — the api package already phrases
+// those as user-facing sentinels (not enough points, reward unavailable, ...).
+func humanizeRewardError(err error) error {
+	if errors.Is(err, api.ErrPersistedQueryNotFound) {
+		return errors.New("twitch is temporarily rejecting the miner's requests (stale query metadata) — redemption is unavailable until it recovers")
+	}
+	return err
 }
 
 // GetAutoRedeem returns the persisted auto-redeem configuration for a streamer
