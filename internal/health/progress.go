@@ -496,6 +496,14 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 	// gets a clean slate, and a standing critical alert is explicitly closed
 	// (a claimable/claimed drop means the stall resolved; an ended campaign
 	// makes the alert moot either way).
+	// Recovered notifications are collected under w.mu and fired AFTER it is
+	// released: NotifyDropRecovered reaches the notifications manager, which
+	// does SQLite (and possibly Discord) I/O — running it under w.mu would hold
+	// the lock across that I/O and pin a w.mu→notifications lock order. This
+	// mirrors advanceRecovery, which also notifies outside the lock.
+	type recoveredNote struct{ campaign, drop, channel string }
+	var recovered []recoveredNote
+
 	w.mu.Lock()
 	for key, st := range w.states {
 		if seen[key] {
@@ -505,12 +513,16 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 			w.avoid.Clear(st.avoidedChannel)
 		}
 		if st.notifiedStalled && w.notifier != nil {
-			w.notifier.NotifyDropRecovered(st.CampaignName, st.DropName, st.Channel,
-				"the drop left the tracked set (claimed, claimable, or campaign ended) — the stall alert no longer applies")
+			recovered = append(recovered, recoveredNote{st.CampaignName, st.DropName, st.Channel})
 		}
 		delete(w.states, key)
 	}
 	w.mu.Unlock()
+
+	for _, n := range recovered {
+		w.notifier.NotifyDropRecovered(n.campaign, n.drop, n.channel,
+			"the drop left the tracked set (claimed, claimable, or campaign ended) — the stall alert no longer applies")
+	}
 
 	w.publishFromStates(now)
 }
