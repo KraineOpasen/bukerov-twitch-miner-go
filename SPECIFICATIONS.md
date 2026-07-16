@@ -44,7 +44,7 @@
 |---------|----------|---------|
 | Twitch GQL API | `https://gql.twitch.tv/gql` | GraphQL queries for all Twitch data |
 | Twitch PubSub | `wss://pubsub-edge.twitch.tv/v1` | Real-time event notifications |
-| Twitch IRC | `irc.chat.twitch.tv:6667` | Chat presence and mentions |
+| Twitch IRC | `irc.chat.twitch.tv:6697` (TLS) | Chat presence and mentions |
 | Twitch OAuth | `https://id.twitch.tv/oauth2/*` | Authentication |
 | Twitch CDN | `https://usher.ttvnw.net/*` | Stream playlist URLs |
 | Spade Analytics | Dynamic URL from page | Minute-watched reporting |
@@ -1334,17 +1334,21 @@ page (feasibility badge + breakdown + per-drop controls) and in
 | Setting | Value |
 |---------|-------|
 | Server | `irc.chat.twitch.tv` |
-| Port | `6667` (plain) or `6697` (SSL) |
+| Port | `6697` (TLS) — the OAuth token is sent as `PASS`, so the plaintext port `6667` is never used |
 | Auth | `PASS oauth:{token}` |
 
 #### Connection Sequence
 ```
-1. Connect to server
+1. Connect to server over TLS (crypto/tls, MinVersion TLS 1.2)
 2. CAP REQ :twitch.tv/tags twitch.tv/commands  (if chat logging enabled)
 3. PASS oauth:{token}
 4. NICK {username}
 5. JOIN #{channel}
 ```
+
+On an unexpected disconnect or a Twitch `RECONNECT` command the client
+re-establishes the connection automatically with exponential backoff (1s → 30s,
+±20% jitter) and replays the sequence above.
 
 #### IRC Capabilities
 
