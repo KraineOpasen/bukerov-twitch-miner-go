@@ -2,12 +2,14 @@ package drops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
@@ -551,8 +553,11 @@ func (d *DropsTracker) syncCampaigns() {
 
 	campaigns, upcoming, dashboardCount, err := d.getActiveCampaigns()
 	if err != nil {
-		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch", "error", err)
-		d.recordSync(0, 0, 0, err)
+		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch; keeping previously tracked campaigns", "error", err)
+		// dashboardCount is non-zero when the dashboard listing succeeded and
+		// the failure happened later (campaign details), so SyncStatus shows
+		// what Twitch reported even for a failed run.
+		d.recordSync(dashboardCount, 0, 0, err)
 		return
 	}
 
@@ -653,6 +658,17 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 		// stays empty even while campaigns are active.
 		detail, err := d.client.GetDropCampaignDetails(campaignID)
 		if err != nil {
+			// A stale persisted-query hash breaks this operation for EVERY
+			// campaign (the hash is per-operation), so skipping per campaign
+			// would collect an empty set, swap out d.campaigns, and stop drops
+			// farming for the whole outage — while also wasting a full client-ID
+			// walk per campaign. Abort the sync instead: the caller keeps the
+			// previously tracked campaigns, exactly like a dashboard-level error.
+			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+				return nil, nil, dashboardCount, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
+			}
+			// Any other error is campaign-specific (campaign gone, malformed
+			// response) — skip just this one and keep syncing the rest.
 			slog.Warn("Drops sync: failed to fetch campaign details, skipping",
 				"campaign", summaryName, "campaignID", campaignID, "error", err)
 			continue
@@ -1072,7 +1088,14 @@ func (d *DropsTracker) applyBlacklist(campaigns []*models.Campaign) []*models.Ca
 
 func (d *DropsTracker) claimAllDropsFromInventory() {
 	inventory, err := d.getInventory()
-	if err != nil || inventory == nil {
+	if err != nil {
+		// Previously swallowed silently: during an outage the auto-claim of
+		// ready drops just stopped with no trace. One WARN per sync interval.
+		slog.Warn("Drops: cannot check inventory for claimable drops; skipping this cycle", "error", err)
+		return
+	}
+	if inventory == nil {
+		// A well-formed response without inventory data: nothing to claim.
 		return
 	}
 

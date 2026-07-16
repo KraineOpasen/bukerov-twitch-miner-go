@@ -23,6 +23,11 @@ type fakeDropsClient struct {
 	inventory    map[string]interface{}
 	inventoryErr error
 	details      map[string]map[string]interface{}
+	// detailsErr, when set, fails EVERY GetDropCampaignDetails call (an
+	// operation-wide outage such as a stale persisted-query hash);
+	// detailErrByID fails only the given campaign (a campaign-specific error).
+	detailsErr    error
+	detailErrByID map[string]error
 
 	// fullSyncSignal, when non-nil, receives one non-blocking signal per full
 	// sync (each ViewerDropsDashboard call), letting a test observe the
@@ -52,6 +57,12 @@ func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interfa
 }
 
 func (f *fakeDropsClient) GetDropCampaignDetails(campaignID string) (map[string]interface{}, error) {
+	if f.detailsErr != nil {
+		return nil, f.detailsErr
+	}
+	if err := f.detailErrByID[campaignID]; err != nil {
+		return nil, err
+	}
 	return f.details[campaignID], nil
 }
 
