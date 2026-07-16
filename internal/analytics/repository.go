@@ -345,7 +345,8 @@ func (r *SQLiteRepository) GetPointSamples(streamer string, startTime, endTime t
 // GetAnnotationRecords returns the event markers for a streamer within
 // [startTime, endTime] (zero bounds are open-ended), ordered oldest-first. The
 // event type falls back to the label text for rows written before the
-// event_type column existed. An unknown streamer yields nil.
+// event_type column existed; the per-type colour is carried through so the
+// chart can render each marker distinctly. An unknown streamer yields nil.
 func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endTime time.Time) ([]AnnotationRecord, error) {
 	var streamerID int64
 	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
@@ -356,7 +357,7 @@ func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endT
 		return nil, err
 	}
 
-	query := "SELECT timestamp, COALESCE(event_type, ''), text FROM annotations WHERE streamer_id = ?"
+	query := "SELECT timestamp, COALESCE(event_type, ''), text, color FROM annotations WHERE streamer_id = ?"
 	args := []interface{}{streamerID}
 	if !startTime.IsZero() {
 		query += " AND timestamp >= ?"
@@ -377,7 +378,7 @@ func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endT
 	var records []AnnotationRecord
 	for rows.Next() {
 		var rec AnnotationRecord
-		if err := rows.Scan(&rec.T, &rec.Type, &rec.Reason); err != nil {
+		if err := rows.Scan(&rec.T, &rec.Type, &rec.Reason, &rec.Color); err != nil {
 			return nil, err
 		}
 		if rec.Type == "" {
