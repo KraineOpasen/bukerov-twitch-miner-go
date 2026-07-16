@@ -110,6 +110,20 @@ func (s *Stream) SetSpadeURL(url string) {
 	s.spadeURL = url
 }
 
+// GetBroadcastID returns the Twitch broadcast (stream) ID of the current
+// stream, or "" until the api client's first successful stream-info fetch. The
+// value is the Twitch stream.id (set by Update): stable for the lifetime of one
+// broadcast and different for a new one. It is exposed purely so the diagnostic
+// logs can carry a broadcast identity that tells a slot re-assignment on the
+// SAME broadcast apart from an attempt on a NEW one; no selection logic consults
+// it. Takes the stream lock like every other accessor — never read the field
+// directly off the goroutines that log it.
+func (s *Stream) GetBroadcastID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.BroadcastID
+}
+
 // GetCampaignIDs returns the campaign IDs Twitch currently advertises on this
 // channel. The returned slice is replaced wholesale by SetCampaignIDs and its
 // elements are immutable — callers may iterate but must not mutate.

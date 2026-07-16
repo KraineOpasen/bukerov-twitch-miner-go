@@ -207,6 +207,11 @@ type StreamerState struct {
 	OfflineSince time.Time `json:"offlineSince,omitzero"`
 	Game         string    `json:"game,omitempty"`
 	Title        string    `json:"title,omitempty"`
+	// BroadcastID is the Twitch stream.id of the current broadcast (empty until
+	// the first successful stream-info fetch). Diagnostic only: it lets an
+	// operator tell a slot re-assignment on the same broadcast apart from a new
+	// one. Only populated while online, since it is meaningless off-air.
+	BroadcastID string `json:"broadcastId,omitempty"`
 
 	// WatchedMinutesWindow is this channel's accumulated watch time within
 	// the trailing watching.watchTimeWindowHours window - the metric the

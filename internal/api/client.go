@@ -945,7 +945,14 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
 			// Log only on a real offline→online transition, so racing detectors
 			// (viewcount + the stream-check loop, two viewcount events, ...) that
 			// both reach this branch don't print a duplicate "Streamer is online".
-			slog.Info("Streamer is online", "streamer", streamer.Username)
+			// channelID/broadcastID are diagnostic: broadcastID identifies the
+			// broadcast this online refers to (note SetOnline()==true also fires
+			// on the initial discovery of an already-running broadcast — this log
+			// does not distinguish that from a witnessed offline→online).
+			slog.Info("Streamer is online",
+				"streamer", streamer.Username,
+				"channelID", streamer.ChannelID,
+				"broadcastID", streamer.Stream.GetBroadcastID())
 		}
 	} else {
 		if err := c.UpdateStream(streamer); err != nil {
@@ -958,7 +965,10 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
 					"streamer", streamer.Username, "error", err)
 				return
 			}
-			slog.Info("Streamer went offline", "streamer", streamer.Username)
+			slog.Info("Streamer went offline",
+				"streamer", streamer.Username,
+				"channelID", streamer.ChannelID,
+				"broadcastID", streamer.Stream.GetBroadcastID())
 			streamer.SetOffline()
 		}
 	}

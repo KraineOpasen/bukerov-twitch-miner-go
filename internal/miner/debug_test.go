@@ -8,6 +8,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
@@ -108,4 +109,50 @@ func TestBuildDebugSnapshotIncludesDropsSection(t *testing.T) {
 // page stuck on "No active drop campaigns".
 func TestDropsTrackerSatisfiesWebProvider(t *testing.T) {
 	var _ web.CampaignsProvider = (*drops.DropsTracker)(nil)
+}
+
+// snapshotStreamerClient is a no-network streamer.twitchClient: it resolves a
+// channel ID and no-ops the rest, so a streamer can be loaded into a Manager for
+// the snapshot test without HTTP.
+type snapshotStreamerClient struct{}
+
+func (snapshotStreamerClient) GetChannelID(u string) (string, error)           { return "ch-" + u, nil }
+func (snapshotStreamerClient) LoadChannelPointsContext(*models.Streamer) error { return nil }
+func (snapshotStreamerClient) CheckStreamerOnline(*models.Streamer)            {}
+
+// TestBuildDebugSnapshotIncludesBroadcastID guards that the per-streamer debug
+// snapshot surfaces the Twitch broadcast ID for an online streamer, so an
+// operator can tell same-broadcast slot churn apart from a new broadcast.
+func TestBuildDebugSnapshotIncludesBroadcastID(t *testing.T) {
+	mgr := streamer.NewManager(snapshotStreamerClient{}, models.DefaultStreamerSettings())
+	if err := mgr.LoadFromConfig([]config.StreamerConfig{{Username: "cyganzor"}}, nil); err != nil {
+		t.Fatalf("load streamers: %v", err)
+	}
+	s := mgr.Get("cyganzor")
+	if s == nil {
+		t.Fatal("streamer not loaded")
+	}
+	s.SetOnline()
+	s.Stream.Update("bc-xyz-9", "Ranked", nil, nil, 1234)
+
+	m := &Miner{config: &config.Config{Username: "tester"}, streamers: mgr}
+	snap := m.BuildDebugSnapshot()
+
+	var present, online bool
+	var bid string
+	for _, st := range snap.Streamers {
+		if st.Username == "cyganzor" {
+			present, online, bid = true, st.Online, st.BroadcastID
+			break
+		}
+	}
+	if !present {
+		t.Fatalf("cyganzor missing from snapshot: %+v", snap.Streamers)
+	}
+	if !online {
+		t.Fatal("expected cyganzor online in the snapshot")
+	}
+	if bid != "bc-xyz-9" {
+		t.Errorf("snapshot broadcastId = %q, want bc-xyz-9", bid)
+	}
 }

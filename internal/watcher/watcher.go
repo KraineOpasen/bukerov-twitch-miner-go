@@ -85,9 +85,12 @@ type MinuteWatcher struct {
 	selectionReasons map[int]string
 	selectionMode    string
 
-	// lastSlots is the previous tick's slot allocation (login -> reason code),
-	// loop-owned, used to log slot changes only when they actually change.
-	lastSlots map[string]string
+	// lastSlots is the previous tick's slot allocation (login -> reason code +
+	// broadcast ID), loop-owned, used to log slot changes only when they
+	// actually change. The broadcast ID is captured alongside the reason so a
+	// "released" log can name the broadcast the slot was on, even though that
+	// streamer is no longer in this tick's slots slice by then.
+	lastSlots map[string]slotLogState
 
 	// displaceParity alternates the displacement victim in the pure
 	// cold-start tie case (equal-rank configured occupants with no rotation
@@ -1291,7 +1294,8 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 		slog.Info("Pursuing watch streak",
 			"streamer", s.Username,
 			"minutesWatched", mw,
-			"neededMinutes", watchStreakThresholdMinutes)
+			"neededMinutes", watchStreakThresholdMinutes,
+			"broadcastID", s.Stream.GetBroadcastID())
 	}
 
 	if mw >= watchStreakThresholdMinutes && !state.stalled {
@@ -1299,7 +1303,8 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 		slog.Warn("Watched past the watch-streak threshold but Twitch has not granted the streak - if this persists the streak is not being credited (check authorization / viewing), not merely under-watched",
 			"streamer", s.Username,
 			"minutesWatched", mw,
-			"thresholdMinutes", watchStreakThresholdMinutes)
+			"thresholdMinutes", watchStreakThresholdMinutes,
+			"broadcastID", s.Stream.GetBroadcastID())
 	}
 
 	w.streakDiag[idx] = state

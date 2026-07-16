@@ -432,30 +432,45 @@ func (w *MinuteWatcher) WatchingOrigin(login string) string {
 	return ""
 }
 
+// slotLogState is the previous-tick per-login slot state logSlotChanges diffs
+// against: the reason code (to detect a reason change) and the broadcast ID the
+// slot was on at the time. The broadcast ID is captured so a later "released"
+// log can name the broadcast the slot held, since that streamer is no longer in
+// the slots slice by the time it is reported released.
+type slotLogState struct {
+	reason    string
+	broadcast string
+}
+
 // logSlotChanges emits an INFO log and a recent-events entry only when the
 // allocation actually changes — a channel takes or leaves a slot, or its
 // reason changes — so a steady state does not log the same decision every
-// minute. Runs on the loop goroutine; lastSlots is loop-owned.
+// minute. Each slot event carries the broadcastID of the streamer that event
+// is about (diagnostic only; the broadcast ID never affects arbitration). Runs
+// on the loop goroutine; lastSlots is loop-owned.
 func (w *MinuteWatcher) logSlotChanges(slots []slotOccupant) {
-	current := make(map[string]string, len(slots))
+	current := make(map[string]slotLogState, len(slots))
 	for _, s := range slots {
-		current[s.streamer.Username] = s.reasonCode
+		current[s.streamer.Username] = slotLogState{
+			reason:    s.reasonCode,
+			broadcast: s.streamer.Stream.GetBroadcastID(),
+		}
 	}
 
-	for login, code := range current {
+	for login, cur := range current {
 		prev, held := w.lastSlots[login]
 		switch {
 		case !held:
-			slog.Info("Watch slot assigned", "channel", login, "reason", code)
-			events.Record(events.TypeSlotAssigned, login, code)
-		case prev != code:
-			slog.Info("Watch slot reason changed", "channel", login, "from", prev, "to", code)
-			events.Record(events.TypeSlotAssigned, login, code)
+			slog.Info("Watch slot assigned", "channel", login, "reason", cur.reason, "broadcastID", cur.broadcast)
+			events.Record(events.TypeSlotAssigned, login, cur.reason)
+		case prev.reason != cur.reason:
+			slog.Info("Watch slot reason changed", "channel", login, "from", prev.reason, "to", cur.reason, "broadcastID", cur.broadcast)
+			events.Record(events.TypeSlotAssigned, login, cur.reason)
 		}
 	}
-	for login := range w.lastSlots {
+	for login, prev := range w.lastSlots {
 		if _, held := current[login]; !held {
-			slog.Info("Watch slot released", "channel", login)
+			slog.Info("Watch slot released", "channel", login, "broadcastID", prev.broadcast)
 			events.Record(events.TypeSlotReleased, login, "")
 		}
 	}

@@ -462,8 +462,12 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 		streamer.StreamUpTime = time.Now()
 	case "stream-down":
 		if streamer.GetIsOnline() {
+			bid := streamer.Stream.GetBroadcastID()
 			streamer.SetOffline()
-			slog.Info("Streamer went offline", "streamer", streamer.Username)
+			slog.Info("Streamer went offline",
+				"streamer", streamer.Username,
+				"channelID", streamer.ChannelID,
+				"broadcastID", bid)
 			if p.onStatusChange != nil {
 				p.onStatusChange(streamer.Username, false)
 			}
