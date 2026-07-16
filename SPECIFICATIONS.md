@@ -159,6 +159,15 @@ internal/
 ├── events/                     # In-memory ring buffer of recent miner events
 │   └── events.go               # Claims/bets/online-offline history for diagnostics
 │
+├── health/                     # Health Center (see "Health Signals")
+│   ├── center.go               # Signal store/snapshot (ok/degraded/failed/idle/stalled/unknown)
+│   ├── canary.go               # Watch-transport accrual canary
+│   ├── progress.go             # Drop-progress watchdog (stall detection + recovery pipeline)
+│   └── avoid.go                # Temporary channel-avoid list used by recovery stage 6
+│
+├── policy/                     # Campaign policy engine (see "Campaign Policy Engine")
+│   └── policy.go               # Pure, deterministic campaign ranking + feasibility
+│
 ├── analytics/                  # Analytics data layer (no HTTP)
 │   ├── service.go              # Point/annotation recording service
 │   ├── repository.go           # SQLite data access
@@ -224,8 +233,16 @@ internal/
 │   ├── format.go               # Number and time formatting (FormatNumber, FormatDuration, FormatTimeAgo)
 │   └── random.go               # Random ID generation (RandomHex, DeviceID)
 │
+├── i18n/                       # Dashboard localization
+│   ├── i18n.go                 # Locale catalog loading and lookup
+│   └── locales/                # Embedded JSON message catalogs (en, ru)
+│
 ├── logger/                     # Logging
 │   └── logger.go               # Structured logging setup
+│
+├── updater/                    # Binary self-update (see "Auto-Update Integrity")
+│   ├── updater.go              # Release check, fail-closed checksum verify, binary swap
+│   └── version.go              # Release/version comparison helpers
 │
 └── version/                    # Version info
     └── version.go              # Build version, injected at compile
@@ -264,7 +281,6 @@ The main controller coordinates all mining operations.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `username` | string | Required | Twitch username |
-| `password` | string | null | Twitch password (prompts if not provided) |
 | `claimDropsOnStartup` | boolean | false | Claim all drops from inventory on startup |
 | `enableAnalytics` | boolean | true | Enable analytics web server |
 | `priority` | array | [STREAK, DROPS, ORDER] | Streamer watching priority |
@@ -1796,7 +1812,6 @@ Per-streamer configuration options:
 | `less` | bool | false | Reduced verbosity mode |
 | `consoleLevel` | enum | INFO | Console log level |
 | `fileLevel` | enum | DEBUG | File log level |
-| `emoji` | bool | true | Enable emoji in logs |
 | `colored` | bool | false | Enable colored output |
 | `autoClear` | bool | true | Log rotation (7 days) |
 | `timeZone` | string | null | Custom timezone |
@@ -2001,7 +2016,7 @@ On termination signal:
 application/
 ├── config.json               # User configuration
 ├── cookies/
-│   └── {username}.pkl        # Authentication tokens (pickle format)
+│   └── {username}.json       # Authentication tokens (JSON; optionally AES-256-GCM encrypted)
 ├── logs/
 │   └── {username}.log        # Log files (7-day rotation)
 └── database/
