@@ -1134,16 +1134,30 @@ func (c *TwitchClient) JoinRaid(streamer *models.Streamer, raid *models.Raid) er
 
 	slog.Info("Joining raid", "from", streamer.Username, "to", raid.TargetLogin)
 
-	streamer.Raid = raid
-
 	op := constants.JoinRaid.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
 			"raidID": raid.RaidID,
 		},
 	})
 
-	_, err := c.postGQLRequest(op)
-	return err
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		return err
+	}
+
+	// A 200 carrying a top-level "errors" array (a non-PQNF service failure)
+	// means Twitch did not accept the join, same as the GetChannelID case.
+	if hasTopLevelGQLErrors(resp) {
+		return fmt.Errorf("twitch GQL error for %s: raid join not accepted", op.OperationName)
+	}
+
+	// Mark the raid as joined only once Twitch actually accepted it. Doing this
+	// before the request (as previously) made the RaidID guard above treat a
+	// FAILED join as done, so the repeated raid_update_v2 events Twitch sends
+	// during the raid countdown — the natural retry channel — were silently
+	// short-circuited and a failed join was never retried.
+	streamer.Raid = raid
+	return nil
 }
 
 // PlacePredictionBet places a single prediction bet for an explicit outcome and
