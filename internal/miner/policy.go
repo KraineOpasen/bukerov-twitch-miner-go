@@ -30,9 +30,16 @@ func (m *Miner) refreshPolicy(now time.Time) {
 
 	m.mu.RLock()
 	mode := policy.Normalize(m.config.CampaignPolicy)
-	rules := m.config.DropRules
 	games := m.config.DirectoryGames
 	m.mu.RUnlock()
+
+	// A COPY of the rules map, not the shared reference: buildPolicyInputs reads
+	// it lock-free (below), while SetDropRule mutates m.config.DropRules under
+	// the lock from another goroutine. Sharing the map reference here would be a
+	// concurrent map read/write (a fatal runtime error). games is a slice whose
+	// backing array is never mutated in place (writers replace the whole slice
+	// under the lock), so capturing its header under RLock is safe as-is.
+	rules := m.snapshotDropRules()
 
 	campaigns := m.dropsTracker.Campaigns()
 	inputs := m.buildPolicyInputs(campaigns, rules, games, now)
@@ -245,16 +252,28 @@ func (m *Miner) PolicySnapshot() (policy.Mode, []policy.Decision) {
 	return s.Mode, s.Decisions
 }
 
+// snapshotDropRules returns a private copy of the per-drop rules taken under the
+// read lock, so callers can read it without holding m.mu while SetDropRule
+// mutates the shared map under the write lock from another goroutine. Handing
+// out the shared reference instead would be a concurrent map read/write — a
+// fatal runtime error.
+func (m *Miner) snapshotDropRules() map[string]config.DropRule {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]config.DropRule, len(m.config.DropRules))
+	for k, v := range m.config.DropRules {
+		out[k] = v
+	}
+	return out
+}
+
 // CurrentCampaignPolicy returns the active mode and a copy of the per-drop
 // rules for the Drops-page controls.
 func (m *Miner) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	rules := make(map[string]config.DropRule, len(m.config.DropRules))
-	for k, v := range m.config.DropRules {
-		rules[k] = v
-	}
-	return string(policy.Normalize(m.config.CampaignPolicy)), rules
+	mode := string(policy.Normalize(m.config.CampaignPolicy))
+	m.mu.RUnlock()
+	return mode, m.snapshotDropRules()
 }
 
 // ApplyCampaignPolicy validates, applies (runtime, no restart), and persists a
