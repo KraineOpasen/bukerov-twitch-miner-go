@@ -357,6 +357,14 @@ func (p *WebSocketPool) UpdateStreamers(streamers []*models.Streamer) {
 }
 
 func (p *WebSocketPool) findStreamer(channelID string) *models.Streamer {
+	// Read under the lock: this runs on each connection's read-loop goroutine for
+	// every message, while UpdateStreamers replaces p.streamers under the write
+	// lock from the settings goroutine. Ranging the slice without the lock is a
+	// data race on the slice header (a torn read could pair a new pointer with a
+	// stale length). The returned *Streamer is safe to use after unlock — it has
+	// its own mutex and the pointer itself is stable.
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	for _, s := range p.streamers {
 		if s.ChannelID == channelID {
 			return s
