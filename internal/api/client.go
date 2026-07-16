@@ -619,6 +619,15 @@ func (c *TwitchClient) GetChannelID(username string) (string, error) {
 		return "", err
 	}
 
+	// A 200 carrying a top-level "errors" array (a non-PQNF service failure
+	// such as "service timeout") returned no authoritative data. Mapping it to
+	// ErrStreamerDoesNotExist below would tell callers — including the startup
+	// fail-fast path, which treats "does not exist" as a config typo and exits —
+	// that the login is missing when Twitch merely hiccuped.
+	if hasTopLevelGQLErrors(resp) {
+		return "", fmt.Errorf("twitch GQL error for %s: user lookup returned no data", op.OperationName)
+	}
+
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
 		return "", ErrStreamerDoesNotExist

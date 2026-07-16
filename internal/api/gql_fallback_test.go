@@ -80,7 +80,6 @@ func TestGetChannelIDMissingDataIsGenuineNotExist(t *testing.T) {
 		{"data absent", `{}`},
 		{"data null", `{"data":null}`},
 		{"user null", `{"data":{"user":null}}`},
-		{"errors without data", `{"errors":[{"message":"some upstream error"}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,6 +93,36 @@ func TestGetChannelIDMissingDataIsGenuineNotExist(t *testing.T) {
 			}
 			if errors.Is(err, ErrPersistedQueryNotFound) {
 				t.Fatal("a genuine missing user must not be reported as PersistedQueryNotFound")
+			}
+		})
+	}
+}
+
+// TestGetChannelIDServiceErrorIsNotMisreportedAsNotExist verifies that an
+// HTTP-200 response carrying a top-level "errors" array (a non-PQNF service
+// failure such as "service timeout") is NOT mapped to ErrStreamerDoesNotExist:
+// the startup fail-fast path treats "does not exist" as a config typo and
+// exits the process, so a transient service error must stay retryable.
+func TestGetChannelIDServiceErrorIsNotMisreportedAsNotExist(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"errors without data", `{"errors":[{"message":"service timeout"}]}`},
+		{"errors with null data", `{"errors":[{"message":"service error"}],"data":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			_, err := c.GetChannelID("somebody")
+			if err == nil {
+				t.Fatal("expected an error for a service-error response")
+			}
+			if errors.Is(err, ErrStreamerDoesNotExist) {
+				t.Fatalf("a transient service error must not be reported as ErrStreamerDoesNotExist, got %v", err)
 			}
 		})
 	}
