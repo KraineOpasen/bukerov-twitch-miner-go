@@ -176,7 +176,7 @@ func (m *Miner) Run(ctx context.Context) error {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 
-	if err := m.authenticate(); err != nil {
+	if err := m.authenticate(ctx); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 
@@ -227,7 +227,7 @@ func (m *Miner) initialize() error {
 	return nil
 }
 
-func (m *Miner) authenticate() error {
+func (m *Miner) authenticate(ctx context.Context) error {
 	slog.Info("Authenticating with Twitch")
 
 	m.auth = auth.NewTwitchAuth(m.config.Username, m.deviceID)
@@ -256,9 +256,38 @@ func (m *Miner) authenticate() error {
 	m.client.UpdateClientVersion()
 	m.client.SetAuthErrorHandler(m.handleAuthError)
 
-	userID, err := m.client.GetChannelID(m.config.Username)
+	// The miner cannot start without its own user ID (pubsub topics, watch
+	// payloads), so a temporary Twitch outage here — stale persisted-query
+	// hashes, a long 5xx spell — is retried in-process instead of exiting:
+	// exiting would only trade this loop for a container crash-loop that also
+	// takes the dashboard down. Token rejection and a genuinely unknown login
+	// (config typo) still fail fast inside retryStartupLookup.
+	var retryBroadcaster *web.StatusBroadcaster
+	if m.webServer != nil {
+		retryBroadcaster = m.webServer.GetStatusBroadcaster()
+	}
+	retried := false
+	userID, err := retryStartupLookup(ctx, func() (string, error) {
+		return m.client.GetChannelID(m.config.Username)
+	}, func(attempt int, err error, next time.Duration) {
+		retried = true
+		slog.Warn("Startup: could not resolve own Twitch user ID; retrying",
+			"attempt", attempt,
+			"nextWaitSeconds", int(next.Seconds()),
+			"error", err)
+		if retryBroadcaster != nil {
+			retryBroadcaster.SetStatus(web.StatusError,
+				fmt.Sprintf("Twitch temporarily unavailable — retrying automatically (attempt %d, next try in %ds)",
+					attempt, int(next.Seconds())))
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get user ID: %w", err)
+	}
+	if retried && retryBroadcaster != nil {
+		// Clear the retry banner now that Twitch answered; without this the
+		// overlay would keep showing the last error until loadStreamers runs.
+		retryBroadcaster.SetStatus(web.StatusLoadingStreamers, "Loading streamers...")
 	}
 	m.auth.SetUserID(userID)
 
