@@ -34,11 +34,17 @@ type PointSample struct {
 
 // AnnotationRecord is a machine-readable event marker for the points-history
 // endpoint: T is a Unix-millis timestamp, Type is the event type (e.g.
-// WATCH_STREAK, WIN, LOSE), Reason is the human-readable description.
+// WATCH_STREAK, WIN, LOSE), Reason is the human-readable description, and Color
+// is the per-type marker colour persisted alongside the annotation (see
+// analytics.RecordAnnotation). Carrying the colour lets the chart give every
+// event type — WATCH_STREAK included — a hue distinct from the balance line
+// without the template duplicating the type→colour map, so a new event type
+// needs no front-end change.
 type AnnotationRecord struct {
 	T      int64  `json:"t"`
 	Type   string `json:"type"`
 	Reason string `json:"reason"`
+	Color  string `json:"color"`
 }
 
 // PointsHistory is the response shape for the statistics points-history

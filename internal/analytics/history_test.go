@@ -161,6 +161,52 @@ func TestGetAnnotationRecords(t *testing.T) {
 	if recs[1].Type != "Legacy marker" {
 		t.Errorf("legacy fallback type = %q, want %q", recs[1].Type, "Legacy marker")
 	}
+	// The persisted per-type colour is carried through to the DTO so the chart can
+	// give each marker its own hue (regression: WATCH_STREAK once rendered in the
+	// series colour because the colour never left the annotations table).
+	if recs[0].Color != "#8b7fd1" {
+		t.Errorf("first annotation colour = %q, want %q", recs[0].Color, "#8b7fd1")
+	}
+	if recs[1].Color != "#ffffff" {
+		t.Errorf("legacy annotation colour = %q, want %q", recs[1].Color, "#ffffff")
+	}
+}
+
+// TestGetAnnotationRecordsRangeAndTimestamp verifies annotation markers are
+// filtered by the requested window and their timestamp round-trips exactly, so a
+// watch streak lands on the right point of the chart: a 3-day-old streak (with
+// its colour) is inside the 30d window but excluded by the 24h window.
+// Deliberately uses no row older than 30d — PruneBefore counts stale rows across
+// the shared package DB, so a >30d seed here would leak into TestPruneBefore.
+func TestGetAnnotationRecordsRangeAndTimestamp(t *testing.T) {
+	repo := newTestRepo(t)
+	const s = "ann_range_streamer"
+	now := time.Now()
+
+	inWindow := now.Add(-3 * 24 * time.Hour) // inside 30d, outside 24h
+	seedAnnotation(t, repo, s, inWindow, "WATCH_STREAK", "+450 - Watch Streak", "#45c1ff")
+
+	recs, err := repo.GetAnnotationRecords(s, now.Add(-30*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("query 30d: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("30d window: want 1 annotation, got %d", len(recs))
+	}
+	if recs[0].T != inWindow.UnixMilli() {
+		t.Errorf("timestamp = %d, want exact round-trip %d", recs[0].T, inWindow.UnixMilli())
+	}
+	if recs[0].Color != "#45c1ff" {
+		t.Errorf("colour = %q, want #45c1ff", recs[0].Color)
+	}
+
+	recent, err := repo.GetAnnotationRecords(s, now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("query 24h: %v", err)
+	}
+	if len(recent) != 0 {
+		t.Errorf("24h window: want 0 annotations, got %d", len(recent))
+	}
 }
 
 // TestPruneBefore verifies retention deletes rows older than the cutoff while

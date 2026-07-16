@@ -180,21 +180,15 @@
         accent:  tok('--color-purple-500', '#8b7fd1'),
         grid:    tok('--color-neutral-700', '#3a3b47'),
         text:    tok('--color-neutral-400', '#9c9aab'),
-        success: tok('--color-success', '#7fa88c'),
-        danger:  tok('--color-danger', '#c97b63'),
-        event:   tok('--color-event', '#d9a25c'),
     };
 
-    // Event type -> annotation colour, using accepted palette tokens only.
-    function annColor(type) {
-        switch ((type || '').toUpperCase()) {
-            case 'WIN':
-            case 'PREDICTION_WIN': return C.success;
-            case 'LOSE':
-            case 'PREDICTION_LOSE': return C.danger;
-            case 'RAID': return C.event;
-            default: return C.accent; // WATCH_STREAK, PREDICTION_MADE, etc.
-        }
+    // Annotation colour comes from the persisted record (the per-type palette in
+    // analytics.RecordAnnotation), so every event type — WATCH_STREAK included —
+    // renders in its own hue instead of colliding with the accent-coloured
+    // balance line, and a new event type needs no template change. Falls back to
+    // the accent only if a row somehow carries no colour.
+    function annColor(a) {
+        return (a && a.color) ? a.color : C.accent;
     }
 
     const els = {
@@ -236,17 +230,20 @@
     function buildOptions(data) {
         const series = (data.points || []).map(p => ({ x: p.t, y: p.balance }));
         const reasons = (data.points || []).map(p => p.reason || '');
-        const annotations = (data.annotations || []).map(a => ({
-            x: a.t,
-            borderColor: annColor(a.type),
-            strokeDashArray: 0,
-            label: {
-                borderColor: annColor(a.type),
-                style: { color: '#15161c', background: annColor(a.type), fontSize: '10px' },
-                text: a.reason || a.type,
-                orientation: 'horizontal',
-            },
-        }));
+        const annotations = (data.annotations || []).map(a => {
+            const color = annColor(a);
+            return {
+                x: a.t,
+                borderColor: color,
+                strokeDashArray: 0,
+                label: {
+                    borderColor: color,
+                    style: { color: '#15161c', background: color, fontSize: '10px' },
+                    text: a.reason || a.type,
+                    orientation: 'horizontal',
+                },
+            };
+        });
 
         return {
             series: [{ name: t('js.stat.balance'), data: series }],

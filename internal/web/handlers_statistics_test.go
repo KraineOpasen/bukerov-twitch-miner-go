@@ -217,6 +217,76 @@ func TestStatisticsPageLocalized(t *testing.T) {
 	}
 }
 
+// TestPointsHistoryAnnotationColors verifies the endpoint carries each event
+// type's persisted colour in the JSON so the chart can render WATCH_STREAK in its
+// own hue, distinct from RAID/WIN (and from the accent-coloured balance line).
+// This is the backend half of the "WATCH_STREAK invisible on the chart" fix.
+func TestPointsHistoryAnnotationColors(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	const s = "ann_color_streamer"
+
+	seeds := []struct{ typ, text, color string }{
+		{"WATCH_STREAK", "+450 - Watch Streak", "#45c1ff"},
+		{"RAID", "+250 - Raid", "#d9a25c"},
+		{"WIN", "+100 - Win", "#36b535"},
+	}
+	for _, sd := range seeds {
+		if err := repo.RecordAnnotation(s, sd.typ, sd.text, sd.color); err != nil {
+			t.Fatalf("seed %s: %v", sd.typ, err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/points-history?streamer="+s+"&range=7d", nil)
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+
+	byType := map[string]string{}
+	for _, a := range got.Annotations {
+		byType[a.Type] = a.Color
+	}
+	for _, sd := range seeds {
+		if byType[sd.typ] != sd.color {
+			t.Errorf("annotation %s colour = %q, want %q (all: %+v)", sd.typ, byType[sd.typ], sd.color, got.Annotations)
+		}
+	}
+	// The whole point of the fix: WATCH_STREAK must not share another type's colour.
+	if byType["WATCH_STREAK"] == byType["RAID"] || byType["WATCH_STREAK"] == byType["WIN"] {
+		t.Errorf("WATCH_STREAK colour collides with another type: %+v", byType)
+	}
+}
+
+// TestStatisticsPageColoursAnnotationsFromRecord guards that the chart colours
+// annotations from the record's own colour (a.color) instead of the removed
+// hardcoded type→colour switch that made WATCH_STREAK fall back to the accent
+// (the same colour as the balance line).
+func TestStatisticsPageColoursAnnotationsFromRecord(t *testing.T) {
+	srv := newStatsTestServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !contains(body, "a.color") {
+		t.Errorf("statistics chart must colour annotations from the record's colour (a.color)")
+	}
+	// The removed per-type palette token must be gone, or a new event type would
+	// again fall through to the accent and vanish against the line.
+	if contains(body, "C.event") {
+		t.Errorf("removed palette token C.event still referenced; type→colour switch not fully removed")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
