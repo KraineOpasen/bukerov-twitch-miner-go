@@ -17,15 +17,25 @@ type ProgressCallback func(current, total int, username string)
 
 // Manager handles loading, storing, and updating streamers.
 type Manager struct {
-	client   *api.TwitchClient
+	client   twitchClient
 	defaults models.StreamerSettings
 
 	streamers []*models.Streamer
 	mu        sync.RWMutex
 }
 
+// twitchClient is the slice of the Twitch API the manager needs to resolve a
+// new streamer's channel ID and hydrate its channel-points context. Narrowed
+// to an interface (satisfied by *api.TwitchClient, the production caller) so
+// the add/load paths can be exercised in tests without HTTP.
+type twitchClient interface {
+	GetChannelID(username string) (string, error)
+	LoadChannelPointsContext(streamer *models.Streamer) error
+	CheckStreamerOnline(streamer *models.Streamer)
+}
+
 // NewManager creates a new streamer manager.
-func NewManager(client *api.TwitchClient, defaults models.StreamerSettings) *Manager {
+func NewManager(client twitchClient, defaults models.StreamerSettings) *Manager {
 	return &Manager{
 		client:   client,
 		defaults: defaults,
@@ -96,11 +106,14 @@ func (m *Manager) LoadFromConfig(configs []config.StreamerConfig, onProgress Pro
 	return nil
 }
 
-// All returns all loaded streamers.
+// All returns a copy of the loaded streamer list. Callers (pubsub pool,
+// watcher, drops tracker, web server) hold the result long-term, so handing
+// out the internal slice would let a later ApplySettings append/replace
+// mutate their view concurrently.
 func (m *Manager) All() []*models.Streamer {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.streamers
+	return append([]*models.Streamer(nil), m.streamers...)
 }
 
 // Count returns the number of loaded streamers.

@@ -50,6 +50,14 @@ type MinuteWatcher struct {
 	pendingSettings   config.RateLimitSettings
 	hasPending        bool
 
+	// pendingStreamers/hasPendingStreamers stage a runtime replacement of the
+	// configured streamer list (Settings-page add/remove) the same way:
+	// UpdateStreamers (any goroutine) stages under mu, the loop swaps it into
+	// the loop-owned streamers field at the start of the next tick — after
+	// remapping every index-keyed piece of loop state (see applyStreamerList).
+	pendingStreamers    []*models.Streamer
+	hasPendingStreamers bool
+
 	// sources supply extra watch candidates (e.g. directory discovery) that
 	// compete for the same slots as the configured list. Guarded by mu; set at
 	// startup and snapshotted at the start of each tick.
@@ -316,18 +324,126 @@ func (w *MinuteWatcher) UpdateSettings(priorities []config.Priority, settings co
 	w.hasPending = true
 }
 
+// UpdateStreamers stages a runtime replacement of the configured streamer
+// list (Settings-page add/remove). The loop goroutine applies it at the start
+// of the next tick (see applyPendingSettings), so streamers stays loop-owned
+// and readable without locking during selection. Two calls before a tick are
+// last-write-wins: only the newest list is ever applied. The slice is copied
+// so later caller-side mutations cannot reach loop state. A removed streamer
+// is released softly: it simply stops being a slot candidate on the next
+// tick, and the normal per-tick selection reassigns its slot.
+func (w *MinuteWatcher) UpdateStreamers(streamers []*models.Streamer) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pendingStreamers = append([]*models.Streamer(nil), streamers...)
+	w.hasPendingStreamers = true
+}
+
 // applyPendingSettings moves any staged runtime settings into the loop-owned
 // priorities/settings fields. Runs on the loop goroutine at the start of each
 // tick; also snapshots the registered sources and the avoid checker.
 func (w *MinuteWatcher) applyPendingSettings() ([]CandidateSource, AvoidChecker) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.hasPending {
 		w.priorities = w.pendingPriorities
 		w.settings = w.pendingSettings
 		w.hasPending = false
 	}
-	return append([]CandidateSource(nil), w.sources...), w.avoid
+	var stagedStreamers []*models.Streamer
+	applyStreamers := false
+	if w.hasPendingStreamers {
+		stagedStreamers = w.pendingStreamers
+		w.pendingStreamers = nil
+		w.hasPendingStreamers = false
+		applyStreamers = true
+	}
+	sources := append([]CandidateSource(nil), w.sources...)
+	avoid := w.avoid
+	w.mu.Unlock()
+
+	// The swap itself happens outside mu: streamers and the rotation/streak
+	// state are loop-owned, and this runs on the loop goroutine.
+	if applyStreamers {
+		w.applyStreamerList(stagedStreamers)
+	}
+	return sources, avoid
+}
+
+// applyStreamerList replaces the loop-owned streamer list and remaps every
+// index-keyed piece of loop state — rotation pair, boost latch, fairness
+// recency (lastWatched), swap-out deferrals, and streak log bookkeeping —
+// from old indexes to new ones by username. Entries whose streamer left the
+// list are dropped. If a rotation-pair or boost seat member was removed, that
+// state is reset so the next selection recomputes it from scratch; per-tick
+// scratch (selectionReasons) needs nothing, it is rebuilt every tick.
+// Username-keyed state (reportStats, pendingRefresh, WatchTimeStore rows)
+// is index-free and intentionally untouched.
+func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
+	oldList := w.streamers
+	newIndexByLogin := make(map[string]int, len(newList))
+	for i, s := range newList {
+		newIndexByLogin[s.Username] = i
+	}
+	translate := func(oldIdx int) (int, bool) {
+		if oldIdx < 0 || oldIdx >= len(oldList) {
+			return -1, false
+		}
+		newIdx, ok := newIndexByLogin[oldList[oldIdx].Username]
+		return newIdx, ok
+	}
+
+	if len(w.rotation.lastWatched) > 0 {
+		remapped := make(map[int]time.Time, len(w.rotation.lastWatched))
+		for oldIdx, at := range w.rotation.lastWatched {
+			if newIdx, ok := translate(oldIdx); ok {
+				remapped[newIdx] = at
+			}
+		}
+		w.rotation.lastWatched = remapped
+	}
+	if len(w.rotation.deferredFor) > 0 {
+		remapped := make(map[int]bool, len(w.rotation.deferredFor))
+		for oldIdx, deferred := range w.rotation.deferredFor {
+			if newIdx, ok := translate(oldIdx); ok {
+				remapped[newIdx] = deferred
+			}
+		}
+		w.rotation.deferredFor = remapped
+	}
+	if len(w.streakDiag) > 0 {
+		remapped := make(map[int]streakDiagState, len(w.streakDiag))
+		for oldIdx, state := range w.streakDiag {
+			if newIdx, ok := translate(oldIdx); ok {
+				remapped[newIdx] = state
+			}
+		}
+		w.streakDiag = remapped
+	}
+
+	if w.rotation.hasPair {
+		a, okA := translate(w.rotation.activePair[0])
+		b, okB := translate(w.rotation.activePair[1])
+		if okA && okB {
+			w.rotation.activePair = [2]int{a, b}
+		} else {
+			// A pair member was removed: drop the pair (and the boost seat that
+			// references it) so this tick's selection recomputes both.
+			w.rotation.hasPair = false
+			w.rotation.clearBoostLatch()
+		}
+	}
+	if w.rotation.boostLatched {
+		target, okT := translate(w.rotation.boostTarget)
+		victim, okV := translate(w.rotation.boostVictim)
+		if okT && okV {
+			w.rotation.boostTarget = target
+			w.rotation.boostVictim = victim
+		} else {
+			w.rotation.clearBoostLatch()
+		}
+	}
+
+	w.streamers = newList
 }
 
 func (w *MinuteWatcher) randomizedDelay(base time.Duration) time.Duration {
