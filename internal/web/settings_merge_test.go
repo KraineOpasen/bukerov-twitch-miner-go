@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
@@ -146,6 +148,120 @@ func TestSettingsPostStreamersReplaceWithoutElementBleedThrough(t *testing.T) {
 	}
 	if got[0].Settings != nil {
 		t.Fatalf("posted element inherited the previous occupant's Settings pointer: %+v", got[0].Settings)
+	}
+}
+
+// TestSettingsPostExplicitFalseAppliesOverTrue: merge semantics must never be
+// implemented as "skip zero values" — an EXPLICIT false posted over a current
+// true is applied, while the untouched sibling fields of the same block keep
+// their current values.
+func TestSettingsPostExplicitFalseAppliesOverTrue(t *testing.T) {
+	var applied []settings.RuntimeSettings
+	srv := mergeTestServer(&applied) // current Logger.Colored = true
+
+	rec := postSettings(t, srv, `{"logger":{"colored":false}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := applied[0].Logger
+	if got.Colored {
+		t.Fatal("explicit false was swallowed by the merge: logger.colored stayed true")
+	}
+	if got.ConsoleLevel != "info" || got.FileLevel != "warn" {
+		t.Fatalf("sibling fields of the posted block must keep current values: %+v", got)
+	}
+}
+
+// TestSettingsPostExplicitZeroAppliesOverNonZero: an EXPLICIT 0 posted over a
+// non-zero current value is applied. The field is deliberately
+// analytics.daysAgo — zero is a legal value there and config.ValidateConfig
+// does not clamp it (unlike every rateLimits interval, where a zero would be
+// silently rewritten to the clamp minimum and the assertion would lie).
+func TestSettingsPostExplicitZeroAppliesOverNonZero(t *testing.T) {
+	var applied []settings.RuntimeSettings
+	srv := mergeTestServer(&applied) // current Analytics.DaysAgo = 7
+
+	rec := postSettings(t, srv, `{"analytics":{"daysAgo":0}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := applied[0].Analytics
+	if got.DaysAgo != 0 {
+		t.Fatalf("explicit zero was swallowed by the merge: daysAgo = %d, want 0", got.DaysAgo)
+	}
+	if got.Refresh != 5 {
+		t.Fatalf("sibling field of the posted block must keep its current value: refresh = %d, want 5", got.Refresh)
+	}
+}
+
+// funcSettingsProvider adapts a closure so the provider can serve LIVE
+// settings built from a mutating config (unlike fakeSettingsProvider's
+// static snapshot).
+type funcSettingsProvider struct {
+	get func() settings.RuntimeSettings
+}
+
+func (f *funcSettingsProvider) GetRuntimeSettings() settings.RuntimeSettings { return f.get() }
+func (f *funcSettingsProvider) GetDefaultSettings() settings.RuntimeSettings { return f.get() }
+
+// TestSettingsPostPartialRoundTripThroughConfigFile drives the full
+// production pipeline for a partial body: handler merge -> ApplyToConfig
+// (which ends in config.ValidateConfig's silent clamps) -> SaveConfig ->
+// LoadConfig (which re-runs ValidateConfig) -> BuildRuntimeSettings. The
+// effective settings right after the apply and after a reload from disk must
+// be identical — this is what pins the merge x clamp interaction: the posted
+// out-of-range interval must be clamped ONCE at apply time and then survive
+// the disk round-trip unchanged, and the explicit unclamped zero must
+// survive it verbatim.
+func TestSettingsPostPartialRoundTripThroughConfigFile(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+
+	cfg := config.DefaultConfig()
+	cfg.Username = "tester"
+	cfg.Streamers = []config.StreamerConfig{{Username: "alpha"}}
+	cfg.Analytics.DaysAgo = 7
+
+	var afterApply settings.RuntimeSettings
+	srv := &Server{
+		settingsProvider: &funcSettingsProvider{get: func() settings.RuntimeSettings {
+			return settings.BuildRuntimeSettings(&cfg)
+		}},
+		onSettingsUpdate: func(rt settings.RuntimeSettings) {
+			settings.ApplyToConfig(&cfg, rt)
+			if err := config.SaveConfig(cfgPath, &cfg); err != nil {
+				t.Fatalf("SaveConfig: %v", err)
+			}
+			afterApply = settings.BuildRuntimeSettings(&cfg)
+		},
+	}
+
+	// minuteWatchedInterval:5 is below ValidateConfig's floor of 30 (an
+	// intentionally clamped input); daysAgo:0 is a legal unclamped zero.
+	rec := postSettings(t, srv, `{"rateLimits":{"minuteWatchedInterval":5},"analytics":{"daysAgo":0}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	loaded, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	afterLoad := settings.BuildRuntimeSettings(loaded)
+
+	if !reflect.DeepEqual(afterApply, afterLoad) {
+		t.Fatalf("effective settings changed across the disk round-trip:\nafter apply: %+v\nafter load:  %+v", afterApply, afterLoad)
+	}
+	if afterLoad.RateLimits.MinuteWatchedInterval != 30 {
+		t.Fatalf("out-of-range posted interval must be clamped exactly once to 30, got %d", afterLoad.RateLimits.MinuteWatchedInterval)
+	}
+	if afterLoad.Analytics.DaysAgo != 0 {
+		t.Fatalf("legal explicit zero must survive the round-trip, got %d", afterLoad.Analytics.DaysAgo)
+	}
+	if len(afterLoad.Streamers) != 1 || afterLoad.Streamers[0].Username != "alpha" {
+		t.Fatalf("roster must survive a partial-body round-trip untouched: %+v", afterLoad.Streamers)
+	}
+	if afterLoad.RateLimits.CampaignSyncInterval != afterApply.RateLimits.CampaignSyncInterval {
+		t.Fatal("untouched clamped fields must be stable across the round-trip")
 	}
 }
 
