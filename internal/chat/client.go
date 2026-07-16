@@ -2,8 +2,10 @@ package chat
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -43,6 +45,16 @@ type IRCClient struct {
 	running  bool
 	stopChan chan struct{}
 
+	// forcedClose is set by Stop() and permanently disables reconnection.
+	// reconnecting guards against overlapping reconnect() runs (read-loop error
+	// and a RECONNECT command can race).
+	forcedClose  bool
+	reconnecting bool
+
+	// dialFn opens a new connection. It is nil in production (dial() is used);
+	// tests inject an in-memory transport here.
+	dialFn func() (net.Conn, error)
+
 	mu sync.RWMutex
 }
 
@@ -60,9 +72,24 @@ func NewIRCClient(username, token string, streamer *models.Streamer, logger Chat
 	}
 }
 
+// dial opens a TLS connection to Twitch IRC. The OAuth token is sent as the
+// PASS line during authentication, so plaintext (port 6667) would leak it on
+// the wire; we always use the TLS port. tls.DialWithDialer applies the dialer's
+// timeout to both the TCP connect and the TLS handshake as a whole.
+func (c *IRCClient) dial() (net.Conn, error) {
+	if c.dialFn != nil {
+		return c.dialFn()
+	}
+	addr := net.JoinHostPort(constants.IRCURL, fmt.Sprintf("%d", constants.IRCPortTLS))
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	return tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: constants.IRCURL,
+	})
+}
+
 func (c *IRCClient) Connect() error {
-	addr := net.JoinHostPort(constants.IRCURL, fmt.Sprintf("%d", constants.IRCPort))
-	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("failed to connect to IRC: %w", err)
 	}
@@ -138,12 +165,16 @@ func (c *IRCClient) readLoop() {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			c.mu.RLock()
-			running := c.running
+			forced := c.forcedClose
 			c.mu.RUnlock()
 
-			if running {
-				slog.Debug("IRC read error", "channel", c.channel, "error", err)
+			// A forced close (Stop) is the expected shutdown path; anything else
+			// is an unexpected drop (EOF, reset) that we recover from.
+			if forced {
+				return
 			}
+			slog.Debug("IRC read error, reconnecting", "channel", c.channel, "error", err)
+			go c.reconnect()
 			return
 		}
 
@@ -152,12 +183,110 @@ func (c *IRCClient) readLoop() {
 	}
 }
 
+// reconnect re-establishes a dropped IRC connection with exponential backoff.
+// It is triggered by a read error or a server RECONNECT command. The
+// reconnecting guard collapses concurrent triggers into a single loop, and
+// forcedClose (set by Stop) makes it exit for good.
+func (c *IRCClient) reconnect() {
+	c.mu.Lock()
+	if c.forcedClose || c.reconnecting {
+		c.mu.Unlock()
+		return
+	}
+	c.reconnecting = true
+	old := c.conn
+	c.mu.Unlock()
+
+	// Closing the old connection unblocks any in-flight ReadString in the
+	// previous readLoop so the stale goroutine exits instead of lingering.
+	if old != nil {
+		_ = old.Close()
+	}
+
+	delay := time.Second
+	const maxDelay = 30 * time.Second
+
+	for {
+		c.mu.RLock()
+		forced := c.forcedClose
+		c.mu.RUnlock()
+		if forced {
+			return
+		}
+
+		select {
+		case <-c.stopChan:
+			return
+		case <-time.After(withJitter(delay)):
+		}
+
+		conn, err := c.dial()
+		if err != nil {
+			slog.Debug("IRC reconnect dial failed, retrying", "channel", c.channel, "error", err, "delay", delay)
+			if delay < maxDelay {
+				delay *= 2
+			}
+			continue
+		}
+
+		c.mu.Lock()
+		if c.forcedClose {
+			c.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		c.conn = conn
+		c.reader = bufio.NewReader(conn)
+		c.mu.Unlock()
+
+		if err := c.authenticate(); err != nil {
+			slog.Debug("IRC reconnect auth failed, retrying", "channel", c.channel, "error", err)
+			_ = conn.Close()
+			if delay < maxDelay {
+				delay *= 2
+			}
+			continue
+		}
+		if err := c.join(); err != nil {
+			slog.Debug("IRC reconnect join failed, retrying", "channel", c.channel, "error", err)
+			_ = conn.Close()
+			if delay < maxDelay {
+				delay *= 2
+			}
+			continue
+		}
+
+		c.mu.Lock()
+		c.reconnecting = false
+		c.mu.Unlock()
+
+		go c.readLoop()
+		slog.Info("Reconnected to IRC chat", "channel", c.channel)
+		return
+	}
+}
+
+// withJitter applies ±20% random jitter to a backoff delay, matching the
+// human-like timing conventions used elsewhere in the miner.
+func withJitter(d time.Duration) time.Duration {
+	jitter := (mathrand.Float64() - 0.5) * 0.4 // ±20%
+	return time.Duration(float64(d) * (1 + jitter))
+}
+
 func (c *IRCClient) handleMessage(line string) {
 	slog.Debug("IRC message received", "channel", c.channel, "line", line)
 
 	if strings.HasPrefix(line, "PING") {
 		pongMsg := strings.Replace(line, "PING", "PONG", 1)
 		_ = c.send(pongMsg)
+		return
+	}
+
+	// Twitch asks the client to reconnect (":tmi.twitch.tv RECONNECT") before it
+	// tears the connection down for maintenance. Honour it proactively.
+	if strings.Contains(line, "RECONNECT") {
+		slog.Info("IRC reconnect requested by server", "channel", c.channel)
+		go c.reconnect()
 		return
 	}
 
@@ -244,6 +373,7 @@ func parseTags(tagStr string) map[string]string {
 func (c *IRCClient) Stop() {
 	c.mu.Lock()
 	c.running = false
+	c.forcedClose = true
 	c.mu.Unlock()
 
 	close(c.stopChan)
