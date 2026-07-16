@@ -131,6 +131,14 @@ type Channel struct {
 	// under the DROPS_ENABLED filter.
 	DropsEnabled bool
 
+	// Subscribed marks that the authenticated account is subscribed to this
+	// channel, per the periodic ChannelPointsContext multiplier probe (see
+	// Manager.RefreshSubscribedSet). Consulted only when DiscoveryPreferSubscribed
+	// is on; a stale-by-one-sync value is acceptable, like Viewers. It is a proxy
+	// — a subscription grants an active points multiplier — the same signal the
+	// SUBSCRIBED watch priority uses.
+	Subscribed bool
+
 	// offline marks a candidate that failed its online verification after
 	// being listed; it is skipped until the next directory sync rebuilds the
 	// pool.
@@ -145,6 +153,7 @@ type Manager struct {
 	slotStatus SlotStatus
 	avoid      AvoidChecker
 	gameRanks  atomic.Pointer[map[string]int]
+	subscribed atomic.Pointer[map[string]bool] // lock-free published subscribed set; nil = none
 	settings   config.RateLimitSettings
 
 	// mode selects candidacy: DiscoveryModeAll farms non-tracked directory
@@ -153,6 +162,16 @@ type Manager struct {
 	// watching. Guarded by mu (written by UpdateSettings, read by the sync/watch
 	// loops).
 	mode config.DiscoveryMode
+
+	// preferSubscribed floats a subscribed candidate above a non-subscribed one
+	// in the candidate comparator (DiscoveryPreferSubscribed). Guarded by mu.
+	preferSubscribed bool
+
+	// subKnown accumulates the ChannelPointsContext probe results across ticks
+	// (login -> subscribed), and subCursor rotates the bounded per-tick probe
+	// across the whole pool. Both guarded by mu, driven by RefreshSubscribedSet.
+	subKnown  map[string]bool
+	subCursor int
 
 	games []string
 
@@ -179,15 +198,17 @@ func NewManager(
 	settings config.RateLimitSettings,
 	games []string,
 	mode config.DiscoveryMode,
+	preferSubscribed bool,
 ) *Manager {
 	return &Manager{
-		client:    client,
-		campaigns: campaigns,
-		tracked:   tracked,
-		settings:  settings,
-		mode:      config.NormalizeDiscoveryMode(string(mode)),
-		games:     games,
-		resync:    make(chan struct{}, 1),
+		client:           client,
+		campaigns:        campaigns,
+		tracked:          tracked,
+		settings:         settings,
+		mode:             config.NormalizeDiscoveryMode(string(mode)),
+		preferSubscribed: preferSubscribed,
+		games:            games,
+		resync:           make(chan struct{}, 1),
 	}
 }
 
@@ -242,6 +263,122 @@ func (m *Manager) orderGamesByPolicy(games []string) []string {
 		return rank(ordered[i]) < rank(ordered[j])
 	})
 	return ordered
+}
+
+// SetSubscribedLogins publishes the set of channel logins (lowercase) the
+// authenticated account is subscribed to, so the candidate comparator can float
+// subscribed channels when DiscoveryPreferSubscribed is on. nil clears it.
+// Lock-free for the reader (mirrors SetGameRanks); safe for concurrent use.
+func (m *Manager) SetSubscribedLogins(set map[string]bool) {
+	if set == nil {
+		m.subscribed.Store(nil)
+		return
+	}
+	m.subscribed.Store(&set)
+}
+
+// subscribedLogins returns the current lock-free subscribed snapshot (may be
+// nil). Callers must treat it as read-only — it is shared with SetSubscribedLogins.
+func (m *Manager) subscribedLogins() map[string]bool {
+	if p := m.subscribed.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// RefreshSubscribedSet probes a bounded, rotating slice of the candidate pool
+// (plus the current pick) for subscription status using the injected probe — the
+// miner backs it with a ChannelPointsContext ActiveMultipliers>0 check, the same
+// proxy the SUBSCRIBED watch priority uses — accumulates the results, prunes them
+// to the live pool, and republishes the lock-free subscribed set. It is a no-op
+// that clears the set when the prefer-subscribed toggle is off, so no
+// point-context calls are spent while the feature is disabled. Called on the
+// miner's slow probe loop; mu is never held across probe() (a network call).
+func (m *Manager) RefreshSubscribedSet(probe func(login string) bool) {
+	m.mu.RLock()
+	prefer := m.preferSubscribed
+	m.mu.RUnlock()
+	if !prefer {
+		// Clear so a set captured while the toggle was on can't linger and keep
+		// skewing the comparator after the operator opts out.
+		m.SetSubscribedLogins(nil)
+		return
+	}
+
+	// Snapshot the pool logins (+ the current pick) and pick this tick's bounded,
+	// rotating probe targets under the lock; probe them without it.
+	m.mu.Lock()
+	poolLogins := make([]string, 0, len(m.pool))
+	for _, ch := range m.pool {
+		poolLogins = append(poolLogins, ch.Streamer.Username)
+	}
+	current := ""
+	if m.current != nil {
+		current = m.current.Streamer.Username
+	}
+	targets := m.rotateProbeTargetsLocked(poolLogins, current)
+	m.mu.Unlock()
+
+	results := make(map[string]bool, len(targets))
+	for _, login := range targets {
+		results[login] = probe(login)
+	}
+
+	// Merge results into the accumulated known-set, prune entries whose channel
+	// left the pool, and publish a copy of the still-subscribed logins.
+	m.mu.Lock()
+	if m.subKnown == nil {
+		m.subKnown = make(map[string]bool)
+	}
+	for login, sub := range results {
+		m.subKnown[login] = sub
+	}
+	live := make(map[string]bool, len(poolLogins)+1)
+	for _, l := range poolLogins {
+		live[l] = true
+	}
+	if current != "" {
+		live[current] = true
+	}
+	set := make(map[string]bool)
+	for login, sub := range m.subKnown {
+		if !live[login] {
+			delete(m.subKnown, login)
+			continue
+		}
+		if sub {
+			set[login] = true
+		}
+	}
+	m.mu.Unlock()
+
+	m.SetSubscribedLogins(set)
+}
+
+// rotateProbeTargetsLocked returns the current pick (if any) plus up to
+// maxCandidateChecksPerTick pool logins, advancing subCursor so successive calls
+// sweep the whole pool instead of re-probing only the top entries. Caller holds
+// mu.
+func (m *Manager) rotateProbeTargetsLocked(poolLogins []string, current string) []string {
+	targets := make([]string, 0, maxCandidateChecksPerTick+1)
+	seen := make(map[string]bool)
+	if current != "" {
+		targets = append(targets, current)
+		seen[current] = true
+	}
+	n := len(poolLogins)
+	for i := 0; i < n && len(targets) < maxCandidateChecksPerTick+1; i++ {
+		login := poolLogins[(m.subCursor+i)%n]
+		if seen[login] {
+			continue
+		}
+		seen[login] = true
+		targets = append(targets, login)
+	}
+	if n > 0 {
+		m.subCursor = (m.subCursor + maxCandidateChecksPerTick) % n
+	}
+	return targets
 }
 
 // isAvoided reports whether the watchdog currently excludes the login.
@@ -338,13 +475,15 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 }
 
-// UpdateSettings replaces the configured game list, discovery mode, and rate
-// limits at runtime, e.g. from the Settings page, and triggers an immediate
-// directory resync so changes apply without waiting out the current interval.
-func (m *Manager) UpdateSettings(games []string, mode config.DiscoveryMode, settings config.RateLimitSettings) {
+// UpdateSettings replaces the configured game list, discovery mode,
+// prefer-subscribed toggle, and rate limits at runtime, e.g. from the Settings
+// page, and triggers an immediate directory resync so changes apply without
+// waiting out the current interval.
+func (m *Manager) UpdateSettings(games []string, mode config.DiscoveryMode, preferSubscribed bool, settings config.RateLimitSettings) {
 	m.mu.Lock()
 	m.games = games
 	m.mode = config.NormalizeDiscoveryMode(string(mode))
+	m.preferSubscribed = preferSubscribed
 	m.settings = settings
 	m.mu.Unlock()
 
@@ -405,7 +544,10 @@ func (m *Manager) syncOnce() time.Duration {
 	m.mu.RLock()
 	regularInterval := time.Duration(m.settings.CampaignSyncInterval) * time.Minute
 	trackedOnly := m.mode == config.DiscoveryModeTrackedOnly
+	preferSubscribed := m.preferSubscribed
 	m.mu.RUnlock()
+
+	subscribedSet := m.subscribedLogins() // lock-free snapshot, read before the pool-build lock
 
 	if len(games) == 0 {
 		m.clearPool()
@@ -488,6 +630,7 @@ func (m *Manager) syncOnce() time.Duration {
 			}
 			ch.Viewers = ds.Viewers
 			ch.DropsEnabled = true
+			ch.Subscribed = subscribedSet[strings.ToLower(ds.Login)]
 			ch.offline = false
 			candidates = append(candidates, ch)
 		}
@@ -496,9 +639,16 @@ func (m *Manager) syncOnce() time.Duration {
 		// VIEWER_COUNT sort should return this order already, but sorting
 		// makes it explicit and independent of the requested sort mode.
 		// Cross-game priority is the configured list order, preserved because
-		// listings are processed in that order.
+		// listings are processed in that order. When DiscoveryPreferSubscribed is
+		// on, subscription is a tertiary key layered over viewers: a subscribed
+		// channel floats above a non-subscribed one regardless of viewer count
+		// (within a game; cross-game order still dominates via listing order).
 		sort.SliceStable(candidates, func(i, j int) bool {
-			return candidates[i].Viewers > candidates[j].Viewers
+			ci, cj := candidates[i], candidates[j]
+			if preferSubscribed && ci.Subscribed != cj.Subscribed {
+				return ci.Subscribed
+			}
+			return ci.Viewers > cj.Viewers
 		})
 
 		newPool = append(newPool, candidates...)

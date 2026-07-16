@@ -512,6 +512,7 @@ Generate a sample config with all options:
   "directoryGames": ["World of Tanks"],
   "discoveryMode": "all",
   "discoveryPreferTracked": false,
+  "discoveryPreferSubscribed": false,
   "streamerSettings": {
     "makePredictions": true,
     "followRaid": true,
@@ -787,6 +788,17 @@ genuinely idle slot. When off, a discovered channel farming an active drop can
 displace a tracked streamer that currently holds a slot only for points or
 fair rotation (a channel-restricted discovery drop can still displace either
 way, since it is only farmable on that one channel).
+
+`discoveryPreferSubscribed` (also a checkbox in the Directory Discovery panel,
+default off) floats a discovered channel you are subscribed to above a
+non-subscribed one when choosing which candidate to farm — a tiebreaker layered
+over viewer count (cross-game priority still dominates). Subscription is detected
+by proxy: an active channel-points multiplier, the same signal the `SUBSCRIBED`
+watch priority uses, read via a slow periodic `ChannelPointsContext` probe of the
+candidate pool (a few channels every few minutes), so it may take a few minutes
+to take effect and costs nothing while the toggle is off. It never forces a
+switch away from a working current pick and has no effect while `directoryGames`
+is empty.
 
 ### Streamer Settings
 

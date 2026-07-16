@@ -73,10 +73,11 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			BotToken: uiBotToken(cfg),
 			GuildID:  cfg.Discord.GuildID,
 		},
-		DropBlacklist:          cfg.DropBlacklist,
-		DirectoryGames:         cfg.DirectoryGames,
-		DiscoveryPreferTracked: cfg.DiscoveryPreferTracked,
-		DiscoveryMode:          string(cfg.DiscoveryMode),
+		DropBlacklist:             cfg.DropBlacklist,
+		DirectoryGames:            cfg.DirectoryGames,
+		DiscoveryPreferTracked:    cfg.DiscoveryPreferTracked,
+		DiscoveryMode:             string(cfg.DiscoveryMode),
+		DiscoveryPreferSubscribed: cfg.DiscoveryPreferSubscribed,
 	}
 }
 
@@ -140,10 +141,11 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			BotToken: defaults.Discord.BotToken,
 			GuildID:  defaults.Discord.GuildID,
 		},
-		DropBlacklist:          defaults.DropBlacklist,
-		DirectoryGames:         defaults.DirectoryGames,
-		DiscoveryPreferTracked: defaults.DiscoveryPreferTracked,
-		DiscoveryMode:          string(defaults.DiscoveryMode),
+		DropBlacklist:             defaults.DropBlacklist,
+		DirectoryGames:            defaults.DirectoryGames,
+		DiscoveryPreferTracked:    defaults.DiscoveryPreferTracked,
+		DiscoveryMode:             string(defaults.DiscoveryMode),
+		DiscoveryPreferSubscribed: defaults.DiscoveryPreferSubscribed,
 	}
 }
 
@@ -198,6 +200,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.DirectoryGames = normalizeGameList(s.DirectoryGames)
 	cfg.DiscoveryPreferTracked = s.DiscoveryPreferTracked
 	cfg.DiscoveryMode = config.NormalizeDiscoveryMode(s.DiscoveryMode)
+	cfg.DiscoveryPreferSubscribed = s.DiscoveryPreferSubscribed
 
 	config.ValidateConfig(cfg)
 }

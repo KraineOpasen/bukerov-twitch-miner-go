@@ -128,6 +128,31 @@ func TestDiscoveryModeRoundTrips(t *testing.T) {
 	}
 }
 
+func TestDiscoveryPreferSubscribedRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.DiscoveryPreferSubscribed {
+		t.Fatalf("default config must leave DiscoveryPreferSubscribed off (behavior-preserving)")
+	}
+
+	// Enabling via the DTO must reach the config.
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryPreferSubscribed: true})
+	if !cfg.DiscoveryPreferSubscribed {
+		t.Errorf("expected ApplyToConfig to enable DiscoveryPreferSubscribed")
+	}
+
+	// And the enabled value must survive the round trip back to the DTO.
+	rt := BuildRuntimeSettings(&cfg)
+	if !rt.DiscoveryPreferSubscribed {
+		t.Errorf("expected DiscoveryPreferSubscribed to survive the round trip, got false")
+	}
+
+	// Disabling via the DTO must reach the config too (not a one-way latch).
+	ApplyToConfig(&cfg, RuntimeSettings{DiscoveryPreferSubscribed: false})
+	if cfg.DiscoveryPreferSubscribed {
+		t.Errorf("expected ApplyToConfig to disable DiscoveryPreferSubscribed")
+	}
+}
+
 // --- Env-managed Discord token semantics (Stage C hardening) ---
 
 // With DISCORD_BOT_TOKEN managing the token, the Settings UI must never see

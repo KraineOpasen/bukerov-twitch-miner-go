@@ -116,6 +116,16 @@ type Config struct {
 	// DiscoveryPreferTracked, which governs slot arbitration, not candidacy.
 	DiscoveryMode DiscoveryMode `json:"discoveryMode,omitempty"`
 
+	// DiscoveryPreferSubscribed, when true, floats a directory-discovered channel
+	// the authenticated account is subscribed to above a non-subscribed one when
+	// picking which candidate to farm — a tertiary preference layered over the
+	// existing viewer-count ordering. Subscription is detected by proxy (an active
+	// channel-points multiplier, the same signal the SUBSCRIBED watch priority
+	// uses) via a slow periodic ChannelPointsContext probe of the candidate pool.
+	// The default (false) preserves the prior viewer-count ordering, and it has no
+	// effect while DirectoryGames is empty (discovery off).
+	DiscoveryPreferSubscribed bool `json:"discoveryPreferSubscribed,omitempty"`
+
 	// AutoRedeem holds per-streamer auto-redeem configuration for custom
 	// channel-points rewards, keyed by lowercase streamer username. It is a
 	// top-level map (rather than a StreamerSettings field) so it survives the

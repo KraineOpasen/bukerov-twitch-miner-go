@@ -91,7 +91,7 @@ type fakeTracked struct {
 func (f *fakeTracked) Names() []string { return f.names }
 
 func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
-	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games, config.DiscoveryModeAll)
+	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games, config.DiscoveryModeAll, false)
 	m.client = client
 	return m
 }
@@ -99,7 +99,7 @@ func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient
 // newTrackedOnlyManager builds a manager in tracked_only mode with the given
 // configured streamer list, for exercising the inverted exclusion gates.
 func newTrackedOnlyManager(games, tracked []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
-	m := NewManager(nil, campaigns, &fakeTracked{names: tracked}, testRateLimits(), games, config.DiscoveryModeTrackedOnly)
+	m := NewManager(nil, campaigns, &fakeTracked{names: tracked}, testRateLimits(), games, config.DiscoveryModeTrackedOnly, false)
 	m.client = client
 	return m
 }
@@ -628,7 +628,7 @@ func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 	m.pool = []*Channel{wotChannel, rustChannel}
 	m.current = wotChannel
 
-	m.UpdateSettings([]string{"Rust"}, config.DiscoveryModeAll, testRateLimits())
+	m.UpdateSettings([]string{"Rust"}, config.DiscoveryModeAll, false, testRateLimits())
 	<-m.resync // drain so the assertion below checks prepareCurrent, not UpdateSettings
 
 	got := m.prepareCurrent()
@@ -641,7 +641,7 @@ func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 func TestUpdateSettingsTriggersResync(t *testing.T) {
 	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
 
-	m.UpdateSettings([]string{"World of Tanks"}, config.DiscoveryModeAll, testRateLimits())
+	m.UpdateSettings([]string{"World of Tanks"}, config.DiscoveryModeAll, false, testRateLimits())
 
 	if got := m.getGames(); len(got) != 1 || got[0] != "World of Tanks" {
 		t.Errorf("expected games updated, got %v", got)
@@ -661,7 +661,7 @@ func TestSyncOnceDisabledClearsPoolAndCurrent(t *testing.T) {
 	m.pool = []*Channel{current}
 	m.current = current
 
-	m.UpdateSettings(nil, config.DiscoveryModeAll, testRateLimits())
+	m.UpdateSettings(nil, config.DiscoveryModeAll, false, testRateLimits())
 	m.syncOnce()
 
 	if m.current != nil || len(m.pool) != 0 {
@@ -691,6 +691,86 @@ func TestSyncOnceBuildsPoolSortedByViewers(t *testing.T) {
 	}
 	if m.pool[0].Game != "World of Tanks" {
 		t.Errorf("expected candidates tagged with the configured game name, got %q", m.pool[0].Game)
+	}
+}
+
+func TestSyncOnceFloatsSubscribedWhenPreferOn(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	client := &fakeClient{streams: []api.DirectoryStream{
+		{ChannelID: "1", Login: "big_channel", Viewers: 9000, GameID: "g1", DropsEnabled: true},
+		{ChannelID: "2", Login: "small_sub", Viewers: 100, GameID: "g1", DropsEnabled: true},
+	}}
+	m := newTestManager([]string{"World of Tanks"}, provider, client)
+	m.SetSubscribedLogins(map[string]bool{"small_sub": true})
+
+	// Toggle off: pure viewer order, the subscribed flag is ignored.
+	m.syncOnce()
+	if m.pool[0].Streamer.Username != "big_channel" {
+		t.Fatalf("toggle off: expected viewer order (big_channel first), got %s", m.pool[0].Streamer.Username)
+	}
+	if !m.pool[1].Subscribed {
+		t.Error("expected small_sub tagged Subscribed from the published set")
+	}
+
+	// Toggle on: the subscribed low-viewer channel floats above the bigger one.
+	m.preferSubscribed = true
+	m.syncOnce()
+	if m.pool[0].Streamer.Username != "small_sub" {
+		t.Fatalf("toggle on: expected subscribed small_sub floated first, got %s", m.pool[0].Streamer.Username)
+	}
+	if !m.pool[0].Subscribed {
+		t.Error("expected the floated candidate flagged Subscribed")
+	}
+}
+
+func TestRefreshSubscribedSetBoundedRotatesAndPrunes(t *testing.T) {
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+	m.preferSubscribed = true
+
+	logins := []string{"c0", "c1", "c2", "c3", "c4", "c5", "c6"}
+	for i, l := range logins {
+		m.pool = append(m.pool, onlineCandidate(l, string(rune('a'+i)), "World of Tanks", "g1", 100))
+	}
+	var probed []string
+	probe := func(login string) bool {
+		probed = append(probed, login)
+		return true // everyone probed is "subscribed"
+	}
+
+	// One tick probes at most maxCandidateChecksPerTick+1 channels (no current pick here).
+	m.RefreshSubscribedSet(probe)
+	if len(probed) > maxCandidateChecksPerTick+1 {
+		t.Fatalf("expected at most %d probes per tick, got %d (%v)", maxCandidateChecksPerTick+1, len(probed), probed)
+	}
+
+	// Enough ticks to sweep the whole pool: every login becomes known-subscribed.
+	for range logins {
+		m.RefreshSubscribedSet(probe)
+	}
+	set := m.subscribedLogins()
+	for _, l := range logins {
+		if !set[l] {
+			t.Errorf("expected %s discovered as subscribed after a full sweep, got %v", l, set)
+		}
+	}
+
+	// Prune: shrink the pool; channels that left it drop from the published set.
+	m.pool = m.pool[:2] // keep c0, c1
+	m.RefreshSubscribedSet(probe)
+	set = m.subscribedLogins()
+	if set["c5"] || set["c6"] {
+		t.Errorf("expected pruned channels removed from the set, got %v", set)
+	}
+	if !set["c0"] || !set["c1"] {
+		t.Errorf("expected surviving subscribed channels retained, got %v", set)
+	}
+
+	// Toggle off clears the set so a stale preference can't linger.
+	m.preferSubscribed = false
+	m.RefreshSubscribedSet(probe)
+	if s := m.subscribedLogins(); len(s) != 0 {
+		t.Errorf("expected the set cleared when prefer-subscribed is off, got %v", s)
 	}
 }
 
