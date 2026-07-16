@@ -66,7 +66,10 @@ func (s *Server) Start() error {
 	s.srv = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// /debug/log can stream up to maxLogTailBytes (~4MB); allow a slow
+		// local reader to finish while still bounding a stuck write.
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	s.addr = listener.Addr().String()
 
