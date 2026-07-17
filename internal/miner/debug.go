@@ -156,7 +156,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 					})
 				}
 
-				if s.GetSettings().WatchStreak && s.Stream.GetWatchStreakMissing() {
+				if s.GetSettings().WatchStreak && s.Stream.StreakPending() {
 					st.WatchStreak = &debug.WatchStreakInfo{
 						Pending:        true,
 						MinutesWatched: s.Stream.GetMinuteWatched(),

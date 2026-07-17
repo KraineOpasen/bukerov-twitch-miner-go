@@ -15,6 +15,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
@@ -132,6 +133,9 @@ type Server struct {
 	streamers      []*models.Streamer
 	discordEnabled bool
 	debugURL       string
+	// debugSnapshot is the miner's in-process snapshot builder, wired only
+	// when Debug.Enabled is true; nil keeps /api/debug/snapshot a 404.
+	debugSnapshot func() debug.Snapshot
 
 	analytics *analytics.Service
 	server    *http.Server
@@ -529,6 +533,12 @@ func (s *Server) handler() http.Handler {
 	// Logs: a standalone log viewer (full page + htmx-refreshed line partial).
 	mux.HandleFunc("/logs", s.handleLogsPage)
 	mux.HandleFunc("/api/logs", s.handleAPILogs)
+
+	// Debug snapshot, proxied in-process from the miner's snapshot builder so
+	// the Logs-page button works from remote browsers (the 127.0.0.1:5757
+	// debug server stays localhost-only). 404s until the miner wires the
+	// provider, which only happens when Debug.Enabled is true.
+	mux.HandleFunc(DebugSnapshotPath, s.handleAPIDebugSnapshot)
 
 	// Prediction ROI analytics: summary (filtered by streamer/strategy/period)
 	// and a full-fidelity raw-bets export. Read-only; never places a bet.

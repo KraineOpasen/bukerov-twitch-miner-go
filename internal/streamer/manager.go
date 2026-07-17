@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -20,8 +21,48 @@ type Manager struct {
 	client   twitchClient
 	defaults models.StreamerSettings
 
+	// streakCache persists watch-streak grants across restarts;
+	// streakHydration is its snapshot loaded once before streamers are
+	// created, applied to each new Streamer's Stream. Both may be nil
+	// (feature off / library use) — everything degrades to the historical
+	// re-pursue behavior.
+	streakCache     *StreakCache
+	streakHydration map[string]StreakGrant
+
 	streamers []*models.Streamer
 	mu        sync.RWMutex
+}
+
+// SetStreakCache wires the persisted streak-grant cache. Must be called
+// before LoadFromConfig so hydration covers the initial roster; runtime-added
+// streamers hydrate from the same snapshot.
+func (m *Manager) SetStreakCache(c *StreakCache) {
+	m.streakCache = c
+	if c != nil {
+		m.streakHydration = c.Load(time.Now())
+	}
+}
+
+// hydrateStreak seeds a persisted grant into a freshly created streamer.
+func (m *Manager) hydrateStreak(s *models.Streamer) {
+	if g, ok := m.streakHydration[s.Username]; ok {
+		s.Stream.HydrateStreakGrant(g.BroadcastID, g.GrantedAt)
+	}
+}
+
+// RecordStreakGrant persists the just-granted watch streak for username, so a
+// restart mid-broadcast does not re-pursue it. No-op without a cache or when
+// the broadcast was never identified.
+func (m *Manager) RecordStreakGrant(username string) {
+	if m.streakCache == nil {
+		return
+	}
+	s := m.Get(username)
+	if s == nil {
+		return
+	}
+	bid, at := s.Stream.StreakEarnedGrant()
+	m.streakCache.Record(s.Username, bid, at)
 }
 
 // twitchClient is the slice of the Twitch API the manager needs to resolve a
@@ -59,6 +100,7 @@ func (m *Manager) LoadFromConfig(configs []config.StreamerConfig, onProgress Pro
 		}
 
 		streamer := models.NewStreamer(strings.ToLower(sc.Username), settings)
+		m.hydrateStreak(streamer)
 
 		channelID, err := m.client.GetChannelID(streamer.Username)
 		if err != nil {
@@ -198,6 +240,7 @@ func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models
 			}
 
 			streamer := models.NewStreamer(username, settings)
+			m.hydrateStreak(streamer)
 			channelID, err := m.client.GetChannelID(streamer.Username)
 			if err != nil {
 				if errors.Is(err, api.ErrPersistedQueryNotFound) {

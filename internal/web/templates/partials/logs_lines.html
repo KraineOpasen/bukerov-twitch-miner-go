@@ -4,7 +4,7 @@
 {{else if not .Lines}}
 <div class="text-neutral-400 text-sm py-8 text-center">{{ t "logs.empty" }}</div>
 {{else}}
-{{range .Lines}}<span class="log-line {{.Class}}">{{.Text}}</span>
+{{range .Lines}}<span class="log-line {{.Class}}"><span class="log-emoji" aria-hidden="true">{{.Emoji}}</span><span class="log-text">{{.Text}}</span></span>
 {{end}}
 {{end}}
 {{end}}

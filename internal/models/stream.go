@@ -23,7 +23,17 @@ type Stream struct {
 	Campaigns   []*Campaign
 
 	WatchStreakMissing bool
-	MinuteWatched      float64
+	// streakEarnedBroadcastID remembers WHICH broadcast the last watch-streak
+	// grant belonged to, and streakEarnedAt when it was granted. Twitch (by
+	// all observed data — never two grants on one broadcast) pays a streak at
+	// most once per broadcast, so pursuing one again on the same BroadcastID
+	// only burns the boost slot and emits misleading WARNs. Both fields are
+	// owned by mu like every other Stream field; they survive an
+	// InitWatchStreak re-arm on purpose (a blip must not forget the grant)
+	// and are only ever overwritten by MarkStreakEarned/HydrateStreakGrant.
+	streakEarnedBroadcastID string
+	streakEarnedAt          time.Time
+	MinuteWatched           float64
 
 	// spadeURL is written by the api client (stream bring-up, session refresh)
 	// and read by the minute sender and health probes on other goroutines —
@@ -57,7 +67,21 @@ func (s *Stream) Update(broadcastID, title string, game *Game, tags []Tag, viewe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.BroadcastID = broadcastID
+	// The broadcast ID is the identity of the current live session. Two rules:
+	//  - never clobber a known ID with an empty one (a partial GQL response
+	//    must not un-identify the stream);
+	//  - a CHANGED non-empty ID is the authoritative "new broadcast" signal,
+	//    so the watch streak re-arms HERE — not (only) on the offline-duration
+	//    heuristic in Streamer.SetOnline. This also covers the stale-cache
+	//    window where a quick restream reuses the online transition before
+	//    UpdateRequired's 10-minute cache expires: the re-arm then happens on
+	//    the first refresh that observes the new ID.
+	if broadcastID != "" {
+		if s.BroadcastID != "" && broadcastID != s.BroadcastID {
+			s.armWatchStreakLocked()
+		}
+		s.BroadcastID = broadcastID
+	}
 	s.Title = title
 	s.Game = game
 	s.Tags = tags
@@ -202,10 +226,76 @@ func (s *Stream) EncodePayload() (string, error) {
 func (s *Stream) InitWatchStreak() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.armWatchStreakLocked()
+}
 
+// armWatchStreakLocked is the shared re-arm primitive (caller holds mu). It
+// deliberately does NOT touch streakEarnedBroadcastID/streakEarnedAt: a
+// re-arm caused by a blip on the SAME broadcast must not forget that the
+// streak was already granted there — that amnesia was exactly the phantom-
+// pursuit bug. StreakPending compares the remembered grant against the
+// current BroadcastID, so a grant from a previous broadcast never blocks a
+// genuinely new one.
+func (s *Stream) armWatchStreakLocked() {
 	s.WatchStreakMissing = true
 	s.MinuteWatched = 0
 	s.minuteWatchedUpdated = time.Time{}
+}
+
+// MarkStreakEarned records a live watch-streak grant: the streak is no longer
+// missing, and it belongs to the given broadcast (empty when the broadcast
+// was not yet identified — then only the missing flag is cleared and the next
+// re-arm falls back to the old time-based behavior).
+func (s *Stream) MarkStreakEarned(broadcastID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.WatchStreakMissing = false
+	s.streakEarnedBroadcastID = broadcastID
+	s.streakEarnedAt = time.Now()
+}
+
+// HydrateStreakGrant seeds a persisted grant (streak cache) into a freshly
+// created Stream at startup. It intentionally leaves WatchStreakMissing true:
+// the block is enforced by StreakPending comparing broadcast IDs, so if the
+// channel is meanwhile on a NEW broadcast the pursuit starts normally.
+func (s *Stream) HydrateStreakGrant(broadcastID string, grantedAt time.Time) {
+	if broadcastID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streakEarnedBroadcastID = broadcastID
+	s.streakEarnedAt = grantedAt
+}
+
+// StreakEarnedGrant returns the remembered grant (broadcast ID + time), for
+// the persistence layer. Empty ID means no identified grant.
+func (s *Stream) StreakEarnedGrant() (string, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.streakEarnedBroadcastID, s.streakEarnedAt
+}
+
+// StreakPending reports whether a watch streak is still worth pursuing on the
+// CURRENT broadcast. It is the single predicate the watcher uses (under mu,
+// racefree):
+//   - streak not missing -> false (granted and no re-arm since);
+//   - broadcast identified -> pending only if the remembered grant belongs to
+//     a DIFFERENT (or no) broadcast;
+//   - broadcast not identified yet -> if a grant is remembered, pursuit is
+//     DEFERRED until the broadcast is identified (never burn the boost slot
+//     blind right after a restart); with no remembered grant this degrades to
+//     the historical behavior and pursues.
+func (s *Stream) StreakPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.WatchStreakMissing {
+		return false
+	}
+	if s.BroadcastID != "" {
+		return s.streakEarnedBroadcastID == "" || s.BroadcastID != s.streakEarnedBroadcastID
+	}
+	return s.streakEarnedBroadcastID == ""
 }
 
 // UpdateMinuteWatched advances the continuous watched-minutes counter and

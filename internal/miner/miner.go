@@ -315,6 +315,10 @@ func (m *Miner) loadStreamers() error {
 	}
 
 	m.streamers = streamer.NewManager(m.client, m.config.StreamerSettings)
+	// Wire the persisted streak-grant cache BEFORE loading, so the initial
+	// roster hydrates and a restart mid-broadcast does not re-pursue streaks
+	// already granted on the still-live broadcast.
+	m.streamers.SetStreakCache(streamer.NewStreakCache(filepath.Join(m.dbBasePath, "streak_cache.json")))
 	return m.streamers.LoadFromConfig(m.config.Streamers, progressCallback)
 }
 
@@ -389,9 +393,6 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.webServer.SetDiscordEnabled(m.config.Discord.Enabled)
 		if m.notifications != nil {
 			m.webServer.SetNotificationManager(m.notifications)
-		}
-		if m.config.Debug.Enabled {
-			m.webServer.SetDebugURL(fmt.Sprintf("http://localhost:%d/debug/snapshot", m.config.Debug.Port))
 		}
 	}
 
@@ -588,6 +589,16 @@ func (m *Miner) startMining(ctx context.Context) {
 		if err := m.debugServer.Start(); err != nil {
 			slog.Error("Failed to start debug server", "error", err)
 			m.debugServer = nil
+		}
+
+		// Publish the same in-process snapshot builder on the main dashboard
+		// (relative URL, full auth/middleware chain) so the Logs-page button
+		// works from remote browsers — "localhost" there is the viewer's
+		// machine, not this container. Wired here, alongside the debug server,
+		// so the dashboard route also never observes half-initialized fields.
+		if m.webServer != nil {
+			m.webServer.SetDebugSnapshotProvider(m.BuildDebugSnapshot)
+			m.webServer.SetDebugURL(web.DebugSnapshotPath)
 		}
 	}
 
@@ -797,6 +808,15 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 			if data := msg.Data; data != nil {
 				if pointGain, ok := data["point_gain"].(map[string]interface{}); ok {
 					if reasonCode, ok := pointGain["reason_code"].(string); ok {
+						// Persist the grant->broadcast binding regardless of
+						// analytics being enabled; runs on the pubsub handler
+						// goroutine, outside any pool/watcher lock. The
+						// in-memory MarkStreakEarned already happened in
+						// UpdateHistory on the pool's own handling path.
+						if reasonCode == "WATCH_STREAK" && m.streamers != nil {
+							m.streamers.RecordStreakGrant(s.Username)
+						}
+
 						if m.analyticsSvc != nil {
 							m.analyticsSvc.RecordPoints(s, reasonCode)
 
