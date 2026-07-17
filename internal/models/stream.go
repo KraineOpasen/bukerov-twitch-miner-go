@@ -360,6 +360,20 @@ func (s *Stream) GetTitle() string {
 	return s.Title
 }
 
+// GetTags returns a copy of the current stream tags, so callers can render
+// them without holding the lock or racing the next Update.
+func (s *Stream) GetTags() []Tag {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.Tags) == 0 {
+		return nil
+	}
+	out := make([]Tag, len(s.Tags))
+	copy(out, s.Tags)
+	return out
+}
+
 func (s *Stream) GetViewersCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

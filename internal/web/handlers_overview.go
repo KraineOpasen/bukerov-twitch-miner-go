@@ -277,6 +277,7 @@ func (s *Server) buildCards(
 			card.LiveDuration = util.FormatDuration(time.Since(st.GetOnlineAt()))
 			card.GameName = st.Stream.GameName()
 			card.Title = st.Stream.GetTitle()
+			card.Tags = cardTags(st.Stream.GetTags())
 			card.ViewersCount = st.Stream.GetViewersCount()
 			card.ViewersCountFormatted = util.FormatNumber(card.ViewersCount)
 			card.ChannelRestrictedDrop = st.HasChannelRestrictedCampaign()
@@ -337,6 +338,26 @@ func (s *Server) buildCards(
 }
 
 const watchStreakThresholdMinutes = 7
+
+// maxCardTags caps how many stream tags a card shows, so a tag-heavy channel
+// can't blow up the card layout.
+const maxCardTags = 3
+
+// cardTags maps the stream's tags to at most maxCardTags non-empty localized
+// names for the card's chip row.
+func cardTags(tags []models.Tag) []string {
+	var out []string
+	for _, tag := range tags {
+		if tag.LocalizedName == "" {
+			continue
+		}
+		out = append(out, tag.LocalizedName)
+		if len(out) == maxCardTags {
+			break
+		}
+	}
+	return out
+}
 
 // manualMinBet is Twitch's minimum prediction stake, mirrored on the dashboard
 // so the UI never offers a bet the backend would reject. Kept in sync with the

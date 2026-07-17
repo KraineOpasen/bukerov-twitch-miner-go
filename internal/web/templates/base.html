@@ -30,6 +30,59 @@
         };
     </script>
     <style>
+        /* Shared semantic UI palette for the dark theme. Lives here (after
+           app.css) rather than in input.css because the Tailwind build is not
+           re-run for template-only changes; every page and the statistics
+           charts read these tokens so states keep one consistent hue across
+           Overview, Statistics, Notifications, and Settings. */
+        :root {
+            --ui-watching: #A970FF;  /* actively farmed */
+            --ui-online: #36D7FF;    /* live / queued for a slot */
+            --ui-queue: #36D7FF;
+            --ui-offline: #6b6a78;   /* deliberately muted */
+            --ui-gain: #B6FF3B;      /* positive point gain */
+            --ui-warn: #FFB020;
+            --ui-roi-pos: #39FF88;
+            --ui-roi-neg: #FF4D67;
+            --ui-refund: #27E5D8;
+            --ui-watch: #FFE44D;     /* points reason: WATCH */
+            --ui-claim: #FFC83D;     /* points reason: CLAIM */
+            --ui-raid: #FF8A3D;      /* points reason: RAID */
+            --ui-streak: #B6FF3B;    /* points reason: WATCH_STREAK */
+            --ui-other: #A970FF;
+        }
+
+        /* Sidebar: icon + label accents on hover/active instead of the flat
+           single-hue wash; the active item carries a violet bar and icon. */
+        .sidebar-link svg { color: var(--color-neutral-400); transition: color 0.15s; }
+        .sidebar-link:hover { background: linear-gradient(90deg, rgba(169, 112, 255, 0.16), rgba(54, 215, 255, 0.08)); color: #fff; }
+        .sidebar-link:hover svg { color: var(--ui-online); }
+        .sidebar-link.is-active {
+            background: linear-gradient(90deg, rgba(169, 112, 255, 0.22), rgba(54, 215, 255, 0.10));
+            color: #fff;
+            box-shadow: inset 3px 0 0 var(--ui-watching);
+        }
+        .sidebar-link.is-active svg { color: var(--ui-watching); }
+
+        /* Richer state badges shared by cards, sidebar queue, and boards:
+           queue reads cyan (waiting, not dead), watching reads violet, gains
+           read lime. Offline/disabled stay deliberately muted. */
+        .badge-watching { background: rgba(169, 112, 255, 0.20); color: #cdb4ff; }
+        .badge-queued { background: rgba(54, 215, 255, 0.13); color: #7fe3ff; }
+        .badge-gain { color: var(--ui-gain); }
+        .badge-event { background: rgba(255, 176, 32, 0.14); color: var(--ui-warn); }
+        .watch-dot.queue { border-color: rgba(54, 215, 255, 0.75); }
+        .bar-streak > span { background: linear-gradient(90deg, var(--ui-streak), var(--ui-online)); }
+        .bar-drop > span { background: linear-gradient(90deg, var(--ui-claim), var(--ui-raid)); }
+        .bar-goal > span { background: linear-gradient(90deg, var(--ui-roi-pos), var(--ui-online)); }
+
+        /* Section headings on Settings/Notifications get a small violet
+           accent bar so those pages stop reading as a gray wall. */
+        .section-title {
+            padding-left: 0.6rem;
+            border-left: 3px solid var(--ui-watching);
+        }
+
         .lang-btn {
             padding: 0.25rem 0.6rem;
             font-size: 0.75rem;
@@ -166,16 +219,25 @@
         // in-page section links (#grid, #predictions) highlight when their
         // section hash is active on the home page.
         (function() {
-            const path = window.location.pathname;
-            const hash = window.location.hash;
-            document.querySelectorAll('[data-nav]').forEach(a => {
-                const nav = a.getAttribute('data-nav');
-                if (nav.startsWith('#')) {
-                    if (path === '/' && nav === hash) a.classList.add('is-active');
-                    return;
-                }
-                if (nav === path || (nav === '/' && path === '/' && !hash)) a.classList.add('is-active');
-            });
+            // Recomputed on every hash change (not just load) so clicking the
+            // in-page section tabs (#grid/#predictions) moves the highlight
+            // immediately instead of only after a reload.
+            function updateActiveNav() {
+                const path = window.location.pathname;
+                const hash = window.location.hash;
+                document.querySelectorAll('[data-nav]').forEach(a => {
+                    const nav = a.getAttribute('data-nav');
+                    let active;
+                    if (nav.startsWith('#')) {
+                        active = path === '/' && nav === hash;
+                    } else {
+                        active = nav === path || (nav === '/' && path === '/' && !hash);
+                    }
+                    a.classList.toggle('is-active', active);
+                });
+            }
+            updateActiveNav();
+            window.addEventListener('hashchange', updateActiveNav);
 
             // Scroll to the section named by the URL hash. The in-page section
             // links (#grid/#predictions) rely on this: arriving from another page

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -87,6 +88,173 @@ func TestPointsHistoryAPIFormat(t *testing.T) {
 	}
 	if len(got.Annotations) != 1 || got.Annotations[0].Type != "WATCH_STREAK" {
 		t.Errorf("annotations = %+v", got.Annotations)
+	}
+}
+
+// TestPointsHistoryBreakdown verifies the earnings-breakdown field over
+// production-shaped rows: positive balance deltas grouped by CANONICAL reason
+// (the stored streak form is "WATCH STREAK" — Service.RecordPoints writes
+// spaces), spends ignored, low-volume reasons pooled into OTHER, sorted by
+// gained descending — the data behind the Statistics donut.
+func TestPointsHistoryBreakdown(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	const s = "api_breakdown_streamer"
+
+	seed := []struct {
+		balance int
+		reason  string
+	}{
+		{1000, "WATCH"}, // baseline
+		{1010, "WATCH"},
+		{1510, "CLAIM"},
+		{1490, "Spent"}, // negative delta: excluded from the breakdown
+		{1740, "RAID"},
+		{1741, "WATCH"},
+		{2191, "WATCH STREAK"},   // production space form → WATCH_STREAK
+		{2192, "WEEKLY REWARDS"}, // deliberately OTHER
+	}
+	for _, p := range seed {
+		if err := repo.RecordPoints(s, p.balance, p.reason); err != nil {
+			t.Fatalf("seed points: %v", err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/points-history?streamer="+s+"&range=7d", nil)
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	want := []analytics.ReasonShare{
+		{Reason: "CLAIM", Gained: 500, Count: 1},
+		{Reason: "WATCH_STREAK", Gained: 450, Count: 1},
+		{Reason: "RAID", Gained: 250, Count: 1},
+		{Reason: "WATCH", Gained: 11, Count: 2},
+		{Reason: "OTHER", Gained: 1, Count: 1},
+	}
+	if len(got.Breakdown) != len(want) {
+		t.Fatalf("breakdown = %+v, want %+v", got.Breakdown, want)
+	}
+	for i := range want {
+		if got.Breakdown[i] != want[i] {
+			t.Errorf("breakdown[%d] = %+v, want %+v", i, got.Breakdown[i], want[i])
+		}
+	}
+	// Small seed: neither completeness flag may fire.
+	if got.RawTruncated || got.ChartDownsampled {
+		t.Errorf("flags = rawTruncated:%v chartDownsampled:%v, want false/false", got.RawTruncated, got.ChartDownsampled)
+	}
+}
+
+// TestPointsHistoryDefaultRange24h: an absent range parameter must resolve to
+// the page default of 24h (matching the UI's initial selection), while an
+// unknown value keeps the documented 7d fallback.
+func TestPointsHistoryDefaultRange24h(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	const s = "default_range_streamer"
+	if err := repo.RecordPoints(s, 100, "WATCH"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/points-history?streamer="+s, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Range != "24h" {
+		t.Errorf("default range = %q, want 24h", got.Range)
+	}
+}
+
+// TestStatisticsKPIsDashOnRawTruncation pins the client-side KPI honesty
+// contract in the page's renderKPIs function (there is no JS test harness in
+// this project, so the contract is asserted on the shipped source):
+//
+//  1. rawTruncated=true dashes out ALL FOUR KPI tiles — a truncated window is
+//     missing its newest rows (ascending fetch + row cap), so the loaded
+//     last balance is not the current balance and last-first is not the
+//     full-period change;
+//  2. chartDownsampled alone never hides KPIs (the function must not consult
+//     that flag at all);
+//  3. the normal full-response path still computes balance/net from the
+//     series and accrued/events from the breakdown, unchanged.
+func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
+	srv := newStatsTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	start := strings.Index(body, "function renderKPIs(data)")
+	if start < 0 {
+		t.Fatal("statistics page lost the renderKPIs function")
+	}
+	end := strings.Index(body[start:], "function renderBreakdown")
+	if end < 0 {
+		t.Fatal("cannot delimit renderKPIs body (renderBreakdown moved?)")
+	}
+	kpiFn := body[start : start+end]
+
+	// (1) The rawTruncated guard dashes all four tiles and runs BEFORE any
+	// computation on the (incomplete) series.
+	guard := strings.Index(kpiFn, "data.rawTruncated")
+	compute := strings.Index(kpiFn, "last - first")
+	if guard < 0 || compute < 0 || guard > compute {
+		t.Errorf("renderKPIs must gate on data.rawTruncated before computing last-first (guard=%d compute=%d)", guard, compute)
+	}
+	if !strings.Contains(kpiFn, `['kpi-balance', 'kpi-net', 'kpi-earned', 'kpi-events']`) {
+		t.Errorf("rawTruncated guard must dash out all four KPI tiles, got:\n%s", kpiFn)
+	}
+	if !strings.Contains(kpiFn, "'—'") {
+		t.Errorf("rawTruncated guard must render the dash placeholder")
+	}
+
+	// (2) chartDownsampled must never influence KPI visibility.
+	if strings.Contains(kpiFn, "chartDownsampled") {
+		t.Errorf("renderKPIs must not consult chartDownsampled — downsampling alone never hides KPIs")
+	}
+
+	// (3) The full-response computation is intact.
+	for _, want := range []string{"share.gained", "share.count", "kpi-balance", "kpi-net", "kpi-earned", "kpi-events"} {
+		if !strings.Contains(kpiFn, want) {
+			t.Errorf("renderKPIs lost its normal computation marker %q", want)
+		}
+	}
+}
+
+// TestHistoryFlagsIndependent pins the two completeness signals as
+// independent: chart downsampling alone must not read as raw truncation
+// (which hides the breakdown), and vice versa.
+func TestHistoryFlagsIndependent(t *testing.T) {
+	cases := []struct {
+		name                    string
+		rawLen, pointsLen, cap_ int
+		wantRaw, wantDown       bool
+	}{
+		{"small window: neither", 100, 100, 20000, false, false},
+		{"downsampled only", 5000, 2000, 20000, false, true},
+		{"raw cap hit, no downsample", 20000, 20000, 20000, true, false},
+		{"both at once", 20000, 2000, 20000, true, true},
+	}
+	for _, c := range cases {
+		gotRaw, gotDown := historyFlags(c.rawLen, c.pointsLen, c.cap_)
+		if gotRaw != c.wantRaw || gotDown != c.wantDown {
+			t.Errorf("%s: historyFlags(%d,%d,%d) = (%v,%v), want (%v,%v)",
+				c.name, c.rawLen, c.pointsLen, c.cap_, gotRaw, gotDown, c.wantRaw, c.wantDown)
+		}
 	}
 }
 
@@ -191,6 +359,40 @@ func TestStatisticsPageRenders(t *testing.T) {
 	if !contains(body, "stat-chart") || !contains(body, "/api/points-history") {
 		t.Errorf("statistics page missing expected chart wiring")
 	}
+
+	// Summary widgets + breakdown/outcome donuts added with the UI refresh.
+	for _, want := range []string{
+		"kpi-balance", "kpi-net", "kpi-earned", "kpi-events",
+		"stat-donut", "stat-breakdown-legend", "roi-donut",
+		"js.stat.br.watch", "--ui-watch",
+	} {
+		if !contains(body, want) {
+			t.Errorf("statistics page missing %q", want)
+		}
+	}
+
+	// Default range is 24h everywhere the page decides it: the initially
+	// active preset button and the JS starting state (which also drives the
+	// first fetch and the export link).
+	for _, want := range []string{
+		`class="stat-range-btn is-active" data-range="24h"`,
+		`currentRange = '24h'`,
+	} {
+		if !contains(body, want) {
+			t.Errorf("statistics page missing 24h default marker %q", want)
+		}
+	}
+	if contains(body, `class="stat-range-btn is-active" data-range="7d"`) || contains(body, `currentRange = '7d'`) {
+		t.Errorf("statistics page still defaults to 7d somewhere")
+	}
+
+	// Independent completeness signals: the partial-data warning element and
+	// the two distinct flags wired in the JS.
+	for _, want := range []string{"stat-partial", "rawTruncated", "chartDownsampled"} {
+		if !contains(body, want) {
+			t.Errorf("statistics page missing completeness wiring %q", want)
+		}
+	}
 }
 
 // TestStatisticsPageLocalized verifies the page renders the default RU strings
@@ -214,6 +416,20 @@ func TestStatisticsPageLocalized(t *testing.T) {
 	}
 	if contains(body, "ROI по ставкам") {
 		t.Errorf("english render leaked Russian text")
+	}
+
+	// KPI labels + the explanatory note distinguishing the two metrics:
+	// balance change (includes spending/bets) vs accrued (positive gains
+	// only). Both languages must carry the clarified wording.
+	for _, want := range []string{"Изменение баланса", "Начислено", "учитывает траты и ставки"} {
+		if !contains(ru.Body.String(), want) {
+			t.Errorf("RU statistics page missing KPI wording %q", want)
+		}
+	}
+	for _, want := range []string{"Balance change", "Accrued", "includes spending and bets"} {
+		if !contains(body, want) {
+			t.Errorf("EN statistics page missing KPI wording %q", want)
+		}
 	}
 }
 

@@ -22,14 +22,15 @@ const (
 )
 
 // rangeWindow maps a range preset to its lookback duration and canonical label.
-// Unknown values fall back to 7d. maxWindow (30d) bounds any query.
+// An absent range means the page default — 24h, matching the UI's initial
+// selection. Unknown values fall back to 7d. maxWindow (30d) bounds any query.
 func rangeWindow(r string) (time.Duration, string) {
 	switch r {
-	case "24h", "1d":
+	case "24h", "1d", "":
 		return 24 * time.Hour, "24h"
 	case "30d":
 		return 30 * 24 * time.Hour, "30d"
-	case "7d", "":
+	case "7d":
 		return 7 * 24 * time.Hour, "7d"
 	default:
 		return 7 * 24 * time.Hour, "7d"
@@ -80,7 +81,8 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 // handleAPIPointsHistory returns the balance series + event annotations for one
 // streamer over a range preset (24h/7d/30d). Response:
 //
-//	{ streamer, range, points:[{t,balance}], annotations:[{t,type,reason}], truncated }
+//	{ streamer, range, points:[{t,balance}], annotations:[{t,type,reason}],
+//	  breakdown:[{reason,gained,count}], rawTruncated, chartDownsampled }
 //
 // The series is downsampled to maxChartPoints for display; use the export
 // endpoint for full fidelity. Auth is inherited from the global middleware.
@@ -118,13 +120,27 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), maxHistoryRows)
 	writeJSONOK(w, analytics.PointsHistory{
-		Streamer:    streamer,
-		Range:       label,
-		Points:      points,
-		Annotations: annotations,
-		Truncated:   len(raw) >= maxHistoryRows || len(points) < len(raw),
+		Streamer:         streamer,
+		Range:            label,
+		Points:           points,
+		Annotations:      annotations,
+		Breakdown:        analytics.BreakdownFromSamples(raw),
+		RawTruncated:     rawTruncated,
+		ChartDownsampled: chartDownsampled,
 	})
+}
+
+// historyFlags derives the two independent completeness signals for a
+// points-history response: rawTruncated means the raw series hit the backend
+// row cap (the window — and thus the breakdown — is incomplete);
+// chartDownsampled means the display series was merely thinned while the raw
+// series, and the breakdown built from it, remain complete. They are
+// deliberately separate: only rawTruncated may hide the breakdown or raise a
+// partial-data warning.
+func historyFlags(rawLen, pointsLen, rawCap int) (rawTruncated, chartDownsampled bool) {
+	return rawLen >= rawCap, pointsLen < rawLen
 }
 
 // handleAPIPointsHistoryExport returns the same data as handleAPIPointsHistory
@@ -163,11 +179,13 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
+	// The export is full-fidelity (never downsampled), so only the raw row
+	// cap can make it incomplete.
 	writeJSONOK(w, analytics.PointsHistory{
-		Streamer:    streamer,
-		Range:       label,
-		Points:      points,
-		Annotations: annotations,
-		Truncated:   len(points) >= maxExportRows,
+		Streamer:     streamer,
+		Range:        label,
+		Points:       points,
+		Annotations:  annotations,
+		RawTruncated: len(points) >= maxExportRows,
 	})
 }

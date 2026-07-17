@@ -1,6 +1,84 @@
 {{define "title"}}Overview - Twitch Points Miner{{end}}
 
 {{define "content"}}
+<style>
+    /* Overview card visual system v2. Inline (not input.css) because the
+       Tailwind build is not re-run for template-only changes; every colour
+       comes from the shared --ui-* semantic palette defined in base.html.
+       State is still conveyed by badge text + border style, never colour
+       alone: watching = solid glow, queued = dashed, disabled = dotted. */
+    .s-card { border-radius: 0.8rem; }
+    .s-card.state-watching {
+        border-color: var(--ui-watching);
+        background:
+            linear-gradient(180deg, rgba(169, 112, 255, 0.12), rgba(169, 112, 255, 0.02) 46%, transparent 72%),
+            var(--color-neutral-800);
+        box-shadow: 0 0 0 1px rgba(169, 112, 255, 0.45), 0 0 18px rgba(169, 112, 255, 0.22);
+    }
+    .s-card.state-watching:hover { border-color: var(--ui-watching); }
+    .s-card.state-queued {
+        border-color: rgba(54, 215, 255, 0.55);
+        background:
+            linear-gradient(180deg, rgba(54, 215, 255, 0.07), transparent 55%),
+            var(--color-neutral-800);
+        box-shadow: 0 0 10px rgba(54, 215, 255, 0.08);
+    }
+    .s-card.state-offline { background: var(--color-neutral-800); }
+
+    /* Live stream title: up to two clamped lines, full text on hover title=. */
+    .s-title {
+        margin-top: 0.5rem;
+        font-size: 0.78rem;
+        line-height: 1.35;
+        color: var(--color-neutral-200);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+    }
+    .s-game { color: var(--ui-online); }
+
+    /* Stream tag chips: single row, overflowing chips are simply cut off. */
+    .s-tags {
+        display: flex;
+        gap: 0.3rem;
+        margin-top: 0.45rem;
+        overflow: hidden;
+        flex-wrap: nowrap;
+        max-width: 100%;
+    }
+    .s-tag {
+        flex: none;
+        max-width: 9.5rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.66rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        color: var(--ui-online);
+        background: rgba(54, 215, 255, 0.10);
+        border: 1px solid rgba(54, 215, 255, 0.28);
+    }
+
+    /* Section headers for the in-page anchors the sidebar links to
+       (#predictions / #grid): a small accent bar ties each section to its
+       nav item, and scroll-margin keeps the heading visible after the jump. */
+    #predictions, #grid { scroll-margin-top: 0.75rem; }
+    .sec-accent {
+        display: inline-block;
+        width: 0.5rem;
+        height: 0.9em;
+        border-radius: 2px;
+        margin-right: 0.45rem;
+        vertical-align: -0.1em;
+    }
+    .sec-accent-pred { background: linear-gradient(180deg, var(--ui-watching), var(--ui-online)); }
+    .sec-accent-grid { background: linear-gradient(180deg, var(--ui-online), var(--ui-gain)); }
+</style>
 <div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
 </div>
