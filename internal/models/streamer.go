@@ -178,7 +178,10 @@ func (s *Streamer) UpdateHistory(reasonCode string, earned int) {
 	s.History[reasonCode].Amount += earned
 
 	if reasonCode == "WATCH_STREAK" {
-		s.Stream.WatchStreakMissing = false
+		// Recorded via the Stream's own lock — this field is owned by
+		// Stream.mu, never written under the Streamer mutex (that split
+		// ownership was a data race with the watcher loop's readers).
+		s.Stream.MarkStreakEarned(s.Stream.GetBroadcastID())
 	}
 }
 

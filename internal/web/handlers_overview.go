@@ -282,7 +282,7 @@ func (s *Server) buildCards(
 			card.ChannelRestrictedDrop = st.HasChannelRestrictedCampaign()
 
 			// Watch-streak progress (0..7 min) toward the streak bonus.
-			if settings.WatchStreak && st.Stream.GetWatchStreakMissing() {
+			if settings.WatchStreak && st.Stream.StreakPending() {
 				mins := int(st.Stream.GetMinuteWatched())
 				card.StreakPending = true
 				card.StreakMinutes = mins
@@ -443,7 +443,7 @@ func (s *Server) buildNowWatching(
 
 		slot.Points = util.FormatNumber(st.GetChannelPoints())
 		slot.Game = st.Stream.GameName()
-		if st.GetSettings().WatchStreak && st.Stream.GetWatchStreakMissing() {
+		if st.GetSettings().WatchStreak && st.Stream.StreakPending() {
 			mins := int(st.Stream.GetMinuteWatched())
 			slot.StreakPending = true
 			slot.StreakMinutes = mins
