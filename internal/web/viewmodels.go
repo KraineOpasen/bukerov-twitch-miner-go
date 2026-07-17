@@ -312,10 +312,13 @@ type DropsPageData struct {
 	PolicyModes []string
 }
 
-// LogLineView is one rendered log line: Class is the color class
-// (log-info/log-warn/log-error), Text is the raw log line.
+// LogLineView is one rendered log line: Class is the semantic color class and
+// Emoji the decorative icon, both assigned by classifyLogLine (logclass.go);
+// Text is the raw log line, rendered untouched. Emoji is empty when the raw
+// line already starts with its own emoji, so icons are never doubled.
 type LogLineView struct {
 	Class string
+	Emoji string
 	Text  string
 }
 

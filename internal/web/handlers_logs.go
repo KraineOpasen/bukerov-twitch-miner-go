@@ -78,39 +78,10 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		views = append(views, LogLineView{Class: logLineClass(line), Text: line})
+		p := classifyLogLine(line)
+		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: line})
 	}
 	return views, true
-}
-
-// logLineClass maps a slog text line to a color class: ERROR (and offline
-// transitions) red, WARN amber, everything else neutral.
-func logLineClass(line string) string {
-	if strings.Contains(line, "went offline") {
-		return "log-error"
-	}
-	switch logLevelOf(line) {
-	case "ERROR":
-		return "log-error"
-	case "WARN":
-		return "log-warn"
-	default:
-		return "log-info"
-	}
-}
-
-// logLevelOf extracts the slog TextHandler level token (level=INFO) from a line.
-func logLevelOf(line string) string {
-	const key = "level="
-	i := strings.Index(line, key)
-	if i < 0 {
-		return ""
-	}
-	rest := line[i+len(key):]
-	if j := strings.IndexByte(rest, ' '); j >= 0 {
-		rest = rest[:j]
-	}
-	return rest
 }
 
 // tailLogFile returns the last maxBytes of the file at path (aligned to the next
