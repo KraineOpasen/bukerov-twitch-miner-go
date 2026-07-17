@@ -562,6 +562,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	migrateRotationInterval(data, &config)
 
+	LogPredictionRiskClamps(config.PredictionRisk, "config.json")
 	ValidateConfig(&config)
 	applyEnvOverrides(&config)
 	tightenConfigPermissions(path)
@@ -653,6 +654,28 @@ func SaveConfig(path string, config *Config) error {
 	// runtime by dashboard saves: owner-only permissions, and an atomic
 	// temp+rename swap so a crash mid-save can never truncate the live file.
 	return util.WriteFileAtomic(path, data, 0o600)
+}
+
+// LogPredictionRiskClamps emits an explicit WARN for each prediction-risk value
+// that is out of range and will therefore be clamped by ValidateConfig, so a
+// clamp is never silent: a negative that becomes an off (0) gate, or a >100
+// percent capped to 100, is surfaced with the field name, the original and
+// applied values, and the source that supplied it (the config file or the
+// Settings API). It does not mutate — ValidateConfig performs the actual clamp
+// immediately afterwards. Call it from an ingestion point that knows its source.
+func LogPredictionRiskClamps(pr PredictionRiskSettings, source string) {
+	switch {
+	case pr.MaxStakePercent < 0:
+		slog.Warn("Clamped out-of-range prediction risk setting",
+			"field", "maxStakePercent", "original", pr.MaxStakePercent, "applied", 0, "source", source)
+	case pr.MaxStakePercent > 100:
+		slog.Warn("Clamped out-of-range prediction risk setting",
+			"field", "maxStakePercent", "original", pr.MaxStakePercent, "applied", 100, "source", source)
+	}
+	if pr.ReservePoints < 0 {
+		slog.Warn("Clamped out-of-range prediction risk setting",
+			"field", "reservePoints", "original", pr.ReservePoints, "applied", 0, "source", source)
+	}
 }
 
 // ValidateConfig enforces min/max bounds on rate limits and other configurable values.

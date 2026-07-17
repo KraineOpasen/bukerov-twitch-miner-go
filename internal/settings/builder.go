@@ -222,6 +222,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 		HealthGateEnabled: s.PredictionRisk.HealthGateEnabled,
 	}
 
+	config.LogPredictionRiskClamps(cfg.PredictionRisk, "Settings API")
 	config.ValidateConfig(cfg)
 }
 

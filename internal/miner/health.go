@@ -93,7 +93,15 @@ func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail s
 // other state — OK, idle, stalled, unknown, or a signal not yet recorded — fails
 // open (the bet is allowed). Scope is deliberately degraded/failed only: a
 // StatusStalled (e.g. PubSub topics-lost) is not treated as a bet blocker here.
-// Priority: GQL outranks PubSub, failed outranks degraded.
+//
+// Priority is signal-first: GQL is inspected fully (failed or degraded) before
+// PubSub, and within each signal failed outranks degraded. GQL is checked first
+// because it is the transport that actually PLACES the bet (PlacePredictionBet is
+// a GraphQL mutation), whereas PubSub only feeds the odds; so when both are
+// impaired the reason names the bet's own write path. This is a log/label choice
+// only — the block decision is identical either way (any degraded/failed on
+// either signal blocks), so "GQL degraded + PubSub failed" logs
+// health_gql_api_degraded, not the strictly more severe PubSub failure.
 type minerBetHealthGate struct{ m *Miner }
 
 func (g minerBetHealthGate) AutoBetDecision() pubsub.BetHealthDecision {

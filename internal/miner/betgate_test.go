@@ -58,6 +58,13 @@ func TestMinerBetHealthGate(t *testing.T) {
 		{"gql_failed_outranks_pubsub_degraded",
 			[]health.Signal{healthSig(health.SignalGQLAPI, health.StatusFailed), healthSig(health.SignalPubSub, health.StatusDegraded)},
 			false, models.GateHealthGQLFailed},
+		// Signal-first (not severity-first): GQL is inspected before PubSub, so a
+		// GQL *degraded* is reported even when PubSub is *failed* (strictly more
+		// severe). Both still block — only the logged reason differs. This pins the
+		// deliberate GQL-first ordering.
+		{"gql_degraded_reported_over_pubsub_failed",
+			[]health.Signal{healthSig(health.SignalGQLAPI, health.StatusDegraded), healthSig(health.SignalPubSub, health.StatusFailed)},
+			false, models.GateHealthGQLDegraded},
 		// StatusStalled is out of scope (degraded/failed only): it must NOT block.
 		{"pubsub_stalled_allows",
 			[]health.Signal{healthSig(health.SignalPubSub, health.StatusStalled)},
