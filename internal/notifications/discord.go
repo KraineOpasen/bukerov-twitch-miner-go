@@ -80,6 +80,16 @@ func (d *DiscordProvider) Connect(ctx context.Context) error {
 	return nil
 }
 
+// IsConnected reports whether the provider currently holds an open gateway
+// session. It is a local lifecycle check (no network round-trip, no Discord API
+// call) that the manager uses to decide whether an unchanged config still needs
+// a Connect. A nil session means "not connected".
+func (d *DiscordProvider) IsConnected() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.session != nil
+}
+
 // Disconnect closes the Discord connection.
 func (d *DiscordProvider) Disconnect() error {
 	d.mu.Lock()

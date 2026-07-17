@@ -11,14 +11,36 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
+// discordProvider is the narrow behaviour the Manager needs from the Discord
+// gateway client. It is deliberately limited to the methods the Manager
+// actually calls so tests can inject a network-free fake that counts
+// connect/disconnect/update-config calls and reports connection state.
+// Production always uses *DiscordProvider.
+type discordProvider interface {
+	Connect(ctx context.Context) error
+	Disconnect() error
+	UpdateConfig(botToken, guildID string)
+	IsConnected() bool
+	Send(ctx context.Context, notification Notification) error
+	GetChannels(ctx context.Context, forceRefresh bool) ([]Channel, error)
+}
+
 // Manager handles notification dispatching across multiple providers.
 type Manager struct {
-	discordConfig *config.DiscordSettings
+	// discordConfig is stored BY VALUE, not as the caller's pointer: it is the
+	// authoritative snapshot of the desired Discord connection settings. Keeping
+	// a value copy makes UpdateDiscordConfig's change detection immune to a
+	// caller mutating the original struct in place (pointer aliasing).
+	discordConfig config.DiscordSettings
 	notifConfig   *config.NotificationsSettings
 	username      string
-	discord       *DiscordProvider
-	repo          *Repository
-	streamers     []string
+	discord       discordProvider
+	// newDiscord builds a Discord provider. Production wires the real
+	// *DiscordProvider constructor; tests inject a fake. It is the single place
+	// Discord providers are created so both paths go through the same seam.
+	newDiscord func(botToken, guildID string) discordProvider
+	repo       *Repository
+	streamers  []string
 
 	// messageProviders are the configured push providers (Matrix, Pushover,
 	// Gotify, webhook). batchers maps each provider name to the Batcher that
@@ -28,6 +50,12 @@ type Manager struct {
 
 	pointsPreviousValues map[string]int
 	mu                   sync.RWMutex
+}
+
+// defaultDiscordFactory is the production Discord provider factory: it returns
+// a real *DiscordProvider wired to the given credentials.
+func defaultDiscordFactory(botToken, guildID string) discordProvider {
+	return NewDiscordProvider(botToken, guildID)
 }
 
 // NewManager creates a new notification manager. discordCfg carries the Discord
@@ -40,18 +68,27 @@ func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.Notificatio
 		return nil, fmt.Errorf("failed to create notification repository: %w", err)
 	}
 
+	// Copy the incoming Discord settings by value immediately; never retain the
+	// caller's pointer as the authoritative config. nil is treated as the
+	// zero value (Discord disabled) rather than panicking.
+	var dc config.DiscordSettings
+	if discordCfg != nil {
+		dc = *discordCfg
+	}
+
 	m := &Manager{
-		discordConfig:        discordCfg,
+		discordConfig:        dc,
 		notifConfig:          notifCfg,
 		username:             username,
 		streamers:            streamers,
+		newDiscord:           defaultDiscordFactory,
 		repo:                 repo,
 		pointsPreviousValues: make(map[string]int),
 		batchers:             make(map[string]*Batcher),
 	}
 
-	if discordCfg.Enabled {
-		m.discord = NewDiscordProvider(discordCfg.BotToken, discordCfg.GuildID)
+	if dc.Enabled {
+		m.discord = m.newDiscord(dc.BotToken, dc.GuildID)
 	}
 
 	for _, p := range NewMessageProvidersFromEnv(username) {
@@ -899,15 +936,37 @@ func (m *Manager) GetDiscordChannels(ctx context.Context, forceRefresh bool) ([]
 	return discord.GetChannels(ctx, forceRefresh)
 }
 
-// UpdateDiscordConfig updates the Discord configuration and reconnects if needed.
+// UpdateDiscordConfig reconciles the desired Discord connection settings with
+// the running provider. It is idempotent: applying the same settings while the
+// provider is already connected is a true no-op (no disconnect, no reconnect,
+// no log), which is what stops every unrelated settings save from tearing the
+// Discord gateway session down and back up.
+//
+// The connection-relevant fields are Enabled, BotToken and GuildID; channel
+// selection lives elsewhere and never requires reconnecting the session.
+// Change detection compares the incoming settings by VALUE against the stored
+// value snapshot, so a caller mutating its original struct in place cannot fool
+// the comparison into a false no-op. Whether a reconnect is actually needed is
+// decided by the provider's real lifecycle state (IsConnected), not by mere
+// provider existence — so a disconnected or failed provider recovers instead of
+// being wrongly skipped.
 func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	oldEnabled := m.discordConfig.Enabled
-	m.discordConfig = cfg
+	old := m.discordConfig
 
-	if !cfg.Enabled {
+	// Local immutable copy of the desired config; a nil pointer is treated as
+	// "Discord disabled". The caller's pointer is never retained.
+	var next config.DiscordSettings
+	if cfg != nil {
+		next = *cfg
+	}
+
+	// Disabled: tear down any live provider and clear it. Re-applying a disabled
+	// config once the provider is already gone is a no-op (nothing logged).
+	if !next.Enabled {
+		m.discordConfig = next
 		if m.discord != nil {
 			_ = m.discord.Disconnect()
 			m.discord = nil
@@ -916,11 +975,35 @@ func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 		return nil
 	}
 
-	if m.discord == nil {
-		m.discord = NewDiscordProvider(cfg.BotToken, cfg.GuildID)
-	} else {
+	// From here Discord is enabled. connectionChanged is true when any field
+	// that requires re-establishing the gateway session differs from the stored
+	// snapshot (including the disabled->enabled transition).
+	connectionChanged := old.Enabled != next.Enabled ||
+		old.BotToken != next.BotToken ||
+		old.GuildID != next.GuildID
+
+	// Store the desired config (by value) BEFORE attempting to connect. If
+	// Connect fails below we still keep the desired settings, so the next
+	// identical apply is not mistaken for a no-op and retries the connection.
+	m.discordConfig = next
+
+	switch {
+	case m.discord == nil:
+		// No provider yet: either a fresh enable, or recovery after the provider
+		// was cleared. Create and connect — no preliminary disconnect.
+		m.discord = m.newDiscord(next.BotToken, next.GuildID)
+	case connectionChanged:
+		// A connection-relevant field changed while a provider exists: tear the
+		// session down and re-point the provider before reconnecting.
 		_ = m.discord.Disconnect()
-		m.discord.UpdateConfig(cfg.BotToken, cfg.GuildID)
+		m.discord.UpdateConfig(next.BotToken, next.GuildID)
+	case m.discord.IsConnected():
+		// Unchanged config and the session is live: nothing to do. This is the
+		// idempotent path that keeps unrelated settings saves from reconnecting.
+		return nil
+	default:
+		// Unchanged config but the session is down (never connected, dropped, or
+		// a prior Connect failed): reconnect without tearing anything down first.
 	}
 
 	if err := m.discord.Connect(context.Background()); err != nil {
@@ -928,10 +1011,15 @@ func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 		return err
 	}
 
-	if !oldEnabled {
+	switch {
+	case !old.Enabled:
 		slog.Info("Discord notifications enabled")
-	} else {
+	case connectionChanged:
 		slog.Info("Discord configuration updated and reconnected")
+	default:
+		// Recovery reconnect of an unchanged config: don't emit the misleading
+		// "configuration updated" line that made the churn look intentional.
+		slog.Debug("Discord provider reconnected after being disconnected")
 	}
 
 	return nil
