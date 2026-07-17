@@ -807,25 +807,32 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 		case "points-earned":
 			if data := msg.Data; data != nil {
 				if pointGain, ok := data["point_gain"].(map[string]interface{}); ok {
-					if reasonCode, ok := pointGain["reason_code"].(string); ok {
+					// Same shared extraction+normalization the pool uses, so both
+					// consumers of this one message derive an identical canonical
+					// reason and neither reads reason_code by hand.
+					if rawReason, reason, ok := pubsub.PointReason(msg); ok {
 						// Persist the grant->broadcast binding regardless of
 						// analytics being enabled; runs on the pubsub handler
 						// goroutine, outside any pool/watcher lock. The
 						// in-memory MarkStreakEarned already happened in
 						// UpdateHistory on the pool's own handling path.
-						if reasonCode == "WATCH_STREAK" && m.streamers != nil {
+						if reason == pubsub.ReasonWatchStreak && m.streamers != nil {
 							m.streamers.RecordStreakGrant(s.Username)
 						}
 
 						if m.analyticsSvc != nil {
-							m.analyticsSvc.RecordPoints(s, reasonCode)
+							// event_type stays RAW: analytics already maps
+							// '_'->' ', so passing the raw wire reason preserves
+							// the historical space-form and avoids a canonical
+							// deployment seam in the points table.
+							m.analyticsSvc.RecordPoints(s, rawReason)
 
-							switch reasonCode {
-							case "WATCH_STREAK":
+							switch reason {
+							case pubsub.ReasonWatchStreak:
 								if earned, ok := pointGain["total_points"].(float64); ok {
 									m.analyticsSvc.RecordAnnotation(s, "WATCH_STREAK", fmt.Sprintf("+%d - Watch Streak", int(earned)))
 								}
-							case "RAID":
+							case pubsub.ReasonRaid:
 								if earned, ok := pointGain["total_points"].(float64); ok {
 									m.analyticsSvc.RecordAnnotation(s, "RAID", fmt.Sprintf("+%d - Raid", int(earned)))
 								}

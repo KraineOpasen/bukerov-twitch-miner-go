@@ -457,26 +457,37 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 		if msg.Type == "points-earned" {
 			if pointGain, ok := msg.Data["point_gain"].(map[string]interface{}); ok {
 				earned := 0
-				reasonCode := ""
 				if pts, ok := pointGain["total_points"].(float64); ok {
 					earned = int(pts)
 				}
-				if rc, ok := pointGain["reason_code"].(string); ok {
-					reasonCode = rc
-				}
-				slog.Info("Points earned",
+				// Extract + canonicalize through the one shared helper (also used
+				// by the miner's onMessage callback), so the space-form
+				// "WATCH STREAK" and the underscore "WATCH_STREAK" both resolve to
+				// the canonical reason all downstream comparisons expect.
+				rawReason, reason, _ := PointReason(msg)
+
+				// reason is the canonical runtime form the exact-match console and
+				// web-log streak classifiers key off; reason_raw is added only when
+				// the wire form differed, preserving the raw value for forensics
+				// without duplicating it for the already-canonical common cases.
+				logArgs := []any{
 					"streamer", streamer.Username,
 					"points", earned,
-					"reason", reasonCode,
-				)
-				streamer.UpdateHistory(reasonCode, earned)
+					"reason", reason,
+				}
+				if rawReason != reason {
+					logArgs = append(logArgs, "reason_raw", rawReason)
+				}
+				slog.Info("Points earned", logArgs...)
+
+				streamer.UpdateHistory(reason, earned)
 
 				// Passive WATCH gains arrive every few minutes per streamer
 				// and would drown everything else in the ring buffer, so only
 				// the notable reason codes (CLAIM, WATCH_STREAK, RAID, ...)
-				// are recorded.
-				if reasonCode != "WATCH" {
-					events.Record(events.TypePointsEarned, streamer.Username, fmt.Sprintf("+%d (%s)", earned, reasonCode))
+				// are recorded — keyed off the canonical reason.
+				if reason != ReasonWatch {
+					events.Record(events.TypePointsEarned, streamer.Username, fmt.Sprintf("+%d (%s)", earned, reason))
 				}
 			}
 		}
