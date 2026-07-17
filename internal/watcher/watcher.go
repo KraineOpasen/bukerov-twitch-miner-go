@@ -587,7 +587,7 @@ func (w *MinuteWatcher) processWatching() {
 			reported = true
 			watchedOK++
 			w.noteReportOutcome(streamer.Username, true, time.Now())
-			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.MinuteWatched)
+			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.GetMinuteWatched())
 			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
 			if sl.idx >= 0 {
 				// Configured channel: credit fair-rotation watch time and track
@@ -1185,7 +1185,7 @@ func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
 		return cp
 	}
 	if cp && hp {
-		return w.streamers[cand].Stream.MinuteWatched > w.streamers[held].Stream.MinuteWatched
+		return w.streamers[cand].Stream.GetMinuteWatched() > w.streamers[held].Stream.GetMinuteWatched()
 	}
 	return false
 }
