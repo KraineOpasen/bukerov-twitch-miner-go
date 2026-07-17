@@ -58,9 +58,22 @@ type fakeDiscord struct {
 	// entry — or an exhausted slice — means that Connect succeeds and marks the
 	// provider connected; a non-nil entry fails and leaves it disconnected.
 	connectErrs []error
+
+	// disconnectErrs is consumed one entry per Disconnect call. Modelling the
+	// real provider's detach-before-close, Disconnect always leaves the fake
+	// disconnected; a non-nil entry is merely returned to the caller.
+	disconnectErrs []error
+
+	// onLifecycle, if set, is invoked at the very start of Connect and
+	// Disconnect (the provider "network" operations) so a test can assert the
+	// Manager lock is not held while they run.
+	onLifecycle func()
 }
 
 func (f *fakeDiscord) Connect(_ context.Context) error {
+	if f.onLifecycle != nil {
+		f.onLifecycle()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connectCalls++
@@ -77,10 +90,20 @@ func (f *fakeDiscord) Connect(_ context.Context) error {
 }
 
 func (f *fakeDiscord) Disconnect() error {
+	if f.onLifecycle != nil {
+		f.onLifecycle()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.disconnectCalls++
+	// Detach-before-close: the fake is never connected once Disconnect returns,
+	// even when it reports a Close error.
 	f.connected = false
+	if len(f.disconnectErrs) > 0 {
+		err := f.disconnectErrs[0]
+		f.disconnectErrs = f.disconnectErrs[1:]
+		return err
+	}
 	return nil
 }
 
@@ -182,8 +205,10 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 
 func mustUpdate(t *testing.T, m *Manager, cfg config.DiscordSettings) {
 	t.Helper()
+	// Never format the whole DiscordSettings (it carries BotToken); log only the
+	// non-secret fields.
 	if err := m.UpdateDiscordConfig(&cfg); err != nil {
-		t.Fatalf("UpdateDiscordConfig(%+v): %v", cfg, err)
+		t.Fatalf("UpdateDiscordConfig(enabled=%v guildID=%q): %v", cfg.Enabled, cfg.GuildID, err)
 	}
 }
 

@@ -49,7 +49,17 @@ type Manager struct {
 	batchers         map[string]*Batcher
 
 	pointsPreviousValues map[string]int
-	mu                   sync.RWMutex
+
+	// mu guards the Manager's own fields (config snapshot, provider reference,
+	// batchers, ...) and is held only for short, non-blocking critical sections.
+	mu sync.RWMutex
+
+	// discordLifecycleMu serializes the Discord connection lifecycle (Start,
+	// Stop, UpdateDiscordConfig). It is always acquired BEFORE mu, and every
+	// network operation (Connect/Disconnect -> session.Open/Close) runs while
+	// only this lock — never mu — is held, so notification paths that take mu
+	// are never blocked on Discord network I/O.
+	discordLifecycleMu sync.Mutex
 }
 
 // defaultDiscordFactory is the production Discord provider factory: it returns
@@ -121,11 +131,18 @@ func (m *Manager) resolveBatchingSettings(providerName string) config.BatchingSe
 
 // Start initializes and connects all enabled providers.
 func (m *Manager) Start(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.discordLifecycleMu.Lock()
+	defer m.discordLifecycleMu.Unlock()
 
-	if m.discord != nil && m.discordConfig.Enabled {
-		if err := m.discord.Connect(ctx); err != nil {
+	m.mu.Lock()
+	provider := m.discord
+	enabled := m.discordConfig.Enabled
+	m.mu.Unlock()
+
+	// Connect with no Manager lock held so the network Open never blocks
+	// notification paths.
+	if provider != nil && enabled {
+		if err := provider.Connect(ctx); err != nil {
 			slog.Error("Failed to connect Discord provider", "error", err)
 			return err
 		}
@@ -133,7 +150,13 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start the per-provider batch flush loops. Each loop performs a final
 	// flush when ctx is cancelled (graceful shutdown).
+	m.mu.RLock()
+	batchers := make([]*Batcher, 0, len(m.batchers))
 	for _, b := range m.batchers {
+		batchers = append(batchers, b)
+	}
+	m.mu.RUnlock()
+	for _, b := range batchers {
 		b.Start(ctx)
 	}
 
@@ -143,27 +166,37 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop disconnects all providers, flushes any pending batches, and closes the
 // repository.
 func (m *Manager) Stop() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.discordLifecycleMu.Lock()
+	defer m.discordLifecycleMu.Unlock()
+
+	m.mu.RLock()
+	batchers := make([]*Batcher, 0, len(m.batchers))
+	for _, b := range m.batchers {
+		batchers = append(batchers, b)
+	}
+	provider := m.discord
+	repo := m.repo
+	m.mu.RUnlock()
 
 	// Force-flush every pending batch before shutting down so no accumulated
 	// events are lost.
-	if len(m.batchers) > 0 {
+	if len(batchers) > 0 {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		for _, b := range m.batchers {
+		for _, b := range batchers {
 			b.Stop(flushCtx)
 		}
 		cancel()
 	}
 
-	if m.discord != nil {
-		if err := m.discord.Disconnect(); err != nil {
+	// Disconnect with no Manager lock held.
+	if provider != nil {
+		if err := provider.Disconnect(); err != nil {
 			slog.Error("Failed to disconnect Discord provider", "error", err)
 		}
 	}
 
-	if m.repo != nil {
-		_ = m.repo.Close()
+	if repo != nil {
+		_ = repo.Close()
 	}
 }
 
@@ -951,10 +984,16 @@ func (m *Manager) GetDiscordChannels(ctx context.Context, forceRefresh bool) ([]
 // provider existence — so a disconnected or failed provider recovers instead of
 // being wrongly skipped.
 func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Serialize the whole reconcile against Start/Stop/other updates, but do NOT
+	// hold m.mu across the network operations below.
+	m.discordLifecycleMu.Lock()
+	defer m.discordLifecycleMu.Unlock()
 
+	// Short critical section: snapshot the stored config and current provider.
+	m.mu.Lock()
 	old := m.discordConfig
+	provider := m.discord
+	m.mu.Unlock()
 
 	// Local immutable copy of the desired config; a nil pointer is treated as
 	// "Discord disabled". The caller's pointer is never retained.
@@ -963,66 +1002,97 @@ func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 		next = *cfg
 	}
 
-	// Disabled: tear down any live provider and clear it. Re-applying a disabled
-	// config once the provider is already gone is a no-op (nothing logged).
+	// --- Disabled ---
 	if !next.Enabled {
-		m.discordConfig = next
-		if m.discord != nil {
-			_ = m.discord.Disconnect()
-			m.discord = nil
-			slog.Info("Discord notifications disabled")
+		if provider == nil {
+			// CASE A: already disabled, no provider -> commit config, no-op.
+			m.setDiscordConfig(next)
+			return nil
 		}
+		// CASE B: tear the provider down outside m.mu. On failure, leave the
+		// state untouched (provider retained, config uncommitted) so the next
+		// identical disable retries instead of falsely succeeding.
+		if err := provider.Disconnect(); err != nil {
+			slog.Error("Failed to disconnect Discord provider", "error", err)
+			return err
+		}
+		m.mu.Lock()
+		m.discordConfig = next
+		if m.discord == provider {
+			m.discord = nil
+		}
+		m.mu.Unlock()
+		slog.Info("Discord notifications disabled")
 		return nil
 	}
 
-	// From here Discord is enabled. connectionChanged is true when any field
-	// that requires re-establishing the gateway session differs from the stored
-	// snapshot (including the disabled->enabled transition).
+	// --- Enabled --- connectionChanged is true when any field that requires
+	// re-establishing the gateway session differs (including disabled->enabled).
 	connectionChanged := old.Enabled != next.Enabled ||
 		old.BotToken != next.BotToken ||
 		old.GuildID != next.GuildID
 
-	// Store the desired config (by value) BEFORE attempting to connect. If
-	// Connect fails below we still keep the desired settings, so the next
-	// identical apply is not mistaken for a no-op and retries the connection.
-	m.discordConfig = next
-
 	switch {
-	case m.discord == nil:
-		// No provider yet: either a fresh enable, or recovery after the provider
-		// was cleared. Create and connect — no preliminary disconnect.
-		m.discord = m.newDiscord(next.BotToken, next.GuildID)
-	case connectionChanged:
-		// A connection-relevant field changed while a provider exists: tear the
-		// session down and re-point the provider before reconnecting.
-		_ = m.discord.Disconnect()
-		m.discord.UpdateConfig(next.BotToken, next.GuildID)
-	case m.discord.IsConnected():
-		// Unchanged config and the session is live: nothing to do. This is the
-		// idempotent path that keeps unrelated settings saves from reconnecting.
+	case provider == nil:
+		// CASE C / F: create the provider and publish it + the desired config
+		// BEFORE connecting, so a failed Connect stays retryable.
+		provider = m.newDiscord(next.BotToken, next.GuildID)
+		m.mu.Lock()
+		m.discord = provider
+		m.discordConfig = next
+		m.mu.Unlock()
+		if err := provider.Connect(context.Background()); err != nil {
+			slog.Error("Failed to connect Discord provider", "error", err)
+			return err
+		}
+		if !old.Enabled {
+			slog.Info("Discord notifications enabled")
+		} else {
+			slog.Debug("Discord provider reconnected after being disconnected")
+		}
 		return nil
-	default:
-		// Unchanged config but the session is down (never connected, dropped, or
-		// a prior Connect failed): reconnect without tearing anything down first.
-	}
 
-	if err := m.discord.Connect(context.Background()); err != nil {
-		slog.Error("Failed to connect Discord provider", "error", err)
-		return err
-	}
-
-	switch {
-	case !old.Enabled:
-		slog.Info("Discord notifications enabled")
 	case connectionChanged:
+		// CASE G / H: a real credential change. Disconnect the old session
+		// outside m.mu FIRST; on failure do nothing else (retryable) — no
+		// UpdateConfig, no Connect, no config commit, no success log.
+		if err := provider.Disconnect(); err != nil {
+			slog.Error("Failed to disconnect Discord provider", "error", err)
+			return err
+		}
+		provider.UpdateConfig(next.BotToken, next.GuildID)
+		m.setDiscordConfig(next)
+		if err := provider.Connect(context.Background()); err != nil {
+			slog.Error("Failed to connect Discord provider", "error", err)
+			return err
+		}
 		slog.Info("Discord configuration updated and reconnected")
-	default:
-		// Recovery reconnect of an unchanged config: don't emit the misleading
-		// "configuration updated" line that made the churn look intentional.
-		slog.Debug("Discord provider reconnected after being disconnected")
-	}
+		return nil
 
-	return nil
+	default:
+		// Unchanged connection config. Decide by real lifecycle state, not by
+		// mere provider existence.
+		if provider.IsConnected() {
+			// CASE D: true no-op (stored config already equals next).
+			return nil
+		}
+		// CASE E: the session is down (never connected, dropped, or a prior
+		// Connect failed) -> reconnect, no teardown, retryable on failure.
+		m.setDiscordConfig(next)
+		if err := provider.Connect(context.Background()); err != nil {
+			slog.Error("Failed to connect Discord provider", "error", err)
+			return err
+		}
+		slog.Debug("Discord provider reconnected after being disconnected")
+		return nil
+	}
+}
+
+// setDiscordConfig stores the desired Discord config under a short lock.
+func (m *Manager) setDiscordConfig(cfg config.DiscordSettings) {
+	m.mu.Lock()
+	m.discordConfig = cfg
+	m.mu.Unlock()
 }
 
 // InitializePointsTracking sets the initial points values for all streamers.
