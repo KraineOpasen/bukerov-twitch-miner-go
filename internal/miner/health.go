@@ -85,6 +85,51 @@ func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail s
 	}
 }
 
+// minerBetHealthGate adapts the aggregated Health Center to pubsub.BetHealthGate,
+// so the auto-bet path can gate on backend health without the pubsub package
+// importing health. It reads the already-composed health.Center snapshot
+// synchronously and blocks an auto-bet when the GQL API or PubSub transport is
+// degraded or failed, naming the offending signal via a stable GateReason. Any
+// other state — OK, idle, stalled, unknown, or a signal not yet recorded — fails
+// open (the bet is allowed). Scope is deliberately degraded/failed only: a
+// StatusStalled (e.g. PubSub topics-lost) is not treated as a bet blocker here.
+//
+// Priority is signal-first: GQL is inspected fully (failed or degraded) before
+// PubSub, and within each signal failed outranks degraded. GQL is checked first
+// because it is the transport that actually PLACES the bet (PlacePredictionBet is
+// a GraphQL mutation), whereas PubSub only feeds the odds; so when both are
+// impaired the reason names the bet's own write path. This is a log/label choice
+// only — the block decision is identical either way (any degraded/failed on
+// either signal blocks), so "GQL degraded + PubSub failed" logs
+// health_gql_api_degraded, not the strictly more severe PubSub failure.
+type minerBetHealthGate struct{ m *Miner }
+
+func (g minerBetHealthGate) AutoBetDecision() pubsub.BetHealthDecision {
+	m := g.m
+	if m.healthCenter == nil {
+		return pubsub.BetHealthDecision{Allowed: true} // unknown -> fail-open
+	}
+	snap := m.healthCenter.Snapshot()
+
+	if gql, ok := snap.Signal(health.SignalGQLAPI); ok {
+		switch gql.Status {
+		case health.StatusFailed:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthGQLFailed}
+		case health.StatusDegraded:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthGQLDegraded}
+		}
+	}
+	if ps, ok := snap.Signal(health.SignalPubSub); ok {
+		switch ps.Status {
+		case health.StatusFailed:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthPubSubFailed}
+		case health.StatusDegraded:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthPubSubDegraded}
+		}
+	}
+	return pubsub.BetHealthDecision{Allowed: true} // OK / Idle / Stalled / Unknown / absent -> fail-open
+}
+
 // refreshHealthCenter records the non-canary health signals from the miner's
 // existing providers. It runs on the health-watchdog tick, so it adds no
 // goroutine. It records only redacted, non-sensitive summaries.

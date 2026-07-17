@@ -78,6 +78,11 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		DiscoveryPreferTracked:    cfg.DiscoveryPreferTracked,
 		DiscoveryMode:             string(cfg.DiscoveryMode),
 		DiscoveryPreferSubscribed: cfg.DiscoveryPreferSubscribed,
+		PredictionRisk: PredictionRiskConfig{
+			MaxStakePercent:   cfg.PredictionRisk.MaxStakePercent,
+			ReservePoints:     cfg.PredictionRisk.ReservePoints,
+			HealthGateEnabled: cfg.PredictionRisk.HealthGateEnabled,
+		},
 	}
 }
 
@@ -146,6 +151,15 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		DiscoveryPreferTracked:    defaults.DiscoveryPreferTracked,
 		DiscoveryMode:             string(defaults.DiscoveryMode),
 		DiscoveryPreferSubscribed: defaults.DiscoveryPreferSubscribed,
+		// Sourced from the config defaults, never hardcoded: "Reset settings"
+		// rebuilds the DTO from scratch (not decode-onto-current), so omitting
+		// this would send the Go zero value {0,0,false} and silently flip the
+		// default-ON health gate off in runtime and the saved config.
+		PredictionRisk: PredictionRiskConfig{
+			MaxStakePercent:   defaults.PredictionRisk.MaxStakePercent,
+			ReservePoints:     defaults.PredictionRisk.ReservePoints,
+			HealthGateEnabled: defaults.PredictionRisk.HealthGateEnabled,
+		},
 	}
 }
 
@@ -202,6 +216,13 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.DiscoveryMode = config.NormalizeDiscoveryMode(s.DiscoveryMode)
 	cfg.DiscoveryPreferSubscribed = s.DiscoveryPreferSubscribed
 
+	cfg.PredictionRisk = config.PredictionRiskSettings{
+		MaxStakePercent:   s.PredictionRisk.MaxStakePercent,
+		ReservePoints:     s.PredictionRisk.ReservePoints,
+		HealthGateEnabled: s.PredictionRisk.HealthGateEnabled,
+	}
+
+	config.LogPredictionRiskClamps(cfg.PredictionRisk, "Settings API")
 	config.ValidateConfig(cfg)
 }
 

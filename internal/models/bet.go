@@ -84,6 +84,59 @@ func DefaultBetSettings() BetSettings {
 	}
 }
 
+// GateReason identifies which prediction risk gate clamped or blocked an
+// auto-bet. Empty means no gate changed the outcome. Health reasons are set by
+// the caller from the injected transport-health verdict; the size reasons come
+// from EvaluateStake.
+type GateReason string
+
+const (
+	GateNone GateReason = ""
+
+	// Size gates (from EvaluateStake).
+	GatePercent          GateReason = "max_stake_percent" // stake clamped to a % of balance
+	GateReserveViolation GateReason = "reserve_violation" // bet SKIPPED to keep the reserve
+
+	// Health gates (from the caller's BetHealthDecision). No generic "health".
+	GateHealthGQLDegraded    GateReason = "health_gql_api_degraded"
+	GateHealthGQLFailed      GateReason = "health_gql_api_failed"
+	GateHealthPubSubDegraded GateReason = "health_pubsub_degraded"
+	GateHealthPubSubFailed   GateReason = "health_pubsub_failed"
+)
+
+// EvaluateStake applies the stateless GLOBAL size gates to a post-Stealth
+// proposed stake. The absolute MaxPoints cap is NOT re-applied here — Calculate
+// already enforces it as the single, per-streamer source. It returns:
+//
+//   - allowed: the stake to place (the max-stake-percent-capped amount);
+//   - reason:  the binding gate, or GateNone. GateReserveViolation means the
+//     caller must SKIP the bet entirely — the reserve is a floor, not a cap, so
+//     the stake is never silently shrunk to fit under it;
+//   - limit:   that reason's limit value (the percent cap, or reservePoints).
+//
+// maxStakePercent and reservePoints are the validated global settings
+// (0 = off). Fixed size priority: reserve violation outranks a percent clamp.
+func EvaluateStake(proposed, balance, maxStakePercent, reservePoints int) (allowed int, reason GateReason, limit int) {
+	allowed = proposed
+	reason = GateNone
+
+	if maxStakePercent > 0 {
+		if cap := balance * maxStakePercent / 100; cap < allowed {
+			allowed, reason, limit = cap, GatePercent, cap
+		}
+	}
+	if allowed < 0 {
+		allowed = 0
+	}
+
+	// Reserve floor is a hard skip on the FINAL (percent-capped) stake: if placing
+	// it would leave the balance below the reserve, do not bet at all.
+	if reservePoints > 0 && balance-allowed < reservePoints {
+		return allowed, GateReserveViolation, reservePoints
+	}
+	return allowed, reason, limit
+}
+
 type Outcome struct {
 	ID              string  `json:"id"`
 	Title           string  `json:"title"`

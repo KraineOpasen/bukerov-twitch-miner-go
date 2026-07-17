@@ -42,6 +42,83 @@ func TestBuildRuntimeSettingsRoundTripsDropBlacklist(t *testing.T) {
 	}
 }
 
+// TestPredictionRiskRoundTrips is the BLOCKER-4 / mandatory-#10 guard: the
+// GLOBAL prediction-risk gates survive the Settings DTO round trip (config ->
+// BuildRuntimeSettings -> ApplyToConfig -> config), and ApplyToConfig runs the
+// same validation clamps so an out-of-range percent is stored as it is applied.
+func TestPredictionRiskRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.PredictionRisk = config.PredictionRiskSettings{
+		MaxStakePercent:   30,
+		ReservePoints:     2500,
+		HealthGateEnabled: false,
+	}
+
+	// config -> DTO.
+	rt := BuildRuntimeSettings(&cfg)
+	if rt.PredictionRisk.MaxStakePercent != 30 || rt.PredictionRisk.ReservePoints != 2500 || rt.PredictionRisk.HealthGateEnabled {
+		t.Fatalf("BuildRuntimeSettings dropped the risk block, got %+v", rt.PredictionRisk)
+	}
+
+	// DTO -> config.
+	out := config.DefaultConfig()
+	ApplyToConfig(&out, rt)
+	if out.PredictionRisk.MaxStakePercent != 30 || out.PredictionRisk.ReservePoints != 2500 || out.PredictionRisk.HealthGateEnabled {
+		t.Fatalf("ApplyToConfig dropped the risk block, got %+v", out.PredictionRisk)
+	}
+}
+
+// TestBuildDefaultSettingsPopulatesPredictionRisk is the reset-blocker guard:
+// "Reset settings" builds the DTO from scratch via BuildDefaultSettings (not
+// decode-onto-current), so the global risk block must carry the config defaults
+// — {0, 0, true} — rather than the Go zero value {0, 0, false}, which would
+// silently flip the default-ON health gate off. Also confirms the current
+// streamers are preserved and that feeding the result through ApplyToConfig
+// keeps the health gate enabled.
+func TestBuildDefaultSettingsPopulatesPredictionRisk(t *testing.T) {
+	existing := []config.StreamerConfig{{Username: "alice"}, {Username: "bob"}}
+
+	got := BuildDefaultSettings(existing)
+
+	if got.PredictionRisk.MaxStakePercent != 0 || got.PredictionRisk.ReservePoints != 0 {
+		t.Errorf("size gates must default OFF (0/0), got pct=%d reserve=%d",
+			got.PredictionRisk.MaxStakePercent, got.PredictionRisk.ReservePoints)
+	}
+	if !got.PredictionRisk.HealthGateEnabled {
+		t.Error("reset defaults must keep the health gate ON (true), not the Go zero value false")
+	}
+	if len(got.Streamers) != 2 || got.Streamers[0].Username != "alice" || got.Streamers[1].Username != "bob" {
+		t.Errorf("current streamers must be preserved, got %+v", got.Streamers)
+	}
+
+	// The defaults, applied to a config, must leave the health gate enabled.
+	cfg := config.DefaultConfig()
+	cfg.PredictionRisk.HealthGateEnabled = false // pretend the operator had turned it off
+	ApplyToConfig(&cfg, got)
+	if !cfg.PredictionRisk.HealthGateEnabled {
+		t.Error("applying reset defaults must re-enable the health gate")
+	}
+}
+
+// TestApplyToConfigClampsPredictionRisk proves ApplyToConfig applies the same
+// validation clamps as LoadConfig: a UI that posts an out-of-range percent must
+// not persist 150 while only 100 is enforced.
+func TestApplyToConfigClampsPredictionRisk(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ApplyToConfig(&cfg, RuntimeSettings{
+		PredictionRisk: PredictionRiskConfig{MaxStakePercent: 150, ReservePoints: -10, HealthGateEnabled: true},
+	})
+	if cfg.PredictionRisk.MaxStakePercent != 100 {
+		t.Errorf("percent = %d, want clamped to 100", cfg.PredictionRisk.MaxStakePercent)
+	}
+	if cfg.PredictionRisk.ReservePoints != 0 {
+		t.Errorf("reserve = %d, want clamped to 0", cfg.PredictionRisk.ReservePoints)
+	}
+	if !cfg.PredictionRisk.HealthGateEnabled {
+		t.Error("healthGateEnabled=true must be preserved")
+	}
+}
+
 func TestApplyToConfigNormalizesDirectoryGames(t *testing.T) {
 	cfg := config.DefaultConfig()
 
