@@ -391,3 +391,83 @@ func TestLoadConfigParsesDirectoryGames(t *testing.T) {
 		t.Errorf("expected configured directory games, got %v", cfg.DirectoryGames)
 	}
 }
+
+// TestLoadConfigPredictionRiskDefaultsOnForExistingConfigs is the BLOCKER-4
+// guard: the GLOBAL prediction-risk block defaults to the health gate ON for
+// configs written before it existed. Crucially it is TOP-LEVEL, so per-streamer
+// settings blocks (which wholesale-replace the defaults) can never silently
+// disable it — the failure mode the reviewer found in production, where every
+// streamer carried a settings block and a per-streamer-scoped opt-out bool would
+// have loaded false everywhere. An explicit healthGateEnabled=false is honored.
+func TestLoadConfigPredictionRiskDefaultsOnForExistingConfigs(t *testing.T) {
+	// Old config: has per-streamer settings blocks, no predictionRisk key.
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"streamers": [
+			{"username": "alice", "settings": {"makePredictions": true}},
+			{"username": "bob", "settings": {"makePredictions": false}}
+		]
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if !cfg.PredictionRisk.HealthGateEnabled {
+		t.Error("health gate must default ON for existing configs, even with per-streamer settings blocks")
+	}
+	if cfg.PredictionRisk.MaxStakePercent != 0 || cfg.PredictionRisk.ReservePoints != 0 {
+		t.Errorf("size gates must default OFF (0/0), got pct=%d reserve=%d",
+			cfg.PredictionRisk.MaxStakePercent, cfg.PredictionRisk.ReservePoints)
+	}
+
+	// An explicit opt-out is honored.
+	pathOff := writeTestConfig(t, `{
+		"username": "test",
+		"predictionRisk": {"healthGateEnabled": false, "maxStakePercent": 25, "reservePoints": 1000}
+	}`)
+	cfgOff, err := LoadConfig(pathOff)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if cfgOff.PredictionRisk.HealthGateEnabled {
+		t.Error("an explicit healthGateEnabled=false must be honored")
+	}
+	if cfgOff.PredictionRisk.MaxStakePercent != 25 || cfgOff.PredictionRisk.ReservePoints != 1000 {
+		t.Errorf("explicit size gates must be parsed, got pct=%d reserve=%d",
+			cfgOff.PredictionRisk.MaxStakePercent, cfgOff.PredictionRisk.ReservePoints)
+	}
+}
+
+// TestValidateConfigClampsPredictionRisk pins the VALIDATION rule: store exactly
+// what is applied. MaxStakePercent is clamped to 0..100 (0 = off), never stored
+// as 150 while 100 is applied; ReservePoints is clamped to >= 0 so a negative
+// never masquerades as "off".
+func TestValidateConfigClampsPredictionRisk(t *testing.T) {
+	cases := []struct {
+		name              string
+		inPct, inReserve  int
+		wantPct, wantResv int
+	}{
+		{"in_range_unchanged", 25, 1000, 25, 1000},
+		{"percent_over_100_clamped", 150, 0, 100, 0},
+		{"percent_negative_zeroed", -5, 0, 0, 0},
+		{"percent_boundary_100", 100, 0, 100, 0},
+		{"reserve_negative_zeroed", 10, -1, 10, 0},
+		{"both_off", 0, 0, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.PredictionRisk.MaxStakePercent = c.inPct
+			cfg.PredictionRisk.ReservePoints = c.inReserve
+			ValidateConfig(&cfg)
+			if cfg.PredictionRisk.MaxStakePercent != c.wantPct || cfg.PredictionRisk.ReservePoints != c.wantResv {
+				t.Errorf("clamp(pct=%d, reserve=%d) = (%d, %d), want (%d, %d)",
+					c.inPct, c.inReserve,
+					cfg.PredictionRisk.MaxStakePercent, cfg.PredictionRisk.ReservePoints,
+					c.wantPct, c.wantResv)
+			}
+		})
+	}
+}

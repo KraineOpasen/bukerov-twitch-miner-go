@@ -85,31 +85,41 @@ func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail s
 	}
 }
 
-// minerBetHealthGate adapts the miner's PubSub transport health to
-// pubsub.BetHealthGate, so the auto-bet path can gate on connection health
-// without the pubsub package importing health. It blocks auto-bets only when the
-// link is definitively degraded/failed/stalled; an unknown or healthy link fails
-// open (bet allowed). Stateless: the verdict is derived from the live
-// pubsub-owned connection snapshot on each call, via the same pubsubSignal
-// composition the Health Center uses.
+// minerBetHealthGate adapts the aggregated Health Center to pubsub.BetHealthGate,
+// so the auto-bet path can gate on backend health without the pubsub package
+// importing health. It reads the already-composed health.Center snapshot
+// synchronously and blocks an auto-bet when the GQL API or PubSub transport is
+// degraded or failed, naming the offending signal via a stable GateReason. Any
+// other state — OK, idle, stalled, unknown, or a signal not yet recorded — fails
+// open (the bet is allowed). Scope is deliberately degraded/failed only: a
+// StatusStalled (e.g. PubSub topics-lost) is not treated as a bet blocker here.
+// Priority: GQL outranks PubSub, failed outranks degraded.
 type minerBetHealthGate struct{ m *Miner }
 
-func (g minerBetHealthGate) AutoBetAllowed() bool {
+func (g minerBetHealthGate) AutoBetDecision() pubsub.BetHealthDecision {
 	m := g.m
-	if m.wsPool == nil {
-		return true // unknown -> fail-open
+	if m.healthCenter == nil {
+		return pubsub.BetHealthDecision{Allowed: true} // unknown -> fail-open
 	}
-	m.mu.RLock()
-	threshold := time.Duration(m.config.RateLimits.ConnectionTimeoutMinutes) * time.Minute
-	m.mu.RUnlock()
+	snap := m.healthCenter.Snapshot()
 
-	sig := pubsubSignal(m.wsPool.ConnSnapshot(), m.wsPool.LastActivity(), time.Now(), threshold, m.wsPool.RecentReconnects(threshold))
-	switch sig.Status {
-	case health.StatusDegraded, health.StatusFailed, health.StatusStalled:
-		return false
-	default:
-		return true // OK / Idle / Unknown -> fail-open
+	if gql, ok := snap.Signal(health.SignalGQLAPI); ok {
+		switch gql.Status {
+		case health.StatusFailed:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthGQLFailed}
+		case health.StatusDegraded:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthGQLDegraded}
+		}
 	}
+	if ps, ok := snap.Signal(health.SignalPubSub); ok {
+		switch ps.Status {
+		case health.StatusFailed:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthPubSubFailed}
+		case health.StatusDegraded:
+			return pubsub.BetHealthDecision{Allowed: false, Reason: models.GateHealthPubSubDegraded}
+		}
+	}
+	return pubsub.BetHealthDecision{Allowed: true} // OK / Idle / Stalled / Unknown / absent -> fail-open
 }
 
 // refreshHealthCenter records the non-canary health signals from the miner's

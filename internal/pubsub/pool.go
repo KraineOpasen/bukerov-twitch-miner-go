@@ -19,14 +19,20 @@ type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
 type StatusHandler func(streamer string, online bool)
 type AuthErrorHandler func(err error)
 
-// BetHealthGate reports whether the transport is currently healthy enough to
-// place an automatic prediction bet. It is injected by the miner (see
-// SetBetHealthGate) as an adapter over pubsub-owned connection state, so this
-// package never imports the health package. A nil gate — or a true return —
-// allows the bet; only a definitive false blocks it (an unknown health state
-// fails open inside the adapter).
+// BetHealthDecision is the injected transport-health verdict for one automatic
+// bet: Allowed=false blocks it, and Reason is a stable models.GateReason
+// (health_gql_api_* / health_pubsub_*) for the structured gate log.
+type BetHealthDecision struct {
+	Allowed bool
+	Reason  models.GateReason
+}
+
+// BetHealthGate returns the transport-health verdict for an automatic bet. It is
+// injected by the miner (see SetBetHealthGate) as an adapter over the aggregated
+// health snapshot, so this package never imports the health package. A nil gate
+// is treated as unknown and fails open (the caller allows the bet).
 type BetHealthGate interface {
-	AutoBetAllowed() bool
+	AutoBetDecision() BetHealthDecision
 }
 
 // BetResult is the settled-bet record the pool emits once, when a prediction
@@ -127,11 +133,15 @@ type WebSocketPool struct {
 	onAuthError    AuthErrorHandler
 	onBetResult    BetResultHandler
 
-	// betHealth, when set, gates auto-bets on transport health. Provided by the
-	// miner as an adapter over pubsub-owned connection state (so this package
-	// never imports health); nil means "unknown" and fails open. Set once before
-	// Start, like the handlers above.
+	// betHealth, when set, gives the transport-health verdict for auto-bets.
+	// Provided by the miner as an adapter over the aggregated health snapshot (so
+	// this package never imports health); nil means "unknown" and fails open. Set
+	// once before Start, like the handlers above.
 	betHealth BetHealthGate
+
+	// risk holds the GLOBAL prediction risk gates applied to auto-bets. Guarded by
+	// mu (updated at wiring time and on every runtime settings apply).
+	risk config.PredictionRiskSettings
 
 	// reconnects records the timestamps of connection reconnects across the pool
 	// as a self-synchronized sliding window. The connection-health watchdog reads
@@ -175,6 +185,15 @@ func (p *WebSocketPool) SetBetResultHandler(handler BetResultHandler) {
 // automatic bet. Call before Start; nil disables the health gate (fail-open).
 func (p *WebSocketPool) SetBetHealthGate(g BetHealthGate) {
 	p.betHealth = g
+}
+
+// SetRiskSettings updates the GLOBAL prediction risk gates (max-stake percent,
+// reserve floor, health-gate switch) the auto-bet path applies. Safe to call at
+// wiring time and on every runtime settings apply.
+func (p *WebSocketPool) SetRiskSettings(r config.PredictionRiskSettings) {
+	p.mu.Lock()
+	p.risk = r
+	p.mu.Unlock()
 }
 
 // PredictionOutcomeSnapshot is a read-only view of one prediction outcome,
@@ -805,19 +824,29 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	settings := event.Bet.Settings
 	streamer := event.Streamer.Username
 	gate := p.betHealth
+	risk := p.risk
 	p.mu.Unlock()
 
 	// Prediction risk gates (auto-bet only; manual bets set Decision directly and
-	// are never gated). Fixed reason priority: health > reserve > percent >
-	// max_points. The health gate is highest and blocks the bet entirely; an
-	// unknown/absent gate fails open.
-	if settings.HealthGateEnabled && gate != nil && !gate.AutoBetAllowed() {
-		slog.Warn("Auto-bet gated",
-			"reason", string(models.GateHealth),
-			"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
-		return
+	// are never gated). Fixed reason priority: health > reserve > percent. The
+	// absolute cap (MaxPoints) is applied per-streamer inside Calculate.
+	if risk.HealthGateEnabled && gate != nil {
+		if d := gate.AutoBetDecision(); !d.Allowed {
+			slog.Warn("Auto-bet gated",
+				"reason", string(d.Reason),
+				"limit", 0, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
+			return
+		}
 	}
-	if allowed, reason, limit := settings.ClampStake(decision.Amount, balance); reason != models.GateNone && allowed != decision.Amount {
+	allowed, reason, limit := models.EvaluateStake(decision.Amount, balance, risk.MaxStakePercent, risk.ReservePoints)
+	switch reason {
+	case models.GateReserveViolation:
+		// Reserve is a floor, not a cap: skip the bet entirely rather than shrink it.
+		slog.Warn("Auto-bet gated",
+			"reason", string(reason),
+			"limit", limit, "proposed", decision.Amount, "allowed", 0, "streamer", streamer)
+		return
+	case models.GatePercent:
 		slog.Info("Auto-bet gated",
 			"reason", string(reason),
 			"limit", limit, "proposed", decision.Amount, "allowed", allowed, "streamer", streamer)
@@ -838,6 +867,14 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 		"choice", decision.Choice,
 		"amount", decision.Amount,
 	)
+
+	// Persist the FINAL stake as the round's decision BEFORE the network call, so
+	// prediction-made / prediction-result (and the ROI BetResult.Placed) record
+	// the amount actually sent, not Calculate's pre-gate proposal. The pool lock
+	// is released again before the Twitch call.
+	p.mu.Lock()
+	event.Bet.Decision.Amount = decision.Amount
+	p.mu.Unlock()
 
 	if err := p.placer.PlacePredictionBet(event, decision.ID, decision.Amount); err != nil {
 		slog.Error("Failed to make prediction", "error", err)

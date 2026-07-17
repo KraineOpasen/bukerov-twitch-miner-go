@@ -85,6 +85,12 @@ type Config struct {
 	Health              HealthSettings       `json:"health"`
 	DailySummary        DailySummarySettings `json:"dailySummary"`
 
+	// PredictionRisk holds the GLOBAL, stateless auto-bet risk gates. It is
+	// deliberately top-level (not per-streamer): as a top-level key absent from an
+	// existing config.json, LoadConfig keeps the DefaultConfig value (health gate
+	// on) regardless of any per-streamer settings blocks.
+	PredictionRisk PredictionRiskSettings `json:"predictionRisk"`
+
 	// DropBlacklist is a list of case-insensitive keywords. Any drop campaign
 	// whose drop or reward name contains one of them is skipped during drop
 	// rotation prioritization, in addition to the claim-history dedup.
@@ -388,6 +394,34 @@ func DefaultBatchingSettings() BatchingSettings {
 	}
 }
 
+// PredictionRiskSettings are the GLOBAL, stateless prediction risk gates applied
+// to automatic bets only (post-Stealth); they never affect manual bets. They are
+// intentionally NOT per-streamer — a per-streamer override would silently load
+// HealthGateEnabled=false for any streamer that already has a settings block,
+// disabling a default-on protection. The absolute per-streamer cap stays
+// BetSettings.MaxPoints and is not duplicated here.
+//
+//   - MaxStakePercent: cap the stake to this percent of balance (0 = off, else 1..100).
+//   - ReservePoints: keep at least this many points unbet — a bet that would push
+//     the balance below it is SKIPPED (0 = off; >= 0).
+//   - HealthGateEnabled: block auto-bets while the GQL API or PubSub transport is
+//     degraded/failed; an unknown health state fails open.
+type PredictionRiskSettings struct {
+	MaxStakePercent   int  `json:"maxStakePercent"`
+	ReservePoints     int  `json:"reservePoints"`
+	HealthGateEnabled bool `json:"healthGateEnabled"`
+}
+
+// DefaultPredictionRiskSettings returns the behaviour-preserving defaults: both
+// size gates off, the health gate on (fail-open on unknown).
+func DefaultPredictionRiskSettings() PredictionRiskSettings {
+	return PredictionRiskSettings{
+		MaxStakePercent:   0,
+		ReservePoints:     0,
+		HealthGateEnabled: true,
+	}
+}
+
 func DefaultConfig() Config {
 	return Config{
 		ClaimDropsOnStartup: false,
@@ -402,6 +436,7 @@ func DefaultConfig() Config {
 		Debug:               DefaultDebugSettings(),
 		Health:              DefaultHealthSettings(),
 		DailySummary:        DefaultDailySummarySettings(),
+		PredictionRisk:      DefaultPredictionRiskSettings(),
 	}
 }
 
@@ -623,6 +658,19 @@ func SaveConfig(path string, config *Config) error {
 // ValidateConfig enforces min/max bounds on rate limits and other configurable values.
 // It mutates the config in place, clamping out-of-range values to valid bounds.
 func ValidateConfig(config *Config) {
+	// Prediction risk gates: store exactly what is applied. MaxStakePercent is
+	// 0 (off) or 1..100 — a stored 150 is clamped to 100, never silently applied
+	// as 100 while 150 sits in the file. A negative value is not a hidden "off":
+	// it is clamped to 0. ReservePoints is clamped to >= 0.
+	if config.PredictionRisk.MaxStakePercent < 0 {
+		config.PredictionRisk.MaxStakePercent = 0
+	} else if config.PredictionRisk.MaxStakePercent > 100 {
+		config.PredictionRisk.MaxStakePercent = 100
+	}
+	if config.PredictionRisk.ReservePoints < 0 {
+		config.PredictionRisk.ReservePoints = 0
+	}
+
 	if config.RateLimits.WebsocketPingInterval < 20 {
 		config.RateLimits.WebsocketPingInterval = 20
 	} else if config.RateLimits.WebsocketPingInterval > 60 {

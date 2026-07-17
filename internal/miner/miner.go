@@ -324,6 +324,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.wsPool = pubsub.NewWebSocketPool(m.client, m.auth.GetAuthToken(), streamers, m.config.RateLimits)
 	m.wsPool.SetMessageHandler(m.handlePubSubMessage)
 	m.wsPool.SetBetHealthGate(minerBetHealthGate{m})
+	m.wsPool.SetRiskSettings(m.config.PredictionRisk)
 	m.wsPool.SetStatusHandler(m.handleStatusChange)
 	m.wsPool.SetAuthErrorHandler(func(error) { m.handleAuthError() })
 	if m.analyticsSvc != nil {
@@ -1156,8 +1157,15 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	wsPool := m.wsPool
 	minuteWatcher := m.watcher
 	dropsTracker := m.dropsTracker
+	riskCfg := m.config.PredictionRisk
 
 	m.mu.Unlock()
+
+	// Push the updated GLOBAL prediction risk gates to the auto-bet path outside
+	// the miner lock (SetRiskSettings takes the pool lock itself).
+	if wsPool != nil {
+		wsPool.SetRiskSettings(riskCfg)
+	}
 
 	for _, streamer := range added {
 		if wsPool != nil {

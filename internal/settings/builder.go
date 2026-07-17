@@ -78,6 +78,11 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		DiscoveryPreferTracked:    cfg.DiscoveryPreferTracked,
 		DiscoveryMode:             string(cfg.DiscoveryMode),
 		DiscoveryPreferSubscribed: cfg.DiscoveryPreferSubscribed,
+		PredictionRisk: PredictionRiskConfig{
+			MaxStakePercent:   cfg.PredictionRisk.MaxStakePercent,
+			ReservePoints:     cfg.PredictionRisk.ReservePoints,
+			HealthGateEnabled: cfg.PredictionRisk.HealthGateEnabled,
+		},
 	}
 }
 
@@ -201,6 +206,12 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.DiscoveryPreferTracked = s.DiscoveryPreferTracked
 	cfg.DiscoveryMode = config.NormalizeDiscoveryMode(s.DiscoveryMode)
 	cfg.DiscoveryPreferSubscribed = s.DiscoveryPreferSubscribed
+
+	cfg.PredictionRisk = config.PredictionRiskSettings{
+		MaxStakePercent:   s.PredictionRisk.MaxStakePercent,
+		ReservePoints:     s.PredictionRisk.ReservePoints,
+		HealthGateEnabled: s.PredictionRisk.HealthGateEnabled,
+	}
 
 	config.ValidateConfig(cfg)
 }

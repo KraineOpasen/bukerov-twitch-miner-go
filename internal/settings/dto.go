@@ -24,6 +24,19 @@ type RuntimeSettings struct {
 	// when true, discovery floats a subscribed channel above a non-subscribed one
 	// when choosing which candidate to farm.
 	DiscoveryPreferSubscribed bool `json:"discoveryPreferSubscribed"`
+	// PredictionRisk mirrors config.Config.PredictionRisk: the GLOBAL, stateless
+	// auto-bet risk gates. A settings save that omits this key keeps the current
+	// value (decode-onto-current), so the default-on health gate is never
+	// silently cleared.
+	PredictionRisk PredictionRiskConfig `json:"predictionRisk"`
+}
+
+// PredictionRiskConfig is the UI shape of config.PredictionRiskSettings: the
+// global prediction risk gates applied to automatic bets only.
+type PredictionRiskConfig struct {
+	MaxStakePercent   int  `json:"maxStakePercent"`
+	ReservePoints     int  `json:"reservePoints"`
+	HealthGateEnabled bool `json:"healthGateEnabled"`
 }
 
 // DiscordUIConfig contains Discord integration settings for the UI.
@@ -105,11 +118,6 @@ type BetSettingsJSON struct {
 	StealthMode   *bool    `json:"stealthMode,omitempty"`
 	Delay         *float64 `json:"delay,omitempty"`
 	DelayMode     *string  `json:"delayMode,omitempty"`
-
-	// Prediction risk gates (see models.BetSettings).
-	MaxStakePercent   *int  `json:"maxStakePercent,omitempty"`
-	ReservePoints     *int  `json:"reservePoints,omitempty"`
-	HealthGateEnabled *bool `json:"healthGateEnabled,omitempty"`
 }
 
 // StreamersConfig is used for streamer-related API responses.

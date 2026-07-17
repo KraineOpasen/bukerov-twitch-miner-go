@@ -42,6 +42,51 @@ func TestBuildRuntimeSettingsRoundTripsDropBlacklist(t *testing.T) {
 	}
 }
 
+// TestPredictionRiskRoundTrips is the BLOCKER-4 / mandatory-#10 guard: the
+// GLOBAL prediction-risk gates survive the Settings DTO round trip (config ->
+// BuildRuntimeSettings -> ApplyToConfig -> config), and ApplyToConfig runs the
+// same validation clamps so an out-of-range percent is stored as it is applied.
+func TestPredictionRiskRoundTrips(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.PredictionRisk = config.PredictionRiskSettings{
+		MaxStakePercent:   30,
+		ReservePoints:     2500,
+		HealthGateEnabled: false,
+	}
+
+	// config -> DTO.
+	rt := BuildRuntimeSettings(&cfg)
+	if rt.PredictionRisk.MaxStakePercent != 30 || rt.PredictionRisk.ReservePoints != 2500 || rt.PredictionRisk.HealthGateEnabled {
+		t.Fatalf("BuildRuntimeSettings dropped the risk block, got %+v", rt.PredictionRisk)
+	}
+
+	// DTO -> config.
+	var out config.Config = config.DefaultConfig()
+	ApplyToConfig(&out, rt)
+	if out.PredictionRisk.MaxStakePercent != 30 || out.PredictionRisk.ReservePoints != 2500 || out.PredictionRisk.HealthGateEnabled {
+		t.Fatalf("ApplyToConfig dropped the risk block, got %+v", out.PredictionRisk)
+	}
+}
+
+// TestApplyToConfigClampsPredictionRisk proves ApplyToConfig applies the same
+// validation clamps as LoadConfig: a UI that posts an out-of-range percent must
+// not persist 150 while only 100 is enforced.
+func TestApplyToConfigClampsPredictionRisk(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ApplyToConfig(&cfg, RuntimeSettings{
+		PredictionRisk: PredictionRiskConfig{MaxStakePercent: 150, ReservePoints: -10, HealthGateEnabled: true},
+	})
+	if cfg.PredictionRisk.MaxStakePercent != 100 {
+		t.Errorf("percent = %d, want clamped to 100", cfg.PredictionRisk.MaxStakePercent)
+	}
+	if cfg.PredictionRisk.ReservePoints != 0 {
+		t.Errorf("reserve = %d, want clamped to 0", cfg.PredictionRisk.ReservePoints)
+	}
+	if !cfg.PredictionRisk.HealthGateEnabled {
+		t.Error("healthGateEnabled=true must be preserved")
+	}
+}
+
 func TestApplyToConfigNormalizesDirectoryGames(t *testing.T) {
 	cfg := config.DefaultConfig()
 
