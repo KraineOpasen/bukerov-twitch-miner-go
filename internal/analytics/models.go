@@ -64,14 +64,20 @@ type PointsHistory struct {
 	Range       string             `json:"range"`
 	Points      []PointSample      `json:"points"`
 	Annotations []AnnotationRecord `json:"annotations"`
-	// Breakdown aggregates the range's positive balance changes by reason so
-	// the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK shares. Computed
-	// from the raw (pre-downsampling) series; omitted when there is nothing
-	// earned in range.
+	// Breakdown aggregates the range's positive balance changes by canonical
+	// reason so the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK shares.
+	// Computed from the raw (pre-downsampling) series; omitted when there is
+	// nothing earned in range.
 	Breakdown []ReasonShare `json:"breakdown,omitempty"`
-	// Truncated is true when the raw series exceeded the point cap and was
-	// downsampled for the chart (the export endpoint returns full fidelity).
-	Truncated bool `json:"truncated"`
+	// RawTruncated is true when the raw series hit the backend row cap, so
+	// the window is incomplete and Breakdown (and any KPI derived from it)
+	// must not be presented as a full-period result.
+	RawTruncated bool `json:"rawTruncated"`
+	// ChartDownsampled is true when Points was thinned for display only; the
+	// raw series (and therefore Breakdown) is still complete. Deliberately a
+	// separate flag from RawTruncated: downsampling alone must never hide the
+	// breakdown or trigger a partial-data warning.
+	ChartDownsampled bool `json:"chartDownsampled"`
 }
 
 type StreamerInfo struct {

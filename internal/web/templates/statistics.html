@@ -58,8 +58,8 @@
         <div class="flex flex-col gap-1">
             <span class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.period" }}</span>
             <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.period" }}">
-                <button type="button" class="stat-range-btn" data-range="24h">{{ t "stat.range.24h" }}</button>
-                <button type="button" class="stat-range-btn is-active" data-range="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="stat-range-btn is-active" data-range="24h">{{ t "stat.range.24h" }}</button>
+                <button type="button" class="stat-range-btn" data-range="7d">{{ t "stat.range.7d" }}</button>
                 <button type="button" class="stat-range-btn" data-range="30d">{{ t "stat.range.30d" }}</button>
             </div>
         </div>
@@ -71,6 +71,7 @@
 
 <div class="card">
     <div id="stat-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.stale" }}</div>
+    <div id="stat-partial" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.partial" }}</div>
 
     <div id="stat-loading">
         <div class="skeleton h-[400px] w-full rounded-lg"></div>
@@ -94,6 +95,7 @@
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="kpi-earned" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="kpi-events" class="stat-value num"></span></div>
         </div>
+        <p class="text-xs text-neutral-500 mb-4">{{ t "stat.kpi.note" }}</p>
         <div id="stat-chart"></div>
         <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">{{ t "stat.truncated" }}</p>
 
@@ -271,6 +273,7 @@
         retry:     document.getElementById('stat-retry'),
         chartWrap: document.getElementById('stat-chart-wrap'),
         truncated: document.getElementById('stat-truncated'),
+        partial:   document.getElementById('stat-partial'),
         export:    document.getElementById('stat-export'),
         rangeBtns: Array.from(document.querySelectorAll('.stat-range-btn')),
         breakdown: document.getElementById('stat-breakdown'),
@@ -279,7 +282,7 @@
 
     let chart = null;
     let donut = null;
-    let currentRange = '7d';
+    let currentRange = '24h';
     let refreshTimer = null;
     let inFlight = null;
 
@@ -372,25 +375,35 @@
         if (sign) el.classList.add(sign);
     }
 
-    // Summary widgets over the fetched series: closing balance, signed net
-    // change across the range, points earned (breakdown total), and how many
-    // positive events produced them.
+    // Summary widgets over the fetched series: closing balance, signed
+    // balance change across the range (spending and bets included), points
+    // accrued (positive gains only, from the breakdown), and how many
+    // positive events produced them. With rawTruncated the breakdown-derived
+    // tiles are dashed out — an incomplete window must not pose as a
+    // full-period total.
     function renderKPIs(data) {
         const pts = data.points || [];
         const first = pts.length ? pts[0].balance : 0;
         const last = pts.length ? pts[pts.length - 1].balance : 0;
         const net = last - first;
-        let earned = 0, events = 0;
-        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
         setKPI('kpi-balance', nfStat.format(last));
         setKPI('kpi-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        if (data.rawTruncated) {
+            setKPI('kpi-earned', '—');
+            setKPI('kpi-events', '—');
+            return;
+        }
+        let earned = 0, events = 0;
+        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
         setKPI('kpi-earned', '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');
         setKPI('kpi-events', nfStat.format(events));
     }
 
-    // Earnings-breakdown donut + colour-coded legend.
+    // Earnings-breakdown donut + colour-coded legend. Hidden entirely when
+    // the raw series was truncated (partial data); mere chart downsampling
+    // never hides it — the breakdown is built from the full raw series.
     function renderBreakdown(data) {
-        const slices = breakdownSlices(data.breakdown);
+        const slices = data.rawTruncated ? [] : breakdownSlices(data.breakdown);
         if (!slices.length) {
             if (donut) { donut.destroy(); donut = null; }
             els.breakdown.classList.add('hidden');
@@ -453,6 +466,7 @@
                 if (chart) { chart.destroy(); chart = null; }
                 if (donut) { donut.destroy(); donut = null; }
                 els.breakdown.classList.add('hidden');
+                els.partial.classList.add('hidden');
                 show('empty');
                 setUpdated();
                 return;
@@ -460,7 +474,11 @@
 
             show('chart');
             render(data);
-            els.truncated.classList.toggle('hidden', !data.truncated);
+            // Two independent completeness signals: the downsampling note is
+            // informational (breakdown still complete); the partial-data
+            // warning fires only when the raw series hit the backend cap.
+            els.truncated.classList.toggle('hidden', !data.chartDownsampled);
+            els.partial.classList.toggle('hidden', !data.rawTruncated);
             setUpdated();
         } catch (err) {
             if (ctrl.signal.aborted) return;
