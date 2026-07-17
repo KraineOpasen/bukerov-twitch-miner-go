@@ -151,6 +151,15 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		DiscoveryPreferTracked:    defaults.DiscoveryPreferTracked,
 		DiscoveryMode:             string(defaults.DiscoveryMode),
 		DiscoveryPreferSubscribed: defaults.DiscoveryPreferSubscribed,
+		// Sourced from the config defaults, never hardcoded: "Reset settings"
+		// rebuilds the DTO from scratch (not decode-onto-current), so omitting
+		// this would send the Go zero value {0,0,false} and silently flip the
+		// default-ON health gate off in runtime and the saved config.
+		PredictionRisk: PredictionRiskConfig{
+			MaxStakePercent:   defaults.PredictionRisk.MaxStakePercent,
+			ReservePoints:     defaults.PredictionRisk.ReservePoints,
+			HealthGateEnabled: defaults.PredictionRisk.HealthGateEnabled,
+		},
 	}
 }
 
