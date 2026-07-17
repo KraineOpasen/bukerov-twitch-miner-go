@@ -17,10 +17,13 @@ type StreamerInfo struct {
 	OfflineDuration       string `json:"offline_duration,omitempty"`
 	GameName              string `json:"game_name,omitempty"`
 	Title                 string `json:"title,omitempty"`
-	ViewersCount          int    `json:"viewers_count,omitempty"`
-	ViewersCountFormatted string `json:"viewers_count_formatted,omitempty"`
-	ChannelRestrictedDrop bool   `json:"channel_restricted_drop,omitempty"`
-	Preference            string `json:"preference,omitempty"`
+	// Tags carries up to maxCardTags of the stream's Twitch tags (localized
+	// names), rendered as compact chips on the live card.
+	Tags                  []string `json:"tags,omitempty"`
+	ViewersCount          int      `json:"viewers_count,omitempty"`
+	ViewersCountFormatted string   `json:"viewers_count_formatted,omitempty"`
+	ChannelRestrictedDrop bool     `json:"channel_restricted_drop,omitempty"`
+	Preference            string   `json:"preference,omitempty"`
 
 	// HasCampaign and the Campaign* fields drive the compact drop-progress
 	// mini bar on the streamer card; populated only for live streamers with

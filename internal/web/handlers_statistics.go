@@ -123,6 +123,7 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		Range:       label,
 		Points:      points,
 		Annotations: annotations,
+		Breakdown:   analytics.BreakdownFromSamples(raw),
 		Truncated:   len(raw) >= maxHistoryRows || len(points) < len(raw),
 	})
 }

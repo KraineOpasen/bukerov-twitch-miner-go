@@ -90,6 +90,57 @@ func TestPointsHistoryAPIFormat(t *testing.T) {
 	}
 }
 
+// TestPointsHistoryBreakdown verifies the additive earnings-breakdown field:
+// positive balance deltas grouped by reason, spends ignored, sorted by gained
+// descending — the data behind the Statistics donut.
+func TestPointsHistoryBreakdown(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	const s = "api_breakdown_streamer"
+
+	seed := []struct {
+		balance int
+		reason  string
+	}{
+		{1000, "WATCH"}, // baseline
+		{1010, "WATCH"},
+		{1510, "CLAIM"},
+		{1490, "Spent"}, // negative delta: excluded from the breakdown
+		{1740, "RAID"},
+		{1741, "WATCH"},
+	}
+	for _, p := range seed {
+		if err := repo.RecordPoints(s, p.balance, p.reason); err != nil {
+			t.Fatalf("seed points: %v", err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/points-history?streamer="+s+"&range=7d", nil)
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	want := []analytics.ReasonShare{
+		{Reason: "CLAIM", Gained: 500, Count: 1},
+		{Reason: "RAID", Gained: 250, Count: 1},
+		{Reason: "WATCH", Gained: 11, Count: 2},
+	}
+	if len(got.Breakdown) != len(want) {
+		t.Fatalf("breakdown = %+v, want %+v", got.Breakdown, want)
+	}
+	for i := range want {
+		if got.Breakdown[i] != want[i] {
+			t.Errorf("breakdown[%d] = %+v, want %+v", i, got.Breakdown[i], want[i])
+		}
+	}
+}
+
 // TestPointsHistoryAPIEmpty verifies an unknown streamer yields 200 with empty
 // arrays rather than an error.
 func TestPointsHistoryAPIEmpty(t *testing.T) {
@@ -190,6 +241,17 @@ func TestStatisticsPageRenders(t *testing.T) {
 	body := rec.Body.String()
 	if !contains(body, "stat-chart") || !contains(body, "/api/points-history") {
 		t.Errorf("statistics page missing expected chart wiring")
+	}
+
+	// Summary widgets + breakdown/outcome donuts added with the UI refresh.
+	for _, want := range []string{
+		"kpi-balance", "kpi-net", "kpi-earned", "kpi-events",
+		"stat-donut", "stat-breakdown-legend", "roi-donut",
+		"js.stat.br.watch", "--ui-watch",
+	} {
+		if !contains(body, want) {
+			t.Errorf("statistics page missing %q", want)
+		}
 	}
 }
 

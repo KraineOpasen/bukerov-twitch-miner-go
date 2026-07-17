@@ -35,7 +35,7 @@
 
 <section id="predictions" class="mb-6">
     <div class="flex items-center gap-2 mb-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400">{{ t "pred.heading" }}</h2>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400"><span class="sec-accent sec-accent-pred" aria-hidden="true"></span>{{ t "pred.heading" }}</h2>
         {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}
     </div>
     {{if .Predictions}}
@@ -49,7 +49,7 @@
 
 <section id="grid">
     {{if .TrackedLive}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.live" }} · {{len .TrackedLive}}</h3>
+    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2"><span class="sec-accent sec-accent-grid" aria-hidden="true"></span>{{ t "grid.live" }} · {{len .TrackedLive}}</h3>
     <div class="card-grid mb-6">
         {{range .TrackedLive}}{{template "overview_card" .}}{{end}}
     </div>
@@ -230,9 +230,17 @@
     </div>
 
     {{if .IsLive}}
+    {{if .Title}}
+    <div class="s-title" title="{{.Title}}">{{.Title}}</div>
+    {{end}}
     {{if or .GameName .ViewersCount}}
     <div class="text-xs text-neutral-400 mt-2 truncate">
-        {{if .GameName}}{{.GameName}}{{end}}{{if and .GameName .ViewersCount}} · {{end}}{{if .ViewersCount}}<span class="num">{{.ViewersCountFormatted}}</span> {{ t "card.viewers" }}{{end}}
+        {{if .GameName}}<span class="s-game">{{.GameName}}</span>{{end}}{{if and .GameName .ViewersCount}} · {{end}}{{if .ViewersCount}}<span class="num">{{.ViewersCountFormatted}}</span> {{ t "card.viewers" }}{{end}}
+    </div>
+    {{end}}
+    {{if .Tags}}
+    <div class="s-tags" aria-label="{{ t "card.tags" }}">
+        {{range .Tags}}<span class="s-tag">{{.}}</span>{{end}}
     </div>
     {{end}}
 

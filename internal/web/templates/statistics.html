@@ -20,6 +20,26 @@
 .roi-table th{color:var(--color-neutral-400);font-weight:500;font-size:.72rem;text-transform:uppercase;letter-spacing:.03em}
 .roi-table td.pos{color:var(--color-success)}
 .roi-table td.neg{color:var(--color-danger)}
+.stat-value.pos{color:var(--ui-roi-pos)}
+.stat-value.neg{color:var(--ui-roi-neg)}
+.roi-table td.pos{color:var(--ui-roi-pos)}
+.roi-table td.neg{color:var(--ui-roi-neg)}
+/* KPI tiles get a soft top accent so the summary row reads as widgets, not
+   a gray strip; hue matches the shared --ui-* palette from base.html. */
+.stat-tile{position:relative;overflow:hidden}
+.stat-tile::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:linear-gradient(90deg,var(--ui-watching),var(--ui-online),transparent)}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));gap:1rem;margin-bottom:1.25rem}
+.breakdown-grid{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:1.5rem;align-items:center;margin-top:1.5rem}
+@media (max-width:760px){.breakdown-grid{grid-template-columns:1fr}}
+.breakdown-legend{display:flex;flex-direction:column;gap:.45rem;font-size:.85rem}
+.breakdown-row{display:flex;align-items:center;gap:.55rem}
+.breakdown-dot{width:.65rem;height:.65rem;border-radius:999px;flex:none}
+.breakdown-name{color:var(--color-neutral-300);min-width:6.5rem}
+.breakdown-val{margin-left:auto;color:var(--color-neutral-100)}
+.breakdown-count{color:var(--color-neutral-500);font-size:.75rem}
+.roi-donut-wrap{display:flex;align-items:center;justify-content:center}
+.roi-outcomes-grid{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:1.5rem;align-items:center;margin-bottom:1.5rem}
+@media (max-width:760px){.roi-outcomes-grid{grid-template-columns:1fr}}
 </style>
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "stat.title" }}</h1>
@@ -68,8 +88,23 @@
     </div>
 
     <div id="stat-chart-wrap" class="hidden">
+        <div class="kpi-grid">
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.balance" }}</span><span id="kpi-balance" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net_change" }}</span><span id="kpi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="kpi-earned" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="kpi-events" class="stat-value num"></span></div>
+        </div>
         <div id="stat-chart"></div>
         <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">{{ t "stat.truncated" }}</p>
+
+        <div id="stat-breakdown" class="breakdown-grid hidden">
+            <div id="stat-donut" role="img" aria-label="{{ t "stat.breakdown.title" }}"></div>
+            <div>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.breakdown.title" }}</h3>
+                <p class="text-xs text-neutral-500 mb-3">{{ t "stat.breakdown.subtitle" }}</p>
+                <div id="stat-breakdown-legend" class="breakdown-legend"></div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -141,12 +176,15 @@
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.avg_win" }}</span><span id="roi-avgwin" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.drawdown" }}</span><span id="roi-drawdown" class="stat-value num"></span></div>
         </div>
-        <p class="text-xs text-neutral-500 mb-6">
-            <span id="roi-wins" class="num"></span> {{ t "stat.roi.wins" }} ·
-            <span id="roi-losses" class="num"></span> {{ t "stat.roi.losses" }} ·
-            <span id="roi-refunds" class="num"></span> {{ t "stat.roi.refunds" }}
-            {{ t "stat.roi.wins_note" }}
-        </p>
+        <div class="roi-outcomes-grid">
+            <div class="roi-donut-wrap"><div id="roi-donut" role="img" aria-label="{{ t "stat.roi.outcomes" }}"></div></div>
+            <p class="text-xs text-neutral-500">
+                <span id="roi-wins" class="num"></span> {{ t "stat.roi.wins" }} ·
+                <span id="roi-losses" class="num"></span> {{ t "stat.roi.losses" }} ·
+                <span id="roi-refunds" class="num"></span> {{ t "stat.roi.refunds" }}
+                {{ t "stat.roi.wins_note" }}
+            </p>
+        </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div>
@@ -180,7 +218,38 @@
         accent:  tok('--color-purple-500', '#8b7fd1'),
         grid:    tok('--color-neutral-700', '#3a3b47'),
         text:    tok('--color-neutral-400', '#9c9aab'),
+        pos:     tok('--ui-roi-pos', '#39FF88'),
+        neg:     tok('--ui-roi-neg', '#FF4D67'),
     };
+
+    // Reason → colour/label for the earnings-breakdown donut. Colours come
+    // from the shared --ui-* palette (base.html) so WATCH/CLAIM/RAID/STREAK
+    // keep one hue everywhere; unknown reasons pool into OTHER.
+    const REASONS = {
+        WATCH:        { color: tok('--ui-watch', '#FFE44D'),    label: () => t('js.stat.br.watch') },
+        CLAIM:        { color: tok('--ui-claim', '#FFC83D'),    label: () => t('js.stat.br.claim') },
+        RAID:         { color: tok('--ui-raid', '#FF8A3D'),     label: () => t('js.stat.br.raid') },
+        WATCH_STREAK: { color: tok('--ui-streak', '#B6FF3B'),   label: () => t('js.stat.br.streak') },
+        OTHER:        { color: tok('--ui-other', '#A970FF'),    label: () => t('js.stat.br.other') },
+    };
+
+    // Collapse the server's per-reason shares into the four first-class
+    // reasons plus one OTHER bucket, keeping the server's order.
+    function breakdownSlices(breakdown) {
+        const slices = [];
+        let other = null;
+        for (const share of breakdown || []) {
+            const known = REASONS[share.reason];
+            if (known && share.reason !== 'OTHER') {
+                slices.push({ key: share.reason, gained: share.gained, count: share.count });
+            } else {
+                if (!other) { other = { key: 'OTHER', gained: 0, count: 0 }; slices.push(other); }
+                other.gained += share.gained;
+                other.count += share.count;
+            }
+        }
+        return slices.filter(s => s.gained > 0);
+    }
 
     // Annotation colour comes from the persisted record (the per-type palette in
     // analytics.RecordAnnotation), so every event type — WATCH_STREAK included —
@@ -204,9 +273,12 @@
         truncated: document.getElementById('stat-truncated'),
         export:    document.getElementById('stat-export'),
         rangeBtns: Array.from(document.querySelectorAll('.stat-range-btn')),
+        breakdown: document.getElementById('stat-breakdown'),
+        legend:    document.getElementById('stat-breakdown-legend'),
     };
 
     let chart = null;
+    let donut = null;
     let currentRange = '7d';
     let refreshTimer = null;
     let inFlight = null;
@@ -288,6 +360,71 @@
             chart = new ApexCharts(document.getElementById('stat-chart'), options);
             chart.render();
         }
+        renderKPIs(data);
+        renderBreakdown(data);
+    }
+
+    const nfStat = new Intl.NumberFormat();
+    function setKPI(id, text, sign) {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        el.classList.remove('pos', 'neg');
+        if (sign) el.classList.add(sign);
+    }
+
+    // Summary widgets over the fetched series: closing balance, signed net
+    // change across the range, points earned (breakdown total), and how many
+    // positive events produced them.
+    function renderKPIs(data) {
+        const pts = data.points || [];
+        const first = pts.length ? pts[0].balance : 0;
+        const last = pts.length ? pts[pts.length - 1].balance : 0;
+        const net = last - first;
+        let earned = 0, events = 0;
+        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
+        setKPI('kpi-balance', nfStat.format(last));
+        setKPI('kpi-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        setKPI('kpi-earned', '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');
+        setKPI('kpi-events', nfStat.format(events));
+    }
+
+    // Earnings-breakdown donut + colour-coded legend.
+    function renderBreakdown(data) {
+        const slices = breakdownSlices(data.breakdown);
+        if (!slices.length) {
+            if (donut) { donut.destroy(); donut = null; }
+            els.breakdown.classList.add('hidden');
+            return;
+        }
+        els.breakdown.classList.remove('hidden');
+
+        const options = {
+            series: slices.map(s => s.gained),
+            labels: slices.map(s => REASONS[s.key].label()),
+            colors: slices.map(s => REASONS[s.key].color),
+            chart: { type: 'donut', height: 240, background: 'transparent', foreColor: C.text, fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotion, speed: 300 } },
+            legend: { show: false },
+            dataLabels: { enabled: false },
+            stroke: { colors: ['#232430'], width: 2 },
+            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: '#e8e6ef', fontSize: '1.05rem', formatter: v => '+' + nfStat.format(v) }, total: { show: true, showAlways: true, label: '', color: '#e8e6ef', formatter: w => '+' + nfStat.format(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+            tooltip: { theme: 'dark', y: { formatter: v => '+' + nfStat.format(v) + ' ' + t('js.stat.points_suffix') } },
+        };
+        if (donut) {
+            donut.updateOptions(options, false, !reducedMotion);
+        } else {
+            donut = new ApexCharts(document.getElementById('stat-donut'), options);
+            donut.render();
+        }
+
+        els.legend.innerHTML = slices.map(s => {
+            const r = REASONS[s.key];
+            return '<div class="breakdown-row">' +
+                '<span class="breakdown-dot" style="background:' + r.color + '"></span>' +
+                '<span class="breakdown-name">' + r.label() + '</span>' +
+                '<span class="breakdown-count num">×' + nfStat.format(s.count) + '</span>' +
+                '<span class="breakdown-val num">+' + nfStat.format(s.gained) + '</span>' +
+                '</div>';
+        }).join('');
     }
 
     function setUpdated() {
@@ -314,6 +451,8 @@
 
             if (!data.points || data.points.length === 0) {
                 if (chart) { chart.destroy(); chart = null; }
+                if (donut) { donut.destroy(); donut = null; }
+                els.breakdown.classList.add('hidden');
                 show('empty');
                 setUpdated();
                 return;
@@ -461,9 +600,50 @@
         document.getElementById('roi-wins').textContent = fmtInt(d.wins);
         document.getElementById('roi-losses').textContent = fmtInt(d.losses);
         document.getElementById('roi-refunds').textContent = fmtInt(d.refunds);
+        renderOutcomesDonut(d);
         renderTable('roi-by-streamer', d.byStreamer);
         renderTable('roi-by-strategy', d.byStrategy);
         renderTable('roi-by-odds', d.byOddsBucket);
+    }
+
+    // Win/lose/refund split as a colour-coded ring, on the shared semantic
+    // ROI palette (green/red/turquoise) from base.html.
+    let outcomesDonut = null;
+    const roiCSS = getComputedStyle(document.documentElement);
+    const roiTok = (name, fallback) => (roiCSS.getPropertyValue(name).trim() || fallback);
+    const reducedMotionROI = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function renderOutcomesDonut(d) {
+        const host = document.getElementById('roi-donut');
+        if (!host) return;
+        if (typeof ApexCharts === 'undefined') {
+            // The chart lib loads deferred; retry briefly instead of dropping
+            // the first render on a fast ROI response.
+            if (!renderOutcomesDonut._started) {
+                renderOutcomesDonut._started = Date.now();
+            }
+            if (Date.now() - renderOutcomesDonut._started < 10000) {
+                setTimeout(() => renderOutcomesDonut(d), 100);
+            }
+            return;
+        }
+        const options = {
+            series: [d.wins || 0, d.losses || 0, d.refunds || 0],
+            labels: [t('js.stat.roi.wins'), t('js.stat.roi.losses'), t('js.stat.roi.refunds')],
+            colors: [roiTok('--ui-roi-pos', '#39FF88'), roiTok('--ui-roi-neg', '#FF4D67'), roiTok('--ui-refund', '#27E5D8')],
+            chart: { type: 'donut', height: 200, background: 'transparent', foreColor: roiTok('--color-neutral-400', '#9c9aab'), fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotionROI, speed: 300 } },
+            legend: { position: 'bottom', fontSize: '12px' },
+            dataLabels: { enabled: false },
+            stroke: { colors: ['#232430'], width: 2 },
+            plotOptions: { pie: { donut: { size: '70%' } } },
+            tooltip: { theme: 'dark' },
+        };
+        if (outcomesDonut) {
+            outcomesDonut.updateOptions(options, false, !reducedMotionROI);
+        } else {
+            outcomesDonut = new ApexCharts(host, options);
+            outcomesDonut.render();
+        }
     }
 
     function setUpdated() { els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString(); }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // sampleOverview builds an OverviewData exercising every card state and board
@@ -43,6 +44,8 @@ func sampleOverview() OverviewData {
 				Name: "shroud", State: "watching", Watching: true, IsLive: true,
 				PointsFormatted: "100,000", PointsPerHour: "1,200", PointsToday: "5,000",
 				GameName: "VALORANT", ViewersCount: 40000, ViewersCountFormatted: "40,000",
+				Title:         "☀️ 2X UPDATE + FAR CRY !DROPS ☀️ | Chilling w/ coffee",
+				Tags:          []string{"English", "DropsEnabled", "FPS"},
 				StreakPending: true, StreakMinutes: 5, StreakPercent: 71,
 				HasCampaign: true, CampaignName: "Drop", CampaignPercent: 40, CampaignMinutesInfo: "8/20 min",
 				HasGoal: true, GoalTitle: "New Emote", GoalPercent: 72,
@@ -78,9 +81,94 @@ func TestRenderOverviewTemplates(t *testing.T) {
 		"★ Приоритет", "Избегать",
 		"New Emote", "72%", "1,200/h", "cycle-preference", "toggle-watch",
 		"data-window-end", "data-card-streamer",
+		// Live-stream context on the card: dynamic title + tag chips ("+" in
+		// the fixture title renders HTML-escaped, so assert around it).
+		"FAR CRY !DROPS ☀️ | Chilling w/ coffee",
+		`class="s-title"`, `class="s-tag"`,
+		"English", "DropsEnabled", "FPS",
+		// In-page anchor sections the sidebar tabs target.
+		`id="predictions"`, `id="grid"`, "sec-accent",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview_live output missing %q", want)
+		}
+	}
+}
+
+// TestOverviewCardEscapesTitleAndTags proves the live title and tag chips are
+// plain escaped text: a hostile stream title can never inject markup.
+func TestOverviewCardEscapesTitleAndTags(t *testing.T) {
+	partials := testPartials(t)
+	data := sampleOverview()
+	data.TrackedLive[0].Title = `<script>alert(1)</script> stream`
+	data.TrackedLive[0].Tags = []string{`<img src=x onerror=alert(2)>`}
+
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
+		t.Fatalf("render overview_live: %v", err)
+	}
+	out := buf.String()
+	for _, banned := range []string{"<script>alert(1)</script>", "<img src=x"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("card rendered unescaped HTML %q", banned)
+		}
+	}
+	if !strings.Contains(out, "&lt;script&gt;") {
+		t.Errorf("title should render as escaped text")
+	}
+}
+
+// TestOverviewCardOmitsEmptyTitleAndTags: cards without live-stream context
+// render no empty title/tag containers.
+func TestOverviewCardOmitsEmptyTitleAndTags(t *testing.T) {
+	partials := testPartials(t)
+	data := sampleOverview()
+	data.TrackedLive = data.TrackedLive[1:] // pokimane: live, no title/tags
+
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
+		t.Fatalf("render overview_live: %v", err)
+	}
+	out := buf.String()
+	for _, banned := range []string{`class="s-title"`, `class="s-tag"`} {
+		if strings.Contains(out, banned) {
+			t.Errorf("empty-context card should not render %q", banned)
+		}
+	}
+}
+
+// TestSidebarAnchorsMatchOverviewSections documents the information
+// architecture finding: the «Стримеры» and «Предикшены» sidebar tabs are NOT
+// duplicate routes — they are in-page anchors into the Overview sections. The
+// anchor targets in the sidebar and the section ids in the live partial must
+// stay in sync, and the card/section styles they rely on must exist in the
+// page templates.
+func TestSidebarAnchorsMatchOverviewSections(t *testing.T) {
+	base, err := templatesFS.ReadFile("templates/base.html")
+	if err != nil {
+		t.Fatalf("read base.html: %v", err)
+	}
+	for _, want := range []string{`data-nav="#grid"`, `data-nav="#predictions"`, `href="/#grid"`, `href="/#predictions"`, "hashchange"} {
+		if !strings.Contains(string(base), want) {
+			t.Errorf("base.html missing %q", want)
+		}
+	}
+
+	overview, err := templatesFS.ReadFile("templates/overview.html")
+	if err != nil {
+		t.Fatalf("read overview.html: %v", err)
+	}
+	for _, want := range []string{".s-title", ".s-tag", "scroll-margin-top", ".sec-accent"} {
+		if !strings.Contains(string(overview), want) {
+			t.Errorf("overview.html style block missing %q", want)
+		}
+	}
+
+	// The shared semantic palette every page (and the statistics charts)
+	// reads must be declared once in base.html.
+	for _, wantVar := range []string{"--ui-watching", "--ui-online", "--ui-gain", "--ui-roi-pos", "--ui-roi-neg", "--ui-watch", "--ui-claim", "--ui-raid", "--ui-streak"} {
+		if !strings.Contains(string(base), wantVar) {
+			t.Errorf("base.html missing semantic palette variable %q", wantVar)
 		}
 	}
 }
@@ -159,6 +247,32 @@ func TestRenderEventsDrawer(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("events_drawer output missing %q", want)
 		}
+	}
+}
+
+func TestCardTags(t *testing.T) {
+	tags := func(names ...string) []models.Tag {
+		out := make([]models.Tag, len(names))
+		for i, n := range names {
+			out[i] = models.Tag{ID: n, LocalizedName: n}
+		}
+		return out
+	}
+
+	if got := cardTags(nil); got != nil {
+		t.Errorf("cardTags(nil) = %v, want nil", got)
+	}
+	if got := cardTags(tags("English", "FPS")); len(got) != 2 || got[0] != "English" {
+		t.Errorf("cardTags two = %v", got)
+	}
+	// Capped at maxCardTags so tag-heavy channels can't overflow the card.
+	if got := cardTags(tags("a", "b", "c", "d", "e")); len(got) != maxCardTags {
+		t.Errorf("cardTags cap = %v, want %d entries", got, maxCardTags)
+	}
+	// Unnamed tags are skipped, not rendered as empty chips.
+	mixed := []models.Tag{{ID: "1"}, {ID: "2", LocalizedName: "Drops"}}
+	if got := cardTags(mixed); len(got) != 1 || got[0] != "Drops" {
+		t.Errorf("cardTags mixed = %v, want [Drops]", got)
 	}
 }
 

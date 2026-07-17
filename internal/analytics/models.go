@@ -47,6 +47,16 @@ type AnnotationRecord struct {
 	Color  string `json:"color"`
 }
 
+// ReasonShare is one slice of the earnings breakdown for the points-history
+// endpoint: how many points arrived under one reason code (WATCH, CLAIM,
+// RAID, WATCH_STREAK, ...) within the requested range, and how many positive
+// balance changes carried that reason.
+type ReasonShare struct {
+	Reason string `json:"reason"`
+	Gained int    `json:"gained"`
+	Count  int    `json:"count"`
+}
+
 // PointsHistory is the response shape for the statistics points-history
 // endpoint: a balance series plus event annotations over a time range.
 type PointsHistory struct {
@@ -54,6 +64,11 @@ type PointsHistory struct {
 	Range       string             `json:"range"`
 	Points      []PointSample      `json:"points"`
 	Annotations []AnnotationRecord `json:"annotations"`
+	// Breakdown aggregates the range's positive balance changes by reason so
+	// the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK shares. Computed
+	// from the raw (pre-downsampling) series; omitted when there is nothing
+	// earned in range.
+	Breakdown []ReasonShare `json:"breakdown,omitempty"`
 	// Truncated is true when the raw series exceeded the point cap and was
 	// downsampled for the chart (the export endpoint returns full fidelity).
 	Truncated bool `json:"truncated"`
