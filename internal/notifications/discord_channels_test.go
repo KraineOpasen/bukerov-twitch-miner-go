@@ -292,6 +292,85 @@ func TestDiscordValidateConfigSnapshotsCredentialsUnderLock(t *testing.T) {
 	}
 }
 
+// --- F2: the post-fetch return is a caller-owned copy, not the internal cache slice ---
+
+func TestDiscordGetChannelsReturnsFetchResultCopy(t *testing.T) {
+	p := NewDiscordProvider("token", "guild")
+	withSession(p, &discordgo.Session{})
+
+	var calls int32
+	p.fetchGuildChannels = func(_ *discordgo.Session, _ string) ([]*discordgo.Channel, error) {
+		atomic.AddInt32(&calls, 1)
+		return []*discordgo.Channel{guildTextChannel("orig")}, nil
+	}
+
+	out, err := p.GetChannels(context.Background(), false) // fetch path populates cache
+	if err != nil {
+		t.Fatalf("GetChannels: %v", err)
+	}
+	oneChannel(t, out, "orig")
+
+	// Mutating the returned slice must not corrupt the provider's cache.
+	out[0].ID = "HACKED"
+	out[0].Name = "HACKED"
+
+	p.mu.RLock()
+	cacheID, cacheName := p.channelCache[0].ID, p.channelCache[0].Name
+	p.mu.RUnlock()
+	if cacheID != "orig" || cacheName != "orig" {
+		t.Fatalf("post-fetch return aliased the internal cache: cache now id=%q name=%q", cacheID, cacheName)
+	}
+}
+
+// --- F2: the cache-hit return is a caller-owned copy, not the internal cache slice ---
+
+func TestDiscordGetChannelsReturnsCacheHitCopy(t *testing.T) {
+	p := NewDiscordProvider("token", "guild")
+	withSession(p, &discordgo.Session{})
+
+	var calls int32
+	p.fetchGuildChannels = func(_ *discordgo.Session, _ string) ([]*discordgo.Channel, error) {
+		atomic.AddInt32(&calls, 1)
+		return []*discordgo.Channel{guildTextChannel("orig")}, nil
+	}
+
+	if _, err := p.GetChannels(context.Background(), false); err != nil { // fetch + cache
+		t.Fatalf("GetChannels(fetch): %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("first call must fetch once, got %d", n)
+	}
+
+	out, err := p.GetChannels(context.Background(), false) // cache hit
+	if err != nil {
+		t.Fatalf("GetChannels(cache): %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("cache hit must not fetch, got %d fetches", n)
+	}
+	oneChannel(t, out, "orig")
+
+	// Mutating the cache-hit result must not corrupt the cache.
+	out[0].ID = "HACKED"
+
+	p.mu.RLock()
+	cacheID := p.channelCache[0].ID
+	p.mu.RUnlock()
+	if cacheID != "orig" {
+		t.Fatalf("cache-hit return aliased the internal cache: cache now id=%q", cacheID)
+	}
+
+	// A subsequent cache hit still yields the original, and still does not fetch.
+	out3, err := p.GetChannels(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetChannels(cache again): %v", err)
+	}
+	oneChannel(t, out3, "orig")
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("third call must still hit cache, got %d fetches", n)
+	}
+}
+
 func TestDiscordValidateConfigNoRaceWithUpdateConfig(t *testing.T) {
 	p := NewDiscordProvider("t0", "g0")
 	p.validateConfig = func(_ context.Context, _, _ string) error { return nil }

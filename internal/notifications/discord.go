@@ -95,11 +95,6 @@ func (d *DiscordProvider) Name() string {
 	return "discord"
 }
 
-// IsConfigured returns true if the provider has valid configuration.
-func (d *DiscordProvider) IsConfigured() bool {
-	return d.botToken != "" && d.guildID != ""
-}
-
 // Connect establishes connection to Discord.
 func (d *DiscordProvider) Connect(ctx context.Context) error {
 	// Snapshot the credentials under the lock, then run the network Open with no
@@ -263,23 +258,26 @@ func (d *DiscordProvider) GetChannels(ctx context.Context, forceRefresh bool) ([
 		}
 
 		d.mu.RLock()
+		if d.session == nil {
+			d.mu.RUnlock()
+			return nil, fmt.Errorf("discord not connected")
+		}
+		// The cache-hit eligibility check AND the caller-owned copy are produced
+		// in this single critical section. UpdateConfig and Disconnect both need
+		// d.mu.Lock, so they cannot commit a new generation, clear the cache, or
+		// replace the session between the decision and the copy — the returned
+		// list is linearized here, and the internal cache slice never escapes.
+		if !forceRefresh && d.channelCache != nil &&
+			d.channelCacheGeneration == d.configGeneration &&
+			time.Since(d.channelCacheTime) < d.channelCacheTTL {
+			out := append([]Channel(nil), d.channelCache...)
+			d.mu.RUnlock()
+			return out, nil
+		}
 		session := d.session
 		guildID := d.guildID
 		generation := d.configGeneration
-		cache := d.channelCache
-		cacheGen := d.channelCacheGeneration
-		cacheTime := d.channelCacheTime
-		cacheTTL := d.channelCacheTTL
 		d.mu.RUnlock()
-
-		if session == nil {
-			return nil, fmt.Errorf("discord not connected")
-		}
-
-		// Cache hit only for the current generation and within the TTL.
-		if !forceRefresh && cache != nil && cacheGen == generation && time.Since(cacheTime) < cacheTTL {
-			return cache, nil
-		}
 
 		channels, err := d.fetchGuildChannels(session, guildID)
 		if err != nil {
@@ -288,20 +286,24 @@ func (d *DiscordProvider) GetChannels(ctx context.Context, forceRefresh bool) ([
 		result := textChannels(channels)
 
 		// Commit the result ONLY if the snapshot is still current — same
-		// generation (token/guild) and the same session pointer. The check and
-		// the cache write share one critical section so UpdateConfig cannot
-		// interleave. A stale result is dropped (never cached, never returned).
+		// generation (token/guild) and the same session pointer. The check, the
+		// cache store, and the caller-owned copy share one critical section so
+		// UpdateConfig cannot interleave; the cached slice and the returned slice
+		// are distinct, so the caller cannot mutate the cache. A stale result is
+		// dropped (never cached, never returned).
 		d.mu.Lock()
 		current := d.configGeneration == generation && d.session == session
+		var out []Channel
 		if current {
 			d.channelCache = result
 			d.channelCacheTime = time.Now()
 			d.channelCacheGeneration = generation
+			out = append([]Channel(nil), result...)
 		}
 		d.mu.Unlock()
 
 		if current {
-			return result, nil
+			return out, nil
 		}
 	}
 	return nil, errChannelConfigChanged
