@@ -3,11 +3,101 @@
 {{define "content"}}
 <style>
     .log-scroll { max-height: 72vh; overflow: auto; }
-    .log-view { font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5; }
-    .log-line { display: block; white-space: pre-wrap; word-break: break-word; padding: 0.02rem 0; }
-    .log-info { color: var(--color-neutral-300); }
-    .log-warn { color: var(--color-amber-500); }
-    .log-error { color: var(--color-danger); }
+    .log-view {
+        font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5;
+
+        /* Semantic log palette: bright, saturated hues tuned for the dark
+           card background. Defined once here; every .log-* class below only
+           references these variables. */
+        --log-bright-green: #39FF88;
+        --log-lime: #B6FF3B;
+        --log-red: #FF4D67;
+        --log-yellow: #FFE44D;
+        --log-gold: #FFC83D;
+        --log-orange: #FF8A3D;
+        --log-amber: #FFB020;
+        --log-turquoise: #27E5D8;
+        --log-cyan: #36D7FF;
+        --log-ultramarine: #6E93FF;
+        --log-violet: #A970FF;
+        --log-magenta: #FF4FD8;
+        --log-info-blue: #5EAEFF;
+    }
+    .log-line {
+        display: block; white-space: pre-wrap; word-break: break-word;
+        padding: 0.02rem 0 0.02rem 0.4rem;
+        border-left: 2px solid currentColor;
+    }
+    /* The emoji is decorative (aria-hidden) and excluded from selection so
+       copied text stays the untouched log line. Fixed width keeps timestamps
+       vertically aligned whether or not a line carries an icon. */
+    .log-emoji {
+        display: inline-block;
+        width: 1.5em;
+        min-width: 1.5em;
+        text-align: center;
+        margin-right: 0.35rem;
+        font-size: 1em;
+        user-select: none;
+    }
+    .log-text { white-space: pre-wrap; }
+
+    /* Levels + fallback. */
+    .log-info { color: var(--log-info-blue); }
+    .log-warn { color: var(--log-amber); }
+    .log-error { color: var(--log-red); }
+
+    /* Startup / service / auth. */
+    .log-startup { color: var(--log-ultramarine); }
+    .log-service { color: var(--log-cyan); }
+    .log-auth { color: var(--log-turquoise); }
+    .log-auth-success { color: var(--log-bright-green); }
+
+    /* Streamer / connections. */
+    .log-streamer-online { color: var(--log-bright-green); }
+    .log-streamer-offline { color: var(--log-red); }
+    .log-connected { color: var(--log-turquoise); }
+    .log-chat { color: var(--log-violet); }
+    .log-reconnect { color: var(--log-orange); }
+
+    /* Points / gains. */
+    .log-points-watch { color: var(--log-yellow); }
+    .log-points-streak { color: var(--log-lime); }
+    .log-points-claim { color: var(--log-gold); }
+    .log-points-raid { color: var(--log-orange); }
+    .log-points-gain { color: var(--log-bright-green); }
+    .log-bonus { color: var(--log-gold); }
+
+    /* Predictions / bets. */
+    .log-bet-win { color: var(--log-bright-green); }
+    .log-bet-lose { color: var(--log-red); }
+    .log-bet-refund { color: var(--log-turquoise); }
+    .log-bet-filter { color: var(--log-magenta); }
+    .log-bet-general { color: var(--log-ultramarine); }
+    .log-bet-failed { color: var(--log-red); }
+    .log-bet-gated { color: var(--log-orange); }
+
+    /* Watch lifecycle. */
+    .log-watch-assigned { color: var(--log-ultramarine); }
+    .log-watch-released { color: var(--log-magenta); }
+    .log-watch-changed { color: var(--log-violet); }
+    .log-rotation { color: var(--log-turquoise); }
+    .log-pursuing-streak { color: var(--log-lime); }
+
+    /* Drops / discovery. */
+    .log-drops { color: var(--log-turquoise); }
+    .log-drop-skipped { color: var(--log-orange); }
+    .log-drop-complete { color: var(--log-bright-green); }
+    .log-discovery { color: var(--log-cyan); }
+
+    /* Auto-update. */
+    .log-update { color: var(--log-cyan); }
+    .log-update-success { color: var(--log-bright-green); }
+
+    /* Settings / health / database. */
+    .log-settings { color: var(--log-violet); }
+    .log-health-ok { color: var(--log-bright-green); }
+    .log-database { color: var(--log-ultramarine); }
 </style>
 
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">

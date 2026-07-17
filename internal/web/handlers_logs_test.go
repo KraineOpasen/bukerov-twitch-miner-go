@@ -56,53 +56,98 @@ func TestTailLogFileMissing(t *testing.T) {
 	}
 }
 
-func TestLogLineClass(t *testing.T) {
-	cases := map[string]string{
-		`time=... level=INFO msg="Streamer is online" streamer=shroud`: "log-info",
-		`time=... level=DEBUG msg="tick"`:                              "log-info",
-		`time=... level=WARN msg="retrying" attempt=2`:                 "log-warn",
-		`time=... level=ERROR msg="auth failed"`:                       "log-error",
-		`time=... level=INFO msg="Streamer went offline" streamer=x`:   "log-error", // offline => red
-		`time=... level=WARN msg="Streamer went offline" streamer=y`:   "log-error", // offline overrides warn
+// TestReadLogTailClassifies exercises the handler-level pipeline: a real log
+// file on disk comes back as classified views (class + emoji + untouched
+// text), independent of any logger setting — the classification has no
+// Logger.Colored input at all.
+func TestReadLogTailClassifies(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		t.Fatal(err)
 	}
-	for line, want := range cases {
-		if got := logLineClass(line); got != want {
-			t.Errorf("logLineClass(%q) = %q, want %q", line, got, want)
+	content := strings.Join([]string{
+		`time=2026-07-14T10:00:00Z level=INFO msg="Streamer is online" streamer=shroud`,
+		`time=2026-07-14T10:01:00Z level=INFO msg="Points earned" streamer=shroud points=10 reason=WATCH`,
+		`time=2026-07-14T10:02:00Z level=WARN msg="GQL request failed, retrying" attempt=2`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join("logs", "tester.log"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{username: "tester"}
+	views, enabled := s.readLogTail()
+	if !enabled {
+		t.Fatal("readLogTail reported file logging disabled")
+	}
+	if len(views) != 3 {
+		t.Fatalf("got %d views, want 3", len(views))
+	}
+	want := []struct{ class, emoji string }{
+		{"log-streamer-online", "🟢"},
+		{"log-points-watch", "👀"},
+		{"log-warn", "⚠️"},
+	}
+	for i, w := range want {
+		if views[i].Class != w.class || views[i].Emoji != w.emoji {
+			t.Errorf("views[%d] = {%s %s}, want {%s %s}", i, views[i].Class, views[i].Emoji, w.class, w.emoji)
+		}
+		if !strings.HasPrefix(views[i].Text, "time=") {
+			t.Errorf("views[%d].Text was altered: %q", i, views[i].Text)
 		}
 	}
 }
 
-func TestLogLevelOf(t *testing.T) {
-	if got := logLevelOf(`time=x level=ERROR msg="y"`); got != "ERROR" {
-		t.Errorf("level = %q, want ERROR", got)
-	}
-	if got := logLevelOf(`no level here`); got != "" {
-		t.Errorf("missing level = %q, want empty", got)
-	}
-}
-
-// TestLogsLinesPartialColoring renders the line partial and checks each level
-// gets its color class and the text is present (and escaped).
+// TestLogsLinesPartialColoring renders the line partial and checks each line
+// gets its semantic class, its emoji in a separate aria-hidden span, and that
+// the text is present (and escaped).
 func TestLogsLinesPartialColoring(t *testing.T) {
 	partials := testPartials(t)
 	data := LogsLinesData{FileLogging: true, Lines: []LogLineView{
-		{Class: "log-info", Text: `level=INFO msg="hello"`},
-		{Class: "log-warn", Text: `level=WARN msg="careful"`},
-		{Class: "log-error", Text: `level=ERROR msg="boom <script>"`},
+		{Class: "log-info", Emoji: "ℹ️", Text: `level=INFO msg="hello"`},
+		{Class: "log-warn", Emoji: "⚠️", Text: `level=WARN msg="careful"`},
+		{Class: "log-error", Emoji: "❌", Text: `level=ERROR msg="boom <script>alert(1)</script>"`},
+		{Class: "log-points-streak", Emoji: "🔥", Text: `level=INFO msg="Points earned" reason=WATCH_STREAK`},
 	}}
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "logs_lines", data); err != nil {
 		t.Fatalf("render logs_lines: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"log-info", "log-warn", "log-error", "hello", "careful"} {
+	for _, want := range []string{
+		"log-info", "log-warn", "log-error", "log-points-streak",
+		"hello", "careful",
+		"ℹ️", "⚠️", "❌", "🔥",
+		`class="log-emoji" aria-hidden="true"`,
+		`class="log-text"`,
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("logs_lines output missing %q:\n%s", want, out)
 		}
 	}
-	// Untrusted log text must be HTML-escaped.
+	// Untrusted log text must be HTML-escaped, never executable.
 	if strings.Contains(out, "<script>") {
 		t.Errorf("log text was not escaped")
+	}
+}
+
+// TestLogsLinesPartialNoDoubleEmoji renders a line whose raw text already
+// starts with an emoji: the decorative span must stay empty so the icon never
+// doubles.
+func TestLogsLinesPartialNoDoubleEmoji(t *testing.T) {
+	partials := testPartials(t)
+	raw := `🟢 time=x level=INFO msg="Streamer is online" streamer=a`
+	p := classifyLogLine(raw)
+	if !p.HasLeadingEmoji || p.Emoji != "" {
+		t.Fatalf("classify(%q) = %+v, want HasLeadingEmoji with empty Emoji", raw, p)
+	}
+	data := LogsLinesData{FileLogging: true, Lines: []LogLineView{{Class: p.Class, Emoji: p.Emoji, Text: raw}}}
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "logs_lines", data); err != nil {
+		t.Fatalf("render logs_lines: %v", err)
+	}
+	out := buf.String()
+	if got := strings.Count(out, "🟢"); got != 1 {
+		t.Errorf("rendered partial contains %d 🟢, want exactly 1 (the original text's):\n%s", got, out)
 	}
 }
 

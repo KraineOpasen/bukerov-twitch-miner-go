@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 // --- test doubles ---
@@ -317,5 +320,45 @@ func TestConsoleWriterWriteDuringCloseDoesNotPanic(t *testing.T) {
 
 		writers.Wait()
 		<-closed // Close (and thus run's drain+exit) has finished
+	}
+}
+
+// TestSetupFileLogStaysPlainWithColoredOn is the end-to-end guard for the
+// "Colored" setting's scope: with coloring ON, the console handler decorates
+// stdout while the on-disk file — the one the web Logs page reads — stays
+// plain slog text with neither ANSI escapes nor emoji.
+func TestSetupFileLogStaysPlainWithColoredOn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+
+	l, err := Setup("plaintester", config.LoggerSettings{
+		Save:         true,
+		Colored:      true,
+		ConsoleLevel: "INFO",
+		FileLevel:    "INFO",
+	})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	slog.Info("Streamer is online", "streamer", "shroud")
+	slog.Warn("careful")
+	l.Close()
+
+	data, err := os.ReadFile(LogFilePath("plaintester"))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	out := string(data)
+	if strings.Contains(out, "\033[") {
+		t.Errorf("file log contains ANSI escape sequences:\n%s", out)
+	}
+	for _, emoji := range []string{"🟢", "⚠️"} {
+		if strings.Contains(out, emoji) {
+			t.Errorf("file log contains console emoji %q:\n%s", emoji, out)
+		}
+	}
+	if !strings.Contains(out, `msg="Streamer is online"`) || !strings.Contains(out, "msg=careful") {
+		t.Errorf("file log lost its plain-text records:\n%s", out)
 	}
 }
