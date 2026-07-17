@@ -1206,9 +1206,9 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 		return true
 	}
 	return s.Settings.WatchStreak &&
-		s.Stream.WatchStreakMissing &&
+		s.Stream.StreakPending() &&
 		(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-		s.Stream.MinuteWatched < watchStreakThresholdMinutes
+		s.Stream.GetMinuteWatched() < watchStreakThresholdMinutes
 }
 
 // streakInProgress reports whether a boost-eligible streamer is part-way
@@ -1218,10 +1218,11 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 // fresh pending-streak streamers each tick and completing none of them.
 func (w *MinuteWatcher) streakInProgress(idx int) bool {
 	s := w.streamers[idx]
+	mw := s.Stream.GetMinuteWatched()
 	return s.Settings.WatchStreak &&
-		s.Stream.WatchStreakMissing &&
-		s.Stream.MinuteWatched > 0 &&
-		s.Stream.MinuteWatched < watchStreakThresholdMinutes
+		s.Stream.StreakPending() &&
+		mw > 0 &&
+		mw < watchStreakThresholdMinutes
 }
 
 // betterBoostCandidate reports whether off-pair streamer cand should take the
@@ -1248,8 +1249,8 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 	if cp && bp {
 		// Both mid-streak: prefer the one with the most watch time banked so the
 		// pursuit converges on a single streamer instead of alternating.
-		cm := w.streamers[cand].Stream.MinuteWatched
-		bm := w.streamers[best].Stream.MinuteWatched
+		cm := w.streamers[cand].Stream.GetMinuteWatched()
+		bm := w.streamers[best].Stream.GetMinuteWatched()
 		if cm != bm {
 			return cm > bm
 		}
@@ -1260,10 +1261,10 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 
 func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 	s := w.streamers[idx]
-	if !s.Settings.WatchStreak || !s.Stream.WatchStreakMissing {
+	if !s.Settings.WatchStreak || !s.Stream.StreakPending() {
 		return false
 	}
-	mw := s.Stream.MinuteWatched
+	mw := s.Stream.GetMinuteWatched()
 	return mw >= 5 && mw < watchStreakThresholdMinutes
 }
 
@@ -1276,9 +1277,12 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 // enough yet" from "watched enough but Twitch never granted it".
 func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	s := w.streamers[idx]
-	if !s.Settings.WatchStreak || !s.Stream.GetWatchStreakMissing() {
-		// Streak disabled or already earned for this broadcast: drop any pursuit
-		// state so the next fresh broadcast reports again from scratch.
+	if !s.Settings.WatchStreak || !s.Stream.StreakPending() {
+		// Streak disabled, already earned for THIS broadcast (including a
+		// re-armed pursuit on the same broadcast after a blip or restart), or
+		// deferred until the broadcast is identified: drop any pursuit state
+		// so the next genuinely fresh broadcast reports again from scratch.
+		// This is what silences the misleading threshold WARN after a grant.
 		delete(w.streakDiag, idx)
 		return
 	}
@@ -1376,9 +1380,9 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 			for _, idx := range onlineIndexes {
 				s := w.streamers[idx]
 				if s.Settings.WatchStreak &&
-					s.Stream.WatchStreakMissing &&
+					s.Stream.StreakPending() &&
 					(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-					s.Stream.MinuteWatched < watchStreakThresholdMinutes {
+					s.Stream.GetMinuteWatched() < watchStreakThresholdMinutes {
 					if !watching[idx] {
 						watching[idx] = true
 						w.noteSelection(idx, "watched: selected by STREAK priority - watch streak not yet earned this stream")
