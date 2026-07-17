@@ -904,7 +904,8 @@ func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	oldEnabled := m.discordConfig.Enabled
+	old := m.discordConfig
+	oldEnabled := old.Enabled
 	m.discordConfig = cfg
 
 	if !cfg.Enabled {
@@ -913,6 +914,16 @@ func (m *Manager) UpdateDiscordConfig(cfg *config.DiscordSettings) error {
 			m.discord = nil
 			slog.Info("Discord notifications disabled")
 		}
+		return nil
+	}
+
+	// A non-Discord settings save (e.g. a streamer-priority change) re-applies
+	// the same effective Discord config on every POST. Every DiscordSettings
+	// field (Enabled, BotToken, GuildID) is connection-relevant, so when the
+	// config is unchanged and a provider is already live there is nothing to
+	// reconnect — tearing the session down and reopening it would drop Discord
+	// notifications for no reason.
+	if m.discord != nil && *old == *cfg {
 		return nil
 	}
 
