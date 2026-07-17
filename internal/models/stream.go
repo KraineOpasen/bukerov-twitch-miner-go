@@ -33,7 +33,7 @@ type Stream struct {
 	// and are only ever overwritten by MarkStreakEarned/HydrateStreakGrant.
 	streakEarnedBroadcastID string
 	streakEarnedAt          time.Time
-	MinuteWatched      float64
+	MinuteWatched           float64
 
 	// spadeURL is written by the api client (stream bring-up, session refresh)
 	// and read by the minute sender and health probes on other goroutines —
