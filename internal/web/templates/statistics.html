@@ -425,9 +425,9 @@
     }
 
     function renderTable(tableId, rows) {
-        const t = document.getElementById(tableId);
+        const table = document.getElementById(tableId);
         if (!rows || rows.length === 0) {
-            t.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
+            table.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
             return;
         }
         let html = '<thead><tr><th>' + t('js.stat.col.key') + '</th><th>N</th><th>' + t('js.stat.col.profit') + '</th><th>ROI</th></tr></thead><tbody>';
@@ -440,7 +440,7 @@
                 '</tr>';
         }
         html += '</tbody>';
-        t.innerHTML = html;
+        table.innerHTML = html;
     }
 
     function escapeHTML(s) {
