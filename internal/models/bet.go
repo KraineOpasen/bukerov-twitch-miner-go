@@ -69,19 +69,91 @@ type BetSettings struct {
 	FilterCondition *FilterCondition `json:"filterCondition,omitempty"`
 	Delay           float64          `json:"delay"`
 	DelayMode       DelayMode        `json:"delayMode"`
+
+	// Prediction risk gates (auto-bet only, stateless). They clamp the
+	// post-Stealth stake Calculate produces; none of them affects manual bets.
+	// MaxStakePercent caps the stake to this percentage of the current balance
+	// (0 = off). ReservePoints keeps at least this many points unbet — a stake
+	// may not push the balance below it (0 = off). HealthGateEnabled blocks
+	// auto-bets while the transport is degraded/failed (default on); an unknown
+	// health state fails open (bet allowed). The absolute cap is MaxPoints
+	// itself — there is no separate absolute-stake field.
+	MaxStakePercent   int  `json:"maxStakePercent"`
+	ReservePoints     int  `json:"reservePoints"`
+	HealthGateEnabled bool `json:"healthGateEnabled"`
 }
 
 func DefaultBetSettings() BetSettings {
 	return BetSettings{
-		Strategy:      StrategySmart,
-		Percentage:    5,
-		PercentageGap: 20,
-		MaxPoints:     50000,
-		MinimumPoints: 0,
-		StealthMode:   false,
-		Delay:         6,
-		DelayMode:     DelayModeFromEnd,
+		Strategy:          StrategySmart,
+		Percentage:        5,
+		PercentageGap:     20,
+		MaxPoints:         50000,
+		MinimumPoints:     0,
+		StealthMode:       false,
+		Delay:             6,
+		DelayMode:         DelayModeFromEnd,
+		MaxStakePercent:   0,
+		ReservePoints:     0,
+		HealthGateEnabled: true,
 	}
+}
+
+// GateReason identifies which prediction risk gate bound (clamped) or blocked an
+// auto-bet stake. Empty means no gate changed the proposed amount.
+type GateReason string
+
+const (
+	GateNone     GateReason = ""
+	GateHealth   GateReason = "health"            // transport degraded/failed (applied by the caller)
+	GateReserve  GateReason = "reserve_points"    // reservePoints floor
+	GatePercent  GateReason = "max_stake_percent" // maxStakePercent cap
+	GateAbsolute GateReason = "max_points"        // MaxPoints absolute cap (single source)
+)
+
+// ClampStake applies the stateless size gates to a post-Stealth proposed stake:
+// the optional reserve floor, the optional max-stake-percent cap, and the
+// absolute MaxPoints cap (the single source of the absolute limit — there is no
+// separate maxStakePoints field). It returns the allowed stake, the binding
+// reason, and that reason's limit value. The tightest cap wins; equal caps break
+// toward the higher-priority reason, giving the fixed priority
+// reserve > percent > absolute. The health gate is NOT applied here — it is
+// stateful and handled by the auto-bet caller first, at a strictly higher
+// priority. A non-positive setting disables that gate.
+func (s BetSettings) ClampStake(proposed, balance int) (allowed int, reason GateReason, limit int) {
+	allowed = proposed
+	reason = GateNone
+
+	consider := func(on bool, cap int, r GateReason) {
+		if on && cap < allowed {
+			allowed = cap
+			reason = r
+			limit = cap
+		}
+	}
+
+	// Reserve floor: the stake may not push the balance below ReservePoints.
+	reserveCap := balance - s.ReservePoints
+	if reserveCap < 0 {
+		reserveCap = 0
+	}
+	consider(s.ReservePoints > 0, reserveCap, GateReserve)
+
+	// Percentage-of-balance cap.
+	pct := s.MaxStakePercent
+	if pct > 100 {
+		pct = 100
+	}
+	consider(s.MaxStakePercent > 0, balance*pct/100, GatePercent)
+
+	// Absolute cap (single source: MaxPoints). Calculate already applies it, so
+	// this is normally a no-op; kept so the gate is self-contained.
+	consider(s.MaxPoints > 0, s.MaxPoints, GateAbsolute)
+
+	if allowed < 0 {
+		allowed = 0
+	}
+	return allowed, reason, limit
 }
 
 type Outcome struct {

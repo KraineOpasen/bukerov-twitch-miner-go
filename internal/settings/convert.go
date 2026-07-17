@@ -30,6 +30,10 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 			StealthMode:   &s.Bet.StealthMode,
 			Delay:         &s.Bet.Delay,
 			DelayMode:     &delayMode,
+
+			MaxStakePercent:   &s.Bet.MaxStakePercent,
+			ReservePoints:     &s.Bet.ReservePoints,
+			HealthGateEnabled: &s.Bet.HealthGateEnabled,
 		},
 	}
 }
@@ -124,5 +128,14 @@ func ApplyBetSettingsFromDTO(dst *models.BetSettings, src *BetSettingsJSON) {
 	}
 	if src.DelayMode != nil {
 		dst.DelayMode = models.DelayMode(*src.DelayMode)
+	}
+	if src.MaxStakePercent != nil {
+		dst.MaxStakePercent = *src.MaxStakePercent
+	}
+	if src.ReservePoints != nil {
+		dst.ReservePoints = *src.ReservePoints
+	}
+	if src.HealthGateEnabled != nil {
+		dst.HealthGateEnabled = *src.HealthGateEnabled
 	}
 }

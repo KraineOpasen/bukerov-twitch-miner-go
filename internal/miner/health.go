@@ -85,6 +85,33 @@ func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail s
 	}
 }
 
+// minerBetHealthGate adapts the miner's PubSub transport health to
+// pubsub.BetHealthGate, so the auto-bet path can gate on connection health
+// without the pubsub package importing health. It blocks auto-bets only when the
+// link is definitively degraded/failed/stalled; an unknown or healthy link fails
+// open (bet allowed). Stateless: the verdict is derived from the live
+// pubsub-owned connection snapshot on each call, via the same pubsubSignal
+// composition the Health Center uses.
+type minerBetHealthGate struct{ m *Miner }
+
+func (g minerBetHealthGate) AutoBetAllowed() bool {
+	m := g.m
+	if m.wsPool == nil {
+		return true // unknown -> fail-open
+	}
+	m.mu.RLock()
+	threshold := time.Duration(m.config.RateLimits.ConnectionTimeoutMinutes) * time.Minute
+	m.mu.RUnlock()
+
+	sig := pubsubSignal(m.wsPool.ConnSnapshot(), m.wsPool.LastActivity(), time.Now(), threshold, m.wsPool.RecentReconnects(threshold))
+	switch sig.Status {
+	case health.StatusDegraded, health.StatusFailed, health.StatusStalled:
+		return false
+	default:
+		return true // OK / Idle / Unknown -> fail-open
+	}
+}
+
 // refreshHealthCenter records the non-canary health signals from the miner's
 // existing providers. It runs on the health-watchdog tick, so it adds no
 // goroutine. It records only redacted, non-sensitive summaries.

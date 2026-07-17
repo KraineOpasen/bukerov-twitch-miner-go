@@ -323,6 +323,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	m.wsPool = pubsub.NewWebSocketPool(m.client, m.auth.GetAuthToken(), streamers, m.config.RateLimits)
 	m.wsPool.SetMessageHandler(m.handlePubSubMessage)
+	m.wsPool.SetBetHealthGate(minerBetHealthGate{m})
 	m.wsPool.SetStatusHandler(m.handleStatusChange)
 	m.wsPool.SetAuthErrorHandler(func(error) { m.handleAuthError() })
 	if m.analyticsSvc != nil {

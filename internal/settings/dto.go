@@ -105,6 +105,11 @@ type BetSettingsJSON struct {
 	StealthMode   *bool    `json:"stealthMode,omitempty"`
 	Delay         *float64 `json:"delay,omitempty"`
 	DelayMode     *string  `json:"delayMode,omitempty"`
+
+	// Prediction risk gates (see models.BetSettings).
+	MaxStakePercent   *int  `json:"maxStakePercent,omitempty"`
+	ReservePoints     *int  `json:"reservePoints,omitempty"`
+	HealthGateEnabled *bool `json:"healthGateEnabled,omitempty"`
 }
 
 // StreamersConfig is used for streamer-related API responses.
