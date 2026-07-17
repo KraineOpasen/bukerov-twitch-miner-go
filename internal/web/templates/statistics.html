@@ -378,21 +378,24 @@
     // Summary widgets over the fetched series: closing balance, signed
     // balance change across the range (spending and bets included), points
     // accrued (positive gains only, from the breakdown), and how many
-    // positive events produced them. With rawTruncated the breakdown-derived
-    // tiles are dashed out — an incomplete window must not pose as a
-    // full-period total.
+    // positive events produced them. rawTruncated dashes out ALL FOUR tiles:
+    // the backend fetches ascending with a row cap, so a truncated window is
+    // missing its NEWEST rows — the loaded series' last balance is not the
+    // current balance and last-first is not the full-period change, not just
+    // the breakdown-derived tiles. The chart stays visible under the
+    // partial-data warning. (This gate is deliberately keyed on rawTruncated
+    // only — chartDownsampled never hides KPIs.)
     function renderKPIs(data) {
+        if (data.rawTruncated) {
+            ['kpi-balance', 'kpi-net', 'kpi-earned', 'kpi-events'].forEach(id => setKPI(id, '—'));
+            return;
+        }
         const pts = data.points || [];
         const first = pts.length ? pts[0].balance : 0;
         const last = pts.length ? pts[pts.length - 1].balance : 0;
         const net = last - first;
         setKPI('kpi-balance', nfStat.format(last));
         setKPI('kpi-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
-        if (data.rawTruncated) {
-            setKPI('kpi-earned', '—');
-            setKPI('kpi-events', '—');
-            return;
-        }
         let earned = 0, events = 0;
         for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
         setKPI('kpi-earned', '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');

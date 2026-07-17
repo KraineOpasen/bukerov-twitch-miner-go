@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -173,6 +174,64 @@ func TestPointsHistoryDefaultRange24h(t *testing.T) {
 	}
 	if got.Range != "24h" {
 		t.Errorf("default range = %q, want 24h", got.Range)
+	}
+}
+
+// TestStatisticsKPIsDashOnRawTruncation pins the client-side KPI honesty
+// contract in the page's renderKPIs function (there is no JS test harness in
+// this project, so the contract is asserted on the shipped source):
+//
+//  1. rawTruncated=true dashes out ALL FOUR KPI tiles — a truncated window is
+//     missing its newest rows (ascending fetch + row cap), so the loaded
+//     last balance is not the current balance and last-first is not the
+//     full-period change;
+//  2. chartDownsampled alone never hides KPIs (the function must not consult
+//     that flag at all);
+//  3. the normal full-response path still computes balance/net from the
+//     series and accrued/events from the breakdown, unchanged.
+func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
+	srv := newStatsTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	start := strings.Index(body, "function renderKPIs(data)")
+	if start < 0 {
+		t.Fatal("statistics page lost the renderKPIs function")
+	}
+	end := strings.Index(body[start:], "function renderBreakdown")
+	if end < 0 {
+		t.Fatal("cannot delimit renderKPIs body (renderBreakdown moved?)")
+	}
+	kpiFn := body[start : start+end]
+
+	// (1) The rawTruncated guard dashes all four tiles and runs BEFORE any
+	// computation on the (incomplete) series.
+	guard := strings.Index(kpiFn, "data.rawTruncated")
+	compute := strings.Index(kpiFn, "last - first")
+	if guard < 0 || compute < 0 || guard > compute {
+		t.Errorf("renderKPIs must gate on data.rawTruncated before computing last-first (guard=%d compute=%d)", guard, compute)
+	}
+	if !strings.Contains(kpiFn, `['kpi-balance', 'kpi-net', 'kpi-earned', 'kpi-events']`) {
+		t.Errorf("rawTruncated guard must dash out all four KPI tiles, got:\n%s", kpiFn)
+	}
+	if !strings.Contains(kpiFn, "'—'") {
+		t.Errorf("rawTruncated guard must render the dash placeholder")
+	}
+
+	// (2) chartDownsampled must never influence KPI visibility.
+	if strings.Contains(kpiFn, "chartDownsampled") {
+		t.Errorf("renderKPIs must not consult chartDownsampled — downsampling alone never hides KPIs")
+	}
+
+	// (3) The full-response computation is intact.
+	for _, want := range []string{"share.gained", "share.count", "kpi-balance", "kpi-net", "kpi-earned", "kpi-events"} {
+		if !strings.Contains(kpiFn, want) {
+			t.Errorf("renderKPIs lost its normal computation marker %q", want)
+		}
 	}
 }
 
