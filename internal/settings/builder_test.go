@@ -61,7 +61,7 @@ func TestPredictionRiskRoundTrips(t *testing.T) {
 	}
 
 	// DTO -> config.
-	var out config.Config = config.DefaultConfig()
+	out := config.DefaultConfig()
 	ApplyToConfig(&out, rt)
 	if out.PredictionRisk.MaxStakePercent != 30 || out.PredictionRisk.ReservePoints != 2500 || out.PredictionRisk.HealthGateEnabled {
 		t.Fatalf("ApplyToConfig dropped the risk block, got %+v", out.PredictionRisk)
