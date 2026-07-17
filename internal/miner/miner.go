@@ -394,9 +394,6 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		if m.notifications != nil {
 			m.webServer.SetNotificationManager(m.notifications)
 		}
-		if m.config.Debug.Enabled {
-			m.webServer.SetDebugURL(fmt.Sprintf("http://localhost:%d/debug/snapshot", m.config.Debug.Port))
-		}
 	}
 
 	var mentionHandler chat.MentionHandler
@@ -592,6 +589,16 @@ func (m *Miner) startMining(ctx context.Context) {
 		if err := m.debugServer.Start(); err != nil {
 			slog.Error("Failed to start debug server", "error", err)
 			m.debugServer = nil
+		}
+
+		// Publish the same in-process snapshot builder on the main dashboard
+		// (relative URL, full auth/middleware chain) so the Logs-page button
+		// works from remote browsers — "localhost" there is the viewer's
+		// machine, not this container. Wired here, alongside the debug server,
+		// so the dashboard route also never observes half-initialized fields.
+		if m.webServer != nil {
+			m.webServer.SetDebugSnapshotProvider(m.BuildDebugSnapshot)
+			m.webServer.SetDebugURL(web.DebugSnapshotPath)
 		}
 	}
 
