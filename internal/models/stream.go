@@ -377,6 +377,28 @@ func (s *Stream) UpdateMinuteWatched(maxGap time.Duration) float64 {
 	return delta
 }
 
+// ResetWatchContinuity breaks the continuous watched-minutes accumulator the
+// instant the channel stops being watched for a reason the in-band report gap
+// cannot see — specifically a real watch-slot loss/switch, which the watcher
+// detects as a held->released transition and reports here. It zeroes ONLY
+// MinuteWatched and its timestamp, so the next successful report re-anchors from
+// zero exactly like a fresh continuity segment and the wall-clock interval during
+// which the channel held no slot is never credited.
+//
+// It complements UpdateMinuteWatched's own gap>maxGap reset: that catches a missed
+// report while the slot is still HELD; this catches the slot itself being lost and
+// regained within maxGap, which the timestamp gap alone cannot distinguish from
+// continuous viewing. The streak IDENTITY is deliberately left intact —
+// WatchStreakMissing, streakEarnedBroadcastID/At, and the streakWatchEvents
+// evidence counter are untouched — so StreakPending is unchanged (a late real
+// WATCH_STREAK is still accepted) and a mere rotation never re-arms the pursuit.
+func (s *Stream) ResetWatchContinuity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.MinuteWatched = 0
+	s.minuteWatchedUpdated = time.Time{}
+}
+
 func (s *Stream) GetMinuteWatched() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

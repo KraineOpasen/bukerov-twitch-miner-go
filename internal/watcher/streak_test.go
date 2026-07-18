@@ -65,8 +65,9 @@ func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 // INFO while the streak is pending and the pursuit is not exhausted, and — this
 // is the key regression vs the old 7-minute timer — being watched PAST seven
 // minutes must NOT trigger a release. The single "Releasing the boost slot" line
-// fires only once the view is confirmed counted (two WATCH credits) with the
-// streak still missing.
+// fires exactly once when the bounded continuous-watch window elapses, and it is
+// OUTCOME-NEUTRAL: releaseReason=bounded_timeout, outcome=unknown, asserting
+// neither that the streak was granted nor that it was not.
 func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
@@ -96,20 +97,31 @@ func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 	}
 
 	// Reach the bounded continuous-watch window with the streak still missing:
-	// exactly one release line, and — since the view was confirmed counted (2
-	// WATCH credits) — it is the benign INFO variant, not the no-credit WARN.
+	// exactly one release line, OUTCOME-NEUTRAL (releaseReason=bounded_timeout,
+	// outcome=unknown), asserting neither "granted" nor "not granted". With WATCH
+	// credits present (evidence>0) it is the plain variant, without the zero-credit
+	// transport/authorization note.
 	s.Stream.MinuteWatched = streakPursuitCapMinutes
 	w.noteStreakProgress(0)
 	w.noteStreakProgress(0)
 
-	if got := strings.Count(buf.String(), "Releasing the watch-streak boost slot"); got != 1 {
-		t.Errorf("release logged %d times, want exactly 1:\n%s", got, buf.String())
+	rel := buf.String()
+	if got := strings.Count(rel, "Releasing the watch-streak boost slot"); got != 1 {
+		t.Errorf("release logged %d times, want exactly 1:\n%s", got, rel)
 	}
-	if !strings.Contains(buf.String(), "view confirmed counted") {
-		t.Errorf("with WATCH credits the release must classify as counted-but-no-streak:\n%s", buf.String())
+	if !strings.Contains(rel, "releaseReason=bounded_timeout") || !strings.Contains(rel, "outcome=unknown") {
+		t.Errorf("release must be tagged releaseReason=bounded_timeout outcome=unknown:\n%s", rel)
 	}
-	if strings.Contains(buf.String(), "saw no WATCH point credits") {
-		t.Errorf("counted view must not log the no-credit WARN variant:\n%s", buf.String())
+	// Must not assert an outcome the release cannot know: the grant may still land,
+	// or may have been dropped by the best-effort PubSub transport.
+	for _, banned := range []string{"granted no streak", "could not be earned", "benign", "view confirmed counted"} {
+		if strings.Contains(rel, banned) {
+			t.Errorf("release log must not assert a streak outcome (%q):\n%s", banned, rel)
+		}
+	}
+	// Evidence is present (2 WATCH credits), so no zero-credit transport note.
+	if strings.Contains(rel, "check authorization/transport") {
+		t.Errorf("with WATCH credits present the release must not emit the zero-credit transport note:\n%s", rel)
 	}
 
 	// Earning the streak clears the pursuit state so the next fresh broadcast

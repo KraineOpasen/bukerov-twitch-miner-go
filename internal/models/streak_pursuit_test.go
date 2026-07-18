@@ -75,6 +75,48 @@ func TestInterruptedPursuitCannotReachCapOnWallClock(t *testing.T) {
 	// fragmented pursuit can never reach the cap by elapsed time alone.
 }
 
+// TestResetWatchContinuityBreaksAccumulatorPreservesIdentity (Q2) proves the
+// slot-loss reset zeroes ONLY the continuous-watch accumulator and its timestamp,
+// so a slot regained within maxGap does not stitch the unwatched interval, while
+// the streak identity (pending, remembered grant, WATCH evidence) is preserved.
+func TestResetWatchContinuityBreaksAccumulatorPreservesIdentity(t *testing.T) {
+	s := NewStream()
+	s.Update("b1", "t", nil, nil, 10)
+	maxGap := 2 * time.Minute
+
+	// Bank ~10 continuous minutes with a RECENT (sub-maxGap) last report, plus one
+	// WATCH-evidence credit.
+	s.UpdateMinuteWatched(maxGap) // anchor the continuity clock
+	s.MinuteWatched = 10
+	s.minuteWatchedUpdated = time.Now().Add(-30 * time.Second)
+	s.NoteWatchPointsEvent()
+
+	// A real slot loss breaks continuity.
+	s.ResetWatchContinuity()
+
+	if s.MinuteWatched != 0 {
+		t.Errorf("ResetWatchContinuity must zero MinuteWatched, got %v", s.MinuteWatched)
+	}
+	if !s.minuteWatchedUpdated.IsZero() {
+		t.Error("ResetWatchContinuity must zero the report timestamp, else the next report stitches the unwatched gap")
+	}
+
+	// Regain within the old sub-maxGap wall-clock: the broken interval must NOT be
+	// credited — the next report re-anchors from zero and returns 0.
+	delta := s.UpdateMinuteWatched(maxGap)
+	if delta != 0 || s.MinuteWatched != 0 {
+		t.Fatalf("a slot-loss break must not be stitched on regain, got delta=%v total=%v", delta, s.MinuteWatched)
+	}
+
+	// Identity preserved: still pending, evidence counter untouched.
+	if !s.StreakPending() {
+		t.Error("ResetWatchContinuity must preserve StreakPending (a late WATCH_STREAK is still accepted)")
+	}
+	if s.StreakWatchEvidence() != 1 {
+		t.Errorf("ResetWatchContinuity must not touch the WATCH-evidence counter, got %d", s.StreakWatchEvidence())
+	}
+}
+
 // TestNoteWatchPointsEventCounts covers the evidence counter and its reset.
 func TestNoteWatchPointsEventCounts(t *testing.T) {
 	s := NewStream()
