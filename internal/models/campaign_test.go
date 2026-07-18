@@ -47,11 +47,19 @@ func TestDropInActiveWindow(t *testing.T) {
 		drop Drop
 		want bool
 	}{
+		// Only a FULLY window-less drop (both bounds absent — the inventory-
+		// recovery shape) is assumed active. Any drop that carries a date window
+		// is judged strictly by DateTimeMatch (both bounds must be satisfied), so
+		// a partial window that doesn't confirm "currently inside" is treated as
+		// inactive rather than optimistically kept.
 		{"no window is active", Drop{}, true},
 		{"inside window", Drop{StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour)}, true},
 		{"before window", Drop{StartAt: now.Add(time.Hour), EndAt: now.Add(2 * time.Hour)}, false},
 		{"after window", Drop{StartAt: now.Add(-2 * time.Hour), EndAt: now.Add(-time.Hour)}, false},
 		{"only start known, not yet begun", Drop{StartAt: now.Add(time.Hour)}, false},
+		{"only start known, no end bound is not confirmable", Drop{StartAt: now.Add(-time.Hour)}, false},
+		{"only end known, still open", Drop{EndAt: now.Add(time.Hour)}, true},
+		{"only end known, already closed", Drop{EndAt: now.Add(-time.Hour)}, false},
 	}
 	for _, tc := range cases {
 		if got := tc.drop.InActiveWindow(); got != tc.want {

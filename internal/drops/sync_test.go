@@ -229,6 +229,37 @@ func TestSyncProgressImmediateRevisionBump(t *testing.T) {
 	}
 }
 
+// TestFullSyncDropsRecoveredCampaignGoneFromInventory is the §6 preflight guard
+// for the other edge: keeping date-less inventory drops must NOT make a recovered
+// campaign linger forever. Because each full sync REBUILDS the tracked pool from
+// scratch and replaces it (never merges), a campaign that disappears from both
+// the dashboard and the inventory is simply not re-added on the next full sync.
+func TestFullSyncDropsRecoveredCampaignGoneFromInventory(t *testing.T) {
+	prog := map[string]interface{}{
+		"id":             "campaign-3moe",
+		"name":           "3 MoE Challenge",
+		"game":           map[string]interface{}{"id": "game-wot", "displayName": "World of Tanks"},
+		"timeBasedDrops": []interface{}{inProgressDrop("drop-1", "3 MoE Reward", 120, 45, false)}, // no dates
+	}
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(),
+		inventory: inventoryWithInProgress(prog),
+		details:   map[string]map[string]interface{}{},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+	if len(tracker.Campaigns()) != 1 {
+		t.Fatalf("first sync should recover the date-less campaign, got %d", len(tracker.Campaigns()))
+	}
+
+	// Twitch stops advertising it (gone from dashboard AND inventory).
+	client.inventory = emptyInventoryResponse()
+	tracker.syncCampaigns()
+	if got := tracker.Campaigns(); len(got) != 0 {
+		t.Fatalf("a date-less campaign gone from Twitch must not linger; got %d tracked", len(got))
+	}
+}
+
 // TestSyncProgressDoesNotDropWindowlessRecoveredCampaign is the direct
 // regression guard for the intermittent 3 MoE loss: a campaign recovered from
 // the inventory whose drops have NO per-drop date window (the common inventory
