@@ -65,10 +65,16 @@ type PointsHistory struct {
 	Points      []PointSample      `json:"points"`
 	Annotations []AnnotationRecord `json:"annotations"`
 	// Breakdown aggregates the range's positive balance changes by canonical
-	// reason so the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK shares.
-	// Computed from the raw (pre-downsampling) series; omitted when there is
-	// nothing earned in range.
+	// reason so the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK/PREDICTION
+	// shares. Computed from the raw (pre-downsampling) series; omitted when there
+	// is nothing earned in range.
 	Breakdown []ReasonShare `json:"breakdown,omitempty"`
+	// BetSummary is the prediction-betting accounting (won/staked/refunded/net)
+	// for the same streamer and window as the series, shown next to the earnings
+	// donut so the PREDICTION slice's origin is explicit. Nil/omitted when there
+	// are no bets in range. Derived from BetRecords, so it agrees with the ROI
+	// section for an equivalent window (only the window differs).
+	BetSummary *BetSummary `json:"betSummary,omitempty"`
 	// RawTruncated is true when the raw series hit the backend row cap, so
 	// the window is incomplete and Breakdown (and any KPI derived from it)
 	// must not be presented as a full-period result.
@@ -129,4 +135,30 @@ type BetRecord struct {
 	Gained     int     `json:"gained"`
 	Odds       float64 `json:"odds"`
 	Manual     bool    `json:"manual"`
+}
+
+// BetSummary is a compact, sign-separated accounting of prediction betting over
+// one selection, shown next to the earnings-breakdown donut so the "Prediction
+// wins" slice (a gross positive channel-point credit) is never mistaken for an
+// unexplained gain: it pairs the winnings with the stake put at risk, the stake
+// refunded, and the net result. Derived from the same BetRecords as the ROI
+// section (SummarizeBets), so the two can only differ by window, never
+// contradict.
+//
+// Invariant: Net == Won - Staked == Σ BetRecord.Gained. Won is the GROSS payout
+// credited on wins (stake*odds, which is exactly the positive balance delta the
+// donut's PREDICTION slice sums), Staked is the stake on settled bets (WIN+LOSE;
+// a refunded stake was returned, so it is reported separately, not staked). A
+// prediction LOSS only ever reduces Net — it is never a positive figure.
+type BetSummary struct {
+	Wins     int `json:"wins"`
+	Losses   int `json:"losses"`
+	Refunds  int `json:"refunds"`
+	Won      int `json:"won"`      // gross payout credited on wins (Σ Won over WIN)
+	Staked   int `json:"staked"`   // stake risked on settled bets (Σ Placed over WIN+LOSE)
+	Refunded int `json:"refunded"` // stake returned on refunds (Σ Placed over REFUND)
+	Net      int `json:"net"`      // net betting result (Σ Gained; == Won - Staked)
+	// Empty is true when the selection has no bet records, so the UI can hide
+	// the betting summary entirely rather than render a row of zeros.
+	Empty bool `json:"empty"`
 }

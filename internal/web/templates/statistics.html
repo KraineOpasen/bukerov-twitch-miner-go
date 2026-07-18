@@ -37,6 +37,13 @@
 .breakdown-name{color:var(--color-neutral-300);min-width:6.5rem}
 .breakdown-val{margin-left:auto;color:var(--color-neutral-100)}
 .breakdown-count{color:var(--color-neutral-500);font-size:.75rem}
+.bet-summary{margin-top:1.25rem;border-top:1px solid var(--color-neutral-700);padding-top:1rem}
+.bet-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(8rem,1fr));gap:.75rem}
+.bet-stat{display:flex;flex-direction:column;gap:.15rem;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-700);background:var(--color-neutral-800);padding:.6rem .75rem}
+.bet-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;color:var(--color-neutral-400)}
+.bet-val{font-size:1.1rem;font-weight:600;color:var(--color-neutral-100)}
+.bet-val.pos{color:var(--ui-roi-pos)}
+.bet-val.neg{color:var(--ui-roi-neg)}
 .roi-donut-wrap{display:flex;align-items:center;justify-content:center}
 .roi-outcomes-grid{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:1.5rem;align-items:center;margin-bottom:1.5rem}
 @media (max-width:760px){.roi-outcomes-grid{grid-template-columns:1fr}}
@@ -106,6 +113,22 @@
                 <p class="text-xs text-neutral-500 mb-3">{{ t "stat.breakdown.subtitle" }}</p>
                 <div id="stat-breakdown-legend" class="breakdown-legend"></div>
             </div>
+        </div>
+
+        <!-- Betting summary: makes the origin of the PREDICTION donut slice
+             explicit by pairing gross winnings with the stake risked, refunded,
+             and net result. Same streamer/window as the series above; consistent
+             with (never contradicting) the ROI section further down. -->
+        <div id="stat-bet-summary" class="bet-summary hidden">
+            <h3 class="text-sm font-semibold text-neutral-300 mb-1">{{ t "stat.bet.title" }}</h3>
+            <p class="text-xs text-neutral-500 mb-3">{{ t "stat.bet.subtitle" }}</p>
+            <div class="bet-summary-grid">
+                <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.won" }}</span><span id="bet-won" class="bet-val num"></span></div>
+                <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.staked" }}</span><span id="bet-staked" class="bet-val num"></span></div>
+                <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.refunded" }}</span><span id="bet-refunded" class="bet-val num"></span></div>
+                <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.net" }}</span><span id="bet-net" class="bet-val num"></span></div>
+            </div>
+            <p id="bet-counts" class="text-xs text-neutral-500 mt-2 num"></p>
         </div>
     </div>
 </div>
@@ -228,11 +251,12 @@
     // from the shared --ui-* palette (base.html) so WATCH/CLAIM/RAID/STREAK
     // keep one hue everywhere; unknown reasons pool into OTHER.
     const REASONS = {
-        WATCH:        { color: tok('--ui-watch', '#FFE44D'),    label: () => t('js.stat.br.watch') },
-        CLAIM:        { color: tok('--ui-claim', '#FFC83D'),    label: () => t('js.stat.br.claim') },
-        RAID:         { color: tok('--ui-raid', '#FF8A3D'),     label: () => t('js.stat.br.raid') },
-        WATCH_STREAK: { color: tok('--ui-streak', '#B6FF3B'),   label: () => t('js.stat.br.streak') },
-        OTHER:        { color: tok('--ui-other', '#A970FF'),    label: () => t('js.stat.br.other') },
+        WATCH:        { color: tok('--ui-watch', '#FFE44D'),      label: () => t('js.stat.br.watch') },
+        CLAIM:        { color: tok('--ui-claim', '#FFC83D'),      label: () => t('js.stat.br.claim') },
+        RAID:         { color: tok('--ui-raid', '#FF8A3D'),       label: () => t('js.stat.br.raid') },
+        WATCH_STREAK: { color: tok('--ui-streak', '#B6FF3B'),     label: () => t('js.stat.br.streak') },
+        PREDICTION:   { color: tok('--ui-prediction', '#22D3EE'), label: () => t('js.stat.br.prediction') },
+        OTHER:        { color: tok('--ui-other', '#A970FF'),      label: () => t('js.stat.br.other') },
     };
 
     // Collapse the server's per-reason shares into the four first-class
@@ -278,6 +302,7 @@
         rangeBtns: Array.from(document.querySelectorAll('.stat-range-btn')),
         breakdown: document.getElementById('stat-breakdown'),
         legend:    document.getElementById('stat-breakdown-legend'),
+        betSummary: document.getElementById('stat-bet-summary'),
     };
 
     let chart = null;
@@ -365,6 +390,37 @@
         }
         renderKPIs(data);
         renderBreakdown(data);
+        renderBetSummary(data.betSummary);
+    }
+
+    // Betting summary shown beside the earnings donut. Won is the gross payout
+    // credited on wins — exactly the balance delta the PREDICTION donut slice
+    // sums — so the two agree; Staked is the stake risked on settled bets; Net =
+    // Won - Staked. A loss only ever pushes Net down, never appears as a positive
+    // figure. Hidden entirely when the range has no bets.
+    function renderBetSummary(bs) {
+        if (!els.betSummary) return;
+        if (!bs || bs.empty) { els.betSummary.classList.add('hidden'); return; }
+        els.betSummary.classList.remove('hidden');
+        const setBet = (id, text, sign) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = text;
+            el.classList.remove('pos', 'neg');
+            if (sign) el.classList.add(sign);
+        };
+        setBet('bet-won', '+' + nfStat.format(bs.won || 0), (bs.won || 0) > 0 ? 'pos' : '');
+        setBet('bet-staked', (bs.staked || 0) > 0 ? '-' + nfStat.format(bs.staked) : '0', (bs.staked || 0) > 0 ? 'neg' : '');
+        setBet('bet-refunded', nfStat.format(bs.refunded || 0));
+        const net = bs.net || 0;
+        setBet('bet-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        const counts = document.getElementById('bet-counts');
+        if (counts) {
+            counts.textContent = t('js.stat.bet.counts')
+                .replace('{wins}', nfStat.format(bs.wins || 0))
+                .replace('{losses}', nfStat.format(bs.losses || 0))
+                .replace('{refunds}', nfStat.format(bs.refunds || 0));
+        }
     }
 
     const nfStat = new Intl.NumberFormat();
@@ -469,6 +525,7 @@
                 if (chart) { chart.destroy(); chart = null; }
                 if (donut) { donut.destroy(); donut = null; }
                 els.breakdown.classList.add('hidden');
+                if (els.betSummary) els.betSummary.classList.add('hidden');
                 els.partial.classList.add('hidden');
                 show('empty');
                 setUpdated();
