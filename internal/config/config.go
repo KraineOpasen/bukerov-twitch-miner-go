@@ -96,6 +96,26 @@ type Config struct {
 	// rotation prioritization, in addition to the claim-history dedup.
 	DropBlacklist []string `json:"dropBlacklist,omitempty"`
 
+	// DropCampaignGameIDs is a strict, GLOBAL allowlist of exact Twitch game IDs
+	// whose drop campaigns are tracked. Unlike DropCampaignGames it is
+	// candidate-independent: it filters correctly even on a sync where the allowed
+	// game has no live campaigns (the production all-foreign-inventory case). Game
+	// IDs are opaque strings compared with exact, case-sensitive equality (no
+	// lowercasing, regex, or substring match). Empty — together with an empty
+	// DropCampaignGames — tracks every game, the backward-compatible default.
+	DropCampaignGameIDs []string `json:"dropCampaignGameIDs,omitempty"`
+
+	// DropCampaignGames is a GLOBAL, best-effort list of game names (or Twitch
+	// displayNames) whose drop campaigns are tracked. Each name is resolved to a
+	// game ID against the campaigns present in the current sync (case-insensitive,
+	// whole-string; never substring or whitespace-collapsed), after which
+	// filtering is strictly by game ID. A name that is ambiguous or absent from
+	// the current sync fails open. For filtering that holds regardless of what is
+	// live, also list the game ID in DropCampaignGameIDs. Empty — together with an
+	// empty DropCampaignGameIDs — tracks every game, the backward-compatible
+	// default.
+	DropCampaignGames []string `json:"dropCampaignGames,omitempty"`
+
 	// DirectoryGames lists game names (as shown on Twitch, e.g. "World of
 	// Tanks") for which directory-based channel discovery is enabled: the
 	// miner periodically queries the game's Twitch directory for live

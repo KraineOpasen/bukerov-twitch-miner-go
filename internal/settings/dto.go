@@ -13,6 +13,14 @@ type RuntimeSettings struct {
 	Discord         DiscordUIConfig        `json:"discord"`
 	DropBlacklist   []string               `json:"dropBlacklist"`
 	DirectoryGames  []string               `json:"directoryGames"`
+	// DropCampaignGameIDs mirrors config.Config.DropCampaignGameIDs: the strict,
+	// candidate-independent allowlist of exact Twitch game IDs whose drop
+	// campaigns are tracked.
+	DropCampaignGameIDs []string `json:"dropCampaignGameIDs"`
+	// DropCampaignGames mirrors config.Config.DropCampaignGames: the best-effort
+	// list of game names/displayNames resolved to game IDs against the current
+	// sync's campaigns. Both lists empty = track every game.
+	DropCampaignGames []string `json:"dropCampaignGames"`
 	// DiscoveryPreferTracked mirrors config.Config.DiscoveryPreferTracked: when
 	// true, directory-discovered channels never displace a tracked streamer's
 	// watch slot (they only fill idle ones).

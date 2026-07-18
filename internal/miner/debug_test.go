@@ -100,6 +100,9 @@ func TestBuildDebugSnapshotIncludesDropsSection(t *testing.T) {
 	if len(snap.Drops.Campaigns) != 1 || snap.Drops.Campaigns[0].Name != "World of Warships Update 15.5" {
 		t.Errorf("expected the tracked campaign in the snapshot, got %+v", snap.Drops.Campaigns)
 	}
+	if snap.Drops.Campaigns[0].GameID != "g1" {
+		t.Errorf("expected the tracked campaign's opaque game ID in the snapshot, got %q", snap.Drops.Campaigns[0].GameID)
+	}
 }
 
 // TestDropsTrackerSatisfiesWebProvider is a compile-time guard that the drops

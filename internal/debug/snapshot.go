@@ -277,8 +277,14 @@ type DropsSyncInfo struct {
 // TrackedCampaignInfo is one campaign as held by the drops tracker, including
 // whether it was recovered from the inventory's in-progress list.
 type TrackedCampaignInfo struct {
-	Name              string    `json:"name"`
-	Game              string    `json:"game,omitempty"`
+	Name string `json:"name"`
+	Game string `json:"game,omitempty"`
+	// GameID is the opaque Twitch game ID, exposed here purely for diagnostics
+	// (e.g. reading the ID of a currently-tracked game). It is taken from
+	// already-synced state — the snapshot makes no network call. It is NOT the
+	// primary way to obtain an ID for the strict filter (a game absent from the
+	// tracked set has no row here); the Settings "find game ID" lookup is.
+	GameID            string    `json:"gameID,omitempty"`
 	EndAt             time.Time `json:"endAt,omitzero"`
 	RemainingDrops    int       `json:"remainingDrops"`
 	OverallPercent    int       `json:"overallPercent"`
