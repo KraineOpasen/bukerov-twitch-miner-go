@@ -1264,10 +1264,13 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 }
 
 // streakPursuitExhausted reports whether the streak boost seat should be RELEASED
-// even though Twitch has not granted the streak. There is exactly one release
-// path here — the CONTINUOUSLY-watched minutes reached streakPursuitCapMinutes —
-// plus the authoritative WATCH_STREAK grant handled separately (StreakPending ->
-// false makes isBoostEligible false immediately, the primary and fastest release).
+// even though Twitch has not granted the streak. The release trigger is the
+// CONTINUOUSLY-watched minutes reaching streakPursuitCapMinutes — and, crucially,
+// once reached it LATCHES per-broadcast (Stream.StreakPursuitExhausted), so a real
+// slot loss that resets the continuous-minute counter can NOT re-open a fresh
+// pursuit window for the same broadcast. The authoritative WATCH_STREAK grant is
+// handled separately (StreakPending -> false makes isBoostEligible false
+// immediately, the primary and fastest release).
 //
 // It deliberately does NOT release on WATCH-points evidence. Twitch pays a watch
 // streak only while the channel is actually being watched, and nothing proves the
@@ -1277,11 +1280,11 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 // subscription is account-wide, so a WATCH credit can be produced by an external
 // browser tab or arrive late from a prior broadcast on the same channel. So a
 // pending streak holds the seat until Twitch grants it or the bounded continuous
-// window elapses — maximizing 300-450 capture while staying bounded. Releasing
-// only frees the seat: StreakPending stays true, so a LATE real WATCH_STREAK is
-// still accepted and recorded exactly once.
+// window elapses (then stays released for that broadcast) — maximizing 300-450
+// capture while staying bounded. Releasing only frees the seat: StreakPending stays
+// true, so a LATE real WATCH_STREAK is still accepted and recorded exactly once.
 func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
-	return w.streamers[idx].Stream.GetMinuteWatched() >= streakPursuitCapMinutes
+	return w.streamers[idx].Stream.StreakPursuitExhausted(streakPursuitCapMinutes)
 }
 
 // streakInProgress reports whether a boost-eligible streamer is actively

@@ -46,6 +46,20 @@ type Stream struct {
 	// 300-450 grant (that stays exclusively the WATCH_STREAK points event).
 	streakWatchEvents int
 
+	// streakPursuitTimedOut latches once the bounded streak-pursuit window (the
+	// hard cap of CONTINUOUSLY-watched minutes) elapsed for the CURRENT broadcast
+	// with no authoritative WATCH_STREAK grant. It is what stops the watcher from
+	// re-opening a fresh pursuit window for the same broadcast after a real slot
+	// loss resets the continuous-minute counter (ResetWatchContinuity): without it,
+	// exhaustion is measured only by MinuteWatched, which the slot-loss reset zeroes,
+	// so the same broadcast would cycle 20-minute pursuit windows forever. Set the
+	// first time StreakPursuitExhausted observes the cap; deliberately NOT cleared by
+	// ResetWatchContinuity or by WATCH evidence; cleared only on re-arm (a genuinely
+	// new broadcast, via armWatchStreakLocked). It never awards points and never
+	// substitutes for the WATCH_STREAK grant — a late real grant is still accepted
+	// and recorded once (StreakPending is unaffected by this field).
+	streakPursuitTimedOut bool
+
 	// spadeURL is written by the api client (stream bring-up, session refresh)
 	// and read by the minute sender and health probes on other goroutines —
 	// unexported so every access takes the lock.
@@ -257,6 +271,10 @@ func (s *Stream) armWatchStreakLocked() {
 	// pursuit, and, symmetrically, a reset that forgot it would let the counter
 	// keep growing across broadcasts).
 	s.streakWatchEvents = 0
+	// The pursuit-timeout latch is bound to one broadcast: a genuinely new
+	// broadcast is a fresh streak worth pursuing, so clear it here (the ONLY place
+	// it clears). It is intentionally NOT cleared on a mere continuity reset.
+	s.streakPursuitTimedOut = false
 }
 
 // MarkStreakEarned records a live watch-streak grant: the streak is no longer
@@ -389,14 +407,50 @@ func (s *Stream) UpdateMinuteWatched(maxGap time.Duration) float64 {
 // report while the slot is still HELD; this catches the slot itself being lost and
 // regained within maxGap, which the timestamp gap alone cannot distinguish from
 // continuous viewing. The streak IDENTITY is deliberately left intact —
-// WatchStreakMissing, streakEarnedBroadcastID/At, and the streakWatchEvents
-// evidence counter are untouched — so StreakPending is unchanged (a late real
-// WATCH_STREAK is still accepted) and a mere rotation never re-arms the pursuit.
+// WatchStreakMissing, streakEarnedBroadcastID/At, the streakWatchEvents evidence
+// counter, and the streakPursuitTimedOut latch are untouched — so StreakPending is
+// unchanged (a late real WATCH_STREAK is still accepted), a mere rotation never
+// re-arms the pursuit, and a broadcast that already timed out is NOT handed a fresh
+// pursuit window just because its continuous minutes were reset.
 func (s *Stream) ResetWatchContinuity() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.MinuteWatched = 0
 	s.minuteWatchedUpdated = time.Time{}
+}
+
+// StreakPursuitExhausted reports whether the bounded streak-pursuit window has
+// elapsed for the current broadcast, LATCHING that timed-out state the first time
+// the continuously-watched minutes reach capMinutes. The latch is what makes the
+// decision survive the continuity reset a slot loss triggers: once a broadcast has
+// burned its bounded window it is never granted a fresh one (StreakPursuitExhausted
+// keeps returning true even after MinuteWatched is reset to zero), until a genuinely
+// new broadcast re-arms via armWatchStreakLocked. Setting the latch is done here,
+// atomically with the exhaustion decision the watcher's isBoostEligible consults, so
+// there is no separate "release" call to keep in sync. capMinutes is passed in so
+// the watcher owns the policy constant; a non-positive cap disables the
+// minutes-based trigger (the latch, once set, still holds). It awards no points and
+// never marks the streak earned — that stays exclusively the WATCH_STREAK grant.
+func (s *Stream) StreakPursuitExhausted(capMinutes float64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streakPursuitTimedOut {
+		return true
+	}
+	if capMinutes > 0 && s.MinuteWatched >= capMinutes {
+		s.streakPursuitTimedOut = true
+		return true
+	}
+	return false
+}
+
+// StreakPursuitTimedOut reports whether the bounded pursuit window has already
+// latched timed-out for the current broadcast (see streakPursuitTimedOut). Pure
+// read; it neither sets the latch nor consults the minute counter.
+func (s *Stream) StreakPursuitTimedOut() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.streakPursuitTimedOut
 }
 
 func (s *Stream) GetMinuteWatched() float64 {
