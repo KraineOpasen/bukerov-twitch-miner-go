@@ -500,6 +500,56 @@ type DropsListData struct {
 	Campaigns []DropCampaignView
 }
 
+// UpcomingState is the honest lifecycle state of the Drops "Upcoming" tab, so it
+// never reuses the active tab's empty message or active-progress UI.
+type UpcomingState string
+
+const (
+	// UpcomingStateNeverSynced: no successful full campaign sync has completed yet.
+	UpcomingStateNeverSynced UpcomingState = "never_synced"
+	// UpcomingStateEmpty: the last sync succeeded and Twitch reported no upcoming
+	// campaigns (for this account, at that moment) — not a claim none exist.
+	UpcomingStateEmpty UpcomingState = "empty"
+	// UpcomingStateStale: the last refresh failed. Any cached upcoming cards are
+	// still shown (Campaigns non-empty) with a stale/error note; when there is no
+	// cache the tab shows the refresh-failed message instead.
+	UpcomingStateStale UpcomingState = "stale"
+	// UpcomingStatePopulated: the last sync succeeded and real upcoming campaigns
+	// are shown.
+	UpcomingStatePopulated UpcomingState = "populated"
+)
+
+// UpcomingCampaignView is one display-only upcoming-campaign card. It carries
+// NO active-farming fields (progress bar, watched minutes, health, priority):
+// an upcoming campaign has not started and is never farmed.
+type UpcomingCampaignView struct {
+	ID        string
+	Name      string
+	GameName  string
+	BoxArtURL string
+	// StartLocal / EndLocal are absolute local date+time strings (rendered in the
+	// dashboard's configured time zone); EndLocal is empty when unknown.
+	StartLocal string
+	EndLocal   string
+	// StartsIn is the relative "starts in …" label.
+	StartsIn string
+	// Rewards are the campaign's reward names, when Twitch provided them.
+	Rewards []string
+}
+
+// DropsUpcomingData feeds the dedicated Upcoming tab partial with its honest
+// state and the display-only cards.
+type DropsUpcomingData struct {
+	State UpcomingState
+	// HasError is true when the last refresh failed (drives the stale/error note
+	// even when cached cards are shown).
+	HasError bool
+	// LastSuccessText is the localized absolute time of the last successful sync
+	// (empty when there has never been one).
+	LastSuccessText string
+	Campaigns       []UpcomingCampaignView
+}
+
 // DiscoveredChannelView is one row in the Drops-page "Discovered Channels"
 // section (the directory-discovery candidate pool).
 type DiscoveredChannelView struct {

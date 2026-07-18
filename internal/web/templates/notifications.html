@@ -131,6 +131,21 @@
         </div>
     </details>
 
+    <details id="notif-drops" class="details-panel">
+        <summary class="text-lg">{{ t "notif.drops.title" }}</summary>
+        <div class="details-content">
+            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.drops.desc" }}</p>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">{{ t "notif.drops.upcoming.enable" }}</div>
+                    <div class="setting-description">{{ t "notif.drops.upcoming.enable.desc" }}</div>
+                </div>
+                <input type="checkbox" class="w-5 h-5 accent-purple-600" id="upcoming-drops-enabled" {{if not .ConfigValid}}disabled{{end}}>
+            </div>
+        </div>
+    </details>
+
     <details id="notif-mentions" class="details-panel">
         <summary class="text-lg">{{ t "notif.mentions.title" }}</summary>
         <div class="details-content">
@@ -400,6 +415,7 @@
         document.getElementById('system-channel').value = config.systemChannelId || '';
 
         document.getElementById('system-enabled').checked = config.systemEnabled;
+        document.getElementById('upcoming-drops-enabled').checked = config.upcomingDropsEnabled;
 
         document.getElementById('mentions-enabled').checked = config.mentionsEnabled;
         document.getElementById('mentions-all-chats').checked = config.mentionsAllChats;
@@ -558,6 +574,7 @@
             offlineChannelId: document.getElementById('offline-channel').value,
             systemChannelId: document.getElementById('system-channel').value,
             systemEnabled: document.getElementById('system-enabled').checked,
+            upcomingDropsEnabled: document.getElementById('upcoming-drops-enabled').checked,
             mentionsEnabled: document.getElementById('mentions-enabled').checked,
             mentionsAllChats: document.getElementById('mentions-all-chats').checked,
             mentionsStreamers: getSelectedStreamers('mentions'),

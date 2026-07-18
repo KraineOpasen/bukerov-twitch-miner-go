@@ -216,6 +216,12 @@ type DropsTracker struct {
 	// once at wiring time before the loops start; read lock-free.
 	onDropClaimed func(dropName string)
 
+	// upcomingNotifier, when set, is alerted once per newly-observed RELEVANT
+	// upcoming campaign on the edge of a SUCCESSFUL full sync (a display/opt-in
+	// concern; the notifier owns durable dedupe). Set once at wiring time before
+	// the loops start; read lock-free. nil disables upcoming-campaign alerts.
+	upcomingNotifier UpcomingNotifier
+
 	// intervalUnit scales the configured sync intervals (minutes in
 	// production). Set once at construction and never mutated, so both loops
 	// read it without the lock; tests set it to a sub-second unit to exercise
@@ -394,6 +400,52 @@ func (d *DropsTracker) UpcomingCampaigns() []*models.Campaign {
 	out := make([]*models.Campaign, len(d.upcomingCampaigns))
 	copy(out, d.upcomingCampaigns)
 	return out
+}
+
+// UpcomingNotifier is the drops tracker's hook for alerting on a newly-observed
+// RELEVANT upcoming campaign. It is invoked once per relevant upcoming campaign
+// on the edge of a SUCCESSFUL full sync, OUTSIDE the tracker's state mutex, so
+// an implementation may perform bounded network I/O and durable dedupe without
+// stalling readers or the active-drops pipeline. Implementations MUST be
+// idempotent per campaign (durable dedupe) so repeated syncs, restarts, and
+// reordered responses never re-notify. nil disables upcoming-campaign alerts.
+type UpcomingNotifier interface {
+	NotifyUpcomingCampaign(ctx context.Context, c *models.Campaign)
+}
+
+// SetUpcomingNotifier wires the upcoming-campaign alert hook. Set once before
+// the sync loops start (read lock-free); nil disables the alert.
+func (d *DropsTracker) SetUpcomingNotifier(n UpcomingNotifier) {
+	d.upcomingNotifier = n
+}
+
+// filterRelevantUpcoming keeps only the upcoming campaigns whose game passes the
+// operator's game filter, reusing the exact active game-identity contract
+// (resolveAllowedGameIDs + gameIDAllowed). Fail-open exactly like the active
+// filter: nothing configured, or a name-only filter that resolved to no IDs this
+// cycle, keeps everything; a campaign with no game ID is kept. Pure and silent —
+// upcoming relevance is a display/notification concern that never touches active
+// counters, blacklist, claim history, or the active-filter logs.
+func (d *DropsTracker) filterRelevantUpcoming(up []*models.Campaign) []*models.Campaign {
+	allowed, configured := d.resolveAllowedGameIDs(up)
+	if !configured || len(allowed) == 0 {
+		return up
+	}
+	out := make([]*models.Campaign, 0, len(up))
+	for _, c := range up {
+		if gameIDAllowed(allowed, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// RelevantUpcomingCampaigns returns the upcoming campaigns that pass the
+// operator's game filter — the display-only relevance the Drops "Upcoming" tab
+// and the upcoming-campaign notification use. It never enters the active farm
+// set and never changes active filtering behavior, counters, or logs.
+func (d *DropsTracker) RelevantUpcomingCampaigns() []*models.Campaign {
+	return d.filterRelevantUpcoming(d.UpcomingCampaigns())
 }
 
 // SetCatalog wires the durable campaign catalog. Set once before the sync loops
@@ -902,6 +954,49 @@ func (d *DropsTracker) syncCampaigns() {
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, time.Since(start), nil)
 
 	d.updateStreamerCampaigns()
+
+	// Edge effect of a SUCCESSFUL full sync only: alert on any newly-announced
+	// relevant upcoming campaign. Runs last (active farming is already set up),
+	// outside d.mu, and is bounded — a notification never rolls back the
+	// published snapshot and never stalls the loop. The lightweight progress
+	// sync never reaches here, so it can never notify.
+	d.notifyUpcoming(upcoming)
+}
+
+// upcomingNotifyTimeout bounds the per-sync upcoming-campaign notification pass
+// so a slow/failed notifier can never stall the full-sync loop for long.
+// Package variable so tests can shrink it.
+var upcomingNotifyTimeout = 15 * time.Second
+
+// notifyUpcoming fires the opt-in upcoming-campaign alert for each RELEVANT
+// upcoming campaign. The notifier owns durable dedupe, so calling it every sync
+// is safe — only a genuinely new relevant campaign produces an alert. Runs
+// OUTSIDE d.mu with a bounded context, so a slow or failing Discord send can
+// neither block campaign readers nor stall the sync loop, and never mutates the
+// published snapshot. A nil notifier (or no relevant upcoming campaigns) is a
+// no-op.
+func (d *DropsTracker) notifyUpcoming(upcoming []*models.Campaign) {
+	notifier := d.upcomingNotifier
+	if notifier == nil || len(upcoming) == 0 {
+		return
+	}
+	relevant := d.filterRelevantUpcoming(upcoming)
+	if len(relevant) == 0 {
+		return
+	}
+
+	base := context.Background()
+	d.mu.RLock()
+	if d.ctx != nil {
+		base = d.ctx
+	}
+	d.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(base, upcomingNotifyTimeout)
+	defer cancel()
+	for _, c := range relevant {
+		notifier.NotifyUpcomingCampaign(ctx, c)
+	}
 }
 
 // syncSummaryFingerprint is a deterministic semantic signature of a completed
@@ -1492,23 +1587,42 @@ func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*mo
 		if c.Game != nil {
 			gameID, gameName = c.Game.ID, c.Game.Name
 		}
+		if !gameIDAllowed(allowed, c) {
+			// Per-campaign filter decisions stay at DEBUG (PR #103) so a routine
+			// sync does not spam INFO; the shared gameIDAllowed helper (PR #104) is
+			// the single game-identity decision reused by the upcoming/notification
+			// relevance path.
+			slog.Debug("Skipping drop campaign: game not in configured drop-campaign game list",
+				"campaign", c.Name, "campaignID", c.ID, "gameID", gameID, "gameName", gameName,
+				"reason", "game_not_allowed", "configuredGameIDs", cfgIDs, "configuredGameNames", cfgNames)
+			filtered++
+			continue
+		}
 		if gameID == "" {
 			// F2: unknown game identity -> keep; a name is never proof it's foreign.
 			slog.Debug("Drops game filter: keeping campaign with no game ID",
 				"campaign", c.Name, "campaignID", c.ID, "reason", "missing_game_id")
-			kept = append(kept, c)
-			continue
 		}
-		if _, ok := allowed[gameID]; ok {
-			kept = append(kept, c)
-			continue
-		}
-		slog.Debug("Skipping drop campaign: game not in configured drop-campaign game list",
-			"campaign", c.Name, "campaignID", c.ID, "gameID", gameID, "gameName", gameName,
-			"reason", "game_not_allowed", "configuredGameIDs", cfgIDs, "configuredGameNames", cfgNames)
-		filtered++
+		kept = append(kept, c)
 	}
 	return kept, filtered
+}
+
+// gameIDAllowed reports whether a campaign passes the operator's game filter for
+// an ALREADY-resolved allowed-ID set: a campaign with no game ID is kept (its
+// identity is unknown, never proof it is foreign — the fail-open policy),
+// otherwise it is kept iff its exact, opaque game ID is in allowed. It is the
+// single per-campaign game-identity decision, shared verbatim by the active
+// filter (applyGameFilter) and the display-only upcoming/notification relevance
+// path so both honor one contract — strict opaque ID equality, never substring,
+// regex, or numeric coercion. Set-level cases (nothing configured, a name-only
+// filter that resolved to no IDs) are the caller's to handle.
+func gameIDAllowed(allowed map[string]struct{}, c *models.Campaign) bool {
+	if c == nil || c.Game == nil || c.Game.ID == "" {
+		return true
+	}
+	_, ok := allowed[c.Game.ID]
+	return ok
 }
 
 // noteGameFilterResolution manages the once-per-transition WARN for the

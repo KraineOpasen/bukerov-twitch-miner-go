@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
@@ -132,29 +133,120 @@ func (s *Server) renderDropsList(w http.ResponseWriter, r *http.Request) {
 	s.renderPartial(w, r, "drops_list", data)
 }
 
-// handleAPIDropsUpcoming renders the "Upcoming" tab: campaigns Twitch announced
-// that have not started yet. Display-only — these are never farmed.
+// handleAPIDropsUpcoming renders the dedicated "Upcoming" tab: campaigns Twitch
+// announced that have not started yet, filtered to the operator's game filter.
+// Display-only — these are never farmed and never show active-progress UI. The
+// tab distinguishes four honest states (never-synced / empty / stale / populated)
+// instead of reusing the active tab's empty message. It only reads the backend
+// snapshot the drops tracker already holds; it never triggers a Twitch sync, so
+// the 1-minute auto-refresh is free of network cost.
 func (s *Server) handleAPIDropsUpcoming(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	provider := s.dropCatalogProvider
 	s.mu.RUnlock()
 
-	var upcoming []*models.Campaign
-	if provider != nil {
-		upcoming = provider.UpcomingCampaigns()
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+	loc := s.displayLocation()
+
+	if provider == nil {
+		s.renderPartial(w, r, "drops_upcoming", DropsUpcomingData{State: UpcomingStateNeverSynced})
+		return
 	}
 
-	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
-	views := make([]DropCampaignView, 0, len(upcoming))
-	now := time.Now()
-	for _, c := range upcoming {
-		v := buildDropCampaignView(c, tr)
-		v.Upcoming = true
-		v.StartsInLabel = startsInLabel(c.StartAt, now, tr)
+	status := provider.CampaignSyncStatus()
+	upcoming := provider.RelevantUpcomingCampaigns()
+	views := buildUpcomingViews(upcoming, time.Now(), loc, tr)
+
+	data := DropsUpcomingData{Campaigns: views}
+	if !status.LastSuccessAt.IsZero() {
+		data.LastSuccessText = formatLocalDateTime(status.LastSuccessAt, loc)
+	}
+	data.State, data.HasError = classifyUpcomingState(status, len(views))
+
+	s.renderPartial(w, r, "drops_upcoming", data)
+}
+
+// classifyUpcomingState maps the last full-sync bookkeeping and the current
+// (relevant) upcoming card count to the Upcoming tab's honest lifecycle state.
+// It relies on the tracker's backend contract: a FAILED sync preserves the
+// previous upcoming snapshot (so cached cards survive an error, shown "stale"),
+// and only a SUCCESSFUL empty sync publishes an empty snapshot ("empty"). The
+// bool return is whether the last refresh errored.
+func classifyUpcomingState(status drops.SyncStatus, cardCount int) (UpcomingState, bool) {
+	neverSynced := status.LastSuccessAt.IsZero() && status.LastSyncAt.IsZero()
+	hasError := status.LastError != ""
+	switch {
+	case neverSynced:
+		return UpcomingStateNeverSynced, false
+	case hasError:
+		// Last refresh failed: keep any cached cards, or show the refresh-failed
+		// message when there is no cache. Both render under the "stale" state.
+		return UpcomingStateStale, true
+	case cardCount > 0:
+		return UpcomingStatePopulated, false
+	default:
+		return UpcomingStateEmpty, false
+	}
+}
+
+// buildUpcomingViews turns relevant upcoming campaigns into display-only cards.
+// Absolute start/end times are rendered in the dashboard's configured time zone;
+// no active-progress, watched-minutes, or health fields are populated.
+func buildUpcomingViews(campaigns []*models.Campaign, now time.Time, loc *time.Location, tr func(string) string) []UpcomingCampaignView {
+	views := make([]UpcomingCampaignView, 0, len(campaigns))
+	for _, c := range campaigns {
+		if c == nil {
+			continue
+		}
+		v := UpcomingCampaignView{
+			ID:       c.ID,
+			Name:     c.Name,
+			StartsIn: startsInLabel(c.StartAt, now, loc, tr),
+			Rewards:  upcomingRewardNames(c),
+		}
+		if c.Game != nil {
+			v.GameName = c.Game.Name
+			v.BoxArtURL = boxArtURL(c.Game.Name)
+		}
+		if !c.StartAt.IsZero() {
+			v.StartLocal = formatLocalDateTime(c.StartAt, loc)
+		}
+		if !c.EndAt.IsZero() {
+			v.EndLocal = formatLocalDateTime(c.EndAt, loc)
+		}
 		views = append(views, v)
 	}
+	return views
+}
 
-	s.renderPartial(w, r, "drops_list", DropsListData{Campaigns: views})
+// upcomingRewardNames collects a campaign's reward names (drop benefit name,
+// falling back to the drop name), de-duplicated and order-preserving.
+func upcomingRewardNames(c *models.Campaign) []string {
+	seen := make(map[string]struct{}, len(c.Drops))
+	var out []string
+	for _, d := range c.Drops {
+		name := strings.TrimSpace(d.Benefit)
+		if name == "" {
+			name = strings.TrimSpace(d.Name)
+		}
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
+// formatLocalDateTime renders an absolute instant in the given location.
+func formatLocalDateTime(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.Local
+	}
+	return t.In(loc).Format("2 Jan 2006, 15:04 MST")
 }
 
 // handleAPIDropsPast renders the "Past" tab: expired campaigns from the durable
@@ -179,10 +271,16 @@ func (s *Server) handleAPIDropsPast(w http.ResponseWriter, r *http.Request) {
 	s.renderPartial(w, r, "drops_past", DropsPastData{Groups: buildPastGroups(records, tr)})
 }
 
-// startsInLabel renders how far in the future a campaign starts.
-func startsInLabel(startAt, now time.Time, tr func(string) string) string {
+// startsInLabel renders how far in the future a campaign starts. The far-future
+// branch renders a calendar date in the dashboard's configured time zone (loc)
+// so it agrees with the card's absolute start time; the relative branches are
+// pure durations and location-independent.
+func startsInLabel(startAt, now time.Time, loc *time.Location, tr func(string) string) string {
 	if startAt.IsZero() {
 		return ""
+	}
+	if loc == nil {
+		loc = time.Local
 	}
 	d := startAt.Sub(now)
 	if d <= 0 {
@@ -194,7 +292,7 @@ func startsInLabel(startAt, now time.Time, tr func(string) string) string {
 	case d < 24*time.Hour:
 		return fmt.Sprintf(tr("drops.starts.in_hours"), int(d.Hours()))
 	default:
-		return tr("drops.starts.on_date") + " " + startAt.Format("2 Jan")
+		return tr("drops.starts.on_date") + " " + startAt.In(loc).Format("2 Jan")
 	}
 }
 

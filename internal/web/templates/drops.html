@@ -69,7 +69,14 @@
 <!-- Upcoming -->
 <div id="tab-upcoming" class="drops-panel hidden">
     <p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
-    <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load" hx-swap="innerHTML">
+    <!--
+        Re-reads the backend snapshot every minute so a new campaign surfaced by a
+        full sync (scheduled or manual "Sync Drops now") appears without a full
+        page reload. This only re-renders the upcoming set the server already holds
+        in memory — it never triggers a Twitch sync. One section, one trigger: tab
+        switching just toggles visibility, so no extra polling loops are created.
+    -->
+    <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load, every 1m" hx-swap="innerHTML">
         <div class="animate-pulse text-neutral-400">{{ t "drops.loading.upcoming" }}</div>
     </section>
 </div>

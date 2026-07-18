@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -50,6 +51,24 @@ func (m *Miner) resolveStreamer(login string) *models.Streamer {
 	return nil
 }
 
+// resolveDisplayLocation loads the time zone the dashboard and operator alerts
+// render absolute times in, from the logger config's time-zone name (production
+// sets "Asia/Jerusalem"). An empty or unloadable name falls back to the process
+// local time rather than failing — the standard time.Location it returns handles
+// daylight-saving transitions.
+func resolveDisplayLocation(name string) *time.Location {
+	if name == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		slog.Warn("Invalid dashboard time zone; falling back to server local time",
+			"timeZone", name, "error", err)
+		return time.Local
+	}
+	return loc
+}
+
 // minerHealthNotifier adapts the miner's (possibly late-created) notification
 // manager to health.Notifier, reading m.notifications at call time so the canary
 // still notifies if Discord is enabled after startup.
@@ -83,6 +102,23 @@ func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail s
 	n.m.mu.RUnlock()
 	if mgr != nil {
 		mgr.NotifyDropRecovered(campaign, drop, channel, detail)
+	}
+}
+
+// minerUpcomingNotifier adapts the (possibly late-created) notification manager
+// to drops.UpcomingNotifier, so the drops tracker can alert on a newly-announced
+// relevant upcoming campaign through the existing notification system. It reads
+// m.notifications at call time (Discord may be enabled after startup) and does
+// nothing when no manager exists — the manager itself owns the opt-in gate and
+// durable dedupe.
+type minerUpcomingNotifier struct{ m *Miner }
+
+func (n minerUpcomingNotifier) NotifyUpcomingCampaign(ctx context.Context, c *models.Campaign) {
+	n.m.mu.RLock()
+	mgr := n.m.notifications
+	n.m.mu.RUnlock()
+	if mgr != nil {
+		mgr.NotifyUpcomingDropCampaign(ctx, c)
 	}
 }
 
