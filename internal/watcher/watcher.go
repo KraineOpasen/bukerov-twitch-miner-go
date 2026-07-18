@@ -225,17 +225,30 @@ func (r *rotationState) clearBoostLatch() {
 // been emitted for a streamer's current (still-missing) streak.
 type streakDiagState struct {
 	pursuing bool // "Pursuing watch streak" already logged
-	stalled  bool // "watched past the threshold but no streak" already warned
+	released bool // "released the boost seat (evidence/bounded window)" already logged
 }
 
-// watchStreakThresholdMinutes is roughly how many minutes of watch time Twitch
-// needs before it grants a watch-streak bonus (a streak is earned by viewing
-// ~5 minutes of a consecutive broadcast; 7 leaves a margin). It doubles as the
-// "should have earned it by now" line: once a streamer has been watched this
-// long with the streak still missing, the streak isn't merely under-watched -
-// something upstream (auth, viewing simulation, or a Twitch-side change) is
-// keeping Twitch from crediting it.
+// watchStreakThresholdMinutes is the rough number of watched minutes by which
+// Twitch usually grants a watch streak. It is NO LONGER a pursuit cutoff — a
+// streak is confirmed only by the real WATCH_STREAK points event (see
+// isBoostEligible / streakPursuitExhausted), because Twitch does not promise the
+// grant at exactly seven minutes and often delivers it later. It survives only
+// as a diagnostic reference for the streak progress display.
 const watchStreakThresholdMinutes = 7.0
+
+// minStreakWatchEvents is how many real "WATCH" points-earned credits confirm
+// Twitch is counting our view. Two of them is a far more reliable signal than a
+// wall-clock timer (rdavydov/Twitch-Channel-Points-Miner-v2#782): once we have
+// them and the streak still hasn't been granted, it isn't payable on this
+// broadcast, so the boost seat is released for another pending candidate.
+const minStreakWatchEvents = 2
+
+// streakPursuitCapMinutes bounds how long a streamer may hold the streak boost
+// seat with NO confirming WATCH credit at all (a view Twitch isn't counting).
+// It is deliberately well above Twitch's ~10-minute stream minimum so a genuine
+// streak has ample time to land first; it is a safety net, not the primary
+// release path (that is the WATCH_STREAK grant or minStreakWatchEvents).
+const streakPursuitCapMinutes = 15.0
 
 func NewMinuteWatcher(
 	client *api.TwitchClient,
@@ -802,13 +815,13 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 //
 // Avoiding last-second interruptions:
 // When the base pair is about to rotate a streamer out, if that streamer is
-// within a few minutes of completing its watch streak (mirrors the
-// `< 7 minutes` threshold used elsewhere for STREAK), the swap is postponed
-// by a short fixed delay so it isn't yanked right before the streak
-// completes. This is a best-effort heuristic based only on watch-streak
-// timing - imminent drop-campaign completion isn't tracked here (that would
-// require deeper integration with the drops package) and can still cause a
-// mid-progress interruption; see PR description for this known limitation.
+// still actively pursuing a watch streak (nearStreakCompletion / streakInProgress
+// — pending, watched, not exhausted), the swap is postponed by a short fixed
+// delay so it isn't yanked mid-pursuit. This is a best-effort heuristic based
+// only on watch-streak state - imminent drop-campaign completion isn't tracked
+// here (that would require deeper integration with the drops package) and can
+// still cause a mid-progress interruption; see PR description for this known
+// limitation.
 // Each streamer can only have its swap-out postponed once per approach, so
 // this can never stall the rotation indefinitely.
 func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
@@ -838,9 +851,10 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 }
 
 // streakDeferDelay is the short wait used to postpone a swap-out that would
-// otherwise interrupt a streamer seconds away from completing its watch
-// streak - deliberately much shorter than the rotation interval itself,
-// since it only needs to bridge the last couple of minutes to 7.
+// otherwise interrupt a streamer actively pursuing its watch streak -
+// deliberately much shorter than the rotation interval itself, and applied at
+// most once per approach (see rotateToLeastWatchedPair), so it only bridges a
+// brief window and can never stall the rotation.
 const streakDeferDelay = 2 * time.Minute
 
 // preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
@@ -1208,21 +1222,41 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 	return s.Settings.WatchStreak &&
 		s.Stream.StreakPending() &&
 		(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-		s.Stream.GetMinuteWatched() < watchStreakThresholdMinutes
+		!w.streakPursuitExhausted(idx)
 }
 
-// streakInProgress reports whether a boost-eligible streamer is part-way
-// through earning its watch streak: some watch time already banked, streak
-// still missing. Preferring these when picking the boost seat lets the watcher
-// finish a streak it already started instead of alternating between several
-// fresh pending-streak streamers each tick and completing none of them.
+// streakPursuitExhausted reports whether the streak boost seat should be RELEASED
+// for this streamer even though Twitch has not granted the streak. Release is
+// evidence-based, never a bare seven-minute timer:
+//
+//   - >= minStreakWatchEvents real WATCH credits prove Twitch is counting the
+//     view, so a still-missing streak means it is not payable on this broadcast
+//     (first stream of the series, a sub-30-minute gap, points opted out, or
+//     already earned) — holding the seat longer cannot make it appear; or
+//   - the continuously-watched minutes reached streakPursuitCapMinutes, a bounded
+//     upper safety net for a view Twitch never credits at all (no WATCH event
+//     arrives). The transport watchdog handles that unhealthy case separately.
+//
+// Releasing only frees the seat: StreakPending stays true, so a LATE real
+// WATCH_STREAK is still accepted and recorded exactly once.
+func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
+	s := w.streamers[idx]
+	return s.Stream.StreakWatchEvidence() >= minStreakWatchEvents ||
+		s.Stream.GetMinuteWatched() >= streakPursuitCapMinutes
+}
+
+// streakInProgress reports whether a boost-eligible streamer is actively
+// pursuing its watch streak: some watch time banked, streak still missing, and
+// the evidence-based pursuit not yet exhausted. Preferring these when picking the
+// boost seat lets the watcher finish a streak it already started instead of
+// alternating between several fresh pending-streak streamers each tick and
+// completing none of them.
 func (w *MinuteWatcher) streakInProgress(idx int) bool {
 	s := w.streamers[idx]
-	mw := s.Stream.GetMinuteWatched()
 	return s.Settings.WatchStreak &&
 		s.Stream.StreakPending() &&
-		mw > 0 &&
-		mw < watchStreakThresholdMinutes
+		s.Stream.GetMinuteWatched() > 0 &&
+		!w.streakPursuitExhausted(idx)
 }
 
 // betterBoostCandidate reports whether off-pair streamer cand should take the
@@ -1259,13 +1293,15 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 	return w.rotation.lastWatched[cand].Before(w.rotation.lastWatched[best])
 }
 
+// nearStreakCompletion reports whether the streamer is actively pursuing a watch
+// streak that has neither been earned nor exhausted, so an in-flight rotation
+// swap-out or a boost displacement should avoid interrupting it. With the
+// event-driven model there is no fixed "minutes-to-completion" line any more
+// (the pursuit ends on the WATCH_STREAK grant or evidence-based exhaustion), so
+// this mirrors streakInProgress. The swap-out deferral it feeds is bounded
+// (once per approach), so it can never stall the rotation.
 func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
-	s := w.streamers[idx]
-	if !s.Settings.WatchStreak || !s.Stream.StreakPending() {
-		return false
-	}
-	mw := s.Stream.GetMinuteWatched()
-	return mw >= 5 && mw < watchStreakThresholdMinutes
+	return w.streakInProgress(idx)
 }
 
 // noteStreakProgress logs watch-streak pursuit for a streamer that just had a
@@ -1292,22 +1328,28 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	}
 	state := w.streakDiag[idx]
 	mw := s.Stream.GetMinuteWatched()
+	evidence := s.Stream.StreakWatchEvidence()
 
 	if !state.pursuing {
 		state.pursuing = true
-		slog.Info("Pursuing watch streak",
+		slog.Info("Pursuing watch streak (holding a boost slot until Twitch grants it or the view is confirmed counted)",
 			"streamer", s.Username,
 			"minutesWatched", mw,
-			"neededMinutes", watchStreakThresholdMinutes,
+			"watchEvents", evidence,
 			"broadcastID", s.Stream.GetBroadcastID())
 	}
 
-	if mw >= watchStreakThresholdMinutes && !state.stalled {
-		state.stalled = true
-		slog.Warn("Watched past the watch-streak threshold but Twitch has not granted the streak - if this persists the streak is not being credited (check authorization / viewing), not merely under-watched",
+	// Log the evidence-based release exactly once: the view is confirmed counted
+	// (>= minStreakWatchEvents WATCH credits) or the bounded window elapsed, yet
+	// no streak arrived. This is usually benign (first stream of the series,
+	// already earned, or opted out), so it is INFO not WARN — and a late real
+	// WATCH_STREAK is still recorded if it ever comes.
+	if w.streakPursuitExhausted(idx) && !state.released {
+		state.released = true
+		slog.Info("Releasing the watch-streak boost slot: view confirmed counted or bounded window elapsed, but Twitch granted no streak this broadcast (likely first stream of the series, already earned, or points opted out)",
 			"streamer", s.Username,
 			"minutesWatched", mw,
-			"thresholdMinutes", watchStreakThresholdMinutes,
+			"watchEvents", evidence,
 			"broadcastID", s.Stream.GetBroadcastID())
 	}
 

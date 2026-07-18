@@ -35,6 +35,17 @@ type Stream struct {
 	streakEarnedAt          time.Time
 	MinuteWatched           float64
 
+	// streakWatchEvents counts the real "WATCH" points-earned events Twitch has
+	// delivered for the CURRENT broadcast. It is evidence (not proof of a grant)
+	// that Twitch is actually crediting our view — two of them is a far more
+	// reliable "the view is being counted" signal than a wall-clock timer (see
+	// rdavydov/Twitch-Channel-Points-Miner-v2#782). Session-local: reset to 0 by
+	// armWatchStreakLocked whenever the streak re-arms (new broadcast / fresh
+	// online), so it never carries across broadcasts and a restart starts it at
+	// zero. It only ever RELEASES the streak boost seat — it never records a
+	// 300-450 grant (that stays exclusively the WATCH_STREAK points event).
+	streakWatchEvents int
+
 	// spadeURL is written by the api client (stream bring-up, session refresh)
 	// and read by the minute sender and health probes on other goroutines —
 	// unexported so every access takes the lock.
@@ -240,6 +251,12 @@ func (s *Stream) armWatchStreakLocked() {
 	s.WatchStreakMissing = true
 	s.MinuteWatched = 0
 	s.minuteWatchedUpdated = time.Time{}
+	// The WATCH-evidence counter is session-local to one broadcast's pursuit, so
+	// it resets together with the minute counter and its timestamp — never carried
+	// across broadcasts (that would let a stale count short-circuit a fresh
+	// pursuit, and, symmetrically, a reset that forgot it would let the counter
+	// keep growing across broadcasts).
+	s.streakWatchEvents = 0
 }
 
 // MarkStreakEarned records a live watch-streak grant: the streak is no longer
@@ -296,6 +313,27 @@ func (s *Stream) StreakPending() bool {
 		return s.streakEarnedBroadcastID == "" || s.BroadcastID != s.streakEarnedBroadcastID
 	}
 	return s.streakEarnedBroadcastID == ""
+}
+
+// NoteWatchPointsEvent records that Twitch delivered a real "WATCH" points-earned
+// event for the current broadcast (evidence the view is being credited) and
+// returns the new count. Called from the PubSub handler; racefree via mu. It is
+// deliberately additive-only and session-local (reset on re-arm), so a PubSub
+// reconnect — which resubscribes for FUTURE events and never replays past ones —
+// cannot double-count a prior broadcast's evidence into a fresh pursuit.
+func (s *Stream) NoteWatchPointsEvent() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streakWatchEvents++
+	return s.streakWatchEvents
+}
+
+// StreakWatchEvidence returns how many real WATCH points events Twitch has
+// delivered for the current broadcast (see streakWatchEvents).
+func (s *Stream) StreakWatchEvidence() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.streakWatchEvents
 }
 
 // UpdateMinuteWatched advances the continuous watched-minutes counter and
