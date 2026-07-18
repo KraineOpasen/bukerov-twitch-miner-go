@@ -77,10 +77,14 @@ func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	// Early ticks, pending and not exhausted — including PAST the old 7-minute
-	// cutoff: exactly one "Pursuing" line, and NO release (a bare timer must not
-	// end the pursuit). This assertion fails if the 7-minute cutoff is restored.
+	// cutoff AND with WATCH credits present: exactly one "Pursuing" line, and NO
+	// release. Neither a bare timer nor WATCH evidence may end the pursuit; only
+	// the grant or the bounded window does. This fails if the 7-minute cutoff or
+	// an evidence-based early release is reintroduced.
 	s.Stream.MinuteWatched = 1
 	w.noteStreakProgress(0)
+	s.Stream.NoteWatchPointsEvent()
+	s.Stream.NoteWatchPointsEvent()
 	s.Stream.MinuteWatched = watchStreakThresholdMinutes + 1 // 8 min: past 7, still pursuing
 	w.noteStreakProgress(0)
 
@@ -88,18 +92,24 @@ func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 		t.Errorf("Pursuing logged %d times, want exactly 1:\n%s", got, buf.String())
 	}
 	if strings.Contains(buf.String(), "Releasing the watch-streak boost slot") {
-		t.Errorf("pursuit released past 7 min with no WATCH evidence — the timer cutoff leaked back in:\n%s", buf.String())
+		t.Errorf("pursuit released before the bounded window (past 7 min / on WATCH evidence) — early cutoff leaked back in:\n%s", buf.String())
 	}
 
-	// Confirm the view is counted (two real WATCH credits) with the streak still
-	// missing: exactly one release line, and it must not repeat.
-	s.Stream.NoteWatchPointsEvent()
-	s.Stream.NoteWatchPointsEvent()
+	// Reach the bounded continuous-watch window with the streak still missing:
+	// exactly one release line, and — since the view was confirmed counted (2
+	// WATCH credits) — it is the benign INFO variant, not the no-credit WARN.
+	s.Stream.MinuteWatched = streakPursuitCapMinutes
 	w.noteStreakProgress(0)
 	w.noteStreakProgress(0)
 
 	if got := strings.Count(buf.String(), "Releasing the watch-streak boost slot"); got != 1 {
 		t.Errorf("release logged %d times, want exactly 1:\n%s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "view confirmed counted") {
+		t.Errorf("with WATCH credits the release must classify as counted-but-no-streak:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "saw no WATCH point credits") {
+		t.Errorf("counted view must not log the no-credit WARN variant:\n%s", buf.String())
 	}
 
 	// Earning the streak clears the pursuit state so the next fresh broadcast
@@ -136,53 +146,94 @@ func TestBoostStaysEligiblePastSevenMinutes(t *testing.T) {
 	}
 }
 
-// TestBoostReleasedAfterTwoWatchEvents (§5.5) proves the evidence-based release:
-// once Twitch has delivered two real WATCH credits (the view is confirmed
-// counted) with no streak granted — the "first stream of the series / opted out"
-// case — the boost seat is released, WITHOUT recording any 300-450 grant. The
-// pursuit stays pending so a late real grant would still be accepted.
-func TestBoostReleasedAfterTwoWatchEvents(t *testing.T) {
+// TestBoostNotReleasedByWatchEventsAlone (§5.5, Q1) is the core safety guard for
+// the conservative pursuit: WATCH points-credits — however many — must NOT release
+// the boost seat. Twitch pays a watch streak only while the channel is watched,
+// and nothing proves the grant lands at/before the second WATCH credit; on top of
+// that the points-earned stream is account-wide, so a WATCH credit can come from
+// an external browser tab or a prior broadcast. The seat is held until the
+// authoritative WATCH_STREAK grant or the bounded continuous window — never on
+// WATCH evidence. The evidence still must never fabricate a 300-450 grant.
+func TestBoostNotReleasedByWatchEventsAlone(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
 	s.Stream.Update("b1", "t", nil, nil, 10)
-	s.Stream.MinuteWatched = 8
+	s.Stream.MinuteWatched = 8 // past 7, well under the bounded cap
 
 	if !w.isBoostEligible(0) {
 		t.Fatal("setup: streamer should start boost-eligible")
 	}
-	s.Stream.NoteWatchPointsEvent()
-	if !w.isBoostEligible(0) {
-		t.Error("one WATCH event is not yet enough evidence to release the seat")
+	// Many WATCH credits must not release the seat: only the grant or the bounded
+	// window may. This is the regression guard against re-adding an evidence-based
+	// (or any premature) early release.
+	for i := 0; i < 5; i++ {
+		s.Stream.NoteWatchPointsEvent()
+		if !w.isBoostEligible(0) {
+			t.Fatalf("WATCH credit #%d released the seat — WATCH evidence must never trigger release", i+1)
+		}
 	}
-	s.Stream.NoteWatchPointsEvent()
-	if w.isBoostEligible(0) {
-		t.Error("two WATCH credits confirm the view is counted; the seat must be released")
-	}
-	// Releasing must NOT fabricate a grant: the streak stays pending.
+	// Still pending, still no fabricated grant.
 	if !s.Stream.StreakPending() {
-		t.Error("the evidence fallback must only release the seat, never mark the streak earned")
+		t.Error("WATCH evidence must never mark the streak earned")
 	}
 	if e := s.History["WATCH_STREAK"]; e != nil {
-		t.Errorf("no WATCH_STREAK must be recorded by the evidence fallback, got %+v", e)
+		t.Errorf("no WATCH_STREAK must be recorded from WATCH evidence, got %+v", e)
 	}
 }
 
-// TestBoostReleasedAtBoundedCap (§5.12) proves the bounded safety net for a view
-// Twitch never credits (no WATCH event ever arrives): the seat is released once
-// the continuously-watched minutes reach the cap, so a channel can't hold the
-// boost forever.
+// TestDelayedWatchAfterReArmIsSafetyNeutral (Q2) documents the WATCH-evidence
+// binding limitation and proves it is safety-neutral. The points-earned payload
+// carries no broadcastID, so a WATCH credit that belongs to a prior broadcast
+// (or an external browser tab watching the same channel) and arrives after a
+// re-arm is counted toward the current attempt. Because release is bounded-minute
+// based and NOT evidence based, such a mis-attributed credit can never release the
+// boost seat early — it only tints a diagnostic log line.
+func TestDelayedWatchAfterReArmIsSafetyNeutral(t *testing.T) {
+	w, _ := newTestWatcher(1)
+	s := w.streamers[0]
+	s.Stream.Update("b1", "t", nil, nil, 10)
+	s.Stream.NoteWatchPointsEvent() // belongs to b1
+
+	// A genuinely new broadcast re-arms and resets the evidence counter.
+	s.Stream.Update("b2", "t", nil, nil, 10)
+	if s.Stream.StreakWatchEvidence() != 0 {
+		t.Fatalf("re-arm must reset the evidence counter, got %d", s.Stream.StreakWatchEvidence())
+	}
+
+	// Late/foreign WATCH credits now land against b2 (no broadcastID to reject them).
+	s.Stream.NoteWatchPointsEvent()
+	s.Stream.NoteWatchPointsEvent()
+	if s.Stream.StreakWatchEvidence() != 2 {
+		t.Fatalf("late WATCH credits are counted toward the current attempt, got %d", s.Stream.StreakWatchEvidence())
+	}
+
+	// Safety-critical: even two (possibly mis-attributed) WATCH credits must NOT
+	// release the seat while under the bounded window — evidence is diagnostic-only.
+	s.Stream.MinuteWatched = 5
+	if !w.isBoostEligible(0) {
+		t.Error("mis-attributed WATCH credits must never release the boost seat (release is minute-bounded, not evidence-based)")
+	}
+}
+
+// TestBoostReleasedAtBoundedCap (§5.12) proves the bounded fallback: a pending
+// streak holds the seat until the CONTINUOUSLY-watched minutes reach the cap, so
+// a channel can't hold the boost forever. WATCH evidence must not move that point
+// earlier — the cap is the sole non-grant release.
 func TestBoostReleasedAtBoundedCap(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
 	s.Stream.Update("b1", "t", nil, nil, 10)
+	// Two WATCH credits present: they must NOT bring the release forward.
+	s.Stream.NoteWatchPointsEvent()
+	s.Stream.NoteWatchPointsEvent()
 
 	s.Stream.MinuteWatched = streakPursuitCapMinutes - 1
 	if !w.isBoostEligible(0) {
-		t.Error("still under the bounded cap with a pending streak: must stay eligible")
+		t.Error("just under the bounded cap with a pending streak: must stay eligible even with WATCH evidence")
 	}
 	s.Stream.MinuteWatched = streakPursuitCapMinutes
 	if w.isBoostEligible(0) {
-		t.Error("at the bounded cap with no WATCH evidence, the seat must be released")
+		t.Error("at the bounded cap the seat must be released")
 	}
 }
 

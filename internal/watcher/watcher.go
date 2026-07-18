@@ -236,18 +236,25 @@ type streakDiagState struct {
 // as a diagnostic reference for the streak progress display.
 const watchStreakThresholdMinutes = 7.0
 
-// minStreakWatchEvents is how many real "WATCH" points-earned credits confirm
-// Twitch is counting our view. Two of them is a far more reliable signal than a
-// wall-clock timer (rdavydov/Twitch-Channel-Points-Miner-v2#782): once we have
-// them and the streak still hasn't been granted, it isn't payable on this
-// broadcast, so the boost seat is released for another pending candidate.
+// minStreakWatchEvents is how many real "WATCH" points-earned credits are taken
+// as "Twitch is counting a view of this channel". It is used ONLY as a diagnostic
+// in the release log (to tell "counted, but no streak" apart from "no WATCH credit
+// at all") — deliberately NOT as a release trigger. Two WATCH credits confirm a
+// view is counted, but nothing proves the grant precedes the second one, and the
+// points-earned stream is account-wide (a credit can come from an external browser
+// tab or a prior broadcast), so releasing on it would risk dropping the channel
+// before Twitch pays the streak. See streakPursuitExhausted.
 const minStreakWatchEvents = 2
 
-// streakPursuitCapMinutes bounds how long a streamer may hold the streak boost
-// seat with NO confirming WATCH credit at all (a view Twitch isn't counting).
-// It is deliberately well above Twitch's ~10-minute stream minimum so a genuine
-// streak has ample time to land first; it is a safety net, not the primary
-// release path (that is the WATCH_STREAK grant or minStreakWatchEvents).
+// streakPursuitCapMinutes is the bounded fallback that releases the streak boost
+// seat when Twitch has still not granted the streak. It is measured in
+// CONTINUOUSLY-watched minutes (Stream.UpdateMinuteWatched resets on a viewing
+// break), so it can only be reached by genuinely watching the channel that long
+// without interruption — well past Twitch's ~10-minute stream minimum and the
+// typical grant point, so a real streak has ample time to land first. The
+// authoritative WATCH_STREAK grant (StreakPending -> false) is the primary, faster
+// release; this cap only bounds the "streak will never come" cases (first stream of
+// the series, opted out, already earned, or a view Twitch isn't counting at all).
 const streakPursuitCapMinutes = 15.0
 
 func NewMinuteWatcher(
@@ -1226,23 +1233,24 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 }
 
 // streakPursuitExhausted reports whether the streak boost seat should be RELEASED
-// for this streamer even though Twitch has not granted the streak. Release is
-// evidence-based, never a bare seven-minute timer:
+// even though Twitch has not granted the streak. There is exactly one release
+// path here — the CONTINUOUSLY-watched minutes reached streakPursuitCapMinutes —
+// plus the authoritative WATCH_STREAK grant handled separately (StreakPending ->
+// false makes isBoostEligible false immediately, the primary and fastest release).
 //
-//   - >= minStreakWatchEvents real WATCH credits prove Twitch is counting the
-//     view, so a still-missing streak means it is not payable on this broadcast
-//     (first stream of the series, a sub-30-minute gap, points opted out, or
-//     already earned) — holding the seat longer cannot make it appear; or
-//   - the continuously-watched minutes reached streakPursuitCapMinutes, a bounded
-//     upper safety net for a view Twitch never credits at all (no WATCH event
-//     arrives). The transport watchdog handles that unhealthy case separately.
-//
-// Releasing only frees the seat: StreakPending stays true, so a LATE real
-// WATCH_STREAK is still accepted and recorded exactly once.
+// It deliberately does NOT release on WATCH-points evidence. Twitch pays a watch
+// streak only while the channel is actually being watched, and nothing proves the
+// grant lands at or before the second WATCH credit; releasing there would trade
+// streak reliability for faster rotation and could drop the channel just before
+// Twitch pays. The evidence is also unreliable as a trigger: the points-earned
+// subscription is account-wide, so a WATCH credit can be produced by an external
+// browser tab or arrive late from a prior broadcast on the same channel. So a
+// pending streak holds the seat until Twitch grants it or the bounded continuous
+// window elapses — maximizing 300-450 capture while staying bounded. Releasing
+// only frees the seat: StreakPending stays true, so a LATE real WATCH_STREAK is
+// still accepted and recorded exactly once.
 func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
-	s := w.streamers[idx]
-	return s.Stream.StreakWatchEvidence() >= minStreakWatchEvents ||
-		s.Stream.GetMinuteWatched() >= streakPursuitCapMinutes
+	return w.streamers[idx].Stream.GetMinuteWatched() >= streakPursuitCapMinutes
 }
 
 // streakInProgress reports whether a boost-eligible streamer is actively
@@ -1332,25 +1340,30 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 
 	if !state.pursuing {
 		state.pursuing = true
-		slog.Info("Pursuing watch streak (holding a boost slot until Twitch grants it or the view is confirmed counted)",
+		slog.Info("Pursuing watch streak (holding a boost slot until Twitch grants it or the bounded watch window elapses)",
 			"streamer", s.Username,
 			"minutesWatched", mw,
 			"watchEvents", evidence,
 			"broadcastID", s.Stream.GetBroadcastID())
 	}
 
-	// Log the evidence-based release exactly once: the view is confirmed counted
-	// (>= minStreakWatchEvents WATCH credits) or the bounded window elapsed, yet
-	// no streak arrived. This is usually benign (first stream of the series,
-	// already earned, or opted out), so it is INFO not WARN — and a late real
-	// WATCH_STREAK is still recorded if it ever comes.
+	// Log the bounded-window release exactly once, and use the WATCH-evidence
+	// counter purely to CLASSIFY it (not to trigger it): with WATCH credits seen,
+	// Twitch was counting the view but granted no streak (benign — first stream of
+	// the series, already earned, or opted out); with none, no watch credit
+	// arrived at all, which points at a transport/authorization problem rather
+	// than "not payable". Either way a late real WATCH_STREAK is still recorded.
 	if w.streakPursuitExhausted(idx) && !state.released {
 		state.released = true
-		slog.Info("Releasing the watch-streak boost slot: view confirmed counted or bounded window elapsed, but Twitch granted no streak this broadcast (likely first stream of the series, already earned, or points opted out)",
-			"streamer", s.Username,
-			"minutesWatched", mw,
-			"watchEvents", evidence,
-			"broadcastID", s.Stream.GetBroadcastID())
+		if evidence >= minStreakWatchEvents {
+			slog.Info("Releasing the watch-streak boost slot: watched the full bounded window with the view confirmed counted, but Twitch granted no streak this broadcast (likely first stream of the series, already earned, or points opted out)",
+				"streamer", s.Username, "minutesWatched", mw, "watchEvents", evidence,
+				"broadcastID", s.Stream.GetBroadcastID())
+		} else {
+			slog.Warn("Releasing the watch-streak boost slot: watched the full bounded window but saw no WATCH point credits - Twitch may not be counting this view (check authorization / transport), so the streak could not be earned",
+				"streamer", s.Username, "minutesWatched", mw, "watchEvents", evidence,
+				"broadcastID", s.Stream.GetBroadcastID())
+		}
 	}
 
 	w.streakDiag[idx] = state

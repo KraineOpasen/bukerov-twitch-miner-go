@@ -45,6 +45,36 @@ func TestArmWatchStreakResetsSessionAtomically(t *testing.T) {
 	}
 }
 
+// TestInterruptedPursuitCannotReachCapOnWallClock (Q3) proves the bounded streak
+// window means CONTINUOUSLY-watched minutes, not wall-clock between ACKs: a pursuit
+// interrupted by a rotation gap larger than maxGap resets MinuteWatched to 0, so
+// the accumulated total across the gap can never reach the cap by elapsed time —
+// the boost is released only after genuinely watching the channel that long.
+func TestInterruptedPursuitCannotReachCapOnWallClock(t *testing.T) {
+	s := NewStream()
+	s.Update("b1", "t", nil, nil, 10)
+	maxGap := 2 * time.Minute
+
+	// Accrue ~14 continuous minutes (just under a 15 cap), one report step.
+	s.UpdateMinuteWatched(maxGap) // anchor the continuity clock
+	s.MinuteWatched = 13
+	s.minuteWatchedUpdated = time.Now().Add(-60 * time.Second)
+	s.UpdateMinuteWatched(maxGap) // -> ~14 continuous
+	if s.MinuteWatched < 13.9 {
+		t.Fatalf("setup: expected ~14 continuous minutes, got %v", s.MinuteWatched)
+	}
+
+	// The channel is rotated OUT: the next report arrives after a gap > maxGap.
+	s.minuteWatchedUpdated = time.Now().Add(-10 * time.Minute)
+	delta := s.UpdateMinuteWatched(maxGap)
+
+	if delta != 0 || s.MinuteWatched != 0 {
+		t.Fatalf("a rotation gap must reset the continuous counter to 0, got delta=%v total=%v", delta, s.MinuteWatched)
+	}
+	// ~24 min of WALL-CLOCK elapsed, yet the continuous total is 0 again: a
+	// fragmented pursuit can never reach the cap by elapsed time alone.
+}
+
 // TestNoteWatchPointsEventCounts covers the evidence counter and its reset.
 func TestNoteWatchPointsEventCounts(t *testing.T) {
 	s := NewStream()
@@ -85,11 +115,10 @@ func TestMarkStreakEarnedAcceptedRegardlessOfMinutes(t *testing.T) {
 	}
 }
 
-// TestLateGrantAfterEvidenceStillEndsPursuit (§5.14) proves that once the
-// evidence-based fallback would have released the boost seat (two WATCH events),
-// a LATE real WATCH_STREAK is still accepted: StreakPending stays true after the
-// evidence alone (the model never marks it earned from WATCH events), and only
-// the WATCH_STREAK grant clears it.
+// TestLateGrantAfterEvidenceStillEndsPursuit (§5.14) proves that WATCH evidence
+// never marks the streak earned (no phantom grant): StreakPending stays true after
+// any number of WATCH events, and only the real WATCH_STREAK grant clears it — so
+// a late grant is always accepted whenever it arrives.
 func TestLateGrantAfterEvidenceStillEndsPursuit(t *testing.T) {
 	s := NewStream()
 	s.Update("b1", "t", nil, nil, 10)
