@@ -46,7 +46,7 @@ func sampleOverview() OverviewData {
 				GameName: "VALORANT", ViewersCount: 40000, ViewersCountFormatted: "40,000",
 				Title:         "☀️ 2X UPDATE + FAR CRY !DROPS ☀️ | Chilling w/ coffee",
 				Tags:          []string{"English", "DropsEnabled", "FPS"},
-				StreakPending: true, StreakMinutes: 5, StreakPercent: 71,
+				StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25,
 				HasCampaign: true, CampaignName: "Drop", CampaignPercent: 40, CampaignMinutesInfo: "8/20 min",
 				HasGoal: true, GoalTitle: "New Emote", GoalPercent: 72,
 				Preference: "prefer", HasActivePrediction: true,
@@ -218,7 +218,7 @@ func TestRenderNowWatching(t *testing.T) {
 	partials := testPartials(t)
 	view := NowWatchingView{
 		Slots: []WatchSlotView{
-			{Name: "shroud", Points: "100,000", Game: "VALORANT", HasGain: true, GainPerHour: "1,200", StreakPending: true, StreakMinutes: 5, StreakPercent: 71},
+			{Name: "shroud", Points: "100,000", Game: "VALORANT", HasGain: true, GainPerHour: "1,200", StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25},
 		},
 		QueuedNames:      []string{"pokimane", "ninja"},
 		HasNextRotation:  true,

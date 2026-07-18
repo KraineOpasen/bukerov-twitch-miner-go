@@ -118,6 +118,22 @@ type DropsTracker struct {
 	lastFilteredGame      int
 	lastSyncErr           string
 
+	// lastSummaryFingerprint is a deterministic semantic signature of the last
+	// "Drops sync complete" summary published at INFO (sorted tracked campaign
+	// IDs + the salient counts + outcome; no timestamps/pointers/map order). It
+	// lets a repeated sync that produced the SAME semantic result publish its
+	// summary at DEBUG instead of spamming an identical INFO block every cycle.
+	// An INFO summary is (re)published only on the first sync, on a genuine
+	// change of this fingerprint, or on recovery from a real sync error. Guarded
+	// by mu; only ever written from the fullSyncMu-serialized syncCampaigns.
+	lastSummaryFingerprint string
+	// lastGameFilterFailOpenKey remembers the name-only, nothing-resolved
+	// fail-open condition already warned about (a signature of the unresolved
+	// configured game names), so the honest transition WARN fires once instead of
+	// every sync; it re-fires when the unresolved set changes and clears (with one
+	// INFO transition) when resolution recovers. Guarded by mu.
+	lastGameFilterFailOpenKey string
+
 	// revision is bumped every time the published campaign pool changes (full or
 	// progress sync); backendUpdatedAt/lastUpdateSource record when and by what.
 	// All guarded by mu. Overview and Drops read these so they can prove they are
@@ -229,13 +245,19 @@ func NewDropsTracker(
 // UpdateBlacklist replaces the drop-name blacklist. Called when the operator
 // changes it on the Settings page so the new keywords take effect on the next
 // campaign sync without a restart.
+//
+// It deliberately does NOT trigger a campaign resync itself: its sole caller,
+// Miner.ApplySettings, always calls UpdateGameFilter immediately afterwards for
+// the same logical settings save, and that call issues the single resync that
+// re-filters the tracked set (blacklist included, since syncCampaigns reads the
+// blacklist fresh). Triggering here as well made one settings save fan out into
+// two full syncs — the buffered-to-1 campaignResync channel does not coalesce
+// the two back-to-back triggers when the loop drains the first before the second
+// is enqueued — which is the duplicate-INFO-block regression this avoids.
 func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Lock()
 	d.dropBlacklist = dropBlacklist
 	d.mu.Unlock()
-	// A blacklist change re-filters the tracked set; run it now instead of
-	// waiting out CampaignSyncInterval so the Drops page reflects it promptly.
-	d.triggerCampaignResync()
 }
 
 // UpdateGameFilter replaces the drop-campaign game filter (the strict game-ID
@@ -478,6 +500,18 @@ func (d *DropsTracker) loop() {
 	d.mu.RLock()
 	ctx := d.ctx
 	d.mu.RUnlock()
+
+	// A campaignResync buffered before the loop started (the construction-time
+	// UpdateGameFilter seed at miner setup) is already reflected by the initial
+	// full sync below, which reads the seeded filter fresh. Drop that pre-Start
+	// trigger so startup runs exactly one full sync instead of immediately firing
+	// a second, byte-identical one on the loop's first select iteration. A real
+	// resync requested after this point (a runtime filter change) still buffers
+	// and runs normally via the :campaignResync case below.
+	select {
+	case <-d.campaignResync:
+	default:
+	}
 
 	d.syncCampaigns()
 
@@ -817,33 +851,74 @@ func (d *DropsTracker) syncCampaigns() {
 	d.bumpRevisionLocked(updateSourceFullSync)
 	d.mu.Unlock()
 
-	// One concise INFO line per sync so a production deployment - which runs
-	// without -debug - can confirm the sync ran and see what it found.
-	// Previously every sync diagnostic was DEBUG-only, so an empty Drops page
-	// was indistinguishable from a sync that never ran, silently skipped every
-	// campaign, or errored. Detailed per-campaign skip reasons stay at DEBUG.
+	// One concise summary per sync so a production deployment - which runs without
+	// -debug - can confirm the sync ran and see what it found. Detailed
+	// per-campaign skip reasons stay at DEBUG. To stop the identical block
+	// repeating on every cycle (and on any redundant back-to-back sync), the
+	// summary is published at INFO only when it says something new: the first
+	// completed sync, a genuine change in the semantic result (fingerprint below),
+	// or recovery from a real sync error. An identical successful no-op result is
+	// published at DEBUG instead.
+	var (
+		summaryMsg  string
+		summaryArgs []any
+	)
 	switch {
 	case len(campaigns) > 0:
 		names := make([]string, 0, len(campaigns))
 		for _, c := range campaigns {
 			names = append(names, c.Name)
 		}
-		slog.Info("Drops sync complete: tracking active drop campaigns",
+		summaryMsg = "Drops sync complete: tracking active drop campaigns"
+		summaryArgs = []any{
 			"tracked", len(campaigns), "dashboardCampaigns", dashboardCount,
 			"recoveredFromInventory", recovered, "filteredByBlacklist", filteredByBlacklist,
-			"filteredByGame", filteredByGame, "campaigns", names)
+			"filteredByGame", filteredByGame, "campaigns", names,
+		}
 	case dashboardCount == 0 && recovered == 0:
-		slog.Info("Drops sync complete: Twitch reports no active drop campaigns for this account")
+		summaryMsg = "Drops sync complete: Twitch reports no active drop campaigns for this account"
 	default:
-		slog.Info("Drops sync complete: active drop campaigns exist on Twitch but none are trackable "+
-			"(all filtered out by date window, claim history, blacklist, or game filter; run with -debug for per-campaign reasons)",
+		summaryMsg = "Drops sync complete: active drop campaigns exist on Twitch but none are trackable " +
+			"(all filtered out by date window, claim history, blacklist, or game filter; run with -debug for per-campaign reasons)"
+		summaryArgs = []any{
 			"dashboardCampaigns", dashboardCount, "recoveredFromInventory", recovered,
-			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame)
+			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame,
+		}
+	}
+
+	fingerprint := syncSummaryFingerprint(campaigns, dashboardCount, recovered, filteredByBlacklist, filteredByGame)
+	d.mu.Lock()
+	changed := fingerprint != d.lastSummaryFingerprint
+	recovering := d.lastSyncErr != ""
+	d.lastSummaryFingerprint = fingerprint
+	d.mu.Unlock()
+
+	if changed || recovering {
+		slog.Info(summaryMsg, summaryArgs...)
+	} else {
+		slog.Debug(summaryMsg, summaryArgs...)
 	}
 
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, time.Since(start), nil)
 
 	d.updateStreamerCampaigns()
+}
+
+// syncSummaryFingerprint is a deterministic semantic signature of a completed
+// full sync's result, used to suppress republishing an identical "Drops sync
+// complete" INFO summary every cycle. It includes only stable, order-independent
+// facts: the sorted tracked campaign IDs and the salient pipeline counts. It
+// excludes timestamps, map iteration order, pointer addresses, request IDs,
+// volatile progress values and raw payloads, so two syncs that reached the same
+// outcome produce the same fingerprint.
+func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recovered, filteredByBlacklist, filteredByGame int) string {
+	ids := make([]string, 0, len(campaigns))
+	for _, c := range campaigns {
+		ids = append(ids, c.ID)
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("tracked=%d[%s]|dashboard=%d|recovered=%d|blacklist=%d|game=%d",
+		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame)
 }
 
 func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign, dashboardTotal int, err error) {
@@ -1217,11 +1292,11 @@ func (d *DropsTracker) applyClaimHistory(campaigns []*models.Campaign) []*models
 
 		switch {
 		case campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed:
-			slog.Info("Skipping drop campaign: already claimed",
+			slog.Debug("Skipping drop campaign: already claimed",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
 				"alreadyClaimed", campaign.ClaimedDropNames)
 		case len(campaign.ClaimedDropNames) > 0:
-			slog.Info("Skipping already-claimed reward within active drop campaign",
+			slog.Debug("Skipping already-claimed reward within active drop campaign",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
 				"alreadyClaimed", campaign.ClaimedDropNames)
 		}
@@ -1293,7 +1368,7 @@ func (d *DropsTracker) applyBlacklist(campaigns []*models.Campaign) []*models.Ca
 	kept := make([]*models.Campaign, 0, len(campaigns))
 	for _, campaign := range campaigns {
 		if keyword, dropName, matched := campaign.MatchesBlacklist(blacklist); matched {
-			slog.Info("Skipping drop campaign: matched drop-name blacklist",
+			slog.Debug("Skipping drop campaign: matched drop-name blacklist",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
 				"keyword", keyword, "matchedDrop", dropName)
 			continue
@@ -1358,7 +1433,13 @@ func (d *DropsTracker) resolveAllowedGameIDs(candidates []*models.Campaign) (all
 		switch hits := alias[key]; {
 		case len(hits) == 0:
 			// Unresolved this sync: never a reason to drop a campaign (fail-open).
-			slog.Info("Drops game filter: configured game name did not resolve to a game ID this sync",
+			// This is a benign, expected per-name diagnostic — not an operational
+			// failure — because a configured strict game ID (dropCampaignGameIDs)
+			// already filters correctly on its own, independent of whether the
+			// best-effort NAME resolves against this sync's candidates. So it stays
+			// at DEBUG. The genuine name-only-nothing-resolved transition is warned
+			// (once) in applyGameFilter's fail-open branch instead.
+			slog.Debug("Drops game filter: configured game name did not resolve to a game ID this sync",
 				"name", name, "reason", "game_name_unresolved")
 		case len(hits) > 1:
 			// Ambiguous: keep ALL matching IDs (fail-open for the affected games),
@@ -1387,14 +1468,16 @@ func (d *DropsTracker) resolveAllowedGameIDs(candidates []*models.Campaign) (all
 // the raw-inventory claim sweep, which runs earlier in syncCampaigns.
 func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*models.Campaign, filtered int) {
 	allowed, configured := d.resolveAllowedGameIDs(campaigns)
+	failOpen := configured && len(allowed) == 0
+	d.noteGameFilterResolution(failOpen)
 	if !configured {
 		return campaigns, 0 // F1: no filter configured -> unchanged (track all).
 	}
 	if len(allowed) == 0 {
 		// F4: names configured but none resolved, and no strict IDs -> track all
-		// this cycle rather than blindly dropping everything.
-		slog.Warn("Drops game filter configured but no game names resolved to an ID this sync; " +
-			"tracking all games this cycle (set a strict Twitch game ID for candidate-independent filtering)")
+		// this cycle rather than blindly dropping everything. The honest WARN is
+		// emitted once by noteGameFilterResolution above (and re-emitted only when
+		// the unresolved name set changes) so it doesn't repeat every sync.
 		return campaigns, 0
 	}
 
@@ -1411,7 +1494,7 @@ func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*mo
 		}
 		if gameID == "" {
 			// F2: unknown game identity -> keep; a name is never proof it's foreign.
-			slog.Info("Drops game filter: keeping campaign with no game ID",
+			slog.Debug("Drops game filter: keeping campaign with no game ID",
 				"campaign", c.Name, "campaignID", c.ID, "reason", "missing_game_id")
 			kept = append(kept, c)
 			continue
@@ -1420,12 +1503,55 @@ func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*mo
 			kept = append(kept, c)
 			continue
 		}
-		slog.Info("Skipping drop campaign: game not in configured drop-campaign game list",
+		slog.Debug("Skipping drop campaign: game not in configured drop-campaign game list",
 			"campaign", c.Name, "campaignID", c.ID, "gameID", gameID, "gameName", gameName,
 			"reason", "game_not_allowed", "configuredGameIDs", cfgIDs, "configuredGameNames", cfgNames)
 		filtered++
 	}
 	return kept, filtered
+}
+
+// noteGameFilterResolution manages the once-per-transition WARN for the
+// name-only, nothing-resolved fail-open condition (the F4 branch in
+// applyGameFilter). failOpen is true when the operator configured game names,
+// none resolved to a game ID this sync, and no strict game ID covers the set —
+// so the filter falls open to tracking every game. The honest WARN is published
+// only when this condition first appears or when the unresolved configured-name
+// set changes; while it persists unchanged the note drops to DEBUG so it does not
+// spam every sync; and when it clears (a name resolved, a strict ID was added, or
+// the filter was removed) a single INFO transition is published. State guarded by
+// mu; only ever driven from the fullSyncMu-serialized syncCampaigns pipeline.
+func (d *DropsTracker) noteGameFilterResolution(failOpen bool) {
+	var key string
+	if failOpen {
+		d.mu.RLock()
+		names := append([]string(nil), d.filterGameNames...)
+		d.mu.RUnlock()
+		sort.Strings(names)
+		// A non-empty, deterministic signature of the unresolved name set; the
+		// leading marker keeps it distinct from the empty "resolved" state.
+		key = "unresolved:" + strings.Join(names, "\x00")
+	}
+
+	d.mu.Lock()
+	prev := d.lastGameFilterFailOpenKey
+	d.lastGameFilterFailOpenKey = key
+	d.mu.Unlock()
+
+	switch {
+	case key != "" && key != prev:
+		// Newly fail-open, or the unresolved configured-name set changed.
+		slog.Warn("Drops game filter configured but no game names resolved to an ID this sync; " +
+			"tracking all games this cycle (set a strict Twitch game ID for candidate-independent filtering)")
+	case key != "" && key == prev:
+		// Same unresolved condition as the previous sync — don't repeat the WARN.
+		slog.Debug("Drops game filter still resolving no configured game name to an ID; " +
+			"tracking all games this cycle (unchanged since last sync)")
+	case key == "" && prev != "":
+		// Recovered: a name now resolves, a strict ID was added, or the filter was
+		// removed. One INFO transition, then silence.
+		slog.Info("Drops game filter: unresolved game-name fail-open condition cleared")
+	}
 }
 
 // sortedKeys returns the map keys sorted, for deterministic log/test output.

@@ -11,6 +11,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
 
 // statsTTL bounds how often the Overview recomputes per-streamer
@@ -282,16 +283,16 @@ func (s *Server) buildCards(
 			card.ViewersCountFormatted = util.FormatNumber(card.ViewersCount)
 			card.ChannelRestrictedDrop = st.HasChannelRestrictedCampaign()
 
-			// Watch-streak progress (0..7 min) toward the streak bonus.
+			// Watch-streak progress across the bounded pursuit window (0..cap
+			// continuously-watched minutes). The denominator is the watcher's hard
+			// pursuit cap (StreakPursuitCapMinutes), not a fixed 7 — it tracks the
+			// window the boost seat is pursued for, not a guaranteed reward minute.
 			if settings.WatchStreak && st.Stream.StreakPending() {
 				mins := int(st.Stream.GetMinuteWatched())
 				card.StreakPending = true
 				card.StreakMinutes = mins
-				pct := (mins * 100) / watchStreakThresholdMinutes
-				if pct > 100 {
-					pct = 100
-				}
-				card.StreakPercent = pct
+				card.StreakCapMinutes = streakCapMinutes
+				card.StreakPercent = streakProgressPercent(mins)
 			}
 
 			// Drop progress: only when farming (active campaign + measurable).
@@ -337,7 +338,24 @@ func (s *Server) buildCards(
 	return live, offline, untracked, ticker
 }
 
-const watchStreakThresholdMinutes = 7
+// streakCapMinutes is the watch-streak progress-bar denominator: the watcher's
+// bounded pursuit cap (20 continuously-watched minutes) surfaced from its single
+// backend source of truth, so the UI never hardcodes its own copy and stays in
+// step if the cap ever changes. It replaced the obsolete fixed 7-minute
+// threshold, which was never the real cap after PR #102.
+const streakCapMinutes = int(watcher.StreakPursuitCapMinutes)
+
+// streakProgressPercent maps continuously-watched minutes to a 0..100 progress
+// value over the bounded pursuit window (streakCapMinutes). Watching past the cap
+// clamps to a full bar rather than overflowing — the window is bounded, and the
+// bar reflects pursuit progress, not a guaranteed reward at the cap.
+func streakProgressPercent(mins int) int {
+	pct := (mins * 100) / streakCapMinutes
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
 
 // maxCardTags caps how many stream tags a card shows, so a tag-heavy channel
 // can't blow up the card layout.
@@ -468,11 +486,8 @@ func (s *Server) buildNowWatching(
 			mins := int(st.Stream.GetMinuteWatched())
 			slot.StreakPending = true
 			slot.StreakMinutes = mins
-			pct := (mins * 100) / watchStreakThresholdMinutes
-			if pct > 100 {
-				pct = 100
-			}
-			slot.StreakPercent = pct
+			slot.StreakCapMinutes = streakCapMinutes
+			slot.StreakPercent = streakProgressPercent(mins)
 		}
 		if cs, ok := stats[name]; ok && cs.hasRate {
 			slot.HasGain = true

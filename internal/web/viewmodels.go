@@ -57,11 +57,14 @@ type StreamerInfo struct {
 	PointsPerHour string `json:"points_per_hour,omitempty"`
 	PointsToday   string `json:"points_today,omitempty"`
 
-	// StreakPending/StreakMinutes describe watch-streak progress toward the
-	// ~7-minute threshold for the current broadcast (not a day count).
-	StreakPending bool `json:"streak_pending,omitempty"`
-	StreakMinutes int  `json:"streak_minutes,omitempty"`
-	StreakPercent int  `json:"streak_percent,omitempty"`
+	// StreakPending/StreakMinutes/StreakCapMinutes describe watch-streak progress
+	// across the bounded 20-minute pursuit window for the current broadcast (not a
+	// day count). StreakCapMinutes is the progress-bar denominator (the watcher's
+	// hard pursuit cap), so the template never hardcodes its own copy.
+	StreakPending    bool `json:"streak_pending,omitempty"`
+	StreakMinutes    int  `json:"streak_minutes,omitempty"`
+	StreakCapMinutes int  `json:"streak_cap_minutes,omitempty"`
+	StreakPercent    int  `json:"streak_percent,omitempty"`
 
 	// LastEventText/LastEventAgo summarise the most recent notable event for
 	// this streamer from the in-memory ring buffer.
@@ -148,14 +151,15 @@ type PredictionView struct {
 // WatchSlotView is one of the (max two) active watch slots rendered in the
 // pinned "Now Watching" sidebar block.
 type WatchSlotView struct {
-	Name          string
-	Points        string
-	Game          string
-	StreakPending bool
-	StreakMinutes int
-	StreakPercent int
-	HasGain       bool
-	GainPerHour   string
+	Name             string
+	Points           string
+	Game             string
+	StreakPending    bool
+	StreakMinutes    int
+	StreakCapMinutes int
+	StreakPercent    int
+	HasGain          bool
+	GainPerHour      string
 	// Origin is the watch-slot source: "configured" (fixed streamer list) or
 	// "discovery" (directory discovery). Discovery-occupied slots render a
 	// badge and omit configured-only detail (points/streak/gain).
