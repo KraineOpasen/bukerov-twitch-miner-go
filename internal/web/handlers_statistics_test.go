@@ -7,10 +7,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // TestMain opens the process-wide DB singleton against a durable directory
@@ -500,6 +502,157 @@ func TestStatisticsPageColoursAnnotationsFromRecord(t *testing.T) {
 	// again fall through to the accent and vanish against the line.
 	if contains(body, "C.event") {
 		t.Errorf("removed palette token C.event still referenced; type→colour switch not fully removed")
+	}
+}
+
+// TestStatisticsDropdownUsesConfiguredRoster pins the §3 fix: the streamer
+// selector is built from the configured roster, not analytics history, so a
+// streamer removed from settings (whose points/annotation rows are deliberately
+// retained) no longer lingers in the dropdown — and cannot silently become the
+// default first <option>. The retained history must still be queryable by
+// direct URL.
+func TestStatisticsDropdownUsesConfiguredRoster(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+
+	// Configured roster: alpha, beta. A removed streamer "gamma-removed" keeps
+	// its history rows but is not in the roster.
+	srv.AttachStreamers([]*models.Streamer{
+		models.NewStreamer("alpha", models.DefaultStreamerSettings()),
+		models.NewStreamer("beta", models.DefaultStreamerSettings()),
+	})
+	if err := repo.RecordPoints("alpha", 1000, "WATCH"); err != nil {
+		t.Fatalf("seed alpha: %v", err)
+	}
+	if err := repo.RecordPoints("gamma-removed", 500, "WATCH"); err != nil {
+		t.Fatalf("seed gamma: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, want := range []string{`<option value="alpha">`, `<option value="beta">`} {
+		if !contains(body, want) {
+			t.Errorf("dropdown missing configured streamer option %q", want)
+		}
+	}
+	if contains(body, `value="gamma-removed"`) {
+		t.Errorf("removed streamer gamma-removed must not appear in the dropdown")
+	}
+
+	// History for the removed streamer is preserved and still queryable directly.
+	rec2 := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/points-history?streamer=gamma-removed&range=7d", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("history status = %d, want 200 (history must be preserved)", rec2.Code)
+	}
+	var hist analytics.PointsHistory
+	if err := json.Unmarshal(rec2.Body.Bytes(), &hist); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(hist.Points) != 1 {
+		t.Errorf("removed streamer history points = %d, want 1 (history must not be destroyed)", len(hist.Points))
+	}
+}
+
+// TestStatisticsDropdownEmptyRosterIsSafe: with no configured streamers the page
+// still renders (disabled selector + empty state), never a crash or a stale
+// history-derived option.
+func TestStatisticsDropdownEmptyRosterIsSafe(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	// History exists for a streamer that is NOT in the (empty) roster.
+	if err := repo.RecordPoints("orphan", 1000, "WATCH"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/statistics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if contains(body, `value="orphan"`) {
+		t.Errorf("history-only streamer orphan must not appear with an empty roster")
+	}
+}
+
+// TestPointsHistoryBetSummaryAndPredictionSlice pins the §4 fix: a prediction
+// win is a first-class PREDICTION breakdown slice (not OTHER), and the response
+// carries a betSummary (won/staked/refunded/net) derived from the same window's
+// bets. A prediction loss must never appear as a positive breakdown slice.
+func TestPointsHistoryBetSummaryAndPredictionSlice(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	const s = "bet_summary_streamer"
+
+	// Points series with a prediction credit and a prediction loss (a spend).
+	for _, p := range []struct {
+		balance int
+		reason  string
+	}{
+		{1000, "WATCH"},      // baseline
+		{900, "Spent"},       // bet placed (-100): excluded from breakdown
+		{1150, "PREDICTION"}, // won round (+250 gross credit)
+		{1050, "Spent"},      // second bet placed (-100)
+		{1050, "PREDICTION"}, // lost round: flat, no credit
+	} {
+		if err := repo.RecordPoints(s, p.balance, p.reason); err != nil {
+			t.Fatalf("seed points: %v", err)
+		}
+	}
+	// Matching bet records (one win, one loss) for the summary.
+	if err := repo.RecordBet(analytics.BetRecord{
+		EventID: "bs-win", Streamer: s, Timestamp: time.Now().UnixMilli(), Strategy: "SMART",
+		ResultType: "WIN", Placed: 100, Won: 250, Gained: 150, Odds: 2.5,
+	}); err != nil {
+		t.Fatalf("record win: %v", err)
+	}
+	if err := repo.RecordBet(analytics.BetRecord{
+		EventID: "bs-lose", Streamer: s, Timestamp: time.Now().UnixMilli(), Strategy: "SMART",
+		ResultType: "LOSE", Placed: 100, Won: 0, Gained: -100, Odds: 1.8,
+	}); err != nil {
+		t.Fatalf("record lose: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/points-history?streamer="+s+"&range=7d", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Prediction win is its own slice; no positive slice from the loss.
+	var pred *analytics.ReasonShare
+	for i := range got.Breakdown {
+		if got.Breakdown[i].Reason == "PREDICTION" {
+			pred = &got.Breakdown[i]
+		}
+		if got.Breakdown[i].Reason == "OTHER" {
+			t.Errorf("prediction credit leaked into OTHER: %+v", got.Breakdown)
+		}
+	}
+	if pred == nil || pred.Gained != 250 || pred.Count != 1 {
+		t.Fatalf("PREDICTION slice = %+v, want gained 250 count 1", pred)
+	}
+
+	// Bet summary present and consistent: Net == Won - Staked.
+	if got.BetSummary == nil {
+		t.Fatal("expected a betSummary in the response")
+	}
+	bs := got.BetSummary
+	if bs.Won != 250 || bs.Staked != 200 || bs.Net != 50 || bs.Wins != 1 || bs.Losses != 1 {
+		t.Errorf("betSummary = %+v, want won 250 staked 200 net 50 wins 1 losses 1", bs)
+	}
+	if bs.Net != bs.Won-bs.Staked {
+		t.Errorf("betSummary invariant broken: net %d != won %d - staked %d", bs.Net, bs.Won, bs.Staked)
 	}
 }
 

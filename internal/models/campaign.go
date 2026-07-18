@@ -154,10 +154,17 @@ func (c *Campaign) Clone() *Campaign {
 	return &clone
 }
 
+// ClearClaimedDrops keeps only the campaign's still-active, unclaimed drops. A
+// drop is kept when it is unclaimed AND within its active window — where a drop
+// with no window supplied (the common inventory shape) counts as active (see
+// Drop.InActiveWindow). Using InActiveWindow rather than the bare DateTimeMatch
+// is what stops the lightweight progress sync from stripping an inventory-
+// recovered campaign's date-less drops and dropping the whole campaign out of
+// the tracked set (and out of directory discovery) between full syncs.
 func (c *Campaign) ClearClaimedDrops() {
-	validDrops := make([]*Drop, 0)
+	validDrops := make([]*Drop, 0, len(c.Drops))
 	for _, drop := range c.Drops {
-		if drop.DateTimeMatch() && !drop.IsClaimed {
+		if drop.InActiveWindow() && !drop.IsClaimed {
 			validDrops = append(validDrops, drop)
 		}
 	}

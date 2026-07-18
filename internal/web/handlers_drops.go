@@ -54,6 +54,50 @@ func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 	s.renderDropsList(w, r)
 }
 
+// handleAPIDropsSync backs the manual "Sync Drops now" action. It asks the drops
+// tracker to schedule an immediate campaign resync — cooldown-gated and
+// coalescing, so it can neither launch a parallel sync nor become a request
+// storm — and returns the outcome plus the last sync's bookkeeping as JSON.
+// It never blocks on the network sync (completion is observed via the polled
+// status) and never surfaces a secret: only operation-level counts and the
+// sanitized last-error string are returned. CSRF is enforced globally by
+// csrfProtectMiddleware, so only the method is checked here.
+func (s *Server) handleAPIDropsSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeNotAllowed(w)
+		return
+	}
+	s.mu.RLock()
+	provider := s.campaignsProvider
+	s.mu.RUnlock()
+	if provider == nil {
+		writeServiceUnavailable(w, "Drops tracking is not available")
+		return
+	}
+
+	res := provider.RequestManualSync()
+	st := res.Status
+	writeJSONOK(w, map[string]interface{}{
+		"triggered":          res.Triggered,
+		"retryAfterSecs":     int(res.RetryAfter.Round(time.Second).Seconds()),
+		"runs":               st.Runs,
+		"lastSyncAtMillis":   unixMilliOrZero(st.LastSyncAt),
+		"dashboardCampaigns": st.DashboardCampaigns,
+		"recoveredCampaigns": st.RecoveredCampaigns,
+		"trackedCampaigns":   st.TrackedCampaigns,
+		"lastError":          st.LastError,
+	})
+}
+
+// unixMilliOrZero renders a time as Unix milliseconds, or 0 for the zero time
+// (so "never synced" is unambiguous in JSON).
+func unixMilliOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
 // renderDropsList builds and renders the campaign-queue partial, merging the
 // progress-watchdog health badges and the campaign-policy decisions. Shared by
 // the drops poll and the policy mode / per-drop-rule POST handlers.

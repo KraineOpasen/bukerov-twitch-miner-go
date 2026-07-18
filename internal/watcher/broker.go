@@ -491,3 +491,31 @@ func configuredWatchedIndexes(slots []slotOccupant) []int {
 	}
 	return out
 }
+
+// resetLostSlotContinuity breaks the continuous-watch accumulator for every
+// configured channel that held a watch slot last tick but not this tick — a real
+// slot loss/switch — then records this tick's configured occupants for the next
+// comparison. Twitch resets its server-side watch-streak session the moment we
+// stop watching a channel, so a channel that loses its slot even for a single tick
+// shorter than maxContinuousGap must restart its continuous minutes from zero;
+// otherwise Stream.UpdateMinuteWatched would credit the unwatched gap on the next
+// report and reach the streak-pursuit cap without that many truly-continuous
+// watched minutes, releasing the boost early. Only the accumulator is reset (via
+// ResetWatchContinuity); the streak identity — StreakPending, the remembered
+// grant, and the WATCH-evidence counter — is preserved, so a late real
+// WATCH_STREAK is still accepted. Runs on the loop goroutine; lastConfiguredWatched
+// is loop-owned and login-keyed (index-free, so applyStreamerList leaves it alone).
+func (w *MinuteWatcher) resetLostSlotContinuity(slots []slotOccupant) {
+	watched := make(map[string]*models.Streamer, len(slots))
+	for _, s := range slots {
+		if s.idx >= 0 {
+			watched[s.streamer.Username] = s.streamer
+		}
+	}
+	for login, streamer := range w.lastConfiguredWatched {
+		if _, stillWatched := watched[login]; !stillWatched {
+			streamer.Stream.ResetWatchContinuity()
+		}
+	}
+	w.lastConfiguredWatched = watched
+}

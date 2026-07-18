@@ -503,6 +503,64 @@ func assertNoRecovery(t *testing.T, h *watchdogHarness, wantDetail string) {
 	}
 }
 
+// TestWatchdogInertBeforeTrackedState (§11/§13.19) proves the watchdog is inert
+// until a drop is actually in the tracked set: with no tracked campaigns it
+// tracks nothing, runs no recovery, and creates no channel exclusion. The
+// watchdog recovers already-tracked drops; it never discovers campaigns, so an
+// empty tracker must leave it completely quiet.
+func TestWatchdogInertBeforeTrackedState(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.drops.mu.Lock()
+	h.drops.campaigns = nil // nothing tracked yet
+	h.drops.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		h.tick(10*time.Minute, true, 3)
+	}
+
+	if snap := h.w.Snapshot(); len(snap.Drops) != 0 {
+		t.Fatalf("watchdog must track nothing with no tracked campaigns, got %+v", snap.Drops)
+	}
+	if syncNow, triggered := h.drops.counts(); syncNow != 0 || triggered != 0 {
+		t.Errorf("watchdog must run no recovery with nothing tracked, got syncNow=%d triggered=%d", syncNow, triggered)
+	}
+	if entries := h.w.AvoidEntries(); len(entries) != 0 {
+		t.Errorf("watchdog must create no channel exclusion with nothing tracked, got %v", entries)
+	}
+}
+
+// TestWatchdogRotationDoesNotExtendExemption (§11/§13.20) refutes the "frequent
+// rotation extends the channel-switch exemption forever" hypothesis. A rotation
+// presents as a gate failure (the channel stops holding the slot): it resets the
+// stall evidence but must NOT touch the avoid list. Only the channel-switch
+// RECOVERY stage sets an exclusion, and it runs at most once per finite pipeline
+// (re-armed only every Rearm), so no amount of plain rotation can create or
+// extend an exemption.
+func TestWatchdogRotationDoesNotExtendExemption(t *testing.T) {
+	h := newWatchdogHarness(t)
+
+	// Simulate many rotations: each cycle the channel drops its slot (rotated
+	// out) and later regains it, never long enough to confirm a stall.
+	for i := 0; i < 10; i++ {
+		h.watch.mu.Lock()
+		h.watch.watching = map[string]bool{"chan": false} // rotated out
+		h.watch.mu.Unlock()
+		h.tick(10*time.Minute, true, 3)
+
+		h.watch.mu.Lock()
+		h.watch.watching = nil // back to default: holding the slot again
+		h.watch.mu.Unlock()
+		h.tick(5*time.Minute, true, 1)
+	}
+
+	if entries := h.w.AvoidEntries(); len(entries) != 0 {
+		t.Fatalf("rotation alone must never create a channel exclusion, got %v", entries)
+	}
+	if syncNow, _ := h.drops.counts(); syncNow != 0 {
+		t.Errorf("rotation churn must not trigger forced resyncs, got syncNow=%d", syncNow)
+	}
+}
+
 func TestWatchdogGateTwitchOutage(t *testing.T) {
 	h := newWatchdogHarness(t)
 	stallReady(t, h)

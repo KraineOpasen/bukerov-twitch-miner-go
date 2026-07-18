@@ -36,10 +36,13 @@ type NextStreamCheckProvider interface {
 	GetNextStreamCheck() time.Time
 }
 
-// CampaignsProvider exposes the currently tracked active drop campaigns so
-// the Drops page can render them. It's satisfied by the drops tracker.
+// CampaignsProvider exposes the currently tracked active drop campaigns so the
+// Drops page can render them, the last sync's bookkeeping for the Status Center,
+// and the manual "Sync Drops now" action. It's satisfied by the drops tracker.
 type CampaignsProvider interface {
 	Campaigns() []*models.Campaign
+	SyncStatus() drops.SyncStatus
+	RequestManualSync() drops.ManualSyncResult
 }
 
 // DropCatalogProvider exposes the Drops-page catalog tabs: upcoming campaigns
@@ -526,6 +529,7 @@ func (s *Server) handler() http.Handler {
 	// Drops routes
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
+	mux.HandleFunc("/api/drops/sync", s.handleAPIDropsSync)
 	mux.HandleFunc("/api/drops/upcoming", s.handleAPIDropsUpcoming)
 	mux.HandleFunc("/api/drops/past", s.handleAPIDropsPast)
 	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)

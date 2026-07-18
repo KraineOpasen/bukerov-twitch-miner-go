@@ -112,6 +112,28 @@ func (d *Drop) DateTimeMatch() bool {
 	return d.StartAt.Before(now) && d.EndAt.After(now)
 }
 
+// HasDateWindow reports whether Twitch supplied a per-drop date window (either
+// bound present). Inventory dropCampaignsInProgress entries frequently omit
+// per-drop startAt/endAt, so a drop can be legitimately live with no window.
+func (d *Drop) HasDateWindow() bool {
+	return !d.StartAt.IsZero() || !d.EndAt.IsZero()
+}
+
+// InActiveWindow reports whether the drop should be treated as currently active.
+// A drop whose window Twitch actually supplied must be inside it; a drop with NO
+// window (both bounds zero — the common inventory-recovery shape) is treated as
+// active. Membership in the inventory's in-progress list already proves Twitch
+// considers the drop live, so discarding it merely for a missing window is the
+// silent loss that made inventory-recovered campaigns flap in and out of the
+// tracked set between the full sync (which keeps them) and the lightweight
+// progress sync (which used to strip them via ClearClaimedDrops).
+func (d *Drop) InActiveWindow() bool {
+	if !d.HasDateWindow() {
+		return true
+	}
+	return d.DateTimeMatch()
+}
+
 // ClampedProgress returns this drop's watch progress as a 0-100 percentage,
 // clamped so an over-watched drop (Twitch occasionally reports more minutes
 // than required) never renders past a full bar.

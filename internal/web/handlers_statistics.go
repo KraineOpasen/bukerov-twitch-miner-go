@@ -52,15 +52,20 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 	debugURL := s.debugURL
 	s.mu.RUnlock()
 
-	var names []string
+	// The streamer selector lists only the current configured roster, never the
+	// analytics history. A streamer removed from settings keeps its persisted
+	// points/bet rows (history is never destroyed), so ListStreamers — which
+	// returns every channel that ever recorded a point — would keep the removed
+	// name in the dropdown, and, because the first <option> is the browser
+	// default with no `selected`, could even make it the active selection. The
+	// roster is what the operator currently tracks and is updated at runtime via
+	// AttachStreamers, so add/remove takes effect without a restart. Removed
+	// streamers' history stays queryable and exportable by direct URL/streamer
+	// parameter; it is only dropped from the picker.
+	names := s.configuredStreamerNames()
+
 	var strategies []string
 	if s.analytics != nil {
-		if streamers, err := s.analytics.Repository().ListStreamers(); err == nil {
-			for _, st := range streamers {
-				names = append(names, st.Name)
-			}
-			sort.Strings(names)
-		}
 		if strats, err := s.analytics.Repository().DistinctBetStrategies(); err == nil {
 			strategies = strats
 		}
@@ -76,6 +81,33 @@ func (s *Server) handleStatisticsPage(w http.ResponseWriter, r *http.Request) {
 		BetStrategies:  strategies,
 	}
 	s.renderPage(w, r, "statistics.html", data)
+}
+
+// configuredStreamerNames returns the current configured roster's usernames,
+// sorted and de-duplicated, for the statistics/ROI streamer selectors. It reads
+// the roster under the same lock AttachStreamers writes it, so a runtime
+// add/remove is reflected without a restart. Deliberately sourced from the
+// roster, not analytics.ListStreamers, so a removed streamer's retained history
+// never lingers in the picker (see handleStatisticsPage).
+func (s *Server) configuredStreamerNames() []string {
+	s.mu.RLock()
+	roster := s.streamers
+	s.mu.RUnlock()
+
+	seen := make(map[string]struct{}, len(roster))
+	names := make([]string, 0, len(roster))
+	for _, st := range roster {
+		if st == nil || st.Username == "" {
+			continue
+		}
+		if _, dup := seen[st.Username]; dup {
+			continue
+		}
+		seen[st.Username] = struct{}{}
+		names = append(names, st.Username)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // handleAPIPointsHistory returns the balance series + event annotations for one
@@ -120,6 +152,18 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Betting summary for the SAME streamer/window as the series, so the
+	// earnings donut's PREDICTION slice (a gross positive credit) can be shown
+	// beside the stake risked, refunded, and net result — making the origin of
+	// the positive prediction points explicit instead of an unexplained "Other".
+	// Best-effort: a bet-history read failure must not fail the whole page, it
+	// just omits the summary.
+	var betSummary *analytics.BetSummary
+	if bets, betErr := repo.GetBets(streamer, "", start, end); betErr == nil && len(bets) > 0 {
+		bs := analytics.SummarizeBets(bets)
+		betSummary = &bs
+	}
+
 	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), maxHistoryRows)
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:         streamer,
@@ -127,6 +171,7 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		Points:           points,
 		Annotations:      annotations,
 		Breakdown:        analytics.BreakdownFromSamples(raw),
+		BetSummary:       betSummary,
 		RawTruncated:     rawTruncated,
 		ChartDownsampled: chartDownsampled,
 	})

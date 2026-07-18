@@ -13,9 +13,14 @@ import (
 //
 // The table is exact — no Contains/HasPrefix — so "WATCH" can never swallow
 // "WATCH STREAK". TrimSpace/ToUpper apply to the lookup key only, never to
-// stored data. Low-volume reasons with no UX value of their own ("WEEKLY
-// REWARDS", "PREDICTION") are deliberately pooled into OTHER, as is any
-// unknown or empty value.
+// stored data. PREDICTION is a first-class category: a prediction win is a
+// genuine positive channel-point credit (Twitch's point-gain reason_code
+// "PREDICTION"), so folding it into OTHER made betting winnings look like an
+// unexplained "Other" slice in the earnings donut. Genuinely low-value reasons
+// with no UX identity of their own ("WEEKLY REWARDS") are still pooled into
+// OTHER, as is any unknown or empty value. Note that only positive balance
+// deltas reach here (see BreakdownFromSamples), so a prediction LOSS — a
+// non-positive delta — never becomes a PREDICTION slice.
 func canonicalPointReason(raw string) string {
 	switch strings.ToUpper(strings.TrimSpace(raw)) {
 	case "WATCH STREAK", "WATCH_STREAK":
@@ -26,6 +31,8 @@ func canonicalPointReason(raw string) string {
 		return "CLAIM"
 	case "RAID":
 		return "RAID"
+	case "PREDICTION":
+		return "PREDICTION"
 	default:
 		return "OTHER"
 	}

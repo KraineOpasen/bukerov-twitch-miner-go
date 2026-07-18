@@ -137,20 +137,39 @@ func TestOverviewCardOmitsEmptyTitleAndTags(t *testing.T) {
 	}
 }
 
-// TestSidebarAnchorsMatchOverviewSections documents the information
-// architecture finding: the «Стримеры» and «Предикшены» sidebar tabs are NOT
-// duplicate routes — they are in-page anchors into the Overview sections. The
-// anchor targets in the sidebar and the section ids in the live partial must
-// stay in sync, and the card/section styles they rely on must exist in the
-// page templates.
-func TestSidebarAnchorsMatchOverviewSections(t *testing.T) {
+// TestSidebarOmitsDuplicateOverviewTabs pins the information-architecture fix:
+// the «Стримеры» (/#grid) and «Предикшены» (/#predictions) sidebar tabs offered
+// no destination distinct from Overview (they were in-page anchors into
+// sections Overview already renders), so they were removed from the sidebar.
+// The section anchors themselves must survive in the live partial so a
+// bookmarked /#grid or /#predictions URL still lands on the right section (no
+// redirect needed), and the generic hashchange highlighting must remain.
+func TestSidebarOmitsDuplicateOverviewTabs(t *testing.T) {
 	base, err := templatesFS.ReadFile("templates/base.html")
 	if err != nil {
 		t.Fatalf("read base.html: %v", err)
 	}
-	for _, want := range []string{`data-nav="#grid"`, `data-nav="#predictions"`, `href="/#grid"`, `href="/#predictions"`, "hashchange"} {
-		if !strings.Contains(string(base), want) {
-			t.Errorf("base.html missing %q", want)
+	// The duplicate sidebar tabs are gone.
+	for _, banned := range []string{`data-nav="#grid"`, `data-nav="#predictions"`, `href="/#grid"`, `href="/#predictions"`} {
+		if strings.Contains(string(base), banned) {
+			t.Errorf("base.html still contains removed duplicate sidebar tab %q", banned)
+		}
+	}
+	// Generic hash-based active-nav highlighting stays (harmless, and still used
+	// by any deep link into a section).
+	if !strings.Contains(string(base), "hashchange") {
+		t.Errorf("base.html missing hashchange handling")
+	}
+
+	// The section anchors themselves still exist, so a direct /#grid or
+	// /#predictions URL scrolls to the right Overview section.
+	partial, err := templatesFS.ReadFile("templates/partials/overview_live.html")
+	if err != nil {
+		t.Fatalf("read overview_live.html: %v", err)
+	}
+	for _, want := range []string{`id="grid"`, `id="predictions"`} {
+		if !strings.Contains(string(partial), want) {
+			t.Errorf("overview_live.html missing section anchor %q", want)
 		}
 	}
 

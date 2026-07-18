@@ -18,6 +18,78 @@ func refund(streamer, strategy string, placed int, odds float64) BetRecord {
 	return BetRecord{Streamer: streamer, Strategy: strategy, ResultType: "REFUND", Placed: placed, Won: 0, Gained: 0, Odds: odds}
 }
 
+func TestSummarizeBetsEmptyIsEmpty(t *testing.T) {
+	s := SummarizeBets(nil)
+	if !s.Empty {
+		t.Fatal("empty input must set Empty=true")
+	}
+	if s.Won != 0 || s.Staked != 0 || s.Refunded != 0 || s.Net != 0 || s.Wins != 0 || s.Losses != 0 || s.Refunds != 0 {
+		t.Fatalf("empty summary must be all-zero, got %+v", s)
+	}
+}
+
+func TestSummarizeBets(t *testing.T) {
+	cases := []struct {
+		name string
+		recs []BetRecord
+		want BetSummary
+	}{
+		{
+			// Won=250, Staked=100(win)+100(loss)=200, Net=(250-100)+(-100)=50.
+			// Net must equal Won-Staked (250-200=50) and be positive.
+			name: "positive net: winnings exceed stake",
+			recs: []BetRecord{
+				win("a", "SMART", 100, 250, 2.5),
+				lose("a", "SMART", 100, 1.8),
+			},
+			want: BetSummary{Wins: 1, Losses: 1, Refunds: 0, Won: 250, Staked: 200, Refunded: 0, Net: 50},
+		},
+		{
+			// Two losses, one small win. Won=120, Staked=100+100+100=300, Net=120-300=-180.
+			name: "negative net: losses dominate, never a positive figure",
+			recs: []BetRecord{
+				lose("a", "SMART", 100, 2.0),
+				lose("a", "SMART", 100, 2.0),
+				win("a", "SMART", 100, 120, 1.2),
+			},
+			want: BetSummary{Wins: 1, Losses: 2, Refunds: 0, Won: 120, Staked: 300, Refunded: 0, Net: -180},
+		},
+		{
+			// One win exactly returns the stake (odds 1.0 payout == stake) plus a
+			// loss of the same size: Won=100, Staked=200, Net=-100... adjust so net==0.
+			name: "zero net",
+			recs: []BetRecord{
+				win("a", "SMART", 100, 200, 2.0), // +100
+				lose("a", "SMART", 100, 2.0),     // -100
+			},
+			want: BetSummary{Wins: 1, Losses: 1, Refunds: 0, Won: 200, Staked: 200, Refunded: 0, Net: 0},
+		},
+		{
+			// A refund returns the stake: counted and reported separately, never
+			// part of Staked, and net-neutral.
+			name: "refund is net-neutral and separately reported",
+			recs: []BetRecord{
+				win("a", "SMART", 100, 250, 2.5),
+				refund("a", "SMART", 400, 3.5),
+			},
+			want: BetSummary{Wins: 1, Losses: 0, Refunds: 1, Won: 250, Staked: 100, Refunded: 400, Net: 150},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SummarizeBets(tc.recs)
+			got.Empty = false // set implicitly false by non-empty input; compare the rest
+			if got != tc.want {
+				t.Fatalf("SummarizeBets() = %+v, want %+v", got, tc.want)
+			}
+			// Invariant the UI relies on: Net == Won - Staked.
+			if got.Net != got.Won-got.Staked {
+				t.Errorf("invariant broken: Net(%d) != Won(%d) - Staked(%d)", got.Net, got.Won, got.Staked)
+			}
+		})
+	}
+}
+
 func TestComputeROIEmptyIsNeutralNotDivByZero(t *testing.T) {
 	s := ComputeROI(nil)
 	if !s.Empty {

@@ -167,6 +167,35 @@ func ComputeROI(records []BetRecord) ROISummary {
 	return sum
 }
 
+// SummarizeBets folds resolved bets into a BetSummary: gross winnings, stake
+// risked on settled bets, refunded stake, and the net result. It is the compact
+// sibling of ComputeROI used for the earnings-page betting summary, and shares
+// its conventions so the two never disagree: refunds return the stake (counted
+// but not "staked"), and Net == Won - Staked == Σ Gained. A nil/empty slice
+// yields Empty=true. Pure and deterministic (no I/O, no time.Now).
+func SummarizeBets(records []BetRecord) BetSummary {
+	if len(records) == 0 {
+		return BetSummary{Empty: true}
+	}
+	var s BetSummary
+	for _, r := range records {
+		s.Net += r.Gained
+		switch r.ResultType {
+		case resultWin:
+			s.Wins++
+			s.Won += r.Won
+			s.Staked += r.Placed
+		case resultLose:
+			s.Losses++
+			s.Staked += r.Placed
+		case resultRefund:
+			s.Refunds++
+			s.Refunded += r.Placed
+		}
+	}
+	return s
+}
+
 // accumulate folds one record into a keyed group, creating it on first sight.
 func accumulate(m map[string]*GroupStat, key string, r BetRecord) {
 	g := m[key]

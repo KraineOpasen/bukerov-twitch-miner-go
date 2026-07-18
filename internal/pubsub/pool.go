@@ -477,6 +477,12 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				// are recorded.
 				if reasonCode != "WATCH" {
 					events.Record(events.TypePointsEarned, streamer.Username, fmt.Sprintf("+%d (%s)", earned, reasonCode))
+				} else {
+					// A real WATCH credit is evidence Twitch is counting this
+					// view. The watcher uses two of them as the reliable,
+					// non-timer signal to release the streak boost seat; it never
+					// records a streak grant (only the WATCH_STREAK event does).
+					streamer.Stream.NoteWatchPointsEvent()
 				}
 			}
 		}

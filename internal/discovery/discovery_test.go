@@ -142,6 +142,34 @@ func TestActiveCampaignGames(t *testing.T) {
 	}
 }
 
+// TestActiveCampaignGamesKeysOnDisplayNameOnly is the discovery half of the §6
+// inventory-only-campaign chain. Twitch's inventory dropCampaignsInProgress node
+// supplies game as { id, displayName } with no `name`, so a recovered campaign
+// has Game.Name == "" and only Game.DisplayName set. activeCampaignGames must
+// still key on the displayName, or World of Tanks never becomes "active",
+// directory discovery never queries its channels, and the campaign appears lost
+// even though it is tracked. (The drops half — that recovery preserves this
+// identity — is drops.TestSyncRecoversAllowedInventoryCampaignAmidBlacklistAndForeign.)
+func TestActiveCampaignGamesKeysOnDisplayNameOnly(t *testing.T) {
+	recovered := &models.Campaign{
+		ID:          "campaign-3moe",
+		Name:        "3 MoE Challenge",
+		Game:        &models.Game{ID: "27546", DisplayName: "World of Tanks"}, // Name deliberately empty
+		ClaimStatus: models.CampaignClaimStatusInProgress,
+		Drops:       []*models.Drop{{ID: "d1", Name: "3 MoE Reward", MinutesRequired: 120}},
+	}
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{recovered}}
+	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
+
+	games := m.activeCampaignGames()
+	if games["world of tanks"] != "27546" {
+		t.Errorf("displayName-only campaign must key activeCampaignGames on the displayName, got %v", games)
+	}
+	if !m.gameStillActive("27546") {
+		t.Error("expected the recovered campaign's game to be active")
+	}
+}
+
 func TestSelectBestPrefersPoolOrder(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
 	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
