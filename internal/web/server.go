@@ -50,6 +50,13 @@ type CampaignsProvider interface {
 // campaigns. Satisfied by the miner.
 type DropCatalogProvider interface {
 	UpcomingCampaigns() []*models.Campaign
+	// RelevantUpcomingCampaigns returns the not-yet-started campaigns filtered to
+	// the operator's game filter (display-only relevance) — foreign upcoming
+	// campaigns are hidden from the tab.
+	RelevantUpcomingCampaigns() []*models.Campaign
+	// CampaignSyncStatus reports the last full-sync bookkeeping so the Upcoming
+	// tab can render honest never-synced / empty / stale states.
+	CampaignSyncStatus() drops.SyncStatus
 	PastCampaigns() ([]drops.CatalogRecord, error)
 }
 
@@ -166,6 +173,11 @@ type Server struct {
 	gameIDResolver          GameIDResolver
 	status                  *StatusBroadcaster
 	ready                   bool
+
+	// displayLoc is the time zone the dashboard renders absolute times in (set
+	// from config LoggerSettings.TimeZone via SetDisplayLocation). nil falls back
+	// to the server's local time. Guarded by mu.
+	displayLoc *time.Location
 
 	// statsCache memoises the per-streamer analytics-derived figures
 	// (points-today and points-per-hour) so the 30s Overview poll doesn't hit
@@ -340,6 +352,27 @@ func (s *Server) SetDropCatalogProvider(provider DropCatalogProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dropCatalogProvider = provider
+}
+
+// SetDisplayLocation sets the time zone the dashboard renders absolute times in
+// (the config's LoggerSettings.TimeZone; production uses Asia/Jerusalem). Safe
+// to call at wiring time before the server serves requests.
+func (s *Server) SetDisplayLocation(loc *time.Location) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.displayLoc = loc
+}
+
+// displayLocation returns the configured display time zone, falling back to the
+// server's local time when none was set.
+func (s *Server) displayLocation() *time.Location {
+	s.mu.RLock()
+	loc := s.displayLoc
+	s.mu.RUnlock()
+	if loc == nil {
+		return time.Local
+	}
+	return loc
 }
 
 func (s *Server) SetFollowedProvider(provider FollowedProvider) {
