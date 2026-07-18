@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,16 @@ type DropsTracker struct {
 	// one. Guarded by mu so it can be updated at runtime from the Settings page.
 	dropBlacklist []string
 
+	// filterGameIDs / filterGameNames are the operator's drop-campaign game
+	// filter (config.DropCampaignGameIDs / DropCampaignGames). filterGameIDs is a
+	// strict, candidate-independent allowlist of exact opaque Twitch game IDs;
+	// filterGameNames is a best-effort list of game names/displayNames resolved
+	// to IDs against each sync's own campaign candidates. Both empty = track
+	// every game (the backward-compatible default). Guarded by mu so they can be
+	// updated at runtime from the Settings page.
+	filterGameIDs   []string
+	filterGameNames []string
+
 	// resync wakes the lightweight progress-sync loop early (buffered to 1 so
 	// bursts of triggers between syncs coalesce into a single extra run). Fed by
 	// TriggerProgressSync, e.g. right after a watched minute is reported so the
@@ -159,6 +170,20 @@ func NewDropsTracker(
 func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Lock()
 	d.dropBlacklist = dropBlacklist
+	d.mu.Unlock()
+}
+
+// UpdateGameFilter replaces the drop-campaign game filter (the strict game-ID
+// allowlist and the best-effort game-name list). Called at construction and
+// whenever the operator saves the Settings page, so a change takes effect on
+// the next full campaign sync without a restart: stale foreign assignments drop
+// off when updateStreamerCampaigns re-runs against the refiltered tracked set.
+// The two lists are the operator's inputs verbatim (already normalized by the
+// config/Settings layer); applyGameFilter does the trimming/resolution.
+func (d *DropsTracker) UpdateGameFilter(gameIDs, gameNames []string) {
+	d.mu.Lock()
+	d.filterGameIDs = gameIDs
+	d.filterGameNames = gameNames
 	d.mu.Unlock()
 }
 
@@ -602,6 +627,15 @@ func (d *DropsTracker) syncCampaigns() {
 
 	campaigns = d.applyBlacklist(campaigns)
 	afterBlacklist := len(campaigns)
+	filteredByBlacklist := afterClaimHistory - afterBlacklist
+
+	// Single filtering point: the dashboard and inventory-recovered candidates
+	// are already merged into `campaigns` here, so one applyGameFilter pass gates
+	// both. Placed after the blacklist so a blacklisted campaign is attributed to
+	// the blacklist (not the game filter), and after recordCatalog so a foreign
+	// campaign still survives in the durable "Past" catalog.
+	campaigns, filteredByGame := d.applyGameFilter(campaigns)
+	afterGameFilter := len(campaigns)
 
 	slog.Debug("Drops sync: campaign counts through the pipeline",
 		"dashboardCount", dashboardCount,
@@ -609,7 +643,10 @@ func (d *DropsTracker) syncCampaigns() {
 		"afterInventory", afterInventory,
 		"recoveredFromInventory", recovered,
 		"afterClaimHistory", afterClaimHistory,
-		"afterBlacklist", afterBlacklist)
+		"afterBlacklist", afterBlacklist,
+		"filteredByBlacklist", filteredByBlacklist,
+		"afterGameFilter", afterGameFilter,
+		"filteredByGame", filteredByGame)
 
 	d.mu.Lock()
 	d.campaigns = campaigns
@@ -628,13 +665,15 @@ func (d *DropsTracker) syncCampaigns() {
 		}
 		slog.Info("Drops sync complete: tracking active drop campaigns",
 			"tracked", len(campaigns), "dashboardCampaigns", dashboardCount,
-			"recoveredFromInventory", recovered, "campaigns", names)
-	case dashboardCount == 0:
+			"recoveredFromInventory", recovered, "filteredByBlacklist", filteredByBlacklist,
+			"filteredByGame", filteredByGame, "campaigns", names)
+	case dashboardCount == 0 && recovered == 0:
 		slog.Info("Drops sync complete: Twitch reports no active drop campaigns for this account")
 	default:
 		slog.Info("Drops sync complete: active drop campaigns exist on Twitch but none are trackable "+
-			"(all filtered out by date window, claim history, or blacklist; run with -debug for per-campaign reasons)",
-			"dashboardCampaigns", dashboardCount)
+			"(all filtered out by date window, claim history, blacklist, or game filter; run with -debug for per-campaign reasons)",
+			"dashboardCampaigns", dashboardCount, "recoveredFromInventory", recovered,
+			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame)
 	}
 
 	d.recordSync(dashboardCount, recovered, len(campaigns), nil)
@@ -1098,6 +1137,140 @@ func (d *DropsTracker) applyBlacklist(campaigns []*models.Campaign) []*models.Ca
 	}
 
 	return kept
+}
+
+// resolveAllowedGameIDs computes the set of Twitch game IDs whose campaigns may
+// be tracked this sync, from the two operator lists. Strict IDs
+// (filterGameIDs) are candidate-independent and compared as exact, opaque,
+// case-sensitive values. Names (filterGameNames) are best-effort: each is
+// resolved to game ID(s) via the games actually present among this sync's
+// campaign candidates, matched with TrimSpace+case-fold on game name AND
+// displayName (never Contains/HasPrefix, never collapsing inner whitespace), so
+// two distinct game IDs are never merged by a coincidental name. configured
+// reports whether either list was non-empty (so the caller can distinguish "no
+// filter" from "filter resolved to nothing").
+func (d *DropsTracker) resolveAllowedGameIDs(candidates []*models.Campaign) (allowed map[string]struct{}, configured bool) {
+	d.mu.RLock()
+	ids := d.filterGameIDs
+	names := d.filterGameNames
+	d.mu.RUnlock()
+
+	configured = len(ids) > 0 || len(names) > 0
+	allowed = make(map[string]struct{}, len(ids)+len(names))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			allowed[id] = struct{}{} // exact, case-sensitive, no other normalization
+		}
+	}
+	if len(names) == 0 {
+		return allowed, configured
+	}
+
+	// alias(case-folded name/displayName) -> set of game IDs seen this sync.
+	alias := make(map[string]map[string]struct{})
+	note := func(k, id string) {
+		if k = strings.ToLower(strings.TrimSpace(k)); k == "" {
+			return
+		}
+		if alias[k] == nil {
+			alias[k] = make(map[string]struct{})
+		}
+		alias[k][id] = struct{}{}
+	}
+	for _, c := range candidates {
+		if c.Game == nil || c.Game.ID == "" {
+			continue
+		}
+		note(c.Game.Name, c.Game.ID)
+		note(c.Game.DisplayName, c.Game.ID)
+	}
+
+	for _, name := range names {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		switch hits := alias[key]; {
+		case len(hits) == 0:
+			// Unresolved this sync: never a reason to drop a campaign (fail-open).
+			slog.Info("Drops game filter: configured game name did not resolve to a game ID this sync",
+				"name", name, "reason", "game_name_unresolved")
+		case len(hits) > 1:
+			// Ambiguous: keep ALL matching IDs (fail-open for the affected games),
+			// never pick one. Not a global track-all.
+			resolved := sortedKeys(hits)
+			slog.Warn("Drops game filter: game name is ambiguous; allowing every matching game ID",
+				"name", name, "gameIDs", resolved, "reason", "game_name_ambiguous")
+			for id := range hits {
+				allowed[id] = struct{}{}
+			}
+		default:
+			for id := range hits {
+				allowed[id] = struct{}{}
+			}
+		}
+	}
+	return allowed, configured
+}
+
+// applyGameFilter is the single filtering point for the merged (dashboard +
+// inventory-recovered) campaign set: it keeps only campaigns whose game ID is in
+// the operator's allowed set, and returns how many it dropped. Fail-open by
+// design: nothing configured -> track all; a name-only config that resolved to
+// no IDs -> track all this cycle with one WARN; a campaign with no game ID ->
+// kept (its identity is unknown, never proof it is foreign). It never touches
+// the raw-inventory claim sweep, which runs earlier in syncCampaigns.
+func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*models.Campaign, filtered int) {
+	allowed, configured := d.resolveAllowedGameIDs(campaigns)
+	if !configured {
+		return campaigns, 0 // F1: no filter configured -> unchanged (track all).
+	}
+	if len(allowed) == 0 {
+		// F4: names configured but none resolved, and no strict IDs -> track all
+		// this cycle rather than blindly dropping everything.
+		slog.Warn("Drops game filter configured but no game names resolved to an ID this sync; " +
+			"tracking all games this cycle (set a strict Twitch game ID for candidate-independent filtering)")
+		return campaigns, 0
+	}
+
+	d.mu.RLock()
+	cfgIDs := d.filterGameIDs
+	cfgNames := d.filterGameNames
+	d.mu.RUnlock()
+
+	kept = make([]*models.Campaign, 0, len(campaigns))
+	for _, c := range campaigns {
+		var gameID, gameName string
+		if c.Game != nil {
+			gameID, gameName = c.Game.ID, c.Game.Name
+		}
+		if gameID == "" {
+			// F2: unknown game identity -> keep; a name is never proof it's foreign.
+			slog.Info("Drops game filter: keeping campaign with no game ID",
+				"campaign", c.Name, "campaignID", c.ID, "reason", "missing_game_id")
+			kept = append(kept, c)
+			continue
+		}
+		if _, ok := allowed[gameID]; ok {
+			kept = append(kept, c)
+			continue
+		}
+		slog.Info("Skipping drop campaign: game not in configured drop-campaign game list",
+			"campaign", c.Name, "campaignID", c.ID, "gameID", gameID, "gameName", gameName,
+			"reason", "game_not_allowed", "configuredGameIDs", cfgIDs, "configuredGameNames", cfgNames)
+		filtered++
+	}
+	return kept, filtered
+}
+
+// sortedKeys returns the map keys sorted, for deterministic log/test output.
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (d *DropsTracker) claimAllDropsFromInventory() {

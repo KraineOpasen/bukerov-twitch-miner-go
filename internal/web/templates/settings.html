@@ -107,6 +107,20 @@
                 </div>
                 <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropBlacklist" placeholder="beta&#10;league of legends&#10;emote"></textarea>
             </div>
+            <div class="setting-row items-start">
+                <div class="pr-4">
+                    <div class="setting-label">{{ t "set.drops.game_ids_label" }}</div>
+                    <div class="setting-description">{{ t "set.drops.game_ids_desc" }}</div>
+                </div>
+                <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropCampaignGameIDs" placeholder="18122&#10;493057"></textarea>
+            </div>
+            <div class="setting-row items-start">
+                <div class="pr-4">
+                    <div class="setting-label">{{ t "set.drops.games_label" }}</div>
+                    <div class="setting-description">{{ t "set.drops.games_desc" }}</div>
+                </div>
+                <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropCampaignGames" placeholder="World of Tanks&#10;World of Warships"></textarea>
+            </div>
         </div>
     </details>
 
@@ -604,6 +618,8 @@
         }
 
         document.getElementById('dropBlacklist').value = (settings.dropBlacklist || []).join('\n');
+        document.getElementById('dropCampaignGameIDs').value = (settings.dropCampaignGameIDs || []).join('\n');
+        document.getElementById('dropCampaignGames').value = (settings.dropCampaignGames || []).join('\n');
 
         populateDirectoryGameList(settings.directoryGames || []);
         document.getElementById('discoveryMode').value = settings.discoveryMode || 'all';
@@ -1040,6 +1056,8 @@
                 guildId: document.getElementById('discordGuildId').value
             },
             dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
+            dropCampaignGameIDs: parseBlacklist(document.getElementById('dropCampaignGameIDs').value),
+            dropCampaignGames: parseBlacklist(document.getElementById('dropCampaignGames').value),
             directoryGames: gatherDirectoryGames(),
             discoveryMode: document.getElementById('discoveryMode').value,
             discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked,

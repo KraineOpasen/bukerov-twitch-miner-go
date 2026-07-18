@@ -75,6 +75,8 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 		},
 		DropBlacklist:             cfg.DropBlacklist,
 		DirectoryGames:            cfg.DirectoryGames,
+		DropCampaignGameIDs:       cfg.DropCampaignGameIDs,
+		DropCampaignGames:         cfg.DropCampaignGames,
 		DiscoveryPreferTracked:    cfg.DiscoveryPreferTracked,
 		DiscoveryMode:             string(cfg.DiscoveryMode),
 		DiscoveryPreferSubscribed: cfg.DiscoveryPreferSubscribed,
@@ -148,6 +150,8 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		},
 		DropBlacklist:             defaults.DropBlacklist,
 		DirectoryGames:            defaults.DirectoryGames,
+		DropCampaignGameIDs:       defaults.DropCampaignGameIDs,
+		DropCampaignGames:         defaults.DropCampaignGames,
 		DiscoveryPreferTracked:    defaults.DiscoveryPreferTracked,
 		DiscoveryMode:             string(defaults.DiscoveryMode),
 		DiscoveryPreferSubscribed: defaults.DiscoveryPreferSubscribed,
@@ -212,6 +216,8 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
 	cfg.DirectoryGames = normalizeGameList(s.DirectoryGames)
+	cfg.DropCampaignGameIDs = normalizeGameIDList(s.DropCampaignGameIDs)
+	cfg.DropCampaignGames = normalizeGameList(s.DropCampaignGames)
 	cfg.DiscoveryPreferTracked = s.DiscoveryPreferTracked
 	cfg.DiscoveryMode = config.NormalizeDiscoveryMode(s.DiscoveryMode)
 	cfg.DiscoveryPreferSubscribed = s.DiscoveryPreferSubscribed
@@ -243,6 +249,28 @@ func normalizeGameList(games []string) []string {
 			continue
 		}
 		seen[key] = true
+		cleaned = append(cleaned, trimmed)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
+}
+
+// normalizeGameIDList trims each Twitch game ID, drops blanks, and removes exact
+// duplicates while preserving order. Game IDs are opaque, so — unlike
+// normalizeGameList — this dedupes CASE-SENSITIVELY and never lowercases: two
+// IDs differing only in case are treated as distinct. Returns nil when nothing
+// remains so the field is omitted from config.json rather than serialized as [].
+func normalizeGameIDList(ids []string) []string {
+	cleaned := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
 		cleaned = append(cleaned, trimmed)
 	}
 	if len(cleaned) == 0 {
