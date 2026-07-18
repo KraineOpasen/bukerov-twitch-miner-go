@@ -90,6 +90,22 @@ func TestGetGameIdentityGQLErrorsReturnError(t *testing.T) {
 	}
 }
 
+// A response that carries BOTH data.game=null AND a non-empty errors array is a
+// failure, not "unknown game": the errors are checked before data, so this
+// surfaces an error rather than a zero identity.
+func TestGetGameIdentityErrorsBesideNullGameReturnError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"game":null},"errors":[{"message":"service error"}]}`)
+	})
+	got, err := c.GetGameIdentity("World of Tanks")
+	if err == nil {
+		t.Fatal("errors beside a null game must surface as an error, not unknown-game")
+	}
+	if got.ID != "" || got.Slug != "" {
+		t.Fatalf("an errored lookup must not fabricate an identity, got %+v", got)
+	}
+}
+
 // T-H2: GetGameSlug reuses the shared resolver and preserves discovery's
 // behaviour — it returns the slug from the same response.
 func TestGetGameSlugReusesResolver(t *testing.T) {

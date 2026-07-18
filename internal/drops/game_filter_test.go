@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -529,19 +531,79 @@ func TestGameFilterRuntimeUpdateClearsRestrictedDropAssignment(t *testing.T) {
 	}
 }
 
-// M2: claim-before-filter through the REAL syncCampaigns pipeline (not the sweep
-// helper in isolation). A foreign campaign with a claimable reward + an
-// in-progress drop is claimed (by the pre-filter claim paths) and then excluded
-// from the tracked set / streamer / broker by the game filter. Fails if the
-// claim is gated by the filter/d.campaigns, or if the recovery-only campaign
-// bypasses the filter. (Slow: the raw-inventory sweep sleeps 5s after a claim.)
-func TestSyncClaimsForeignRewardBeforeGameFilter(t *testing.T) {
-	foreign := map[string]interface{}{
+// claimEvent records one ClaimDrop call's identity.
+type claimEvent struct{ DropID, InstanceID string }
+
+// orderedClaimClient records the ORDER of GQL operations and claims, and — after
+// the first successful claim — advances the inventory it returns to
+// isClaimed=true, mimicking Twitch propagating the claimed state on the next
+// fetch. This lets the test pin that the raw-inventory claim sweep runs BEFORE
+// the dashboard/filter, WITHOUT asserting a second (recovery) claim of the same
+// reward: a future dedup that stops re-claiming an already-claimed drop must not
+// break this test.
+type orderedClaimClient struct {
+	mu        sync.Mutex
+	events    []string
+	claims    []claimEvent
+	claimed   bool
+	invBefore map[string]interface{}
+	invAfter  map[string]interface{}
+	dashboard map[string]interface{}
+	details   map[string]map[string]interface{}
+}
+
+func (c *orderedClaimClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
+	c.mu.Lock()
+	c.events = append(c.events, op.OperationName)
+	claimed := c.claimed
+	c.mu.Unlock()
+	switch op.OperationName {
+	case "ViewerDropsDashboard":
+		return c.dashboard, nil
+	case "Inventory":
+		if claimed {
+			return c.invAfter, nil // Twitch now reports the reward as claimed
+		}
+		return c.invBefore, nil
+	default:
+		return map[string]interface{}{}, nil
+	}
+}
+
+func (c *orderedClaimClient) GetDropCampaignDetails(id string) (map[string]interface{}, error) {
+	c.mu.Lock()
+	c.events = append(c.events, "Details")
+	c.mu.Unlock()
+	return c.details[id], nil
+}
+
+func (c *orderedClaimClient) ClaimDrop(drop *models.Drop) (bool, error) {
+	c.mu.Lock()
+	c.events = append(c.events, "Claim")
+	c.claims = append(c.claims, claimEvent{DropID: drop.ID, InstanceID: drop.DropInstanceID})
+	c.claimed = true
+	c.mu.Unlock()
+	return true, nil
+}
+
+func firstIndex(events []string, s string) int {
+	for i, e := range events {
+		if e == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// foreignInProgressWithClaim builds the inventory entry for the foreign campaign
+// with a claimable reward (claimed toggles its isClaimed) plus a still-in-progress
+// drop that keeps the campaign recoverable.
+func foreignInProgressWithClaim(claimed bool) map[string]interface{} {
+	return map[string]interface{}{
 		"id":   "campaign-wt",
 		"name": "Challenger League Major",
 		"game": map[string]interface{}{"id": "game-foreign", "name": "War Thunder"},
 		"timeBasedDrops": []interface{}{
-			// claimable: dropInstanceID present + watched>=required + unclaimed.
 			map[string]interface{}{
 				"id":                     "d-claim",
 				"name":                   "Rustic Sword",
@@ -549,38 +611,52 @@ func TestSyncClaimsForeignRewardBeforeGameFilter(t *testing.T) {
 				"self": map[string]interface{}{
 					"currentMinutesWatched": float64(120),
 					"dropInstanceID":        "inst-1",
-					"isClaimed":             false,
+					"isClaimed":             claimed,
 				},
 			},
-			// in-progress, not claimable — keeps the campaign recoverable so it
-			// reaches the filter with a remaining drop.
 			inProgressDrop("d-prog", "Longbow", 120, 60, false),
 		},
 	}
-	client := &claimRecordingClient{fakeDropsClient: &fakeDropsClient{
+}
+
+// M2: claim-before-filter through the REAL syncCampaigns pipeline. The
+// raw-inventory claim sweep claims a foreign reward BEFORE the dashboard listing
+// (before candidates are built and the game filter runs); exactly one successful
+// claim is required (state propagation makes the later inventory fetch report
+// it claimed, so recovery does not re-claim), and the foreign campaign is still
+// filtered out of the tracked set. Fails if the sweep is skipped, moved after
+// the dashboard/filter, or gated by allowed game IDs. (Slow: the sweep sleeps 5s
+// after a claim.)
+func TestSyncClaimsForeignRewardBeforeGameFilter(t *testing.T) {
+	client := &orderedClaimClient{
+		invBefore: inventoryWithInProgress(foreignInProgressWithClaim(false)),
+		invAfter:  inventoryWithInProgress(foreignInProgressWithClaim(true)),
 		dashboard: dashboardResponse(),
-		inventory: inventoryWithInProgress(foreign),
 		details:   map[string]map[string]interface{}{},
-	}}
+	}
 	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
 	tracker.UpdateGameFilter([]string{"game-wot"}, nil) // foreign game excluded from tracking
 	tracker.syncCampaigns()
 
-	rustic := 0
-	for _, n := range client.claimed {
-		switch n {
-		case "Rustic Sword":
-			rustic++
-		case "Longbow":
-			t.Fatalf("the in-progress (non-claimable) drop must never be claimed, got %v", client.claimed)
-		}
+	// Exactly one successful claim, of the claimable reward (never the
+	// in-progress drop, never a second claim of the same reward).
+	if len(client.claims) != 1 {
+		t.Fatalf("expected exactly one claim, got %d (%+v)", len(client.claims), client.claims)
 	}
-	// Both pre-filter claim paths run before the filter: the raw-inventory sweep
-	// (claimAllDropsFromInventory) and the inventory-recovery SyncDrops. Gating
-	// either by the filter drops this count.
-	if rustic != 2 {
-		t.Fatalf("foreign claimable reward must be claimed by both pre-filter paths (want 2), got %d (%v)", rustic, client.claimed)
+	if client.claims[0].DropID != "d-claim" || client.claims[0].InstanceID != "inst-1" {
+		t.Fatalf("unexpected claimed drop: %+v", client.claims[0])
 	}
+
+	// The claim happened in the raw-inventory sweep — the first inventory fetch
+	// precedes the claim, and the claim precedes the first dashboard listing
+	// (i.e. before candidates are built and the game filter runs).
+	invAt := firstIndex(client.events, "Inventory")
+	claimAt := firstIndex(client.events, "Claim")
+	dashAt := firstIndex(client.events, "ViewerDropsDashboard")
+	if invAt < 0 || claimAt < 0 || dashAt < 0 || invAt > claimAt || claimAt >= dashAt {
+		t.Fatalf("claim must occur in the raw inventory sweep, before the first ViewerDropsDashboard; events=%v", client.events)
+	}
+
 	// ...and the foreign campaign is still filtered out of the tracked set.
 	if got := tracker.Campaigns(); len(got) != 0 {
 		t.Fatalf("foreign campaign must be filtered from d.campaigns, got %d", len(got))

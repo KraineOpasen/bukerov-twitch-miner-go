@@ -233,14 +233,16 @@ func (c *TwitchClient) GetGameIdentity(gameName string) (GameIdentity, error) {
 		return GameIdentity{}, err
 	}
 
+	// A non-empty top-level errors array is a lookup FAILURE (e.g. a rotated
+	// persisted-query hash), checked before data so a response that carries both
+	// errors and a null game surfaces the error rather than being mistaken for
+	// "Twitch doesn't know this game" (which is data.game == null with no errors).
+	if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
+		return GameIdentity{}, fmt.Errorf("game identity lookup for %q returned GQL errors: %v", name, errs)
+	}
+
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		// No data at all: report GQL errors as a failure (e.g. a rotated
-		// persisted-query hash) rather than conflating them with "Twitch
-		// doesn't know this game".
-		if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
-			return GameIdentity{}, fmt.Errorf("game identity lookup for %q returned GQL errors: %v", name, errs)
-		}
 		return GameIdentity{}, nil
 	}
 	game, ok := data["game"].(map[string]interface{})
