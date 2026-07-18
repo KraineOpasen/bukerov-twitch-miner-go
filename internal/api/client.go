@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,13 @@ const (
 	gqlMaxRetries  = 4
 	gqlBaseBackoff = 500 * time.Millisecond
 	gqlMaxBackoff  = 8 * time.Second
+
+	// gqlRetryAfterCap bounds how long a server-supplied Retry-After header is
+	// honored, so a pathological or hostile value can never park a request for
+	// minutes. When Twitch returns 429 with Retry-After, that hint is authoritative
+	// and used in place of the computed exponential backoff (clamped to this cap);
+	// a small jitter is still added so a fleet of requests doesn't resume in lockstep.
+	gqlRetryAfterCap = 30 * time.Second
 )
 
 // isTransientGQLStatus reports whether an HTTP status code represents a
@@ -460,8 +468,10 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 // doGQLRequestWithRetry sends the given already-marshaled GQL request body
 // using the supplied client ID, retrying with exponential backoff on transient
 // failures: network-level errors (timeouts, connection resets) and HTTP 429/5xx
-// responses. Other HTTP errors (4xx auth/logic errors) are returned immediately
-// since retrying them would just reproduce the same failure.
+// responses. A 429's Retry-After header, when present, is honored in place of
+// the computed backoff (see gqlRetryWait). Other HTTP errors (4xx auth/logic
+// errors) are returned immediately since retrying them would just reproduce the
+// same failure. A successful response never incurs a wait.
 func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID string) ([]byte, int, error) {
 	var lastErr error
 
@@ -472,7 +482,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 		}
 		c.setGQLHeaders(req, clientID)
 
-		respBody, statusCode, err := c.doGQLOnce(req)
+		respBody, statusCode, retryAfter, err := c.doGQLOnce(req)
 		if err == nil {
 			slog.Debug("GQL response", "operation", operationLabel, "status", statusCode)
 			return respBody, statusCode, nil
@@ -489,12 +499,14 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 			break
 		}
 
-		wait := gqlBackoffDuration(attempt)
+		wait, via := gqlRetryWait(attempt, retryAfter)
 		slog.Warn("GQL request failed, retrying",
 			"operation", operationLabel,
 			"attempt", attempt+1,
 			"maxAttempts", gqlMaxRetries+1,
 			"waitSeconds", wait.Seconds(),
+			"nextRetryVia", via,
+			"status", statusCode,
 			"error", lastErr,
 		)
 		time.Sleep(wait)
@@ -510,26 +522,69 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
 }
 
-// doGQLOnce performs a single HTTP round trip. It returns the response body
-// on success, or an error with the observed status code (0 for network-level
-// errors, where no HTTP response was received at all).
-func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, error) {
+// doGQLOnce performs a single HTTP round trip. It returns the response body on
+// success, or an error with the observed status code (0 for network-level
+// errors, where no HTTP response was received at all) plus any Retry-After delay
+// the server asked for (0 when absent), so the caller can honor a 429 hint.
+func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, time.Duration, error) {
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("request failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("failed to read response: %w", err)
+		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if isTransientGQLStatus(resp.StatusCode) {
-		return nil, resp.StatusCode, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		return nil, resp.StatusCode, retryAfter, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
 	}
 
-	return respBody, resp.StatusCode, nil
+	return respBody, resp.StatusCode, 0, nil
+}
+
+// parseRetryAfter interprets an HTTP Retry-After header value, which is either a
+// non-negative integer number of seconds or an HTTP-date. It returns the delay
+// (never negative), or 0 when the header is absent, malformed, or in the past —
+// so a bad value simply falls back to the computed backoff rather than skewing
+// the wait.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// gqlRetryWait picks the delay before the next retry and a label for why. A
+// server-supplied Retry-After (from a 429) is authoritative and wins over the
+// computed backoff: it is clamped to gqlRetryAfterCap (so a hostile/huge value
+// can't park the request) and given a small jitter so a fleet doesn't resume in
+// lockstep. Without one, it falls back to bounded exponential backoff with
+// jitter. Extracted (and jitter-bounded) so the selection is unit-testable
+// without sleeping.
+func gqlRetryWait(attempt int, retryAfter time.Duration) (time.Duration, string) {
+	if retryAfter > 0 {
+		if retryAfter > gqlRetryAfterCap {
+			retryAfter = gqlRetryAfterCap
+		}
+		return retryAfter + time.Duration(rand.Int63n(int64(gqlBaseBackoff))), "retry-after"
+	}
+	return gqlBackoffDuration(attempt), "backoff"
 }
 
 // gqlBackoffDuration returns the exponential backoff delay (with jitter) for
