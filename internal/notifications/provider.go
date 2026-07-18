@@ -20,6 +20,11 @@ const (
 	NotificationTypeDropStalled        NotificationType = "drop_stalled"
 	NotificationTypeDropRecovered      NotificationType = "drop_recovered"
 	NotificationTypeDailySummary       NotificationType = "daily_summary"
+	// NotificationTypeUpcomingCampaign is the opt-in, one-time alert fired when
+	// Twitch first reports a new relevant upcoming drop campaign. It doubles as
+	// the durable-dedupe key half (with the campaign ID) so a campaign is never
+	// re-announced across syncs or restarts.
+	NotificationTypeUpcomingCampaign NotificationType = "upcoming_drop_campaign"
 )
 
 // Notification represents a notification to be sent.

@@ -27,6 +27,13 @@ type NotificationConfig struct {
 	// lost/restored. These are system-wide (not tied to a specific streamer).
 	SystemChannelID string `json:"systemChannelId"`
 	SystemEnabled   bool   `json:"systemEnabled"`
+
+	// UpcomingDropsEnabled opts in to a one-time alert when Twitch first reports
+	// a NEW relevant upcoming drop campaign. It is OFF by default so an update
+	// never starts sending an event nobody asked for; the alert reuses the
+	// system channel (SystemChannelID), so no Discord token/guild/channel
+	// settings are duplicated.
+	UpcomingDropsEnabled bool `json:"upcomingDropsEnabled"`
 }
 
 // PointRule represents a point threshold notification rule.

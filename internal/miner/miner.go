@@ -396,6 +396,18 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		}
 	}
 
+	// Resolve the dashboard/notification display time zone once (from the logger
+	// config; production sets Asia/Jerusalem) and share it, so absolute times on
+	// the Drops "Upcoming" tab and in the upcoming-campaign alert match. Standard
+	// time.Location handles DST; an empty/invalid zone falls back to local time.
+	displayLoc := resolveDisplayLocation(m.config.Logger.TimeZone)
+	if m.webServer != nil {
+		m.webServer.SetDisplayLocation(displayLoc)
+	}
+	if m.notifications != nil {
+		m.notifications.SetDisplayLocation(displayLoc)
+	}
+
 	var mentionHandler chat.MentionHandler
 	if m.notifications != nil {
 		mentionHandler = m.notifications.NotifyMention
@@ -440,6 +452,12 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	// Seed the drop-campaign game filter before the sync loops start, so the very
 	// first sync already tracks only the allowed games.
 	m.dropsTracker.UpdateGameFilter(m.config.DropCampaignGameIDs, m.config.DropCampaignGames)
+
+	// Alert (opt-in, off by default) when Twitch first reports a new relevant
+	// upcoming campaign. The adapter reads m.notifications at call time and the
+	// manager owns the opt-in gate + durable dedupe, so no alert is ever sent
+	// unless the operator enabled the event.
+	m.dropsTracker.SetUpcomingNotifier(minerUpcomingNotifier{m})
 
 	// Durably record each drop claim (under a hidden analytics bucket) so the
 	// daily summary can count claims across restarts, not just from the
@@ -1179,6 +1197,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	discordCfg := m.config.Discord
 	notifCfg := m.config.Notifications
 	notifUsername := m.config.Username
+	displayTZ := m.config.Logger.TimeZone
 	notifMgr := m.notifications
 	webServer := m.webServer
 	wsPool := m.wsPool
@@ -1258,6 +1277,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 			m.mu.Unlock()
 
 			newNotifMgr.InitializePointsTracking(m.streamers.PointsMap())
+			newNotifMgr.SetDisplayLocation(resolveDisplayLocation(displayTZ))
 
 			if err := newNotifMgr.Start(context.Background()); err != nil {
 				slog.Error("Failed to start notification manager", "error", err)
