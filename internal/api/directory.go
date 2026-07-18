@@ -201,17 +201,36 @@ func parseDirectoryStreams(resp map[string]interface{}) []DirectoryStream {
 	return result
 }
 
-// GetGameSlug resolves a game's display name to its directory slug via the
-// same GQL operation twitch.tv uses when redirecting /directory/game/<name>
-// URLs. Returns "" (no error) when Twitch doesn't know the game.
-func (c *TwitchClient) GetGameSlug(gameName string) (string, error) {
+// GameIdentity is a game's stable Twitch identity as returned by the
+// directory-redirect lookup: the opaque game ID plus its directory slug. The ID
+// is an opaque string — callers must not lowercase, regex-check, or otherwise
+// transform it.
+type GameIdentity struct {
+	ID   string
+	Slug string
+}
+
+// GetGameIdentity resolves a game's display name to its Twitch identity (opaque
+// game ID + directory slug) via the same DirectoryGameRedirect operation the
+// site uses for /directory/game/<name> URLs — the one candidate-independent way
+// to obtain a game ID, so it works even when no campaign for that game is live.
+// The input name is TrimSpace'd; a blank name makes no network call. A game
+// Twitch does not know returns a zero GameIdentity and no error; GQL/transport
+// errors are returned as errors (kept distinct from "unknown game"). The ID and
+// slug are taken verbatim from the response — no derivation, no fallback.
+func (c *TwitchClient) GetGameIdentity(gameName string) (GameIdentity, error) {
+	name := strings.TrimSpace(gameName)
+	if name == "" {
+		return GameIdentity{}, nil
+	}
+
 	op := constants.DirectoryGameRedirect.WithVariables(map[string]interface{}{
-		"name": gameName,
+		"name": name,
 	})
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
-		return "", err
+		return GameIdentity{}, err
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
@@ -220,16 +239,30 @@ func (c *TwitchClient) GetGameSlug(gameName string) (string, error) {
 		// persisted-query hash) rather than conflating them with "Twitch
 		// doesn't know this game".
 		if errs, ok := resp["errors"].([]interface{}); ok && len(errs) > 0 {
-			return "", fmt.Errorf("slug lookup for %q returned GQL errors: %v", gameName, errs)
+			return GameIdentity{}, fmt.Errorf("game identity lookup for %q returned GQL errors: %v", name, errs)
 		}
-		return "", nil
+		return GameIdentity{}, nil
 	}
 	game, ok := data["game"].(map[string]interface{})
 	if !ok || game == nil {
-		return "", nil
+		return GameIdentity{}, nil
 	}
+	id, _ := game["id"].(string)
 	slug, _ := game["slug"].(string)
-	return slug, nil
+	return GameIdentity{ID: id, Slug: slug}, nil
+}
+
+// GetGameSlug resolves a game's display name to its directory slug via the same
+// GQL operation twitch.tv uses when redirecting /directory/game/<name> URLs.
+// Returns "" (no error) when Twitch doesn't know the game. It reuses
+// GetGameIdentity so the single GQL response is parsed one way (discovery reads
+// the slug; the Settings game-ID lookup reads the ID).
+func (c *TwitchClient) GetGameSlug(gameName string) (string, error) {
+	identity, err := c.GetGameIdentity(gameName)
+	if err != nil {
+		return "", err
+	}
+	return identity.Slug, nil
 }
 
 var slugNonAlnum = regexp.MustCompile(`[^a-z0-9]+`)

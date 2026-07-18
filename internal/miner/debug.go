@@ -196,6 +196,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 			}
 			if c.Game != nil {
 				tc.Game = c.Game.Name
+				tc.GameID = c.Game.ID
 			}
 			info.Campaigns = append(info.Campaigns, tc)
 		}

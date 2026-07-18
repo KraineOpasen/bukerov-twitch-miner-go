@@ -526,6 +526,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.webServer.SetCampaignsProvider(m.dropsTracker)
 		m.webServer.SetDropCatalogProvider(m)
 		m.webServer.SetFollowedProvider(m)
+		// Read-only Twitch game-ID lookup for the Settings "find game ID" helper;
+		// the authenticated client resolves a name to its opaque game ID directly.
+		m.webServer.SetGameIDResolver(m.client)
 		m.webServer.SetDiscoveryProvider(m.discovery)
 		m.webServer.SetHealthProvider(m)
 		m.webServer.SetDropProgressProvider(m)

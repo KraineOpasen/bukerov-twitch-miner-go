@@ -160,6 +160,7 @@ type Server struct {
 	rewardsProvider         RewardsProvider
 	overviewProvider        OverviewProvider
 	predictionControl       PredictionControlProvider
+	gameIDResolver          GameIDResolver
 	status                  *StatusBroadcaster
 	ready                   bool
 
@@ -322,6 +323,14 @@ func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.campaignsProvider = provider
+}
+
+// SetGameIDResolver wires the read-only Twitch game-ID lookup backing the
+// Settings "find game ID" helper. Satisfied by *api.TwitchClient.
+func (s *Server) SetGameIDResolver(resolver GameIDResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gameIDResolver = resolver
 }
 
 func (s *Server) SetDropCatalogProvider(provider DropCatalogProvider) {
@@ -555,6 +564,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/settings", s.handleSettingsPage)
 	mux.HandleFunc("/api/settings", s.handleAPISettings)
 	mux.HandleFunc("/api/settings/reset", s.handleAPISettingsReset)
+	mux.HandleFunc("/api/settings/resolve-game-id", s.handleAPIResolveGameID)
 	mux.HandleFunc("/api/followed", s.handleAPIFollowed)
 	mux.HandleFunc("/api/followed/import", s.handleAPIFollowedImport)
 

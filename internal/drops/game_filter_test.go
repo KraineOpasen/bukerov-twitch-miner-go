@@ -459,6 +459,137 @@ func TestForeignCampaignStillCatalogued(t *testing.T) {
 	}
 }
 
+func streamerHasCampaign(s *models.Streamer, id string) bool {
+	for _, c := range s.Stream.GetCampaigns() {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// M1: a runtime filter change must clear a stale channel-restricted assignment
+// from the STREAMER (not just d.campaigns), so the broker stops classifying the
+// slot as restricted_drop. Drives the real updateStreamerCampaigns via
+// syncCampaigns and asserts Stream.GetCampaigns() and HasChannelRestrictedCampaign()
+// — broker.classify (internal/watcher/broker.go) keys reason=restricted_drop off
+// exactly that method, so clearing it removes the restricted_drop reason without
+// importing the watcher.
+func TestGameFilterRuntimeUpdateClearsRestrictedDropAssignment(t *testing.T) {
+	game := &models.Game{ID: "game-foreign", Name: "War Thunder"}
+	streamer := models.NewStreamer("wt_streamer", models.StreamerSettings{ClaimDrops: true})
+	streamer.ChannelID = "chan-foreign"
+	streamer.IsOnline = true
+	streamer.Stream.Game = game
+	streamer.Stream.CampaignIDs = []string{"campaign-wt"}
+
+	// Foreign channel-restricted campaign recovered from inventory, restricted to
+	// this streamer's channel.
+	prog := map[string]interface{}{
+		"id":    "campaign-wt",
+		"name":  "Challenger League Major",
+		"game":  map[string]interface{}{"id": "game-foreign", "name": "War Thunder"},
+		"allow": map[string]interface{}{"channels": []interface{}{map[string]interface{}{"id": "chan-foreign"}}},
+		"timeBasedDrops": []interface{}{
+			inProgressDrop("d-wt", "Challenger Reward", 120, 60, false),
+		},
+	}
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(),
+		inventory: inventoryWithInProgress(prog),
+		details:   map[string]map[string]interface{}{},
+	}
+	tracker := NewDropsTracker(client, []*models.Streamer{streamer}, config.RateLimitSettings{}, nil)
+
+	// No filter: foreign restricted campaign is tracked AND assigned -> the broker
+	// would classify this streamer's slot as restricted_drop.
+	tracker.syncCampaigns()
+	if got := keptIDs(tracker.Campaigns()); !got["campaign-wt"] {
+		t.Fatalf("precondition: foreign campaign must be tracked without a filter, got %v", got)
+	}
+	if !streamerHasCampaign(streamer, "campaign-wt") {
+		t.Fatal("precondition: foreign campaign must be assigned to the streamer's stream")
+	}
+	if !streamer.HasChannelRestrictedCampaign() {
+		t.Fatal("precondition: streamer must hold a channel-restricted campaign (broker restricted_drop input)")
+	}
+
+	// Runtime filter change to WoT-only, then a normal sync.
+	tracker.UpdateGameFilter([]string{"game-wot"}, nil)
+	tracker.syncCampaigns()
+
+	if got := keptIDs(tracker.Campaigns()); got["campaign-wt"] {
+		t.Fatalf("foreign campaign must leave d.campaigns after the filter, got %v", got)
+	}
+	if streamerHasCampaign(streamer, "campaign-wt") {
+		t.Fatal("stale foreign campaign must be cleared from the streamer's stream after the filter")
+	}
+	if streamer.HasChannelRestrictedCampaign() {
+		t.Fatal("restricted_drop must clear: HasChannelRestrictedCampaign() still true after the filter update")
+	}
+}
+
+// M2: claim-before-filter through the REAL syncCampaigns pipeline (not the sweep
+// helper in isolation). A foreign campaign with a claimable reward + an
+// in-progress drop is claimed (by the pre-filter claim paths) and then excluded
+// from the tracked set / streamer / broker by the game filter. Fails if the
+// claim is gated by the filter/d.campaigns, or if the recovery-only campaign
+// bypasses the filter. (Slow: the raw-inventory sweep sleeps 5s after a claim.)
+func TestSyncClaimsForeignRewardBeforeGameFilter(t *testing.T) {
+	foreign := map[string]interface{}{
+		"id":   "campaign-wt",
+		"name": "Challenger League Major",
+		"game": map[string]interface{}{"id": "game-foreign", "name": "War Thunder"},
+		"timeBasedDrops": []interface{}{
+			// claimable: dropInstanceID present + watched>=required + unclaimed.
+			map[string]interface{}{
+				"id":                     "d-claim",
+				"name":                   "Rustic Sword",
+				"requiredMinutesWatched": float64(120),
+				"self": map[string]interface{}{
+					"currentMinutesWatched": float64(120),
+					"dropInstanceID":        "inst-1",
+					"isClaimed":             false,
+				},
+			},
+			// in-progress, not claimable — keeps the campaign recoverable so it
+			// reaches the filter with a remaining drop.
+			inProgressDrop("d-prog", "Longbow", 120, 60, false),
+		},
+	}
+	client := &claimRecordingClient{fakeDropsClient: &fakeDropsClient{
+		dashboard: dashboardResponse(),
+		inventory: inventoryWithInProgress(foreign),
+		details:   map[string]map[string]interface{}{},
+	}}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.UpdateGameFilter([]string{"game-wot"}, nil) // foreign game excluded from tracking
+	tracker.syncCampaigns()
+
+	rustic := 0
+	for _, n := range client.claimed {
+		switch n {
+		case "Rustic Sword":
+			rustic++
+		case "Longbow":
+			t.Fatalf("the in-progress (non-claimable) drop must never be claimed, got %v", client.claimed)
+		}
+	}
+	// Both pre-filter claim paths run before the filter: the raw-inventory sweep
+	// (claimAllDropsFromInventory) and the inventory-recovery SyncDrops. Gating
+	// either by the filter drops this count.
+	if rustic != 2 {
+		t.Fatalf("foreign claimable reward must be claimed by both pre-filter paths (want 2), got %d (%v)", rustic, client.claimed)
+	}
+	// ...and the foreign campaign is still filtered out of the tracked set.
+	if got := tracker.Campaigns(); len(got) != 0 {
+		t.Fatalf("foreign campaign must be filtered from d.campaigns, got %d", len(got))
+	}
+	if tracker.SyncStatus().TrackedCampaigns != 0 {
+		t.Fatalf("tracked must be 0 after filtering the foreign campaign")
+	}
+}
+
 // T19: a runtime UpdateGameFilter (the Settings-page path) takes effect on the
 // next full sync without a restart — no new goroutine, no restart.
 func TestGameFilterRuntimeUpdateChangesTrackedSet(t *testing.T) {
