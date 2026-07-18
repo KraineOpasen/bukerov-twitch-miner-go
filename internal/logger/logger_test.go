@@ -267,17 +267,27 @@ func TestConsoleHandlerColorizes(t *testing.T) {
 	}
 }
 
-// TestConsoleHandlerPlainWhenColorOff confirms color-off output is the raw
-// TextHandler line with no ANSI codes.
-func TestConsoleHandlerPlainWhenColorOff(t *testing.T) {
+// TestConsoleHandlerColorOffDropsANSIKeepsEmoji locks the emoji contract: the
+// `colored` setting gates ONLY the ANSI color envelope. With color off, stdout
+// carries NO ANSI escapes but KEEPS the emoji prefix — emoji are an operator
+// decoration independent of ANSI color. (The on-disk file stays fully plain; see
+// TestSetupFileLogStaysPlainWithColoredOn.)
+func TestConsoleHandlerColorOffDropsANSIKeepsEmoji(t *testing.T) {
 	var sink syncBuffer
 	h := newConsoleHandler(&sink, slog.LevelDebug, false)
 
 	_ = h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelError, "boom", 0))
 	h.cw.Close()
 
-	if out := sink.String(); strings.Contains(out, "\033[") {
+	out := sink.String()
+	if strings.Contains(out, "\033[") {
 		t.Errorf("color-off output must contain no ANSI escapes, got %q", out)
+	}
+	if !strings.Contains(out, "🔴") {
+		t.Errorf("color-off output must still carry the emoji prefix (emoji independent of ANSI color), got %q", out)
+	}
+	if !strings.Contains(out, "boom") {
+		t.Errorf("color-off output must preserve the message, got %q", out)
 	}
 }
 

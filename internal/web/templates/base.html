@@ -51,6 +51,7 @@
             --ui-streak: #B6FF3B;    /* points reason: WATCH_STREAK */
             --ui-prediction: #22D3EE;/* points reason: PREDICTION (bet wins) */
             --ui-other: #A970FF;
+            --ui-brand-orange: #FF7A00; /* sidebar brand wordmark; ~7.6:1 on --color-sidebar #15161c */
         }
 
         /* Sidebar: icon + label accents on hover/active instead of the flat
@@ -64,6 +65,36 @@
             box-shadow: inset 3px 0 0 var(--ui-watching);
         }
         .sidebar-link.is-active svg { color: var(--ui-watching); }
+
+        /* Sidebar brand wordmark: an orange two-line title beside the (unchanged)
+           alien logo. Its own semantic token — deliberately not the raid/error
+           hues — so the brand meaning never mixes with state colors. leading-tight
+           keeps the two lines beside the 52px logo; the sub line is a touch
+           smaller for hierarchy while staying the same orange. */
+        .sidebar-brand { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+        .sidebar-brand-title { color: var(--ui-brand-orange); font-weight: 600; }
+        .sidebar-brand-sub { color: var(--ui-brand-orange); font-size: 0.8em; font-weight: 500; }
+
+        /* Mobile drawer toggle. On desktop/tablet (>900px) the sidebar is always
+           present in the grid, so the toggle is hidden and occupies no space —
+           the main content starts directly at the page content with no top gap.
+           At <=900px the sidebar is an off-canvas drawer (translateX(-100%)), so a
+           fixed hamburger opens/closes it. It is gated on the SAME 900px
+           breakpoint as the sidebar (not Tailwind's md:768) so there is no
+           range where the drawer is hidden yet the toggle is gone. */
+        .sidebar-toggle { display: none; }
+        @media (max-width: 900px) {
+            .sidebar-toggle {
+                display: inline-flex;
+                position: fixed;
+                top: 0.6rem;
+                left: 0.6rem;
+                z-index: 70; /* above the drawer (z-index 60) so it also closes it */
+                background: var(--color-neutral-800);
+            }
+            /* Reserve room so the fixed hamburger never overlaps page content. */
+            .app-main { padding: 3.25rem 1rem 1rem; }
+        }
 
         /* Richer state badges shared by cards, sidebar queue, and boards:
            queue reads cyan (waiting, not dead), watching reads violet, gains
@@ -132,10 +163,16 @@
     </div>
 
     <div class="app-shell">
+        <button type="button" id="sidebar-toggle" class="sidebar-toggle qa-btn" aria-label="{{ t "a11y.toggle_menu" }}" aria-controls="app-sidebar" aria-expanded="false">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
         <aside class="app-sidebar" id="app-sidebar">
             <a href="/" class="flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-neutral-100">
                 <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="31" height="52" class="shrink-0" style="height:52px;width:auto;object-fit:contain">
-                <span>Points Miner</span>
+                <span class="sidebar-brand">
+                    <span class="sidebar-brand-title">Twitch Drops Miner</span>
+                    <span class="sidebar-brand-sub">Channel Points</span>
+                </span>
             </a>
 
             <nav class="flex flex-col py-1" aria-label="{{ t "a11y.primary_nav" }}">
@@ -194,11 +231,8 @@
         </aside>
 
         <main class="app-main">
-            <div class="flex items-center gap-3 mb-3">
-                <button type="button" id="sidebar-toggle" class="md:hidden qa-btn" aria-label="{{ t "a11y.toggle_menu" }}">
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
-                </button>
-                <div class="ml-auto inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "a11y.language" }}">
+            <div class="flex items-center justify-end mb-3">
+                <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "a11y.language" }}">
                     <button type="button" class="lang-btn{{if eq lang "ru"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"ru"}' hx-swap="none" aria-pressed="{{if eq lang "ru"}}true{{else}}false{{end}}">RU</button>
                     <button type="button" class="lang-btn{{if eq lang "en"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"en"}' hx-swap="none" aria-pressed="{{if eq lang "en"}}true{{else}}false{{end}}">EN</button>
                 </div>
@@ -254,10 +288,21 @@
             requestAnimationFrame(scrollToHash);
             window.addEventListener('hashchange', scrollToHash);
 
+            // Mobile drawer toggle. The button lives outside the (off-canvas)
+            // sidebar so it can open it while the drawer is slid off-screen; the
+            // same button also closes it. aria-expanded mirrors the drawer state
+            // and Escape closes an open drawer for keyboard users.
             const toggle = document.getElementById('sidebar-toggle');
             const sidebar = document.getElementById('app-sidebar');
             if (toggle && sidebar) {
-                toggle.addEventListener('click', () => sidebar.classList.toggle('is-open'));
+                const setOpen = (open) => {
+                    sidebar.classList.toggle('is-open', open);
+                    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                };
+                toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('is-open')));
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setOpen(false);
+                });
             }
         })();
     </script>

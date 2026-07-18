@@ -21,7 +21,7 @@
     {{if ne .Origin "discovery"}}
     <div class="flex items-center justify-between text-xs">
         {{if .HasGain}}<span class="badge-gain num">+{{.GainPerHour}}/h</span>{{else}}<span class="text-neutral-500">—</span>{{end}}
-        {{if .StreakPending}}<span class="num text-online" title="{{ t "now.streak_title" }}">🔥 {{.StreakMinutes}}/7</span>{{end}}
+        {{if .StreakPending}}<span class="num text-online" title="{{ t "now.streak_title" }}">🔥 {{.StreakMinutes}}/{{.StreakCapMinutes}}</span>{{end}}
     </div>
     {{if .StreakPending}}<div class="bar bar-streak mt-1"><span style="width: {{.StreakPercent}}%"></span></div>{{end}}
     {{end}}

@@ -20,6 +20,7 @@ func nowPlusHours(h int) time.Time  { return time.Now().Add(time.Duration(h) * t
 // answered independently, and GetDropCampaignDetails is keyed by campaign ID.
 type fakeDropsClient struct {
 	dashboard    map[string]interface{}
+	dashboardErr error
 	inventory    map[string]interface{}
 	inventoryErr error
 	details      map[string]map[string]interface{}
@@ -44,6 +45,9 @@ func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interfa
 			case f.fullSyncSignal <- struct{}{}:
 			default:
 			}
+		}
+		if f.dashboardErr != nil {
+			return nil, f.dashboardErr
 		}
 		return f.dashboard, nil
 	case "Inventory":

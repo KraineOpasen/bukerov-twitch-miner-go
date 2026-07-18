@@ -281,6 +281,15 @@ const streakDeliveryGraceMinutes = 5.0
 // and recorded exactly once.
 const streakPursuitCapMinutes = streakExpectedGrantMinutes + streakDeliveryGraceMinutes
 
+// StreakPursuitCapMinutes is the UI-facing hard pursuit cap, in continuously
+// watched minutes: the bounded window (expected grant + delivery grace) after
+// which the streak boost seat is released even when Twitch never granted. The web
+// dashboard reads it as the watch-streak progress-bar denominator, so the UI and
+// the watcher share one 20-minute source of truth instead of a hardcoded copy. It
+// is the pursuit/watch window, NOT a promise that a reward is delivered at minute
+// 20 — see streakPursuitCapMinutes above for the full semantics.
+const StreakPursuitCapMinutes = streakPursuitCapMinutes
+
 func NewMinuteWatcher(
 	client *api.TwitchClient,
 	streamers []*models.Streamer,
