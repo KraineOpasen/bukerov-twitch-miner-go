@@ -245,8 +245,8 @@
     {{end}}
 
     {{if .StreakPending}}
-    <div class="mt-2" title="{{ t "card.streak_title" }} ({{.StreakMinutes}}/7 {{ t "card.min" }})">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span>{{ t "card.streak" }}</span><span class="num">{{.StreakMinutes}}/7 {{ t "card.min" }}</span></div>
+    <div class="mt-2" title="{{ t "card.streak_title" }} ({{.StreakMinutes}}/{{.StreakCapMinutes}} {{ t "card.min" }})">
+        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span>{{ t "card.streak" }}</span><span class="num">{{.StreakMinutes}}/{{.StreakCapMinutes}} {{ t "card.min" }}</span></div>
         <div class="bar bar-streak"><span style="width: {{.StreakPercent}}%"></span></div>
     </div>
     {{end}}

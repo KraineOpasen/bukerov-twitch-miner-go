@@ -309,19 +309,23 @@ func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 // decorate returns the final console bytes for the record as a freshly
-// allocated, caller-owned slice: the plain formatted line when coloring is off
-// or the record is unstyled, otherwise the line wrapped in its ANSI color with
-// an emoji prefix. line is slog's TextHandler output (trailing newline
-// included) and is not retained.
+// allocated, caller-owned slice. line is slog's TextHandler output (trailing
+// newline included) and is not retained.
+//
+// Emoji and ANSI color are decorated independently. The emoji prefix is an
+// operator decoration applied whenever the message maps to one, regardless of the
+// `colored` setting — so a plain, ANSI-free stdout still carries the same emoji as
+// a colored one. The `colored` setting gates ONLY the ANSI color envelope. The
+// file handler formats the untouched record separately (a bare slog.TextHandler),
+// so the on-disk log — served verbatim by the web Logs page — stays plain text
+// with neither color nor emoji.
 func (h *consoleHandler) decorate(r slog.Record, line []byte) []byte {
-	// The "Colored Output" setting gates all console decoration (color + emoji);
-	// with it off, stdout is the same plain text as the file.
-	if !h.color {
-		return append([]byte(nil), line...)
-	}
-
 	style := styleForRecord(r)
-	if style.color == "" && style.emoji == "" {
+
+	// ANSI color is applied only when the setting is on AND the record maps to a
+	// color; the emoji is applied whenever the record maps to one.
+	useColor := h.color && style.color != ""
+	if style.emoji == "" && !useColor {
 		return append([]byte(nil), line...)
 	}
 
@@ -329,7 +333,7 @@ func (h *consoleHandler) decorate(r slog.Record, line []byte) []byte {
 
 	var out bytes.Buffer
 	out.Grow(len(trimmed) + len(style.color) + len(style.emoji) + len(ansiReset) + 3)
-	if style.color != "" {
+	if useColor {
 		out.WriteString(style.color)
 	}
 	if style.emoji != "" {
@@ -337,7 +341,7 @@ func (h *consoleHandler) decorate(r slog.Record, line []byte) []byte {
 		out.WriteByte(' ')
 	}
 	out.Write(trimmed)
-	if style.color != "" {
+	if useColor {
 		out.WriteString(ansiReset)
 	}
 	out.WriteByte('\n')

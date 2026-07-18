@@ -295,19 +295,13 @@
             
             <div class="setting-row">
                 <div>
-                    <div class="setting-label">{{ t "set.logger.less_label" }}</div>
-                    <div class="setting-description">{{ t "set.logger.less_desc" }}</div>
-                </div>
-                <input type="checkbox" id="less" class="w-5 h-5 accent-purple-600">
-            </div>
-
-            <div class="setting-row">
-                <div>
                     <div class="setting-label">{{ t "set.logger.colored_label" }}</div>
                     <div class="setting-description">{{ t "set.logger.colored_desc" }}</div>
                 </div>
                 <input type="checkbox" id="colored" class="w-5 h-5 accent-purple-600">
             </div>
+
+            <p class="setting-description text-amber-500 mt-1">{{ t "set.logger.restart_note" }}</p>
         </div>
     </details>
 
@@ -617,7 +611,6 @@
 
         document.getElementById('consoleLevel').value = settings.logger.consoleLevel;
         document.getElementById('fileLevel').value = settings.logger.fileLevel;
-        document.getElementById('less').checked = settings.logger.less;
         document.getElementById('colored').checked = settings.logger.colored;
 
         document.getElementById('refresh').value = settings.analytics.refresh;
@@ -1099,7 +1092,6 @@
             logger: {
                 consoleLevel: document.getElementById('consoleLevel').value,
                 fileLevel: document.getElementById('fileLevel').value,
-                less: document.getElementById('less').checked,
                 colored: document.getElementById('colored').checked
             },
             analytics: {
