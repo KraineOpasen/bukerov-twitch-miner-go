@@ -1,6 +1,64 @@
 package models
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// TestClearClaimedDropsKeepsWindowlessDrops pins the deterministic fix for the
+// inventory-recovered-campaign flap: ClearClaimedDrops must keep a drop that has
+// NO date window (the common inventory shape) instead of stripping it, while
+// still removing claimed drops and drops whose supplied window has actually
+// expired. Before the fix, the lightweight progress sync's ClearClaimedDrops
+// stripped date-less recovered drops, emptying the campaign and dropping it out
+// of the tracked set and directory discovery between full syncs.
+func TestClearClaimedDropsKeepsWindowlessDrops(t *testing.T) {
+	now := time.Now()
+	c := &Campaign{Drops: []*Drop{
+		{ID: "windowless", Name: "Recovered Reward"},                                                         // no dates: keep
+		{ID: "in-window", Name: "Dashboard Reward", StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour)}, // keep
+		{ID: "expired", Name: "Old Reward", StartAt: now.Add(-2 * time.Hour), EndAt: now.Add(-time.Hour)},    // drop: window passed
+		{ID: "claimed", Name: "Done Reward", IsClaimed: true},                                                // drop: claimed
+	}}
+	c.ClearClaimedDrops()
+
+	got := map[string]bool{}
+	for _, d := range c.Drops {
+		got[d.ID] = true
+	}
+	if !got["windowless"] {
+		t.Error("a drop with no date window must be kept (inventory-recovered drops routinely lack dates)")
+	}
+	if !got["in-window"] {
+		t.Error("a drop inside its supplied window must be kept")
+	}
+	if got["expired"] {
+		t.Error("a drop whose supplied window has passed must be dropped")
+	}
+	if got["claimed"] {
+		t.Error("a claimed drop must be dropped")
+	}
+}
+
+func TestDropInActiveWindow(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		drop Drop
+		want bool
+	}{
+		{"no window is active", Drop{}, true},
+		{"inside window", Drop{StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour)}, true},
+		{"before window", Drop{StartAt: now.Add(time.Hour), EndAt: now.Add(2 * time.Hour)}, false},
+		{"after window", Drop{StartAt: now.Add(-2 * time.Hour), EndAt: now.Add(-time.Hour)}, false},
+		{"only start known, not yet begun", Drop{StartAt: now.Add(time.Hour)}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.drop.InActiveWindow(); got != tc.want {
+			t.Errorf("%s: InActiveWindow() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestCampaignIsChannelRestricted(t *testing.T) {
 	unrestricted := &Campaign{}

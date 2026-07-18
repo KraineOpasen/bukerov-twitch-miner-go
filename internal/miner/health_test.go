@@ -71,3 +71,56 @@ func TestStalenessSignal(t *testing.T) {
 		}
 	}
 }
+
+// TestDropsInventorySignal pins the §12 Status-Center freshness contract for the
+// Drops Inventory Sync signal: unknown before the first run; failed on a last
+// error; OK while within the configured interval (with a next-sync ETA and, for
+// a long interval, the honest new-campaign delay); DEGRADED once the last
+// SUCCESS is older than interval+grace even if a later attempt was recent.
+func TestDropsInventorySignal(t *testing.T) {
+	now := time.Now()
+
+	t.Run("never run is unknown", func(t *testing.T) {
+		sig := dropsInventorySignal(drops.SyncStatus{IntervalMinutes: 60}, now)
+		if sig.Status != health.StatusUnknown {
+			t.Fatalf("status = %q, want unknown", sig.Status)
+		}
+	})
+
+	t.Run("last error is failed", func(t *testing.T) {
+		sig := dropsInventorySignal(drops.SyncStatus{
+			IntervalMinutes: 60, LastSyncAt: now.Add(-time.Minute), LastError: "boom",
+		}, now)
+		if sig.Status != health.StatusFailed || sig.ErrorCode != "sync_error" {
+			t.Fatalf("got %q/%q, want failed/sync_error", sig.Status, sig.ErrorCode)
+		}
+	})
+
+	t.Run("fresh within interval is ok with ETA and delay note", func(t *testing.T) {
+		last := now.Add(-36 * time.Minute) // 36m ago at a 60m interval: still healthy
+		sig := dropsInventorySignal(drops.SyncStatus{
+			IntervalMinutes: 60, LastSyncAt: last, LastSuccessAt: last, TrackedCampaigns: 1,
+		}, now)
+		if sig.Status != health.StatusOK {
+			t.Fatalf("status = %q, want ok", sig.Status)
+		}
+		// next sync ~24m away, and the long-interval delay caveat present.
+		if !strings.Contains(sig.Detail, "next sync in ~24m") {
+			t.Errorf("detail missing next-sync ETA: %q", sig.Detail)
+		}
+		if !strings.Contains(sig.Detail, "up to 1h0m0s to appear") && !strings.Contains(sig.Detail, "up to 1h") {
+			t.Errorf("detail missing long-interval new-campaign caveat: %q", sig.Detail)
+		}
+	})
+
+	t.Run("overdue success is degraded even if attempted recently", func(t *testing.T) {
+		sig := dropsInventorySignal(drops.SyncStatus{
+			IntervalMinutes: 60,
+			LastSyncAt:      now.Add(-time.Minute),      // attempted recently...
+			LastSuccessAt:   now.Add(-90 * time.Minute), // ...but last SUCCESS is 90m ago (> 60m + 15m grace)
+		}, now)
+		if sig.Status != health.StatusDegraded || sig.ErrorCode != "sync_overdue" {
+			t.Fatalf("got %q/%q, want degraded/sync_overdue; detail=%q", sig.Status, sig.ErrorCode, sig.Detail)
+		}
+	})
+}

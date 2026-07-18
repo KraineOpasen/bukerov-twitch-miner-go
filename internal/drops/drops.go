@@ -35,12 +35,41 @@ type twitchClient interface {
 // run errored - none of which was observable before, since every sync
 // diagnostic was DEBUG-only and a production container runs without -debug.
 type SyncStatus struct {
-	LastSyncAt         time.Time
-	Runs               int
+	// LastSyncAt is the last full-sync ATTEMPT (stamped on success and failure);
+	// LastSuccessAt is the last full sync that completed without error. Keeping
+	// them distinct lets the Status Center show "attempted 20s ago, but the last
+	// SUCCESSFUL discovery was 40m ago" instead of masking a failing sync.
+	LastSyncAt    time.Time
+	LastSuccessAt time.Time
+	// LastDuration is how long the last full sync took (dashboard + details +
+	// inventory), for the Status Center's "duration" field.
+	LastDuration time.Duration
+	Runs         int
+	// IntervalMinutes is the configured full campaign-sync cadence, so the Status
+	// Center can compute the next sync and the worst-case new-campaign delay
+	// without duplicating the settings lookup.
+	IntervalMinutes    int
 	DashboardCampaigns int
 	RecoveredCampaigns int
 	TrackedCampaigns   int
-	LastError          string
+	// FilteredByBlacklist / FilteredByGame are how many candidates the last sync
+	// dropped for each reason, surfaced so the Status Center can explain an empty
+	// tracked set without -debug.
+	FilteredByBlacklist int
+	FilteredByGame      int
+	LastError           string
+
+	// Revision is a monotonic counter bumped every time the published campaign
+	// pool changes (full sync OR lightweight progress sync). Overview and Drops
+	// both read it, so identical revisions prove they are rendering the very same
+	// backend snapshot; a changed revision means new confirmed data landed.
+	Revision uint64
+	// BackendUpdatedAt is when the campaign pool was last (re)published, and
+	// UpdateSource says what published it (full_sync / light_sync / manual_sync).
+	// Together with Revision they are the diagnostic freshness fields the Drops
+	// and Overview pages surface. No secrets are ever carried here.
+	BackendUpdatedAt time.Time
+	UpdateSource     string
 
 	// Lightweight progress-sync observability (Stage 3). ProgressLastSyncAt is
 	// stamped only when an inventory read actually completed, so the progress
@@ -51,6 +80,13 @@ type SyncStatus struct {
 	ProgressLastSyncAt time.Time
 	ProgressLastError  string
 }
+
+// Update sources for SyncStatus.UpdateSource / the diagnostic freshness fields.
+const (
+	updateSourceFullSync   = "full_sync"
+	updateSourceLightSync  = "light_sync"
+	updateSourceManualSync = "manual_sync"
+)
 
 type DropsTracker struct {
 	client    twitchClient
@@ -71,12 +107,24 @@ type DropsTracker struct {
 	catalog *CampaignCatalog
 
 	// Sync bookkeeping for SyncStatus (and LastSync); all guarded by mu.
-	syncRuns           int
-	lastSyncAt         time.Time
-	lastDashboardCount int
-	lastRecoveredCount int
-	lastTrackedCount   int
-	lastSyncErr        string
+	syncRuns              int
+	lastSyncAt            time.Time
+	lastSuccessAt         time.Time
+	lastDuration          time.Duration
+	lastDashboardCount    int
+	lastRecoveredCount    int
+	lastTrackedCount      int
+	lastFilteredBlacklist int
+	lastFilteredGame      int
+	lastSyncErr           string
+
+	// revision is bumped every time the published campaign pool changes (full or
+	// progress sync); backendUpdatedAt/lastUpdateSource record when and by what.
+	// All guarded by mu. Overview and Drops read these so they can prove they are
+	// showing the same snapshot (see SyncStatus.Revision).
+	revision         uint64
+	backendUpdatedAt time.Time
+	lastUpdateSource string
 
 	// Lightweight progress-sync bookkeeping (see SyncStatus); guarded by mu.
 	progressRuns       int
@@ -109,6 +157,19 @@ type DropsTracker struct {
 	// Drops page reflects the new progress within seconds instead of waiting out
 	// DropProgressSyncInterval.
 	resync chan struct{}
+
+	// campaignResync wakes the FULL campaign-sync loop early (buffered to 1 so
+	// bursts coalesce into one extra run). Fed by triggerCampaignResync when the
+	// operator changes a Drops filter/blacklist (so a re-filtered campaign set
+	// takes effect within seconds instead of waiting out CampaignSyncInterval)
+	// and by the manual "Sync Drops now" action. Unlike the progress resync this
+	// runs the full discovery pipeline, so it is the only path that can surface a
+	// campaign the current tracked set is missing without waiting a full interval.
+	campaignResync chan struct{}
+
+	// lastManualSyncAt gates the manual "Sync Drops now" action so it can't be
+	// spammed into a request storm; guarded by mu.
+	lastManualSyncAt time.Time
 
 	// logMu guards the assignment/progress de-dup state below. Both the full
 	// campaign sync (loop) and the lightweight progress sync (progressLoop) call
@@ -155,12 +216,13 @@ func NewDropsTracker(
 	dropBlacklist []string,
 ) *DropsTracker {
 	return &DropsTracker{
-		client:        client,
-		streamers:     streamers,
-		settings:      settings,
-		dropBlacklist: dropBlacklist,
-		resync:        make(chan struct{}, 1),
-		intervalUnit:  time.Minute,
+		client:         client,
+		streamers:      streamers,
+		settings:       settings,
+		dropBlacklist:  dropBlacklist,
+		resync:         make(chan struct{}, 1),
+		campaignResync: make(chan struct{}, 1),
+		intervalUnit:   time.Minute,
 	}
 }
 
@@ -171,6 +233,9 @@ func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Lock()
 	d.dropBlacklist = dropBlacklist
 	d.mu.Unlock()
+	// A blacklist change re-filters the tracked set; run it now instead of
+	// waiting out CampaignSyncInterval so the Drops page reflects it promptly.
+	d.triggerCampaignResync()
 }
 
 // UpdateGameFilter replaces the drop-campaign game filter (the strict game-ID
@@ -185,6 +250,10 @@ func (d *DropsTracker) UpdateGameFilter(gameIDs, gameNames []string) {
 	d.filterGameIDs = gameIDs
 	d.filterGameNames = gameNames
 	d.mu.Unlock()
+	// A game-filter change alters which campaigns are trackable; run a full
+	// resync now (re-fetching the dashboard so a game newly allowed can also be
+	// discovered, not just re-filtered) instead of waiting out the interval.
+	d.triggerCampaignResync()
 }
 
 // UpdateStreamers replaces the tracked streamer list at runtime (Settings-page
@@ -325,31 +394,64 @@ func (d *DropsTracker) SyncStatus() SyncStatus {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return SyncStatus{
-		LastSyncAt:         d.lastSyncAt,
-		Runs:               d.syncRuns,
-		DashboardCampaigns: d.lastDashboardCount,
-		RecoveredCampaigns: d.lastRecoveredCount,
-		TrackedCampaigns:   d.lastTrackedCount,
-		LastError:          d.lastSyncErr,
-		ProgressRuns:       d.progressRuns,
-		ProgressLastSyncAt: d.progressLastSyncAt,
-		ProgressLastError:  d.progressLastErr,
+		LastSyncAt:          d.lastSyncAt,
+		LastSuccessAt:       d.lastSuccessAt,
+		LastDuration:        d.lastDuration,
+		Runs:                d.syncRuns,
+		IntervalMinutes:     d.settings.CampaignSyncInterval,
+		DashboardCampaigns:  d.lastDashboardCount,
+		RecoveredCampaigns:  d.lastRecoveredCount,
+		TrackedCampaigns:    d.lastTrackedCount,
+		FilteredByBlacklist: d.lastFilteredBlacklist,
+		FilteredByGame:      d.lastFilteredGame,
+		LastError:           d.lastSyncErr,
+		Revision:            d.revision,
+		BackendUpdatedAt:    d.backendUpdatedAt,
+		UpdateSource:        d.lastUpdateSource,
+		ProgressRuns:        d.progressRuns,
+		ProgressLastSyncAt:  d.progressLastSyncAt,
+		ProgressLastError:   d.progressLastErr,
 	}
 }
 
-// recordSync updates the sync bookkeeping surfaced by SyncStatus.
-func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount int, err error) {
+// Revision returns the current campaign-pool revision (bumped on every published
+// change, full or progress sync). Overview and Drops read it to prove they are
+// rendering the same backend snapshot. Lock-free-safe via the RLock.
+func (d *DropsTracker) Revision() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.revision
+}
+
+// bumpRevision records that the published campaign pool just changed: it
+// increments the revision and stamps when/by-what. Caller must hold d.mu.
+func (d *DropsTracker) bumpRevisionLocked(source string) {
+	d.revision++
+	d.backendUpdatedAt = time.Now()
+	d.lastUpdateSource = source
+}
+
+// recordSync updates the sync bookkeeping surfaced by SyncStatus. duration is
+// the wall time of the full sync; filteredByBlacklist/filteredByGame are how
+// many candidates it dropped for each reason. lastSyncAt is stamped on every
+// attempt; lastSuccessAt only when err is nil.
+func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount, filteredByBlacklist, filteredByGame int, duration time.Duration, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.syncRuns++
-	d.lastSyncAt = time.Now()
+	now := time.Now()
+	d.lastSyncAt = now
+	d.lastDuration = duration
 	d.lastDashboardCount = dashboardCount
 	d.lastRecoveredCount = recoveredCount
 	d.lastTrackedCount = trackedCount
+	d.lastFilteredBlacklist = filteredByBlacklist
+	d.lastFilteredGame = filteredByGame
 	if err != nil {
 		d.lastSyncErr = err.Error()
 	} else {
 		d.lastSyncErr = ""
+		d.lastSuccessAt = now
 	}
 }
 
@@ -395,8 +497,67 @@ func (d *DropsTracker) loop() {
 			return
 		case <-timer.C:
 			d.syncCampaigns()
+		case <-d.campaignResync:
+			// Early wake: a Drops filter/blacklist change or a manual "Sync now".
+			// Stop the pending timer so the next iteration starts a fresh one at
+			// the current interval (a resync must not shorten the steady cadence).
+			timer.Stop()
+			d.syncCampaigns()
 		}
 	}
+}
+
+// triggerCampaignResync asks the full-sync loop to run an immediate campaign
+// sync instead of waiting out CampaignSyncInterval. Non-blocking and coalescing
+// (buffered-to-1 channel): concurrent triggers collapse into a single extra run,
+// and syncCampaigns' fullSyncMu still serializes it against the scheduled sync,
+// so this never launches a parallel sync. A trigger sent before Start is
+// buffered and consumed once the loop begins.
+func (d *DropsTracker) triggerCampaignResync() {
+	select {
+	case d.campaignResync <- struct{}{}:
+	default:
+	}
+}
+
+// manualSyncCooldown bounds how often the manual "Sync Drops now" action may
+// force a resync, so a user (or a stuck auto-refresh) cannot turn the button
+// into a request storm. Package variable so tests can shrink it.
+var manualSyncCooldown = 30 * time.Second
+
+// ManualSyncResult reports the outcome of a manual "Sync Drops now" request.
+type ManualSyncResult struct {
+	// Triggered is true when a resync was scheduled; false when the call was
+	// within the cooldown window (RetryAfter then reports how long to wait).
+	Triggered bool
+	// RetryAfter is the remaining cooldown when Triggered is false (else 0).
+	RetryAfter time.Duration
+	// Status is a snapshot of the sync bookkeeping at call time, so the caller
+	// can report the last completed sync and its counts without a secret in sight.
+	Status SyncStatus
+}
+
+// RequestManualSync schedules an immediate campaign resync on behalf of the
+// dashboard's "Sync Drops now" action. It is race-safe and non-blocking: the
+// resync runs on the full-sync loop (serialized by fullSyncMu, so never a
+// parallel sync), and a cooldown prevents spamming. Completion is observed via
+// SyncStatus (LastSyncAt), which the Drops/Status pages already poll — so the
+// result carries the current status rather than blocking for the network sync.
+func (d *DropsTracker) RequestManualSync() ManualSyncResult {
+	now := time.Now()
+
+	d.mu.Lock()
+	elapsed := now.Sub(d.lastManualSyncAt)
+	if !d.lastManualSyncAt.IsZero() && elapsed < manualSyncCooldown {
+		remaining := manualSyncCooldown - elapsed
+		d.mu.Unlock()
+		return ManualSyncResult{Triggered: false, RetryAfter: remaining, Status: d.SyncStatus()}
+	}
+	d.lastManualSyncAt = now
+	d.mu.Unlock()
+
+	d.triggerCampaignResync()
+	return ManualSyncResult{Triggered: true, Status: d.SyncStatus()}
 }
 
 // progressLoop runs the lightweight, inventory-only progress refresh on the
@@ -543,6 +704,7 @@ func (d *DropsTracker) syncProgress() {
 
 	d.mu.Lock()
 	d.campaigns = updated
+	d.bumpRevisionLocked(updateSourceLightSync)
 	d.mu.Unlock()
 
 	// Re-point the streamers at the refreshed campaigns so watch-priority
@@ -588,6 +750,8 @@ func (d *DropsTracker) syncCampaigns() {
 	d.fullSyncMu.Lock()
 	defer d.fullSyncMu.Unlock()
 
+	start := time.Now()
+
 	d.claimAllDropsFromInventory()
 
 	campaigns, upcoming, dashboardCount, err := d.getActiveCampaigns()
@@ -596,7 +760,7 @@ func (d *DropsTracker) syncCampaigns() {
 		// dashboardCount is non-zero when the dashboard listing succeeded and
 		// the failure happened later (campaign details), so SyncStatus shows
 		// what Twitch reported even for a failed run.
-		d.recordSync(dashboardCount, 0, 0, err)
+		d.recordSync(dashboardCount, 0, 0, 0, 0, time.Since(start), err)
 		return
 	}
 
@@ -650,6 +814,7 @@ func (d *DropsTracker) syncCampaigns() {
 
 	d.mu.Lock()
 	d.campaigns = campaigns
+	d.bumpRevisionLocked(updateSourceFullSync)
 	d.mu.Unlock()
 
 	// One concise INFO line per sync so a production deployment - which runs
@@ -676,7 +841,7 @@ func (d *DropsTracker) syncCampaigns() {
 			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame)
 	}
 
-	d.recordSync(dashboardCount, recovered, len(campaigns), nil)
+	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, time.Since(start), nil)
 
 	d.updateStreamerCampaigns()
 }

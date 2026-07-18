@@ -265,13 +265,24 @@ type DiscoveryInfo struct {
 // an empty Drops page diagnosable without -debug — telling a campaign that was
 // filtered out apart from a sync that never ran or one that errored.
 type DropsSyncInfo struct {
-	LastSyncAt             time.Time             `json:"lastSyncAt,omitzero"`
-	SyncRuns               int                   `json:"syncRuns"`
-	DashboardCampaigns     int                   `json:"dashboardCampaigns"`
-	RecoveredFromInventory int                   `json:"recoveredFromInventory"`
-	TrackedCampaigns       int                   `json:"trackedCampaigns"`
-	LastError              string                `json:"lastError,omitempty"`
-	Campaigns              []TrackedCampaignInfo `json:"campaigns,omitempty"`
+	LastSyncAt             time.Time `json:"lastSyncAt,omitzero"`
+	LastSuccessAt          time.Time `json:"lastSuccessAt,omitzero"`
+	LastDurationMillis     int64     `json:"lastDurationMillis,omitempty"`
+	IntervalMinutes        int       `json:"intervalMinutes,omitempty"`
+	SyncRuns               int       `json:"syncRuns"`
+	DashboardCampaigns     int       `json:"dashboardCampaigns"`
+	RecoveredFromInventory int       `json:"recoveredFromInventory"`
+	TrackedCampaigns       int       `json:"trackedCampaigns"`
+	FilteredByBlacklist    int       `json:"filteredByBlacklist"`
+	FilteredByGame         int       `json:"filteredByGame"`
+	LastError              string    `json:"lastError,omitempty"`
+	// Shared-snapshot freshness diagnostics: the campaign-pool revision Overview
+	// and Drops both read (identical revision ⇒ same backend snapshot), when the
+	// pool was last (re)published, and by what (full_sync / light_sync).
+	Revision         uint64                `json:"revision"`
+	BackendUpdatedAt time.Time             `json:"backendUpdatedAt,omitzero"`
+	UpdateSource     string                `json:"updateSource,omitempty"`
+	Campaigns        []TrackedCampaignInfo `json:"campaigns,omitempty"`
 }
 
 // TrackedCampaignInfo is one campaign as held by the drops tracker, including

@@ -31,6 +31,14 @@
         <span class="text-xs text-neutral-500">{{ t "drops.policy.hint" }}</span>
     </form>
 
+    <!-- Manual "Sync Drops now": forces an immediate campaign resync (cooldown-
+         gated server-side so it can't storm). Useful when a campaign started right
+         after the last scheduled sync and shouldn't wait out the interval. -->
+    <div class="flex items-center gap-3 mb-6">
+        <button type="button" id="drops-sync-now" class="btn-secondary text-sm">{{ t "drops.sync_now" }}</button>
+        <span id="drops-sync-result" class="text-xs text-neutral-500" aria-live="polite"></span>
+    </div>
+
     <!--
         Polls every 30 seconds (not the dashboard-wide RefreshMinutes) so the fresher
         backend progress — refreshed every DropProgressSyncInterval and on each
@@ -136,5 +144,31 @@
             openDropModal(trigger.dataset.dropModal);
         }
     });
+
+    // Manual "Sync Drops now": POSTs to the cooldown-gated endpoint and reports
+    // the outcome. The button briefly disables itself; the campaign list's own
+    // 30s poll surfaces the refreshed data once the resync completes.
+    (function () {
+        const btn = document.getElementById('drops-sync-now');
+        const out = document.getElementById('drops-sync-result');
+        if (!btn || !out) return;
+        btn.addEventListener('click', async function () {
+            btn.disabled = true;
+            out.textContent = '…';
+            try {
+                const resp = await fetch('/api/drops/sync', { method: 'POST', headers: { 'X-Requested-With': 'fetch' } });
+                const d = await resp.json();
+                if (d.triggered) {
+                    out.textContent = t('js.drops.sync_triggered');
+                } else {
+                    out.textContent = t('js.drops.sync_cooldown').replace('{secs}', d.retryAfterSecs || 0);
+                }
+            } catch (err) {
+                out.textContent = t('js.drops.sync_failed');
+            } finally {
+                setTimeout(function () { btn.disabled = false; }, 1500);
+            }
+        });
+    })();
 </script>
 {{end}}

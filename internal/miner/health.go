@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
@@ -172,18 +173,7 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 	if m.dropsTracker != nil {
 		st := m.dropsTracker.SyncStatus()
 
-		inv := health.Signal{Name: health.SignalDropsInventory, CheckedAt: st.LastSyncAt}
-		switch {
-		case st.LastSyncAt.IsZero():
-			inv.Status = health.StatusUnknown
-		case st.LastError != "":
-			inv.Status = health.StatusFailed
-			inv.Detail = "the last inventory sync errored"
-			inv.ErrorCode = "sync_error"
-		default:
-			inv.Status = health.StatusOK
-		}
-		m.healthCenter.Record(inv)
+		m.healthCenter.Record(dropsInventorySignal(st, now))
 
 		// Drops progress: the progress watchdog owns the semantics (healthy /
 		// recovering / confirmed STALLED); composing the signal here keeps the
@@ -202,6 +192,64 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 			m.healthCenter.Record(prog)
 		}
 	}
+}
+
+// dropsInventorySignal composes the Drops Inventory Sync health signal from the
+// tracker's SyncStatus. It deliberately separates "attempted" (LastSyncAt) from
+// "succeeded" (LastSuccessAt) so a failing sync can't masquerade as fresh, and
+// it makes the freshness contract honest: an interval-plus-grace overdue sync is
+// DEGRADED (campaign discovery is overdue), while a sync that is simply old but
+// within the configured cadence stays OK with the next-sync ETA and — for a long
+// interval — the worst-case new-campaign delay stated plainly. No secret is ever
+// placed in the detail (only counts, ages, and the interval).
+func dropsInventorySignal(st drops.SyncStatus, now time.Time) health.Signal {
+	sig := health.Signal{Name: health.SignalDropsInventory, CheckedAt: st.LastSyncAt, Duration: st.LastDuration, Stage: st.UpdateSource}
+
+	interval := st.IntervalMinutes
+	if interval <= 0 {
+		interval = 60
+	}
+	intervalDur := time.Duration(interval) * time.Minute
+	grace := intervalDur / 4
+	if grace < 5*time.Minute {
+		grace = 5 * time.Minute
+	}
+
+	switch {
+	case st.LastSyncAt.IsZero():
+		sig.Status = health.StatusUnknown
+		sig.Detail = "no inventory sync has run yet"
+		return sig
+	case st.LastError != "":
+		sig.Status = health.StatusFailed
+		sig.Detail = "the last inventory sync attempt errored"
+		sig.ErrorCode = "sync_error"
+		return sig
+	}
+
+	age := now.Sub(st.LastSuccessAt)
+	if !st.LastSuccessAt.IsZero() && age > intervalDur+grace {
+		// Successful before, but the last success is older than the interval plus
+		// grace: the scheduler is overdue and new campaigns may be undiscovered.
+		sig.Status = health.StatusDegraded
+		sig.ErrorCode = "sync_overdue"
+		sig.Detail = fmt.Sprintf("campaign discovery overdue: last successful sync %s ago exceeds the %s interval (+grace); new campaigns may be missing — try \"Sync Drops now\"",
+			age.Round(time.Minute), intervalDur)
+		return sig
+	}
+
+	sig.Status = health.StatusOK
+	sig.Detail = fmt.Sprintf("%d campaign(s) tracked; last successful discovery %s ago", st.TrackedCampaigns, age.Round(time.Minute))
+	if nextIn := st.LastSyncAt.Add(intervalDur).Sub(now); nextIn > 0 {
+		sig.Detail += fmt.Sprintf(", next sync in ~%s", nextIn.Round(time.Minute))
+	}
+	// Honest long-interval caveat: a campaign that starts right after a sync can
+	// take up to a full interval to be discovered (the light progress sync only
+	// updates already-tracked campaigns, never discovers new ones).
+	if intervalDur >= 30*time.Minute {
+		sig.Detail += fmt.Sprintf("; a newly-started campaign may take up to %s to appear", intervalDur)
+	}
+	return sig
 }
 
 // DropProgress exposes the progress watchdog's published per-drop state for
