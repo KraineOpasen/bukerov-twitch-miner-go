@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
@@ -73,7 +74,9 @@ func (fakeDropsGQL) GetDropCampaignDetails(string) (map[string]interface{}, erro
 	return map[string]interface{}{}, nil
 }
 
-func (fakeDropsGQL) ClaimDrop(*models.Drop) (bool, error) { return false, nil }
+func (fakeDropsGQL) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
+	return api.ClaimStatusRejected, nil
+}
 
 // debugHasDecision reports whether the watcher's last published debug state
 // carries a per-streamer decision for the given login — i.e. whether the watch

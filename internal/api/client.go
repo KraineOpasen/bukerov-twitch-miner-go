@@ -55,6 +55,14 @@ var (
 	// what is a temporary, Twitch-side failure. Recovery is a hash update in
 	// internal/constants/gql.go (see the per-operation client-ID fallback below).
 	ErrPersistedQueryNotFound = errors.New("twitch: persisted query not found (stale query hash or client metadata)")
+
+	// ErrClaimNotAccepted indicates a claim mutation returned an HTTP 200 with no
+	// transport or top-level GraphQL error, but its authoritative business-result
+	// node was missing, null, malformed, or an explicit rejection — so the claim
+	// was NOT accepted and must not be treated as success. It wraps a stable
+	// ClaimStatus code (never any response payload, claim ID, or token) so callers
+	// and tests can classify and, where relevant, retry the outcome.
+	ErrClaimNotAccepted = errors.New("twitch: claim not accepted")
 )
 
 const (
@@ -1175,8 +1183,29 @@ func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) err
 		},
 	})
 
-	_, err := c.postGQLRequest(op)
-	return err
+	resp, err := c.postGQLRequest(op)
+	if err != nil {
+		// Transport / auth (ErrUnauthorized) / PersistedQueryNotFound — already
+		// typed, and left retryable via the caller's bounded paths (the PubSub
+		// claim-available re-delivery and the polling fallback).
+		return err
+	}
+
+	// An HTTP 200 with no top-level GraphQL error is NOT proof of a claim: the
+	// authoritative business-result node (data.claimCommunityPoints) must be
+	// present and un-rejected. Previously the payload was ignored, so a null or
+	// missing node was silently treated as success.
+	status := classifyCommunityPointsClaim(resp)
+	if !status.Accepted() {
+		// Privacy-safe: outcome class only — never the payload, claim ID, token,
+		// or headers. No success log/event is emitted for a non-accepted claim.
+		slog.Warn("Channel points bonus claim not accepted by Twitch",
+			"streamer", streamer.Username,
+			"outcome", string(status),
+			"retryable", status.Retryable())
+		return fmt.Errorf("%w: %s", ErrClaimNotAccepted, status)
+	}
+	return nil
 }
 
 func (c *TwitchClient) ClaimMoment(streamer *models.Streamer, momentID string) error {
@@ -1382,7 +1411,16 @@ func (c *TwitchClient) GetPlaybackAccessToken(username string) (string, string, 
 	return signature, value, nil
 }
 
-func (c *TwitchClient) ClaimDrop(drop *models.Drop) (bool, error) {
+// ClaimDrop submits the drop-reward claim mutation and returns the authoritative
+// outcome as a ClaimStatus. The accepted statuses are preserved exactly as
+// before — ELIGIBLE_FOR_ALL (fresh) and DROP_INSTANCE_ALREADY_CLAIMED (an
+// idempotent already-claimed reconciliation) — but the status-parsing is now
+// funneled through the shared classifyDropClaim boundary so callers can tell a
+// fresh claim from a reconciliation (and thus avoid duplicate success events)
+// and so the parse is unit-testable without a network round trip. On a
+// transport/auth error the error is returned and the ClaimStatus is unspecified;
+// callers must check the error first.
+func (c *TwitchClient) ClaimDrop(drop *models.Drop) (ClaimStatus, error) {
 	slog.Info("Claiming drop", "drop", drop.Name)
 
 	op := constants.DropsPageClaimDropRewards.WithVariables(map[string]interface{}{
@@ -1393,27 +1431,10 @@ func (c *TwitchClient) ClaimDrop(drop *models.Drop) (bool, error) {
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
-		return false, err
+		return ClaimStatus(""), err
 	}
 
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return false, nil
-	}
-
-	claimRewards, ok := data["claimDropRewards"].(map[string]interface{})
-	if !ok || claimRewards == nil {
-		if errs, ok := data["errors"].([]interface{}); ok && len(errs) > 0 {
-			return false, nil
-		}
-		return false, nil
-	}
-
-	if status, ok := claimRewards["status"].(string); ok {
-		return status == "ELIGIBLE_FOR_ALL" || status == "DROP_INSTANCE_ALREADY_CLAIMED", nil
-	}
-
-	return false, nil
+	return classifyDropClaim(resp), nil
 }
 
 func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goalID, title string, amount int) error {

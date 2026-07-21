@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
@@ -64,7 +65,9 @@ func (snapshotDropsClient) GetDropCampaignDetails(campaignID string) (map[string
 	}, nil
 }
 
-func (snapshotDropsClient) ClaimDrop(*models.Drop) (bool, error) { return false, nil }
+func (snapshotDropsClient) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
+	return api.ClaimStatusRejected, nil
+}
 
 // TestBuildDebugSnapshotIncludesDropsSection guards the miner wiring that makes
 // the drop-campaign sync observable: BuildDebugSnapshot must surface the drops
