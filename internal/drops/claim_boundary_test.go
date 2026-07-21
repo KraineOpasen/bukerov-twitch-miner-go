@@ -217,3 +217,70 @@ func TestLightweightProgressSyncNeverClaims(t *testing.T) {
 		t.Errorf("lightweight progress sync must not emit success events, got %d", *successes)
 	}
 }
+
+// TestClaimPathBuildsFreshInstancelessDrops proves the starting point of every
+// active-claim full-sync pass: a Drop built from DropCampaignDetails carries NO
+// authoritative self-state (no dropInstanceID, Unknown claimability, not
+// claimable) until the CURRENT inventory snapshot is applied. This is the
+// architectural guarantee that makes Drop.Update's field-retention semantics
+// safe: a stale dropInstanceID from a prior sync can never reach a claim on the
+// full-sync path because the object is rebuilt fresh from details each sync.
+func TestClaimPathBuildsFreshInstancelessDrops(t *testing.T) {
+	summary, detail := dashCampaign("c1", "Camp", "g1", "Game", "d1", "Reward")
+	campaign, _, skip := buildTrackedCampaign(summary, detail)
+	if skip != skipNone {
+		t.Fatalf("campaign should be tracked, got skip=%v", skip)
+	}
+	if len(campaign.Drops) == 0 {
+		t.Fatal("expected drops built from details")
+	}
+	for _, dr := range campaign.Drops {
+		if dr.DropInstanceID != "" {
+			t.Errorf("fresh drop from details must have no dropInstanceID, got %q", dr.DropInstanceID)
+		}
+		if dr.Claimability != models.ClaimabilityUnknown {
+			t.Errorf("fresh drop must be ClaimabilityUnknown, got %v", dr.Claimability)
+		}
+		if dr.CanClaim() {
+			t.Error("fresh drop (no inventory self applied yet) must not be claimable")
+		}
+	}
+}
+
+// TestFullSyncNoClaimWithoutInstanceID drives the real full-sync claim path end
+// to end (getActiveCampaigns -> details -> syncWithInventory + the raw-inventory
+// sweep). The current inventory snapshot reports the drop's watch requirement met
+// and unclaimed but supplies NO dropInstanceID, so there is no authoritative
+// claim signal: ClaimDrop must never be called and no success event is emitted —
+// proving the claim reflects the current snapshot with zero cross-sync carryover.
+func TestFullSyncNoClaimWithoutInstanceID(t *testing.T) {
+	summary, detail := dashCampaign("c1", "Camp", "g1", "Game", "d1", "Reward")
+	invCampaign := map[string]interface{}{
+		"id":   "c1",
+		"name": "Camp",
+		"game": map[string]interface{}{"id": "g1", "name": "Game"},
+		"timeBasedDrops": []interface{}{
+			// Watch requirement met and unclaimed, but NO dropInstanceID minted.
+			invEntry("d1", 60, 60, map[string]interface{}{"isClaimed": false}),
+		},
+	}
+	client := &statusClient{fakeDropsClient: &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		details:   map[string]map[string]interface{}{"c1": detail},
+		inventory: inventoryWithInProgress(invCampaign),
+	}, status: api.ClaimStatusAccepted}
+	tr, successes := trackerWithHook(t, client)
+
+	tr.syncCampaigns()
+
+	if client.callCount() != 0 {
+		t.Fatalf("no dropInstanceID => no authoritative signal => ClaimDrop must not be called, got %d", client.callCount())
+	}
+	if *successes != 0 {
+		t.Fatalf("no claim => no success event, got %d", *successes)
+	}
+	// The campaign is still tracked (its drop is farmable, just not claimable yet).
+	if len(tr.Campaigns()) == 0 {
+		t.Fatal("campaign should be tracked while its drop is still progressing")
+	}
+}

@@ -58,6 +58,20 @@ func TestClassifyCommunityPointsClaim(t *testing.T) {
 			want: ClaimStatusAccepted,
 		},
 		{
+			// Deliberate, audited decision: an EMPTY business-result object is
+			// accepted. Rejection in this mutation family is signaled solely by a
+			// non-null embedded `error` (matching PlacePredictionBet /
+			// ContributeToCommunityGoal / redeemResponseError); {} has none, and no
+			// evidence exists that {} means rejection. Requiring a specific success
+			// field would fail-close on genuine successes with no supporting
+			// fixture. Functionally identical to the {"error":nil} case above.
+			name: "accepted: empty business-result object (present, non-null, no error)",
+			resp: map[string]interface{}{"data": map[string]interface{}{
+				"claimCommunityPoints": map[string]interface{}{},
+			}},
+			want: ClaimStatusAccepted,
+		},
+		{
 			name: "claimCommunityPoints: null",
 			resp: map[string]interface{}{"data": map[string]interface{}{"claimCommunityPoints": nil}},
 			want: ClaimStatusNullResult,

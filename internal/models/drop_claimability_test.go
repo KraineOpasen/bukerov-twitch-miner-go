@@ -230,3 +230,53 @@ func TestDropUpdateIdempotentReconciliation(t *testing.T) {
 		t.Fatal("repeated sync of a claimed drop must remain non-claimable (idempotent)")
 	}
 }
+
+// TestDropUpdateRetainsAbsentAuthoritativeFields documents Drop.Update's
+// set-if-present (snapshot-retention) semantics: an authoritative field absent
+// from a later selfData keeps its prior value. Twitch's inventory `self` is a
+// full snapshot (a minted dropInstanceID is not dropped mid-progress), so this
+// retention is benign; and it is safe against a wrongful claim ONLY because every
+// active-claim path rebuilds a FRESH Drop per pass — proven by
+// drops.TestClaimPathBuildsFreshInstancelessDrops,
+// drops.TestFullSyncNoClaimWithoutInstanceID, and, for the single object-reuse
+// path, drops.TestLightweightProgressSyncNeverClaims. This test pins the
+// retention behavior so a future in-place-reuse refactor cannot silently
+// reintroduce a stale-field claim.
+func TestDropUpdateRetainsAbsentAuthoritativeFields(t *testing.T) {
+	// (1) dropInstanceID is retained when a later snapshot omits it.
+	d := &Drop{MinutesRequired: 60}
+	d.Update(self(map[string]interface{}{"currentMinutesWatched": float64(60), "dropInstanceID": "i1"}))
+	if d.DropInstanceID != "i1" || !d.CanClaim() {
+		t.Fatalf("setup: minted instance must be claimable, got instance=%q canClaim=%v", d.DropInstanceID, d.CanClaim())
+	}
+	d.Update(self(map[string]interface{}{"currentMinutesWatched": float64(60)})) // dropInstanceID absent
+	if d.DropInstanceID != "i1" {
+		t.Errorf("Update must retain an absent dropInstanceID (set-if-present semantics), got %q", d.DropInstanceID)
+	}
+
+	// (2) isClaimed is monotonic-safe: retained true across an absent isClaimed,
+	// so a claimed drop can never flip back to claimable via an omitted field.
+	d2 := &Drop{MinutesRequired: 60}
+	d2.Update(self(map[string]interface{}{"dropInstanceID": "i1", "isClaimed": true}))
+	d2.Update(self(map[string]interface{}{"dropInstanceID": "i1"})) // isClaimed absent
+	if !d2.IsClaimed {
+		t.Error("Update must retain isClaimed=true across an absent isClaimed (monotonic)")
+	}
+	if d2.CanClaim() {
+		t.Error("a claimed drop must stay non-claimable across a later snapshot")
+	}
+
+	// (3) hasPreconditionsMet=false is retained (fail-closed) across an absent field.
+	d3 := &Drop{MinutesRequired: 60}
+	d3.Update(self(map[string]interface{}{"dropInstanceID": "i1", "hasPreconditionsMet": false}))
+	if d3.HasPreconditionsMet == nil || *d3.HasPreconditionsMet || d3.CanClaim() {
+		t.Fatal("setup: hasPreconditionsMet=false must block the claim")
+	}
+	d3.Update(self(map[string]interface{}{"dropInstanceID": "i1"})) // hasPreconditionsMet absent
+	if d3.HasPreconditionsMet == nil || *d3.HasPreconditionsMet {
+		t.Error("Update must retain hasPreconditionsMet=false across an absent field (fail-closed)")
+	}
+	if d3.CanClaim() {
+		t.Error("retained hasPreconditionsMet=false must keep the drop non-claimable")
+	}
+}
