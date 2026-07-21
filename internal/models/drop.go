@@ -5,6 +5,26 @@ import (
 	"time"
 )
 
+// Claimability is the authoritative, server-derived claim state of a drop. It
+// is deliberately tri-state so a drop is only ever claimed on an explicit
+// authoritative "yes" from Twitch — never inferred from locally-counted watch
+// minutes, a 100% progress bar, or the mere presence of a campaign.
+type Claimability int
+
+const (
+	// ClaimabilityUnknown means Twitch has not (yet) provided an authoritative
+	// claimable signal for this drop. Treated as NOT claimable (fail-closed).
+	ClaimabilityUnknown Claimability = iota
+	// ClaimabilityKnownFalse means Twitch authoritatively indicates the drop is
+	// not claimable: it is already claimed, an explicit isClaimable==false, or
+	// hasPreconditionsMet==false.
+	ClaimabilityKnownFalse
+	// ClaimabilityKnownTrue means Twitch authoritatively indicates the drop is
+	// claimable: an explicit isClaimable==true, or Twitch has minted the drop
+	// instance (dropInstanceID present) for an unclaimed, un-blocked drop.
+	ClaimabilityKnownTrue
+)
+
 type Drop struct {
 	ID                    string
 	Name                  string
@@ -15,10 +35,17 @@ type Drop struct {
 	PercentageProgress    int
 	HasPreconditionsMet   *bool
 	DropInstanceID        string
-	IsClaimable           bool
-	IsClaimed             bool
-	StartAt               time.Time
-	EndAt                 time.Time
+	// IsClaimable mirrors Claimability == ClaimabilityKnownTrue for backward
+	// compatibility with existing readers. It is a derived convenience only;
+	// Claimability is the source of truth and CanClaim gates the actual claim.
+	IsClaimable bool
+	IsClaimed   bool
+	// Claimability is the authoritative, server-derived tri-state claim status.
+	// It is computed by Update from the inventory `self` data and never from the
+	// locally-counted watch minutes.
+	Claimability Claimability
+	StartAt      time.Time
+	EndAt        time.Time
 
 	// SubscriberOnly is Twitch's best-effort subscriber-only flag for the drop;
 	// SubscriberOnlyKnown records whether Twitch actually reported it. The
@@ -102,9 +129,57 @@ func (d *Drop) Update(selfData map[string]interface{}) {
 		d.PercentageProgress = (d.CurrentMinutesWatched * 100) / d.MinutesRequired
 	}
 
-	d.IsClaimable = d.DropInstanceID != "" &&
-		!d.IsClaimed &&
-		d.CurrentMinutesWatched >= d.MinutesRequired
+	// Claimability is authoritative and server-derived only — it is NEVER
+	// inferred from the locally-counted minutes above (that local heuristic was
+	// the integrity bug: reaching the required minutes locally is not proof that
+	// Twitch has authorized the claim). IsClaimable mirrors the known-true state
+	// so existing readers keep working.
+	d.Claimability = d.deriveClaimability(selfData)
+	d.IsClaimable = d.Claimability == ClaimabilityKnownTrue
+}
+
+// deriveClaimability computes the authoritative, server-derived claim state from
+// an inventory `self` object. Local watched minutes are never an input — they
+// drive progress/UI only. Precedence (fail-closed):
+//
+//  1. Already claimed                       -> known false (nothing to claim).
+//  2. hasPreconditionsMet == false          -> known false (authoritative block,
+//     even if a stray isClaimable==true were also present).
+//  3. explicit server isClaimable, if sent  -> its boolean value.
+//  4. a Twitch-minted dropInstanceID         -> known true (the "ready to claim"
+//     signal Twitch actually provides on the inventory shape, for an unclaimed,
+//     un-blocked drop).
+//  5. otherwise                             -> unknown (never claim).
+//
+// Note: the inventory `self` shape confirmed by this repository's fixtures does
+// NOT carry an isClaimable field; step 3 exists so that if Twitch ever supplies
+// one it is honored as the top authority, without inventing it when absent.
+func (d *Drop) deriveClaimability(selfData map[string]interface{}) Claimability {
+	if d.IsClaimed {
+		return ClaimabilityKnownFalse
+	}
+	if d.HasPreconditionsMet != nil && !*d.HasPreconditionsMet {
+		return ClaimabilityKnownFalse
+	}
+	if v, ok := selfData["isClaimable"].(bool); ok {
+		if v {
+			return ClaimabilityKnownTrue
+		}
+		return ClaimabilityKnownFalse
+	}
+	if d.DropInstanceID != "" {
+		return ClaimabilityKnownTrue
+	}
+	return ClaimabilityUnknown
+}
+
+// CanClaim reports whether this drop may be submitted to the claim mutation:
+// Twitch authoritatively marks it claimable (ClaimabilityKnownTrue) AND has
+// minted the dropInstanceID the mutation requires AND it is not already claimed.
+// Local watched minutes are never consulted, so a drop can never be claimed on
+// locally-counted progress or a full progress bar alone.
+func (d *Drop) CanClaim() bool {
+	return d.Claimability == ClaimabilityKnownTrue && d.DropInstanceID != "" && !d.IsClaimed
 }
 
 func (d *Drop) DateTimeMatch() bool {

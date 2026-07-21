@@ -303,7 +303,10 @@ func (c *Campaign) SyncDrops(inventoryDrops []interface{}, claimFunc func(*Drop)
 				if selfData, ok := dropData["self"].(map[string]interface{}); ok {
 					drop.Update(selfData)
 				}
-				if drop.IsClaimable && claimFunc != nil {
+				// Claim only on the authoritative server signal (CanClaim), never
+				// on locally-counted watch minutes. claimFunc reports whether the
+				// drop is now in a reconciled claimed state.
+				if drop.CanClaim() && claimFunc != nil {
 					drop.IsClaimed = claimFunc(drop)
 				}
 				break

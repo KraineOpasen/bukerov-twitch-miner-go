@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -70,7 +71,9 @@ func (f *fakeDropsClient) GetDropCampaignDetails(campaignID string) (map[string]
 	return f.details[campaignID], nil
 }
 
-func (f *fakeDropsClient) ClaimDrop(*models.Drop) (bool, error) { return false, nil }
+func (f *fakeDropsClient) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
+	return api.ClaimStatusRejected, nil
+}
 
 // dashboardResponse wraps campaign summaries the way ViewerDropsDashboard does.
 func dashboardResponse(campaigns ...map[string]interface{}) map[string]interface{} {

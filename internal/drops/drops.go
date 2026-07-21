@@ -25,7 +25,7 @@ import (
 type twitchClient interface {
 	PostGQL(op constants.GQLOperation) (map[string]interface{}, error)
 	GetDropCampaignDetails(campaignID string) (map[string]interface{}, error)
-	ClaimDrop(drop *models.Drop) (bool, error)
+	ClaimDrop(drop *models.Drop) (api.ClaimStatus, error)
 }
 
 // SyncStatus is a snapshot of the most recent campaign sync. It exists so the
@@ -1307,16 +1307,29 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 // watch requirement is met, recording a claim event on success.
 func (d *DropsTracker) claimDropFn() func(*models.Drop) bool {
 	return func(drop *models.Drop) bool {
-		claimed, err := d.client.ClaimDrop(drop)
+		status, err := d.client.ClaimDrop(drop)
 		if err != nil {
 			slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
 			return false
 		}
-		if claimed {
+		if !status.Accepted() {
+			// Rejected / missing / null / malformed: leave the drop unclaimed so a
+			// later bounded sync can retry. No success event is recorded.
+			slog.Warn("Drop claim not accepted by Twitch",
+				"drop", drop.Name, "outcome", string(status), "retryable", status.Retryable())
+			return false
+		}
+		if status.Fresh() {
+			// Fresh authoritative claim: emit the user-facing success event once.
 			events.Record(events.TypeDropClaimed, "", drop.Name)
 			d.noteDropClaimed(drop.Name)
+		} else {
+			// Authoritative already-claimed: reconcile local state to claimed
+			// WITHOUT emitting a duplicate user-facing success event.
+			slog.Debug("Drop already claimed on Twitch; reconciling state without duplicate event",
+				"drop", drop.Name)
 		}
-		return claimed
+		return true
 	}
 }
 
@@ -1718,13 +1731,25 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 				drop.Update(selfData)
 			}
 
-			if drop.IsClaimable {
-				if claimed, err := d.client.ClaimDrop(drop); err != nil {
+			// Claim only on the authoritative server signal (CanClaim), never on
+			// locally-counted watch minutes.
+			if drop.CanClaim() {
+				status, err := d.client.ClaimDrop(drop)
+				switch {
+				case err != nil:
 					slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
-				} else if claimed {
+				case status.Fresh():
+					// Fresh authoritative claim: one success log + one event.
 					slog.Info("Claimed drop", "drop", drop.Name)
 					events.Record(events.TypeDropClaimed, "", drop.Name)
 					d.noteDropClaimed(drop.Name)
+				case status.Accepted():
+					// Already-claimed reconciliation — no duplicate success event.
+					slog.Debug("Drop already claimed on Twitch; no duplicate success event",
+						"drop", drop.Name)
+				default:
+					slog.Warn("Drop claim not accepted by Twitch",
+						"drop", drop.Name, "outcome", string(status), "retryable", status.Retryable())
 				}
 				time.Sleep(5 * time.Second)
 			}
