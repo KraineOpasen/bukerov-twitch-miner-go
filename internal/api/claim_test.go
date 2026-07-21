@@ -44,13 +44,19 @@ func TestClassifyCommunityPointsClaim(t *testing.T) {
 		want ClaimStatus
 	}{
 		{
-			name: "accepted: present business-result node, no error",
+			// Parser-policy case (synthetic shape; NOT a claim that Twitch returns
+			// exactly this): a non-empty node with a business-result field and no
+			// error is accepted.
+			name: "accepted: non-empty node with a business-result field, no error",
 			resp: map[string]interface{}{"data": map[string]interface{}{
 				"claimCommunityPoints": map[string]interface{}{"claim": map[string]interface{}{"id": "x"}},
 			}},
 			want: ClaimStatusAccepted,
 		},
 		{
+			// Parser-policy case: an explicit `error: null` is the family's
+			// "no error" marker and is a non-empty node, so it is accepted. This is
+			// deliberately NOT merged with the empty-object case below.
 			name: "accepted: present node with explicit null error",
 			resp: map[string]interface{}{"data": map[string]interface{}{
 				"claimCommunityPoints": map[string]interface{}{"error": nil},
@@ -58,18 +64,40 @@ func TestClassifyCommunityPointsClaim(t *testing.T) {
 			want: ClaimStatusAccepted,
 		},
 		{
-			// Deliberate, audited decision: an EMPTY business-result object is
-			// accepted. Rejection in this mutation family is signaled solely by a
-			// non-null embedded `error` (matching PlacePredictionBet /
-			// ContributeToCommunityGoal / redeemResponseError); {} has none, and no
-			// evidence exists that {} means rejection. Requiring a specific success
-			// field would fail-close on genuine successes with no supporting
-			// fixture. Functionally identical to the {"error":nil} case above.
-			name: "accepted: empty business-result object (present, non-null, no error)",
+			// Burden of proof: an EMPTY business-result object carries NO positive
+			// evidence of a successful claim. No fixture/selection-set/captured
+			// response confirms {} is a real success (verified by an adversarial
+			// evidence hunt), so it is fail-closed as malformed — never accepted on
+			// the mere absence of a rejection. Mirrors classifyDropClaim, which also
+			// treats a status-less claimDropRewards:{} as malformed.
+			name: "malformed: empty business-result object (no positive evidence)",
 			resp: map[string]interface{}{"data": map[string]interface{}{
 				"claimCommunityPoints": map[string]interface{}{},
 			}},
-			want: ClaimStatusAccepted,
+			want: ClaimStatusMalformed,
+		},
+		{
+			// A non-null `error` of an unexpected type is malformed — fail-closed,
+			// never read as success.
+			name: "malformed: error is a string",
+			resp: map[string]interface{}{"data": map[string]interface{}{
+				"claimCommunityPoints": map[string]interface{}{"error": "unexpected"},
+			}},
+			want: ClaimStatusMalformed,
+		},
+		{
+			name: "malformed: error is a bool",
+			resp: map[string]interface{}{"data": map[string]interface{}{
+				"claimCommunityPoints": map[string]interface{}{"error": false},
+			}},
+			want: ClaimStatusMalformed,
+		},
+		{
+			name: "malformed: error is an array",
+			resp: map[string]interface{}{"data": map[string]interface{}{
+				"claimCommunityPoints": map[string]interface{}{"error": []interface{}{}},
+			}},
+			want: ClaimStatusMalformed,
 		},
 		{
 			name: "claimCommunityPoints: null",
@@ -242,6 +270,52 @@ func TestClaimBonusNullResultIsNotSuccess(t *testing.T) {
 	}
 }
 
+// TestEmptyCommunityPointsResultIsMalformedAndRetryable pins the burden-of-proof
+// decision: an empty business-result object is non-authoritative (malformed),
+// not accepted, and stays retryable through the existing bounded paths.
+func TestEmptyCommunityPointsResultIsMalformedAndRetryable(t *testing.T) {
+	st := classifyCommunityPointsClaim(map[string]interface{}{"data": map[string]interface{}{
+		"claimCommunityPoints": map[string]interface{}{},
+	}})
+	if st != ClaimStatusMalformed {
+		t.Fatalf("empty {} must be malformed, got %q", st)
+	}
+	if st.Accepted() {
+		t.Fatal("empty {} must not report Accepted()")
+	}
+	if !st.Retryable() {
+		t.Fatal("empty {} must remain retryable")
+	}
+}
+
+// TestClaimBonusEmptyResultIsNotSuccess proves the end-to-end path: an empty
+// claimCommunityPoints object makes ClaimBonus return ErrClaimNotAccepted with no
+// success log/event, and leaks neither the claim ID nor the token into logs.
+func TestClaimBonusEmptyResultIsNotSuccess(t *testing.T) {
+	buf := captureAPILogs(t)
+	const secretClaimID = "SECRET-CLAIM-ID-empty"
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"claimCommunityPoints":{}}}`)
+	})
+	err := c.ClaimBonus(newTestStreamer("s"), secretClaimID)
+	if err == nil {
+		t.Fatal("empty business-result object must NOT be treated as success")
+	}
+	if !errors.Is(err, ErrClaimNotAccepted) {
+		t.Fatalf("want ErrClaimNotAccepted, got %v", err)
+	}
+	logs := buf.String()
+	if strings.Contains(logs, "Claimed") {
+		t.Fatalf("no success must be logged for an empty result; logs: %s", logs)
+	}
+	if strings.Contains(logs, secretClaimID) {
+		t.Fatalf("claim ID must never be logged; found it in: %s", logs)
+	}
+	if strings.Contains(logs, "dummy-token") {
+		t.Fatalf("OAuth token must never be logged; found it in: %s", logs)
+	}
+}
+
 func TestClaimBonusRejectionIsNotSuccess(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"data":{"claimCommunityPoints":{"error":{"code":"SERVER_ERROR"}}}}`)
@@ -319,6 +393,26 @@ func TestClaimAvailableBonusFalseAfterNullResult(t *testing.T) {
 	claimed, err := c.ClaimAvailableBonus(newTestStreamer("s"))
 	if claimed {
 		t.Fatal("polling fallback must NOT report success when the claim returned a null result")
+	}
+	if !errors.Is(err, ErrClaimNotAccepted) {
+		t.Fatalf("want ErrClaimNotAccepted from the fallback, got %v", err)
+	}
+}
+
+func TestClaimAvailableBonusFalseAfterEmptyResult(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch gqlOperationName(r) {
+		case "ChannelPointsContext":
+			_, _ = io.WriteString(w, `{"data":{"community":{"channel":{"self":{"communityPoints":{"availableClaim":{"id":"claim-1"}}}}}}}`)
+		case "ClaimCommunityPoints":
+			_, _ = io.WriteString(w, `{"data":{"claimCommunityPoints":{}}}`)
+		default:
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		}
+	})
+	claimed, err := c.ClaimAvailableBonus(newTestStreamer("s"))
+	if claimed {
+		t.Fatal("polling fallback must NOT report success when the claim returned an empty object")
 	}
 	if !errors.Is(err, ErrClaimNotAccepted) {
 		t.Fatalf("want ErrClaimNotAccepted from the fallback, got %v", err)

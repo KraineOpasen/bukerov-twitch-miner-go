@@ -78,13 +78,26 @@ func (s ClaimStatus) Retryable() bool {
 
 // classifyCommunityPointsClaim inspects a ClaimCommunityPoints response and
 // returns the authoritative outcome without exposing any payload. The mutation's
-// business-result node is `data.claimCommunityPoints`. Acceptance requires that
-// node to be present, non-null, an object, and free of an embedded `error`
-// object — the same "present, error-free payload node == success" rule this
-// client already applies to MakePrediction, ContributeCommunityGoal and
-// RedeemCustomReward. The exact success-content fields inside the node are not
-// required because no repository fixture confirms them; demanding a specific
-// inner field would risk rejecting genuine successes.
+// business-result node is `data.claimCommunityPoints`.
+//
+// Because this is a side-effecting mutation, acceptance must be POSITIVELY
+// established, not merely inferred from the absence of a rejection — the burden
+// of proof for "success" lies on the success classification. No repository
+// fixture, persisted-query selection set, or captured response confirms the
+// exact success shape (the operation is sent as an Automatic Persisted Query, so
+// only its hash is in the tree), so the parser is fail-closed:
+//
+//   - a non-null embedded `error` OBJECT is an authoritative rejection;
+//   - a non-null `error` of any other type is a malformed shape and is NOT read
+//     as success;
+//   - the business-result node must carry positive evidence of a result — at
+//     least one field (a returned business-result field, or an explicit
+//     `error: null` "no error" marker). An EMPTY object `{}` carries no such
+//     evidence and is treated as malformed, mirroring how classifyDropClaim
+//     already fail-closes a status-less `claimDropRewards: {}`.
+//
+// No specific inner success field is required (none is confirmed), so a non-empty
+// error-free node is accepted; only the evidence-free empty object is rejected.
 func classifyCommunityPointsClaim(resp map[string]interface{}) ClaimStatus {
 	if hasTopLevelGQLErrors(resp) {
 		return ClaimStatusGraphQLError
@@ -104,8 +117,21 @@ func classifyCommunityPointsClaim(resp map[string]interface{}) ClaimStatus {
 	if !ok {
 		return ClaimStatusMalformed
 	}
-	if errObj, ok := payload["error"].(map[string]interface{}); ok && errObj != nil {
-		return ClaimStatusRejected
+
+	// A non-null error is authoritative: an error object is a rejection; a
+	// non-null error of any other type is malformed and must never be read as
+	// success.
+	if errVal, hasErr := payload["error"]; hasErr && errVal != nil {
+		if _, isObj := errVal.(map[string]interface{}); isObj {
+			return ClaimStatusRejected
+		}
+		return ClaimStatusMalformed
+	}
+
+	// No non-null error. Acceptance still requires positive evidence of a
+	// business result; an empty object provides none, so it is fail-closed.
+	if len(payload) == 0 {
+		return ClaimStatusMalformed
 	}
 	return ClaimStatusAccepted
 }
