@@ -117,6 +117,7 @@ type SessionRefreshOutcome struct {
 	ExpectedBroadcastID       string      `json:"expectedBroadcastId,omitempty"`
 	CurrentBroadcastID        string      `json:"currentBroadcastId,omitempty"`
 	ExpectedSessionGeneration uint64      `json:"expectedSessionGeneration,omitempty"`
+	CurrentSessionGeneration  uint64      `json:"currentSessionGeneration,omitempty"`
 	AppliedSessionGeneration  uint64      `json:"appliedSessionGeneration,omitempty"`
 	Signature                 string      `json:"signature,omitempty"`
 	Requested                 time.Time   `json:"requested"`
@@ -342,6 +343,7 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 			out.Skipped = true
 			out.Reason = RefreshReasonNoClient
 			out.Detail = "skipped: no refresh-capable client (test harness)"
+			out.CurrentSessionGeneration = streamer.Stream.SessionGeneration()
 			out.Completed = time.Now()
 		default:
 			// Pre-I/O correlation guard: the request must still describe the live
@@ -353,6 +355,7 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 			curBroadcast := streamer.Stream.GetBroadcastID()
 			curGen := streamer.Stream.SessionGeneration()
 			out.CurrentBroadcastID = curBroadcast
+			out.CurrentSessionGeneration = curGen
 			if reason, stale := requestStale(req, curBroadcast, curGen); stale {
 				out.Stale = true
 				out.Reason = reason
@@ -403,13 +406,13 @@ func requestStale(req SessionRefreshRequest, curBroadcast string, curGen uint64)
 // changed during the I/O yields a stale outcome without a partial overwrite.
 // Detail strings never carry a URL or token by construction.
 func (w *MinuteWatcher) runSessionRefresh(out *SessionRefreshOutcome, streamer *models.Streamer, req SessionRefreshRequest) {
-	// A recovery refresh must not be gated by the 2-minute stream-info cadence.
-	streamer.Stream.ForceUpdateRequired()
-
+	// RefreshPlaybackSession always fetches fresh stream info (a recovery refresh
+	// is never gated by the 2-minute cadence), so no ForceUpdateRequired is needed.
 	res := w.refresher.RefreshPlaybackSession(streamer, req.Mode == RefreshSession,
 		models.ExpectedSession{BroadcastID: req.ExpectedBroadcastID, Generation: req.ExpectedGeneration})
 
 	out.AppliedSessionGeneration = res.AppliedGeneration
+	out.CurrentSessionGeneration = res.CurrentGeneration
 	out.CurrentBroadcastID = res.CurrentBroadcastID
 	out.Completed = time.Now()
 

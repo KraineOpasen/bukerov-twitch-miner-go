@@ -135,6 +135,56 @@ func TestBrokerGenerationDriftDuringIOIsStale(t *testing.T) {
 	}
 }
 
+// TestBrokerOutcomeDistinguishesGenerations (CP2 outcome schema): a refresh outcome
+// honestly reports expected / current / applied generation. On a pre-I/O stale
+// reject the current generation is filled and applied stays zero; on success the
+// applied generation is non-zero.
+func TestBrokerOutcomeDistinguishesGenerations(t *testing.T) {
+	t.Run("pre-I/O stale fills current, not applied", func(t *testing.T) {
+		w, _ := newTestWatcher(1)
+		w.refresher = &fakeRefresher{}
+		setSession(w, 0, "b1") // gen 1
+		login := w.streamers[0].Username
+
+		w.RequestSessionRefresh(SessionRefreshRequest{
+			RequestID: "r", Login: login, Mode: RefreshSession,
+			ExpectedBroadcastID: "b1", ExpectedGeneration: 99, // mismatch
+		})
+		w.executeSessionRefreshes(occupantsFor(w, 0))
+
+		out, _ := w.LastSessionRefresh(login)
+		if !out.Stale {
+			t.Fatalf("expected a stale outcome, got %+v", out)
+		}
+		if out.ExpectedSessionGeneration != 99 || out.CurrentSessionGeneration != 1 || out.AppliedSessionGeneration != 0 {
+			t.Fatalf("stale outcome must carry expected=99 current=1 applied=0, got exp=%d cur=%d app=%d",
+				out.ExpectedSessionGeneration, out.CurrentSessionGeneration, out.AppliedSessionGeneration)
+		}
+	})
+
+	t.Run("success fills applied and current", func(t *testing.T) {
+		w, _ := newTestWatcher(1)
+		w.refresher = &fakeRefresher{}
+		setSession(w, 0, "b1") // gen 1
+		login := w.streamers[0].Username
+
+		w.RequestSessionRefresh(SessionRefreshRequest{
+			RequestID: "r", Login: login, Mode: RefreshSession,
+			ExpectedBroadcastID: "b1", ExpectedGeneration: 1,
+		})
+		w.executeSessionRefreshes(occupantsFor(w, 0))
+
+		out, _ := w.LastSessionRefresh(login)
+		if !out.Success {
+			t.Fatalf("expected a successful outcome, got %+v", out)
+		}
+		if out.ExpectedSessionGeneration != 1 || out.AppliedSessionGeneration == 0 || out.CurrentSessionGeneration == 0 {
+			t.Fatalf("success outcome must carry expected=1, non-zero applied+current, got exp=%d cur=%d app=%d",
+				out.ExpectedSessionGeneration, out.CurrentSessionGeneration, out.AppliedSessionGeneration)
+		}
+	})
+}
+
 // TestExecuteSessionRefreshesParallelNoRace (Group F): many slotted refreshes run
 // in parallel; every worker writes only its own pre-allocated outcome slot and the
 // parent never appends to the outcomes slice after launching workers. Run under
