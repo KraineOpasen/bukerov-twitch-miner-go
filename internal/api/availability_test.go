@@ -276,3 +276,106 @@ func TestUpdateStreamMalformedListPreservesPreviousIDs(t *testing.T) {
 		t.Fatalf("previous IDs must be retained as last-known continuity, got %v", ids)
 	}
 }
+
+// TestGetCampaignIDsFromStreamerContainerMatrix pins the viewerDropCampaigns
+// CONTAINER discrimination: absent / explicit null / valid empty array are the
+// authoritative resolved-empty cases (no error, Known-empty), while a present
+// but wrong-typed container is malformed (error => availability Unknown). It also
+// pins campaign-ID whitespace strictness (opaque ids are never silently trimmed).
+func TestGetCampaignIDsFromStreamerContainerMatrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		channel string // JSON value of data.channel
+		wantErr bool
+		wantIDs []string
+	}{
+		{"container absent => resolved empty", `{"id":"c"}`, false, nil},
+		{"container explicit null => resolved empty", `{"viewerDropCampaigns":null}`, false, nil},
+		{"container valid empty array => resolved empty", `{"viewerDropCampaigns":[]}`, false, nil},
+		{"container string => malformed/unknown", `{"viewerDropCampaigns":"nope"}`, true, nil},
+		{"container object => malformed/unknown", `{"viewerDropCampaigns":{"a":1}}`, true, nil},
+		{"container number => malformed/unknown", `{"viewerDropCampaigns":42}`, true, nil},
+		{"container bool => malformed/unknown", `{"viewerDropCampaigns":true}`, true, nil},
+		{"whitespace-only id => error", `{"viewerDropCampaigns":[{"id":"   "}]}`, true, nil},
+		{"leading/trailing whitespace id => error", `{"viewerDropCampaigns":[{"id":" c1 "}]}`, true, nil},
+		{"clean valid ids => sorted dedup", `{"viewerDropCampaigns":[{"id":"c2"},{"id":"c1"},{"id":"c1"}]}`, false, []string{"c1", "c2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"data":{"channel":` + tc.channel + `}}`
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+			s := newTestStreamer("streamer")
+			s.ChannelID = "chan-1"
+
+			ids, err := c.GetCampaignIDsFromStreamer(s)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error (=> availability UNKNOWN), got ids=%v", ids)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(ids, tc.wantIDs) {
+				t.Fatalf("ids = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+// TestUpdateStreamMalformedContainerPreservesPreviousIDs is the end-to-end guard:
+// a wrong-typed viewerDropCampaigns container records availability Unknown and
+// retains the previous Known IDs as last-known continuity — it never flips to an
+// authoritative empty/No that would clear a live assignment.
+func TestUpdateStreamMalformedContainerPreservesPreviousIDs(t *testing.T) {
+	streamInfo := `{"data":{"user":{"stream":{"id":"b1","viewersCount":3},"broadcastSettings":{"title":"t","game":{"id":"g1","name":"GameX"}}}}}`
+	malformedContainer := `{"data":{"channel":{"viewerDropCampaigns":"nope"}}}`
+
+	c := newTestClient(t, updateStreamHandler(t, streamInfo, malformedContainer))
+
+	s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+	s.ChannelID = "chan-1"
+	s.Stream.SetCampaignIDs([]string{"camp-1"}) // prior Known list
+
+	if err := c.UpdateStream(s); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	state, ids := s.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityUnknown {
+		t.Fatalf("availability = %v, want Unknown after a malformed container", state)
+	}
+	if !reflect.DeepEqual(ids, []string{"camp-1"}) {
+		t.Fatalf("previous IDs must be retained as last-known continuity, got %v", ids)
+	}
+}
+
+// TestUpdateStreamValidEmptyContainerRecordsKnownEmpty is the counterpart: a valid
+// empty container is authoritative and records Known + empty (which the drops path
+// then treats as "not available here" and clears the assignment).
+func TestUpdateStreamValidEmptyContainerRecordsKnownEmpty(t *testing.T) {
+	streamInfo := `{"data":{"user":{"stream":{"id":"b1","viewersCount":3},"broadcastSettings":{"title":"t","game":{"id":"g1","name":"GameX"}}}}}`
+	emptyContainer := `{"data":{"channel":{"viewerDropCampaigns":[]}}}`
+
+	c := newTestClient(t, updateStreamHandler(t, streamInfo, emptyContainer))
+
+	s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+	s.ChannelID = "chan-1"
+	s.Stream.SetCampaignIDs([]string{"camp-1"})
+
+	if err := c.UpdateStream(s); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	state, ids := s.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityKnown {
+		t.Fatalf("availability = %v, want Known after a valid empty container", state)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("valid empty container must record an exact empty list, got %v", ids)
+	}
+}

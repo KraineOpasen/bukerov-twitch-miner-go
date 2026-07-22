@@ -1562,21 +1562,37 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 		return nil, fmt.Errorf("twitch GQL %s: missing or malformed channel", op.OperationName)
 	}
 
-	// The channel node resolved: an absent/null/empty viewerDropCampaigns is the
-	// AUTHORITATIVE "no drop campaigns available on this channel" — a genuinely
-	// resolved empty list (Known + empty), distinct from the failures above.
-	campaigns, ok := channel["viewerDropCampaigns"].([]interface{})
-	if !ok || campaigns == nil || len(campaigns) == 0 {
+	// The viewerDropCampaigns CONTAINER is discriminated via map MEMBERSHIP, not a
+	// single type assertion — a bare `.([]interface{})` would conflate a genuinely
+	// resolved absence with a malformed wrong-type value. Per the proven contract:
+	//   - key absent          => authoritative "no campaigns here" (Known + empty);
+	//   - explicit JSON null   => authoritative "no campaigns here" (Known + empty);
+	//   - valid empty array    => authoritative "no campaigns here" (Known + empty);
+	//   - present, wrong type  => MALFORMED response => error (=> availability
+	//                             UNKNOWN, previous IDs preserved; NEVER recorded as
+	//                             an authoritative "No" that would clear a live
+	//                             assignment).
+	raw, present := channel["viewerDropCampaigns"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	campaigns, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("twitch GQL %s: malformed viewerDropCampaigns container", op.OperationName)
+	}
+	if len(campaigns) == 0 {
 		return nil, nil
 	}
 
-	// ALL-OR-NOTHING parse: the list becomes an authoritative Known allowlist only
-	// if EVERY element is a well-formed campaign object carrying a non-empty string
-	// id. A single malformed element (non-object, missing/empty/non-string id) makes
-	// the whole lookup an error (=> availability UNKNOWN) — we never publish a valid
-	// SUBSET as if it were the complete advertised set, and never clear the previous
-	// IDs off a partially-parsed response. IDs are deduplicated and returned in a
-	// deterministic (sorted) order.
+	// ALL-OR-NOTHING element parse: the list becomes an authoritative Known
+	// allowlist only if EVERY element is a well-formed campaign object carrying a
+	// clean, non-empty string id. A single malformed element makes the whole lookup
+	// an error (=> availability UNKNOWN) — we never publish a valid SUBSET as if it
+	// were the complete advertised set, and never clear the previous IDs off a
+	// partially-parsed response. Channel/campaign IDs are opaque: a whitespace-only
+	// id, or one with leading/trailing whitespace, is malformed and is NOT silently
+	// trimmed (no case-folding, no fuzzy normalization). IDs are deduplicated and
+	// returned in a deterministic (sorted) order.
 	seen := make(map[string]struct{}, len(campaigns))
 	for _, campaign := range campaigns {
 		cm, ok := campaign.(map[string]interface{})
@@ -1584,7 +1600,7 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 			return nil, fmt.Errorf("twitch GQL %s: malformed campaign element", op.OperationName)
 		}
 		id, ok := cm["id"].(string)
-		if !ok || id == "" {
+		if !ok || id == "" || strings.TrimSpace(id) != id {
 			return nil, fmt.Errorf("twitch GQL %s: malformed campaign id", op.OperationName)
 		}
 		seen[id] = struct{}{}

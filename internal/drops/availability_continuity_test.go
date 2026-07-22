@@ -181,3 +181,25 @@ func TestContinuityNoNewAssignmentDuringGrace(t *testing.T) {
 		t.Fatal("Unknown availability must never create a NEW assignment off a stale ID")
 	}
 }
+
+// TestValidEmptyAvailabilityClearsAssignment (container-matrix case 11): a resolved
+// Known + EMPTY availability is authoritative "not available here" and clears an
+// existing assignment immediately (no grace), distinct from an Unknown blip.
+func TestValidEmptyAvailabilityClearsAssignment(t *testing.T) {
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	now := base
+	d, s, _ := continuitySetup(&now)
+
+	setAvailability(s, true, []string{"camp-1"}, now)
+	d.updateStreamerCampaigns()
+	if !hasAssignment(s) {
+		t.Fatal("expected initial assignment under Known+Yes")
+	}
+
+	// Authoritative resolved EMPTY list (Known, no ids) -> immediate clear.
+	setAvailability(s, true, nil, now)
+	d.updateStreamerCampaigns()
+	if hasAssignment(s) {
+		t.Fatal("a resolved Known+empty availability must clear the assignment immediately")
+	}
+}
