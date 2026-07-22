@@ -131,11 +131,13 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	m := &Miner{config: cfg, streamers: mgr, watcher: w, dropsTracker: d}
 
 	// Runtime ADD via the same full-body path the Settings page posts:
-	// current settings + one extra streamer. DisableWatch keeps beta out of
-	// actual watch slots (no network sends) while still visible to the loop;
-	// ClaimDrops makes it a drops candidate.
+	// current settings + one extra streamer. ClaimDrops makes it a drops
+	// candidate; DisableWatch is left OFF because a watch opt-out now (correctly)
+	// also blocks drop-campaign ASSIGNMENT (a channel that never watches never
+	// farms). beta stays out of actual watch slots for the test's duration via the
+	// watcher's 30s new-online settle guard, so no network send occurs.
 	rs := settings.BuildRuntimeSettings(cfg)
-	disableWatch, claimDrops := true, true
+	disableWatch, claimDrops := false, true
 	rs.Streamers = append(rs.Streamers, settings.StreamerConfig{
 		Username: "beta",
 		Settings: &settings.StreamerSettingsConfig{DisableWatch: &disableWatch, ClaimDrops: &claimDrops},
@@ -150,7 +152,7 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	// writes): online, streaming the recovered campaign's game.
 	beta.SetConfirmedOnline()
 	beta.Stream.Game = &models.Game{ID: "game-wot", Name: "World of Tanks"}
-	beta.Stream.CampaignIDs = []string{"campaign-wot"}
+	beta.Stream.SetCampaignIDs([]string{"campaign-wot"})
 
 	// Drops leg (add): one synchronous sync pass assigns the campaign.
 	d.SyncNow()

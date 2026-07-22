@@ -316,3 +316,69 @@ func TestDatelessDropWindowUnknownButActive(t *testing.T) {
 		t.Fatal("dateless drop should be active in the legacy helper too")
 	}
 }
+
+// B1: a per-grant instance ID is TERMINAL when present on both sides. Two
+// different instances are two different grants and must NEVER be re-confirmed as
+// the same reward by weaker benefit/composite/name evidence.
+func TestMatchIdentityInstanceTerminal(t *testing.T) {
+	clock := fixedClock(testNow)
+	win := knownWindow(hoursFromNow(-2), hoursFromNow(2))
+
+	cases := []struct {
+		name          string
+		claimed, cand RewardIdentity
+		want          IdentityMatch
+	}{
+		{
+			// different instance + same benefit + overlapping window -> NoMatch.
+			name:    "diff instance same benefit overlapping window",
+			claimed: NewRewardIdentity("g1", "ben-1", "inst-a", "", "", "Skin", 0, win),
+			cand:    NewRewardIdentity("g1", "ben-1", "inst-b", "", "", "Skin", 0, win),
+			want:    IdentityNoMatch,
+		},
+		{
+			// different instance + same campaign/drop -> NoMatch.
+			name:    "diff instance same campaign drop",
+			claimed: NewRewardIdentity("g1", "", "inst-a", "drop-1", "camp-1", "Skin", 0, win),
+			cand:    NewRewardIdentity("g1", "", "inst-b", "drop-1", "camp-1", "Skin", 0, win),
+			want:    IdentityNoMatch,
+		},
+		{
+			// different instance + same canonical name -> NoMatch.
+			name:    "diff instance same name",
+			claimed: NewRewardIdentity("g1", "", "inst-a", "", "", "Skin", 0, EntitlementWindow{}),
+			cand:    NewRewardIdentity("g1", "", "inst-b", "", "", "Skin", 0, EntitlementWindow{}),
+			want:    IdentityNoMatch,
+		},
+		{
+			// same instance + different weaker fields -> Confirmed.
+			name:    "same instance different weaker fields",
+			claimed: NewRewardIdentity("g1", "ben-1", "inst-a", "drop-1", "camp-1", "Skin", 0, win),
+			cand:    NewRewardIdentity("g1", "ben-2", "inst-a", "drop-9", "camp-9", "Other", 0, EntitlementWindow{}),
+			want:    IdentityMatchConfirmed,
+		},
+		{
+			// one-sided instance + same benefit id with known overlapping windows ->
+			// decided by the BenefitID/window policy (Confirmed).
+			name:    "one-sided instance benefit overlap confirmed",
+			claimed: NewRewardIdentity("g1", "ben-1", "", "", "", "Skin", 0, win),
+			cand:    NewRewardIdentity("g1", "ben-1", "inst-b", "", "", "Skin", 0, win),
+			want:    IdentityMatchConfirmed,
+		},
+		{
+			// one-sided instance + unknown occurrence (name only, no window) -> not
+			// Confirmed (Ambiguous — instance alone on one side proves nothing).
+			name:    "one-sided instance unknown occurrence ambiguous",
+			claimed: NewRewardIdentity("g1", "", "inst-a", "", "", "Skin", 0, EntitlementWindow{}),
+			cand:    NewRewardIdentity("g1", "", "", "", "", "Skin", 0, EntitlementWindow{}),
+			want:    IdentityMatchAmbiguous,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MatchIdentity(tc.claimed, tc.cand, clock); got != tc.want {
+				t.Fatalf("MatchIdentity = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

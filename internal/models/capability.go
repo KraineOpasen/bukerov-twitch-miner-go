@@ -126,6 +126,105 @@ func (s *Streamer) ApplyChannelPointsContextIfCurrent(obsSeq uint64, state Capab
 	return CapabilityTransition{Previous: prev, Current: state, Applied: true, Changed: changed}
 }
 
+// ChannelPointsContextSnapshot is a fully-parsed Channel Points context, built
+// from a response BEFORE any streamer write, so the whole observation can be
+// published in ONE atomic step (capability + balance + multipliers + goals)
+// rather than piecemeal. Each Has* flag distinguishes "field present and valid"
+// (apply, even when empty) from "absent or malformed" (preserve the prior value)
+// — so a missing/malformed activeMultipliers never clears known-good multipliers,
+// while a valid empty list authoritatively clears them.
+type ChannelPointsContextSnapshot struct {
+	Capability CapabilityState
+	Reason     CapabilityReason
+
+	Balance    int
+	HasBalance bool
+
+	Multipliers    []Multiplier
+	HasMultipliers bool
+
+	Goals    []*CommunityGoal
+	HasGoals bool
+
+	AvailableClaimID string
+}
+
+// ContextApplyResult is the immutable outcome of ApplyChannelPointsContext.
+type ContextApplyResult struct {
+	// Applied is true when the observation was the latest-begun one and the whole
+	// snapshot was published.
+	Applied bool
+	// Stale is true when a newer observation had already begun, so nothing was
+	// written (neither state nor a bonus-claim opportunity).
+	Stale bool
+	// Capability / AvailableClaimID echo the published values (only when Applied).
+	Capability       CapabilityState
+	AvailableClaimID string
+}
+
+// BeginChannelPointsContextObservation starts a new Channel Points context
+// observation and returns its monotonic ID. Callers invoke it BEFORE their
+// network I/O; the highest ID (latest begun) is the authoritative observation,
+// so ApplyChannelPointsContext/AuthorizeBonusClaim publish only for the newest
+// request regardless of completion order.
+func (s *Streamer) BeginChannelPointsContextObservation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.capObs++
+	return s.capObs
+}
+
+// ApplyChannelPointsContext atomically publishes a fully-parsed context snapshot
+// under a SINGLE lock, but only when obsID is still the latest-begun observation.
+// If a newer observation has begun, the whole snapshot is dropped (Stale) — no
+// capability/balance/multiplier/goal write and no bonus-claim opportunity — so an
+// old slow response can never overwrite newer state nor interleave a partial
+// write between a newer response's fields. Optional fields are applied only when
+// their Has* flag is set (absent/malformed => preserved).
+func (s *Streamer) ApplyChannelPointsContext(obsID uint64, snap ChannelPointsContextSnapshot) ContextApplyResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if obsID != s.capObs {
+		return ContextApplyResult{Stale: true}
+	}
+	s.applyChannelPointsCapabilityLocked(snap.Capability, snap.Reason)
+	if snap.HasBalance {
+		s.ChannelPoints = snap.Balance
+	}
+	if snap.HasMultipliers {
+		s.ActiveMultipliers = snap.Multipliers
+	}
+	if snap.HasGoals {
+		if s.CommunityGoals == nil {
+			s.CommunityGoals = make(map[string]*CommunityGoal)
+		}
+		for _, g := range snap.Goals {
+			if g != nil {
+				s.CommunityGoals[g.GoalID] = g
+			}
+		}
+	}
+	return ContextApplyResult{Applied: true, Capability: snap.Capability, AvailableClaimID: snap.AvailableClaimID}
+}
+
+// AuthorizeBonusClaim reserves a bonus claim for exactly one authorized network
+// mutation. It returns true only when obsID is STILL the latest-begun observation
+// (no newer context has superseded it) AND this claim ID has not already been
+// authorized (dedup across racing contexts). The reservation is taken atomically
+// under the lock; the caller then releases the lock before the Twitch call.
+func (s *Streamer) AuthorizeBonusClaim(obsID uint64, claimID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if obsID != s.capObs {
+		return false
+	}
+	if claimID == "" || claimID == s.lastAuthorizedClaimID {
+		return false
+	}
+	s.lastAuthorizedClaimID = claimID
+	return true
+}
+
 // ChannelPointsCapabilitySnapshot returns the current capability state and the
 // capability sequence, read under the lock. A network caller captures this
 // BEFORE its I/O and passes the sequence to ApplyChannelPointsCapabilityIfCurrent

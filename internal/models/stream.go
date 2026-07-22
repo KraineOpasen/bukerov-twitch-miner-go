@@ -21,6 +21,13 @@ type Stream struct {
 	// access is tolerated only in single-goroutine test setup.
 	CampaignIDs []string
 	Campaigns   []*Campaign
+	// campaignAvailability is the tri-state result of the last channel-side
+	// per-channel campaign lookup (see campaign_availability.go). Unknown means
+	// the lookup failed and CampaignIDs is stale continuity data, not a fresh
+	// authoritative "available here". campaignAvailSeq guards against a stale
+	// lookup overwriting a newer one. Owned by mu like every other Stream field.
+	campaignAvailability CampaignAvailabilityState
+	campaignAvailSeq     uint64
 
 	WatchStreakMissing bool
 	// streakEarnedBroadcastID remembers WHICH broadcast the last watch-streak
@@ -182,11 +189,16 @@ func (s *Stream) GetCampaignIDs() []string {
 	return s.CampaignIDs
 }
 
-// SetCampaignIDs replaces the advertised campaign ID list (api client only).
+// SetCampaignIDs replaces the advertised campaign ID list and marks channel-side
+// availability KNOWN (a set of resolved IDs is by definition a resolved lookup).
+// Production uses the seq-guarded SetCampaignAvailabilityIfCurrent; this setter
+// remains for single-goroutine test setup and any legacy caller.
 func (s *Stream) SetCampaignIDs(ids []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.campaignAvailSeq++
 	s.CampaignIDs = ids
+	s.campaignAvailability = CampaignAvailabilityKnown
 }
 
 // GetCampaigns returns the tracked campaigns assigned to this channel by the

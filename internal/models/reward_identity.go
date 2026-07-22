@@ -305,11 +305,16 @@ func gamesConflict(a, b RewardIdentity) bool {
 // weakest:
 //
 //   - Different games (both known) => NoMatch.
-//   - Instance ID present on both & equal => Confirmed (unique per-grant handle).
+//   - Instance ID present on BOTH sides: equal => Confirmed (unique per-grant
+//     handle); different => NoMatch, TERMINAL — two distinct grants are two
+//     distinct rewards, so we never fall through to weaker (benefit / composite /
+//     name) evidence that could re-confirm them. A ONE-SIDED instance ID is not
+//     comparable and simply drops to weaker evidence (it never confirms alone).
 //   - Benefit ID present on both:
-//     equal + windows not provably disjoint => Confirmed;
-//     equal + windows provably disjoint     => NoMatch (new occurrence);
-//     unequal                               => NoMatch (different benefit,
+//     equal + both windows decidable & overlapping => Confirmed;
+//     equal + both windows decidable & disjoint    => NoMatch (new occurrence);
+//     equal + either window unknown/malformed       => Ambiguous;
+//     unequal                                       => NoMatch (different benefit,
 //     even under an identical name).
 //   - Composite (campaign+drop) present on both:
 //     equal campaign & drop + not provably disjoint => Confirmed;
@@ -329,13 +334,17 @@ func MatchIdentity(claimed, candidate RewardIdentity, clock Clock) IdentityMatch
 		return IdentityNoMatch
 	}
 
-	// Strongest: server-minted instance handle.
+	// Strongest: server-minted per-grant instance handle. When BOTH sides carry
+	// one it is TERMINAL: equal => the same grant (Confirmed); different => two
+	// distinct grants (NoMatch). We deliberately do NOT fall through to weaker
+	// benefit/composite/name evidence on a mismatch, so two different instances
+	// can never be re-confirmed as the same reward. A one-sided instance ID is not
+	// comparable and drops to the weaker evidence below (never confirming alone).
 	if claimed.InstanceID != "" && candidate.InstanceID != "" {
 		if claimed.InstanceID == candidate.InstanceID {
 			return IdentityMatchConfirmed
 		}
-		// Distinct instances are distinct grants only when we cannot otherwise
-		// tell (they may be different tiers). Fall through to weaker evidence.
+		return IdentityNoMatch
 	}
 
 	// Benefit/Reward ID identifies a reward FAMILY, not a specific repeatable

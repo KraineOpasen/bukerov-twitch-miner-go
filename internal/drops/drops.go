@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
@@ -1839,6 +1840,51 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 	}
 }
 
+// dropsEligibility is the single centralized policy used to decide, per campaign,
+// whether a streamer may be ASSIGNED a drop campaign (the production wiring of
+// eligibility.EvaluateDrops). Stateless (system clock).
+var dropsEligibility = eligibility.Evaluator{}
+
+// campaignAvailabilityFor maps the channel-side availability tri-state plus the
+// last-known advertised IDs into the evaluator's Availability for one campaign:
+// Unknown lookup => AvailabilityUnknown; a resolved lookup that lists the
+// campaign => AvailabilityYes; a resolved lookup that does NOT list it =>
+// AvailabilityNo (authoritative "not advertised on this channel").
+func campaignAvailabilityFor(state models.CampaignAvailabilityState, ids []string, campaignID string) eligibility.Availability {
+	if state == models.CampaignAvailabilityUnknown {
+		return eligibility.AvailabilityUnknown
+	}
+	for _, id := range ids {
+		if id == campaignID {
+			return eligibility.AvailabilityYes
+		}
+	}
+	return eligibility.AvailabilityNo
+}
+
+// logDropIneligible records, at DEBUG (never per-sync INFO), that a campaign was
+// not assigned to a streamer, with a stable privacy-safe reason and the ACL
+// state — no channel list, no reward IDs.
+func logDropIneligible(streamer *models.Streamer, campaign *models.Campaign, avail eligibility.Availability, reason eligibility.Reason) {
+	slog.Debug("Drop campaign not assigned: not eligible",
+		"streamer", streamer.Username,
+		"campaign", campaign.Name, "campaignID", campaign.ID,
+		"reason", string(reason),
+		"availability", availabilityLabel(avail),
+		"aclState", campaign.ACLState().String())
+}
+
+func availabilityLabel(a eligibility.Availability) string {
+	switch a {
+	case eligibility.AvailabilityYes:
+		return "yes"
+	case eligibility.AvailabilityNo:
+		return "no"
+	default:
+		return "unknown"
+	}
+}
+
 func (d *DropsTracker) updateStreamerCampaigns() {
 	// Snapshot the streamer list together with the campaigns: it can be
 	// replaced at runtime by UpdateStreamers, and this runs on both sync
@@ -1874,59 +1920,59 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	var progressOrder []*models.Campaign
 
 	for _, streamer := range streamers {
-		if !streamer.DropsCondition() {
+		// Process every CONFIRMED-online, drops-enabled streamer — even one that
+		// currently advertises no campaigns — so an authoritative empty/No
+		// availability actually CLEARS a stale assignment (SetCampaigns below). An
+		// offline or unknown-liveness streamer is skipped WITHOUT clearing, so a
+		// transient blip retains its last assignment (BKM-002 continuity).
+		// DropsCondition's len(CampaignIDs)>0 requirement is deliberately NOT used
+		// here — it would prevent that clear.
+		if !streamer.GetIsOnline() || !streamer.GetSettings().ClaimDrops {
 			continue
 		}
+
+		// Snapshot the previously-assigned campaign IDs and the channel-side
+		// availability once per streamer. prevAssigned drives the bounded
+		// continuity policy: under an UNKNOWN availability we may RETAIN an already
+		// eligible assignment but must never create a NEW one (a stale ID is never
+		// silently promoted to a fresh authoritative Yes).
+		prevAssigned := make(map[string]struct{})
+		for _, c := range streamer.Stream.GetCampaigns() {
+			prevAssigned[c.ID] = struct{}{}
+		}
+		availState, availIDs := streamer.Stream.CampaignAvailability()
 
 		var streamerCampaigns []*models.Campaign
 		for _, campaign := range campaigns {
 			if len(campaign.Drops) == 0 {
 				continue
 			}
-
-			if campaign.Game == nil || streamer.Stream.GameID() == "" {
+			// The production-evaluated eligibility runs against the campaign's
+			// actual next watchable drop (CurrentDrop), never an arbitrary later
+			// tier: window/claim/feasibility are judged on the drop that would be
+			// farmed next.
+			drop := campaign.CurrentDrop()
+			if drop == nil {
 				continue
 			}
 
-			if campaign.Game.ID != streamer.Stream.GameID() {
+			avail := campaignAvailabilityFor(availState, availIDs, campaign.ID)
+			decision := dropsEligibility.EvaluateDrops(streamer, campaign, drop, avail)
+			if !decision.Eligible {
+				logDropIneligible(streamer, campaign, avail, decision.Reason)
 				continue
 			}
 
-			hasID := false
-			for _, id := range streamer.Stream.GetCampaignIDs() {
-				if id == campaign.ID {
-					hasID = true
-					break
+			// EvaluateDrops does not block an UNKNOWN channel-side availability
+			// (unknown != authoritative No). But an unknown availability must not
+			// create a NEW assignment — only retain one that was already assigned
+			// (bounded continuity). This prevents a stale advertised ID from
+			// silently becoming a fresh authoritative Yes.
+			if avail == eligibility.AvailabilityUnknown {
+				if _, existed := prevAssigned[campaign.ID]; !existed {
+					logDropIneligible(streamer, campaign, avail, eligibility.ReasonCampaignNotAvailable)
+					continue
 				}
-			}
-
-			if !hasID {
-				continue
-			}
-
-			// Single crediting gate: AllowsChannel returns true for unrestricted
-			// campaigns, membership for restricted ones, and FALSE for an
-			// ACLUnknown campaign (fail closed — an unresolved allowlist never
-			// widens eligibility). This deliberately also covers the ACLUnknown
-			// case, which IsChannelRestricted() reports as not-restricted; gating
-			// on IsChannelRestricted alone would silently over-credit an unknown
-			// ACL on any channel.
-			if !campaign.AllowsChannel(streamer.ChannelID) {
-				if campaign.IsChannelRestricted() {
-					// Defensive: Twitch's per-channel CampaignIDs lookup should
-					// already exclude ineligible campaigns; make a real exclusion
-					// loud (privacy-safe: count, not the channel list).
-					slog.Warn("Withholding drop progress: channel not in campaign's allowed-channel list",
-						"streamer", streamer.Username, "channelID", streamer.ChannelID,
-						"campaign", campaign.Name, "campaignID", campaign.ID,
-						"allowedChannelCount", campaign.AllowedChannelCount())
-				} else {
-					slog.Debug("Withholding drop progress: campaign ACL unresolved (fail closed)",
-						"streamer", streamer.Username,
-						"campaign", campaign.Name, "campaignID", campaign.ID,
-						"aclState", campaign.ACLState().String())
-				}
-				continue
 			}
 
 			if campaign.IsChannelRestricted() {

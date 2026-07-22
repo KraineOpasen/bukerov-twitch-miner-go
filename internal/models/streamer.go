@@ -189,13 +189,21 @@ type Streamer struct {
 	// capSeq increments on every CONFIRMED (enabled/disabled) capability
 	// transition so a slow/stale check cannot overwrite a newer confirmation
 	// (mirrors statusSeq for liveness). Unknown transitions do NOT bump it.
-	capSeq            uint64
-	CommunityGoals    map[string]*CommunityGoal
-	ViewerIsMod       bool
-	ActiveMultipliers []Multiplier
-	Stream            *Stream
-	Raid              *Raid
-	History           map[string]*HistoryEntry
+	capSeq uint64
+	// capObs is the monotonic Channel Points context OBSERVATION generation,
+	// distinct from capSeq: each LoadChannelPointsContext begins a new observation
+	// BEFORE its I/O, and only the latest-begun observation may publish or claim a
+	// bonus, so a newer request always wins regardless of completion order.
+	capObs uint64
+	// lastAuthorizedClaimID is the last bonus claim ID this streamer authorized,
+	// so a duplicate availableClaim across racing contexts is claimed at most once.
+	lastAuthorizedClaimID string
+	CommunityGoals        map[string]*CommunityGoal
+	ViewerIsMod           bool
+	ActiveMultipliers     []Multiplier
+	Stream                *Stream
+	Raid                  *Raid
+	History               map[string]*HistoryEntry
 
 	mu sync.RWMutex
 }
@@ -486,6 +494,25 @@ func (s *Streamer) DropsCondition() bool {
 	return s.Settings.ClaimDrops &&
 		s.Status == StatusOnline &&
 		len(s.Stream.GetCampaignIDs()) > 0
+}
+
+// HasEligibleAssignedDropCampaign reports whether this streamer currently has at
+// least one drop campaign ASSIGNED by the drops tracker with a still-watchable
+// current drop. The tracker only assigns campaigns that passed the full
+// production eligibility evaluation (active entitlement, not claimed, feasible
+// deadline, coherent ACL, exact channel eligibility, confirmed channel-side
+// availability), so this is the authoritative "has an eligible Drops reason to
+// occupy a watch slot" signal — distinct from DropsCondition, which only proves
+// online + ClaimDrops + a non-empty advertised campaign-ID list.
+func (s *Streamer) HasEligibleAssignedDropCampaign() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, c := range s.Stream.GetCampaigns() {
+		if c.CurrentDrop() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // HasChannelRestrictedCampaign reports whether this streamer currently has

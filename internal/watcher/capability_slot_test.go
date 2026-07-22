@@ -61,10 +61,33 @@ func TestGetOnlineStreamersKeepsDisabledPointsWithDrops(t *testing.T) {
 		s.SetConfirmedOnline()
 		s.OnlineAt = time.Now().Add(-time.Minute)
 		s.SetChannelPointsCapability(cap, models.CapReasonConfirmedDisabled)
-		s.Stream.SetCampaignIDs([]string{"camp-1"}) // DropsCondition -> true
+		// An ELIGIBLE ASSIGNED drop campaign (with a watchable current drop) — the
+		// production-evaluated signal, not a bare advertised ID.
+		s.Stream.SetCampaigns([]*models.Campaign{{
+			ID:    "camp-1",
+			Drops: []*models.Drop{{ID: "d1", Name: "Reward", MinutesRequired: 60}},
+		}})
 
 		if online := w.getOnlineStreamers(nil); len(online) != 1 {
-			t.Fatalf("cap=%v: streamer with active drops should keep its slot, got %v", cap, online)
+			t.Fatalf("cap=%v: streamer with an eligible assigned drop should keep its slot, got %v", cap, online)
+		}
+	}
+}
+
+// A bare advertised campaign ID (no eligible ASSIGNED campaign) does NOT earn a
+// slot for a disabled/unknown-points channel — only a production-evaluated
+// assignment does.
+func TestGetOnlineStreamersStaleCampaignIDGetsNoSlot(t *testing.T) {
+	for _, cap := range []models.CapabilityState{models.CapabilityDisabled, models.CapabilityUnknown} {
+		w, _ := newTestWatcher(1)
+		s := w.streamers[0]
+		s.SetConfirmedOnline()
+		s.OnlineAt = time.Now().Add(-time.Minute)
+		s.SetChannelPointsCapability(cap, models.CapReasonConfirmedDisabled)
+		s.Stream.SetCampaignIDs([]string{"camp-1"}) // advertised only, never assigned
+
+		if online := w.getOnlineStreamers(nil); len(online) != 0 {
+			t.Fatalf("cap=%v: a stale advertised ID must not earn a slot, got %v", cap, online)
 		}
 	}
 }
@@ -78,5 +101,30 @@ func TestGetOnlineStreamersEnabledPointsKept(t *testing.T) {
 	}
 	if online := w.getOnlineStreamers(nil); len(online) != 2 {
 		t.Fatalf("enabled points-only configured streamers must remain candidates, got %v", online)
+	}
+}
+
+// Two-slot invariant holds under a mix of points-enabled and drops-eligible
+// (disabled-points) candidates: selection never exceeds MaxSimultaneousStreams.
+func TestMaxSlotsUnderMixedCandidates(t *testing.T) {
+	w, _ := newTestWatcher(3)
+	// streamer 0,1: enabled points. streamer 2: disabled points but an eligible
+	// assigned drop.
+	for _, s := range w.streamers {
+		s.SetConfirmedOnline()
+		s.OnlineAt = time.Now().Add(-time.Minute)
+	}
+	w.streamers[2].SetChannelPointsCapability(models.CapabilityDisabled, models.CapReasonConfirmedDisabled)
+	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{{
+		ID: "camp-1", Drops: []*models.Drop{{ID: "d1", Name: "R", MinutesRequired: 60}},
+	}})
+
+	online := w.getOnlineStreamers(nil)
+	if len(online) != 3 {
+		t.Fatalf("all three should be eligible candidates, got %d", len(online))
+	}
+	watched := w.selectStreamersToWatch(online)
+	if len(watched) > 2 {
+		t.Fatalf("watch selection must never exceed two slots, got %d", len(watched))
 	}
 }

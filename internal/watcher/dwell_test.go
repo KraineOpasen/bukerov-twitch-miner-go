@@ -180,7 +180,7 @@ func TestBoostLatchYieldsToRestrictedDrop(t *testing.T) {
 	}
 
 	// Streamer 4 now has a channel-restricted campaign.
-	w.streamers[4].Stream.CampaignIDs = []string{"restricted"}
+	w.streamers[4].Stream.SetCampaignIDs([]string{"restricted"})
 	w.streamers[4].Stream.Campaigns = []*models.Campaign{
 		{ID: "restricted", Channels: []string{w.streamers[4].ChannelID}},
 	}

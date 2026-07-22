@@ -162,3 +162,166 @@ func TestCapabilityIndependentFromLiveness(t *testing.T) {
 		t.Fatal("liveness->unknown must leave capability unchanged")
 	}
 }
+
+// --- B3: Channel Points context observation snapshot ---------------------
+
+func ctxSnap(cap CapabilityState, balance int, mult int) ChannelPointsContextSnapshot {
+	ms := make([]Multiplier, mult)
+	for i := range ms {
+		ms[i] = Multiplier{Factor: 1.5}
+	}
+	return ChannelPointsContextSnapshot{
+		Capability: cap, Reason: CapReasonConfirmedContext,
+		Balance: balance, HasBalance: true,
+		Multipliers: ms, HasMultipliers: true,
+	}
+}
+
+// Scenarios 1-6: old begins, new begins later, new publishes, old publishes
+// afterward -> final state is NEW; the old (stale) context is dropped whole.
+func TestContextObservationNewestWinsForwardOrder(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	old := s.BeginChannelPointsContextObservation()
+	newer := s.BeginChannelPointsContextObservation()
+
+	if r := s.ApplyChannelPointsContext(newer, ctxSnap(CapabilityEnabled, 200, 2)); !r.Applied {
+		t.Fatal("newer observation should apply")
+	}
+	if r := s.ApplyChannelPointsContext(old, ctxSnap(CapabilityEnabled, 100, 1)); !r.Stale {
+		t.Fatal("older observation must be dropped as stale")
+	}
+	if s.GetChannelPoints() != 200 || len(s.ActiveMultipliers) != 2 {
+		t.Fatalf("final must be newer: balance=%d mult=%d", s.GetChannelPoints(), len(s.ActiveMultipliers))
+	}
+}
+
+// Scenarios 7-11: old begins, new begins later, OLD completes first, new
+// completes afterward -> final is still NEW (newest-started-wins, NOT
+// first-completion-wins).
+func TestContextObservationNewestWinsReverseOrder(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	old := s.BeginChannelPointsContextObservation()
+	newer := s.BeginChannelPointsContextObservation()
+
+	// OLD completes first — but a newer observation already began, so it is stale.
+	if r := s.ApplyChannelPointsContext(old, ctxSnap(CapabilityEnabled, 100, 1)); !r.Stale {
+		t.Fatal("old completing first must still be stale (a newer obs began)")
+	}
+	if r := s.ApplyChannelPointsContext(newer, ctxSnap(CapabilityEnabled, 200, 2)); !r.Applied {
+		t.Fatal("newer observation must apply")
+	}
+	if s.GetChannelPoints() != 200 || len(s.ActiveMultipliers) != 2 {
+		t.Fatalf("final must be newer regardless of completion order: balance=%d mult=%d", s.GetChannelPoints(), len(s.ActiveMultipliers))
+	}
+}
+
+// Scenarios 12-16: post-apply interleaving — old reaches publication AFTER new
+// already published; old must not overwrite any field and must not claim.
+func TestContextObservationPostApplyInterleaving(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	old := s.BeginChannelPointsContextObservation()
+	newer := s.BeginChannelPointsContextObservation()
+
+	newSnap := ctxSnap(CapabilityEnabled, 200, 2)
+	newSnap.Goals = []*CommunityGoal{{GoalID: "g-new"}}
+	newSnap.HasGoals = true
+	newSnap.AvailableClaimID = "claim-new"
+	s.ApplyChannelPointsContext(newer, newSnap)
+
+	oldSnap := ctxSnap(CapabilityEnabled, 100, 1)
+	oldSnap.Goals = []*CommunityGoal{{GoalID: "g-old"}}
+	oldSnap.HasGoals = true
+	oldSnap.AvailableClaimID = "claim-old"
+	res := s.ApplyChannelPointsContext(old, oldSnap)
+
+	if !res.Stale {
+		t.Fatal("old post-apply must be stale")
+	}
+	if s.GetChannelPoints() != 200 || len(s.ActiveMultipliers) != 2 {
+		t.Fatal("old must not overwrite balance/multipliers")
+	}
+	if _, ok := s.CommunityGoals["g-old"]; ok {
+		t.Fatal("old goals must not be written")
+	}
+	// old bonus claim must not authorize (obs no longer current).
+	if s.AuthorizeBonusClaim(old, "claim-old") {
+		t.Fatal("stale observation must not authorize a bonus claim")
+	}
+}
+
+// Scenarios 17-19: optional-field preservation.
+func TestContextObservationOptionalFieldPreservation(t *testing.T) {
+	// 17: valid response WITHOUT activeMultipliers preserves previous multipliers.
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	o1 := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(o1, ctxSnap(CapabilityEnabled, 100, 3)) // 3 multipliers
+	o2 := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(o2, ChannelPointsContextSnapshot{
+		Capability: CapabilityEnabled, Reason: CapReasonConfirmedContext,
+		Balance: 150, HasBalance: true, // no multipliers field
+	})
+	if len(s.ActiveMultipliers) != 3 {
+		t.Fatalf("absent multipliers must preserve previous: got %d", len(s.ActiveMultipliers))
+	}
+	if s.GetChannelPoints() != 150 {
+		t.Fatal("balance should still update")
+	}
+
+	// 19: a valid EMPTY activeMultipliers authoritatively clears them.
+	o3 := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(o3, ChannelPointsContextSnapshot{
+		Capability: CapabilityEnabled, Reason: CapReasonConfirmedContext,
+		Multipliers: []Multiplier{}, HasMultipliers: true,
+	})
+	if len(s.ActiveMultipliers) != 0 {
+		t.Fatalf("valid empty multipliers must clear: got %d", len(s.ActiveMultipliers))
+	}
+}
+
+// Scenarios 20-21: latest genuine Unknown preserves everything; a stale Unknown
+// changes nothing.
+func TestContextObservationUnknownPreservesAndStaleNoop(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	o1 := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(o1, ctxSnap(CapabilityEnabled, 300, 2))
+
+	// 20: latest Unknown preserves LastConfirmed, balance, multipliers.
+	o2 := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(o2, ChannelPointsContextSnapshot{Capability: CapabilityUnknown, Reason: CapReasonTimeout})
+	if s.GetChannelPointsCapability() != CapabilityUnknown {
+		t.Fatal("latest should be unknown")
+	}
+	if s.LastConfirmedChannelPointsCapability() != CapabilityEnabled || s.GetChannelPoints() != 300 || len(s.ActiveMultipliers) != 2 {
+		t.Fatal("unknown must preserve last-confirmed, balance and multipliers")
+	}
+
+	// 21: a stale Unknown (old obs) changes nothing.
+	if r := s.ApplyChannelPointsContext(o1, ChannelPointsContextSnapshot{Capability: CapabilityUnknown, Reason: CapReasonTransportError}); !r.Stale {
+		t.Fatal("stale unknown must be dropped")
+	}
+}
+
+// Scenario 22: a duplicate availableClaim across racing contexts authorizes at
+// most one mutation.
+func TestContextObservationBonusReservationDedup(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	obs := s.BeginChannelPointsContextObservation()
+	s.ApplyChannelPointsContext(obs, ctxSnap(CapabilityEnabled, 100, 0))
+
+	if !s.AuthorizeBonusClaim(obs, "claim-1") {
+		t.Fatal("first authorization should succeed")
+	}
+	if s.AuthorizeBonusClaim(obs, "claim-1") {
+		t.Fatal("duplicate claim id must not authorize twice")
+	}
+	// An empty claim id never authorizes.
+	if s.AuthorizeBonusClaim(obs, "") {
+		t.Fatal("empty claim id must not authorize")
+	}
+	// A stale observation never authorizes.
+	stale := obs
+	s.BeginChannelPointsContextObservation() // advance
+	if s.AuthorizeBonusClaim(stale, "claim-2") {
+		t.Fatal("stale observation must not authorize")
+	}
+}

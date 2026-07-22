@@ -777,7 +777,13 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 		// channel with a live drop still qualifies. Retained (BKM-002 continuity)
 		// slots handled above bypass this gate, so an in-progress session is never
 		// dropped by it.
-		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.DropsCondition()); !ok {
+		// The Drops input is the production-evaluated eligible-assignment signal
+		// (HasEligibleAssignedDropCampaign), NOT the stale DropsCondition: a bare
+		// advertised campaign ID no longer earns a slot - the drops tracker must
+		// have actually assigned an eligible campaign (active entitlement, not
+		// claimed, feasible, coherent ACL, allowed channel, confirmed availability).
+		// Points capability still grants a slot independently.
+		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.HasEligibleAssignedDropCampaign()); !ok {
 			w.noteSelection(i, "not eligible for a new watch slot ("+string(reason)+")")
 			continue
 		}

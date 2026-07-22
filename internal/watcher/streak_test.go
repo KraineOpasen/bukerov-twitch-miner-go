@@ -43,7 +43,7 @@ func TestBoostFinishesStreakInProgressInsteadOfThrashing(t *testing.T) {
 func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 	w, online := newTestWatcher(4)
 	w.streamers[2].Stream.MinuteWatched = 6 // streak nearly done
-	w.streamers[3].Stream.CampaignIDs = []string{"restricted"}
+	w.streamers[3].Stream.SetCampaignIDs([]string{"restricted"})
 	w.streamers[3].Stream.Campaigns = []*models.Campaign{
 		{ID: "restricted", Channels: []string{w.streamers[3].ChannelID}},
 	}

@@ -38,7 +38,7 @@ func restrictedTracker(watched, required int) *DropsTracker {
 	streamer.ChannelID = "chan-1"
 	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = game
-	streamer.Stream.CampaignIDs = []string{"campaign-amd"}
+	streamer.Stream.SetCampaignIDs([]string{"campaign-amd"})
 
 	campaign := &models.Campaign{
 		ID:          "campaign-amd",
