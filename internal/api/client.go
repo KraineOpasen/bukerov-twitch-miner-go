@@ -1051,15 +1051,19 @@ type pendingCampaignAvailability struct {
 	at    time.Time
 }
 
-// observeCampaignAvailability begins the availability observation (before its I/O)
-// and fetches the result into a local pending value WITHOUT publishing it. Publish
-// happens later, only if the playback-session apply succeeded (see
-// doRefreshPlaybackSession). It preserves the tri-state Known/Unknown contract: a
-// resolved lookup (including a legitimately empty list) is Known; a failed lookup
-// or an unresolved game is Unknown (keeping previous IDs as last-known).
-func (c *TwitchClient) observeCampaignAvailability(streamer *models.Streamer, game *models.Game) pendingCampaignAvailability {
+// observeCampaignAvailability fetches the availability result into a local pending
+// value under a PRE-ALLOCATED observation id (obsID) WITHOUT publishing it. The
+// observation is reserved by the caller ALONGSIDE the session observation, before
+// any I/O, so the availability domain keeps the same relative ordering as the
+// session domain (an older playback refresh never holds a newer availability
+// observation). Publish happens later, only if the playback-session apply succeeded
+// (see doRefreshPlaybackSession). It preserves the tri-state Known/Unknown
+// contract: a resolved lookup (including a legitimately empty list) is Known; a
+// failed lookup or an unresolved game is Unknown (keeping previous IDs as
+// last-known).
+func (c *TwitchClient) observeCampaignAvailability(streamer *models.Streamer, game *models.Game, obsID uint64) pendingCampaignAvailability {
 	pend := pendingCampaignAvailability{
-		obsID: streamer.Stream.BeginCampaignAvailabilityObservation(),
+		obsID: obsID,
 		at:    time.Now(),
 	}
 	if game != nil && game.Name != "" && game.ID != "" {
@@ -1102,6 +1106,19 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 	// Begin the observation ONLY now that we will do I/O, before the FIRST network
 	// call, so a concurrently-started newer refresh always supersedes this one.
 	obs := streamer.Stream.BeginSessionObservation()
+
+	// Reserve the campaign-availability observation id ALONGSIDE the session
+	// observation — before any network I/O — so the two observation domains keep
+	// the SAME relative ordering. Without this the availability observation would
+	// begin only after the stream-info fetch, letting an older playback refresh
+	// (older session observation) begin a NEWER availability observation and
+	// silently drop the newer refresh's availability, leaving playback session and
+	// channel availability inconsistent.
+	var availObs uint64
+	claimDrops := streamer.Settings.ClaimDrops
+	if fetchStreamInfo && claimDrops {
+		availObs = streamer.Stream.BeginCampaignAvailabilityObservation()
+	}
 
 	cand := models.PlaybackSessionCandidate{}
 
@@ -1173,12 +1190,12 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 		cand.Tags = tags
 		cand.ViewersCount = viewersCount
 
-		// Channel-side campaign availability keeps its OWN observation contract. Its
-		// observation begins before its I/O, but its RESULT is held locally and NOT
+		// Channel-side campaign availability uses the observation id reserved above
+		// (aligned with the session observation). Its RESULT is held locally and NOT
 		// published yet: a stale/rejected playback apply must not publish
 		// availability derived from a superseded refresh.
-		if streamer.Settings.ClaimDrops {
-			avail = c.observeCampaignAvailability(streamer, game)
+		if claimDrops {
+			avail = c.observeCampaignAvailability(streamer, game, availObs)
 			haveAvail = true
 		}
 

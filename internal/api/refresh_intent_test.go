@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -260,6 +261,121 @@ func TestSuccessfulRefreshPublishesCampaignAvailability(t *testing.T) {
 	if state != models.CampaignAvailabilityKnown || !reflect.DeepEqual(ids, []string{"camp-NEW"}) {
 		t.Fatalf("a successful refresh must publish the fresh Known IDs, got %v state %v", ids, state)
 	}
+}
+
+// --- Corrective pass 3: availability observation aligned with session observation ---
+
+// runAvailabilityInterleave drives two concurrent refreshes on ONE streamer with
+// channel barriers (no time.Sleep): refresh A begins its session observation FIRST
+// but blocks inside its stream-info fetch; refresh B begins SECOND, fetches
+// everything, and parks just before its playback apply. Both then park before
+// apply, and the caller chooses which applies first. In every case the NEWER
+// session B must win BOTH the playback session and the channel availability — the
+// older refresh A can never supersede B's availability observation.
+func runAvailabilityInterleave(t *testing.T, olderAppliesFirst bool) {
+	t.Helper()
+	const (
+		availA = `{"data":{"channel":{"id":"cid","viewerDropCampaigns":[{"id":"camp-A"}]}}}`
+		availB = `{"data":{"channel":{"id":"cid","viewerDropCampaigns":[{"id":"camp-B"}]}}}`
+	)
+
+	var aStreamOnce sync.Once
+	aStreamReached := make(chan struct{})
+	releaseAStream := make(chan struct{})
+	aBeforeApply := make(chan struct{})
+	releaseAApply := make(chan struct{})
+	bBeforeApply := make(chan struct{})
+	releaseBApply := make(chan struct{})
+
+	cA := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch gqlOperationName(r) {
+		case constants_VideoPlayerStreamInfoOverlayChannel:
+			aStreamOnce.Do(func() { close(aStreamReached) })
+			<-releaseAStream
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(validStreamInfoBody))
+		case constants_DropsHighlightServiceAvailableDrops:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(availA))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	})
+	cB := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch gqlOperationName(r) {
+		case constants_VideoPlayerStreamInfoOverlayChannel:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(validStreamInfoBody))
+		case constants_DropsHighlightServiceAvailableDrops:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(availB))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	})
+	cA.beforeSessionApply = func() { close(aBeforeApply); <-releaseAApply }
+	cB.beforeSessionApply = func() { close(bBeforeApply); <-releaseBApply }
+
+	s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+	s.ChannelID = "cid"
+	s.Stream.SetCampaignIDs([]string{"camp-OLD"}) // prior Known list
+
+	var resA, resB SessionRefreshResult
+	aDone := make(chan struct{})
+	bDone := make(chan struct{})
+
+	// A begins its session (and availability) observation first, then blocks in
+	// stream-info.
+	go func() { resA = cA.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(aDone) }()
+	<-aStreamReached
+
+	// B begins its observations second and runs to just before its apply.
+	go func() { resB = cB.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(bDone) }()
+	<-bBeforeApply
+
+	// Release A's stream-info; A fetches its availability and reaches its apply.
+	close(releaseAStream)
+	<-aBeforeApply
+
+	if olderAppliesFirst {
+		close(releaseAApply)
+		<-aDone
+		close(releaseBApply)
+		<-bDone
+	} else {
+		close(releaseBApply)
+		<-bDone
+		close(releaseAApply)
+		<-aDone
+	}
+
+	if !resA.Stale {
+		t.Fatalf("the older refresh A must be stale, got %+v", resA)
+	}
+	if !resB.Applied || resB.Stale {
+		t.Fatalf("the newer refresh B must apply, got %+v", resB)
+	}
+	state, ids := s.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityKnown || !reflect.DeepEqual(ids, []string{"camp-B"}) {
+		t.Fatalf("availability must be the newer session's (Known [camp-B]); camp-A must never publish and camp-OLD must be replaced — got state=%v ids=%v",
+			state, ids)
+	}
+}
+
+// TestOlderPlaybackRefreshCannotSupersedeNewerAvailabilityObservation: the newer
+// session B applies first; the older A is stale. B's playback session and
+// availability stay consistent (Known [camp-B]).
+func TestOlderPlaybackRefreshCannotSupersedeNewerAvailabilityObservation(t *testing.T) {
+	runAvailabilityInterleave(t, false)
+}
+
+// TestNewerPlaybackRefreshAvailabilityWinsWhenOlderCompletesFirst: the other
+// completion order — the older A applies (and goes stale) first, then B applies.
+// The result is still Known [camp-B].
+func TestNewerPlaybackRefreshAvailabilityWinsWhenOlderCompletesFirst(t *testing.T) {
+	runAvailabilityInterleave(t, true)
 }
 
 // TestMalformedAvailabilityStillPublishesUnknown: a successful playback apply with
