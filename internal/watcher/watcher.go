@@ -766,6 +766,18 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 			online = append(online, i)
 			continue
 		}
+		// Capability gate for a NEW slot: a channel whose Channel Points are
+		// AUTHORITATIVELY confirmed disabled has no points-only value, so it does
+		// not occupy a watch slot UNLESS it has an active drop entitlement (Drops
+		// are never gated by points capability). An unknown capability is
+		// intentionally NOT excluded here — configured streamers are an explicit
+		// operator opt-in, so the default watch is preserved; unknown merely
+		// withholds points-only priority elsewhere. Retained (BKM-002 continuity)
+		// slots handled above are never subject to this gate.
+		if pointsOnlyCapabilityBlocked(s) {
+			w.noteSelection(i, "channel points confirmed disabled and no active drop campaign - not occupying a watch slot")
+			continue
+		}
 		if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
 			online = append(online, i)
 		} else {
@@ -793,6 +805,20 @@ func (w *MinuteWatcher) retainsSlotWhileUnknown(s *models.Streamer) bool {
 	}
 	since := s.GetUnknownSince()
 	return !since.IsZero() && time.Since(since) < unknownSlotRetentionGrace
+}
+
+// pointsOnlyCapabilityBlocked reports whether a streamer must be kept out of a
+// NEW watch slot because its Channel Points are authoritatively confirmed
+// disabled and it has no other reason to be watched. Drops are never gated by
+// points capability, so a disabled-points channel with an active drop
+// entitlement (DropsCondition) is still watched. An unknown capability returns
+// false — it is not a basis to exclude a configured, operator-chosen streamer;
+// the two-slot broker cap and fair rotation are unchanged.
+func pointsOnlyCapabilityBlocked(s *models.Streamer) bool {
+	if s.GetChannelPointsCapability() != models.CapabilityDisabled {
+		return false
+	}
+	return !s.DropsCondition()
 }
 
 // selectStreamersToWatch picks which online streamers to send minute-watched
