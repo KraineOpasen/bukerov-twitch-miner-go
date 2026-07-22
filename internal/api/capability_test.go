@@ -3,6 +3,8 @@ package api
 import (
 	"io"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -63,5 +65,60 @@ func TestLoadChannelPointsContextUnknownPreservesConfirmed(t *testing.T) {
 	}
 	if s.GetChannelPoints() != 9000 {
 		t.Fatalf("balance must be preserved, got %d", s.GetChannelPoints())
+	}
+}
+
+// B7 scenario 9 (concurrent, channel-synchronized, no sleeps): when a slower
+// LoadChannelPointsContext response is superseded by a newer confirmation, the
+// stale response must be dropped WHOLE — in particular it must NOT fire a bonus
+// claim off its stale context. Deterministic: the handler blocks the first
+// (old) ChannelPointsContext request until the second (new) one has completed
+// and applied, using channels rather than timing.
+func TestLoadChannelPointsContextStaleDropsBonusClaim(t *testing.T) {
+	var claimHits int32
+	var ctxReq int32
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+
+	const ctxWithClaim = `{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":100,"availableClaim":{"id":"claim-1"}}}}}}}`
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "ClaimCommunityPoints") {
+			atomic.AddInt32(&claimHits, 1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"data":{"claimCommunityPoints":{"claim":{"id":"claim-1"}}}}`)
+			return
+		}
+		// ChannelPointsContext: the first (old) request blocks until released.
+		if atomic.AddInt32(&ctxReq, 1) == 1 {
+			close(arrived)
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, ctxWithClaim)
+	})
+
+	s := newTestStreamer("chan")
+	s.SetConfirmedOnline() // so the bonus-claim task's liveness gate passes
+
+	done := make(chan struct{})
+	go func() { _ = c.LoadChannelPointsContext(s); close(done) }() // OLD request
+
+	<-arrived // OLD has captured its sequence and is now blocked in the handler.
+
+	// NEW request completes first, applying Enabled+balance and (being eligible)
+	// claiming the bonus once.
+	_ = c.LoadChannelPointsContext(s)
+	if got := atomic.LoadInt32(&claimHits); got != 1 {
+		t.Fatalf("the fresh context should claim exactly once, got %d", got)
+	}
+
+	// Release the OLD request; its context is now stale and must be dropped
+	// before the bonus-claim block — no additional claim.
+	close(release)
+	<-done
+	if got := atomic.LoadInt32(&claimHits); got != 1 {
+		t.Fatalf("stale context must NOT fire a second bonus claim, got %d total", got)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -766,16 +767,18 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 			online = append(online, i)
 			continue
 		}
-		// Capability gate for a NEW slot: a channel whose Channel Points are
-		// AUTHORITATIVELY confirmed disabled has no points-only value, so it does
-		// not occupy a watch slot UNLESS it has an active drop entitlement (Drops
-		// are never gated by points capability). An unknown capability is
-		// intentionally NOT excluded here — configured streamers are an explicit
-		// operator opt-in, so the default watch is preserved; unknown merely
-		// withholds points-only priority elsewhere. Retained (BKM-002 continuity)
-		// slots handled above are never subject to this gate.
-		if pointsOnlyCapabilityBlocked(s) {
-			w.noteSelection(i, "channel points confirmed disabled and no active drop campaign - not occupying a watch slot")
+		// Capability gate for a NEW slot, via the single centralized policy
+		// (eligibility.SlotCandidateEligible): a channel earns a new watch slot
+		// only with a confirmed-useful task - an active eligible Drops entitlement,
+		// OR a points task whose Channel Points capability is confirmed Enabled. A
+		// points-only channel whose capability is Disabled OR merely Unknown gets
+		// no new slot (unknown is never a basis to grant one, and never coerced to
+		// enabled); Drops are evaluated independently, so a disabled/unknown-points
+		// channel with a live drop still qualifies. Retained (BKM-002 continuity)
+		// slots handled above bypass this gate, so an in-progress session is never
+		// dropped by it.
+		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.DropsCondition()); !ok {
+			w.noteSelection(i, "not eligible for a new watch slot ("+string(reason)+")")
 			continue
 		}
 		if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
@@ -807,19 +810,10 @@ func (w *MinuteWatcher) retainsSlotWhileUnknown(s *models.Streamer) bool {
 	return !since.IsZero() && time.Since(since) < unknownSlotRetentionGrace
 }
 
-// pointsOnlyCapabilityBlocked reports whether a streamer must be kept out of a
-// NEW watch slot because its Channel Points are authoritatively confirmed
-// disabled and it has no other reason to be watched. Drops are never gated by
-// points capability, so a disabled-points channel with an active drop
-// entitlement (DropsCondition) is still watched. An unknown capability returns
-// false — it is not a basis to exclude a configured, operator-chosen streamer;
-// the two-slot broker cap and fair rotation are unchanged.
-func pointsOnlyCapabilityBlocked(s *models.Streamer) bool {
-	if s.GetChannelPointsCapability() != models.CapabilityDisabled {
-		return false
-	}
-	return !s.DropsCondition()
-}
+// watcherEligibility is the single centralized eligibility policy used for
+// new-slot candidacy (SlotCandidateEligible). It is stateless (system clock);
+// there is deliberately no second, divergent capability policy in the watcher.
+var watcherEligibility = eligibility.Evaluator{}
 
 // selectStreamersToWatch picks which online streamers to send minute-watched
 // events for. Twitch only credits watch time for up to

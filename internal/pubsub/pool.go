@@ -11,9 +11,52 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
+
+// pointsEligibility is the single centralized policy used to gate every
+// Channel-Points action on this PubSub path (bonus claims, auto-bets, community
+// goals). It is stateless (system clock); there is no second capability policy.
+var pointsEligibility = eligibility.Evaluator{}
+
+// logSkippedPointsAction emits a throttled, privacy-safe DEBUG line when a
+// points action is skipped because it is not eligible (capability disabled/
+// unknown, offline, user setting off). No raw Twitch payload is logged.
+func logSkippedPointsAction(streamer *models.Streamer, action string, d eligibility.Decision) {
+	slog.Debug("Skipping channel-points action: not eligible",
+		"action", action, "streamer", streamer.Username,
+		"reason", string(d.Reason), "state", d.State.String())
+}
+
+// User-facing, privacy-safe errors for a blocked manual bet. Capability unknown
+// is kept DISTINCT from capability disabled and from offline/status-unknown, so
+// the dashboard shows an accurate, stable reason instead of a raw error.
+var (
+	ErrChannelPointsDisabled = errors.New("channel points are disabled for this channel")
+	ErrChannelPointsUnknown  = errors.New("channel points availability is not confirmed yet; please try again shortly")
+	// ErrStreamerNotLive is used for a status-unknown (unconfirmed) streamer,
+	// distinct from the authoritative-offline ErrStreamerOffline defined below.
+	ErrStreamerNotLive = errors.New("streamer is not currently live")
+)
+
+// manualBetGateError maps an ineligible decision to a user-safe error, keeping
+// capability-disabled, capability-unknown, offline, and status-unknown distinct.
+func manualBetGateError(d eligibility.Decision) error {
+	switch d.Reason {
+	case eligibility.ReasonCapabilityDisabled:
+		return ErrChannelPointsDisabled
+	case eligibility.ReasonCapabilityUnknown:
+		return ErrChannelPointsUnknown
+	case eligibility.ReasonStatusOffline:
+		return ErrStreamerOffline
+	case eligibility.ReasonStatusUnknown:
+		return ErrStreamerNotLive
+	default:
+		return ErrChannelPointsUnknown
+	}
+}
 
 type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
 
@@ -512,6 +555,12 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 		}
 		if claim, ok := msg.Data["claim"].(map[string]interface{}); ok {
 			if claimID, ok := claim["id"].(string); ok {
+				// Centralized gate: never start a bonus claim when Channel Points
+				// are confirmed disabled or merely unknown (fail safe).
+				if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); !d.Eligible {
+					logSkippedPointsAction(streamer, "bonus claim", d)
+					return
+				}
 				if err := p.client.ClaimBonus(streamer, claimID); err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
 				} else {
@@ -682,7 +731,11 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			outcomes,
 		)
 
-		if !streamer.GetIsOnline() {
+		// Centralized gate: schedule a NEW auto-bet only when the prediction task
+		// is eligible (user setting on, confirmed online, Channel Points enabled).
+		// Disabled/unknown capability never starts a new bet.
+		if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskPrediction); !d.Eligible {
+			logSkippedPointsAction(streamer, "auto prediction", d)
 			return
 		}
 
@@ -970,6 +1023,15 @@ func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (s
 		return "", ErrPredictionNotFound
 	}
 
+	// Centralized capability gate for a manual bet — the same policy as auto-bets,
+	// with a user-safe reason (unknown is distinct from disabled/offline; no raw
+	// Twitch/Go error is surfaced).
+	if event.Streamer != nil {
+		if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
+			return "", manualBetGateError(d)
+		}
+	}
+
 	if amount <= 0 {
 		return "", ErrInvalidAmount
 	}
@@ -1192,6 +1254,13 @@ func (p *WebSocketPool) handleCommunityPointsChannel(msg *PubSubMessage, streame
 }
 
 func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
+	// Centralized gate: contribute points to community goals only when the task
+	// is eligible (confirmed online, Channel Points enabled). Disabled/unknown
+	// capability never starts a new contribution.
+	if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskCommunityGoal); !d.Eligible {
+		logSkippedPointsAction(streamer, "community goal", d)
+		return
+	}
 	for _, goal := range streamer.CommunityGoals {
 		if goal.Status != models.CommunityGoalStarted || !goal.IsInStock {
 			continue

@@ -8,6 +8,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
@@ -31,6 +32,13 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 	s := m.streamers.Get(username)
 	if s == nil {
 		return fmt.Errorf("streamer %q is not tracked", username)
+	}
+
+	// Centralized capability gate: a custom-reward redemption spends channel
+	// points, so it is blocked when Channel Points are confirmed disabled or not
+	// yet confirmed (unknown), with a user-safe reason distinct from offline.
+	if err := pointsActionGate(s, eligibility.TaskCustomReward); err != nil {
+		return err
 	}
 
 	rewards, err := m.client.GetCustomRewards(s)

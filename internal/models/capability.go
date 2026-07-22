@@ -88,6 +88,44 @@ func (s *Streamer) applyChannelPointsCapabilityLocked(state CapabilityState, rea
 	return prev != state
 }
 
+// CapabilityTransition is the immutable result of an atomic capability/context
+// application. It lets callers distinguish "dropped as stale" from "applied but
+// unchanged" (a plain bool cannot).
+type CapabilityTransition struct {
+	Previous CapabilityState
+	Current  CapabilityState
+	// Applied is true when the observation was accepted (not stale) and written.
+	Applied bool
+	// Changed is true when Applied and the state actually moved.
+	Changed bool
+	// Stale is true when the observation was discarded because a newer confirmed
+	// transition had already landed since obsSeq was captured.
+	Stale bool
+}
+
+// ApplyChannelPointsContextIfCurrent atomically applies a Channel Points
+// observation (capability + optionally the balance) under a SINGLE lock, but
+// only when no newer CONFIRMED capability transition landed since obsSeq was
+// captured (before the network I/O). A stale observation is dropped WHOLE —
+// neither capability nor balance is written — so an old slow response can never
+// overwrite a newer capability or a newer balance, nor trigger a bonus claim off
+// a stale context. balance is written only when hasBalance is true and the
+// observation is accepted; an Unknown observation preserves LastConfirmed and
+// the balance and never bumps the sequence.
+func (s *Streamer) ApplyChannelPointsContextIfCurrent(obsSeq uint64, state CapabilityState, reason CapabilityReason, balance int, hasBalance bool) CapabilityTransition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.channelPointsCap
+	if obsSeq != s.capSeq {
+		return CapabilityTransition{Previous: prev, Current: prev, Stale: true}
+	}
+	changed := s.applyChannelPointsCapabilityLocked(state, reason)
+	if hasBalance {
+		s.ChannelPoints = balance
+	}
+	return CapabilityTransition{Previous: prev, Current: state, Applied: true, Changed: changed}
+}
+
 // ChannelPointsCapabilitySnapshot returns the current capability state and the
 // capability sequence, read under the lock. A network caller captures this
 // BEFORE its I/O and passes the sequence to ApplyChannelPointsCapabilityIfCurrent

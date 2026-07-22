@@ -80,6 +80,71 @@ func TestCapabilityStaleGuard(t *testing.T) {
 	}
 }
 
+// B7: ApplyChannelPointsContextIfCurrent applies capability + balance atomically
+// under the stale guard.
+func TestApplyChannelPointsContextIfCurrentAtomic(t *testing.T) {
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	s.SetChannelPoints(50)
+
+	_, seq := s.ChannelPointsCapabilitySnapshot()
+	tr := s.ApplyChannelPointsContextIfCurrent(seq, CapabilityEnabled, CapReasonConfirmedContext, 200, true)
+	if !tr.Applied || tr.Stale {
+		t.Fatalf("current observation should apply: %+v", tr)
+	}
+	if s.GetChannelPointsCapability() != CapabilityEnabled || s.GetChannelPoints() != 200 {
+		t.Fatalf("capability+balance not applied atomically: cap=%v bal=%d", s.GetChannelPointsCapability(), s.GetChannelPoints())
+	}
+
+	// The captured seq is now stale (a confirmation bumped it). A stale apply is
+	// dropped whole — neither capability nor balance changes.
+	tr2 := s.ApplyChannelPointsContextIfCurrent(seq, CapabilityUnknown, CapReasonTimeout, 999, true)
+	if !tr2.Stale || tr2.Applied {
+		t.Fatalf("stale observation should be dropped: %+v", tr2)
+	}
+	if s.GetChannelPointsCapability() != CapabilityEnabled || s.GetChannelPoints() != 200 {
+		t.Fatalf("stale apply must not change state: cap=%v bal=%d", s.GetChannelPointsCapability(), s.GetChannelPoints())
+	}
+}
+
+// B7 scenarios 1-8: a newer Enabled+balance wins; an older result (Unknown, or a
+// stale Enabled with an old balance) that completes afterward is dropped.
+func TestApplyChannelPointsContextOrdering(t *testing.T) {
+	// old Unknown completing after newer Enabled+balance=200 -> final Enabled/200.
+	s := NewStreamer("bob", DefaultStreamerSettings())
+	_, oldSeq := s.ChannelPointsCapabilitySnapshot()
+	s.ApplyChannelPointsContextIfCurrent(oldSeq, CapabilityEnabled, CapReasonConfirmedContext, 200, true) // newer lands
+	if tr := s.ApplyChannelPointsContextIfCurrent(oldSeq, CapabilityUnknown, CapReasonTimeout, 0, false); !tr.Stale {
+		t.Fatal("stale unknown must be dropped")
+	}
+	if s.GetChannelPointsCapability() != CapabilityEnabled || s.GetChannelPoints() != 200 {
+		t.Fatalf("final should be enabled/200, got %v/%d", s.GetChannelPointsCapability(), s.GetChannelPoints())
+	}
+
+	// old Enabled+balance=100 completing after newer Enabled+balance=200 -> 200.
+	s2 := NewStreamer("bob", DefaultStreamerSettings())
+	_, oldSeq2 := s2.ChannelPointsCapabilitySnapshot()
+	s2.ApplyChannelPointsContextIfCurrent(oldSeq2, CapabilityEnabled, CapReasonConfirmedContext, 200, true)
+	s2.ApplyChannelPointsContextIfCurrent(oldSeq2, CapabilityEnabled, CapReasonConfirmedContext, 100, true) // stale
+	if s2.GetChannelPoints() != 200 {
+		t.Fatalf("stale balance must not overwrite newer: got %d", s2.GetChannelPoints())
+	}
+
+	// genuine latest Unknown preserves last-confirmed and balance.
+	s3 := NewStreamer("bob", DefaultStreamerSettings())
+	s3.SetChannelPoints(77)
+	_, seq3 := s3.ChannelPointsCapabilitySnapshot()
+	s3.ApplyChannelPointsContextIfCurrent(seq3, CapabilityEnabled, CapReasonConfirmedContext, 300, true)
+	_, seq3b := s3.ChannelPointsCapabilitySnapshot()
+	s3.ApplyChannelPointsContextIfCurrent(seq3b, CapabilityUnknown, CapReasonTimeout, 0, false)
+	if s3.GetChannelPointsCapability() != CapabilityUnknown {
+		t.Fatal("latest unknown should be current state")
+	}
+	if s3.LastConfirmedChannelPointsCapability() != CapabilityEnabled || s3.GetChannelPoints() != 300 {
+		t.Fatalf("unknown must preserve last-confirmed enabled and balance 300, got %v/%d",
+			s3.LastConfirmedChannelPointsCapability(), s3.GetChannelPoints())
+	}
+}
+
 // 23: capability and liveness are independent tri-states.
 func TestCapabilityIndependentFromLiveness(t *testing.T) {
 	s := NewStreamer("bob", DefaultStreamerSettings())

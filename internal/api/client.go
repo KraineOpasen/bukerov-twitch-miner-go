@@ -19,9 +19,15 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
+
+// channelPointsEligibility is the single centralized policy used to gate the
+// bonus claim triggered from a freshly-loaded, accepted Channel Points context.
+// Stateless (system clock).
+var channelPointsEligibility = eligibility.Evaluator{}
 
 var (
 	ErrStreamerDoesNotExist = errors.New("streamer does not exist")
@@ -1150,6 +1156,10 @@ func capabilityFromError(err error) models.CapabilityReason {
 }
 
 func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
+	// Capture the capability sequence BEFORE the network I/O so a slow/stale
+	// response can never overwrite a newer capability or balance (stale guard).
+	_, obsSeq := streamer.ChannelPointsCapabilitySnapshot()
+
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
 		"channelLogin": streamer.Username,
 	})
@@ -1158,25 +1168,25 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	if err != nil {
 		// Inconclusive: never overwrite a prior confirmation and never clear the
 		// balance — classify the capability UNKNOWN with a privacy-safe reason.
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, capabilityFromError(err))
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, capabilityFromError(err), 0, false)
 		return err
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
 		return ErrStreamerDoesNotExist
 	}
 
 	community, ok := data["community"].(map[string]interface{})
 	if !ok || community == nil {
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
 		return ErrStreamerDoesNotExist
 	}
 
 	channel, ok := community["channel"].(map[string]interface{})
 	if !ok || channel == nil {
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
 		return ErrStreamerDoesNotExist
 	}
 
@@ -1185,52 +1195,71 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 		// A structurally valid channel with no self node: the feature context is
 		// missing but Twitch is NOT known to signal "disabled" by omission, so
 		// this is UNKNOWN (never coerced to Disabled without proof).
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMissingContext)
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMissingContext, 0, false)
 		return nil
 	}
 
 	communityPoints, ok := self["communityPoints"].(map[string]interface{})
 	if !ok {
-		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMissingContext)
+		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMissingContext, 0, false)
 		return nil
 	}
 
-	// A structurally valid communityPoints context is the authoritative
-	// "Channel Points available for this channel" signal we can prove.
-	streamer.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
-
-	if balance, ok := communityPoints["balance"].(float64); ok {
-		streamer.SetChannelPoints(int(balance))
+	// Parse the accepted context WITHOUT writing to the streamer yet.
+	balance, hasBalance := 0, false
+	if b, ok := communityPoints["balance"].(float64); ok {
+		balance, hasBalance = int(b), true
 	}
 
-	if multipliers, ok := communityPoints["activeMultipliers"].([]interface{}); ok {
-		streamer.ActiveMultipliers = nil
-		for _, m := range multipliers {
+	// Atomically apply capability + balance under the stale guard. If a newer
+	// confirmation already landed, drop this whole observation — including the
+	// multipliers, goals, and any bonus claim below — so a stale context can
+	// never overwrite newer state or fire a bonus claim off old data.
+	tr := streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityEnabled, models.CapReasonConfirmedContext, balance, hasBalance)
+	if tr.Stale {
+		slog.Debug("Dropping stale channel-points context (a newer capability confirmation already applied)",
+			"streamer", streamer.Username)
+		return nil
+	}
+
+	// Multipliers: applied only on an accepted observation, via a locked setter
+	// (the previous direct field write raced the locked readers).
+	var multipliers []models.Multiplier
+	if ms, ok := communityPoints["activeMultipliers"].([]interface{}); ok {
+		for _, m := range ms {
 			if mMap, ok := m.(map[string]interface{}); ok {
 				if factor, ok := mMap["factor"].(float64); ok {
-					streamer.ActiveMultipliers = append(streamer.ActiveMultipliers, models.Multiplier{Factor: factor})
+					multipliers = append(multipliers, models.Multiplier{Factor: factor})
 				}
 			}
 		}
 	}
+	streamer.SetActiveMultipliers(multipliers)
 
 	if streamer.Settings.CommunityGoals {
 		if settings, ok := channel["communityPointsSettings"].(map[string]interface{}); ok {
 			if goals, ok := settings["goals"].([]interface{}); ok {
 				for _, g := range goals {
 					if goalMap, ok := g.(map[string]interface{}); ok {
-						goal := models.CommunityGoalFromGQL(goalMap)
-						streamer.AddCommunityGoal(goal)
+						streamer.AddCommunityGoal(models.CommunityGoalFromGQL(goalMap))
 					}
 				}
 			}
 		}
 	}
 
+	// Bonus claim: OUTSIDE any streamer lock, only after an ACCEPTED Enabled
+	// context, and only when the bonus-claim task is eligible (the centralized
+	// capability gate). A stale context returned above never reaches here.
 	if availableClaim, ok := communityPoints["availableClaim"].(map[string]interface{}); ok && availableClaim != nil {
-		if claimID, ok := availableClaim["id"].(string); ok {
-			if err := c.ClaimBonus(streamer, claimID); err != nil {
-				slog.Error("Failed to claim bonus", "error", err)
+		if claimID, ok := availableClaim["id"].(string); ok && claimID != "" {
+			if d := channelPointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); d.Eligible {
+				if err := c.ClaimBonus(streamer, claimID); err != nil {
+					slog.Error("Failed to claim bonus", "error", err)
+				}
+			} else {
+				slog.Debug("Skipping bonus claim from context: not eligible",
+					"streamer", streamer.Username, "reason", string(d.Reason))
 			}
 		}
 	}

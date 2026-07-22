@@ -14,6 +14,8 @@ func newOnlineStreamer(name string) *models.Streamer {
 	s.SetConfirmedOnline()
 	// Backdate past the 30s "settle" guard so it is immediately a candidate.
 	s.OnlineAt = time.Now().Add(-time.Minute)
+	// Normal points-enabled channel (capability confirmed at startup in prod).
+	s.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	return s
 }
 

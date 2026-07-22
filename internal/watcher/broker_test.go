@@ -447,6 +447,8 @@ func newLoopWatcher(n int, sender minuteReporter, checker onlineChecker) (*Minut
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
 		streamers[i].SetConfirmedOnline()
 		streamers[i].OnlineAt = time.Now().Add(-time.Minute)
+		// Normal points-enabled channel (capability confirmed at startup in prod).
+		streamers[i].SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	}
 	w := &MinuteWatcher{
 		client:     checker,

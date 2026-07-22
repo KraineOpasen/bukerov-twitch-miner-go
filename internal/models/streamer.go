@@ -631,6 +631,16 @@ func (s *Streamer) ActiveCommunityGoals() []CommunityGoalProgress {
 	return out
 }
 
+// SetActiveMultipliers replaces the active points multipliers under the lock.
+// The Channel Points context path previously assigned this slice directly on a
+// non-owning goroutine, racing the locked readers below; this setter closes that
+// race and is only applied on an accepted (non-stale) context observation.
+func (s *Streamer) SetActiveMultipliers(multipliers []Multiplier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ActiveMultipliers = multipliers
+}
+
 func (s *Streamer) ViewerHasPointsMultiplier() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

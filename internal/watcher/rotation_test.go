@@ -18,6 +18,11 @@ func newTestWatcher(n int) (*MinuteWatcher, []int) {
 	online := make([]int, n)
 	for i := range streamers {
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
+		// Represent a normal, points-enabled channel: after startup the miner
+		// confirms Channel Points capability for each streamer (LoadChannelPoints
+		// Context), so a configured streamer is Enabled by the time watch
+		// selection runs. Tests that need Unknown/Disabled override this per-case.
+		streamers[i].SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 		online[i] = i
 	}
 	w := &MinuteWatcher{
