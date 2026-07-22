@@ -30,7 +30,7 @@ func runtimeCampaign() *models.Campaign {
 func runtimeStreamer(name, channelID string) *models.Streamer {
 	s := models.NewStreamer(name, models.StreamerSettings{ClaimDrops: true})
 	s.ChannelID = channelID
-	s.IsOnline = true
+	s.SetConfirmedOnline()
 	s.Stream.Game = runtimeGame()
 	s.Stream.CampaignIDs = []string{"campaign-amd"}
 	return s

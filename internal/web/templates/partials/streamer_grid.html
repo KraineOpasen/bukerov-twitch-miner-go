@@ -1,11 +1,19 @@
 {{define "streamer_grid"}}
-{{if or .TrackedLive .TrackedOffline}}
+{{if or .TrackedLive .TrackedUnknown .TrackedOffline}}
 <div class="mb-8">
     <h2 class="section-title">{{ t "grid.tracked" }}</h2>
     {{if .TrackedLive}}
     <h3 class="subsection-title">{{ t "grid.live" }}</h3>
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
         {{range .TrackedLive}}
+        {{template "streamer_card" .}}
+        {{end}}
+    </div>
+    {{end}}
+    {{if .TrackedUnknown}}
+    <h3 class="subsection-title">{{ t "grid.unknown" }}</h3>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
+        {{range .TrackedUnknown}}
         {{template "streamer_card" .}}
         {{end}}
     </div>
@@ -32,7 +40,7 @@
 </div>
 {{end}}
 
-{{if not (or .TrackedLive .TrackedOffline .Untracked)}}
+{{if not (or .TrackedLive .TrackedUnknown .TrackedOffline .Untracked)}}
 <p class="text-neutral-400">{{ t "grid.empty" }}</p>
 {{end}}
 {{end}}

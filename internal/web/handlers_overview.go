@@ -160,7 +160,17 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		predByStreamer[p.Streamer] = true
 	}
 
-	live, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer, tr)
+	live, unknown, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer, tr)
+
+	// LiveCount counts CONFIRMED-online streamers only; a card in the live group
+	// that is merely holding its slot during a transient unknown (Unconfirmed) is
+	// not counted as live.
+	liveCount := 0
+	for _, c := range live {
+		if c.IsLive {
+			liveCount++
+		}
+	}
 
 	data := OverviewData{
 		Username:       s.username,
@@ -177,12 +187,13 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		NetState:       netState(status),
 		TotalPoints:    util.FormatNumber(total),
 		StreamerCount:  len(streamers),
-		LiveCount:      len(live),
+		LiveCount:      liveCount,
 		PointsToday:    util.FormatNumber(today),
 		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
 		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost),
 		TrackedLive:    live,
+		TrackedUnknown: unknown,
 		TrackedOffline: offline,
 		Untracked:      untracked,
 		GeneratedUnix:  time.Now().Unix(),
@@ -229,17 +240,25 @@ func (s *Server) buildCards(
 	stats map[string]streamerStats,
 	predByStreamer map[string]bool,
 	tr func(string) string,
-) (live, offline, untracked []StreamerInfo, ticker []TickerItem) {
+) (live, unknown, offline, untracked []StreamerInfo, ticker []TickerItem) {
 	watching := slots.Watching
 
 	for _, st := range streamers {
 		settings := st.GetSettings()
-		online := st.GetIsOnline()
+		status := st.GetStatus()
+		online := status == models.StatusOnline
+		watchingSlot := watching[st.Username]
+		// A streamer that went online→unknown while still holding a watch slot is
+		// shown in the live group as "watching" but flagged unconfirmed (never a
+		// red offline); it is not counted in LiveCount.
+		slottedUnconfirmed := status == models.StatusUnknown && watchingSlot
 		card := StreamerInfo{
 			Name:            st.Username,
 			Points:          st.GetChannelPoints(),
 			PointsFormatted: util.FormatNumber(st.GetChannelPoints()),
+			Status:          status.String(),
 			IsLive:          online,
+			Unconfirmed:     status == models.StatusUnknown,
 			Preference:      string(settings.Preference),
 			DisableWatch:    settings.DisableWatch,
 		}
@@ -274,7 +293,10 @@ func (s *Server) buildCards(
 
 		card.HasActivePrediction = predByStreamer[st.Username]
 
-		if online {
+		if online || slottedUnconfirmed {
+			// Confirmed online, or holding a slot during a transient unknown blip.
+			// The stream metadata is the last-known value (SetUnknown never clears
+			// it), so it is safe to keep showing while unconfirmed.
 			card.LiveDuration = util.FormatDuration(time.Since(st.GetOnlineAt()))
 			card.GameName = st.Stream.GameName()
 			card.Title = st.Stream.GetTitle()
@@ -312,15 +334,31 @@ func (s *Server) buildCards(
 			switch {
 			case settings.DisableWatch:
 				card.State = "disabled"
-			case watching[st.Username]:
+			case watchingSlot:
 				card.State = "watching"
 				card.Watching = true
-			default:
+			case online:
 				card.State = "queued"
 				card.Queued = true
+			default:
+				// Unknown but slotted: keep the "watching" chrome; the Unconfirmed
+				// flag drives the distinct "unconfirmed" indication.
+				card.State = "watching"
+				card.Watching = true
 			}
 			live = append(live, card)
+		} else if status == models.StatusUnknown {
+			// Unknown and NOT holding a slot: its own group, never rendered as a red
+			// offline card and never shown with an offline duration.
+			card.WatchReason = slots.Reason[st.Username]
+			if settings.DisableWatch {
+				card.State = "disabled"
+			} else {
+				card.State = "unknown"
+			}
+			unknown = append(unknown, card)
 		} else {
+			// Confirmed offline.
 			if off := st.GetOfflineAt(); !off.IsZero() {
 				card.OfflineDuration = util.FormatDuration(time.Since(off))
 			}
@@ -335,7 +373,7 @@ func (s *Server) buildCards(
 
 	// Sort ticker by completion desc so the most interesting goals lead.
 	sort.SliceStable(ticker, func(i, j int) bool { return ticker[i].Percent > ticker[j].Percent })
-	return live, offline, untracked, ticker
+	return live, unknown, offline, untracked, ticker
 }
 
 // streakCapMinutes is the watch-streak progress-bar denominator: the watcher's

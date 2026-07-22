@@ -20,7 +20,7 @@ import (
 // re-verify a stale stream; narrowed to an interface so the broker's send loop
 // can be tested with a fake. Satisfied by *api.TwitchClient.
 type onlineChecker interface {
-	CheckStreamerOnline(streamer *models.Streamer)
+	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
 // minuteReporter abstracts MinuteSender so the loop can be exercised in tests
@@ -726,33 +726,73 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 	return out
 }
 
+// unknownSlotRetentionGrace bounds how long a channel that was being watched and
+// then went UNKNOWN (an online→unknown transient check failure) may keep its watch
+// slot without a fresh confirmation. Within the grace its slot and continuous-watch
+// accumulator are preserved so a network blip doesn't drop a live drop mid-campaign;
+// past it the slot is released to a confirmed-online channel so a permanently-stuck
+// unknown (a dead connection) can never pin a slot indefinitely. A failed
+// minute-watched send or the stale re-check resolves most cases well within it.
+const unknownSlotRetentionGrace = 2 * time.Minute
+
 func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 	var online []int
 	for i, s := range w.streamers {
-		if s.GetIsOnline() {
-			// DisableWatch is a hard opt-out: the streamer stays tracked and
-			// online for display, but never becomes a watch-slot candidate -
-			// even when it's the only online channel (unlike PreferenceAvoid).
-			if s.GetSettings().DisableWatch {
-				w.noteSelection(i, "watching disabled for this streamer in its settings")
-				continue
-			}
-			// A temporary watchdog avoid works like DisableWatch, but expires on
-			// its own: the progress watchdog excludes a channel whose drop
-			// progress stalled despite session recovery, so the broker switches
-			// to the next eligible channel instead.
-			if avoid != nil && avoid.IsAvoided(s.Username) {
-				w.noteSelection(i, "temporarily avoided by the drop-progress watchdog (stalled progress recovery)")
-				continue
-			}
-			if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
-				online = append(online, i)
-			} else {
-				w.noteSelection(i, "went online less than 30s ago - waiting for the stream to settle before watching")
-			}
+		confirmed := s.GetIsOnline()
+		// A streamer that just went online→unknown while holding a slot stays a
+		// candidate through the blip (continuity retention); it never lets an
+		// unknown channel claim a NEW slot — only keep an existing one.
+		retained := !confirmed && w.retainsSlotWhileUnknown(s)
+		if !confirmed && !retained {
+			continue
+		}
+		// DisableWatch is a hard opt-out: the streamer stays tracked and
+		// online for display, but never becomes a watch-slot candidate -
+		// even when it's the only online channel (unlike PreferenceAvoid).
+		if s.GetSettings().DisableWatch {
+			w.noteSelection(i, "watching disabled for this streamer in its settings")
+			continue
+		}
+		// A temporary watchdog avoid works like DisableWatch, but expires on
+		// its own: the progress watchdog excludes a channel whose drop
+		// progress stalled despite session recovery, so the broker switches
+		// to the next eligible channel instead.
+		if avoid != nil && avoid.IsAvoided(s.Username) {
+			w.noteSelection(i, "temporarily avoided by the drop-progress watchdog (stalled progress recovery)")
+			continue
+		}
+		if retained {
+			w.noteSelection(i, "status unconfirmed - retaining the current watch slot and continuity during a transient check failure")
+			online = append(online, i)
+			continue
+		}
+		if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
+			online = append(online, i)
+		} else {
+			w.noteSelection(i, "went online less than 30s ago - waiting for the stream to settle before watching")
 		}
 	}
 	return online
+}
+
+// retainsSlotWhileUnknown reports whether a currently-UNKNOWN streamer should stay
+// a watch candidate this tick to preserve an in-progress session. It requires all
+// of: the streamer is unknown but was last confirmed ONLINE (an online→unknown
+// blip, not initial-unknown or a confirmed-offline channel); it actually held a
+// configured watch slot on the previous tick (so this only ever RETAINS a slot,
+// never grants a new one); and the uncertainty is recent (bounded by
+// unknownSlotRetentionGrace so a stuck unknown eventually releases the slot). An
+// authoritative offline (GQL stream:null or a PubSub stream-down) sets StatusOffline
+// and ends retention immediately.
+func (w *MinuteWatcher) retainsSlotWhileUnknown(s *models.Streamer) bool {
+	if s.GetStatus() != models.StatusUnknown || s.GetLastConfirmedStatus() != models.StatusOnline {
+		return false
+	}
+	if _, held := w.lastConfiguredWatched[s.Username]; !held {
+		return false
+	}
+	since := s.GetUnknownSince()
+	return !since.IsZero() && time.Since(since) < unknownSlotRetentionGrace
 }
 
 // selectStreamersToWatch picks which online streamers to send minute-watched

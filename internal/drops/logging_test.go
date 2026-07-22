@@ -36,7 +36,7 @@ func restrictedTracker(watched, required int) *DropsTracker {
 
 	streamer := models.NewStreamer("cyganzor", models.StreamerSettings{ClaimDrops: true})
 	streamer.ChannelID = "chan-1"
-	streamer.IsOnline = true
+	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = game
 	streamer.Stream.CampaignIDs = []string{"campaign-amd"}
 

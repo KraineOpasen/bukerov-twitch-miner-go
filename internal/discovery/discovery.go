@@ -72,7 +72,7 @@ type CampaignsProvider interface {
 // to an interface so tests can substitute a fake. Satisfied by
 // *api.TwitchClient.
 type twitchAPI interface {
-	CheckStreamerOnline(streamer *models.Streamer)
+	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 	GetDirectoryStreams(gameName string, limit int) ([]api.DirectoryStream, error)
 }
 
@@ -890,7 +890,10 @@ func (m *Manager) prepareCurrent() *Channel {
 	}
 
 	if reason, invalid := m.invalidReason(current); invalid {
-		if !current.Streamer.GetIsOnline() {
+		// Mark the channel offline only on an AUTHORITATIVE offline; an unknown
+		// (transient check failure) must not be recorded as offline — the channel
+		// is switched away from for whatever reason but stays re-checkable.
+		if current.Streamer.GetStatus() == models.StatusOffline {
 			m.mu.Lock()
 			current.offline = true
 			m.mu.Unlock()
@@ -960,7 +963,7 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	} else if m.isTracked(ch.Streamer.Username) {
 		return "channel is now on the configured streamer list (rotation covers it)", true
 	}
-	if !ch.Streamer.GetIsOnline() {
+	if ch.Streamer.GetStatus() == models.StatusOffline {
 		return "channel went offline", true
 	}
 	if !m.gameStillActive(gameID) {
@@ -1042,10 +1045,16 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 			m.client.CheckStreamerOnline(ch.Streamer)
 		}
 
-		if !ch.Streamer.GetIsOnline() {
-			m.mu.Lock()
-			ch.offline = true
-			m.mu.Unlock()
+		// A NEW discovery slot requires CONFIRMED online (fail closed): an
+		// unverified candidate is skipped this tick and re-checked later, but only
+		// an authoritative offline is recorded as offline (so a transient failure
+		// doesn't permanently exclude a live channel until the next resync).
+		if ch.Streamer.GetStatus() != models.StatusOnline {
+			if ch.Streamer.GetStatus() == models.StatusOffline {
+				m.mu.Lock()
+				ch.offline = true
+				m.mu.Unlock()
+			}
 			continue
 		}
 		if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {

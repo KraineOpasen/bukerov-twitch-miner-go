@@ -18,7 +18,7 @@ import (
 // probe channel online. Satisfied by *api.TwitchClient.
 type TwitchClient interface {
 	GetChannelID(username string) (string, error)
-	CheckStreamerOnline(streamer *models.Streamer)
+	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
 // Prober runs the instrumented watch-transport sequence (playback token ->
@@ -245,8 +245,16 @@ func (c *Canary) probe(ctx context.Context, channel string) Signal {
 		detail, code := abortReason(err)
 		return c.failSignal("stream_info", detail, code, start)
 	}
-	if !streamer.GetIsOnline() {
+	switch streamer.GetStatus() {
+	case models.StatusOnline:
+		// confirmed live — continue to the spade/probe stages.
+	case models.StatusOffline:
 		return c.failSignal("stream_info", "the canary channel is offline", "channel_offline", start)
+	default:
+		// Unknown: the stream-info check was inconclusive (transport/GQL/PQNF/etc.).
+		// The signal still fails (the pipeline is impaired) but must NOT assert the
+		// channel is offline — report the inconclusive classification instead.
+		return c.failSignal("stream_info", "could not confirm the canary channel's live status", "stream_status_"+string(streamer.GetStatusReason()), start)
 	}
 	if streamer.Stream.GetSpadeURL() == "" {
 		return c.failSignal("spade_url", "spade URL was not discovered", "spade_url_missing", start)

@@ -26,14 +26,14 @@ import (
 // the field is owned exclusively by Stream.mu.
 func TestWatchStreakFieldOwnershipRace(t *testing.T) {
 	s := models.NewStreamer("racer", models.DefaultStreamerSettings())
-	s.IsOnline = true
+	s.SetConfirmedOnline()
 
 	// A second, static mid-pursuit streamer so the reader goroutine reaches
 	// betterBoostCandidate's both-in-progress tie-break — the MinuteWatched
 	// comparison — every iteration in which the raced streamer is also
 	// mid-pursuit.
 	other := models.NewStreamer("static", models.DefaultStreamerSettings())
-	other.IsOnline = true
+	other.SetConfirmedOnline()
 	// UpdateMinuteWatched's first call only sets the baseline; the second call
 	// banks the (tiny, >0) gap — enough for streakInProgress's mw > 0.
 	other.Stream.Update("bid-static", "t", nil, nil, 1)
@@ -47,7 +47,7 @@ func TestWatchStreakFieldOwnershipRace(t *testing.T) {
 	// reader passes strictlyHigherBoost's both-in-progress gate on every
 	// iteration and hits the tie-break's field reads (the R1 site).
 	accruing := models.NewStreamer("accruing", models.DefaultStreamerSettings())
-	accruing.IsOnline = true
+	accruing.SetConfirmedOnline()
 	accruing.Stream.Update("bid-accruing", "t", nil, nil, 1)
 	accruing.Stream.UpdateMinuteWatched(time.Hour)
 	accruing.Stream.UpdateMinuteWatched(time.Hour)

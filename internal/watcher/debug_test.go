@@ -20,7 +20,7 @@ func runSelectionTick(w *MinuteWatcher, online []int) {
 func TestDebugStateReportsRotationDecisions(t *testing.T) {
 	w, online := newTestWatcher(4)
 	for _, s := range w.streamers {
-		s.SetOnline()
+		s.SetConfirmedOnline()
 	}
 
 	runSelectionTick(w, online)
@@ -56,7 +56,7 @@ func TestDebugStateReportsRotationDecisions(t *testing.T) {
 func TestDebugStateExplainsAvoidedStreamer(t *testing.T) {
 	w, online := newTestWatcher(4)
 	for _, s := range w.streamers {
-		s.SetOnline()
+		s.SetConfirmedOnline()
 	}
 	w.streamers[1].Settings.Preference = models.PreferenceAvoid
 
@@ -84,7 +84,7 @@ func TestDebugStateExplainsAvoidedStreamer(t *testing.T) {
 func TestDebugStateDirectModeReportsPriorityReason(t *testing.T) {
 	w, online := newTestWatcher(2)
 	for _, s := range w.streamers {
-		s.SetOnline()
+		s.SetConfirmedOnline()
 	}
 
 	runSelectionTick(w, online)

@@ -8,7 +8,7 @@ import (
 func onlineStreamerWithBroadcast(bid string) *Streamer {
 	s := NewStreamer("orzanel", DefaultStreamerSettings())
 	s.Stream.Update(bid, "title", &Game{ID: "g", Name: "G"}, nil, 10)
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	return s
 }
 
@@ -18,32 +18,34 @@ func TestStreakBlipUnderGraceKeepsGrant(t *testing.T) {
 	s := onlineStreamerWithBroadcast("bid-1")
 	s.UpdateHistory("WATCH_STREAK", 300) // grant on bid-1
 
-	s.SetOffline()
-	s.SetOnline() // seconds later: same broadcast, no re-arm
+	s.SetConfirmedOffline()
+	s.SetConfirmedOnline() // seconds later: same broadcast, no re-arm
 
 	if s.Stream.StreakPending() {
 		t.Fatal("short blip on the same broadcast must not re-arm the pursuit")
 	}
 }
 
-// T2 (the production orzanel case): a blip LONGER than the grace re-arms the
-// missing flag, but the broadcast-ID binding must still block the pursuit —
-// the streak was already granted on this very broadcast.
+// T2 (the production orzanel case): a blip LONGER than the grace on the SAME
+// broadcast must NOT re-pursue the streak. Under tri-state the streak re-arm is
+// authoritative on a CHANGED broadcast ID (Stream.Update), not on the offline-gap
+// heuristic — so an unchanged broadcast ID keeps the already-granted streak bound
+// and the pursuit off, regardless of how long the offline gap was. The grant's
+// broadcast binding is preserved throughout.
 func TestStreakLongBlipSameBroadcastDoesNotRePursue(t *testing.T) {
 	s := onlineStreamerWithBroadcast("bid-1")
 	s.UpdateHistory("WATCH_STREAK", 300)
 
-	s.SetOffline()
+	s.SetConfirmedOffline()
 	s.OfflineAt = time.Now().Add(-3 * time.Minute) // blip > 2min grace
-	s.SetOnline()                                  // time-based heuristic re-arms (InitWatchStreak)
+	s.SetConfirmedOnline()                         // same broadcast ID (bid-1): no re-pursuit
 
-	if !s.Stream.GetWatchStreakMissing() {
-		t.Fatal("precondition: long blip must re-arm the missing flag")
-	}
-	// The re-arm must NOT have forgotten the grant's broadcast binding.
+	// The grant's broadcast binding is intact...
 	if bid, _ := s.Stream.StreakEarnedGrant(); bid != "bid-1" {
-		t.Fatalf("InitWatchStreak erased the grant binding: %q", bid)
+		t.Fatalf("the grant binding was erased: %q", bid)
 	}
+	// ...and the pursuit stays OFF: the streak was already granted on bid-1 and
+	// the broadcast ID has not changed (orzanel case).
 	if s.Stream.StreakPending() {
 		t.Fatal("pursuit re-armed on the SAME broadcast the streak was already granted on (orzanel case)")
 	}
@@ -71,14 +73,14 @@ func TestStreakNewBroadcastRePursues(t *testing.T) {
 // one when nothing is known, and DEFERRED when a grant is remembered.
 func TestStreakEmptyBroadcastFallback(t *testing.T) {
 	fresh := NewStreamer("fresh", DefaultStreamerSettings())
-	fresh.SetOnline()
+	fresh.SetConfirmedOnline()
 	if !fresh.Stream.StreakPending() {
 		t.Fatal("no grant + unidentified broadcast must fall back to pursuing (historical behavior)")
 	}
 
 	hydrated := NewStreamer("hydrated", DefaultStreamerSettings())
 	hydrated.Stream.HydrateStreakGrant("bid-1", time.Now())
-	hydrated.SetOnline()
+	hydrated.SetConfirmedOnline()
 	if hydrated.Stream.StreakPending() {
 		t.Fatal("remembered grant + unidentified broadcast must DEFER pursuit until the broadcast is identified")
 	}

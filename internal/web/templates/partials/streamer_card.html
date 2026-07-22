@@ -28,6 +28,8 @@
     <div class="text-sm mt-2">
         {{if .IsLive}}
         <span class="text-red-500">{{ t "card.streaming_for" }} {{.LiveDuration}}</span>
+        {{else if .Unconfirmed}}
+        <span class="status-unavailable">{{ t "card.status_unavailable" }}</span>
         {{else if .OfflineDuration}}
         <span class="text-neutral-400">{{ t "card.offline_for" }} {{.OfflineDuration}}</span>
         {{end}}

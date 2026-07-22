@@ -17,7 +17,7 @@ import (
 func discoveryStreamer(login string, restricted bool) *models.Streamer {
 	s := models.NewStreamer(login, models.StreamerSettings{ClaimDrops: true})
 	s.ChannelID = "ch-" + login
-	s.IsOnline = true
+	s.SetConfirmedOnline()
 	s.OnlineAt = time.Now().Add(-time.Minute)
 	s.Stream.CampaignIDs = []string{"camp-" + login}
 	if restricted {
@@ -418,11 +418,12 @@ func TestSlotRankOrdering(t *testing.T) {
 // without real HTTP.
 type staticChecker struct{ checked chan string }
 
-func (c *staticChecker) CheckStreamerOnline(s *models.Streamer) {
+func (c *staticChecker) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	select {
 	case c.checked <- s.Username:
 	default:
 	}
+	return models.StatusTransition{}
 }
 
 type countingSender struct {
@@ -444,7 +445,7 @@ func newLoopWatcher(n int, sender minuteReporter, checker onlineChecker) (*Minut
 	streamers := make([]*models.Streamer, n)
 	for i := range streamers {
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
-		streamers[i].SetOnline()
+		streamers[i].SetConfirmedOnline()
 		streamers[i].OnlineAt = time.Now().Add(-time.Minute)
 	}
 	w := &MinuteWatcher{

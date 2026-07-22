@@ -126,6 +126,8 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		for _, s := range m.streamers.All() {
 			st := debug.StreamerState{
 				Username:      s.Username,
+				Status:        s.GetStatus().String(),
+				StatusReason:  string(s.GetStatusReason()),
 				Online:        s.GetIsOnline(),
 				ChannelPoints: s.GetChannelPoints(),
 				Preference:    string(s.GetSettings().Preference),
@@ -162,10 +164,17 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 						MinutesWatched: s.Stream.GetMinuteWatched(),
 					}
 				}
-			} else {
+			} else if s.GetStatus() == models.StatusOffline {
 				st.OfflineSince = s.GetOfflineAt()
 				if st.Reason == "" {
 					st.Reason = "offline"
+				}
+			} else {
+				// Unknown: the live state could not be authoritatively confirmed.
+				// Do NOT stamp an offline time or claim "offline" — surface the
+				// privacy-safe status reason instead.
+				if st.Reason == "" {
+					st.Reason = "status unconfirmed (" + string(s.GetStatusReason()) + ")"
 				}
 			}
 

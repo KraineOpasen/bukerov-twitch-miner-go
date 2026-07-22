@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -64,6 +66,63 @@ var (
 	// and tests can classify and, where relevant, retry the outcome.
 	ErrClaimNotAccepted = errors.New("twitch: claim not accepted")
 )
+
+// StreamCheckError classifies a stream-status check that could NOT be resolved to
+// an authoritative online/offline: a malformed/absent response, a top-level
+// GraphQL error, a missing Spade URL, or another inconclusive outcome. It carries
+// a compact, privacy-safe models.StatusReason (never any raw payload, token, or
+// header) so CheckStreamerOnline maps it to UNKNOWN — never a false offline. It is
+// deliberately distinct from ErrStreamerIsOffline, which is reserved for the ONE
+// authoritative GQL offline shape: user present, "stream" key present and JSON null.
+type StreamCheckError struct {
+	Reason models.StatusReason
+	Err    error
+}
+
+func (e *StreamCheckError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("stream check inconclusive (%s): %v", e.Reason, e.Err)
+	}
+	return fmt.Sprintf("stream check inconclusive (%s)", e.Reason)
+}
+
+func (e *StreamCheckError) Unwrap() error { return e.Err }
+
+// newStreamCheckError builds a classified inconclusive-check error.
+func newStreamCheckError(reason models.StatusReason, format string, args ...any) *StreamCheckError {
+	return &StreamCheckError{Reason: reason, Err: fmt.Errorf(format, args...)}
+}
+
+// classifyCheck maps the error returned by a stream-status fetch (GetStreamInfo /
+// UpdateStream) to the authoritative tri-state transition it justifies. This is
+// the single place the "errors mean UNKNOWN, not offline" policy is enforced:
+// only nil is online and only ErrStreamerIsOffline is offline — every other
+// error (transport, timeout, auth, PersistedQueryNotFound, top-level GraphQL
+// errors, malformed/absent structural fields, Spade failure, cancelled context)
+// is UNKNOWN with a specific reason.
+func classifyCheck(err error) (models.StreamerStatus, models.StatusReason) {
+	switch {
+	case err == nil:
+		return models.StatusOnline, ""
+	case errors.Is(err, ErrStreamerIsOffline):
+		return models.StatusOffline, ""
+	case errors.Is(err, ErrPersistedQueryNotFound):
+		return models.StatusUnknown, models.ReasonPersistedQueryMissing
+	case errors.Is(err, ErrUnauthorized):
+		return models.StatusUnknown, models.ReasonUnauthorized
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return models.StatusUnknown, models.ReasonTimeout
+	}
+	var sce *StreamCheckError
+	if errors.As(err, &sce) {
+		return models.StatusUnknown, sce.Reason
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return models.StatusUnknown, models.ReasonTimeout
+	}
+	return models.StatusUnknown, models.ReasonTransportError
+}
 
 const (
 	// gqlMaxRetries is the number of retries attempted after the initial try,
@@ -830,22 +889,41 @@ func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]inte
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
+		// Transport / auth (ErrUnauthorized) / PersistedQueryNotFound / empty body
+		// / invalid JSON — all inconclusive, never offline. Propagated verbatim and
+		// classified by classifyCheck at the call site.
 		return nil, err
 	}
 
+	// A top-level GraphQL "errors" array means Twitch returned no authoritative
+	// data (even at HTTP 200) — inconclusive, not offline.
+	if hasTopLevelGQLErrors(resp) {
+		return nil, newStreamCheckError(models.ReasonGraphQLError, "twitch GQL %s: top-level errors", op.OperationName)
+	}
+
 	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return nil, ErrStreamerIsOffline
+	if !ok || data == nil {
+		return nil, newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: missing or malformed data", op.OperationName)
 	}
 
 	user, ok := data["user"].(map[string]interface{})
 	if !ok || user == nil {
-		return nil, ErrStreamerIsOffline
+		return nil, newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: missing or malformed user", op.OperationName)
 	}
 
-	stream, ok := user["stream"].(map[string]interface{})
-	if !ok || stream == nil {
+	// Distinguish the ONE authoritative offline (stream key present and JSON null)
+	// from an absent/malformed stream field (inconclusive). Map membership — not a
+	// type assertion — is what separates present-null from key-absent.
+	streamVal, present := user["stream"]
+	switch {
+	case !present:
+		return nil, newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: stream field absent", op.OperationName)
+	case streamVal == nil:
+		// user present, "stream": null — authoritatively offline.
 		return nil, ErrStreamerIsOffline
+	}
+	if _, ok := streamVal.(map[string]interface{}); !ok {
+		return nil, newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: malformed stream field", op.OperationName)
 	}
 
 	return user, nil
@@ -858,12 +936,18 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 
 	streamInfo, err := c.GetStreamInfo(streamer)
 	if err != nil {
+		// GetStreamInfo already distinguishes authoritative offline
+		// (ErrStreamerIsOffline) from inconclusive (StreamCheckError / transport /
+		// PQNF / auth). Propagate verbatim so the caller classifies it correctly.
 		return err
 	}
 
+	// GetStreamInfo guarantees a valid stream map on success; a failed assertion
+	// here would be a structural anomaly, so treat it as inconclusive (never a
+	// false offline).
 	stream, ok := streamInfo["stream"].(map[string]interface{})
 	if !ok {
-		return ErrStreamerIsOffline
+		return newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: malformed stream after fetch", constants.VideoPlayerStreamInfoOverlayChannel.OperationName)
 	}
 
 	broadcastSettings, _ := streamInfo["broadcastSettings"].(map[string]interface{})
@@ -974,67 +1058,76 @@ func (c *TwitchClient) GetSpadeURL(streamer *models.Streamer) error {
 	return nil
 }
 
-func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) {
-	if time.Since(streamer.GetOfflineAt()) < time.Minute {
-		return
+// CheckStreamerOnline resolves a streamer's live status and applies the resulting
+// tri-state transition, returning it so the caller (PubSub viewcount, the manager
+// loop, discovery, health) can act on a typed result instead of racing to read
+// mutable state before and after the call. The classification is authoritative:
+//   - a valid stream object  -> online
+//   - a valid "stream": null -> offline
+//   - EVERYTHING else (transport, timeout, auth, PersistedQueryNotFound, top-level
+//     GraphQL errors, malformed/absent structural fields, a Spade fetch failure,
+//     cancelled context) -> UNKNOWN, never a false offline.
+//
+// The result is applied under a stale-observation guard (StatusSnapshot captured
+// before any I/O), so a slow result can never overwrite a newer authoritative
+// PubSub stream-up/stream-down that landed while this check was in flight.
+func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition {
+	// Rate-limit re-checks of a CONFIRMED-offline streamer (don't hammer a channel
+	// just authoritatively seen offline). Unknown and online streamers are checked
+	// on their normal cadence so an unknown resolves promptly — unlike the old gate
+	// on OfflineAt, which unknown no longer writes.
+	status, obsSeq := streamer.StatusSnapshot()
+	if status == models.StatusOffline && time.Since(streamer.GetOfflineAt()) < time.Minute {
+		return models.StatusTransition{Previous: status, Current: status}
 	}
 
 	streamer.SetLastChecked(time.Now())
 
-	if !streamer.GetIsOnline() {
+	if status != models.StatusOnline {
+		// Not currently confirmed online: run the full bring-online probe. A Spade
+		// fetch failure is inconclusive (UNKNOWN), NOT evidence the channel is
+		// offline — never SetOffline here.
 		if err := c.GetSpadeURL(streamer); err != nil {
-			slog.Debug("Failed to get spade URL", "streamer", streamer.Username, "error", err)
-			streamer.SetOffline()
-			return
+			slog.Debug("Cannot fetch Spade URL; recording status as unknown (not offline)",
+				"streamer", streamer.Username, "reason", string(models.ReasonSpadeUnavailable))
+			return streamer.ApplyCheckResultIfCurrent(obsSeq, models.StatusUnknown, models.ReasonSpadeUnavailable)
 		}
 
-		if err := c.UpdateStream(streamer); err != nil {
-			// A stale persisted-query hash (PersistedQueryNotFound) is a
-			// temporary Twitch-side outage, not evidence the channel is offline.
-			// Leave the current state untouched and let PubSub (video-playback
-			// stream-up/down) or the next check settle it, rather than locking
-			// the streamer offline for the whole outage.
-			if errors.Is(err, ErrPersistedQueryNotFound) {
-				slog.Warn("Cannot confirm stream status: stale Twitch query metadata; leaving state unchanged",
-					"streamer", streamer.Username, "error", err)
-				return
-			}
-			slog.Debug("Failed to update stream", "streamer", streamer.Username, "error", err)
-			streamer.SetOffline()
-			return
-		}
-
-		if streamer.SetOnline() {
-			// Log only on a real offline→online transition, so racing detectors
-			// (viewcount + the stream-check loop, two viewcount events, ...) that
-			// both reach this branch don't print a duplicate "Streamer is online".
-			// channelID/broadcastID are diagnostic: broadcastID identifies the
-			// broadcast this online refers to (note SetOnline()==true also fires
-			// on the initial discovery of an already-running broadcast — this log
-			// does not distinguish that from a witnessed offline→online).
+		next, reason := classifyCheck(c.UpdateStream(streamer))
+		tr := streamer.ApplyCheckResultIfCurrent(obsSeq, next, reason)
+		if tr.OnlineConfirmed {
+			// Log only on a genuine transition (not a recovery continuation), so
+			// racing detectors don't print a duplicate "Streamer is online".
 			slog.Info("Streamer is online",
 				"streamer", streamer.Username,
 				"channelID", streamer.ChannelID,
 				"broadcastID", streamer.Stream.GetBroadcastID())
+		} else if tr.Current == models.StatusUnknown && !tr.Stale {
+			slog.Debug("Cannot confirm stream status; keeping state as unknown (not offline)",
+				"streamer", streamer.Username, "reason", string(reason))
 		}
-	} else {
-		if err := c.UpdateStream(streamer); err != nil {
-			// Don't flap an online streamer offline because Twitch rotated a
-			// query hash — keep it online; a genuine offline still arrives via
-			// the PubSub stream-down event (and the next successful refresh
-			// corrects stale stream data).
-			if errors.Is(err, ErrPersistedQueryNotFound) {
-				slog.Warn("Cannot refresh stream info: stale Twitch query metadata; keeping streamer online",
-					"streamer", streamer.Username, "error", err)
-				return
-			}
-			slog.Info("Streamer went offline",
-				"streamer", streamer.Username,
-				"channelID", streamer.ChannelID,
-				"broadcastID", streamer.Stream.GetBroadcastID())
-			streamer.SetOffline()
-		}
+		return tr
 	}
+
+	// Already confirmed online: refresh metadata. A non-authoritative refresh
+	// failure (transport, PersistedQueryNotFound, top-level GraphQL errors,
+	// malformed response) yields UNKNOWN — never offline — so the slot, streak and
+	// last-known stream data are preserved; only an authoritative "stream": null
+	// settles offline (which arrives here as ErrStreamerIsOffline) or a PubSub
+	// stream-down does it directly.
+	next, reason := classifyCheck(c.UpdateStream(streamer))
+	tr := streamer.ApplyCheckResultIfCurrent(obsSeq, next, reason)
+	switch {
+	case tr.OfflineConfirmed:
+		slog.Info("Streamer went offline",
+			"streamer", streamer.Username,
+			"channelID", streamer.ChannelID,
+			"broadcastID", streamer.Stream.GetBroadcastID())
+	case tr.Current == models.StatusUnknown && tr.Changed():
+		slog.Warn("Cannot refresh stream info; status is unknown, keeping last-known state (not offline)",
+			"streamer", streamer.Username, "reason", string(reason))
+	}
+	return tr
 }
 
 func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {

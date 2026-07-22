@@ -25,13 +25,12 @@ type fakeClient struct {
 	err     error
 }
 
-func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) {
+func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	f.checked = append(f.checked, s.Username)
 	if f.online[s.Username] {
-		s.SetOnline()
-	} else {
-		s.SetOffline()
+		return s.SetConfirmedOnline()
 	}
+	return s.SetConfirmedOffline()
 }
 
 func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]api.DirectoryStream, error) {
@@ -78,7 +77,7 @@ func onlineCandidate(login, channelID, game, gameID string, viewers int) *Channe
 		Viewers:      viewers,
 		DropsEnabled: true,
 	}
-	ch.Streamer.IsOnline = true
+	ch.Streamer.SetConfirmedOnline()
 	ch.Streamer.Stream.Update("b-"+channelID, "title", &models.Game{ID: gameID, Name: game}, nil, viewers)
 	ch.Streamer.Stream.CampaignIDs = []string{"camp-" + gameID}
 	return ch
@@ -220,7 +219,7 @@ func TestSelectBestVerifiesOfflineCandidatesAndMarksThem(t *testing.T) {
 	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	stale := onlineCandidate("stale_channel", "1", "World of Tanks", "g1", 9000)
-	stale.Streamer.IsOnline = false // listed by the directory but needs verification
+	stale.Streamer.SetConfirmedOffline() // listed by the directory but needs verification
 
 	m.pool = []*Channel{stale}
 
@@ -242,7 +241,7 @@ func TestSelectBestBoundsChecksPerTick(t *testing.T) {
 
 	for i := 0; i < maxCandidateChecksPerTick+3; i++ {
 		ch := onlineCandidate("candidate", string(rune('a'+i)), "World of Tanks", "g1", 100)
-		ch.Streamer.IsOnline = false
+		ch.Streamer.SetConfirmedOffline()
 		m.pool = append(m.pool, ch)
 	}
 
@@ -474,7 +473,7 @@ func TestInvalidReason(t *testing.T) {
 	}
 
 	offline := onlineCandidate("offline", "2", "World of Tanks", "g1", 100)
-	offline.Streamer.IsOnline = false
+	offline.Streamer.SetConfirmedOffline()
 	if _, invalid := m.invalidReason(offline); !invalid {
 		t.Error("expected offline channel to be invalid")
 	}
@@ -552,7 +551,7 @@ func TestPrepareCurrentSwitchesWhenCurrentGoesOffline(t *testing.T) {
 	m.pool = []*Channel{dying, backup}
 	m.current = dying
 
-	dying.Streamer.IsOnline = false
+	dying.Streamer.SetConfirmedOffline()
 
 	got := m.prepareCurrent()
 
@@ -568,7 +567,7 @@ func TestPrepareCurrentClearsSlotWhenPoolExhausted(t *testing.T) {
 	only := onlineCandidate("only_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{only}
 	m.current = only
-	only.Streamer.IsOnline = false
+	only.Streamer.SetConfirmedOffline()
 
 	if got := m.prepareCurrent(); got != nil || m.current != nil {
 		t.Fatalf("expected the slot to empty out, got %+v", m.current)
@@ -589,7 +588,7 @@ func TestPrepareCurrentExhaustedPoolRequestsEarlyResync(t *testing.T) {
 	m := newTestManager([]string{"World of Tanks"}, provider, client)
 
 	dead := onlineCandidate("dead_channel", "1", "World of Tanks", "g1", 100)
-	dead.Streamer.IsOnline = false
+	dead.Streamer.SetConfirmedOffline()
 	m.pool = []*Channel{dead}
 	// lastSync is zero => far past the retry cadence, so the resync fires.
 

@@ -72,7 +72,7 @@ func (m *Manager) RecordStreakGrant(username string) {
 type twitchClient interface {
 	GetChannelID(username string) (string, error)
 	LoadChannelPointsContext(streamer *models.Streamer) error
-	CheckStreamerOnline(streamer *models.Streamer)
+	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
 // NewManager creates a new streamer manager.

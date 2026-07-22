@@ -16,7 +16,9 @@ type fakeStreamerAPI struct{}
 
 func (fakeStreamerAPI) GetChannelID(username string) (string, error)    { return "chan-" + username, nil }
 func (fakeStreamerAPI) LoadChannelPointsContext(*models.Streamer) error { return nil }
-func (fakeStreamerAPI) CheckStreamerOnline(*models.Streamer)            {}
+func (fakeStreamerAPI) CheckStreamerOnline(*models.Streamer) models.StatusTransition {
+	return models.StatusTransition{}
+}
 
 func newCacheAt(t *testing.T) (*StreakCache, string) {
 	t.Helper()
@@ -49,7 +51,7 @@ func TestRestartHydrationBlocksSameBroadcast(t *testing.T) {
 
 	// Mirror api.CheckStreamerOnline: UpdateStream -> Stream.Update -> SetOnline.
 	s.Stream.Update("bid-live", "t", &models.Game{ID: "g"}, nil, 5)
-	s.SetOnline()
+	s.SetConfirmedOnline()
 
 	if s.Stream.StreakPending() {
 		t.Fatal("restart + persisted grant on the still-live broadcast must not re-pursue")
@@ -62,7 +64,7 @@ func TestRestartHydrationBlocksSameBroadcast(t *testing.T) {
 	}
 	b := bare.Get("alpha")
 	b.Stream.Update("bid-live", "t", &models.Game{ID: "g"}, nil, 5)
-	b.SetOnline()
+	b.SetConfirmedOnline()
 	if !b.Stream.StreakPending() {
 		t.Fatal("control: without a cache the pursuit must start (historical behavior)")
 	}
@@ -77,7 +79,7 @@ func TestRestartHydrationDefersUntilIdentified(t *testing.T) {
 
 	mgr := loadedManager(t, cache)
 	s := mgr.Get("alpha")
-	s.SetOnline() // online before any stream-info fetch (id still empty)
+	s.SetConfirmedOnline() // online before any stream-info fetch (id still empty)
 
 	if s.Stream.StreakPending() {
 		t.Fatal("unidentified broadcast + fresh grant: pursuit must be deferred, not started blind")
@@ -99,7 +101,7 @@ func TestRestartWithoutCachePursues(t *testing.T) {
 	mgr := loadedManager(t, cache)
 	s := mgr.Get("alpha")
 	s.Stream.Update("bid-live", "t", nil, nil, 1)
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	if !s.Stream.StreakPending() {
 		t.Fatal("empty cache must degrade to the historical pursue-on-restart behavior")
 	}
