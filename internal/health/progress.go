@@ -33,7 +33,7 @@ type WatchView interface {
 	BrokerSnapshot() watcher.BrokerSnapshot
 	IsWatching(login string) bool
 	ReportStats(login string) (watcher.ReportStats, bool)
-	RequestSessionRefresh(login string, mode watcher.RefreshMode)
+	RequestSessionRefresh(req watcher.SessionRefreshRequest)
 	LastSessionRefresh(login string) (watcher.SessionRefreshOutcome, bool)
 }
 
@@ -83,7 +83,31 @@ const (
 	// recoveryStageTimeout bounds the blocking recovery stages (forced full
 	// resync, transport probe) on the watchdog goroutine.
 	recoveryStageTimeout = 60 * time.Second
+	// recoveryOutcomeDeadline bounds how long an async recovery stage (a staged
+	// session refresh) waits for its matching broker outcome before giving up and
+	// publishing a typed timeout. The broker executes a staged refresh at the
+	// start of its next watch tick (well under a minute), and the watchdog
+	// re-evaluates roughly every minute, so a matching outcome normally lands
+	// within one or two passes; the deadline exists only so a broker that never
+	// runs the request (slot churn, shutdown) cannot pin the pipeline forever.
+	recoveryOutcomeDeadline = 5 * time.Minute
 )
+
+// pendingRecovery correlates an in-flight async recovery stage (a staged session
+// refresh) with the broker outcome that will complete it. The watchdog does NOT
+// advance past the stage until a broker outcome matching this exact RequestID and
+// signature is observed (success/failed), the session it targeted is superseded
+// (stale), the slot is lost (skipped), or the bounded deadline elapses (timeout).
+type pendingRecovery struct {
+	requestID   string
+	signature   string
+	broadcastID string
+	generation  uint64
+	stageIndex  int // recoveryStages index of the stage that issued this request
+	stageName   string
+	requestedAt time.Time
+	deadline    time.Time
+}
 
 // DropProgress is the published per-drop watchdog state: what the Drops page
 // badge and the debug snapshot render. It carries no URLs or tokens.
@@ -133,6 +157,13 @@ type dropState struct {
 	avoidedChannel     string    // channel this episode's switch stage excluded ("" if none)
 	exhaustedAt        time.Time // when the pipeline ran out of stages
 	notifiedStalled    bool      // critical notification already sent this episode
+
+	// pending correlates an in-flight async recovery stage with its broker
+	// outcome. While non-nil the pipeline is parked on that stage: no new stage
+	// runs, no duplicate request is staged, and the status stays Recovering with an
+	// honest "awaiting outcome" detail until the outcome matches or the deadline
+	// elapses.
+	pending *pendingRecovery
 }
 
 // resetEvidence discards the stall-evidence window (a gate failed): the delay
@@ -193,9 +224,12 @@ var recoveryStages = []recoveryStage{
 	{
 		name:  "stream_info",
 		label: "stream info refresh",
-		run: func(w *ProgressWatchdog, st *dropState, _ time.Time) string {
-			w.watch.RequestSessionRefresh(st.Channel, watcher.RefreshStreamInfo)
-			return "asked the slot broker to re-fetch stream info (broadcast, game, campaign IDs, payload)"
+		run: func(w *ProgressWatchdog, st *dropState, now time.Time) string {
+			// Async: stage a correlated refresh into the broker and PARK on it. The
+			// stage does not count as done until a matching outcome is observed (see
+			// resolvePending) — merely queuing the request is not recovery.
+			return w.stageSessionRefresh(st, watcher.RefreshStreamInfo, st.RecoveryStage-1, "stream_info", now,
+				"asked the slot broker to re-fetch stream info (broadcast, game, campaign IDs, payload)")
 		},
 	},
 	{
@@ -218,9 +252,9 @@ var recoveryStages = []recoveryStage{
 	{
 		name:  "session_recreate",
 		label: "watch session recreate",
-		run: func(w *ProgressWatchdog, st *dropState, _ time.Time) string {
-			w.watch.RequestSessionRefresh(st.Channel, watcher.RefreshSession)
-			return "asked the slot broker to recreate the watch session (spade URL, stream info, beacon payload)"
+		run: func(w *ProgressWatchdog, st *dropState, now time.Time) string {
+			return w.stageSessionRefresh(st, watcher.RefreshSession, st.RecoveryStage-1, "session_recreate", now,
+				"asked the slot broker to recreate the watch session (spade URL, stream info, beacon payload)")
 		},
 	},
 	{
@@ -270,6 +304,7 @@ type ProgressWatchdog struct {
 	mu     sync.Mutex
 	cfg    WatchdogConfig
 	states map[string]*dropState // loop-owned; under mu only for UpdateSettings-driven resets
+	reqSeq uint64                // loop-owned monotone counter minting unique refresh RequestIDs
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -702,10 +737,146 @@ func (w *ProgressWatchdog) gatesHold(st *dropState, campaign *models.Campaign, d
 	return true, ""
 }
 
-// advanceRecovery runs the next recovery stage if the cooldown allows,
-// returning true when a stage actually executed. The pipeline is finite; once
-// exhausted the drop stays STALLED until progress resumes or Rearm elapses.
+// stageSessionRefresh stages a correlated session refresh into the broker for an
+// async recovery stage and PARKS the pipeline on it (records the pending
+// correlation). It captures the live broadcast/session identity so the broker can
+// reject the request if the session moved, and mints a unique RequestID +
+// privacy-safe signature so only the exact matching outcome can complete this
+// stage. Returns the redacted stage detail. Runs on the watchdog goroutine.
+func (w *ProgressWatchdog) stageSessionRefresh(st *dropState, mode watcher.RefreshMode, stageIndex int, stageName string, now time.Time, detail string) string {
+	var (
+		broadcastID string
+		generation  uint64
+	)
+	if streamer := w.resolveStreamer(st.Channel); streamer != nil {
+		broadcastID = streamer.Stream.GetBroadcastID()
+		generation = streamer.Stream.SessionGeneration()
+	}
+	w.reqSeq++
+	requestID := fmt.Sprintf("%s\x00%s\x00%d", st.CampaignID, st.DropID, w.reqSeq)
+	signature := watcher.RecoverySignature{
+		Login:             st.Channel,
+		BroadcastID:       broadcastID,
+		SessionGeneration: generation,
+		Stage:             watcher.ProbeStage(stageName),
+		Mode:              mode,
+	}.String()
+
+	w.watch.RequestSessionRefresh(watcher.SessionRefreshRequest{
+		RequestID:           requestID,
+		Login:               st.Channel,
+		Mode:                mode,
+		ExpectedBroadcastID: broadcastID,
+		ExpectedGeneration:  generation,
+		Signature:           signature,
+		Requested:           now,
+	})
+	st.pending = &pendingRecovery{
+		requestID:   requestID,
+		signature:   signature,
+		broadcastID: broadcastID,
+		generation:  generation,
+		stageIndex:  stageIndex,
+		stageName:   stageName,
+		requestedAt: now,
+		deadline:    now.Add(recoveryOutcomeDeadline),
+	}
+	return detail + " — awaiting the broker outcome before advancing"
+}
+
+// resolvePending checks whether the in-flight async recovery stage has a matching
+// broker outcome, and drives the pipeline accordingly. It returns true when it
+// consumed this pass's single recovery-stage budget (a resolution or a still-valid
+// wait counts, so a parked drop never lets another drop's stage run out from under
+// it). It is the state machine that makes async recovery outcome-driven.
+func (w *ProgressWatchdog) resolvePending(st *dropState, now time.Time) bool {
+	p := st.pending
+	outcome, ok := w.watch.LastSessionRefresh(st.Channel)
+	matched := ok && outcome.RequestID == p.requestID && outcome.Signature == p.signature
+
+	if !matched {
+		// No matching outcome yet. Match is by EXACT RequestID + signature, so an
+		// old/foreign outcome (wrong RequestID, old signature, old broadcast) is
+		// ignored, never mistaken for this episode's completion.
+		if now.After(p.deadline) {
+			st.pending = nil
+			st.LastRecoveryAt = now // cooldown before the next stage
+			st.Status = ProgressRecovering
+			st.Detail = fmt.Sprintf("%s recovery timed out awaiting the broker outcome; will continue after cooldown", p.stageName)
+			return true
+		}
+		st.Status = ProgressRecovering
+		st.Detail = fmt.Sprintf("awaiting the %s recovery outcome from the slot broker", p.stageName)
+		return true
+	}
+
+	// A matching outcome landed. Clear the pending correlation and act on the kind.
+	stageIndex, stageName := p.stageIndex, p.stageName
+	st.pending = nil
+	switch {
+	case outcome.Stale:
+		// The session the refresh targeted was superseded (new broadcast/session):
+		// this recovery episode is over. Rebaseline evidence and restart the
+		// pipeline so the fresh session is judged on its own merits.
+		w.rebaselineEpisode(st, now)
+		st.Detail = "recovery outcome stale — broadcast/session changed; recovery rebaselined for the new session"
+		return true
+	case outcome.Skipped:
+		// The channel lost its slot: staging a request is NOT a completed transport
+		// recovery. Roll the stage back so it re-runs once farming is re-confirmed,
+		// and discard the stall evidence so the gates must prove active farming
+		// again before the stage retries.
+		st.RecoveryStage = stageIndex
+		st.resetEvidence()
+		st.Status = ProgressRecovering
+		st.Detail = fmt.Sprintf("%s recovery skipped (watch slot lost); will retry once farming is re-confirmed", stageName)
+		return true
+	case outcome.Success:
+		// The refresh applied. A successful refresh is NOT proof the drop recovered —
+		// only real progress confirms that — so stay Recovering and let the next
+		// stage run after cooldown if the stall persists.
+		st.LastRecoveryAt = now
+		st.Status = ProgressRecovering
+		st.Detail = fmt.Sprintf("%s recovery applied by the broker; awaiting confirmed drop progress", stageName)
+		return true
+	default:
+		// Matching failure: the stage is done (failed). The next stage may run after
+		// the cooldown.
+		st.LastRecoveryAt = now
+		st.Status = ProgressRecovering
+		st.Detail = fmt.Sprintf("%s recovery failed at the broker (%s); next stage after cooldown", stageName, outcome.Reason)
+		return true
+	}
+}
+
+// rebaselineEpisode restarts the recovery pipeline for a fresh session (a stale
+// outcome from a broadcast change): evidence, stage, and exhaustion clear, but the
+// notified-stalled flag is preserved so a session churn cannot re-fire the
+// critical alert. The recovered notification still fires later if real progress
+// resumes.
+func (w *ProgressWatchdog) rebaselineEpisode(st *dropState, now time.Time) {
+	st.pending = nil
+	st.RecoveryStage = 0
+	st.RecoveryStageName = ""
+	st.exhaustedAt = time.Time{}
+	st.LastRecoveryAt = time.Time{}
+	st.resetEvidence()
+	st.Status = ProgressRecovering
+}
+
+// advanceRecovery drives the recovery pipeline one step per pass, returning true
+// when it consumed this pass's recovery-stage budget. It is finite; once
+// exhausted the drop stays STALLED until progress resumes or Rearm elapses. An
+// async stage parks the pipeline on a pending broker outcome (resolvePending)
+// instead of advancing the instant its request is queued.
 func (w *ProgressWatchdog) advanceRecovery(st *dropState, cfg WatchdogConfig, now time.Time) bool {
+	// An in-flight async stage takes priority: resolve (or keep waiting on) its
+	// outcome before any new stage can run. A queued request is not a completed
+	// stage — the stage number does not advance again until the outcome matches.
+	if st.pending != nil {
+		return w.resolvePending(st, now)
+	}
+
 	if !st.exhaustedAt.IsZero() {
 		if cfg.Rearm <= 0 || now.Sub(st.exhaustedAt) < cfg.Rearm {
 			st.Status = ProgressStalled
