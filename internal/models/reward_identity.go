@@ -338,16 +338,23 @@ func MatchIdentity(claimed, candidate RewardIdentity, clock Clock) IdentityMatch
 		// tell (they may be different tiers). Fall through to weaker evidence.
 	}
 
-	// Benefit/Reward ID.
+	// Benefit/Reward ID identifies a reward FAMILY, not a specific repeatable
+	// entitlement occurrence. It confirms a claim ONLY together with positive
+	// occurrence evidence: both windows decidable AND overlapping. Disjoint known
+	// windows are a genuinely new occurrence (NoMatch); if EITHER window is
+	// unknown/malformed we cannot prove the same occurrence, so we fail open to
+	// Ambiguous (never confirm a repeatable reward on unknown historical window).
 	if claimed.BenefitID != "" && candidate.BenefitID != "" {
 		if claimed.BenefitID != candidate.BenefitID {
 			return IdentityNoMatch
 		}
-		// Same benefit ID: distinguish occurrences by window.
-		if claimed.Window.DisjointFrom(candidate.Window) {
-			return IdentityNoMatch
+		if !claimed.Window.Decidable() || !candidate.Window.Decidable() {
+			return IdentityMatchAmbiguous
 		}
-		return IdentityMatchConfirmed
+		if claimed.Window.Overlaps(candidate.Window) {
+			return IdentityMatchConfirmed
+		}
+		return IdentityNoMatch
 	}
 
 	// Composite campaign+drop identity (same instance).

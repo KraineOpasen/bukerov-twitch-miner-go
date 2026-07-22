@@ -120,8 +120,10 @@ func TestACLEnabledEmptyChannelsUnknown(t *testing.T) {
 	}
 }
 
-// malformed channel element -> Complete=false (not a truncated "complete" list).
-func TestACLMalformedElementIncomplete(t *testing.T) {
+// A malformed channel element makes the WHOLE ACL unknown (fail closed): the
+// valid subset must never be usable as a complete allowlist, so no channel is
+// creditable from a partially-parsed list.
+func TestACLMalformedElementFailsClosed(t *testing.T) {
 	c := gqlCampaign(map[string]interface{}{
 		"channels": []interface{}{
 			map[string]interface{}{"id": "c1"},
@@ -129,11 +131,29 @@ func TestACLMalformedElementIncomplete(t *testing.T) {
 			"garbage",
 		},
 	})
-	if c.ACLState() != ACLRestricted {
-		t.Fatalf("valid element should still yield restricted, got %s", c.ACLState())
+	if c.ACLState() != ACLUnknown {
+		t.Fatalf("a malformed element must yield ACLUnknown, got %s", c.ACLState())
 	}
 	if c.ACL.Complete {
-		t.Error("a malformed element must mark the ACL incomplete, not a complete allowlist")
+		t.Error("a malformed ACL must not be marked complete")
+	}
+	if c.AllowsChannel("c1") {
+		t.Error("no channel from a partially-parsed list may be credited (fail closed)")
+	}
+}
+
+// A present-but-malformed isEnabled (wrong type) is unknown, not silently
+// treated as absent.
+func TestACLMalformedIsEnabledFailsClosed(t *testing.T) {
+	c := gqlCampaign(map[string]interface{}{
+		"isEnabled": "yes", // not a bool
+		"channels":  channelList("c1"),
+	})
+	if c.ACLState() != ACLUnknown {
+		t.Fatalf("malformed isEnabled must yield ACLUnknown, got %s", c.ACLState())
+	}
+	if c.AllowsChannel("c1") {
+		t.Error("unknown ACL must fail closed")
 	}
 }
 

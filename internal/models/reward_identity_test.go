@@ -102,6 +102,21 @@ func TestMatchIdentity(t *testing.T) {
 			want:    IdentityNoMatch,
 		},
 		{
+			// B1: Exact BenefitID + one unknown window -> ambiguous (benefit id
+			// proves a reward family, not a specific occurrence).
+			name:    "benefit unknown window ambiguous",
+			claimed: benefit("g1", "ben-1", "Skin", EntitlementWindow{}),
+			cand:    benefit("g1", "ben-1", "Skin", winA),
+			want:    IdentityMatchAmbiguous,
+		},
+		{
+			// B1: Exact BenefitID + both unknown windows -> ambiguous.
+			name:    "benefit both unknown windows ambiguous",
+			claimed: benefit("g1", "ben-1", "Skin", EntitlementWindow{}),
+			cand:    benefit("g1", "ben-1", "Skin", EntitlementWindow{}),
+			want:    IdentityMatchAmbiguous,
+		},
+		{
 			// 3. Same display name + different BenefitID -> no match.
 			name:    "same name different benefit no match",
 			claimed: benefit("g1", "ben-1", "Skin", winA),
@@ -239,6 +254,50 @@ func TestIdentityDoesNotAffectClaimability(t *testing.T) {
 	_ = d.Identity("g1", "camp-1", EntitlementWindow{})
 	if !d.CanClaim() {
 		t.Fatal("Identity() must not change CanClaim")
+	}
+}
+
+// B2: Drop.Identity propagates DropInstanceID as the strongest evidence when
+// present, without fabricating it when absent, and distinct instances do not
+// confirm sameness.
+func TestDropIdentityPropagatesInstanceID(t *testing.T) {
+	withInstance := &Drop{ID: "d1", Name: "Skin", DropInstanceID: "inst-abc", MinutesRequired: 60}
+	id := withInstance.Identity("g1", "camp-1", EntitlementWindow{})
+	if id.InstanceID != "inst-abc" {
+		t.Fatalf("Identity did not carry DropInstanceID, got %q", id.InstanceID)
+	}
+	if id.Evidence != EvidenceInstance {
+		t.Fatalf("expected EvidenceInstance, got %v", id.Evidence)
+	}
+
+	noInstance := &Drop{ID: "d1", Name: "Skin", MinutesRequired: 60}
+	id2 := noInstance.Identity("g1", "camp-1", EntitlementWindow{})
+	if id2.InstanceID != "" {
+		t.Fatal("empty DropInstanceID must not fabricate an instance id")
+	}
+	if id2.Evidence == EvidenceInstance {
+		t.Fatal("no instance id must not claim instance evidence")
+	}
+
+	// Exact same non-empty instance id on both sides confirms, even when the
+	// composite (campaign+drop) differs — the instance handle is the strongest
+	// evidence.
+	same := MatchIdentity(
+		NewRewardIdentity("g1", "", "inst-1", "d1", "c1", "Skin", 0, EntitlementWindow{}),
+		NewRewardIdentity("g1", "", "inst-1", "d2", "c2", "Skin", 0, EntitlementWindow{}),
+		fixedClock(testNow),
+	)
+	if same != IdentityMatchConfirmed {
+		t.Fatal("same instance id must confirm")
+	}
+	// Different instance ids with no other strong evidence do NOT confirm.
+	diff := MatchIdentity(
+		NewRewardIdentity("g1", "", "inst-1", "", "", "Skin", 0, EntitlementWindow{}),
+		NewRewardIdentity("g1", "", "inst-2", "", "", "Skin", 0, EntitlementWindow{}),
+		fixedClock(testNow),
+	)
+	if diff == IdentityMatchConfirmed {
+		t.Fatal("different instance ids (no other strong evidence) must not confirm")
 	}
 }
 

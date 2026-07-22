@@ -282,7 +282,12 @@ func (d *Drop) Identity(gameID, campaignID string, fallback EntitlementWindow) R
 	if !w.Known && fallback.Known {
 		w = fallback
 	}
-	return NewRewardIdentity(gameID, d.BenefitID, "", d.ID, campaignID, d.Name, d.MinutesRequired, w)
+	// DropInstanceID is the server-minted per-grant handle (strongest evidence
+	// when present on BOTH sides). It is passed through so an instance-level
+	// comparison is possible; MatchIdentity only confirms on an exact match of a
+	// non-empty instance ID on both sides, so a one-sided instance never
+	// fabricates cross-occurrence sameness.
+	return NewRewardIdentity(gameID, d.BenefitID, d.DropInstanceID, d.ID, campaignID, d.Name, d.MinutesRequired, w)
 }
 
 // RewardKey is a NON-AUTHORITATIVE display/grouping key (game + normalized drop

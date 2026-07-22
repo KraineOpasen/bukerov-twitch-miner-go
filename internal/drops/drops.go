@@ -898,6 +898,18 @@ func (d *DropsTracker) syncCampaigns() {
 		"afterGameFilter", afterGameFilter,
 		"filteredByGame", filteredByGame)
 
+	// Reconcile each fresh campaign's ACL against the previously-published ACL
+	// for the same campaign instance BEFORE publishing, so a transient
+	// unknown/incomplete ACL in this sync never erodes a known-good allowlist and
+	// a stale result never overwrites a newer one (see models.ReconcileACL). The
+	// previous snapshot is immutable and never mutated; only the fresh (not yet
+	// published) campaigns are adjusted. This runs off the network path with no
+	// lock held during the reconcile itself.
+	d.mu.RLock()
+	previous := d.campaigns
+	d.mu.RUnlock()
+	reconcileCampaignACLs(previous, campaigns)
+
 	d.mu.Lock()
 	d.campaigns = campaigns
 	d.bumpRevisionLocked(updateSourceFullSync)
@@ -1422,6 +1434,43 @@ func (d *DropsTracker) applyClaimHistory(campaigns []*models.Campaign) []*models
 	}
 
 	return campaigns
+}
+
+// reconcileCampaignACLs applies the ACL lifecycle policy across a full sync. For
+// each freshly-built campaign it reconciles the campaign's ACL against the
+// previously-published ACL for the SAME campaign instance ID via
+// models.ReconcileACL, so:
+//
+//   - a transient unknown/incomplete ACL never erodes a known-good allowlist;
+//   - a stale (older) observation never overwrites a newer one;
+//   - an authoritative isEnabled=false (or a fresh complete restricted set) still
+//     replaces the previous ACL.
+//
+// The previous snapshot is treated as immutable (never mutated). Campaigns that
+// disappeared from the fresh set are simply not carried here — normal lifecycle
+// removal is unaffected; we never keep a campaign alive only to preserve its ACL.
+// The derived Channels mirror is re-synced to the reconciled ACL.
+func reconcileCampaignACLs(previous, fresh []*models.Campaign) {
+	if len(previous) == 0 || len(fresh) == 0 {
+		return
+	}
+	prevByID := make(map[string]*models.Campaign, len(previous))
+	for _, c := range previous {
+		if c != nil && c.ID != "" {
+			prevByID[c.ID] = c
+		}
+	}
+	for _, c := range fresh {
+		if c == nil || c.ID == "" {
+			continue
+		}
+		prev, ok := prevByID[c.ID]
+		if !ok {
+			continue
+		}
+		c.ACL = models.ReconcileACL(prev.ACL, c.ACL)
+		c.SyncChannelsFromACL()
+	}
 }
 
 // extractClaimedRewards reads the inventory's gameEventDrops -- Twitch's

@@ -117,12 +117,23 @@ func buildCampaignACL(allowRaw interface{}, observedAt time.Time) CampaignACL {
 		return acl
 	}
 
-	if enabled, present := allow["isEnabled"].(bool); present && !enabled {
-		// Authoritative disabled allowlist: unrestricted, and any previously
-		// published channel list must be dropped (the snapshot swap does this).
-		acl.State = ACLUnrestricted
-		acl.Complete = true
-		return acl
+	// isEnabled, when present, MUST be a bool. A present-but-malformed value is
+	// NOT ignored (that would silently treat a broken response as "field
+	// absent"): it makes the ACL unknown, fail closed.
+	if raw, present := allow["isEnabled"]; present {
+		enabled, isBool := raw.(bool)
+		if !isBool {
+			acl.State = ACLUnknown
+			acl.Complete = false
+			return acl
+		}
+		if !enabled {
+			// Authoritative disabled allowlist: unrestricted, and any previously
+			// published channel list must be dropped (the snapshot swap does this).
+			acl.State = ACLUnrestricted
+			acl.Complete = true
+			return acl
+		}
 	}
 
 	channels, ok := allow["channels"].([]interface{})
@@ -136,17 +147,21 @@ func buildCampaignACL(allowRaw interface{}, observedAt time.Time) CampaignACL {
 
 	ids := make([]string, 0, len(channels))
 	seen := make(map[string]struct{}, len(channels))
-	malformed := false
 	for _, ch := range channels {
 		chMap, ok := ch.(map[string]interface{})
 		if !ok {
-			malformed = true
-			continue
+			// A malformed element means the channel set cannot be trusted as a
+			// COMPLETE allowlist. Publishing the valid subset would be a partial
+			// allowlist — forbidden — so the whole ACL is unknown, fail closed.
+			acl.State = ACLUnknown
+			acl.Complete = false
+			return acl
 		}
 		id, ok := chMap["id"].(string)
 		if !ok || strings.TrimSpace(id) == "" {
-			malformed = true
-			continue
+			acl.State = ACLUnknown
+			acl.Complete = false
+			return acl
 		}
 		if _, dup := seen[id]; dup {
 			continue
@@ -162,15 +177,14 @@ func buildCampaignACL(allowRaw interface{}, observedAt time.Time) CampaignACL {
 		return acl
 	}
 
+	// The verified DropCampaignDetails operation returns allow.channels as a
+	// FLAT array (no pageInfo/cursor in the proven contract), so a fully-parsed
+	// non-empty list with no malformed element is complete. Any malformed element
+	// above already returned ACLUnknown, so a Restricted ACL is always Complete.
 	sort.Strings(ids)
 	acl.State = ACLRestricted
 	acl.ChannelIDs = ids
-	// The verified DropCampaignDetails operation returns allow.channels as a
-	// FLAT array (no pageInfo/cursor in the proven contract), so a successfully
-	// parsed non-empty list is complete. A malformed element does not silently
-	// truncate a "complete" allowlist — mark it incomplete so it is treated as
-	// not-fully-loaded rather than a shorter authoritative list.
-	acl.Complete = !malformed
+	acl.Complete = true
 	return acl
 }
 
@@ -224,6 +238,18 @@ func (c *Campaign) effectiveACLChannels() []string {
 		return c.ACL.ChannelIDs
 	}
 	return c.Channels
+}
+
+// SyncChannelsFromACL re-derives the legacy Channels compatibility mirror from
+// the authoritative ACL. It is called after ReconcileACL swaps a fresh
+// campaign's ACL (before publication) so old readers of Channels stay consistent
+// with the reconciled allowlist.
+func (c *Campaign) SyncChannelsFromACL() {
+	if c.ACL.State == ACLRestricted {
+		c.Channels = append([]string(nil), c.ACL.ChannelIDs...)
+	} else {
+		c.Channels = nil
+	}
 }
 
 // ACLState exposes the campaign's authoritative ACL state for diagnostics and

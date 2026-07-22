@@ -68,32 +68,37 @@ func TestExtractClaimedRewardsEmpty(t *testing.T) {
 	}
 }
 
-// End-to-end at the campaign level: a name-only claim history keeps a same-named
-// drop farmable (fail open) while a benefit-id match confirms it.
-func TestClaimHistoryFailOpenVsConfirmed(t *testing.T) {
-	inv := map[string]interface{}{
+// End-to-end at the campaign level: because the proven gameEventDrops shape
+// carries NO entitlement window, BOTH a name-only and a benefit-id claim record
+// yield an Ambiguous match — the drop stays farmable (fail open). A benefit id
+// alone identifies a reward family, not a specific occurrence, so without window
+// evidence it can never confirm a claim from claim history. This is the
+// corrected B1 behavior: a repeatable reward is never falsely marked claimed.
+func TestClaimHistoryFailOpenNoWindow(t *testing.T) {
+	nameOnlyInv := map[string]interface{}{
 		"gameEventDrops": []interface{}{
 			map[string]interface{}{"name": "Coin", "gameId": "g1"},
 		},
 	}
-	recs := extractClaimedRewards(inv)
-
 	nameOnly := &models.Campaign{ID: "c1", Game: &models.Game{ID: "g1"},
 		Drops: []*models.Drop{{ID: "d1", Name: "Coin", MinutesRequired: 60}}}
-	nameOnly.ApplyClaimHistoryRecords(recs, nil)
+	nameOnly.ApplyClaimHistoryRecords(extractClaimedRewards(nameOnlyInv), nil)
 	if len(nameOnly.Drops) != 1 {
 		t.Fatal("name-only claim history must keep the drop farmable (fail open)")
 	}
 
-	invBenefit := map[string]interface{}{
+	benefitInv := map[string]interface{}{
 		"gameEventDrops": []interface{}{
 			map[string]interface{}{"name": "Coin", "gameId": "g1", "benefit": map[string]interface{}{"id": "ben-1"}},
 		},
 	}
 	withBenefit := &models.Campaign{ID: "c2", Game: &models.Game{ID: "g1"},
 		Drops: []*models.Drop{{ID: "d1", Name: "Coin", BenefitID: "ben-1", MinutesRequired: 60}}}
-	withBenefit.ApplyClaimHistoryRecords(extractClaimedRewards(invBenefit), nil)
-	if len(withBenefit.Drops) != 0 {
-		t.Fatal("benefit-id claim history should confirm and remove the drop")
+	out := withBenefit.ApplyClaimHistoryRecords(extractClaimedRewards(benefitInv), nil)
+	if len(withBenefit.Drops) != 1 {
+		t.Fatal("benefit-id claim history WITHOUT a window must stay ambiguous (fail open), not confirm")
+	}
+	if len(out.AmbiguousNames) != 1 || len(out.ConfirmedNames) != 0 {
+		t.Fatalf("expected ambiguous, got confirmed=%v ambiguous=%v", out.ConfirmedNames, out.AmbiguousNames)
 	}
 }

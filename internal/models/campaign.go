@@ -275,6 +275,28 @@ func (c *Campaign) ApplyClaimHistoryRecords(records []ClaimedReward, clock Clock
 	return outcome
 }
 
+// strictNameFallbackConfirms decides whether an otherwise-Ambiguous name match
+// may be upgraded to Confirmed. It requires the FULL evidence set — anything
+// missing keeps the drop retained (fail open):
+//
+//  1. both game IDs present and equal (a missing game on either side => never);
+//  2. the candidate's normalized name is unique among the campaign's drops;
+//  3. both windows decidable AND overlapping (same occurrence).
+//
+// This mirrors the domain contract that "missing game ID + name only" is always
+// Ambiguous, never Confirmed.
+func strictNameFallbackConfirms(claimed, cand RewardIdentity, nameCount map[string]int) bool {
+	cg, dg := canonicalGame(claimed.GameID), canonicalGame(cand.GameID)
+	if cg == "" || dg == "" || cg != dg {
+		return false
+	}
+	if cand.CanonicalName == "" || nameCount[cand.CanonicalName] != 1 {
+		return false
+	}
+	return claimed.Window.Decidable() && cand.Window.Decidable() &&
+		claimed.Window.Overlaps(cand.Window)
+}
+
 // classifyAgainstClaimHistory returns whether a candidate drop is confirmed
 // claimed by any record, and whether it saw an ambiguous (retained) signal.
 func classifyAgainstClaimHistory(cand RewardIdentity, records []ClaimedReward, nameCount map[string]int, clock Clock) (confirmed, ambiguous bool) {
@@ -283,9 +305,7 @@ func classifyAgainstClaimHistory(cand RewardIdentity, records []ClaimedReward, n
 		case IdentityMatchConfirmed:
 			return true, false
 		case IdentityMatchAmbiguous:
-			if rec.Identity.Window.Decidable() && cand.Window.Decidable() &&
-				rec.Identity.Window.Overlaps(cand.Window) &&
-				cand.CanonicalName != "" && nameCount[cand.CanonicalName] == 1 {
+			if strictNameFallbackConfirms(rec.Identity, cand, nameCount) {
 				return true, false
 			}
 			ambiguous = true
