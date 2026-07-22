@@ -993,7 +993,7 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 
 	streamer.Stream.Update(broadcastID, strings.TrimSpace(title), game, tags, viewersCount)
 
-	if game != nil && game.Name != "" && game.ID != "" && streamer.Settings.ClaimDrops {
+	if streamer.Settings.ClaimDrops {
 		// Channel-side campaign availability is a TRI-STATE, captured with a
 		// sequence so a stale lookup can't overwrite a newer one. A successful
 		// lookup (including a legitimately EMPTY list — the authoritative "no
@@ -1003,12 +1003,21 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 		// authoritative Yes (the drops assignment path treats Unknown as
 		// "no NEW assignment", so a stale ID can't silently create one).
 		obsSeq := streamer.Stream.CampaignAvailabilitySeq()
-		if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
-			slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
-				"streamer", streamer.Username, "error", err)
-			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
+		if game != nil && game.Name != "" && game.ID != "" {
+			if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
+				slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
+					"streamer", streamer.Username, "error", err)
+				streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
+			} else {
+				streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, true, campaignIDs)
+			}
 		} else {
-			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, true, campaignIDs)
+			// Online but the channel's game/category is unresolved this refresh, so
+			// drop availability cannot be authoritatively determined. Record UNKNOWN
+			// (keeping previous IDs only as last-known continuity) rather than leaving
+			// a stale Known list that the assignment path would read as a fresh
+			// authoritative "Yes" for a channel not currently playing the game.
+			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
 		}
 	}
 
@@ -1477,16 +1486,32 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 		return nil, err
 	}
 
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return nil, nil
+	// A top-level GraphQL "errors" array (even at HTTP 200, typically with
+	// data:null) is a service-layer failure, NOT an authoritative "no campaigns
+	// available here". Returning an error keeps channel-side availability UNKNOWN
+	// so a transient failure never gets recorded as Known+empty (which the drops
+	// assignment path would read as authoritative "No" and use to clear a valid
+	// assignment mid-farm).
+	if hasTopLevelGQLErrors(resp) {
+		return nil, fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
 	}
 
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok || data == nil {
+		return nil, fmt.Errorf("twitch GQL %s: missing or malformed data", op.OperationName)
+	}
+
+	// An ABSENT/null channel node is an unresolved response, not proof of "no
+	// campaigns". Treat it as inconclusive (=> availability UNKNOWN), never as an
+	// authoritative empty list.
 	channel, ok := data["channel"].(map[string]interface{})
 	if !ok || channel == nil {
-		return nil, nil
+		return nil, fmt.Errorf("twitch GQL %s: missing or malformed channel", op.OperationName)
 	}
 
+	// The channel node resolved: an absent/null/empty viewerDropCampaigns is the
+	// AUTHORITATIVE "no drop campaigns available on this channel" — a genuinely
+	// resolved empty list (Known + empty), distinct from the failures above.
 	campaigns, ok := channel["viewerDropCampaigns"].([]interface{})
 	if !ok || campaigns == nil {
 		return nil, nil
@@ -1494,8 +1519,8 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 
 	var ids []string
 	for _, campaign := range campaigns {
-		if c, ok := campaign.(map[string]interface{}); ok {
-			if id, ok := c["id"].(string); ok {
+		if cm, ok := campaign.(map[string]interface{}); ok {
+			if id, ok := cm["id"].(string); ok {
 				ids = append(ids, id)
 			}
 		}

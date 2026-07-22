@@ -130,9 +130,16 @@ func (s *Streamer) ApplyChannelPointsContextIfCurrent(obsSeq uint64, state Capab
 // from a response BEFORE any streamer write, so the whole observation can be
 // published in ONE atomic step (capability + balance + multipliers + goals)
 // rather than piecemeal. Each Has* flag distinguishes "field present and valid"
-// (apply, even when empty) from "absent or malformed" (preserve the prior value)
-// — so a missing/malformed activeMultipliers never clears known-good multipliers,
-// while a valid empty list authoritatively clears them.
+// (apply) from "absent or malformed" (preserve the prior value) — so a
+// missing/malformed activeMultipliers never clears known-good multipliers, while
+// a valid empty list authoritatively clears them.
+//
+// Goals are the deliberate exception to the "valid empty clears" rule: HasGoals
+// governs whether the listed goals are UPSERTED into the streamer's goal map,
+// but a valid-empty goals list does NOT clear existing goals. Goal
+// removal/lifecycle is owned by the PubSub community-points delete path, not by a
+// periodic context snapshot (which can legitimately omit a goal without it having
+// ended).
 type ChannelPointsContextSnapshot struct {
 	Capability CapabilityState
 	Reason     CapabilityReason
@@ -143,6 +150,7 @@ type ChannelPointsContextSnapshot struct {
 	Multipliers    []Multiplier
 	HasMultipliers bool
 
+	// Goals is upsert-merged (never cleared on empty) — see the type doc.
 	Goals    []*CommunityGoal
 	HasGoals bool
 
@@ -195,6 +203,9 @@ func (s *Streamer) ApplyChannelPointsContext(obsID uint64, snap ChannelPointsCon
 		s.ActiveMultipliers = snap.Multipliers
 	}
 	if snap.HasGoals {
+		// Upsert-only: a context snapshot can legitimately omit an active goal, so
+		// we never treat a shrinking/empty list as a removal. Goal deletion is
+		// owned by the PubSub delete path (see the snapshot type doc).
 		if s.CommunityGoals == nil {
 			s.CommunityGoals = make(map[string]*CommunityGoal)
 		}
