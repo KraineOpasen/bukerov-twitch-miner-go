@@ -3,10 +3,42 @@ package pubsub
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
+
+// countStreamerEvents returns how many events of type t were recorded for the
+// given (test-unique) streamer name. The events log is process-global but tests
+// run sequentially and each test below uses a unique name, so the count isolates
+// that test's transitions.
+func countStreamerEvents(typ events.Type, streamer string) int {
+	n := 0
+	for _, e := range events.Recent(200) {
+		if e.Type == typ && e.Streamer == streamer {
+			n++
+		}
+	}
+	return n
+}
+
+// newCountingPool is a thread-safe pool for the concurrent boundary tests: it
+// counts online/offline StatusHandler invocations with atomics.
+func newCountingPool(checker streamChecker) (*WebSocketPool, *int64, *int64) {
+	var online, offline int64
+	p := &WebSocketPool{checker: checker}
+	p.onStatusChange = func(_ string, st models.StreamerStatus) {
+		switch st {
+		case models.StatusOnline:
+			atomic.AddInt64(&online, 1)
+		case models.StatusOffline:
+			atomic.AddInt64(&offline, 1)
+		}
+	}
+	return p, &online, &offline
+}
 
 // fakeChecker is an injectable streamChecker for the video-playback handler.
 type fakeChecker struct {
@@ -195,5 +227,161 @@ func TestStatusHandlerIsTyped(t *testing.T) {
 	h("x", models.StatusOnline)
 	if got != models.StatusOnline {
 		t.Fatalf("typed StatusHandler did not carry the status, got %v", got)
+	}
+}
+
+// --- Corrective boundary tests: the offline StatusHandler callback and the
+// "went offline" log must fire ONLY on a genuine online→offline transition
+// (tr.OfflineConfirmed), never for an initial-unknown→offline or an
+// unknown(last-confirmed-offline)→offline first/recovery confirmation. ---
+
+// TestStreamDownInitialUnknownNoNotify covers case 1: an initial-unknown streamer
+// that receives a stream-down settles offline (with OfflineAt) but was never
+// confirmed online, so no StatusOffline callback and no TypeStreamerOffline event
+// fire — no misleading online→offline notification.
+func TestStreamDownInitialUnknownNoNotify(t *testing.T) {
+	p, cb := newStatusTestPool(&fakeChecker{})
+	name := "t1-initial-unknown"
+	s := models.NewStreamer(name, models.DefaultStreamerSettings()) // initial unknown
+
+	p.handleVideoPlayback(&PubSubMessage{Type: "stream-down"}, s)
+
+	if s.GetStatus() != models.StatusOffline {
+		t.Fatalf("status = %v, want offline", s.GetStatus())
+	}
+	if s.GetOfflineAt().IsZero() {
+		t.Error("initial-unknown → offline must stamp OfflineAt")
+	}
+	if len(*cb) != 0 {
+		t.Fatalf("initial-unknown → offline must NOT fire the StatusHandler, got %+v", *cb)
+	}
+	if n := countStreamerEvents(events.TypeStreamerOffline, name); n != 0 {
+		t.Fatalf("initial-unknown → offline must NOT create a TypeStreamerOffline event, got %d", n)
+	}
+}
+
+// TestStreamDownFromOnlineViaUnknownNotifiesOnce covers case 2: online→unknown→
+// stream-down is a genuine online→offline transition — StatusHandler fires exactly
+// once with StatusOffline, one TypeStreamerOffline event, and a duplicate
+// stream-down produces no second callback.
+func TestStreamDownFromOnlineViaUnknownNotifiesOnce(t *testing.T) {
+	p, cb := newStatusTestPool(&fakeChecker{})
+	name := "t2-online-unknown"
+	s := models.NewStreamer(name, models.DefaultStreamerSettings())
+	s.SetConfirmedOnline()                    // (no pubsub callback: set directly)
+	s.SetUnknown(models.ReasonTransportError) // online → unknown
+
+	p.handleVideoPlayback(&PubSubMessage{Type: "stream-down"}, s)
+	p.handleVideoPlayback(&PubSubMessage{Type: "stream-down"}, s) // duplicate
+
+	if s.GetStatus() != models.StatusOffline {
+		t.Fatalf("status = %v, want offline", s.GetStatus())
+	}
+	if len(*cb) != 1 || (*cb)[0].status != models.StatusOffline {
+		t.Fatalf("expected exactly one StatusOffline notification, got %+v", *cb)
+	}
+	if n := countStreamerEvents(events.TypeStreamerOffline, name); n != 1 {
+		t.Fatalf("expected exactly one TypeStreamerOffline event, got %d", n)
+	}
+}
+
+// TestStreamDownFromOfflineViaUnknownNoNotify covers case 3: offline→unknown→
+// stream-down is a first/recovery offline confirmation — the streamer was never
+// confirmed online, so no callback fires again, and OfflineAt keeps its prior
+// logical-offline continuity (not re-stamped by the stream-down).
+func TestStreamDownFromOfflineViaUnknownNoNotify(t *testing.T) {
+	p, cb := newStatusTestPool(&fakeChecker{})
+	name := "t3-offline-unknown"
+	s := models.NewStreamer(name, models.DefaultStreamerSettings())
+	s.SetConfirmedOffline()
+	originalOfflineAt := s.GetOfflineAt()
+	s.SetUnknown(models.ReasonTransportError) // offline → unknown
+
+	p.handleVideoPlayback(&PubSubMessage{Type: "stream-down"}, s)
+
+	if s.GetStatus() != models.StatusOffline {
+		t.Fatalf("status = %v, want offline", s.GetStatus())
+	}
+	if len(*cb) != 0 {
+		t.Fatalf("offline→unknown→stream-down must NOT fire the StatusHandler, got %+v", *cb)
+	}
+	if s.GetOfflineAt() != originalOfflineAt {
+		t.Error("OfflineAt must preserve the prior offline continuity, not be re-stamped")
+	}
+	if n := countStreamerEvents(events.TypeStreamerOffline, name); n != 0 {
+		t.Fatalf("recovery offline confirmation must NOT create a new TypeStreamerOffline event, got %d", n)
+	}
+}
+
+// TestConcurrentDuplicateStreamDownExactlyOnce covers case 4: many concurrent
+// stream-down deliveries for one logical online→offline transition yield exactly
+// one callback and one event. Run under -race.
+func TestConcurrentDuplicateStreamDownExactlyOnce(t *testing.T) {
+	p, _, offline := newCountingPool(&fakeChecker{})
+	name := "t4-concurrent-down"
+	s := models.NewStreamer(name, models.DefaultStreamerSettings())
+	s.SetConfirmedOnline()
+
+	const n = 32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			p.handleVideoPlayback(&PubSubMessage{Type: "stream-down"}, s)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(offline); got != 1 {
+		t.Fatalf("concurrent duplicate stream-down: offline callback count = %d, want 1", got)
+	}
+	if ev := countStreamerEvents(events.TypeStreamerOffline, name); ev != 1 {
+		t.Fatalf("concurrent duplicate stream-down: TypeStreamerOffline event count = %d, want 1", ev)
+	}
+}
+
+// TestConcurrentTransitionsExactlyOnce covers case 5: a controlled scenario where
+// concurrency within each phase must still yield exactly-once callback/event per
+// logical transition. Phase 1: N concurrent stream-up on a fresh streamer → one
+// online. Phase 2: N concurrent stream-down → one offline. Deterministic, -race.
+func TestConcurrentTransitionsExactlyOnce(t *testing.T) {
+	p, online, offline := newCountingPool(&fakeChecker{})
+	name := "t5-concurrent-transitions"
+	s := models.NewStreamer(name, models.DefaultStreamerSettings())
+
+	runConcurrent := func(msgType string) {
+		const n = 32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				p.handleVideoPlayback(&PubSubMessage{Type: msgType}, s)
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+
+	runConcurrent("stream-up")   // fresh unknown → online, exactly once
+	runConcurrent("stream-down") // online → offline, exactly once
+
+	if got := atomic.LoadInt64(online); got != 1 {
+		t.Fatalf("online callback count = %d, want exactly 1", got)
+	}
+	if got := atomic.LoadInt64(offline); got != 1 {
+		t.Fatalf("offline callback count = %d, want exactly 1", got)
+	}
+	if ev := countStreamerEvents(events.TypeStreamerOnline, name); ev != 1 {
+		t.Fatalf("TypeStreamerOnline event count = %d, want exactly 1", ev)
+	}
+	if ev := countStreamerEvents(events.TypeStreamerOffline, name); ev != 1 {
+		t.Fatalf("TypeStreamerOffline event count = %d, want exactly 1", ev)
 	}
 }

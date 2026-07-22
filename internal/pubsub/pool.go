@@ -547,18 +547,32 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 			}
 		}
 	case "stream-down":
-		// Authoritative offline. Fires from online OR unknown so a stream-down
-		// during an unknown blip still settles offline and releases the slot.
-		if streamer.GetStatus() != models.StatusOffline {
-			bid := streamer.Stream.GetBroadcastID()
-			tr := streamer.SetConfirmedOffline()
+		// Authoritative offline. SetConfirmedOffline settles offline from online OR
+		// unknown and is a no-op when already offline. The observable "went offline"
+		// notification fires ONLY on a genuine online→offline transition
+		// (tr.OfflineConfirmed) — the one case the domain also emits TypeStreamerOffline
+		// for. An initial-unknown→offline or unknown(last-confirmed-offline)→offline is
+		// an authoritative FIRST/recovery confirmation: it settles the status (and its
+		// OfflineAt per the domain contract) WITHOUT a Discord notification and WITHOUT
+		// a TypeStreamerOffline event, so it must not fire the StatusOffline callback.
+		bid := streamer.Stream.GetBroadcastID()
+		tr := streamer.SetConfirmedOffline()
+		switch {
+		case tr.OfflineConfirmed:
 			slog.Info("Streamer went offline",
 				"streamer", streamer.Username,
 				"channelID", streamer.ChannelID,
 				"broadcastID", bid)
-			if tr.Changed() && p.onStatusChange != nil {
+			if p.onStatusChange != nil {
 				p.onStatusChange(streamer.Username, models.StatusOffline)
 			}
+		case tr.Changed():
+			// First/recovery authoritative offline confirmation: privacy-safe log
+			// only, no notification and no online→offline event.
+			slog.Info("Streamer status confirmed offline",
+				"streamer", streamer.Username,
+				"channelID", streamer.ChannelID,
+				"broadcastID", bid)
 		}
 	case "viewcount":
 		// A viewcount can only CONFIRM online via a successful GQL check or leave
