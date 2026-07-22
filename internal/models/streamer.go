@@ -116,6 +116,11 @@ const (
 	ReasonMalformedResponse     StatusReason = "malformed_response"
 	ReasonSpadeUnavailable      StatusReason = "spade_unavailable"
 	ReasonCheckFailed           StatusReason = "check_failed"
+	// ReasonSessionStale marks a stream check whose atomic playback-session apply
+	// was superseded by a newer observation. It is inconclusive (UNKNOWN): the
+	// newer refresh is authoritative, so this observation confirms neither online
+	// nor offline.
+	ReasonSessionStale StatusReason = "session_stale"
 )
 
 // StatusTransition is the immutable result of a single atomic status transition.
