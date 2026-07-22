@@ -279,10 +279,13 @@ func (s *Stream) SetCampaigns(campaigns []*Campaign) {
 	s.Campaigns = campaigns
 }
 
-func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game *Game) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+// BuildMinuteWatchedPayload builds the beacon events for a minute-watched report
+// from the identity of one observed broadcast. It is pure (no lock, no I/O), so a
+// full session refresh can build the payload off-lock as part of an immutable
+// PlaybackSessionCandidate and publish it atomically with the spade URL and
+// broadcast ID (see ApplyPlaybackSessionIfCurrent), instead of via a separate
+// SetPayload write.
+func BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel string, game *Game) []MinuteWatchedEvent {
 	properties := map[string]interface{}{
 		"channel_id":   channelID,
 		"broadcast_id": broadcastID,
@@ -297,12 +300,19 @@ func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game
 		properties["game_id"] = game.ID
 	}
 
-	s.payload = []MinuteWatchedEvent{
+	return []MinuteWatchedEvent{
 		{
 			Event:      "minute-watched",
 			Properties: properties,
 		},
 	}
+}
+
+func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game *Game) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.payload = BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel, game)
 	// A freshly built payload (new broadcast, refreshed game/user context) is a new
 	// playback session for beacon purposes.
 	s.sessionGen++
