@@ -172,11 +172,24 @@ type Streamer struct {
 	// always wins over a concurrent inconclusive check.
 	statusSeq uint64
 
-	StreamUpTime      time.Time
-	OnlineAt          time.Time
-	OfflineAt         time.Time
-	LastChecked       time.Time
-	ChannelPoints     int
+	StreamUpTime  time.Time
+	OnlineAt      time.Time
+	OfflineAt     time.Time
+	LastChecked   time.Time
+	ChannelPoints int
+	// channelPointsCap is the tri-state Channel Points capability for this
+	// channel (see capability.go): whether Twitch has AUTHORITATIVELY confirmed
+	// the feature is available, distinct from liveness, from the user's settings,
+	// and from DisableWatch. Its zero value is CapabilityUnknown. All capability
+	// fields are guarded by mu.
+	channelPointsCap          CapabilityState
+	lastConfirmedChannelPtCap CapabilityState
+	capObservedAt             time.Time
+	capReason                 CapabilityReason
+	// capSeq increments on every CONFIRMED (enabled/disabled) capability
+	// transition so a slow/stale check cannot overwrite a newer confirmation
+	// (mirrors statusSeq for liveness). Unknown transitions do NOT bump it.
+	capSeq            uint64
 	CommunityGoals    map[string]*CommunityGoal
 	ViewerIsMod       bool
 	ActiveMultipliers []Multiplier

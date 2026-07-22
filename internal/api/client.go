@@ -1130,6 +1130,25 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 	return tr
 }
 
+// capabilityFromError maps a transport/GQL error to the tri-state Channel
+// Points capability reason. Every error outcome is UNKNOWN (never Disabled):
+// a failure is not proof the feature is off.
+func capabilityFromError(err error) models.CapabilityReason {
+	switch {
+	case errors.Is(err, ErrPersistedQueryNotFound):
+		return models.CapReasonPQNF
+	case errors.Is(err, ErrUnauthorized):
+		return models.CapReasonUnauthorized
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return models.CapReasonCancelled
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return models.CapReasonTimeout
+	}
+	return models.CapReasonTransportError
+}
+
 func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
 		"channelLogin": streamer.Username,
@@ -1137,33 +1156,48 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
+		// Inconclusive: never overwrite a prior confirmation and never clear the
+		// balance — classify the capability UNKNOWN with a privacy-safe reason.
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, capabilityFromError(err))
 		return err
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
 
 	community, ok := data["community"].(map[string]interface{})
 	if !ok || community == nil {
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
 
 	channel, ok := community["channel"].(map[string]interface{})
 	if !ok || channel == nil {
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
 
 	self, ok := channel["self"].(map[string]interface{})
 	if !ok {
+		// A structurally valid channel with no self node: the feature context is
+		// missing but Twitch is NOT known to signal "disabled" by omission, so
+		// this is UNKNOWN (never coerced to Disabled without proof).
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMissingContext)
 		return nil
 	}
 
 	communityPoints, ok := self["communityPoints"].(map[string]interface{})
 	if !ok {
+		streamer.SetChannelPointsCapability(models.CapabilityUnknown, models.CapReasonMissingContext)
 		return nil
 	}
+
+	// A structurally valid communityPoints context is the authoritative
+	// "Channel Points available for this channel" signal we can prove.
+	streamer.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 
 	if balance, ok := communityPoints["balance"].(float64); ok {
 		streamer.SetChannelPoints(int(balance))
