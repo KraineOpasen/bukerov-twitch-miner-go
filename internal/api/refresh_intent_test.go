@@ -378,6 +378,104 @@ func TestNewerPlaybackRefreshAvailabilityWinsWhenOlderCompletesFirst(t *testing.
 	runAvailabilityInterleave(t, true)
 }
 
+// TestObservationPairCannotInvertBetweenConcurrentRefreshes (CP4) is the
+// deterministic split-window regression for the atomic observation-pair
+// allocator. Two concurrent refreshes on ONE streamer are driven with channel
+// barriers (no time.Sleep) so their observation reservations interleave at
+// exactly the point a split allocator could invert:
+//
+//	A reserves its pair (blocks right after) → B reserves its pair and parks
+//	before apply → A resumes and parks before apply → B applies → A applies.
+//
+// With the atomic allocator, A always gets (session=1, avail=1) and B always
+// gets (session=2, avail=2): B is newest in BOTH domains, so B applies the
+// playback session AND publishes camp-B, and A is stale. With the OLD split
+// allocator (M23: session and availability reserved in two separate critical
+// sections, A pausing between them) the pair inverts to A=(s1,a2), B=(s2,a1):
+// B still wins the playback session but its availability observation (a1) is now
+// stale against A's later a2, so B's camp-B publish is rejected and availability
+// is left at the prior camp-OLD — a session/availability inconsistency. This
+// test pins the atomic outcome (Known [camp-B]).
+func TestObservationPairCannotInvertBetweenConcurrentRefreshes(t *testing.T) {
+	const (
+		availA = `{"data":{"channel":{"id":"cid","viewerDropCampaigns":[{"id":"camp-A"}]}}}`
+		availB = `{"data":{"channel":{"id":"cid","viewerDropCampaigns":[{"id":"camp-B"}]}}}`
+	)
+
+	availHandler := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			switch gqlOperationName(r) {
+			case constants_VideoPlayerStreamInfoOverlayChannel:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(validStreamInfoBody))
+			case constants_DropsHighlightServiceAvailableDrops:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(body))
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"data":{}}`))
+			}
+		}
+	}
+
+	cA := newTestClient(t, availHandler(availA))
+	cB := newTestClient(t, availHandler(availB))
+
+	aReserved := make(chan struct{})
+	releaseA := make(chan struct{})
+	aBeforeApply := make(chan struct{})
+	releaseAApply := make(chan struct{})
+	bBeforeApply := make(chan struct{})
+	releaseBApply := make(chan struct{})
+
+	// A parks immediately after reserving its observation pair (in the split
+	// allocator this seam sits BETWEEN the two Begin* calls, so A's availability id
+	// is reserved only after it resumes — forcing the inversion).
+	cA.afterRefreshObservation = func() { close(aReserved); <-releaseA }
+	cA.beforeSessionApply = func() { close(aBeforeApply); <-releaseAApply }
+	cB.beforeSessionApply = func() { close(bBeforeApply); <-releaseBApply }
+
+	s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+	s.ChannelID = "cid"
+	s.Stream.SetCampaignIDs([]string{"camp-OLD"}) // prior Known list
+
+	var resA, resB SessionRefreshResult
+	aDone := make(chan struct{})
+	bDone := make(chan struct{})
+
+	// A reserves first, then blocks at afterRefreshObservation.
+	go func() { resA = cA.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(aDone) }()
+	<-aReserved
+
+	// B reserves second and runs to just before its apply.
+	go func() { resB = cB.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(bDone) }()
+	<-bBeforeApply
+
+	// Only now release A — in the split allocator this is where A reserves its
+	// (higher) availability id, after B already reserved a lower one. A runs to just
+	// before its own apply.
+	close(releaseA)
+	<-aBeforeApply
+
+	// Both parked before apply. Let the newer session B apply first, then A.
+	close(releaseBApply)
+	<-bDone
+	close(releaseAApply)
+	<-aDone
+
+	if !resA.Stale {
+		t.Fatalf("the older refresh A must be stale, got %+v", resA)
+	}
+	if !resB.Applied || resB.Stale {
+		t.Fatalf("the newer refresh B must apply, got %+v", resB)
+	}
+	state, ids := s.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityKnown || !reflect.DeepEqual(ids, []string{"camp-B"}) {
+		t.Fatalf("atomic pair must keep availability consistent with the newer session (Known [camp-B]); "+
+			"an inverted pair would leave it at camp-OLD — got state=%v ids=%v", state, ids)
+	}
+}
+
 // TestMalformedAvailabilityStillPublishesUnknown: a successful playback apply with
 // a FAILED availability lookup still records Unknown (keeping prior IDs) — the
 // existing tri-state contract is preserved.

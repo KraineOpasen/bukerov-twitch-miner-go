@@ -93,6 +93,50 @@ func (s *Stream) BeginSessionObservation() uint64 {
 	return s.sessionObs
 }
 
+// PlaybackRefreshObservation is the atomically-reserved pair of observation ids a
+// single full playback refresh operates under: the full-session observation and,
+// when the refresh also re-checks channel-side drop-campaign availability, the
+// availability observation. Both are allocated under ONE Stream.mu hold (see
+// BeginPlaybackRefreshObservation), so the two counters advance together with no
+// window in which another refresh can slip between them.
+type PlaybackRefreshObservation struct {
+	// SessionID is the full-session observation id (always non-zero).
+	SessionID uint64
+	// CampaignAvailabilityID is the channel-side availability observation id, or
+	// zero when this refresh does not re-check availability.
+	CampaignAvailabilityID uint64
+	// HasCampaignAvailability reports whether an availability observation was
+	// reserved (CampaignAvailabilityID is meaningful only when true).
+	HasCampaignAvailability bool
+}
+
+// BeginPlaybackRefreshObservation atomically reserves the observation ids a full
+// playback refresh needs, under a SINGLE Stream.mu hold. It always starts a new
+// full-session observation; when includeCampaignAvailability is true it ALSO
+// starts a channel-side availability observation, in the same critical section.
+//
+// Reserving both under one lock is what preserves the cross-domain ordering
+// invariant: for two refreshes A and B that both include availability, if A's
+// session id is lower than B's then A's availability id is also lower than B's
+// (the pair can never invert). Two separate Begin* calls could be preempted
+// between them and hand out inverted pairs, letting a newer refresh's
+// availability be rejected as stale against an older one — this method closes
+// that window. A refresh MUST call this BEFORE any network I/O so the
+// newest-STARTED-wins guards (ApplyPlaybackSessionIfCurrent,
+// ApplyCampaignAvailability) can drop a slow older refresh.
+func (s *Stream) BeginPlaybackRefreshObservation(includeCampaignAvailability bool) PlaybackRefreshObservation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionObs++
+	obs := PlaybackRefreshObservation{SessionID: s.sessionObs}
+	if includeCampaignAvailability {
+		s.campaignAvailObs++
+		obs.CampaignAvailabilityID = s.campaignAvailObs
+		obs.HasCampaignAvailability = true
+	}
+	return obs
+}
+
 // SessionObservation returns the current (latest-begun) full-session observation
 // id without starting a new one, for a caller that wants to check whether its own
 // observation is still current.

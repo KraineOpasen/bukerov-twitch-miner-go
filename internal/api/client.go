@@ -190,6 +190,12 @@ type TwitchClient struct {
 	// barrier to prove no partial session tuple is ever visible during the I/O.
 	beforeSessionApply func()
 
+	// afterRefreshObservation, when set, is invoked on the refresh goroutine
+	// immediately AFTER the atomic observation pair is reserved and BEFORE any
+	// network I/O. Nil in production; tests use it as a deterministic barrier to
+	// interleave concurrent refreshes at the observation-reservation boundary.
+	afterRefreshObservation func()
+
 	authErrorHandler func()
 
 	healthMu    sync.RWMutex
@@ -1105,19 +1111,25 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 
 	// Begin the observation ONLY now that we will do I/O, before the FIRST network
 	// call, so a concurrently-started newer refresh always supersedes this one.
-	obs := streamer.Stream.BeginSessionObservation()
-
-	// Reserve the campaign-availability observation id ALONGSIDE the session
-	// observation — before any network I/O — so the two observation domains keep
-	// the SAME relative ordering. Without this the availability observation would
-	// begin only after the stream-info fetch, letting an older playback refresh
-	// (older session observation) begin a NEWER availability observation and
-	// silently drop the newer refresh's availability, leaving playback session and
-	// channel availability inconsistent.
-	var availObs uint64
+	//
+	// Reserve BOTH the session and the campaign-availability observation ids in a
+	// SINGLE atomic step: two separate Begin* calls could be preempted between
+	// them and hand out inverted (session, availability) pairs across concurrent
+	// refreshes, letting a newer playback refresh's availability be rejected as
+	// stale against an older one. BeginPlaybackRefreshObservation advances both
+	// counters under one Stream.mu hold, so the two domains keep the same relative
+	// ordering with no window in between (see PlaybackRefreshObservation).
 	claimDrops := streamer.Settings.ClaimDrops
-	if fetchStreamInfo && claimDrops {
-		availObs = streamer.Stream.BeginCampaignAvailabilityObservation()
+	observation := streamer.Stream.BeginPlaybackRefreshObservation(fetchStreamInfo && claimDrops)
+	obs := observation.SessionID
+	availObs := observation.CampaignAvailabilityID
+
+	// afterRefreshObservation, when set (tests only), fires immediately after the
+	// atomic observation pair is reserved and before any network I/O — a
+	// deterministic barrier for interleaving concurrent refreshes at exactly the
+	// point the split allocator could invert.
+	if c.afterRefreshObservation != nil {
+		c.afterRefreshObservation()
 	}
 
 	cand := models.PlaybackSessionCandidate{}

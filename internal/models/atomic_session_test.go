@@ -2,9 +2,11 @@ package models
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // --- Corrective pass: atomic session publication (models level) ---
@@ -181,4 +183,88 @@ func TestApplyExpectedMatchApplies(t *testing.T) {
 	if r.Generation != gen+1 {
 		t.Fatalf("apply must bump the generation exactly once: got %d want %d", r.Generation, gen+1)
 	}
+}
+
+// --- Corrective pass 4: atomic observation-pair allocator (models level) ---
+
+// TestBeginPlaybackRefreshObservationAllocatesAtomicOrderedPair proves the single
+// model-level allocator reserves both observation domains atomically and keeps
+// them ordered together: including availability bumps BOTH counters, excluding it
+// bumps ONLY the session counter (availability id stays zero and campaignAvailObs
+// is untouched), and across many concurrent callers the pairs never invert —
+// sorting by session id yields strictly increasing availability ids.
+func TestBeginPlaybackRefreshObservationAllocatesAtomicOrderedPair(t *testing.T) {
+	t.Run("include availability bumps both", func(t *testing.T) {
+		s := NewStream()
+		obs := s.BeginPlaybackRefreshObservation(true)
+		if obs.SessionID != 1 || obs.CampaignAvailabilityID != 1 || !obs.HasCampaignAvailability {
+			t.Fatalf("first pair must be session=1 avail=1 has=true, got %+v", obs)
+		}
+		if got := s.SessionObservation(); got != 1 {
+			t.Fatalf("session observation must be 1, got %d", got)
+		}
+		snap, _ := s.CampaignAvailabilitySnapshotAt(time.Now())
+		if snap.ObservationID != 1 {
+			t.Fatalf("campaign availability observation must be 1, got %d", snap.ObservationID)
+		}
+	})
+
+	t.Run("exclude availability bumps only session", func(t *testing.T) {
+		s := NewStream()
+		obs := s.BeginPlaybackRefreshObservation(false)
+		if obs.SessionID != 1 {
+			t.Fatalf("session id must be 1, got %d", obs.SessionID)
+		}
+		if obs.CampaignAvailabilityID != 0 || obs.HasCampaignAvailability {
+			t.Fatalf("excluded availability must leave id zero/has false, got %+v", obs)
+		}
+		snap, _ := s.CampaignAvailabilitySnapshotAt(time.Now())
+		if snap.ObservationID != 0 {
+			t.Fatalf("campaignAvailObs must be untouched (0) when availability excluded, got %d", snap.ObservationID)
+		}
+	})
+
+	t.Run("concurrent callers get unique, non-inverting pairs", func(t *testing.T) {
+		const n = 200
+		s := NewStream()
+		pairs := make([]PlaybackRefreshObservation, n)
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func(i int) {
+				defer wg.Done()
+				pairs[i] = s.BeginPlaybackRefreshObservation(true)
+			}(i)
+		}
+		wg.Wait()
+
+		seenSess := make(map[uint64]bool, n)
+		seenAvail := make(map[uint64]bool, n)
+		for _, p := range pairs {
+			if p.SessionID == 0 || p.CampaignAvailabilityID == 0 {
+				t.Fatalf("every pair must be non-zero, got %+v", p)
+			}
+			if seenSess[p.SessionID] {
+				t.Fatalf("duplicate session id %d", p.SessionID)
+			}
+			if seenAvail[p.CampaignAvailabilityID] {
+				t.Fatalf("duplicate availability id %d", p.CampaignAvailabilityID)
+			}
+			seenSess[p.SessionID], seenAvail[p.CampaignAvailabilityID] = true, true
+		}
+
+		// Sort by session id; availability ids must be strictly increasing in lockstep
+		// — the pair never inverts.
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].SessionID < pairs[j].SessionID })
+		for i := 1; i < len(pairs); i++ {
+			if pairs[i-1].SessionID >= pairs[i].SessionID {
+				t.Fatalf("session ids not strictly increasing at %d: %d !< %d", i, pairs[i-1].SessionID, pairs[i].SessionID)
+			}
+			if pairs[i-1].CampaignAvailabilityID >= pairs[i].CampaignAvailabilityID {
+				t.Fatalf("availability ids inverted at %d: sess %d<%d but avail %d !< %d",
+					i, pairs[i-1].SessionID, pairs[i].SessionID,
+					pairs[i-1].CampaignAvailabilityID, pairs[i].CampaignAvailabilityID)
+			}
+		}
+	})
 }
