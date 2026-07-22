@@ -72,27 +72,27 @@ func (e *errSpadeDiscovery) Error() string {
 
 func spadeErr(stage, reason string) error { return &errSpadeDiscovery{stage: stage, reason: reason} }
 
-// discoverSpadeURL runs the hardened pipeline: begin a session observation BEFORE
-// any I/O (newest-STARTED-wins), fetch + validate the channel page and settings
-// asset, extract + validate the spade URL, then publish it only if our
-// observation is still the latest. Any failure returns a redacted error and never
-// clears the last-known spade URL.
-func (c *TwitchClient) discoverSpadeURL(ctx context.Context, streamer *models.Streamer) error {
-	obs := streamer.Stream.BeginSessionObservation()
-
+// discoverSpadeURL runs the hardened pipeline: fetch + validate the channel page
+// and settings asset, extract + validate the spade URL, and RETURN it. It is
+// purely non-mutating — it never touches the Stream and never publishes anything,
+// so the validated URL can be folded into a single atomic playback-session apply
+// (see RefreshPlaybackSession). A stale/superseded observation can therefore never
+// turn a successful network fetch into a silent partial publication. Any failure
+// returns a redacted error; the caller leaves the last-known session intact.
+func (c *TwitchClient) discoverSpadeURL(ctx context.Context, streamer *models.Streamer) (string, error) {
 	channelURL := fmt.Sprintf("%s/%s", c.twitchBaseURL, streamer.Username)
 	channelBody, err := c.fetchSpadeAsset(ctx, "channel_page", channelURL, c.maxChannelPageBytes, false)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	settingsRaw, err := extractFirstMatch(c.settingsURLPattern, channelBody)
 	if err != nil {
-		return spadeErr("settings_url", "settings asset URL not found on the channel page")
+		return "", spadeErr("settings_url", "settings asset URL not found on the channel page")
 	}
 	settingsURL, err := validateTwitchAssetURL(settingsRaw)
 	if err != nil {
-		return spadeErr("settings_url", redactURLErr(err))
+		return "", spadeErr("settings_url", redactURLErr(err))
 	}
 
 	// The settings asset must come from a confirmed Twitch-owned origin even after
@@ -100,22 +100,18 @@ func (c *TwitchClient) discoverSpadeURL(ctx context.Context, streamer *models.St
 	// feed us a spoofed spade_url.
 	settingsBody, err := c.fetchSpadeAsset(ctx, "settings_asset", settingsURL, c.maxSettingsBytes, true)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	spadeRaw, err := extractSpadeURL(c.spadeURLPattern, settingsBody)
 	if err != nil {
-		return err
+		return "", err
 	}
 	spadeURL, err := validateTwitchAssetURL(spadeRaw)
 	if err != nil {
-		return spadeErr("spade_url", redactURLErr(err))
+		return "", spadeErr("spade_url", redactURLErr(err))
 	}
-
-	// Publish only if our observation is still the latest-begun one; a newer
-	// refresh that started after us wins and this (older) result is dropped.
-	streamer.Stream.PublishSpadeURLIfCurrent(obs, spadeURL)
-	return nil
+	return spadeURL, nil
 }
 
 // fetchSpadeAsset GETs a discovery asset with strict status/size checks and an

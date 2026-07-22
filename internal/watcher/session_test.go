@@ -8,34 +8,70 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
-// fakeRefresher records session-refresh calls and can fail either step.
+// fakeRefresher models the api client's atomic session refresh: it records which
+// steps ran and can fail either, otherwise publishing the session tuple through
+// the real ApplyPlaybackSessionIfCurrent (so the observation/expected guards are
+// exercised, not stubbed).
 type fakeRefresher struct {
 	mu          sync.Mutex
 	spadeCalls  []string
 	streamCalls []string
 	spadeErr    error
 	streamErr   error
+	// beforeApply, when set, runs on the refresh goroutine just before the atomic
+	// apply — a seam for tests that need the session to change DURING the I/O (so
+	// the expected-generation guard rejects the apply as stale).
+	beforeApply func(*models.Streamer)
 }
 
-func (f *fakeRefresher) GetSpadeURL(s *models.Streamer) error {
+func (f *fakeRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.spadeCalls = append(f.spadeCalls, s.Username)
-	if f.spadeErr != nil {
-		return f.spadeErr
+	res := api.SessionRefreshResult{
+		CurrentGeneration:  s.Stream.SessionGeneration(),
+		CurrentBroadcastID: s.Stream.GetBroadcastID(),
 	}
-	s.Stream.SetSpadeURL("http://spade.test/refreshed")
-	return nil
-}
-
-func (f *fakeRefresher) UpdateStream(s *models.Streamer) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	if fetchSpade {
+		f.spadeCalls = append(f.spadeCalls, s.Username)
+		if f.spadeErr != nil {
+			res.Stage = "spade"
+			f.mu.Unlock()
+			return res
+		}
+	}
 	f.streamCalls = append(f.streamCalls, s.Username)
-	return f.streamErr
+	if f.streamErr != nil {
+		res.Stage = "stream_info"
+		f.mu.Unlock()
+		return res
+	}
+	beforeApply := f.beforeApply
+	f.mu.Unlock()
+
+	// Publish the tuple atomically, exactly as the real client does.
+	obs := s.Stream.BeginSessionObservation()
+	cand := models.PlaybackSessionCandidate{BroadcastID: s.Stream.GetBroadcastID()}
+	if fetchSpade {
+		cand = cand.WithSpadeURL("http://spade.test/refreshed")
+	}
+	cand = cand.WithPayload("cid", cand.BroadcastID, "uid", s.Username, nil)
+	if beforeApply != nil {
+		beforeApply(s)
+	}
+	apply := s.Stream.ApplyPlaybackSessionIfCurrent(obs, cand, expected)
+	res.Applied = apply.Applied
+	res.Stale = apply.Stale
+	res.Reason = apply.Reason
+	res.AppliedGeneration = apply.Generation
+	res.CurrentGeneration = apply.CurrentGeneration
+	res.CurrentBroadcastID = apply.CurrentBroadcastID
+	if apply.Stale {
+		res.Stage = "apply"
+	}
+	return res
 }
 
 func (f *fakeRefresher) calls() (spade, stream []string) {
@@ -313,22 +349,21 @@ func TestAvoidedChannelExcludedFromSelection(t *testing.T) {
 	}
 }
 
-// delayedRefresher simulates network latency: every GetSpadeURL/UpdateStream
-// call sleeps `delay` before succeeding (a scaled-down stand-in for the api
-// client's 30s-per-round worst case), and records per-call timing.
+// delayedRefresher simulates network latency: a refresh sleeps `delay` per network
+// round (spade fetch + stream-info fetch) before publishing, a scaled-down
+// stand-in for the api client's 30s-per-round worst case, and records per-call
+// timing through the inner fake.
 type delayedRefresher struct {
 	delay time.Duration
 	inner fakeRefresher
 }
 
-func (d *delayedRefresher) GetSpadeURL(s *models.Streamer) error {
-	time.Sleep(d.delay)
-	return d.inner.GetSpadeURL(s)
-}
-
-func (d *delayedRefresher) UpdateStream(s *models.Streamer) error {
-	time.Sleep(d.delay)
-	return d.inner.UpdateStream(s)
+func (d *delayedRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult {
+	if fetchSpade {
+		time.Sleep(d.delay) // spade round
+	}
+	time.Sleep(d.delay) // stream-info round
+	return d.inner.RefreshPlaybackSession(s, fetchSpade, expected)
 }
 
 // timestampingSender records when each minute-watched send happens.

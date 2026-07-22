@@ -48,9 +48,11 @@ func TestRefreshCoalesceDedupBySignature(t *testing.T) {
 	w.refresher = ref
 	login := w.streamers[0].Username
 
+	// Same signature, unspecified expected session (the streamer has no broadcast/
+	// generation yet), so the dedup — not the pre-I/O guard — is what's under test.
 	sig := RecoverySignature{Login: login, BroadcastID: "b1", SessionGeneration: 1, Stage: StageBeacon, Mode: RefreshStreamInfo}.String()
-	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r1", Login: login, Mode: RefreshStreamInfo, Signature: sig, ExpectedGeneration: 1})
-	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r2", Login: login, Mode: RefreshStreamInfo, Signature: sig, ExpectedGeneration: 1})
+	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r1", Login: login, Mode: RefreshStreamInfo, Signature: sig})
+	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r2", Login: login, Mode: RefreshStreamInfo, Signature: sig})
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 
 	if _, stream := ref.calls(); len(stream) != 1 {

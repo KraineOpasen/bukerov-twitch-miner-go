@@ -175,6 +175,12 @@ type TwitchClient struct {
 	maxChannelPageBytes int64
 	maxSettingsBytes    int64
 
+	// beforeSessionApply, when set, is invoked on the refresh goroutine AFTER all
+	// fetch/parse/campaign-availability work and JUST BEFORE the single atomic
+	// playback-session apply. Nil in production; tests use it as a deterministic
+	// barrier to prove no partial session tuple is ever visible during the I/O.
+	beforeSessionApply func()
+
 	authErrorHandler func()
 
 	healthMu    sync.RWMutex
@@ -945,113 +951,183 @@ func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]inte
 	return user, nil
 }
 
-func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
-	if !streamer.Stream.UpdateRequired() {
-		return nil
-	}
-
-	streamInfo, err := c.GetStreamInfo(streamer)
-	if err != nil {
-		// GetStreamInfo already distinguishes authoritative offline
-		// (ErrStreamerIsOffline) from inconclusive (StreamCheckError / transport /
-		// PQNF / auth). Propagate verbatim so the caller classifies it correctly.
-		return err
-	}
-
-	// GetStreamInfo guarantees a valid stream map on success; a failed assertion
-	// here would be a structural anomaly, so treat it as inconclusive (never a
-	// false offline).
-	stream, ok := streamInfo["stream"].(map[string]interface{})
-	if !ok {
-		return newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: malformed stream after fetch", constants.VideoPlayerStreamInfoOverlayChannel.OperationName)
-	}
-
-	broadcastSettings, _ := streamInfo["broadcastSettings"].(map[string]interface{})
-
-	broadcastID, _ := stream["id"].(string)
-	title := ""
-	if broadcastSettings != nil {
-		title, _ = broadcastSettings["title"].(string)
-	}
-
-	var game *models.Game
-	if broadcastSettings != nil {
-		if gameData, ok := broadcastSettings["game"].(map[string]interface{}); ok && gameData != nil {
-			game = &models.Game{}
-			game.ID, _ = gameData["id"].(string)
-			game.Name, _ = gameData["name"].(string)
-			game.DisplayName, _ = gameData["displayName"].(string)
-		}
-	}
-
-	var tags []models.Tag
-	if tagsData, ok := stream["tags"].([]interface{}); ok {
-		for _, t := range tagsData {
-			if tagMap, ok := t.(map[string]interface{}); ok {
-				tag := models.Tag{}
-				tag.ID, _ = tagMap["id"].(string)
-				tag.LocalizedName, _ = tagMap["localizedName"].(string)
-				tags = append(tags, tag)
-			}
-		}
-	}
-
-	viewersCount := 0
-	if vc, ok := stream["viewersCount"].(float64); ok {
-		viewersCount = int(vc)
-	}
-
-	streamer.Stream.Update(broadcastID, strings.TrimSpace(title), game, tags, viewersCount)
-
-	if streamer.Settings.ClaimDrops {
-		// Channel-side campaign availability is a TRI-STATE published through an
-		// OBSERVATION generation begun BEFORE the I/O, so the newest-STARTED lookup
-		// wins regardless of completion order (a slow older lookup can never
-		// overwrite a newer one). A successful lookup (including a legitimately EMPTY
-		// list — the authoritative "no campaigns available here") records Known +
-		// exact IDs. A transient failure records Unknown while KEEPING the previous
-		// IDs only as last-known continuity/diagnostic data — never promoted to a
-		// fresh authoritative Yes (the drops assignment path treats Unknown as
-		// "no NEW assignment", so a stale ID can't silently create one).
-		obsID := streamer.Stream.BeginCampaignAvailabilityObservation()
-		now := time.Now()
-		if game != nil && game.Name != "" && game.ID != "" {
-			if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
-				slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
-					"streamer", streamer.Username, "error", err)
-				streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
-			} else {
-				streamer.Stream.ApplyCampaignAvailability(obsID, true, campaignIDs, now)
-			}
-		} else {
-			// Online but the channel's game/category is unresolved this refresh, so
-			// drop availability cannot be authoritatively determined. Record UNKNOWN
-			// (keeping previous IDs only as last-known continuity) rather than leaving
-			// a stale Known list that the assignment path would read as a fresh
-			// authoritative "Yes" for a channel not currently playing the game.
-			streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
-		}
-	}
-
-	streamer.Stream.SetPayload(
-		streamer.ChannelID,
-		broadcastID,
-		c.auth.GetUserID(),
-		streamer.Username,
-		game,
-	)
-
-	return nil
+// SessionRefreshResult is the redacted outcome of a full playback-session refresh
+// (see RefreshPlaybackSession). It reports whether the session tuple was atomically
+// applied, whether it was rejected as stale (a newer session/observation won), the
+// stage that failed (if any), and the generation bookkeeping — never a URL, token,
+// or body.
+type SessionRefreshResult struct {
+	Applied            bool
+	Stale              bool
+	Stage              string // "" ok; "spade"; "stream_info"; "apply"
+	Reason             string // bounded reason code
+	AppliedGeneration  uint64
+	CurrentGeneration  uint64
+	CurrentBroadcastID string
 }
 
-// GetSpadeURL discovers the streamer's spade (minute-watched beacon) endpoint by
-// scraping the channel page for the settings.js asset and the settings asset for
-// the spade_url, then publishes it under a full-session observation guard. See
-// spade.go for the hardened fetch/parse/validate/publish pipeline. A failure at
-// any step returns a redacted error and leaves the last-known spade URL intact —
-// a discovery failure is never treated as "no session".
-func (c *TwitchClient) GetSpadeURL(streamer *models.Streamer) error {
-	return c.discoverSpadeURL(context.Background(), streamer)
+// UpdateStream refreshes a streamer's stream info and beacon payload past the
+// 2-minute gate and publishes them ATOMICALLY (broadcast, metadata, and payload
+// in one apply, no partial tuple). It is the stream-info-only refresh (no spade
+// re-scrape) used by the manager/pubsub online-metadata path. Errors are
+// propagated verbatim (authoritative offline vs inconclusive) for the caller to
+// classify; a stale apply is not an error.
+func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
+	_, err := c.doRefreshPlaybackSession(context.Background(), streamer, false, models.ExpectedSession{})
+	return err
+}
+
+// RefreshPlaybackSession is the broker-facing full session refresh: it fetches
+// (optionally the spade URL, always stream info + payload) OFF the Stream lock and
+// publishes the whole tuple in ONE atomic, optimistic apply guarded by expected.
+// It never returns a raw error (the broker does not classify liveness); a network
+// failure or a stale/superseded apply is reflected in the redacted result.
+func (c *TwitchClient) RefreshPlaybackSession(streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) SessionRefreshResult {
+	res, err := c.doRefreshPlaybackSession(context.Background(), streamer, fetchSpade, expected)
+	if err != nil && res.Stage == "" {
+		res.Stage = "stream_info"
+	}
+	if err != nil && res.Reason == "" {
+		res.Reason = string(classifyReason(err))
+	}
+	return res
+}
+
+// classifyReason maps a stream-info/transport error to the bounded status reason
+// code (reusing the tri-state classifier's vocabulary), for redacted outcomes.
+func classifyReason(err error) models.StatusReason {
+	_, reason := classifyCheck(err)
+	return reason
+}
+
+// doRefreshPlaybackSession is the shared orchestration for every full/partial
+// playback-session refresh. It begins the session observation BEFORE any network
+// I/O (newest-STARTED-wins), performs all fetch/parse/campaign-availability work
+// OFF the Stream lock into an immutable candidate, then publishes the whole tuple
+// in ONE atomic apply. It returns the redacted result plus the underlying
+// stream-info error (for the tri-state classifier at the CheckStreamerOnline
+// boundary); a spade fetch failure is surfaced with Stage=="spade".
+func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) (SessionRefreshResult, error) {
+	// Begin the observation before the FIRST network I/O so a concurrently-started
+	// newer refresh always supersedes this one at apply time.
+	obs := streamer.Stream.BeginSessionObservation()
+	res := SessionRefreshResult{
+		CurrentGeneration:  streamer.Stream.SessionGeneration(),
+		CurrentBroadcastID: streamer.Stream.GetBroadcastID(),
+	}
+
+	cand := models.PlaybackSessionCandidate{}
+
+	if fetchSpade {
+		url, err := c.discoverSpadeURL(ctx, streamer)
+		if err != nil {
+			res.Stage, res.Reason = "spade", string(models.ReasonSpadeUnavailable)
+			return res, err
+		}
+		cand = cand.WithSpadeURL(url)
+	}
+
+	// Stream-info + payload only past the refresh gate (the broker forces it for a
+	// recovery via ForceUpdateRequired; the metadata path honors the 2-minute gate).
+	if streamer.Stream.UpdateRequired() {
+		streamInfo, err := c.GetStreamInfo(streamer)
+		if err != nil {
+			// Offline (ErrStreamerIsOffline) or inconclusive — no apply either way.
+			res.Stage = "stream_info"
+			return res, err
+		}
+
+		stream, ok := streamInfo["stream"].(map[string]interface{})
+		if !ok {
+			err := newStreamCheckError(models.ReasonMalformedResponse, "twitch GQL %s: malformed stream after fetch", constants.VideoPlayerStreamInfoOverlayChannel.OperationName)
+			res.Stage = "stream_info"
+			return res, err
+		}
+
+		broadcastSettings, _ := streamInfo["broadcastSettings"].(map[string]interface{})
+		broadcastID, _ := stream["id"].(string)
+		title := ""
+		if broadcastSettings != nil {
+			title, _ = broadcastSettings["title"].(string)
+		}
+
+		var game *models.Game
+		if broadcastSettings != nil {
+			if gameData, ok := broadcastSettings["game"].(map[string]interface{}); ok && gameData != nil {
+				game = &models.Game{}
+				game.ID, _ = gameData["id"].(string)
+				game.Name, _ = gameData["name"].(string)
+				game.DisplayName, _ = gameData["displayName"].(string)
+			}
+		}
+
+		var tags []models.Tag
+		if tagsData, ok := stream["tags"].([]interface{}); ok {
+			for _, t := range tagsData {
+				if tagMap, ok := t.(map[string]interface{}); ok {
+					tag := models.Tag{}
+					tag.ID, _ = tagMap["id"].(string)
+					tag.LocalizedName, _ = tagMap["localizedName"].(string)
+					tags = append(tags, tag)
+				}
+			}
+		}
+
+		viewersCount := 0
+		if vc, ok := stream["viewersCount"].(float64); ok {
+			viewersCount = int(vc)
+		}
+
+		cand.BroadcastID = broadcastID
+		cand.Title = strings.TrimSpace(title)
+		cand.Game = game
+		cand.Tags = tags
+		cand.ViewersCount = viewersCount
+
+		// Channel-side campaign availability keeps its OWN observation contract and
+		// writes only CampaignIDs — a field OUTSIDE the playback-session tuple. It
+		// runs here (before the single atomic tuple apply), so it can never sit
+		// between two writes of the tuple.
+		if streamer.Settings.ClaimDrops {
+			obsID := streamer.Stream.BeginCampaignAvailabilityObservation()
+			now := time.Now()
+			if game != nil && game.Name != "" && game.ID != "" {
+				if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
+					slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
+						"streamer", streamer.Username, "error", err)
+					streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
+				} else {
+					streamer.Stream.ApplyCampaignAvailability(obsID, true, campaignIDs, now)
+				}
+			} else {
+				streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
+			}
+		}
+
+		cand = cand.WithPayload(streamer.ChannelID, broadcastID, c.auth.GetUserID(), streamer.Username, game)
+	}
+
+	if cand.IsEmpty() {
+		// Nothing to publish (gated, spade-less no-op).
+		res.CurrentGeneration = streamer.Stream.SessionGeneration()
+		res.CurrentBroadcastID = streamer.Stream.GetBroadcastID()
+		return res, nil
+	}
+
+	if c.beforeSessionApply != nil {
+		c.beforeSessionApply()
+	}
+
+	apply := streamer.Stream.ApplyPlaybackSessionIfCurrent(obs, cand, expected)
+	res.Applied = apply.Applied
+	res.Stale = apply.Stale
+	res.AppliedGeneration = apply.Generation
+	res.CurrentGeneration = apply.CurrentGeneration
+	res.CurrentBroadcastID = apply.CurrentBroadcastID
+	if apply.Stale {
+		res.Stage, res.Reason = "apply", apply.Reason
+	}
+	return res, nil
 }
 
 // CheckStreamerOnline resolves a streamer's live status and applies the resulting
@@ -1080,16 +1156,18 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 	streamer.SetLastChecked(time.Now())
 
 	if status != models.StatusOnline {
-		// Not currently confirmed online: run the full bring-online probe. A Spade
-		// fetch failure is inconclusive (UNKNOWN), NOT evidence the channel is
-		// offline — never SetOffline here.
-		if err := c.GetSpadeURL(streamer); err != nil {
+		// Not currently confirmed online: run the full bring-online probe as ONE
+		// atomic session refresh (spade URL + stream info + payload published
+		// together). A Spade fetch failure is inconclusive (UNKNOWN), NOT evidence
+		// the channel is offline — never SetOffline here.
+		res, err := c.doRefreshPlaybackSession(context.Background(), streamer, true, models.ExpectedSession{})
+		if res.Stage == "spade" {
 			slog.Debug("Cannot fetch Spade URL; recording status as unknown (not offline)",
 				"streamer", streamer.Username, "reason", string(models.ReasonSpadeUnavailable))
 			return streamer.ApplyCheckResultIfCurrent(obsSeq, models.StatusUnknown, models.ReasonSpadeUnavailable)
 		}
 
-		next, reason := classifyCheck(c.UpdateStream(streamer))
+		next, reason := classifyCheck(err)
 		tr := streamer.ApplyCheckResultIfCurrent(obsSeq, next, reason)
 		if tr.OnlineConfirmed {
 			// Log only on a genuine transition (not a recovery continuation), so

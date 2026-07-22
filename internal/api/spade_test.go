@@ -88,11 +88,16 @@ func assertPreservedKnownGood(t *testing.T, s *models.Streamer) {
 
 func TestSpadeValidProvenShape(t *testing.T) {
 	c, s := newSpadeTestClient(t, validHandler)
-	if err := c.discoverSpadeURL(context.Background(), s); err != nil {
+	got, err := c.discoverSpadeURL(context.Background(), s)
+	if err != nil {
 		t.Fatalf("a valid proven Twitch shape must succeed, got %v", err)
 	}
-	if got := s.Stream.GetSpadeURL(); got != validSpadeURL {
-		t.Fatalf("expected the published spade URL, got %q", got)
+	if got != validSpadeURL {
+		t.Fatalf("expected the validated spade URL to be returned, got %q", got)
+	}
+	// Discovery is non-mutating: it never touches the Stream.
+	if s.Stream.GetSpadeURL() != "https://spade.twitch.tv/known-good" {
+		t.Fatalf("discovery must not publish to the Stream, got %q", s.Stream.GetSpadeURL())
 	}
 }
 
@@ -105,7 +110,7 @@ func TestSpadeChannelPageNon2xx(t *testing.T) {
 		}
 		return validHandler(req)
 	})
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("a non-2xx channel page must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -119,7 +124,7 @@ func TestSpadeSettingsAssetNon2xx(t *testing.T) {
 		// Valid spade body but an error status: only the status check should stop it.
 		return spadeReply{status: 500, body: `{"spade_url":"` + validSpadeURL + `"}`}
 	})
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("a non-2xx settings asset must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -129,7 +134,7 @@ func TestSpadeContextCancellation(t *testing.T) {
 	c, s := newSpadeTestClient(t, validHandler)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := c.discoverSpadeURL(ctx, s)
+	_, err := c.discoverSpadeURL(ctx, s)
 	if err == nil {
 		t.Fatal("a cancelled context must fail discovery")
 	}
@@ -139,7 +144,7 @@ func TestSpadeContextCancellation(t *testing.T) {
 func TestSpadeOversizedChannelPage(t *testing.T) {
 	c, s := newSpadeTestClient(t, validHandler)
 	c.maxChannelPageBytes = 8 // tiny cap; the page body is larger
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("an oversized channel page must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -148,7 +153,7 @@ func TestSpadeOversizedChannelPage(t *testing.T) {
 func TestSpadeOversizedSettingsAsset(t *testing.T) {
 	c, s := newSpadeTestClient(t, validHandler)
 	c.maxSettingsBytes = 8 // tiny cap; the settings body is larger
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("an oversized settings asset must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -161,7 +166,7 @@ func TestSpadeMissingSettingsURL(t *testing.T) {
 		}
 		return validHandler(req)
 	})
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("a channel page with no settings URL must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -175,7 +180,7 @@ func TestSpadeRedirectToForeignOrigin(t *testing.T) {
 		// The settings fetch is redirected to a non-Twitch final origin.
 		return spadeReply{status: 200, body: `{"spade_url":"` + validSpadeURL + `"}`, finalHost: "evil.example.com"}
 	})
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("a settings asset redirected to a foreign origin must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -188,7 +193,7 @@ func TestSpadeMissingSpadeURL(t *testing.T) {
 		}
 		return spadeReply{status: 200, body: `{"other":"value"}`}
 	})
-	if err := c.discoverSpadeURL(context.Background(), s); err == nil {
+	if _, err := c.discoverSpadeURL(context.Background(), s); err == nil {
 		t.Fatal("a settings asset with no spade_url must fail discovery")
 	}
 	assertPreservedKnownGood(t, s)
@@ -206,10 +211,11 @@ func TestSpadeURLValidationMatrix(t *testing.T) {
 			// A realistic settings.js embeds the URL JSON-escaped.
 			return spadeReply{status: 200, body: `{"spade_url":"https:\/\/spade.twitch.tv\/track"}`}
 		})
-		if err := c.discoverSpadeURL(context.Background(), s); err != nil {
+		got, err := c.discoverSpadeURL(context.Background(), s)
+		if err != nil {
 			t.Fatalf("a JSON-escaped spade URL must decode and succeed, got %v", err)
 		}
-		if got := s.Stream.GetSpadeURL(); got != validSpadeURL {
+		if got != validSpadeURL {
 			t.Fatalf("JSON escapes must be decoded, got %q", got)
 		}
 	})
@@ -259,7 +265,7 @@ func TestSpadeErrorsAreRedacted(t *testing.T) {
 		}
 		return spadeReply{status: 200, body: `{"spade_url":"https://spade.evil.com/track?token=SECRET"}`}
 	})
-	err := c.discoverSpadeURL(context.Background(), s)
+	_, err := c.discoverSpadeURL(context.Background(), s)
 	if err == nil {
 		t.Fatal("expected a validation failure")
 	}
