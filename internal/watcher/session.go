@@ -66,23 +66,77 @@ func refreshModeRank(m RefreshMode) int {
 	return 1
 }
 
-// SessionRefreshOutcome is the published result of the last executed (or
-// skipped) session refresh for a channel. Detail is human-readable and
-// redacted - never a URL or token.
-type SessionRefreshOutcome struct {
-	Login     string      `json:"login"`
-	Mode      RefreshMode `json:"mode"`
-	Requested time.Time   `json:"requested"`
-	Completed time.Time   `json:"completed"`
-	OK        bool        `json:"ok"`
-	Detail    string      `json:"detail"`
+// SessionRefreshRequest is a correlated request to rebuild a slotted channel's
+// watch session. It binds the refresh to the exact broadcast/session it was
+// requested for, so the broker can reject (as stale/skipped) a request that no
+// longer matches the live channel before doing any I/O, and the caller (the
+// progress watchdog) can match the resulting outcome to the exact recovery
+// episode it belongs to instead of accepting any outcome for the login.
+//
+// ExpectedBroadcastID / ExpectedGeneration being zero is an EXPLICIT
+// "unspecified" (the requester did not know the session identity), never a
+// wildcard that matches anything: the broker only rejects on a concrete mismatch.
+type SessionRefreshRequest struct {
+	RequestID           string
+	Login               string
+	Mode                RefreshMode
+	ExpectedBroadcastID string
+	ExpectedGeneration  uint64
+	Signature           string // privacy-safe recovery signature (see RecoverySignature)
+	Requested           time.Time
 }
 
-// pendingRefresh is one staged refresh request (coalesced per login).
-type pendingRefresh struct {
-	mode      RefreshMode
-	requested time.Time
+// supersedes reports whether r should replace an already-staged request prev for
+// the same login. An identical signature is deduped (the same work is already
+// staged); otherwise a newer session (higher expected generation) wins, then a
+// stronger mode, then a newer request timestamp.
+func (r SessionRefreshRequest) supersedes(prev SessionRefreshRequest) bool {
+	if r.Signature != "" && r.Signature == prev.Signature {
+		return false
+	}
+	if r.ExpectedGeneration != prev.ExpectedGeneration {
+		return r.ExpectedGeneration > prev.ExpectedGeneration
+	}
+	if refreshModeRank(r.Mode) != refreshModeRank(prev.Mode) {
+		return refreshModeRank(r.Mode) > refreshModeRank(prev.Mode)
+	}
+	return r.Requested.After(prev.Requested)
 }
+
+// SessionRefreshOutcome is the published, correlation-capable result of the last
+// executed (or skipped/stale) session refresh for a channel. It carries the exact
+// request identity and the expected-vs-current session identity so a caller can
+// prove an outcome belongs to its own recovery episode. Detail is human-readable
+// and redacted - never a URL, token, or payload; Reason is a bounded code.
+type SessionRefreshOutcome struct {
+	RequestID                 string      `json:"requestId"`
+	ObservationID             uint64      `json:"observationId"`
+	Login                     string      `json:"login"`
+	Mode                      RefreshMode `json:"mode"`
+	ExpectedBroadcastID       string      `json:"expectedBroadcastId,omitempty"`
+	CurrentBroadcastID        string      `json:"currentBroadcastId,omitempty"`
+	ExpectedSessionGeneration uint64      `json:"expectedSessionGeneration,omitempty"`
+	AppliedSessionGeneration  uint64      `json:"appliedSessionGeneration,omitempty"`
+	Signature                 string      `json:"signature,omitempty"`
+	Requested                 time.Time   `json:"requested"`
+	Started                   time.Time   `json:"started,omitzero"`
+	Completed                 time.Time   `json:"completed"`
+	Success                   bool        `json:"success"`
+	Stale                     bool        `json:"stale,omitempty"`
+	Skipped                   bool        `json:"skipped,omitempty"`
+	Reason                    string      `json:"reason"`
+	Detail                    string      `json:"detail"`
+}
+
+// Bounded reason-code vocabulary for a SessionRefreshOutcome.
+const (
+	RefreshReasonOK             = "ok"
+	RefreshReasonNotSlotted     = "not_slotted"
+	RefreshReasonNoClient       = "no_client"
+	RefreshReasonBroadcastMoved = "broadcast_changed"
+	RefreshReasonSpadeFailed    = "spade_failed"
+	RefreshReasonStreamInfoFail = "stream_info_failed"
+)
 
 // SetAvoidChecker registers the temporary avoid list consulted during watch
 // selection. Safe for concurrent use; takes effect on the next tick.
@@ -132,25 +186,29 @@ func (w *MinuteWatcher) orderByCampaignScore(indexes []int) []int {
 	return ordered
 }
 
-// RequestSessionRefresh stages a watch-session refresh for a channel. The
-// broker loop executes it at the start of its next tick - on the loop
-// goroutine, only if the channel still holds a watch slot - and publishes the
-// outcome for LastSessionRefresh. Requests coalesce per login, keeping the
-// strongest mode, so callers cannot queue duplicate work. Safe for concurrent
-// use from any goroutine.
-func (w *MinuteWatcher) RequestSessionRefresh(login string, mode RefreshMode) {
-	if login == "" {
+// RequestSessionRefresh stages a correlated watch-session refresh for a channel.
+// The broker loop executes it at the start of its next tick - on the loop
+// goroutine, only if the channel still holds a watch slot AND still matches the
+// request's expected broadcast - and publishes the correlated outcome for
+// LastSessionRefresh. Requests coalesce per login (see supersedes): an identical
+// signature is deduped, a newer session or stronger mode wins. Safe for
+// concurrent use from any goroutine.
+func (w *MinuteWatcher) RequestSessionRefresh(req SessionRefreshRequest) {
+	if req.Login == "" {
 		return
 	}
-	if mode != RefreshSession {
-		mode = RefreshStreamInfo
+	if req.Mode != RefreshSession {
+		req.Mode = RefreshStreamInfo
+	}
+	if req.Requested.IsZero() {
+		req.Requested = time.Now()
 	}
 	w.mu.Lock()
 	if w.pendingRefresh == nil {
-		w.pendingRefresh = make(map[string]pendingRefresh)
+		w.pendingRefresh = make(map[string]SessionRefreshRequest)
 	}
-	if prev, ok := w.pendingRefresh[login]; !ok || refreshModeRank(mode) > refreshModeRank(prev.mode) {
-		w.pendingRefresh[login] = pendingRefresh{mode: mode, requested: time.Now()}
+	if prev, ok := w.pendingRefresh[req.Login]; !ok || req.supersedes(prev) {
+		w.pendingRefresh[req.Login] = req
 	}
 	w.mu.Unlock()
 }
@@ -180,12 +238,19 @@ func (w *MinuteWatcher) ReportStats(login string) (ReportStats, bool) {
 
 // drainPendingRefreshes takes the staged refresh requests. Runs on the loop
 // goroutine once per tick.
-func (w *MinuteWatcher) drainPendingRefreshes() map[string]pendingRefresh {
+func (w *MinuteWatcher) drainPendingRefreshes() map[string]SessionRefreshRequest {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	pending := w.pendingRefresh
 	w.pendingRefresh = nil
 	return pending
+}
+
+// nextRefreshObs returns a unique, monotonic observation id for one refresh
+// execution, so every outcome the broker publishes is distinguishable even for
+// the same login/broadcast across ticks. Concurrency-safe.
+func (w *MinuteWatcher) nextRefreshObs() uint64 {
+	return w.refreshObsSeq.Add(1)
 }
 
 // executeSessionRefreshes runs the staged refreshes against the channels that
@@ -229,38 +294,73 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 		slotted[sl.streamer.Username] = sl.streamer
 	}
 
+	now := time.Now()
 	outcomes := make([]SessionRefreshOutcome, 0, len(pending))
 	var wg sync.WaitGroup
 	for login, req := range pending {
 		outcome := SessionRefreshOutcome{
-			Login:     login,
-			Mode:      req.mode,
-			Requested: req.requested,
+			RequestID:                 req.RequestID,
+			ObservationID:             w.nextRefreshObs(),
+			Login:                     login,
+			Mode:                      req.Mode,
+			ExpectedBroadcastID:       req.ExpectedBroadcastID,
+			ExpectedSessionGeneration: req.ExpectedGeneration,
+			Signature:                 req.Signature,
+			Requested:                 req.Requested,
 		}
 
 		streamer, held := slotted[login]
 		switch {
 		case !held:
+			// Lost the slot: NOT a completed transport recovery. The requester must
+			// re-confirm active farming before this stage counts as done.
+			outcome.Skipped = true
+			outcome.Reason = RefreshReasonNotSlotted
 			outcome.Detail = "skipped: channel no longer holds a watch slot"
 			outcome.Completed = time.Now()
 			outcomes = append(outcomes, outcome)
 		case w.refresher == nil:
+			outcome.Skipped = true
+			outcome.Reason = RefreshReasonNoClient
 			outcome.Detail = "skipped: no refresh-capable client (test harness)"
 			outcome.Completed = time.Now()
 			outcomes = append(outcomes, outcome)
 		default:
+			// Pre-I/O correlation guard: the request must still describe the live
+			// session. A concrete broadcast mismatch means the request was staged
+			// against a broadcast that has since changed (the old episode is over) —
+			// reject as stale WITHOUT any I/O or session mutation, so a stale
+			// recovery never runs against a new broadcast. Zero expected fields are
+			// "unspecified", not a wildcard, so they never trigger a mismatch.
+			curBroadcast := streamer.Stream.GetBroadcastID()
+			outcome.CurrentBroadcastID = curBroadcast
+			if req.ExpectedBroadcastID != "" && curBroadcast != "" && req.ExpectedBroadcastID != curBroadcast {
+				outcome.Stale = true
+				outcome.Reason = RefreshReasonBroadcastMoved
+				outcome.Detail = "stale: broadcast changed since the refresh was staged; not run on the new broadcast"
+				outcome.Completed = time.Now()
+				outcomes = append(outcomes, outcome)
+				break
+			}
+
 			// Distinct logins mean distinct streamer objects (one channel never
 			// holds two slots), so each worker mutates only its own streamer and
 			// writes only its own pre-allocated outcome slot - no shared state
 			// beyond the WaitGroup join below.
+			outcome.Started = now
 			outcomes = append(outcomes, outcome)
 			idx := len(outcomes) - 1
 			wg.Add(1)
 			go func(idx int, streamer *models.Streamer, mode RefreshMode) {
 				defer wg.Done()
-				outcomes[idx].OK, outcomes[idx].Detail = w.refreshSession(streamer, mode)
+				ok, reason, detail := w.refreshSession(streamer, mode)
+				outcomes[idx].Success = ok
+				outcomes[idx].Reason = reason
+				outcomes[idx].Detail = detail
+				outcomes[idx].AppliedSessionGeneration = streamer.Stream.SessionGeneration()
+				outcomes[idx].CurrentBroadcastID = streamer.Stream.GetBroadcastID()
 				outcomes[idx].Completed = time.Now()
-			}(idx, streamer, req.mode)
+			}(idx, streamer, req.Mode)
 		}
 	}
 	wg.Wait()
@@ -268,7 +368,9 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 	for i := range outcomes {
 		slog.Info("Watch session refresh",
 			"channel", outcomes[i].Login, "mode", string(outcomes[i].Mode),
-			"ok", outcomes[i].OK, "detail", outcomes[i].Detail)
+			"requestId", outcomes[i].RequestID, "success", outcomes[i].Success,
+			"stale", outcomes[i].Stale, "skipped", outcomes[i].Skipped,
+			"reason", outcomes[i].Reason, "detail", outcomes[i].Detail)
 	}
 	w.publishRefreshOutcomes(outcomes)
 }
@@ -276,26 +378,27 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 // refreshSession rebuilds a slotted channel's watch session on the loop
 // goroutine: RefreshSession re-scrapes the spade URL first, then both modes
 // force stream info (broadcast ID, game, campaign IDs, beacon payload) past
-// the 2-minute gate. Detail strings are redacted by construction.
-func (w *MinuteWatcher) refreshSession(streamer *models.Streamer, mode RefreshMode) (bool, string) {
+// the 2-minute gate. Returns (success, bounded reason code, redacted detail);
+// detail strings never carry a URL or token by construction.
+func (w *MinuteWatcher) refreshSession(streamer *models.Streamer, mode RefreshMode) (bool, string, string) {
 	if mode == RefreshSession {
 		if err := w.refresher.GetSpadeURL(streamer); err != nil {
-			return false, "spade URL re-fetch failed"
+			return false, RefreshReasonSpadeFailed, "spade URL re-fetch failed"
 		}
 	}
 
 	streamer.Stream.ForceUpdateRequired()
 	if err := w.refresher.UpdateStream(streamer); err != nil {
 		if mode == RefreshSession {
-			return false, "spade URL re-fetched, but stream info refresh failed"
+			return false, RefreshReasonStreamInfoFail, "spade URL re-fetched, but stream info refresh failed"
 		}
-		return false, "stream info refresh failed"
+		return false, RefreshReasonStreamInfoFail, "stream info refresh failed"
 	}
 
 	if mode == RefreshSession {
-		return true, "watch session recreated: spade URL, stream info, and beacon payload refreshed"
+		return true, RefreshReasonOK, "watch session recreated: spade URL, stream info, and beacon payload refreshed"
 	}
-	return true, "stream info re-fetched: broadcast, game, campaign IDs, and beacon payload refreshed"
+	return true, RefreshReasonOK, "stream info re-fetched: broadcast, game, campaign IDs, and beacon payload refreshed"
 }
 
 // publishRefreshOutcomes merges the batch into the published last-outcome-per-

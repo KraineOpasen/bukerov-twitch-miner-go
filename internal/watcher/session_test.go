@@ -81,7 +81,7 @@ func TestSessionRefreshFullModeRebuildsSession(t *testing.T) {
 	ref := &fakeRefresher{}
 	w.refresher = ref
 
-	w.RequestSessionRefresh(w.streamers[0].Username, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[0].Username, Mode: RefreshSession})
 	w.executeSessionRefreshes(occupantsFor(w, 0, 1))
 
 	spade, stream := ref.calls()
@@ -92,7 +92,7 @@ func TestSessionRefreshFullModeRebuildsSession(t *testing.T) {
 		t.Fatalf("expected one stream refresh for the requested channel, got %v", stream)
 	}
 	out, ok := w.LastSessionRefresh(w.streamers[0].Username)
-	if !ok || !out.OK || out.Mode != RefreshSession {
+	if !ok || !out.Success || out.Mode != RefreshSession {
 		t.Fatalf("expected a published OK outcome, got ok=%v %+v", ok, out)
 	}
 	if w.streamers[0].Stream.GetSpadeURL() != "http://spade.test/refreshed" {
@@ -107,7 +107,7 @@ func TestSessionRefreshInfoModeSkipsSpade(t *testing.T) {
 	ref := &fakeRefresher{}
 	w.refresher = ref
 
-	w.RequestSessionRefresh(w.streamers[0].Username, RefreshStreamInfo)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[0].Username, Mode: RefreshStreamInfo})
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 
 	spade, stream := ref.calls()
@@ -127,7 +127,7 @@ func TestSessionRefreshSkippedWhenNotSlotted(t *testing.T) {
 	ref := &fakeRefresher{}
 	w.refresher = ref
 
-	w.RequestSessionRefresh(w.streamers[1].Username, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[1].Username, Mode: RefreshSession})
 	w.executeSessionRefreshes(occupantsFor(w, 0)) // only streamer 0 slotted
 
 	spade, stream := ref.calls()
@@ -135,7 +135,7 @@ func TestSessionRefreshSkippedWhenNotSlotted(t *testing.T) {
 		t.Fatalf("skipped refresh must not perform network work, got spade=%v stream=%v", spade, stream)
 	}
 	out, ok := w.LastSessionRefresh(w.streamers[1].Username)
-	if !ok || out.OK {
+	if !ok || out.Success {
 		t.Fatalf("expected a published skipped outcome, got ok=%v %+v", ok, out)
 	}
 
@@ -155,8 +155,8 @@ func TestSessionRefreshCoalescesToStrongestMode(t *testing.T) {
 	w.refresher = ref
 
 	login := w.streamers[0].Username
-	w.RequestSessionRefresh(login, RefreshSession)
-	w.RequestSessionRefresh(login, RefreshStreamInfo) // weaker: must not downgrade
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo}) // weaker: must not downgrade
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 
 	spade, stream := ref.calls()
@@ -172,8 +172,8 @@ func TestSessionRefreshCoalescesToStrongestMode(t *testing.T) {
 	// watchdog's stage-5 session recreate as a mere stream-info refresh).
 	ref2 := &fakeRefresher{}
 	w.refresher = ref2
-	w.RequestSessionRefresh(login, RefreshStreamInfo)
-	w.RequestSessionRefresh(login, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo})
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 
 	spade2, stream2 := ref2.calls()
@@ -226,10 +226,10 @@ func TestSessionRefreshFailureOutcomes(t *testing.T) {
 	login := w.streamers[0].Username
 
 	w.refresher = &fakeRefresher{spadeErr: errors.New("boom http://leak.example/sig=abc")}
-	w.RequestSessionRefresh(login, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 	out, _ := w.LastSessionRefresh(login)
-	if out.OK {
+	if out.Success {
 		t.Fatal("spade failure must publish a not-OK outcome")
 	}
 	if containsAny(out.Detail, "http://", "sig=", "leak.example") {
@@ -237,10 +237,10 @@ func TestSessionRefreshFailureOutcomes(t *testing.T) {
 	}
 
 	w.refresher = &fakeRefresher{streamErr: errors.New("stream fail")}
-	w.RequestSessionRefresh(login, RefreshStreamInfo)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo})
 	w.executeSessionRefreshes(occupantsFor(w, 0))
 	out, _ = w.LastSessionRefresh(login)
-	if out.OK {
+	if out.Success {
 		t.Fatal("stream-info failure must publish a not-OK outcome")
 	}
 }
@@ -337,11 +337,11 @@ type timestampingSender struct {
 	sends []time.Time
 }
 
-func (s *timestampingSender) Send(*models.Streamer) (error, error) {
+func (s *timestampingSender) Send(*models.Streamer) SendResult {
 	s.mu.Lock()
 	s.sends = append(s.sends, time.Now())
 	s.mu.Unlock()
-	return nil, nil
+	return SendResult{Delivered: true}
 }
 
 func (s *timestampingSender) first() (time.Time, bool) {
@@ -380,8 +380,8 @@ func TestSessionRefreshBothSlotsParallelBoundsTickDelay(t *testing.T) {
 	w.ctx = ctx
 
 	// Both slotted channels get a full session recreate staged for one tick.
-	w.RequestSessionRefresh(streamers[0].Username, RefreshSession)
-	w.RequestSessionRefresh(streamers[1].Username, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: streamers[0].Username, Mode: RefreshSession})
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: streamers[1].Username, Mode: RefreshSession})
 
 	// processWatching = selection (~µs) + executeSessionRefreshes + sends
 	// (instant pacer, instant sender), so the measured window is dominated by
@@ -413,7 +413,7 @@ func TestSessionRefreshBothSlotsParallelBoundsTickDelay(t *testing.T) {
 		t.Fatalf("expected both channels fully refreshed, got spade=%v stream=%v", spade, stream)
 	}
 	for _, login := range []string{streamers[0].Username, streamers[1].Username} {
-		if out, ok := w.LastSessionRefresh(login); !ok || !out.OK {
+		if out, ok := w.LastSessionRefresh(login); !ok || !out.Success {
 			t.Fatalf("expected a published OK outcome for %s, got ok=%v %+v", login, ok, out)
 		}
 	}
@@ -443,7 +443,7 @@ func TestBrokerLoopConcurrentWithWatchdogCalls(t *testing.T) {
 
 	// Pre-stage one refresh so the first tick deterministically executes it,
 	// independent of how the concurrent staging below interleaves.
-	w.RequestSessionRefresh(streamers[0].Username, RefreshSession)
+	w.RequestSessionRefresh(SessionRefreshRequest{Login: streamers[0].Username, Mode: RefreshSession})
 
 	var loopDone sync.WaitGroup
 	loopDone.Add(1)
@@ -459,8 +459,8 @@ func TestBrokerLoopConcurrentWithWatchdogCalls(t *testing.T) {
 	go func() {
 		defer watchdogDone.Done()
 		for i := 0; !stop.Load(); i++ {
-			w.RequestSessionRefresh(login, RefreshSession)
-			w.RequestSessionRefresh(login, RefreshStreamInfo)
+			w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
+			w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo})
 			_, _ = w.LastSessionRefresh(login)
 			_, _ = w.ReportStats(login)
 			_ = w.IsWatching(login)

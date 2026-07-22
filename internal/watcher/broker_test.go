@@ -431,12 +431,15 @@ type countingSender struct {
 	err  error
 }
 
-func (s *countingSender) Send(streamer *models.Streamer) (error, error) {
+func (s *countingSender) Send(streamer *models.Streamer) SendResult {
 	select {
 	case s.sent <- streamer.Username:
 	default:
 	}
-	return nil, s.err
+	if s.err != nil {
+		return SendResult{Failure: &WatchFailure{Stage: StageBeacon, ErrorCode: "beacon_error"}}
+	}
+	return SendResult{Delivered: true, Generation: streamer.Stream.SessionGeneration()}
 }
 
 // newLoopWatcher builds a broker wired with fakes so the real loop() can run
