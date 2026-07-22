@@ -27,7 +27,7 @@ type onlineChecker interface {
 // minuteReporter abstracts MinuteSender so the loop can be exercised in tests
 // without real HTTP. Satisfied by *MinuteSender.
 type minuteReporter interface {
-	Send(streamer *models.Streamer) (simulateErr error, err error)
+	Send(streamer *models.Streamer) SendResult
 }
 
 // MinuteWatcher is the unified slot broker: the single owner of the (at most
@@ -124,11 +124,15 @@ type MinuteWatcher struct {
 	// construction; nil only in tests that never exercise refreshes.
 	refresher sessionRefresher
 
-	// pendingRefresh stages watch-session refresh requests from
+	// pendingRefresh stages correlated watch-session refresh requests from
 	// RequestSessionRefresh (any goroutine) under mu, coalesced per login; the
 	// loop drains and executes them at the start of each tick, keeping the loop
 	// goroutine the single writer of slotted channels' watch sessions.
-	pendingRefresh map[string]pendingRefresh
+	pendingRefresh map[string]SessionRefreshRequest
+
+	// refreshObsSeq mints a unique, monotonic observation id per refresh
+	// execution so every published outcome is distinguishable for correlation.
+	refreshObsSeq atomic.Uint64
 
 	// refreshOutcomes publishes the last session-refresh outcome per login for
 	// the progress watchdog and the debug snapshot to read lock-free.
@@ -635,16 +639,28 @@ func (w *MinuteWatcher) processWatching() {
 	for _, sl := range slots {
 		streamer := sl.streamer
 
-		if err := w.sendMinuteWatched(streamer); err != nil {
+		res := w.sendMinuteWatched(streamer)
+		switch {
+		case res.Stale:
+			// The playback session changed between snapshot capture and the beacon
+			// (a new broadcast or a completed refresh). No minute was delivered, but
+			// this is NOT a transport failure and NOT an offline signal: do not note
+			// a failure and do not re-check online — the next tick retries against
+			// the new session. It also does not count as delivered lost mining
+			// against Twitch, so leave watchedOK alone.
+			slog.Debug("Skipped minute watched: session changed mid-send (stale)",
+				"streamer", streamer.Username, "origin", sl.origin)
+		case res.Failure != nil:
 			w.noteReportOutcome(streamer.Username, false, time.Now())
-			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "origin", sl.origin, "error", err)
+			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "origin", sl.origin,
+				"stage", string(res.Failure.Stage), "code", res.Failure.ErrorCode)
 			// A failed send usually means the stream just ended; re-check the
 			// online state so the next tick drops or switches it (and, for a
 			// discovery channel, so discovery's own maintenance abandons it).
 			if w.client != nil {
 				w.client.CheckStreamerOnline(streamer)
 			}
-		} else {
+		default:
 			reported = true
 			watchedOK++
 			w.noteReportOutcome(streamer.Username, true, time.Now())
@@ -1638,12 +1654,12 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 	return result
 }
 
-func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) error {
-	simulateErr, err := w.sender.Send(streamer)
-	if simulateErr != nil {
-		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", simulateErr)
+func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) SendResult {
+	res := w.sender.Send(streamer)
+	if res.SimulateErr != nil {
+		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", res.SimulateErr)
 	}
-	return err
+	return res
 }
 
 // accrueLostMining credits this tick's idle-slot time to the lost-mining

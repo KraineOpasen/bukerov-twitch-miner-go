@@ -57,6 +57,14 @@ type fakeWatchView struct {
 	watching  map[string]bool
 	successes map[string]int
 	refreshes []refreshCall
+	// outcomes is the last correlated refresh outcome per login, as the broker
+	// would publish it. outcomeMode selects how a staged request auto-resolves so
+	// tests can model the broker succeeding/failing/going stale/skipping/never
+	// running: "success" (default), "fail", "stale", "skip", or "none".
+	outcomes    map[string]watcher.SessionRefreshOutcome
+	outcomeMode string
+	obsSeq      uint64
+	lastReq     map[string]watcher.SessionRefreshRequest
 }
 
 func (f *fakeWatchView) BrokerSnapshot() watcher.BrokerSnapshot {
@@ -90,13 +98,84 @@ func (f *fakeWatchView) ReportStats(login string) (watcher.ReportStats, bool) {
 	}
 	return watcher.ReportStats{Successes: n}, true
 }
-func (f *fakeWatchView) RequestSessionRefresh(login string, mode watcher.RefreshMode) {
+func (f *fakeWatchView) RequestSessionRefresh(req watcher.SessionRefreshRequest) {
 	f.mu.Lock()
-	f.refreshes = append(f.refreshes, refreshCall{login, mode})
+	defer f.mu.Unlock()
+	f.refreshes = append(f.refreshes, refreshCall{req.Login, req.Mode})
+	if f.lastReq == nil {
+		f.lastReq = make(map[string]watcher.SessionRefreshRequest)
+	}
+	f.lastReq[req.Login] = req
+	mode := f.outcomeMode
+	if mode == "" {
+		mode = "success"
+	}
+	if mode == "none" {
+		return
+	}
+	f.obsSeq++
+	out := watcher.SessionRefreshOutcome{
+		RequestID:                 req.RequestID,
+		ObservationID:             f.obsSeq,
+		Login:                     req.Login,
+		Mode:                      req.Mode,
+		ExpectedBroadcastID:       req.ExpectedBroadcastID,
+		CurrentBroadcastID:        req.ExpectedBroadcastID,
+		ExpectedSessionGeneration: req.ExpectedGeneration,
+		AppliedSessionGeneration:  req.ExpectedGeneration,
+		Signature:                 req.Signature,
+		Requested:                 req.Requested,
+		Completed:                 req.Requested,
+	}
+	switch mode {
+	case "fail":
+		out.Reason = watcher.RefreshReasonStreamInfoFail
+	case "stale":
+		out.Stale = true
+		out.Reason = watcher.RefreshReasonBroadcastMoved
+	case "skip":
+		out.Skipped = true
+		out.Reason = watcher.RefreshReasonNotSlotted
+	default: // success
+		out.Success = true
+		out.Reason = watcher.RefreshReasonOK
+	}
+	if f.outcomes == nil {
+		f.outcomes = make(map[string]watcher.SessionRefreshOutcome)
+	}
+	f.outcomes[req.Login] = out
+}
+
+// setOutcomeMode controls how future staged refreshes auto-resolve.
+func (f *fakeWatchView) setOutcomeMode(mode string) {
+	f.mu.Lock()
+	f.outcomeMode = mode
 	f.mu.Unlock()
 }
-func (f *fakeWatchView) LastSessionRefresh(string) (watcher.SessionRefreshOutcome, bool) {
-	return watcher.SessionRefreshOutcome{}, false
+
+// injectOutcome overwrites the published outcome for a login (for correlation
+// tests that need a specific/foreign outcome).
+func (f *fakeWatchView) injectOutcome(login string, out watcher.SessionRefreshOutcome) {
+	f.mu.Lock()
+	if f.outcomes == nil {
+		f.outcomes = make(map[string]watcher.SessionRefreshOutcome)
+	}
+	f.outcomes[login] = out
+	f.mu.Unlock()
+}
+
+func (f *fakeWatchView) LastSessionRefresh(login string) (watcher.SessionRefreshOutcome, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.outcomes[login]
+	return o, ok
+}
+
+// lastRequest returns the most recent refresh request staged for a login.
+func (f *fakeWatchView) lastRequest(login string) watcher.SessionRefreshRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastReq[login]
 }
 func (f *fakeWatchView) addSuccesses(login string, n int) {
 	f.mu.Lock()
@@ -248,6 +327,22 @@ func (h *watchdogHarness) driveToStall(t *testing.T) {
 	}
 }
 
+// driveToExhaustion ticks (feeding evidence and auto-resolving each staged
+// refresh via the fake broker) until the finite pipeline reaches its terminal
+// notify stage. Async stages (stream_info, session_recreate) each take an extra
+// pass now that the watchdog waits for the correlated broker outcome, so tests
+// must not assume a fixed stage-per-tick cadence.
+func (h *watchdogHarness) driveToExhaustion(t *testing.T) {
+	t.Helper()
+	for i := 0; i < 25; i++ {
+		h.tick(10*time.Minute, true, 3)
+		if len(h.notifier.byKind("stalled")) > 0 {
+			return
+		}
+	}
+	t.Fatalf("recovery pipeline did not reach the terminal notify stage")
+}
+
 func (h *watchdogHarness) state(t *testing.T) DropProgress {
 	t.Helper()
 	snap := h.w.Snapshot()
@@ -290,22 +385,33 @@ func TestWatchdogRecoveryStageOrder(t *testing.T) {
 		t.Fatalf("stage 2 must force a full resync, got %d", syncNow)
 	}
 
-	h.tick(10*time.Minute, true, 3) // stage 3
+	h.tick(10*time.Minute, true, 3) // stage 3: stage a stream-info refresh (async)
 	calls := h.watch.refreshCalls()
 	if len(calls) != 1 || calls[0].mode != watcher.RefreshStreamInfo || calls[0].login != "chan" {
 		t.Fatalf("stage 3 must stage a stream-info refresh into the broker, got %+v", calls)
 	}
+	// The async stage PARKS on the broker outcome: it must not advance to the
+	// probe merely because the request was queued.
+	if st := h.state(t); st.RecoveryStage != 3 || h.prober.callCount() != 0 {
+		t.Fatalf("stream_info stage must wait for the broker outcome, not advance on queue: %+v probe=%d", st, h.prober.callCount())
+	}
 
-	h.tick(10*time.Minute, true, 3) // stage 4
+	h.tick(10*time.Minute, true, 3) // resolve stream_info (broker success) — no new stage
+	if h.prober.callCount() != 0 {
+		t.Fatalf("resolving the refresh outcome must not itself run the next stage, got probe=%d", h.prober.callCount())
+	}
+
+	h.tick(10*time.Minute, true, 3) // stage 4: transport probe
 	if got := h.prober.callCount(); got != 1 {
 		t.Fatalf("stage 4 must run the transport probe, got %d", got)
 	}
 
-	h.tick(10*time.Minute, true, 3) // stage 5
+	h.tick(10*time.Minute, true, 3) // stage 5: stage a full session recreate (async)
 	calls = h.watch.refreshCalls()
 	if len(calls) != 2 || calls[1].mode != watcher.RefreshSession {
 		t.Fatalf("stage 5 must stage a full session recreate, got %+v", calls)
 	}
+	h.tick(10*time.Minute, true, 3) // resolve session_recreate (broker success)
 
 	h.tick(10*time.Minute, true, 3) // stage 6: channel switch via avoid list
 	if !h.w.avoid.IsAvoided("chan") {
@@ -341,9 +447,7 @@ func TestWatchdogRecoveryStageOrder(t *testing.T) {
 func TestWatchdogProgressResumeResetsAndNotifiesRecovered(t *testing.T) {
 	h := newWatchdogHarness(t)
 	h.driveToStall(t)
-	for i := 0; i < 6; i++ { // run the pipeline to exhaustion
-		h.tick(10*time.Minute, true, 3)
-	}
+	h.driveToExhaustion(t) // run the finite pipeline to its terminal stage
 	if st := h.state(t); st.Status != ProgressStalled || !h.w.avoid.IsAvoided("chan") {
 		t.Fatalf("setup: expected exhausted stall with avoided channel, got %+v", st)
 	}
@@ -393,9 +497,7 @@ func TestWatchdogRecoveryCooldownBlocksStages(t *testing.T) {
 func TestWatchdogRearmRestartsPipelineWithoutRenotifying(t *testing.T) {
 	h := newWatchdogHarness(t)
 	h.driveToStall(t)
-	for i := 0; i < 6; i++ {
-		h.tick(10*time.Minute, true, 3)
-	}
+	h.driveToExhaustion(t)
 	if _, triggered := h.drops.counts(); triggered != 1 {
 		t.Fatal("setup: expected one full pipeline pass")
 	}
@@ -407,7 +509,7 @@ func TestWatchdogRearmRestartsPipelineWithoutRenotifying(t *testing.T) {
 	}
 	// ...but the state never left stalled, so no second critical notification
 	// even after the second pass exhausts.
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 12; i++ {
 		h.tick(10*time.Minute, true, 3)
 	}
 	if stalled := h.notifier.byKind("stalled"); len(stalled) != 1 {
@@ -970,9 +1072,7 @@ func TestWatchdogTransientGateBlipPausesButKeepsStage(t *testing.T) {
 func TestWatchdogCleanupClosesEscalatedEpisode(t *testing.T) {
 	h := newWatchdogHarness(t)
 	h.driveToStall(t)
-	for i := 0; i < 6; i++ {
-		h.tick(10*time.Minute, true, 3) // exhaust: stalled notified, channel avoided
-	}
+	h.driveToExhaustion(t) // exhaust: stalled notified, channel avoided
 	if !h.w.avoid.IsAvoided("chan") || len(h.notifier.byKind("stalled")) != 1 {
 		t.Fatal("setup: expected an exhausted, notified, avoided episode")
 	}
@@ -1055,9 +1155,7 @@ func TestWatchdogProgressSignal(t *testing.T) {
 	}
 
 	// Exhausted -> stalled.
-	for i := 0; i < 6; i++ {
-		h.tick(10*time.Minute, true, 3)
-	}
+	h.driveToExhaustion(t)
 	sig = h.w.ProgressSignal(h.now)
 	if sig.Status != StatusStalled || sig.ErrorCode != "drop_progress_stalled" {
 		t.Fatalf("expected the stalled signal, got %+v", sig)

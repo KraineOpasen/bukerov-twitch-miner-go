@@ -159,45 +159,51 @@ func TestProbeResultCarriesNoSensitiveData(t *testing.T) {
 // --- Send behavior preservation (the step extraction must not change it) ---
 
 // TestSendSimulateFailureIsNonFatal locks the key Send invariant: a playlist
-// simulation failure is returned as simulateErr but does NOT fail the send — the
-// beacon still posts and err is nil.
+// simulation failure is returned as SimulateErr but does NOT fail the send — the
+// beacon still posts and the minute is Delivered.
 func TestSendSimulateFailureIsNonFatal(t *testing.T) {
 	b := okBehavior()
 	b.playlistStatus = 403 // simulate fails
 	// beacon still 204 (OK)
-	simErr, err := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
-	if simErr == nil {
-		t.Error("expected a non-nil simulateErr when the playlist fails")
+	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
+	if res.SimulateErr == nil {
+		t.Error("expected a non-nil SimulateErr when the playlist fails")
 	}
-	if err != nil {
-		t.Errorf("a playlist failure must not fail the send (simulate is best-effort), got err=%v", err)
+	if res.Failure != nil {
+		t.Errorf("a playlist failure must not fail the send (simulate is best-effort), got %+v", res.Failure)
+	}
+	if !res.Delivered {
+		t.Error("the beacon must still be delivered when only the simulation failed")
 	}
 }
 
 func TestSendTokenErrorIsFatalAndSkipsSimulate(t *testing.T) {
-	simErr, err := testSender(okBehavior(), fakeToken{err: context.DeadlineExceeded}).Send(canaryStreamer())
-	if err == nil {
-		t.Error("expected a fatal error when the playback token fails")
+	res := testSender(okBehavior(), fakeToken{err: context.DeadlineExceeded}).Send(canaryStreamer())
+	if res.Failure == nil || res.Failure.Stage != StagePlaybackToken {
+		t.Errorf("expected a fatal playback_token failure, got %+v", res)
 	}
-	if simErr != nil {
-		t.Errorf("simulate must not run when the token step fails, got simulateErr=%v", simErr)
+	if res.SimulateErr != nil {
+		t.Errorf("simulate must not run when the token step fails, got SimulateErr=%v", res.SimulateErr)
+	}
+	if res.Delivered {
+		t.Error("a token failure must not deliver")
 	}
 }
 
 func TestSendBeaconNon2xxIsFatal(t *testing.T) {
 	b := okBehavior()
 	b.beaconStatus = 400
-	_, err := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
-	if err == nil {
-		t.Error("expected a non-2xx spade response to fail the send")
+	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
+	if res.Failure == nil || res.Failure.Stage != StageBeacon || res.Failure.Status != 400 {
+		t.Errorf("expected a non-2xx spade response to fail the send at the beacon, got %+v", res)
 	}
 }
 
 func TestSendMissingSpadeURLIsFatal(t *testing.T) {
 	s := canaryStreamer()
 	s.Stream.SetSpadeURL("")
-	_, err := testSender(okBehavior(), fakeToken{sig: "s", token: "t"}).Send(s)
-	if err == nil {
-		t.Error("expected a missing spade URL to fail the send")
+	res := testSender(okBehavior(), fakeToken{sig: "s", token: "t"}).Send(s)
+	if res.Failure == nil || res.Failure.Stage != StageSessionSnapshot {
+		t.Errorf("expected a missing spade URL to fail the send at the session snapshot, got %+v", res)
 	}
 }
