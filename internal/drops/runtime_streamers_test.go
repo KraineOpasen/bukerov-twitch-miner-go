@@ -32,7 +32,7 @@ func runtimeStreamer(name, channelID string) *models.Streamer {
 	s.ChannelID = channelID
 	s.SetConfirmedOnline()
 	s.Stream.Game = runtimeGame()
-	s.Stream.CampaignIDs = []string{"campaign-amd"}
+	s.Stream.SetCampaignIDs([]string{"campaign-amd"})
 	return s
 }
 

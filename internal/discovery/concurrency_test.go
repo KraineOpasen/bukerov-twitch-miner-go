@@ -20,7 +20,7 @@ type safeClient struct{ streams []api.DirectoryStream }
 
 func (f *safeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	if len(s.Stream.CampaignIDs) == 0 {
-		s.Stream.CampaignIDs = []string{"camp-g1"} // only the watch goroutine calls this
+		s.Stream.SetCampaignIDs([]string{"camp-g1"}) // only the watch goroutine calls this
 	}
 	return s.SetConfirmedOnline()
 }

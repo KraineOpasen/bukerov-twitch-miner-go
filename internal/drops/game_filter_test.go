@@ -484,7 +484,7 @@ func TestGameFilterRuntimeUpdateClearsRestrictedDropAssignment(t *testing.T) {
 	streamer.ChannelID = "chan-foreign"
 	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = game
-	streamer.Stream.CampaignIDs = []string{"campaign-wt"}
+	streamer.Stream.SetCampaignIDs([]string{"campaign-wt"})
 
 	// Foreign channel-restricted campaign recovered from inventory, restricted to
 	// this streamer's channel.

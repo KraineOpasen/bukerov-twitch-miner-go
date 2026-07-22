@@ -50,6 +50,9 @@ func newTestStreamer(points int) *models.Streamer {
 	s := models.NewStreamer("streamer", models.DefaultStreamerSettings())
 	s.ChannelID = "chan-1"
 	s.SetConfirmedOnline()
+	// Normal points-enabled channel: capability is confirmed at startup in prod,
+	// so a live betting round runs on an Enabled channel.
+	s.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	s.SetChannelPoints(points)
 	return s
 }

@@ -79,7 +79,7 @@ func onlineCandidate(login, channelID, game, gameID string, viewers int) *Channe
 	}
 	ch.Streamer.SetConfirmedOnline()
 	ch.Streamer.Stream.Update("b-"+channelID, "title", &models.Game{ID: gameID, Name: game}, nil, viewers)
-	ch.Streamer.Stream.CampaignIDs = []string{"camp-" + gameID}
+	ch.Streamer.Stream.SetCampaignIDs([]string{"camp-" + gameID})
 	return ch
 }
 
@@ -195,7 +195,7 @@ func TestSelectBestSkipsIneligibleCandidates(t *testing.T) {
 	wrongGame.Streamer.Stream.Update("b-2", "t", &models.Game{ID: "other", Name: "Other"}, nil, 5000)
 
 	noCampaigns := onlineCandidate("no_campaigns", "3", "World of Tanks", "g1", 3000)
-	noCampaigns.Streamer.Stream.CampaignIDs = nil
+	noCampaigns.Streamer.Stream.SetCampaignIDs(nil)
 
 	inactiveGame := onlineCandidate("inactive_game", "4", "Dead Game", "dead", 2000)
 
@@ -269,10 +269,10 @@ func TestSelectBestRequiresChannelLevelActiveCampaign(t *testing.T) {
 	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	topButClaimed := onlineCandidate("top_channel", "1", "World of Tanks", "g1", 9000)
-	topButClaimed.Streamer.Stream.CampaignIDs = []string{"camp-old"}
+	topButClaimed.Streamer.Stream.SetCampaignIDs([]string{"camp-old"})
 
 	smallButFresh := onlineCandidate("small_channel", "2", "World of Tanks", "g1", 100)
-	smallButFresh.Streamer.Stream.CampaignIDs = []string{"camp-new"}
+	smallButFresh.Streamer.Stream.SetCampaignIDs([]string{"camp-new"})
 
 	m.pool = []*Channel{topButClaimed, smallButFresh}
 
@@ -294,13 +294,13 @@ func TestChannelCarriesActiveCampaignHonorsChannelRestriction(t *testing.T) {
 	m := newTestManager([]string{"World of Tanks"}, provider, &fakeClient{})
 
 	allowed := onlineCandidate("allowed_channel", "allowed-channel-id", "World of Tanks", "g1", 100)
-	allowed.Streamer.Stream.CampaignIDs = []string{"camp-restricted"}
+	allowed.Streamer.Stream.SetCampaignIDs([]string{"camp-restricted"})
 	if !m.channelCarriesActiveCampaign(allowed) {
 		t.Error("expected allow-listed channel to qualify for the restricted campaign")
 	}
 
 	other := onlineCandidate("other_channel", "other-channel-id", "World of Tanks", "g1", 100)
-	other.Streamer.Stream.CampaignIDs = []string{"camp-restricted"}
+	other.Streamer.Stream.SetCampaignIDs([]string{"camp-restricted"})
 	if m.channelCarriesActiveCampaign(other) {
 		t.Error("expected non-allow-listed channel to be rejected for a channel-restricted campaign")
 	}
@@ -485,7 +485,7 @@ func TestInvalidReason(t *testing.T) {
 	}
 
 	noDrops := onlineCandidate("nodrops", "4", "World of Tanks", "g1", 100)
-	noDrops.Streamer.Stream.CampaignIDs = nil
+	noDrops.Streamer.Stream.SetCampaignIDs(nil)
 	if _, invalid := m.invalidReason(noDrops); !invalid {
 		t.Error("expected channel without available campaigns to be invalid")
 	}

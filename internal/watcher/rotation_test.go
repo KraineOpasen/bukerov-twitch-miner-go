@@ -18,6 +18,11 @@ func newTestWatcher(n int) (*MinuteWatcher, []int) {
 	online := make([]int, n)
 	for i := range streamers {
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
+		// Represent a normal, points-enabled channel: after startup the miner
+		// confirms Channel Points capability for each streamer (LoadChannelPoints
+		// Context), so a configured streamer is Enabled by the time watch
+		// selection runs. Tests that need Unknown/Disabled override this per-case.
+		streamers[i].SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 		online[i] = i
 	}
 	w := &MinuteWatcher{
@@ -239,7 +244,7 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 	w, online := newTestWatcher(3)
 	// streamer 2 has an active drop campaign but isn't in the base pair.
-	w.streamers[2].Stream.CampaignIDs = []string{"campaign-1"}
+	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-1"})
 
 	pair := [2]int{0, 1}
 	w.rotation.lastWatched = map[int]time.Time{
@@ -260,8 +265,8 @@ func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 // watched more recently than the unrestricted-campaign candidate.
 func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 	w, online := newTestWatcher(4)
-	w.streamers[2].Stream.CampaignIDs = []string{"campaign-unrestricted"}
-	w.streamers[3].Stream.CampaignIDs = []string{"campaign-restricted"}
+	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-unrestricted"})
+	w.streamers[3].Stream.SetCampaignIDs([]string{"campaign-restricted"})
 	w.streamers[3].Stream.Campaigns = []*models.Campaign{
 		{ID: "campaign-restricted", Channels: []string{w.streamers[3].ChannelID}},
 	}
@@ -282,7 +287,7 @@ func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 
 func TestNearStreakCompletionProtectsFromSwap(t *testing.T) {
 	w, online := newTestWatcher(3)
-	w.streamers[2].Stream.CampaignIDs = []string{"campaign-1"}
+	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-1"})
 
 	pair := [2]int{0, 1}
 

@@ -23,13 +23,23 @@ const (
 )
 
 type Campaign struct {
-	ID          string
-	Name        string
-	Game        *Game
-	Status      CampaignStatus
-	StartAt     time.Time
-	EndAt       time.Time
-	Channels    []string
+	ID      string
+	Name    string
+	Game    *Game
+	Status  CampaignStatus
+	StartAt time.Time
+	EndAt   time.Time
+	// Channels is a DERIVED compatibility mirror of ACL.ChannelIDs, retained so
+	// legacy readers/tests that construct a Campaign with Channels directly (and
+	// the ones that read it) keep working. New code should read ACL / the
+	// restriction helpers (IsChannelRestricted, AllowsChannel, ACLState), which
+	// treat the typed ACL as the single source of truth and fall back to this
+	// slice only for directly-constructed campaigns.
+	Channels []string
+	// ACL is the authoritative, typed channel access-control state, populated by
+	// NewCampaignFromGQL from the campaign's `allow` block. See CampaignACL and
+	// campaign_acl.go for the response semantics.
+	ACL         CampaignACL
 	InInventory bool
 	Drops       []*Drop
 	DateMatch   bool
@@ -84,16 +94,13 @@ func NewCampaignFromGQL(data map[string]interface{}) *Campaign {
 	now := time.Now()
 	c.DateMatch = c.StartAt.Before(now) && c.EndAt.After(now)
 
-	if allow, ok := data["allow"].(map[string]interface{}); ok {
-		if channels, ok := allow["channels"].([]interface{}); ok && channels != nil {
-			for _, ch := range channels {
-				if chMap, ok := ch.(map[string]interface{}); ok {
-					if id, ok := chMap["id"].(string); ok {
-						c.Channels = append(c.Channels, id)
-					}
-				}
-			}
-		}
+	// Build the authoritative typed ACL from the raw `allow` block (handles
+	// isEnabled, missing/malformed channels, dedup and deterministic order), then
+	// mirror the restricted channel set into the legacy Channels slice for
+	// backward-compatible readers.
+	c.ACL = buildCampaignACL(data["allow"], now)
+	if c.ACL.State == ACLRestricted {
+		c.Channels = append([]string(nil), c.ACL.ChannelIDs...)
 	}
 
 	if drops, ok := data["timeBasedDrops"].([]interface{}); ok {
@@ -107,26 +114,36 @@ func NewCampaignFromGQL(data map[string]interface{}) *Campaign {
 	return c
 }
 
-// IsChannelRestricted reports whether this campaign only credits watch time
-// on a specific set of channels (Twitch's `allow.channels`), as opposed to
-// crediting progress on any channel streaming the campaign's game.
+// IsChannelRestricted reports whether this campaign is authoritatively known to
+// credit watch time only on a specific set of channels. It is true ONLY for
+// ACLRestricted — an ACLUnknown campaign is not reported as restricted (its
+// restriction is unproven), so it never gains restricted-drop slot priority.
+// Crediting eligibility itself is decided by AllowsChannel, which fails closed
+// on unknown, so an unknown ACL can never widen access.
 func (c *Campaign) IsChannelRestricted() bool {
-	return len(c.Channels) > 0
+	return c.effectiveACLState() == ACLRestricted
 }
 
-// AllowsChannel reports whether channelID is eligible to progress this
-// campaign. Unrestricted campaigns (IsChannelRestricted() == false) allow
-// any channel.
+// AllowsChannel reports whether channelID may progress this campaign. It is the
+// single crediting gate:
+//   - ACLUnrestricted => any channel;
+//   - ACLRestricted   => exact membership in the allowlist;
+//   - ACLUnknown      => false (fail closed: never credit toward a campaign
+//     whose allowlist could not be authoritatively loaded).
 func (c *Campaign) AllowsChannel(channelID string) bool {
-	if !c.IsChannelRestricted() {
+	switch c.effectiveACLState() {
+	case ACLUnrestricted:
 		return true
-	}
-	for _, id := range c.Channels {
-		if id == channelID {
-			return true
+	case ACLRestricted:
+		for _, id := range c.effectiveACLChannels() {
+			if id == channelID {
+				return true
+			}
 		}
+		return false
+	default: // ACLUnknown
+		return false
 	}
-	return false
 }
 
 // Clone returns a copy of the campaign safe to mutate independently of the
@@ -151,6 +168,9 @@ func (c *Campaign) Clone() *Campaign {
 	if c.ClaimedDropNames != nil {
 		clone.ClaimedDropNames = append([]string(nil), c.ClaimedDropNames...)
 	}
+	// Deep-copy the typed ACL slice so a published snapshot's allowlist is never
+	// mutated through a clone (immutable-snapshot guarantee).
+	clone.ACL = c.ACL.clone()
 	return &clone
 }
 
@@ -171,14 +191,134 @@ func (c *Campaign) ClearClaimedDrops() {
 	c.Drops = validDrops
 }
 
-// ApplyClaimHistory drops any reward already present in claimedRewards
-// (keyed by Drop.RewardKey) from this campaign's watchable drops. Those keys
-// represent rewards Twitch's account-wide claim history has already
-// confirmed as granted, which covers recurring/regional variants of this
-// same campaign -- ones sharing the same reward name and game but a
-// different campaign or drop ID -- so their watch time isn't wasted again.
-// It records what was skipped and marks the campaign fully claimed once
-// nothing watchable is left.
+// campaignWindow returns the campaign-level entitlement window used as the
+// occurrence fallback for drops that carry no per-drop dates (the common
+// inventory shape). A campaign present in the inventory but carrying no dates of
+// its own yields an inventory-sourced, not-Known window: server evidence it is
+// live now, never proof of a historical occurrence identity.
+func (c *Campaign) campaignWindow() EntitlementWindow {
+	if c.StartAt.IsZero() && c.EndAt.IsZero() {
+		src := WindowSourceNone
+		if c.InInventory {
+			src = WindowSourceInventory
+		}
+		return EntitlementWindow{Source: src, Known: false}
+	}
+	return EntitlementWindow{
+		Start:  c.StartAt,
+		End:    c.EndAt,
+		Source: WindowSourceCampaign,
+		Known:  true,
+	}
+}
+
+// ClaimHistoryOutcome summarizes what an ApplyClaimHistoryRecords pass did, so
+// the pipeline can log confirmed removals and (throttled) ambiguous retentions
+// without the domain layer taking on any logging responsibility.
+type ClaimHistoryOutcome struct {
+	// ConfirmedNames are drops removed because claim history authoritatively
+	// matched them for the same entitlement occurrence.
+	ConfirmedNames []string
+	// AmbiguousNames are drops KEPT despite a weak (name-only / unknown-window)
+	// claim-history signal — fail open. These must never be labelled claimed.
+	AmbiguousNames []string
+}
+
+// ApplyClaimHistoryRecords is the evidence-aware, authoritative replacement for
+// the name-only ApplyClaimHistory. It removes a drop only on a positive,
+// provable identity match (MatchIdentity == Confirmed, or the strict
+// uniqueness+overlapping-window fallback below); every ambiguous signal fails
+// open — the drop is retained and NEVER labelled already-claimed — and the
+// actual claim mutation stays independently gated by Drop.CanClaim. clock is
+// injectable so window classification is deterministic in tests.
+//
+// The strict fallback upgrades an otherwise-Ambiguous name match to Confirmed
+// only when ALL hold: the claimed record's window and the candidate's window are
+// both decidable and overlap (proving the same occurrence), and the candidate's
+// normalized name is unique among this campaign's drops (so there is no tier
+// ambiguity). This is the only way a name can confirm a claim — a bare game+name
+// match, a missing game, or an unknown window can never remove a drop.
+func (c *Campaign) ApplyClaimHistoryRecords(records []ClaimedReward, clock Clock) ClaimHistoryOutcome {
+	gameID := ""
+	if c.Game != nil {
+		gameID = c.Game.ID
+	}
+	fallback := c.campaignWindow()
+
+	nameCount := make(map[string]int, len(c.Drops))
+	for _, d := range c.Drops {
+		nameCount[canonicalName(d.Name)]++
+	}
+
+	var outcome ClaimHistoryOutcome
+	kept := make([]*Drop, 0, len(c.Drops))
+	for _, drop := range c.Drops {
+		cand := drop.Identity(gameID, c.ID, fallback)
+		confirmed, ambiguous := classifyAgainstClaimHistory(cand, records, nameCount, clock)
+		if confirmed {
+			c.ClaimedDropNames = append(c.ClaimedDropNames, drop.Name)
+			outcome.ConfirmedNames = append(outcome.ConfirmedNames, drop.Name)
+			continue
+		}
+		if ambiguous {
+			outcome.AmbiguousNames = append(outcome.AmbiguousNames, drop.Name)
+		}
+		kept = append(kept, drop)
+	}
+	c.Drops = kept
+
+	if len(c.Drops) == 0 && len(c.ClaimedDropNames) > 0 {
+		c.ClaimStatus = CampaignClaimStatusAlreadyClaimed
+	} else {
+		c.ClaimStatus = CampaignClaimStatusInProgress
+	}
+	return outcome
+}
+
+// strictNameFallbackConfirms decides whether an otherwise-Ambiguous name match
+// may be upgraded to Confirmed. It requires the FULL evidence set — anything
+// missing keeps the drop retained (fail open):
+//
+//  1. both game IDs present and equal (a missing game on either side => never);
+//  2. the candidate's normalized name is unique among the campaign's drops;
+//  3. both windows decidable AND overlapping (same occurrence).
+//
+// This mirrors the domain contract that "missing game ID + name only" is always
+// Ambiguous, never Confirmed.
+func strictNameFallbackConfirms(claimed, cand RewardIdentity, nameCount map[string]int) bool {
+	cg, dg := canonicalGame(claimed.GameID), canonicalGame(cand.GameID)
+	if cg == "" || dg == "" || cg != dg {
+		return false
+	}
+	if cand.CanonicalName == "" || nameCount[cand.CanonicalName] != 1 {
+		return false
+	}
+	return claimed.Window.Decidable() && cand.Window.Decidable() &&
+		claimed.Window.Overlaps(cand.Window)
+}
+
+// classifyAgainstClaimHistory returns whether a candidate drop is confirmed
+// claimed by any record, and whether it saw an ambiguous (retained) signal.
+func classifyAgainstClaimHistory(cand RewardIdentity, records []ClaimedReward, nameCount map[string]int, clock Clock) (confirmed, ambiguous bool) {
+	for _, rec := range records {
+		switch MatchIdentity(rec.Identity, cand, clock) {
+		case IdentityMatchConfirmed:
+			return true, false
+		case IdentityMatchAmbiguous:
+			if strictNameFallbackConfirms(rec.Identity, cand, nameCount) {
+				return true, false
+			}
+			ambiguous = true
+		}
+	}
+	return false, ambiguous
+}
+
+// ApplyClaimHistory is a retained NON-AUTHORITATIVE compatibility helper keyed
+// by the lossy game+name RewardKey. New code MUST use ApplyClaimHistoryRecords,
+// which keeps distinct tiers/benefits/occurrences apart and fails open on
+// ambiguity. This shim survives only for legacy callers/tests that still pass a
+// pre-built name key set; it must not be treated as the authoritative matcher.
 func (c *Campaign) ApplyClaimHistory(claimedRewards map[string]bool) {
 	gameID := ""
 	if c.Game != nil {

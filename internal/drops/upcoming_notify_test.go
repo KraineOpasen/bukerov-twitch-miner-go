@@ -100,7 +100,7 @@ func TestFutureCampaignNotAssignedToStreamer(t *testing.T) {
 	streamer.ChannelID = "chan-1"
 	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = &models.Game{ID: "27546", Name: "World of Tanks"}
-	streamer.Stream.CampaignIDs = []string{"fut"}
+	streamer.Stream.SetCampaignIDs([]string{"fut"})
 
 	client := &fakeDropsClient{
 		dashboard: dashboardResponse(uS),

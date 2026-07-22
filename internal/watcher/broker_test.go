@@ -19,7 +19,7 @@ func discoveryStreamer(login string, restricted bool) *models.Streamer {
 	s.ChannelID = "ch-" + login
 	s.SetConfirmedOnline()
 	s.OnlineAt = time.Now().Add(-time.Minute)
-	s.Stream.CampaignIDs = []string{"camp-" + login}
+	s.Stream.SetCampaignIDs([]string{"camp-" + login})
 	if restricted {
 		s.Stream.Campaigns = []*models.Campaign{{ID: "camp-" + login, Channels: []string{s.ChannelID}}}
 	}
@@ -447,6 +447,8 @@ func newLoopWatcher(n int, sender minuteReporter, checker onlineChecker) (*Minut
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
 		streamers[i].SetConfirmedOnline()
 		streamers[i].OnlineAt = time.Now().Add(-time.Minute)
+		// Normal points-enabled channel (capability confirmed at startup in prod).
+		streamers[i].SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	}
 	w := &MinuteWatcher{
 		client:     checker,

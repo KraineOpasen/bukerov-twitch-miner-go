@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -766,6 +767,26 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 			online = append(online, i)
 			continue
 		}
+		// Capability gate for a NEW slot, via the single centralized policy
+		// (eligibility.SlotCandidateEligible): a channel earns a new watch slot
+		// only with a confirmed-useful task - an active eligible Drops entitlement,
+		// OR a points task whose Channel Points capability is confirmed Enabled. A
+		// points-only channel whose capability is Disabled OR merely Unknown gets
+		// no new slot (unknown is never a basis to grant one, and never coerced to
+		// enabled); Drops are evaluated independently, so a disabled/unknown-points
+		// channel with a live drop still qualifies. Retained (BKM-002 continuity)
+		// slots handled above bypass this gate, so an in-progress session is never
+		// dropped by it.
+		// The Drops input is the production-evaluated eligible-assignment signal
+		// (HasEligibleAssignedDropCampaign), NOT the stale DropsCondition: a bare
+		// advertised campaign ID no longer earns a slot - the drops tracker must
+		// have actually assigned an eligible campaign (active entitlement, not
+		// claimed, feasible, coherent ACL, allowed channel, confirmed availability).
+		// Points capability still grants a slot independently.
+		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.HasEligibleAssignedDropCampaign()); !ok {
+			w.noteSelection(i, "not eligible for a new watch slot ("+string(reason)+")")
+			continue
+		}
 		if s.GetOnlineAt().IsZero() || time.Since(s.GetOnlineAt()) > 30*time.Second {
 			online = append(online, i)
 		} else {
@@ -794,6 +815,11 @@ func (w *MinuteWatcher) retainsSlotWhileUnknown(s *models.Streamer) bool {
 	since := s.GetUnknownSince()
 	return !since.IsZero() && time.Since(since) < unknownSlotRetentionGrace
 }
+
+// watcherEligibility is the single centralized eligibility policy used for
+// new-slot candidacy (SlotCandidateEligible). It is stateless (system clock);
+// there is deliberately no second, divergent capability policy in the watcher.
+var watcherEligibility = eligibility.Evaluator{}
 
 // selectStreamersToWatch picks which online streamers to send minute-watched
 // events for. Twitch only credits watch time for up to

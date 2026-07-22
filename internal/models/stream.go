@@ -21,6 +21,24 @@ type Stream struct {
 	// access is tolerated only in single-goroutine test setup.
 	CampaignIDs []string
 	Campaigns   []*Campaign
+	// campaignAvailability is the tri-state result of the last channel-side
+	// per-channel campaign lookup (see campaign_availability.go). Unknown means
+	// the lookup failed and CampaignIDs is stale continuity data, not a fresh
+	// authoritative "available here". Owned by mu like every other Stream field.
+	//
+	// campaignAvailObs is the monotonic OBSERVATION generation (mirrors the Channel
+	// Points context's capObs): each lookup begins a new observation BEFORE its I/O
+	// and only the latest-begun observation may publish, so a newer request always
+	// wins regardless of completion order (newest-STARTED-wins, not
+	// first-completion-wins). campaignAvailObservedAt/UnknownSince/LastKnownAt carry
+	// the bounded-continuity timestamps: UnknownSince is stamped at the first
+	// Unknown after a Known and preserved across a run of Unknowns (so repeated
+	// failures never extend the grace); LastKnownAt is the last authoritative Known.
+	campaignAvailability    CampaignAvailabilityState
+	campaignAvailObs        uint64
+	campaignAvailObservedAt time.Time
+	campaignUnknownSince    time.Time
+	campaignLastKnownAt     time.Time
 
 	WatchStreakMissing bool
 	// streakEarnedBroadcastID remembers WHICH broadcast the last watch-streak
@@ -114,6 +132,12 @@ func (s *Stream) Update(broadcastID, title string, game *Game, tags []Tag, viewe
 	s.lastUpdate = time.Now()
 }
 
+// StreamUpdateInterval is the normal cadence at which the api client refreshes a
+// stream's info (UpdateRequired's threshold). It is named so downstream policy —
+// notably the campaign-availability continuity grace — can be DERIVED from it
+// rather than duplicating the magic duration.
+const StreamUpdateInterval = 2 * time.Minute
+
 func (s *Stream) UpdateRequired() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -121,7 +145,7 @@ func (s *Stream) UpdateRequired() bool {
 	if s.lastUpdate.IsZero() {
 		return true
 	}
-	return time.Since(s.lastUpdate) >= 2*time.Minute
+	return time.Since(s.lastUpdate) >= StreamUpdateInterval
 }
 
 func (s *Stream) UpdateElapsed() time.Duration {
@@ -182,11 +206,22 @@ func (s *Stream) GetCampaignIDs() []string {
 	return s.CampaignIDs
 }
 
-// SetCampaignIDs replaces the advertised campaign ID list (api client only).
+// SetCampaignIDs replaces the advertised campaign ID list and marks channel-side
+// availability KNOWN (a set of resolved IDs is by definition a resolved lookup).
+// Production uses the observation-guarded BeginCampaignAvailabilityObservation /
+// ApplyCampaignAvailability pair; this setter remains for single-goroutine test
+// setup and any legacy caller. It bumps the observation generation (so any
+// in-flight older observation becomes stale) and resets the Unknown-continuity
+// timestamps, since a fresh Known list ends any prior unknown streak.
 func (s *Stream) SetCampaignIDs(ids []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.campaignAvailObs++
 	s.CampaignIDs = ids
+	s.campaignAvailability = CampaignAvailabilityKnown
+	s.campaignAvailObservedAt = time.Now()
+	s.campaignLastKnownAt = s.campaignAvailObservedAt
+	s.campaignUnknownSince = time.Time{}
 }
 
 // GetCampaigns returns the tracked campaigns assigned to this channel by the

@@ -26,9 +26,16 @@ const (
 )
 
 type Drop struct {
-	ID                    string
-	Name                  string
-	Benefit               string
+	ID   string
+	Name string
+	// Benefit is the reward's display name (benefitEdges[0].benefit.name).
+	Benefit string
+	// BenefitID is the reward's stable Benefit/Reward ID
+	// (benefitEdges[0].benefit.id) when Twitch supplies it. The proven contract
+	// (this repo's fixtures) does NOT currently carry it, so it is parsed
+	// additively and is frequently empty; identity/claim-matching treats it as
+	// strong evidence only when present, and never fabricates it.
+	BenefitID             string
 	ImageURL              string
 	MinutesRequired       int
 	CurrentMinutesWatched int
@@ -71,6 +78,13 @@ func NewDropFromGQL(data map[string]interface{}) *Drop {
 			if benefit, ok := edge["benefit"].(map[string]interface{}); ok {
 				if name, ok := benefit["name"].(string); ok {
 					drop.Benefit = name
+				}
+				// Additive: capture the Benefit/Reward ID when Twitch supplies
+				// it. It is the strongest cross-variant reward identity, but the
+				// current proven response shape omits it, so this is best-effort
+				// and stays empty rather than being invented.
+				if id, ok := benefit["id"].(string); ok {
+					drop.BenefitID = id
 				}
 				// imageAssetURL is the reward's own artwork; the Drops-page
 				// modal uses it as each drop's icon, falling back to the
@@ -240,16 +254,56 @@ func (d *Drop) IsPrintable() bool {
 	return !d.IsClaimed && d.CurrentMinutesWatched > 0 && d.CurrentMinutesWatched < d.MinutesRequired
 }
 
-// RewardKey normalizes this drop's reward identity by game + drop name, so
-// recurring/regional campaign variants that grant the identical reward under
-// a different (and sometimes colliding) campaign or drop ID are recognized
-// as the same reward rather than relying on Twitch's raw IDs.
+// Window returns the drop's entitlement window from its own per-drop
+// startAt/endAt when Twitch supplied them (WindowSourceDrop). Inventory
+// in-progress drops legitimately carry no dates — that yields a not-Known
+// window (never mistaken for expired), which callers layer a campaign-level or
+// inventory source onto. The window is deliberately NOT anchored to time.Now
+// here; classification uses an injectable clock via EntitlementWindow.State.
+func (d *Drop) Window() EntitlementWindow {
+	if d.StartAt.IsZero() && d.EndAt.IsZero() {
+		return EntitlementWindow{Source: WindowSourceNone, Known: false}
+	}
+	return EntitlementWindow{
+		Start:  d.StartAt,
+		End:    d.EndAt,
+		Source: WindowSourceDrop,
+		Known:  true,
+	}
+}
+
+// Identity builds this drop's evidence-aware RewardIdentity within a campaign
+// instance. gameID and campaignID come from the owning Campaign; window is the
+// drop's own when known, otherwise the caller-supplied fallback (campaign-level
+// or inventory) so an in-progress drop still carries the best available
+// occurrence evidence. Evidence class is derived from which IDs are present.
+func (d *Drop) Identity(gameID, campaignID string, fallback EntitlementWindow) RewardIdentity {
+	w := d.Window()
+	if !w.Known && fallback.Known {
+		w = fallback
+	}
+	// DropInstanceID is the server-minted per-grant handle (strongest evidence
+	// when present on BOTH sides). It is passed through so an instance-level
+	// comparison is possible; MatchIdentity only confirms on an exact match of a
+	// non-empty instance ID on both sides, so a one-sided instance never
+	// fabricates cross-occurrence sameness.
+	return NewRewardIdentity(gameID, d.BenefitID, d.DropInstanceID, d.ID, campaignID, d.Name, d.MinutesRequired, w)
+}
+
+// RewardKey is a NON-AUTHORITATIVE display/grouping key (game + normalized drop
+// name). It is retained only for catalog grouping and legacy display, where a
+// coarse, human-recognizable bucket is wanted. It MUST NOT be used as the sole
+// evidence for claim deduplication — that path now runs through the
+// evidence-aware RewardIdentity/MatchIdentity machinery, which keeps distinct
+// tiers, benefits, and entitlement occurrences apart. See ClaimedReward and
+// Campaign.ApplyClaimHistoryRecords.
 func (d *Drop) RewardKey(gameID string) string {
 	return NormalizeRewardKey(gameID, d.Name)
 }
 
-// NormalizeRewardKey builds a stable, case/whitespace-insensitive identifier
-// for a drop reward from its game and display name.
+// NormalizeRewardKey builds a stable, case/whitespace-insensitive grouping
+// identifier for a drop reward from its game and display name. It is a
+// non-authoritative bucket (see Drop.RewardKey) — never a claim-history proof.
 func NormalizeRewardKey(gameID, name string) string {
 	return strings.ToLower(strings.TrimSpace(gameID)) + "::" + strings.ToLower(strings.TrimSpace(name))
 }

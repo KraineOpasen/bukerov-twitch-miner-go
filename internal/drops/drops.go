@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
@@ -92,6 +93,11 @@ type DropsTracker struct {
 	client    twitchClient
 	streamers []*models.Streamer
 	settings  config.RateLimitSettings
+
+	// clock is the injectable time source for the per-cycle drop eligibility
+	// evaluator and the channel-availability continuity grace. Nil means the
+	// system clock; tests set it to advance time deterministically.
+	clock models.Clock
 
 	campaigns []*models.Campaign
 
@@ -898,6 +904,18 @@ func (d *DropsTracker) syncCampaigns() {
 		"afterGameFilter", afterGameFilter,
 		"filteredByGame", filteredByGame)
 
+	// Reconcile each fresh campaign's ACL against the previously-published ACL
+	// for the same campaign instance BEFORE publishing, so a transient
+	// unknown/incomplete ACL in this sync never erodes a known-good allowlist and
+	// a stale result never overwrites a newer one (see models.ReconcileACL). The
+	// previous snapshot is immutable and never mutated; only the fresh (not yet
+	// published) campaigns are adjusted. This runs off the network path with no
+	// lock held during the reconcile itself.
+	d.mu.RLock()
+	previous := d.campaigns
+	d.mu.RUnlock()
+	reconcileCampaignACLs(previous, campaigns)
+
 	d.mu.Lock()
 	d.campaigns = campaigns
 	d.bumpRevisionLocked(updateSourceFullSync)
@@ -1390,46 +1408,98 @@ func (d *DropsTracker) applyClaimHistory(campaigns []*models.Campaign) []*models
 		return campaigns
 	}
 
-	claimedRewards := extractClaimedRewardKeys(inventory)
-	if len(claimedRewards) == 0 {
+	claimed := extractClaimedRewards(inventory)
+	if len(claimed) == 0 {
 		return campaigns
 	}
 
 	for _, campaign := range campaigns {
-		campaign.ApplyClaimHistory(claimedRewards)
+		// nil clock = system clock; window classification is deterministic in
+		// tests via the domain APIs, which accept an injectable clock.
+		outcome := campaign.ApplyClaimHistoryRecords(claimed, nil)
 
 		switch {
 		case campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed:
-			slog.Debug("Skipping drop campaign: already claimed",
+			slog.Debug("Skipping drop campaign: already claimed (evidence-confirmed)",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
-				"alreadyClaimed", campaign.ClaimedDropNames)
-		case len(campaign.ClaimedDropNames) > 0:
+				"confirmed", outcome.ConfirmedNames)
+		case len(outcome.ConfirmedNames) > 0:
 			slog.Debug("Skipping already-claimed reward within active drop campaign",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
-				"alreadyClaimed", campaign.ClaimedDropNames)
+				"confirmed", outcome.ConfirmedNames)
+		}
+		if len(outcome.AmbiguousNames) > 0 {
+			// Fail-open diagnostic: the reward is KEPT farmable because claim
+			// history could not authoritatively prove a match for this
+			// entitlement occurrence. The claim mutation is still gated by
+			// Drop.CanClaim, so retaining it can never double-claim.
+			slog.Debug("Retaining reward despite weak claim-history signal (kept farmable)",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"ambiguous", outcome.AmbiguousNames)
 		}
 	}
 
 	return campaigns
 }
 
-// extractClaimedRewardKeys reads the inventory's gameEventDrops -- Twitch's
-// account-wide record of rewards already granted -- and normalizes each one
-// into a Drop.RewardKey-compatible identifier (game + reward name). Raw
-// reward/drop IDs are intentionally not used here: they can differ (or even
-// collide) between recurring/regional variants of the same campaign, while
-// the reward's own name and game stay stable.
-func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool {
-	claimed := make(map[string]bool)
+// reconcileCampaignACLs applies the ACL lifecycle policy across a full sync. For
+// each freshly-built campaign it reconciles the campaign's ACL against the
+// previously-published ACL for the SAME campaign instance ID via
+// models.ReconcileACL, so:
+//
+//   - a transient unknown/incomplete ACL never erodes a known-good allowlist;
+//   - a stale (older) observation never overwrites a newer one;
+//   - an authoritative isEnabled=false (or a fresh complete restricted set) still
+//     replaces the previous ACL.
+//
+// The previous snapshot is treated as immutable (never mutated). Campaigns that
+// disappeared from the fresh set are simply not carried here — normal lifecycle
+// removal is unaffected; we never keep a campaign alive only to preserve its ACL.
+// The derived Channels mirror is re-synced to the reconciled ACL.
+func reconcileCampaignACLs(previous, fresh []*models.Campaign) {
+	if len(previous) == 0 || len(fresh) == 0 {
+		return
+	}
+	prevByID := make(map[string]*models.Campaign, len(previous))
+	for _, c := range previous {
+		if c != nil && c.ID != "" {
+			prevByID[c.ID] = c
+		}
+	}
+	for _, c := range fresh {
+		if c == nil || c.ID == "" {
+			continue
+		}
+		prev, ok := prevByID[c.ID]
+		if !ok {
+			continue
+		}
+		c.ACL = models.ReconcileACL(prev.ACL, c.ACL)
+		c.SyncChannelsFromACL()
+	}
+}
+
+// extractClaimedRewards reads the inventory's gameEventDrops -- Twitch's
+// account-wide record of rewards already granted -- into evidence-rich
+// ClaimedReward records. It captures the strongest identity each entry actually
+// supplies: the Benefit/Reward ID when Twitch provides it (additive; the proven
+// contract omits it), otherwise game + reward name only. The proven
+// gameEventDrops shape carries no entitlement window, so a name-only record
+// yields an ambiguous (fail-open, retained) match downstream rather than a false
+// already-claimed — a genuinely new occurrence of a repeatable reward is never
+// silently skipped. Records are deduplicated deterministically so repeated rows
+// do not multiply annotations.
+func extractClaimedRewards(inventory map[string]interface{}) []models.ClaimedReward {
 	if inventory == nil {
-		return claimed
+		return nil
 	}
 
 	events, ok := inventory["gameEventDrops"].([]interface{})
 	if !ok || events == nil {
-		return claimed
+		return nil
 	}
 
+	records := make([]models.ClaimedReward, 0, len(events))
 	for _, e := range events {
 		entry, ok := e.(map[string]interface{})
 		if !ok {
@@ -1437,12 +1507,17 @@ func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool 
 		}
 
 		name, _ := entry["name"].(string)
-		if name == "" {
-			if benefit, ok := entry["benefit"].(map[string]interface{}); ok {
+		benefitID := ""
+		if benefit, ok := entry["benefit"].(map[string]interface{}); ok {
+			if name == "" {
 				name, _ = benefit["name"].(string)
 			}
+			// Additive: the Benefit/Reward ID is the strongest cross-variant
+			// identity, used to confirm a claim without relying on the display
+			// name. Usually absent in the current contract.
+			benefitID, _ = benefit["id"].(string)
 		}
-		if name == "" {
+		if name == "" && benefitID == "" {
 			continue
 		}
 
@@ -1453,10 +1528,23 @@ func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool 
 			}
 		}
 
-		claimed[models.NormalizeRewardKey(gameID, name)] = true
+		var claimedAt time.Time
+		if ts, ok := entry["lastAwardedAt"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				claimedAt = t
+			}
+		}
+
+		// No DropID/CampaignID: a gameEventDrops entry's id is the per-user event
+		// id, NOT the campaign's timeBasedDrop id, so mapping it to DropID would
+		// never match (or worse, collide). Window is left unknown (the proven
+		// contract carries none). Evidence therefore resolves to Benefit (when an
+		// id is present) or name-only.
+		id := models.NewRewardIdentity(gameID, benefitID, "", "", "", name, 0, models.EntitlementWindow{})
+		records = append(records, models.ClaimedReward{Identity: id, ClaimedAt: claimedAt})
 	}
 
-	return claimed
+	return models.DedupeClaimedRewards(records)
 }
 
 // applyBlacklist drops any campaign whose drop or reward name matches a
@@ -1757,6 +1845,55 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 	}
 }
 
+// dropsEvaluator builds the per-cycle centralized policy used to decide, per
+// campaign, whether a streamer may be ASSIGNED a drop campaign (the production
+// wiring of eligibility.EvaluateDrops). It shares the tracker's injectable clock
+// so window/deadline decisions and the availability continuity grace are judged
+// against the same time source.
+func (d *DropsTracker) dropsEvaluator() eligibility.Evaluator {
+	return eligibility.Evaluator{Clock: d.clock}
+}
+
+// campaignAvailabilityFor maps the channel-side availability tri-state plus the
+// last-known advertised IDs into the evaluator's Availability for one campaign:
+// Unknown lookup => AvailabilityUnknown; a resolved lookup that lists the
+// campaign => AvailabilityYes; a resolved lookup that does NOT list it =>
+// AvailabilityNo (authoritative "not advertised on this channel").
+func campaignAvailabilityFor(state models.CampaignAvailabilityState, ids []string, campaignID string) eligibility.Availability {
+	if state == models.CampaignAvailabilityUnknown {
+		return eligibility.AvailabilityUnknown
+	}
+	for _, id := range ids {
+		if id == campaignID {
+			return eligibility.AvailabilityYes
+		}
+	}
+	return eligibility.AvailabilityNo
+}
+
+// logDropIneligible records, at DEBUG (never per-sync INFO), that a campaign was
+// not assigned to a streamer, with a stable privacy-safe reason and the ACL
+// state — no channel list, no reward IDs.
+func logDropIneligible(streamer *models.Streamer, campaign *models.Campaign, avail eligibility.Availability, reason eligibility.Reason) {
+	slog.Debug("Drop campaign not assigned: not eligible",
+		"streamer", streamer.Username,
+		"campaign", campaign.Name, "campaignID", campaign.ID,
+		"reason", string(reason),
+		"availability", availabilityLabel(avail),
+		"aclState", campaign.ACLState().String())
+}
+
+func availabilityLabel(a eligibility.Availability) string {
+	switch a {
+	case eligibility.AvailabilityYes:
+		return "yes"
+	case eligibility.AvailabilityNo:
+		return "no"
+	default:
+		return "unknown"
+	}
+}
+
 func (d *DropsTracker) updateStreamerCampaigns() {
 	// Snapshot the streamer list together with the campaigns: it can be
 	// replaced at runtime by UpdateStreamers, and this runs on both sync
@@ -1779,6 +1916,11 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		d.loggedProgressBucket = make(map[string]int)
 	}
 
+	// One evaluator per cycle, sharing the tracker's injectable clock so the drop
+	// window/deadline gates and the availability continuity grace are judged
+	// against the same time source.
+	ev := d.dropsEvaluator()
+
 	// currentAssignments accumulates this cycle's channel-restricted assignments;
 	// it replaces loggedRestrictedAssignments at the end so a campaign that stops
 	// being assigned is announced again if it later comes back.
@@ -1792,50 +1934,69 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	var progressOrder []*models.Campaign
 
 	for _, streamer := range streamers {
-		if !streamer.DropsCondition() {
+		// Process every CONFIRMED-online, drops-enabled streamer — even one that
+		// currently advertises no campaigns — so an authoritative empty/No
+		// availability actually CLEARS a stale assignment (SetCampaigns below). An
+		// offline or unknown-liveness streamer is skipped WITHOUT clearing, so a
+		// transient blip retains its last assignment (BKM-002 continuity).
+		// DropsCondition's len(CampaignIDs)>0 requirement is deliberately NOT used
+		// here — it would prevent that clear.
+		if !streamer.GetIsOnline() || !streamer.GetSettings().ClaimDrops {
 			continue
 		}
+
+		// Snapshot the previously-assigned campaign IDs and the channel-side
+		// availability once per streamer. prevAssigned drives the bounded
+		// continuity policy: under an UNKNOWN availability we may RETAIN an already
+		// eligible assignment but must never create a NEW one (a stale ID is never
+		// silently promoted to a fresh authoritative Yes), and only until the
+		// continuity grace expires.
+		prevAssigned := make(map[string]struct{})
+		for _, c := range streamer.Stream.GetCampaigns() {
+			prevAssigned[c.ID] = struct{}{}
+		}
+		availSnap, unknownGraceExpired := streamer.Stream.CampaignAvailabilitySnapshotAt(ev.Clock.Now())
 
 		var streamerCampaigns []*models.Campaign
 		for _, campaign := range campaigns {
 			if len(campaign.Drops) == 0 {
 				continue
 			}
-
-			if campaign.Game == nil || streamer.Stream.GameID() == "" {
+			// The production-evaluated eligibility runs against the campaign's
+			// actual next watchable drop (CurrentDrop), never an arbitrary later
+			// tier: window/claim/feasibility are judged on the drop that would be
+			// farmed next.
+			drop := campaign.CurrentDrop()
+			if drop == nil {
 				continue
 			}
 
-			if campaign.Game.ID != streamer.Stream.GameID() {
+			avail := campaignAvailabilityFor(availSnap.State, availSnap.CampaignIDs, campaign.ID)
+			decision := ev.EvaluateDrops(streamer, campaign, drop, avail)
+			if !decision.Eligible {
+				logDropIneligible(streamer, campaign, avail, decision.Reason)
 				continue
 			}
 
-			hasID := false
-			for _, id := range streamer.Stream.GetCampaignIDs() {
-				if id == campaign.ID {
-					hasID = true
-					break
+			// EvaluateDrops does not block an UNKNOWN channel-side availability
+			// (unknown != authoritative No). But an unknown availability must not
+			// create a NEW assignment — only RETAIN one that was already assigned,
+			// and only within the bounded continuity grace. A never-assigned
+			// campaign is never started off a stale ID; a previously-assigned one is
+			// released once the grace has elapsed (the retained assignment must not
+			// live forever behind a persistently-failing lookup).
+			if avail == eligibility.AvailabilityUnknown {
+				if _, existed := prevAssigned[campaign.ID]; !existed {
+					logDropIneligible(streamer, campaign, avail, eligibility.ReasonCampaignNotAvailable)
+					continue
 				}
-			}
-
-			if !hasID {
-				continue
+				if unknownGraceExpired {
+					logDropIneligible(streamer, campaign, avail, eligibility.ReasonCampaignNotAvailable)
+					continue
+				}
 			}
 
 			if campaign.IsChannelRestricted() {
-				if !campaign.AllowsChannel(streamer.ChannelID) {
-					// Defensive: Twitch's per-channel CampaignIDs lookup
-					// (GetCampaignIDsFromStreamer) should already exclude
-					// campaigns this channel isn't eligible for, so this
-					// should never trigger in practice. If it ever does,
-					// make it loud instead of silently over-crediting watch
-					// time Twitch won't actually count.
-					slog.Warn("Withholding drop progress: channel not in campaign's allowed-channel list",
-						"streamer", streamer.Username, "channelID", streamer.ChannelID,
-						"campaign", campaign.Name, "campaignID", campaign.ID,
-						"allowedChannels", campaign.Channels)
-					continue
-				}
 				d.logRestrictedAssignment(streamer, campaign, currentAssignments)
 			}
 

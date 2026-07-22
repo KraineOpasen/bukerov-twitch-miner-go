@@ -20,6 +20,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
@@ -751,6 +752,14 @@ func (m *Miner) bonusPollLoop(ctx context.Context) {
 func (m *Miner) pollBonuses() {
 	for _, s := range m.streamers.All() {
 		if !s.GetIsOnline() {
+			continue
+		}
+
+		// Centralized capability gate: the polling fallback must not claim a bonus
+		// when Channel Points are confirmed disabled or not yet confirmed.
+		if err := pointsActionGate(s, eligibility.TaskBonusClaim); err != nil {
+			slog.Debug("Skipping bonus poll: not eligible", "streamer", s.Username, "reason", err.Error())
+			m.evaluateAutoRedeem(s)
 			continue
 		}
 
