@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,15 +20,9 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
-
-// channelPointsEligibility is the single centralized policy used to gate the
-// bonus claim triggered from a freshly-loaded, accepted Channel Points context.
-// Stateless (system clock).
-var channelPointsEligibility = eligibility.Evaluator{}
 
 var (
 	ErrStreamerDoesNotExist = errors.New("streamer does not exist")
@@ -994,22 +989,24 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 	streamer.Stream.Update(broadcastID, strings.TrimSpace(title), game, tags, viewersCount)
 
 	if streamer.Settings.ClaimDrops {
-		// Channel-side campaign availability is a TRI-STATE, captured with a
-		// sequence so a stale lookup can't overwrite a newer one. A successful
-		// lookup (including a legitimately EMPTY list — the authoritative "no
-		// campaigns available here") records Known + exact IDs. A transient
-		// failure records Unknown while KEEPING the previous IDs only as
-		// last-known continuity/diagnostic data — never promoted to a fresh
-		// authoritative Yes (the drops assignment path treats Unknown as
+		// Channel-side campaign availability is a TRI-STATE published through an
+		// OBSERVATION generation begun BEFORE the I/O, so the newest-STARTED lookup
+		// wins regardless of completion order (a slow older lookup can never
+		// overwrite a newer one). A successful lookup (including a legitimately EMPTY
+		// list — the authoritative "no campaigns available here") records Known +
+		// exact IDs. A transient failure records Unknown while KEEPING the previous
+		// IDs only as last-known continuity/diagnostic data — never promoted to a
+		// fresh authoritative Yes (the drops assignment path treats Unknown as
 		// "no NEW assignment", so a stale ID can't silently create one).
-		obsSeq := streamer.Stream.CampaignAvailabilitySeq()
+		obsID := streamer.Stream.BeginCampaignAvailabilityObservation()
+		now := time.Now()
 		if game != nil && game.Name != "" && game.ID != "" {
 			if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
 				slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
 					"streamer", streamer.Username, "error", err)
-				streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
+				streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
 			} else {
-				streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, true, campaignIDs)
+				streamer.Stream.ApplyCampaignAvailability(obsID, true, campaignIDs, now)
 			}
 		} else {
 			// Online but the channel's game/category is unresolved this refresh, so
@@ -1017,7 +1014,7 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 			// (keeping previous IDs only as last-known continuity) rather than leaving
 			// a stale Known list that the assignment path would read as a fresh
 			// authoritative "Yes" for a channel not currently playing the game.
-			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
+			streamer.Stream.ApplyCampaignAvailability(obsID, false, nil, now)
 		}
 	}
 
@@ -1168,6 +1165,50 @@ func capabilityFromError(err error) models.CapabilityReason {
 	return models.CapReasonTransportError
 }
 
+// parseActiveMultipliers parses the activeMultipliers array with ALL-OR-NOTHING
+// strictness: it returns (multipliers, true) only when EVERY element is an object
+// carrying a numeric factor. A single malformed element (non-object, or a
+// missing/non-numeric factor) returns (nil, false) so the caller preserves the
+// prior multipliers rather than publishing a partial set. A valid empty array
+// returns (empty, true) — the authoritative clear.
+func parseActiveMultipliers(ms []interface{}) ([]models.Multiplier, bool) {
+	out := make([]models.Multiplier, 0, len(ms))
+	for _, m := range ms {
+		mMap, ok := m.(map[string]interface{})
+		if !ok || mMap == nil {
+			return nil, false
+		}
+		factor, ok := mMap["factor"].(float64)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, models.Multiplier{Factor: factor})
+	}
+	return out, true
+}
+
+// parseCommunityGoals parses the goals array with ALL-OR-NOTHING strictness: it
+// returns (goals, true) only when EVERY element is an object that yields a goal
+// with a non-empty id. A single malformed element returns (nil, false) so the
+// caller preserves the prior goals rather than publishing a partial upsert. A
+// valid empty array returns (empty, true) — but the caller's upsert semantics
+// never clear on empty (goal removal is owned by the PubSub delete path).
+func parseCommunityGoals(goals []interface{}) ([]*models.CommunityGoal, bool) {
+	out := make([]*models.CommunityGoal, 0, len(goals))
+	for _, g := range goals {
+		goalMap, ok := g.(map[string]interface{})
+		if !ok || goalMap == nil {
+			return nil, false
+		}
+		goal := models.CommunityGoalFromGQL(goalMap)
+		if goal == nil || goal.GoalID == "" {
+			return nil, false
+		}
+		out = append(out, goal)
+	}
+	return out, true
+}
+
 func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
 	// Begin a fresh observation BEFORE the I/O. Only the latest-begun observation
 	// may publish, so a newer request always wins regardless of completion order
@@ -1191,6 +1232,17 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	if err != nil {
 		applyUnknown(capabilityFromError(err))
 		return err
+	}
+
+	// A top-level GraphQL "errors" array (even at HTTP 200, and even when a
+	// partially-valid data node is ALSO present) means Twitch returned no
+	// authoritative context. Classify UNKNOWN and stop BEFORE parsing data — a
+	// service-layer error must never be read as an Enabled capability nor update
+	// balance/multipliers/goals nor trigger a bonus claim. LastConfirmed and every
+	// optional field are preserved (applyUnknown writes none of them).
+	if hasTopLevelGQLErrors(resp) {
+		applyUnknown(models.CapReasonGraphQLError)
+		return fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
@@ -1230,32 +1282,29 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	if b, ok := communityPoints["balance"].(float64); ok {
 		snap.Balance, snap.HasBalance = int(b), true
 	}
-	// activeMultipliers: present AND a valid array (even empty) is authoritative
-	// (an empty list clears them); absent or malformed preserves the prior value.
+	// activeMultipliers: ALL-OR-NOTHING. Absent or a wrong top-level type preserves
+	// the prior value (HasMultipliers stays false). A present array is parsed
+	// strictly — every element MUST be an object carrying a numeric factor. A single
+	// malformed element rejects the WHOLE field (preserve prior), never a partial
+	// set; a valid (possibly empty) array authoritatively replaces/clears.
 	if raw, present := communityPoints["activeMultipliers"]; present {
 		if ms, ok := raw.([]interface{}); ok {
-			mult := make([]models.Multiplier, 0, len(ms))
-			for _, m := range ms {
-				if mMap, ok := m.(map[string]interface{}); ok {
-					if factor, ok := mMap["factor"].(float64); ok {
-						mult = append(mult, models.Multiplier{Factor: factor})
-					}
-				}
+			if mult, valid := parseActiveMultipliers(ms); valid {
+				snap.Multipliers, snap.HasMultipliers = mult, true
 			}
-			snap.Multipliers, snap.HasMultipliers = mult, true
 		}
 	}
 	if streamer.Settings.CommunityGoals {
 		if settings, ok := channel["communityPointsSettings"].(map[string]interface{}); ok {
 			if raw, present := settings["goals"]; present {
 				if goals, ok := raw.([]interface{}); ok {
-					gs := make([]*models.CommunityGoal, 0, len(goals))
-					for _, g := range goals {
-						if goalMap, ok := g.(map[string]interface{}); ok {
-							gs = append(gs, models.CommunityGoalFromGQL(goalMap))
-						}
+					// ALL-OR-NOTHING goals: a single malformed goal element rejects the
+					// whole field (HasGoals stays false => prior goals preserved). A valid
+					// list uses the upsert semantics; a valid EMPTY list does NOT clear
+					// (goal removal is owned by the PubSub delete path).
+					if gs, valid := parseCommunityGoals(goals); valid {
+						snap.Goals, snap.HasGoals = gs, true
 					}
-					snap.Goals, snap.HasGoals = gs, true
 				}
 			}
 		}
@@ -1275,17 +1324,21 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 		return nil
 	}
 
-	// Bonus claim: OUTSIDE the lock, only after an accepted CURRENT observation,
-	// gated by eligibility, then atomically reserved (still current + not already
-	// authorized) so a stale or duplicate claim is never sent to Twitch.
+	// Bonus claim: the eligibility check and the reservation are ONE atomic step so
+	// the streamer cannot go Offline / lose the Channel Points capability between
+	// "eligible" and "reserved". ReserveBonusClaimIfEligible confirms, under the
+	// streamer lock, that the observation is still current, the streamer is Online,
+	// the capability is Enabled, and the claim id is non-empty and not already
+	// reserved — only then does it reserve. The Twitch mutation runs OUTSIDE the
+	// lock, and at most once per claim id via this path.
 	if res.AvailableClaimID != "" {
-		if d := channelPointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); !d.Eligible {
-			slog.Debug("Skipping bonus claim from context: not eligible",
-				"streamer", streamer.Username, "reason", string(d.Reason))
-		} else if streamer.AuthorizeBonusClaim(obsID, res.AvailableClaimID) {
+		if r := streamer.ReserveBonusClaimIfEligible(obsID, res.AvailableClaimID); r.Authorized {
 			if err := c.ClaimBonus(streamer, res.AvailableClaimID); err != nil {
 				slog.Error("Failed to claim bonus", "error", err)
 			}
+		} else {
+			slog.Debug("Skipping bonus claim from context: not reserved",
+				"streamer", streamer.Username, "reason", r.Reason.String())
 		}
 	}
 
@@ -1513,19 +1566,35 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 	// AUTHORITATIVE "no drop campaigns available on this channel" — a genuinely
 	// resolved empty list (Known + empty), distinct from the failures above.
 	campaigns, ok := channel["viewerDropCampaigns"].([]interface{})
-	if !ok || campaigns == nil {
+	if !ok || campaigns == nil || len(campaigns) == 0 {
 		return nil, nil
 	}
 
-	var ids []string
+	// ALL-OR-NOTHING parse: the list becomes an authoritative Known allowlist only
+	// if EVERY element is a well-formed campaign object carrying a non-empty string
+	// id. A single malformed element (non-object, missing/empty/non-string id) makes
+	// the whole lookup an error (=> availability UNKNOWN) — we never publish a valid
+	// SUBSET as if it were the complete advertised set, and never clear the previous
+	// IDs off a partially-parsed response. IDs are deduplicated and returned in a
+	// deterministic (sorted) order.
+	seen := make(map[string]struct{}, len(campaigns))
 	for _, campaign := range campaigns {
-		if cm, ok := campaign.(map[string]interface{}); ok {
-			if id, ok := cm["id"].(string); ok {
-				ids = append(ids, id)
-			}
+		cm, ok := campaign.(map[string]interface{})
+		if !ok || cm == nil {
+			return nil, fmt.Errorf("twitch GQL %s: malformed campaign element", op.OperationName)
 		}
+		id, ok := cm["id"].(string)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("twitch GQL %s: malformed campaign id", op.OperationName)
+		}
+		seen[id] = struct{}{}
 	}
 
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	return ids, nil
 }
 

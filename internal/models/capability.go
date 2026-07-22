@@ -173,8 +173,8 @@ type ContextApplyResult struct {
 // BeginChannelPointsContextObservation starts a new Channel Points context
 // observation and returns its monotonic ID. Callers invoke it BEFORE their
 // network I/O; the highest ID (latest begun) is the authoritative observation,
-// so ApplyChannelPointsContext/AuthorizeBonusClaim publish only for the newest
-// request regardless of completion order.
+// so ApplyChannelPointsContext/ReserveBonusClaimIfEligible publish only for the
+// newest request regardless of completion order.
 func (s *Streamer) BeginChannelPointsContextObservation() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,22 +218,93 @@ func (s *Streamer) ApplyChannelPointsContext(obsID uint64, snap ChannelPointsCon
 	return ContextApplyResult{Applied: true, Capability: snap.Capability, AvailableClaimID: snap.AvailableClaimID}
 }
 
-// AuthorizeBonusClaim reserves a bonus claim for exactly one authorized network
-// mutation. It returns true only when obsID is STILL the latest-begun observation
-// (no newer context has superseded it) AND this claim ID has not already been
-// authorized (dedup across racing contexts). The reservation is taken atomically
-// under the lock; the caller then releases the lock before the Twitch call.
-func (s *Streamer) AuthorizeBonusClaim(obsID uint64, claimID string) bool {
+// BonusReservationReason is a stable, privacy-safe code explaining why a bonus
+// claim reservation was granted or refused. It carries no claim identifier.
+type BonusReservationReason uint8
+
+const (
+	BonusReservationOK BonusReservationReason = iota
+	BonusReservationStaleObservation
+	BonusReservationOffline
+	BonusReservationStatusUnknown
+	BonusReservationCapabilityDisabled
+	BonusReservationCapabilityUnknown
+	BonusReservationEmptyClaim
+	BonusReservationDuplicate
+)
+
+func (r BonusReservationReason) String() string {
+	switch r {
+	case BonusReservationOK:
+		return "ok"
+	case BonusReservationStaleObservation:
+		return "stale_observation"
+	case BonusReservationOffline:
+		return "status_offline"
+	case BonusReservationStatusUnknown:
+		return "status_unknown"
+	case BonusReservationCapabilityDisabled:
+		return "capability_disabled"
+	case BonusReservationCapabilityUnknown:
+		return "capability_unknown"
+	case BonusReservationEmptyClaim:
+		return "empty_claim"
+	case BonusReservationDuplicate:
+		return "duplicate_claim"
+	default:
+		return "unknown"
+	}
+}
+
+// BonusClaimReservation is the immutable result of ReserveBonusClaimIfEligible.
+type BonusClaimReservation struct {
+	// Authorized is true only when the caller may proceed to the single Twitch
+	// ClaimBonus mutation for this claim id.
+	Authorized bool
+	Reason     BonusReservationReason
+}
+
+// ReserveBonusClaimIfEligible atomically confirms the CURRENT bonus-claim
+// prerequisites AND reserves the claim, all under one lock, so nothing can change
+// between the eligibility check and the reservation (the streamer cannot go
+// Offline or lose the Channel Points capability in the gap). It grants the
+// reservation only when, at this instant:
+//
+//   - obsID is still the latest-begun Channel Points observation (not superseded);
+//   - the streamer is confirmed StatusOnline;
+//   - the Channel Points capability is confirmed Enabled;
+//   - the claim id is non-empty AND not already reserved (dedup).
+//
+// The prerequisites intentionally mirror EvaluatePointsTask(TaskBonusClaim) for
+// the liveness/capability axis (a parity test locks this equivalence). The
+// reservation is taken under the lock; the caller releases the lock before the
+// network ClaimBonus. At most one reservation is ever granted per claim id.
+func (s *Streamer) ReserveBonusClaimIfEligible(obsID uint64, claimID string) BonusClaimReservation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if obsID != s.capObs {
-		return false
+		return BonusClaimReservation{Reason: BonusReservationStaleObservation}
 	}
-	if claimID == "" || claimID == s.lastAuthorizedClaimID {
-		return false
+	switch s.Status {
+	case StatusOffline:
+		return BonusClaimReservation{Reason: BonusReservationOffline}
+	case StatusUnknown:
+		return BonusClaimReservation{Reason: BonusReservationStatusUnknown}
+	}
+	switch s.channelPointsCap {
+	case CapabilityDisabled:
+		return BonusClaimReservation{Reason: BonusReservationCapabilityDisabled}
+	case CapabilityUnknown:
+		return BonusClaimReservation{Reason: BonusReservationCapabilityUnknown}
+	}
+	if claimID == "" {
+		return BonusClaimReservation{Reason: BonusReservationEmptyClaim}
+	}
+	if claimID == s.lastAuthorizedClaimID {
+		return BonusClaimReservation{Reason: BonusReservationDuplicate}
 	}
 	s.lastAuthorizedClaimID = claimID
-	return true
+	return BonusClaimReservation{Authorized: true, Reason: BonusReservationOK}
 }
 
 // ChannelPointsCapabilitySnapshot returns the current capability state and the

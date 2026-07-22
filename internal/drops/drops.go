@@ -94,6 +94,11 @@ type DropsTracker struct {
 	streamers []*models.Streamer
 	settings  config.RateLimitSettings
 
+	// clock is the injectable time source for the per-cycle drop eligibility
+	// evaluator and the channel-availability continuity grace. Nil means the
+	// system clock; tests set it to advance time deterministically.
+	clock models.Clock
+
 	campaigns []*models.Campaign
 
 	// upcomingCampaigns holds campaigns Twitch's dashboard returned that have not
@@ -1840,10 +1845,14 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 	}
 }
 
-// dropsEligibility is the single centralized policy used to decide, per campaign,
-// whether a streamer may be ASSIGNED a drop campaign (the production wiring of
-// eligibility.EvaluateDrops). Stateless (system clock).
-var dropsEligibility = eligibility.Evaluator{}
+// dropsEvaluator builds the per-cycle centralized policy used to decide, per
+// campaign, whether a streamer may be ASSIGNED a drop campaign (the production
+// wiring of eligibility.EvaluateDrops). It shares the tracker's injectable clock
+// so window/deadline decisions and the availability continuity grace are judged
+// against the same time source.
+func (d *DropsTracker) dropsEvaluator() eligibility.Evaluator {
+	return eligibility.Evaluator{Clock: d.clock}
+}
 
 // campaignAvailabilityFor maps the channel-side availability tri-state plus the
 // last-known advertised IDs into the evaluator's Availability for one campaign:
@@ -1907,6 +1916,11 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		d.loggedProgressBucket = make(map[string]int)
 	}
 
+	// One evaluator per cycle, sharing the tracker's injectable clock so the drop
+	// window/deadline gates and the availability continuity grace are judged
+	// against the same time source.
+	ev := d.dropsEvaluator()
+
 	// currentAssignments accumulates this cycle's channel-restricted assignments;
 	// it replaces loggedRestrictedAssignments at the end so a campaign that stops
 	// being assigned is announced again if it later comes back.
@@ -1935,12 +1949,13 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		// availability once per streamer. prevAssigned drives the bounded
 		// continuity policy: under an UNKNOWN availability we may RETAIN an already
 		// eligible assignment but must never create a NEW one (a stale ID is never
-		// silently promoted to a fresh authoritative Yes).
+		// silently promoted to a fresh authoritative Yes), and only until the
+		// continuity grace expires.
 		prevAssigned := make(map[string]struct{})
 		for _, c := range streamer.Stream.GetCampaigns() {
 			prevAssigned[c.ID] = struct{}{}
 		}
-		availState, availIDs := streamer.Stream.CampaignAvailability()
+		availSnap, unknownGraceExpired := streamer.Stream.CampaignAvailabilitySnapshotAt(ev.Clock.Now())
 
 		var streamerCampaigns []*models.Campaign
 		for _, campaign := range campaigns {
@@ -1956,8 +1971,8 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 				continue
 			}
 
-			avail := campaignAvailabilityFor(availState, availIDs, campaign.ID)
-			decision := dropsEligibility.EvaluateDrops(streamer, campaign, drop, avail)
+			avail := campaignAvailabilityFor(availSnap.State, availSnap.CampaignIDs, campaign.ID)
+			decision := ev.EvaluateDrops(streamer, campaign, drop, avail)
 			if !decision.Eligible {
 				logDropIneligible(streamer, campaign, avail, decision.Reason)
 				continue
@@ -1965,11 +1980,17 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 
 			// EvaluateDrops does not block an UNKNOWN channel-side availability
 			// (unknown != authoritative No). But an unknown availability must not
-			// create a NEW assignment — only retain one that was already assigned
-			// (bounded continuity). This prevents a stale advertised ID from
-			// silently becoming a fresh authoritative Yes.
+			// create a NEW assignment — only RETAIN one that was already assigned,
+			// and only within the bounded continuity grace. A never-assigned
+			// campaign is never started off a stale ID; a previously-assigned one is
+			// released once the grace has elapsed (the retained assignment must not
+			// live forever behind a persistently-failing lookup).
 			if avail == eligibility.AvailabilityUnknown {
 				if _, existed := prevAssigned[campaign.ID]; !existed {
+					logDropIneligible(streamer, campaign, avail, eligibility.ReasonCampaignNotAvailable)
+					continue
+				}
+				if unknownGraceExpired {
 					logDropIneligible(streamer, campaign, avail, eligibility.ReasonCampaignNotAvailable)
 					continue
 				}

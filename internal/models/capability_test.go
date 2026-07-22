@@ -243,9 +243,9 @@ func TestContextObservationPostApplyInterleaving(t *testing.T) {
 	if _, ok := s.CommunityGoals["g-old"]; ok {
 		t.Fatal("old goals must not be written")
 	}
-	// old bonus claim must not authorize (obs no longer current).
-	if s.AuthorizeBonusClaim(old, "claim-old") {
-		t.Fatal("stale observation must not authorize a bonus claim")
+	// old bonus claim must not reserve (obs no longer current).
+	if s.ReserveBonusClaimIfEligible(old, "claim-old").Authorized {
+		t.Fatal("stale observation must not reserve a bonus claim")
 	}
 }
 
@@ -301,27 +301,30 @@ func TestContextObservationUnknownPreservesAndStaleNoop(t *testing.T) {
 	}
 }
 
-// Scenario 22: a duplicate availableClaim across racing contexts authorizes at
-// most one mutation.
+// Scenario 22: a duplicate availableClaim across racing contexts reserves at
+// most one mutation. (Full liveness/capability/parity coverage lives in
+// bonus_reservation_test.go; here we pin the observation + dedup axis alongside
+// the other context-observation scenarios.)
 func TestContextObservationBonusReservationDedup(t *testing.T) {
 	s := NewStreamer("bob", DefaultStreamerSettings())
 	obs := s.BeginChannelPointsContextObservation()
 	s.ApplyChannelPointsContext(obs, ctxSnap(CapabilityEnabled, 100, 0))
+	s.Status = StatusOnline // reservation additionally requires confirmed-online
 
-	if !s.AuthorizeBonusClaim(obs, "claim-1") {
-		t.Fatal("first authorization should succeed")
+	if !s.ReserveBonusClaimIfEligible(obs, "claim-1").Authorized {
+		t.Fatal("first reservation should succeed")
 	}
-	if s.AuthorizeBonusClaim(obs, "claim-1") {
-		t.Fatal("duplicate claim id must not authorize twice")
+	if s.ReserveBonusClaimIfEligible(obs, "claim-1").Authorized {
+		t.Fatal("duplicate claim id must not reserve twice")
 	}
-	// An empty claim id never authorizes.
-	if s.AuthorizeBonusClaim(obs, "") {
-		t.Fatal("empty claim id must not authorize")
+	// An empty claim id never reserves.
+	if s.ReserveBonusClaimIfEligible(obs, "").Authorized {
+		t.Fatal("empty claim id must not reserve")
 	}
-	// A stale observation never authorizes.
+	// A stale observation never reserves.
 	stale := obs
 	s.BeginChannelPointsContextObservation() // advance
-	if s.AuthorizeBonusClaim(stale, "claim-2") {
-		t.Fatal("stale observation must not authorize")
+	if s.ReserveBonusClaimIfEligible(stale, "claim-2").Authorized {
+		t.Fatal("stale observation must not reserve")
 	}
 }
