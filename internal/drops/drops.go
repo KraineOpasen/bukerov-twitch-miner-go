@@ -1390,46 +1390,61 @@ func (d *DropsTracker) applyClaimHistory(campaigns []*models.Campaign) []*models
 		return campaigns
 	}
 
-	claimedRewards := extractClaimedRewardKeys(inventory)
-	if len(claimedRewards) == 0 {
+	claimed := extractClaimedRewards(inventory)
+	if len(claimed) == 0 {
 		return campaigns
 	}
 
 	for _, campaign := range campaigns {
-		campaign.ApplyClaimHistory(claimedRewards)
+		// nil clock = system clock; window classification is deterministic in
+		// tests via the domain APIs, which accept an injectable clock.
+		outcome := campaign.ApplyClaimHistoryRecords(claimed, nil)
 
 		switch {
 		case campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed:
-			slog.Debug("Skipping drop campaign: already claimed",
+			slog.Debug("Skipping drop campaign: already claimed (evidence-confirmed)",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
-				"alreadyClaimed", campaign.ClaimedDropNames)
-		case len(campaign.ClaimedDropNames) > 0:
+				"confirmed", outcome.ConfirmedNames)
+		case len(outcome.ConfirmedNames) > 0:
 			slog.Debug("Skipping already-claimed reward within active drop campaign",
 				"campaign", campaign.Name, "campaignID", campaign.ID,
-				"alreadyClaimed", campaign.ClaimedDropNames)
+				"confirmed", outcome.ConfirmedNames)
+		}
+		if len(outcome.AmbiguousNames) > 0 {
+			// Fail-open diagnostic: the reward is KEPT farmable because claim
+			// history could not authoritatively prove a match for this
+			// entitlement occurrence. The claim mutation is still gated by
+			// Drop.CanClaim, so retaining it can never double-claim.
+			slog.Debug("Retaining reward despite weak claim-history signal (kept farmable)",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"ambiguous", outcome.AmbiguousNames)
 		}
 	}
 
 	return campaigns
 }
 
-// extractClaimedRewardKeys reads the inventory's gameEventDrops -- Twitch's
-// account-wide record of rewards already granted -- and normalizes each one
-// into a Drop.RewardKey-compatible identifier (game + reward name). Raw
-// reward/drop IDs are intentionally not used here: they can differ (or even
-// collide) between recurring/regional variants of the same campaign, while
-// the reward's own name and game stay stable.
-func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool {
-	claimed := make(map[string]bool)
+// extractClaimedRewards reads the inventory's gameEventDrops -- Twitch's
+// account-wide record of rewards already granted -- into evidence-rich
+// ClaimedReward records. It captures the strongest identity each entry actually
+// supplies: the Benefit/Reward ID when Twitch provides it (additive; the proven
+// contract omits it), otherwise game + reward name only. The proven
+// gameEventDrops shape carries no entitlement window, so a name-only record
+// yields an ambiguous (fail-open, retained) match downstream rather than a false
+// already-claimed — a genuinely new occurrence of a repeatable reward is never
+// silently skipped. Records are deduplicated deterministically so repeated rows
+// do not multiply annotations.
+func extractClaimedRewards(inventory map[string]interface{}) []models.ClaimedReward {
 	if inventory == nil {
-		return claimed
+		return nil
 	}
 
 	events, ok := inventory["gameEventDrops"].([]interface{})
 	if !ok || events == nil {
-		return claimed
+		return nil
 	}
 
+	records := make([]models.ClaimedReward, 0, len(events))
 	for _, e := range events {
 		entry, ok := e.(map[string]interface{})
 		if !ok {
@@ -1437,12 +1452,17 @@ func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool 
 		}
 
 		name, _ := entry["name"].(string)
-		if name == "" {
-			if benefit, ok := entry["benefit"].(map[string]interface{}); ok {
+		benefitID := ""
+		if benefit, ok := entry["benefit"].(map[string]interface{}); ok {
+			if name == "" {
 				name, _ = benefit["name"].(string)
 			}
+			// Additive: the Benefit/Reward ID is the strongest cross-variant
+			// identity, used to confirm a claim without relying on the display
+			// name. Usually absent in the current contract.
+			benefitID, _ = benefit["id"].(string)
 		}
-		if name == "" {
+		if name == "" && benefitID == "" {
 			continue
 		}
 
@@ -1453,10 +1473,23 @@ func extractClaimedRewardKeys(inventory map[string]interface{}) map[string]bool 
 			}
 		}
 
-		claimed[models.NormalizeRewardKey(gameID, name)] = true
+		var claimedAt time.Time
+		if ts, ok := entry["lastAwardedAt"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				claimedAt = t
+			}
+		}
+
+		// No DropID/CampaignID: a gameEventDrops entry's id is the per-user event
+		// id, NOT the campaign's timeBasedDrop id, so mapping it to DropID would
+		// never match (or worse, collide). Window is left unknown (the proven
+		// contract carries none). Evidence therefore resolves to Benefit (when an
+		// id is present) or name-only.
+		id := models.NewRewardIdentity(gameID, benefitID, "", "", "", name, 0, models.EntitlementWindow{})
+		records = append(records, models.ClaimedReward{Identity: id, ClaimedAt: claimedAt})
 	}
 
-	return claimed
+	return models.DedupeClaimedRewards(records)
 }
 
 // applyBlacklist drops any campaign whose drop or reward name matches a
@@ -1822,20 +1855,32 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 				continue
 			}
 
-			if campaign.IsChannelRestricted() {
-				if !campaign.AllowsChannel(streamer.ChannelID) {
-					// Defensive: Twitch's per-channel CampaignIDs lookup
-					// (GetCampaignIDsFromStreamer) should already exclude
-					// campaigns this channel isn't eligible for, so this
-					// should never trigger in practice. If it ever does,
-					// make it loud instead of silently over-crediting watch
-					// time Twitch won't actually count.
+			// Single crediting gate: AllowsChannel returns true for unrestricted
+			// campaigns, membership for restricted ones, and FALSE for an
+			// ACLUnknown campaign (fail closed — an unresolved allowlist never
+			// widens eligibility). This deliberately also covers the ACLUnknown
+			// case, which IsChannelRestricted() reports as not-restricted; gating
+			// on IsChannelRestricted alone would silently over-credit an unknown
+			// ACL on any channel.
+			if !campaign.AllowsChannel(streamer.ChannelID) {
+				if campaign.IsChannelRestricted() {
+					// Defensive: Twitch's per-channel CampaignIDs lookup should
+					// already exclude ineligible campaigns; make a real exclusion
+					// loud (privacy-safe: count, not the channel list).
 					slog.Warn("Withholding drop progress: channel not in campaign's allowed-channel list",
 						"streamer", streamer.Username, "channelID", streamer.ChannelID,
 						"campaign", campaign.Name, "campaignID", campaign.ID,
-						"allowedChannels", campaign.Channels)
-					continue
+						"allowedChannelCount", campaign.AllowedChannelCount())
+				} else {
+					slog.Debug("Withholding drop progress: campaign ACL unresolved (fail closed)",
+						"streamer", streamer.Username,
+						"campaign", campaign.Name, "campaignID", campaign.ID,
+						"aclState", campaign.ACLState().String())
 				}
+				continue
+			}
+
+			if campaign.IsChannelRestricted() {
 				d.logRestrictedAssignment(streamer, campaign, currentAssignments)
 			}
 
