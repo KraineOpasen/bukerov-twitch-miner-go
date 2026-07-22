@@ -165,6 +165,16 @@ type TwitchClient struct {
 	spadeURLPattern        *regexp.Regexp
 	settingsURLPattern     *regexp.Regexp
 
+	// spadeHTTP is the narrow HTTP surface Spade discovery uses (channel page +
+	// settings.js fetch). It defaults to c.client in production; tests inject a
+	// fake so the strict fetch/validation can be exercised without real DNS.
+	// twitchBaseURL is the channel-page origin, constants.TwitchURL in production
+	// and a test double otherwise.
+	spadeHTTP           spadeHTTPClient
+	twitchBaseURL       string
+	maxChannelPageBytes int64
+	maxSettingsBytes    int64
+
 	authErrorHandler func()
 
 	healthMu    sync.RWMutex
@@ -202,7 +212,7 @@ type TwitchClient struct {
 }
 
 func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient {
-	return &TwitchClient{
+	c := &TwitchClient{
 		auth:                   twitchAuth,
 		deviceID:               deviceID,
 		clientSession:          util.RandomHex(16),
@@ -216,7 +226,12 @@ func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient
 		spadeURLPattern:        regexp.MustCompile(`"spade_url":"(.*?)"`),
 		settingsURLPattern:     regexp.MustCompile(`(https://static.twitchcdn.net/config/settings.*?js|https://assets.twitch.tv/config/settings.*?.js)`),
 		lastSuccess:            time.Now(),
+		twitchBaseURL:          constants.TwitchURL,
+		maxChannelPageBytes:    maxChannelPageBytes,
+		maxSettingsBytes:       maxSettingsBytes,
 	}
+	c.spadeHTTP = c.client
+	return c
 }
 
 // setGQLEndpoint overrides the GraphQL endpoint URL. It exists for tests, which
@@ -1029,49 +1044,14 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 	return nil
 }
 
+// GetSpadeURL discovers the streamer's spade (minute-watched beacon) endpoint by
+// scraping the channel page for the settings.js asset and the settings asset for
+// the spade_url, then publishes it under a full-session observation guard. See
+// spade.go for the hardened fetch/parse/validate/publish pipeline. A failure at
+// any step returns a redacted error and leaves the last-known spade URL intact —
+// a discovery failure is never treated as "no session".
 func (c *TwitchClient) GetSpadeURL(streamer *models.Streamer) error {
-	streamerURL := fmt.Sprintf("%s/%s", constants.TwitchURL, streamer.Username)
-
-	req, err := http.NewRequest("GET", streamerURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:85.0) Gecko/20100101 Firefox/85.0")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	settingsMatches := c.settingsURLPattern.FindSubmatch(body)
-	if len(settingsMatches) < 2 {
-		return fmt.Errorf("failed to find settings URL")
-	}
-
-	settingsResp, err := c.client.Get(string(settingsMatches[1]))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = settingsResp.Body.Close() }()
-
-	settingsBody, err := io.ReadAll(settingsResp.Body)
-	if err != nil {
-		return err
-	}
-
-	spadeMatches := c.spadeURLPattern.FindSubmatch(settingsBody)
-	if len(spadeMatches) < 2 {
-		return fmt.Errorf("failed to find spade URL")
-	}
-
-	streamer.Stream.SetSpadeURL(string(spadeMatches[1]))
-	return nil
+	return c.discoverSpadeURL(context.Background(), streamer)
 }
 
 // CheckStreamerOnline resolves a streamer's live status and applies the resulting

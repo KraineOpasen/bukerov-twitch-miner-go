@@ -87,6 +87,24 @@ type Stream struct {
 	lastUpdate           time.Time
 	minuteWatchedUpdated time.Time
 
+	// sessionGen is the monotonic PLAYBACK-SESSION generation: it increments on
+	// every change to the coherent watch session a beacon depends on — a new (or
+	// changed) broadcast ID, a new spade URL, or a re-published beacon payload.
+	// The minute sender captures it alongside a SessionSnapshot and re-checks it
+	// just before the beacon, so a session that changed mid-send (a new broadcast,
+	// a completed refresh) is detected and the stale beacon suppressed instead of
+	// mixing an old payload with a new spade URL. Its zero value means the session
+	// is uninitialised (no bring-online yet).
+	//
+	// sessionObs is the monotonic full-session OBSERVATION generation (mirrors
+	// campaignAvailObs / the Channel Points capObs): a full session refresh begins
+	// a new observation BEFORE its network I/O and only the latest-begun
+	// observation may publish the spade URL, so a slow older refresh can never
+	// clobber a newer one (newest-STARTED-wins, not first-completion-wins). Both
+	// are owned by mu like every other Stream field.
+	sessionGen uint64
+	sessionObs uint64
+
 	mu sync.RWMutex
 }
 
@@ -120,8 +138,15 @@ func (s *Stream) Update(broadcastID, title string, game *Game, tags []Tag, viewe
 	//    UpdateRequired's 10-minute cache expires: the re-arm then happens on
 	//    the first refresh that observes the new ID.
 	if broadcastID != "" {
-		if s.BroadcastID != "" && broadcastID != s.BroadcastID {
-			s.armWatchStreakLocked()
+		if broadcastID != s.BroadcastID {
+			if s.BroadcastID != "" {
+				s.armWatchStreakLocked()
+			}
+			// A new (or first) broadcast is a new playback session: bump the
+			// generation so any beacon captured against the previous broadcast is
+			// treated as stale, and a stale full-session refresh started against the
+			// old broadcast cannot be published over it.
+			s.sessionGen++
 		}
 		s.BroadcastID = broadcastID
 	}
@@ -176,11 +201,24 @@ func (s *Stream) GetSpadeURL() string {
 	return s.spadeURL
 }
 
-// SetSpadeURL records the spade endpoint (api client only).
+// SetSpadeURL records the spade endpoint (api client only). It bumps the
+// playback-session generation when the URL actually changes, so a beacon
+// captured against the previous spade endpoint is treated as stale.
 func (s *Stream) SetSpadeURL(url string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.setSpadeURLLocked(url)
+}
+
+// setSpadeURLLocked publishes a spade URL under the caller-held lock, bumping the
+// session generation only on a real change (a no-op re-publish must not appear as
+// a session change and needlessly stale an in-flight send).
+func (s *Stream) setSpadeURLLocked(url string) {
+	if url == s.spadeURL {
+		return
+	}
 	s.spadeURL = url
+	s.sessionGen++
 }
 
 // GetBroadcastID returns the Twitch broadcast (stream) ID of the current
@@ -265,6 +303,9 @@ func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game
 			Properties: properties,
 		},
 	}
+	// A freshly built payload (new broadcast, refreshed game/user context) is a new
+	// playback session for beacon purposes.
+	s.sessionGen++
 }
 
 func (s *Stream) EncodePayload() (string, error) {
