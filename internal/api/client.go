@@ -994,17 +994,21 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 	streamer.Stream.Update(broadcastID, strings.TrimSpace(title), game, tags, viewersCount)
 
 	if game != nil && game.Name != "" && game.ID != "" && streamer.Settings.ClaimDrops {
-		// On a transient fetch failure, keep the channel's previously-known
-		// campaign IDs instead of wiping them: SetCampaignIDs(nil) would drop
-		// the streamer out of DropsCondition() and make its Overview drop
-		// indicator vanish until the next successful refresh (the indicator
-		// then flaps between syncs). A successful fetch — including a
-		// legitimately empty list — still updates the list as before.
+		// Channel-side campaign availability is a TRI-STATE, captured with a
+		// sequence so a stale lookup can't overwrite a newer one. A successful
+		// lookup (including a legitimately EMPTY list — the authoritative "no
+		// campaigns available here") records Known + exact IDs. A transient
+		// failure records Unknown while KEEPING the previous IDs only as
+		// last-known continuity/diagnostic data — never promoted to a fresh
+		// authoritative Yes (the drops assignment path treats Unknown as
+		// "no NEW assignment", so a stale ID can't silently create one).
+		obsSeq := streamer.Stream.CampaignAvailabilitySeq()
 		if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
-			slog.Warn("Failed to fetch channel drop campaign IDs; keeping previous list",
+			slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
 				"streamer", streamer.Username, "error", err)
+			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, false, nil)
 		} else {
-			streamer.Stream.SetCampaignIDs(campaignIDs)
+			streamer.Stream.SetCampaignAvailabilityIfCurrent(obsSeq, true, campaignIDs)
 		}
 	}
 
@@ -1156,9 +1160,19 @@ func capabilityFromError(err error) models.CapabilityReason {
 }
 
 func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
-	// Capture the capability sequence BEFORE the network I/O so a slow/stale
-	// response can never overwrite a newer capability or balance (stale guard).
-	_, obsSeq := streamer.ChannelPointsCapabilitySnapshot()
+	// Begin a fresh observation BEFORE the I/O. Only the latest-begun observation
+	// may publish, so a newer request always wins regardless of completion order
+	// (capSeq alone could not order two requests that begin at the same sequence).
+	obsID := streamer.BeginChannelPointsContextObservation()
+
+	// applyUnknown publishes an inconclusive result through the observation guard:
+	// capability Unknown, and every optional field absent, so LastConfirmed,
+	// balance, multipliers and goals are all PRESERVED.
+	applyUnknown := func(reason models.CapabilityReason) {
+		streamer.ApplyChannelPointsContext(obsID, models.ChannelPointsContextSnapshot{
+			Capability: models.CapabilityUnknown, Reason: reason,
+		})
+	}
 
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
 		"channelLogin": streamer.Username,
@@ -1166,100 +1180,102 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
-		// Inconclusive: never overwrite a prior confirmation and never clear the
-		// balance — classify the capability UNKNOWN with a privacy-safe reason.
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, capabilityFromError(err), 0, false)
+		applyUnknown(capabilityFromError(err))
 		return err
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
+		applyUnknown(models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
-
 	community, ok := data["community"].(map[string]interface{})
 	if !ok || community == nil {
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
+		applyUnknown(models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
-
 	channel, ok := community["channel"].(map[string]interface{})
 	if !ok || channel == nil {
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMalformed, 0, false)
+		applyUnknown(models.CapReasonMalformed)
 		return ErrStreamerDoesNotExist
 	}
-
 	self, ok := channel["self"].(map[string]interface{})
 	if !ok {
-		// A structurally valid channel with no self node: the feature context is
-		// missing but Twitch is NOT known to signal "disabled" by omission, so
-		// this is UNKNOWN (never coerced to Disabled without proof).
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMissingContext, 0, false)
+		// Structurally valid channel with no self node: the feature context is
+		// missing, but Twitch is NOT known to signal "disabled" by omission, so
+		// UNKNOWN (never coerced to Disabled without proof).
+		applyUnknown(models.CapReasonMissingContext)
 		return nil
 	}
-
 	communityPoints, ok := self["communityPoints"].(map[string]interface{})
 	if !ok {
-		streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityUnknown, models.CapReasonMissingContext, 0, false)
+		applyUnknown(models.CapReasonMissingContext)
 		return nil
 	}
 
-	// Parse the accepted context WITHOUT writing to the streamer yet.
-	balance, hasBalance := 0, false
+	// Parse the FULL accepted context into one snapshot WITHOUT any streamer write.
+	snap := models.ChannelPointsContextSnapshot{
+		Capability: models.CapabilityEnabled,
+		Reason:     models.CapReasonConfirmedContext,
+	}
 	if b, ok := communityPoints["balance"].(float64); ok {
-		balance, hasBalance = int(b), true
+		snap.Balance, snap.HasBalance = int(b), true
+	}
+	// activeMultipliers: present AND a valid array (even empty) is authoritative
+	// (an empty list clears them); absent or malformed preserves the prior value.
+	if raw, present := communityPoints["activeMultipliers"]; present {
+		if ms, ok := raw.([]interface{}); ok {
+			mult := make([]models.Multiplier, 0, len(ms))
+			for _, m := range ms {
+				if mMap, ok := m.(map[string]interface{}); ok {
+					if factor, ok := mMap["factor"].(float64); ok {
+						mult = append(mult, models.Multiplier{Factor: factor})
+					}
+				}
+			}
+			snap.Multipliers, snap.HasMultipliers = mult, true
+		}
+	}
+	if streamer.Settings.CommunityGoals {
+		if settings, ok := channel["communityPointsSettings"].(map[string]interface{}); ok {
+			if raw, present := settings["goals"]; present {
+				if goals, ok := raw.([]interface{}); ok {
+					gs := make([]*models.CommunityGoal, 0, len(goals))
+					for _, g := range goals {
+						if goalMap, ok := g.(map[string]interface{}); ok {
+							gs = append(gs, models.CommunityGoalFromGQL(goalMap))
+						}
+					}
+					snap.Goals, snap.HasGoals = gs, true
+				}
+			}
+		}
+	}
+	if availableClaim, ok := communityPoints["availableClaim"].(map[string]interface{}); ok && availableClaim != nil {
+		if id, ok := availableClaim["id"].(string); ok {
+			snap.AvailableClaimID = id
+		}
 	}
 
-	// Atomically apply capability + balance under the stale guard. If a newer
-	// confirmation already landed, drop this whole observation — including the
-	// multipliers, goals, and any bonus claim below — so a stale context can
-	// never overwrite newer state or fire a bonus claim off old data.
-	tr := streamer.ApplyChannelPointsContextIfCurrent(obsSeq, models.CapabilityEnabled, models.CapReasonConfirmedContext, balance, hasBalance)
-	if tr.Stale {
-		slog.Debug("Dropping stale channel-points context (a newer capability confirmation already applied)",
+	// ONE atomic publication under the observation guard. A newer observation
+	// makes this whole context (state + optional fields + bonus opportunity) stale.
+	res := streamer.ApplyChannelPointsContext(obsID, snap)
+	if res.Stale {
+		slog.Debug("Dropping stale channel-points context (a newer observation already published)",
 			"streamer", streamer.Username)
 		return nil
 	}
 
-	// Multipliers: applied only on an accepted observation, via a locked setter
-	// (the previous direct field write raced the locked readers).
-	var multipliers []models.Multiplier
-	if ms, ok := communityPoints["activeMultipliers"].([]interface{}); ok {
-		for _, m := range ms {
-			if mMap, ok := m.(map[string]interface{}); ok {
-				if factor, ok := mMap["factor"].(float64); ok {
-					multipliers = append(multipliers, models.Multiplier{Factor: factor})
-				}
-			}
-		}
-	}
-	streamer.SetActiveMultipliers(multipliers)
-
-	if streamer.Settings.CommunityGoals {
-		if settings, ok := channel["communityPointsSettings"].(map[string]interface{}); ok {
-			if goals, ok := settings["goals"].([]interface{}); ok {
-				for _, g := range goals {
-					if goalMap, ok := g.(map[string]interface{}); ok {
-						streamer.AddCommunityGoal(models.CommunityGoalFromGQL(goalMap))
-					}
-				}
-			}
-		}
-	}
-
-	// Bonus claim: OUTSIDE any streamer lock, only after an ACCEPTED Enabled
-	// context, and only when the bonus-claim task is eligible (the centralized
-	// capability gate). A stale context returned above never reaches here.
-	if availableClaim, ok := communityPoints["availableClaim"].(map[string]interface{}); ok && availableClaim != nil {
-		if claimID, ok := availableClaim["id"].(string); ok && claimID != "" {
-			if d := channelPointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); d.Eligible {
-				if err := c.ClaimBonus(streamer, claimID); err != nil {
-					slog.Error("Failed to claim bonus", "error", err)
-				}
-			} else {
-				slog.Debug("Skipping bonus claim from context: not eligible",
-					"streamer", streamer.Username, "reason", string(d.Reason))
+	// Bonus claim: OUTSIDE the lock, only after an accepted CURRENT observation,
+	// gated by eligibility, then atomically reserved (still current + not already
+	// authorized) so a stale or duplicate claim is never sent to Twitch.
+	if res.AvailableClaimID != "" {
+		if d := channelPointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); !d.Eligible {
+			slog.Debug("Skipping bonus claim from context: not eligible",
+				"streamer", streamer.Username, "reason", string(d.Reason))
+		} else if streamer.AuthorizeBonusClaim(obsID, res.AvailableClaimID) {
+			if err := c.ClaimBonus(streamer, res.AvailableClaimID); err != nil {
+				slog.Error("Failed to claim bonus", "error", err)
 			}
 		}
 	}
