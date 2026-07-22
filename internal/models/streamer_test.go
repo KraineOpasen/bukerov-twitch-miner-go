@@ -70,16 +70,16 @@ func TestActiveCampaignProgressPicksFurthestAlong(t *testing.T) {
 func TestSetOnlineGracePreservesStreakOnBlip(t *testing.T) {
 	s := NewStreamer("blipper", DefaultStreamerSettings())
 
-	if !s.SetOnline() {
-		t.Fatal("first SetOnline should report an offline→online transition")
+	if !s.SetConfirmedOnline().OnlineConfirmed {
+		t.Fatal("first SetConfirmedOnline should report an online transition")
 	}
 	// Progress banked on this broadcast: 5 watched minutes, streak already earned.
 	s.Stream.MinuteWatched = 5
 	s.Stream.WatchStreakMissing = false
 
 	// Brief flap: offline then immediately back online (OfflineAt ≈ now).
-	s.SetOffline()
-	if !s.SetOnline() {
+	s.SetConfirmedOffline()
+	if !s.SetConfirmedOnline().OnlineConfirmed {
 		t.Fatal("re-online after a blip is still a real transition")
 	}
 
@@ -97,17 +97,17 @@ func TestSetOnlineGracePreservesStreakOnBlip(t *testing.T) {
 func TestSetOnlineReArmsStreakOnNewBroadcast(t *testing.T) {
 	s := NewStreamer("returner", DefaultStreamerSettings())
 
-	if !s.SetOnline() {
-		t.Fatal("first SetOnline should report a transition")
+	if !s.SetConfirmedOnline().OnlineConfirmed {
+		t.Fatal("first SetConfirmedOnline should report a transition")
 	}
 	s.Stream.MinuteWatched = 6
 	s.Stream.WatchStreakMissing = false
 
-	s.SetOffline()
+	s.SetConfirmedOffline()
 	// Simulate a new broadcast: offline well beyond the grace window.
 	s.OfflineAt = time.Now().Add(-watchStreakContinuityGrace - time.Minute)
 
-	if !s.SetOnline() {
+	if !s.SetConfirmedOnline().OnlineConfirmed {
 		t.Fatal("re-online should report a transition")
 	}
 	if got := s.Stream.GetMinuteWatched(); got != 0 {
@@ -119,11 +119,10 @@ func TestSetOnlineReArmsStreakOnNewBroadcast(t *testing.T) {
 }
 
 // TestSetOnlineReportsTransitionOnlyOnce is the log-dedup case (A): many
-// concurrent online detections racing on the same offline streamer must yield
-// exactly ONE reported transition, so the "Streamer is online" log fires once.
-// Run under -race.
+// concurrent online detections racing on the same streamer must yield exactly
+// ONE reported transition, so the "Streamer is online" log fires once. Run under -race.
 func TestSetOnlineReportsTransitionOnlyOnce(t *testing.T) {
-	s := NewStreamer("racer", DefaultStreamerSettings()) // starts offline
+	s := NewStreamer("racer", DefaultStreamerSettings()) // starts unknown
 
 	const n = 32
 	var transitions atomic.Int64
@@ -134,7 +133,7 @@ func TestSetOnlineReportsTransitionOnlyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if s.SetOnline() {
+			if s.SetConfirmedOnline().OnlineConfirmed {
 				transitions.Add(1)
 			}
 		}()
@@ -143,7 +142,7 @@ func TestSetOnlineReportsTransitionOnlyOnce(t *testing.T) {
 	wg.Wait()
 
 	if got := transitions.Load(); got != 1 {
-		t.Fatalf("concurrent SetOnline must report exactly one transition (log fires once), got %d", got)
+		t.Fatalf("concurrent SetConfirmedOnline must report exactly one transition (log fires once), got %d", got)
 	}
 	if !s.GetIsOnline() {
 		t.Error("streamer must be online after the race")

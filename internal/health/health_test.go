@@ -39,20 +39,22 @@ func (f *fakeClient) GetChannelID(string) (string, error) {
 	return f.channelID, f.idErr
 }
 
-func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) {
+func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	if f.onlineGate != nil {
 		<-f.onlineGate
 	}
 	atomic.AddInt32(&f.checks, 1)
+	var tr models.StatusTransition
 	if f.online {
-		s.SetOnline()
+		tr = s.SetConfirmedOnline()
 		s.Stream.SetSpadeURL(f.spade)
 	} else {
-		s.SetOffline()
+		tr = s.SetConfirmedOffline()
 	}
 	if f.onlineDone != nil {
 		close(f.onlineDone)
 	}
+	return tr
 }
 
 type fakeProber struct {

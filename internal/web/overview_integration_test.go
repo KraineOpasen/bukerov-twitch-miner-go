@@ -40,12 +40,15 @@ func newOverviewTestServer(t *testing.T) (*Server, *models.Streamer, *bool) {
 
 	online := models.NewStreamer("shroud", models.DefaultStreamerSettings())
 	online.ChannelID = "1"
-	online.SetOnline()
+	online.SetConfirmedOnline()
 	online.SetChannelPoints(100000)
 	online.Stream.Update("b1", "Ranked", &models.Game{Name: "VALORANT"}, nil, 40000)
 
 	offline := models.NewStreamer("summit", models.DefaultStreamerSettings())
 	offline.ChannelID = "2"
+	// A fresh streamer is now UNKNOWN, not offline; confirm it offline so this
+	// test exercises the offline card rendering as intended.
+	offline.SetConfirmedOffline()
 	offline.SetChannelPoints(5000)
 
 	// Seed a couple of point samples so points-today has something to diff.

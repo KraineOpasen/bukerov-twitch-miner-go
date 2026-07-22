@@ -13,7 +13,7 @@ import (
 func dropsEligible(w *MinuteWatcher, idx int) {
 	s := w.streamers[idx]
 	s.Settings.ClaimDrops = true
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	s.OnlineAt = time.Now().Add(-time.Minute)
 	s.Stream.SetCampaignIDs([]string{"camp-" + s.Username})
 }

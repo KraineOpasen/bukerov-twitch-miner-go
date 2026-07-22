@@ -1106,14 +1106,17 @@ func connectionDegradedDetail(reconnects, gqlFails int, window time.Duration) st
 	}
 }
 
-func (m *Miner) handleStatusChange(username string, online bool) {
+func (m *Miner) handleStatusChange(username string, status models.StreamerStatus) {
 	if m.notifications == nil {
 		return
 	}
 
-	if online {
+	// Only authoritative online/offline transitions notify. Unknown carries no
+	// notification, so a transient check failure never fires a false "went offline".
+	switch status {
+	case models.StatusOnline:
 		m.notifications.NotifyOnline(username)
-	} else {
+	case models.StatusOffline:
 		m.notifications.NotifyOffline(username)
 	}
 }

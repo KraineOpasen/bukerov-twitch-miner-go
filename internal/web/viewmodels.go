@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 type StreamerInfo struct {
@@ -12,11 +13,21 @@ type StreamerInfo struct {
 	PointsFormatted       string `json:"points_formatted"`
 	LastActivity          int64  `json:"last_activity"`
 	LastActivityFormatted string `json:"last_activity_formatted"`
-	IsLive                bool   `json:"is_live"`
-	LiveDuration          string `json:"live_duration,omitempty"`
-	OfflineDuration       string `json:"offline_duration,omitempty"`
-	GameName              string `json:"game_name,omitempty"`
-	Title                 string `json:"title,omitempty"`
+	// Status is the tri-state liveness: "unknown" | "online" | "offline". IsLive
+	// is kept as a DERIVED, backward-compatible field: is_live == (status ==
+	// "online"). Clients that only read is_live keep working; clients that need to
+	// tell "offline" apart from "status could not be confirmed" read status.
+	Status string `json:"status"`
+	IsLive bool   `json:"is_live"`
+	// Unconfirmed marks a streamer whose live status is currently UNKNOWN
+	// (transport/GQL failure) — including one still holding a watch slot during a
+	// transient blip. Rendered as a distinct "unconfirmed" indication, never as a
+	// red offline state.
+	Unconfirmed     bool   `json:"unconfirmed,omitempty"`
+	LiveDuration    string `json:"live_duration,omitempty"`
+	OfflineDuration string `json:"offline_duration,omitempty"`
+	GameName        string `json:"game_name,omitempty"`
+	Title           string `json:"title,omitempty"`
 	// Tags carries up to maxCardTags of the stream's Twitch tags (localized
 	// names), rendered as compact chips on the live card.
 	Tags                  []string `json:"tags,omitempty"`
@@ -205,6 +216,7 @@ type OverviewData struct {
 	NowWatching NowWatchingView
 
 	TrackedLive    []StreamerInfo
+	TrackedUnknown []StreamerInfo
 	TrackedOffline []StreamerInfo
 	Untracked      []StreamerInfo
 
@@ -294,6 +306,7 @@ type StreamerPageData struct {
 
 type StreamerGridData struct {
 	TrackedLive    []StreamerInfo
+	TrackedUnknown []StreamerInfo
 	TrackedOffline []StreamerInfo
 	Untracked      []StreamerInfo
 }
@@ -587,12 +600,22 @@ type NotificationsPageData struct {
 }
 
 func convertStreamerInfo(info analytics.StreamerInfo) StreamerInfo {
+	// analytics.StreamerInfo carries only a boolean IsLive (from stored history),
+	// so its tri-state status is derived: online when live, otherwise offline.
+	// The live-tracked overview cards get their real tri-state from the streamer
+	// model in buildCards; this DB-derived path preserves the existing is_live
+	// grouping for backward compatibility.
+	status := models.StatusOffline.String()
+	if info.IsLive {
+		status = models.StatusOnline.String()
+	}
 	return StreamerInfo{
 		Name:                  info.Name,
 		Points:                info.Points,
 		PointsFormatted:       info.PointsFormatted,
 		LastActivity:          info.LastActivity,
 		LastActivityFormatted: info.LastActivityFormatted,
+		Status:                status,
 		IsLive:                info.IsLive,
 		LiveDuration:          info.LiveDuration,
 		OfflineDuration:       info.OfflineDuration,

@@ -76,11 +76,102 @@ type HistoryEntry struct {
 	Amount  int
 }
 
+// StreamerStatus is the strict tri-state liveness of a streamer. Its zero value
+// is StatusUnknown by construction (uint8 iota) so a freshly created / never
+// checked streamer is UNKNOWN, never a false "offline". Only an authoritative
+// positive signal makes a streamer online, and only an authoritative negative
+// signal makes it offline; every inconclusive outcome (network/GQL/PQNF/timeout/
+// malformed/Spade failure) is UNKNOWN, which must not be treated as offline.
+type StreamerStatus uint8
+
+const (
+	StatusUnknown StreamerStatus = iota // zero value — state not authoritatively confirmed
+	StatusOnline                        // confirmed live
+	StatusOffline                       // authoritatively confirmed not live
+)
+
+func (s StreamerStatus) String() string {
+	switch s {
+	case StatusOnline:
+		return "online"
+	case StatusOffline:
+		return "offline"
+	default:
+		return "unknown"
+	}
+}
+
+// StatusReason is a compact, privacy-safe classification of WHY a streamer's
+// current status is what it is (chiefly why it is unknown). It carries no raw
+// Twitch payload, token, cookie, header or claim identifier — only a stable code.
+type StatusReason string
+
+const (
+	ReasonInitial               StatusReason = "initial"
+	ReasonTransportError        StatusReason = "transport_error"
+	ReasonTimeout               StatusReason = "timeout"
+	ReasonGraphQLError          StatusReason = "graphql_error"
+	ReasonPersistedQueryMissing StatusReason = "persisted_query_not_found"
+	ReasonUnauthorized          StatusReason = "unauthorized"
+	ReasonMalformedResponse     StatusReason = "malformed_response"
+	ReasonSpadeUnavailable      StatusReason = "spade_unavailable"
+	ReasonCheckFailed           StatusReason = "check_failed"
+)
+
+// StatusTransition is the immutable result of a single atomic status transition.
+// The transition method computes it under the Streamer lock and returns it so
+// callers can log the change and fire external callbacks OUTSIDE the lock,
+// exactly once per logical transition even when detections race.
+type StatusTransition struct {
+	Previous StreamerStatus
+	Current  StreamerStatus
+	Reason   StatusReason
+	// OnlineConfirmed is true only on a genuine offline/first-detection→online
+	// transition worth logging and notifying — NOT on a recovery continuation
+	// (unknown whose last confirmed status was online → online).
+	OnlineConfirmed bool
+	// OfflineConfirmed is true only on a genuine online→offline authoritative
+	// transition — NOT on an initial-unknown→offline (streamer never was online)
+	// nor on re-confirming an already-offline streamer.
+	OfflineConfirmed bool
+	// Stale is true when a seq-guarded check result was discarded because a newer
+	// authoritative transition had already been applied (see ApplyCheckResultIfCurrent).
+	Stale bool
+}
+
+// Changed reports whether this transition actually moved the status.
+func (t StatusTransition) Changed() bool { return t.Previous != t.Current }
+
 type Streamer struct {
-	Username          string
-	ChannelID         string
-	Settings          StreamerSettings
-	IsOnline          bool
+	Username string
+	// ChannelID and Settings are configuration; Status and the timestamps below
+	// are the single writable source of truth for liveness (there is no separate
+	// IsOnline bool — GetIsOnline() is a derived helper).
+	ChannelID string
+	Settings  StreamerSettings
+
+	// Status is the current authoritative liveness (single source of truth).
+	Status StreamerStatus
+	// LastConfirmedStatus is the last status that was authoritatively confirmed
+	// (only ever StatusOnline or StatusOffline; StatusUnknown until the first
+	// authoritative signal). It survives transitions INTO unknown so callers can
+	// distinguish initial-unknown from unknown-after-online / unknown-after-offline.
+	LastConfirmedStatus StreamerStatus
+	// StatusReason is the compact code for the current status (mainly why unknown).
+	StatusReason StatusReason
+	// LastConfirmedAt is when Status last became a confirmed (online/offline) value.
+	LastConfirmedAt time.Time
+	// UnknownSince is when the status last became unknown (zero when not unknown).
+	UnknownSince time.Time
+	// StatusChangedAt is when Status last changed value.
+	StatusChangedAt time.Time
+	// statusSeq increments on every CONFIRMED (online/offline) transition. A
+	// network check captures it BEFORE its I/O and applies its result only if it
+	// is unchanged, so a slow/stale check can never overwrite a newer authoritative
+	// PubSub transition. Unknown transitions do NOT bump it, so a genuine confirm
+	// always wins over a concurrent inconclusive check.
+	statusSeq uint64
+
 	StreamUpTime      time.Time
 	OnlineAt          time.Time
 	OfflineAt         time.Time
@@ -102,8 +193,12 @@ type Multiplier struct {
 
 func NewStreamer(username string, settings StreamerSettings) *Streamer {
 	return &Streamer{
-		Username:       username,
-		Settings:       settings,
+		Username: username,
+		Settings: settings,
+		// Status is left at its zero value (StatusUnknown): a freshly created
+		// streamer is UNKNOWN, not offline. OfflineAt/OnlineAt/LastConfirmedAt
+		// are intentionally left zero — do not stamp an offline at creation.
+		StatusReason:   ReasonInitial,
 		CommunityGoals: make(map[string]*CommunityGoal),
 		Stream:         NewStream(),
 		History:        make(map[string]*HistoryEntry),
@@ -114,57 +209,221 @@ func (s *Streamer) String() string {
 	return fmt.Sprintf("Streamer(%s, %d points)", s.Username, s.ChannelPoints)
 }
 
-func (s *Streamer) SetOffline() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// watchStreakContinuityGrace is how briefly a streamer may drop offline and
+// return while still counting as the SAME continuous broadcast for watch-streak
+// purposes. It is now a FALLBACK, consulted only inside applyStatusLocked on a
+// genuine new-online detection where no broadcast ID is yet known (BroadcastID
+// == ""): the authoritative re-arm lives in Stream.Update's changed-broadcast-ID
+// comparison, which already survives online→unknown→online recovery (unknown
+// never writes OfflineAt, so the gap heuristic can no longer see a blip). Matches
+// StreamUpElapsed's 2-minute notion of a settled stream.
+const watchStreakContinuityGrace = 2 * time.Minute
 
-	if s.IsOnline {
-		s.OfflineAt = time.Now()
-		s.IsOnline = false
+// applyStatusLocked performs one atomic tri-state transition to next with mu
+// already held. It mutates only status/timestamp/reason/seq fields (and, on a
+// genuine first-online with no known broadcast, arms the streak); it performs NO
+// network I/O and emits NO events. It returns the immutable StatusTransition so
+// the public wrappers can emit events and fire callbacks after unlocking.
+//
+// Semantics per target:
+//   - StatusOnline: recovery from unknown-whose-last-confirmed-was-online is a
+//     CONTINUATION (no OnlineConfirmed, OnlineAt/streak untouched). Any other
+//     move into online is a genuine detection (OnlineConfirmed, OnlineAt set,
+//     streak re-armed as a fallback only when BroadcastID=="").
+//   - StatusOffline: OfflineConfirmed only when the streamer was actually online
+//     (prev==online or last-confirmed-online) — never a fake online→offline for a
+//     streamer that was never online. OfflineAt is set on a genuine new offline
+//     and preserved when merely re-confirming offline.
+//   - StatusUnknown: EVENT-FREE. Sets reason + UnknownSince (first time only) and
+//     leaves LastConfirmedStatus/LastConfirmedAt/OfflineAt/OnlineAt/Stream/streak
+//     untouched, and does NOT bump statusSeq (unknown is a weak observation).
+func (s *Streamer) applyStatusLocked(next StreamerStatus, reason StatusReason) StatusTransition {
+	prev := s.Status
+	now := time.Now()
+	s.LastChecked = now
+	tr := StatusTransition{Previous: prev, Current: next, Reason: reason}
+
+	switch next {
+	case StatusOnline:
+		recovery := prev == StatusUnknown && s.LastConfirmedStatus == StatusOnline
+		s.Status = StatusOnline
+		s.LastConfirmedStatus = StatusOnline
+		s.LastConfirmedAt = now
+		s.StatusReason = ""
+		s.UnknownSince = time.Time{}
+		s.statusSeq++
+		if prev != StatusOnline {
+			s.StatusChangedAt = now
+		}
+		if prev != StatusOnline && !recovery {
+			// Genuine new online detection (offline→online, initial-unknown→online,
+			// or unknown-last-offline→online): stamp the broadcast start and, as a
+			// fallback, re-arm the streak only when no broadcast ID is known yet
+			// (Stream.Update's changed-ID path is the authoritative re-arm).
+			s.OnlineAt = now
+			if s.Stream.GetBroadcastID() == "" {
+				freshBroadcast := s.OfflineAt.IsZero() || now.Sub(s.OfflineAt) >= watchStreakContinuityGrace
+				if freshBroadcast {
+					s.Stream.InitWatchStreak()
+				}
+			}
+			tr.OnlineConfirmed = true
+		}
+
+	case StatusOffline:
+		everOnline := prev == StatusOnline || s.LastConfirmedStatus == StatusOnline
+		wasOffline := prev == StatusOffline
+		s.Status = StatusOffline
+		s.LastConfirmedStatus = StatusOffline
+		s.LastConfirmedAt = now
+		s.StatusReason = ""
+		s.UnknownSince = time.Time{}
+		s.statusSeq++
+		if prev != StatusOffline {
+			s.StatusChangedAt = now
+		}
+		// Set OfflineAt on a genuine new offline (from online) or the first-ever
+		// authoritative offline; preserve it when merely re-confirming offline
+		// (e.g. unknown-last-offline→offline) so offline duration stays honest.
+		if s.OfflineAt.IsZero() || prev == StatusOnline {
+			s.OfflineAt = now
+		}
+		if !wasOffline && everOnline {
+			tr.OfflineConfirmed = true
+		}
+
+	default: // StatusUnknown
+		s.Status = StatusUnknown
+		s.StatusReason = reason
+		if s.UnknownSince.IsZero() {
+			s.UnknownSince = now
+		}
+		if prev != StatusUnknown {
+			s.StatusChangedAt = now
+		}
+		// Deliberately DO NOT touch LastConfirmedStatus/LastConfirmedAt/OfflineAt/
+		// OnlineAt/Stream/broadcastID/payload/campaignIDs/streak/ChannelPoints, and
+		// DO NOT bump statusSeq.
+	}
+	return tr
+}
+
+// emitTransition records the diagnostic event for a genuine confirmed transition,
+// after the Streamer lock is released. Exactly-once per logical transition: only
+// the goroutine that actually flipped the state gets OnlineConfirmed/OfflineConfirmed.
+func (s *Streamer) emitTransition(tr StatusTransition) {
+	switch {
+	case tr.OnlineConfirmed:
+		events.Record(events.TypeStreamerOnline, s.Username, "")
+	case tr.OfflineConfirmed:
 		events.Record(events.TypeStreamerOffline, s.Username, "")
 	}
 }
 
-// watchStreakContinuityGrace is how briefly a streamer may drop offline and
-// return while still counting as the SAME continuous broadcast for watch-streak
-// purposes. A short offline blip — an online-detection flap, e.g. a PubSub
-// stream-down (or a transient check failure) immediately followed by a viewcount
-// re-check — must not wipe accumulated watch-streak progress; only a genuinely
-// new broadcast (offline at least this long) re-arms the streak. Matches
-// StreamUpElapsed's 2-minute notion of a settled stream; the streak's own
-// per-report continuity guard (UpdateMinuteWatched's 2×interval gap check)
-// remains the backstop for whether the viewing was actually continuous.
-const watchStreakContinuityGrace = 2 * time.Minute
+// SetConfirmedOnline records an authoritative positive live signal (successful
+// GQL with a valid stream object, PubSub stream-up, or a viewcount-confirmed
+// check). It returns the transition; tr.OnlineConfirmed is true only on a genuine
+// new detection (not a recovery continuation from a transient unknown), so
+// callers log/notify exactly once and never on a mere recovery.
+func (s *Streamer) SetConfirmedOnline() StatusTransition {
+	s.mu.Lock()
+	tr := s.applyStatusLocked(StatusOnline, "")
+	s.mu.Unlock()
+	s.emitTransition(tr)
+	return tr
+}
 
-// SetOnline marks the streamer online and reports whether this call actually
-// transitioned it from offline to online (true) or was a no-op because it was
-// already online (false). Callers use the return value to log the transition
-// exactly once even when concurrent online detections (the stream-check loop,
-// PubSub viewcount, the watcher's stale re-check, ...) race on the same streamer.
-//
-// On a genuine transition it re-arms the watch streak (InitWatchStreak) UNLESS
-// the streamer was offline only briefly (< watchStreakContinuityGrace): such a
-// blip is treated as a continuation of the same broadcast, so accumulated
-// MinuteWatched and the WatchStreakMissing flag are preserved rather than reset.
-func (s *Streamer) SetOnline() bool {
+// SetConfirmedOffline records an authoritative negative signal (PubSub
+// stream-down, or a structurally valid GQL response where the user exists and
+// stream is explicitly null). It fires from online OR unknown so a stream-down
+// during an unknown blip still settles offline and releases the watch slot.
+func (s *Streamer) SetConfirmedOffline() StatusTransition {
+	s.mu.Lock()
+	tr := s.applyStatusLocked(StatusOffline, "")
+	s.mu.Unlock()
+	s.emitTransition(tr)
+	return tr
+}
+
+// SetUnknown records that the current live state could NOT be authoritatively
+// confirmed (transport/timeout/GQL/PQNF/auth/malformed/Spade failure, cancelled
+// context, ...). It is event-free and preserves all confirmed state: it never
+// sets OfflineAt, never emits an offline event, never logs "went offline", never
+// clears Stream/broadcastID/payload/campaign IDs, never resets the watch streak,
+// and never changes ChannelPoints.
+func (s *Streamer) SetUnknown(reason StatusReason) StatusTransition {
+	s.mu.Lock()
+	tr := s.applyStatusLocked(StatusUnknown, reason)
+	s.mu.Unlock()
+	s.emitTransition(tr)
+	return tr
+}
+
+// ApplyCheckResultIfCurrent applies a network stream-check result but ONLY if no
+// newer authoritative (online/offline) transition has been applied since obsSeq
+// was captured (via StatusSnapshot, before the I/O). This is the stale-observation
+// guard: a slow GQL result that observed the stream live cannot resurrect a
+// channel an intervening PubSub stream-down already released, and a stale failure
+// cannot overwrite a newer confirmed online. If discarded, the returned
+// transition has Stale=true and Changed()==false.
+func (s *Streamer) ApplyCheckResultIfCurrent(obsSeq uint64, next StreamerStatus, reason StatusReason) StatusTransition {
+	s.mu.Lock()
+	if obsSeq != s.statusSeq {
+		cur := s.Status
+		s.mu.Unlock()
+		return StatusTransition{Previous: cur, Current: cur, Reason: reason, Stale: true}
+	}
+	tr := s.applyStatusLocked(next, reason)
+	s.mu.Unlock()
+	s.emitTransition(tr)
+	return tr
+}
+
+// StatusSnapshot returns the current status and the status sequence, read under
+// the lock. Network callers capture this BEFORE any I/O and pass the sequence to
+// ApplyCheckResultIfCurrent so a stale result can be discarded.
+func (s *Streamer) StatusSnapshot() (StreamerStatus, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Status, s.statusSeq
+}
+
+// GetStatus returns the current tri-state liveness.
+func (s *Streamer) GetStatus() StreamerStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Status
+}
+
+// GetStatusReason returns the current status reason code.
+func (s *Streamer) GetStatusReason() StatusReason {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.StatusReason
+}
+
+// GetLastConfirmedStatus returns the last authoritatively confirmed status
+// (StatusUnknown until the first confirmation).
+func (s *Streamer) GetLastConfirmedStatus() StreamerStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastConfirmedStatus
+}
+
+// GetUnknownSince returns when the status last became unknown (zero when not
+// currently unknown).
+func (s *Streamer) GetUnknownSince() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.UnknownSince
+}
+
+// SetStreamUpTime records the PubSub stream-up timestamp under the lock (replaces
+// the previous unsynchronised field write on the PubSub read-loop goroutine).
+func (s *Streamer) SetStreamUpTime(t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.IsOnline {
-		return false
-	}
-
-	// A brief flap (seconds) is the same broadcast; only a real new broadcast
-	// — offline for at least the grace, or never seen online before — re-arms.
-	freshBroadcast := s.OfflineAt.IsZero() || time.Since(s.OfflineAt) >= watchStreakContinuityGrace
-
-	s.OnlineAt = time.Now()
-	s.IsOnline = true
-	if freshBroadcast {
-		s.Stream.InitWatchStreak()
-	}
-	events.Record(events.TypeStreamerOnline, s.Username, "")
-	return true
+	s.StreamUpTime = t
 }
 
 func (s *Streamer) UpdateHistory(reasonCode string, earned int) {
@@ -203,12 +462,16 @@ func (s *Streamer) StreamUpElapsed() bool {
 	return s.StreamUpTime.IsZero() || time.Since(s.StreamUpTime) > 2*time.Minute
 }
 
+// DropsCondition reports drop-farming eligibility for confirmed-online streamers
+// only. Unknown yields false (fail closed), but note SetUnknown never clears the
+// campaign IDs, and the watcher retains an already-farming slot during a transient
+// unknown — so a brief blip does not lose drop progress.
 func (s *Streamer) DropsCondition() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	return s.Settings.ClaimDrops &&
-		s.IsOnline &&
+		s.Status == StatusOnline &&
 		len(s.Stream.GetCampaignIDs()) > 0
 }
 
@@ -426,10 +689,16 @@ func (s *Streamer) GetOfflineAt() time.Time {
 	return s.OfflineAt
 }
 
+// GetIsOnline is a derived compatibility helper: it reports CONFIRMED online
+// only (Status == StatusOnline). Both unknown and offline return false, so every
+// risky-action gate (predictions, raids, chat join, drops, watcher new-slot
+// selection, bonus polling) fails closed on unknown automatically. Offline must
+// NEVER be derived as !GetIsOnline() — a caller needing confirmed-offline must
+// test GetStatus() == StatusOffline.
 func (s *Streamer) GetIsOnline() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.IsOnline
+	return s.Status == StatusOnline
 }
 
 func (s *Streamer) GetChannelPoints() int {

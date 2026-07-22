@@ -21,7 +21,9 @@ type fakeStreamerAPI struct{}
 
 func (fakeStreamerAPI) GetChannelID(username string) (string, error)    { return "chan-" + username, nil }
 func (fakeStreamerAPI) LoadChannelPointsContext(*models.Streamer) error { return nil }
-func (fakeStreamerAPI) CheckStreamerOnline(*models.Streamer)            {}
+func (fakeStreamerAPI) CheckStreamerOnline(*models.Streamer) models.StatusTransition {
+	return models.StatusTransition{}
+}
 
 // fakeDropsGQL satisfies the drops tracker's twitchClient slice. The dashboard
 // is empty and one in-progress campaign is recovered from the inventory, so a
@@ -146,7 +148,7 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	}
 	// Make beta a live candidate BEFORE the loops observe it (no concurrent
 	// writes): online, streaming the recovered campaign's game.
-	beta.IsOnline = true
+	beta.SetConfirmedOnline()
 	beta.Stream.Game = &models.Game{ID: "game-wot", Name: "World of Tanks"}
 	beta.Stream.CampaignIDs = []string{"campaign-wot"}
 

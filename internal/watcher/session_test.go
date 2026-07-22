@@ -295,7 +295,7 @@ func TestAvoidedChannelExcludedFromSelection(t *testing.T) {
 	avoid := &staticAvoid{}
 	avoid.set(w.streamers[0].Username, true)
 	for _, s := range w.streamers {
-		s.SetOnline()
+		s.SetConfirmedOnline()
 		s.OnlineAt = time.Now().Add(-time.Minute)
 	}
 

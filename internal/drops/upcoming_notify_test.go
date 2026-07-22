@@ -98,7 +98,7 @@ func TestFutureCampaignNotAssignedToStreamer(t *testing.T) {
 	uS, uD := futurePair("fut", "Future", "27546", "World of Tanks")
 	streamer := models.NewStreamer("wot_streamer", models.StreamerSettings{ClaimDrops: true})
 	streamer.ChannelID = "chan-1"
-	streamer.IsOnline = true
+	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = &models.Game{ID: "27546", Name: "World of Tanks"}
 	streamer.Stream.CampaignIDs = []string{"fut"}
 

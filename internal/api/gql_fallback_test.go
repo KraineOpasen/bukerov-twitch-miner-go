@@ -245,11 +245,12 @@ func TestClientIDFallbackAllFail(t *testing.T) {
 	}
 }
 
-// TestCheckStreamerOnlineStaleHashDoesNotFlapOffline verifies the review's HIGH
-// finding fix: a stale VideoPlayerStreamInfoOverlayChannel hash
+// TestCheckStreamerOnlineStaleHashDoesNotFlapOffline verifies the tri-state
+// contract: a stale VideoPlayerStreamInfoOverlayChannel hash
 // (PersistedQueryNotFound during a stream refresh) must NOT flap an online
-// streamer offline — its online state is preserved for PubSub / the next check
-// to settle.
+// streamer OFFLINE. Under tri-state it becomes UNKNOWN (not offline, not
+// online), preserving OfflineAt and the last-known stream so PubSub / the next
+// check settle it; a recovery back to online is then an event-free continuation.
 func TestCheckStreamerOnlineStaleHashDoesNotFlapOffline(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		// The stream-info refresh (VideoPlayerStreamInfoOverlayChannel) is stale.
@@ -258,15 +259,28 @@ func TestCheckStreamerOnlineStaleHashDoesNotFlapOffline(t *testing.T) {
 	})
 
 	s := newTestStreamer("onlinestreamer")
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	if !s.GetIsOnline() {
 		t.Fatal("precondition: streamer should start online")
 	}
+	offlineBefore := s.GetOfflineAt()
 
-	c.CheckStreamerOnline(s)
+	tr := c.CheckStreamerOnline(s)
 
-	if !s.GetIsOnline() {
+	if s.GetStatus() == models.StatusOffline {
 		t.Fatal("a stale stream-info hash must not flap an online streamer offline")
+	}
+	if s.GetStatus() != models.StatusUnknown {
+		t.Fatalf("PersistedQueryNotFound during refresh should mark the streamer unknown, got %v", s.GetStatus())
+	}
+	if r := s.GetStatusReason(); r != models.ReasonPersistedQueryMissing {
+		t.Errorf("expected reason %q, got %q", models.ReasonPersistedQueryMissing, r)
+	}
+	if tr.OfflineConfirmed {
+		t.Error("an inconclusive refresh must not report a confirmed-offline transition")
+	}
+	if s.GetOfflineAt() != offlineBefore {
+		t.Error("OfflineAt must be preserved across an unknown transition")
 	}
 }
 

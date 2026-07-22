@@ -332,6 +332,7 @@
 .watch-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
 .watch-dot.on { background: var(--color-online); box-shadow: 0 0 6px rgba(139,127,209,0.8); }
 .watch-dot.queue { background: transparent; border: 1.5px solid var(--color-neutral-500); }
+.watch-dot.unknown { background: transparent; border: 1.5px dashed var(--color-event); }
 
 /* Responsive, container-reactive card grid: ~6 cols @2560 down to 1 @390,
    never overflows horizontally. */
@@ -360,6 +361,11 @@
 .s-card.state-queued { border-style: dashed; }
 .s-card.state-offline { border-color: var(--color-offline); }
 .s-card.state-disabled { border-color: var(--color-offline); opacity: 0.6; border-style: dotted; }
+/* Unknown (unconfirmed) status: distinguished by SHAPE (dashed amber border) and
+   icon/text, never by an offline-red colour. `unconfirmed` layers the same dashed
+   cue onto a still-watching card during a transient blip. */
+.s-card.state-unknown { border-color: var(--color-event); border-style: dashed; }
+.s-card.unconfirmed { border-style: dashed; }
 
 .s-name { color: var(--color-streamer); font-weight: 600; }
 .s-points { color: var(--color-neutral-100); }
@@ -384,6 +390,8 @@
 .badge-prefer { background: rgba(127,168,140,0.18); color: var(--color-success); }
 .badge-avoid { background: rgba(201,123,99,0.18); color: var(--color-danger); }
 .badge-event { background: rgba(217,162,92,0.16); color: var(--color-event); }
+.badge-unknown { background: rgba(217,162,92,0.14); color: var(--color-event); }
+.status-unavailable { color: var(--color-event); }
 .badge-gain { color: var(--color-success); }
 
 /* Progress bars. */

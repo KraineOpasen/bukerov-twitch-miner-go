@@ -482,7 +482,7 @@ func TestGameFilterRuntimeUpdateClearsRestrictedDropAssignment(t *testing.T) {
 	game := &models.Game{ID: "game-foreign", Name: "War Thunder"}
 	streamer := models.NewStreamer("wt_streamer", models.StreamerSettings{ClaimDrops: true})
 	streamer.ChannelID = "chan-foreign"
-	streamer.IsOnline = true
+	streamer.SetConfirmedOnline()
 	streamer.Stream.Game = game
 	streamer.Stream.CampaignIDs = []string{"campaign-wt"}
 

@@ -11,7 +11,9 @@ import (
 // candidate (online, settled, defaults).
 func newOnlineStreamer(name string) *models.Streamer {
 	s := models.NewStreamer(name, models.DefaultStreamerSettings())
-	s.IsOnline = true
+	s.SetConfirmedOnline()
+	// Backdate past the 30s "settle" guard so it is immediately a candidate.
+	s.OnlineAt = time.Now().Add(-time.Minute)
 	return s
 }
 
@@ -22,7 +24,8 @@ func newOnlineStreamer(name string) *models.Streamer {
 // would keep selecting from the startup snapshot forever.
 func TestUpdateStreamersAddsCandidateOnNextTick(t *testing.T) {
 	w, _ := newTestWatcher(1)
-	w.streamers[0].IsOnline = true
+	w.streamers[0].SetConfirmedOnline()
+	w.streamers[0].OnlineAt = time.Now().Add(-time.Minute)
 
 	added := newOnlineStreamer("streamerz")
 	newList := append(append([]*models.Streamer(nil), w.streamers...), added)
@@ -61,7 +64,8 @@ func TestUpdateStreamersAddsCandidateOnNextTick(t *testing.T) {
 func TestUpdateStreamersRemovalFreesSlotOnNextTick(t *testing.T) {
 	w, online := newTestWatcher(2)
 	for _, s := range w.streamers {
-		s.IsOnline = true
+		s.SetConfirmedOnline()
+		s.OnlineAt = time.Now().Add(-time.Minute)
 	}
 
 	watched := w.selectStreamersToWatch(online)

@@ -16,7 +16,14 @@ import (
 )
 
 type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
-type StatusHandler func(streamer string, online bool)
+
+// StatusHandler is notified of an authoritative streamer status transition. It
+// carries the typed tri-state status (never a bool), so 'unknown' is never
+// silently coerced to offline/false through the callback boundary. It fires ONLY
+// on genuine confirmed transitions — StatusOnline on a confirmed online, StatusOffline
+// on an authoritative stream-down — and is NEVER invoked for the unknown path, so
+// a transient check failure can never drive an offline notification.
+type StatusHandler func(streamer string, status models.StreamerStatus)
 type AuthErrorHandler func(err error)
 
 // BetHealthDecision is the injected transport-health verdict for one automatic
@@ -97,6 +104,16 @@ type predictionPlacer interface {
 	PlacePredictionBet(event *models.EventPrediction, outcomeID string, amount int) error
 }
 
+// streamChecker is the narrow slice of the Twitch client the video-playback
+// handler needs: a best-effort metadata refresh (after a stream-up) and a full
+// stream-status re-check (after a viewcount). Kept as an interface so the
+// tri-state status wiring can be unit-tested without real Twitch calls;
+// *api.TwitchClient satisfies it.
+type streamChecker interface {
+	UpdateStream(streamer *models.Streamer) error
+	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
+}
+
 // roundControl is the per-round transient state backing manual betting and the
 // per-round auto-bet suppression. One entry lives alongside each tracked
 // prediction in the pool and is removed together with it, so the state can
@@ -122,6 +139,7 @@ type WebSocketPool struct {
 	clients     []*WebSocketClient
 	client      *api.TwitchClient
 	placer      predictionPlacer
+	checker     streamChecker
 	streamers   []*models.Streamer
 	authToken   string
 	settings    config.RateLimitSettings
@@ -155,6 +173,7 @@ func NewWebSocketPool(twitchClient *api.TwitchClient, authToken string, streamer
 	return &WebSocketPool{
 		client:      twitchClient,
 		placer:      twitchClient,
+		checker:     twitchClient,
 		streamers:   streamers,
 		authToken:   authToken,
 		settings:    settings,
@@ -506,25 +525,48 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models.Streamer) {
 	switch msg.Type {
 	case "stream-up":
-		streamer.StreamUpTime = time.Now()
+		// stream-up is an authoritative positive live signal. Confirm online first
+		// (so risky actions and the dashboard reflect it immediately), THEN do a
+		// best-effort metadata refresh — a refresh failure must NOT cancel the
+		// authoritative online signal, so its result is intentionally ignored here.
+		streamer.SetStreamUpTime(time.Now())
+		tr := streamer.SetConfirmedOnline()
+		if tr.OnlineConfirmed {
+			slog.Info("Streamer is online",
+				"streamer", streamer.Username,
+				"channelID", streamer.ChannelID,
+				"broadcastID", streamer.Stream.GetBroadcastID())
+			if p.onStatusChange != nil {
+				p.onStatusChange(streamer.Username, models.StatusOnline)
+			}
+		}
+		if p.checker != nil {
+			if err := p.checker.UpdateStream(streamer); err != nil {
+				slog.Debug("Metadata refresh after stream-up failed; keeping authoritative online",
+					"streamer", streamer.Username)
+			}
+		}
 	case "stream-down":
-		if streamer.GetIsOnline() {
+		// Authoritative offline. Fires from online OR unknown so a stream-down
+		// during an unknown blip still settles offline and releases the slot.
+		if streamer.GetStatus() != models.StatusOffline {
 			bid := streamer.Stream.GetBroadcastID()
-			streamer.SetOffline()
+			tr := streamer.SetConfirmedOffline()
 			slog.Info("Streamer went offline",
 				"streamer", streamer.Username,
 				"channelID", streamer.ChannelID,
 				"broadcastID", bid)
-			if p.onStatusChange != nil {
-				p.onStatusChange(streamer.Username, false)
+			if tr.Changed() && p.onStatusChange != nil {
+				p.onStatusChange(streamer.Username, models.StatusOffline)
 			}
 		}
 	case "viewcount":
-		wasOnline := streamer.GetIsOnline()
-		if streamer.StreamUpElapsed() {
-			p.client.CheckStreamerOnline(streamer)
-			if !wasOnline && streamer.GetIsOnline() && p.onStatusChange != nil {
-				p.onStatusChange(streamer.Username, true)
+		// A viewcount can only CONFIRM online via a successful GQL check or leave
+		// the status unknown on failure — it never drives a false offline.
+		if p.checker != nil && streamer.StreamUpElapsed() {
+			tr := p.checker.CheckStreamerOnline(streamer)
+			if tr.OnlineConfirmed && p.onStatusChange != nil {
+				p.onStatusChange(streamer.Username, models.StatusOnline)
 			}
 		}
 	}
@@ -532,6 +574,12 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 
 func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer) {
 	if msg.Type != "raid_update_v2" || !streamer.Settings.FollowRaid {
+		return
+	}
+
+	// Following a raid is a live-state-dependent action: fail closed on anything
+	// but confirmed online, so a transient unknown never triggers a raid follow.
+	if !streamer.GetIsOnline() {
 		return
 	}
 

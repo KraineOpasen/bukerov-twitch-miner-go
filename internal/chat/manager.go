@@ -36,16 +36,23 @@ func (m *ChatManager) ToggleChat(streamer *models.Streamer) {
 	case models.ChatNever:
 		m.leaveChat(streamer)
 	case models.ChatOnline:
-		if streamer.GetIsOnline() {
+		// Join only on CONFIRMED online; leave only on CONFIRMED offline. On
+		// UNKNOWN take no action, so an online→unknown blip does not tear down an
+		// already-established IRC connection over transient uncertainty.
+		switch streamer.GetStatus() {
+		case models.StatusOnline:
 			m.joinChat(streamer)
-		} else {
+		case models.StatusOffline:
 			m.leaveChat(streamer)
 		}
 	case models.ChatOffline:
-		if streamer.GetIsOnline() {
-			m.leaveChat(streamer)
-		} else {
+		// Join only on CONFIRMED offline; leave on CONFIRMED online. UNKNOWN is
+		// NOT treated as offline, so no offline-specific join happens on it.
+		switch streamer.GetStatus() {
+		case models.StatusOffline:
 			m.joinChat(streamer)
+		case models.StatusOnline:
+			m.leaveChat(streamer)
 		}
 	}
 }

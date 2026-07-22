@@ -18,7 +18,7 @@ func TestSelectByPriorityFavorsChannelRestrictedDrop(t *testing.T) {
 	w.priorities = []config.Priority{config.PriorityDrops}
 
 	for _, idx := range online {
-		w.streamers[idx].IsOnline = true
+		w.streamers[idx].SetConfirmedOnline()
 		w.streamers[idx].Stream.CampaignIDs = []string{"campaign-unrestricted"}
 	}
 

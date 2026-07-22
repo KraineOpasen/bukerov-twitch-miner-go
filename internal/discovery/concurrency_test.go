@@ -18,11 +18,11 @@ func (f *safeCampaigns) Campaigns() []*models.Campaign { return f.campaigns }
 
 type safeClient struct{ streams []api.DirectoryStream }
 
-func (f *safeClient) CheckStreamerOnline(s *models.Streamer) {
+func (f *safeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	if len(s.Stream.CampaignIDs) == 0 {
 		s.Stream.CampaignIDs = []string{"camp-g1"} // only the watch goroutine calls this
 	}
-	s.SetOnline()
+	return s.SetConfirmedOnline()
 }
 
 func (f *safeClient) GetDirectoryStreams(string, int) ([]api.DirectoryStream, error) {

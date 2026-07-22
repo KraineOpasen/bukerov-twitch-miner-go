@@ -55,6 +55,13 @@
     </div>
     {{end}}
 
+    {{if .TrackedUnknown}}
+    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.unknown" }} · {{len .TrackedUnknown}}</h3>
+    <div class="card-grid mb-6">
+        {{range .TrackedUnknown}}{{template "overview_card" .}}{{end}}
+    </div>
+    {{end}}
+
     {{if .TrackedOffline}}
     <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.offline" }} · {{len .TrackedOffline}}</h3>
     <div class="card-grid mb-6">
@@ -69,7 +76,7 @@
     </div>
     {{end}}
 
-    {{if not (or .TrackedLive .TrackedOffline .Untracked)}}
+    {{if not (or .TrackedLive .TrackedUnknown .TrackedOffline .Untracked)}}
     <p class="text-neutral-400">{{ t "grid.empty" }}</p>
     {{end}}
 </section>
@@ -196,7 +203,7 @@
 
 
 {{define "overview_card"}}
-<article class="s-card state-{{.State}}" tabindex="0" role="button"
+<article class="s-card state-{{.State}}{{if .Unconfirmed}} unconfirmed{{end}}" tabindex="0" role="button"
          data-card-streamer="{{.Name}}"
          aria-label="{{.Name}}. {{ t "card.open_events" }}">
     <div class="flex items-start justify-between gap-2 mb-1.5">
@@ -213,10 +220,13 @@
     <div class="flex items-center gap-2 mb-2">
         {{if eq .State "watching"}}
         <span class="watch-dot on"></span><span class="badge badge-watching">{{ t "card.watching" }}</span>
+        {{if .Unconfirmed}}<span class="badge badge-unknown" title="{{ t "card.status_unavailable" }}">{{ t "card.unconfirmed" }}</span>{{end}}
         {{else if eq .State "queued"}}
         <span class="watch-dot queue"></span><span class="badge badge-queued">{{ t "card.queued" }}</span>
         {{else if eq .State "disabled"}}
         <span class="badge badge-disabled" title="{{.WatchReason}}">{{ t "card.disabled" }}</span>
+        {{else if eq .State "unknown"}}
+        <span class="watch-dot unknown"></span><span class="badge badge-unknown" title="{{ t "card.status_unavailable" }}">{{ t "card.status_unknown" }}</span>
         {{else}}
         <span class="badge badge-offline">{{ t "card.offline" }}</span>
         {{end}}
@@ -229,7 +239,7 @@
         {{if .PointsToday}}<span class="text-neutral-400">· <span class="num">+{{.PointsToday}}</span> {{ t "ov.today" }}</span>{{end}}
     </div>
 
-    {{if .IsLive}}
+    {{if or .IsLive .Watching}}
     {{if .Title}}
     <div class="s-title" title="{{.Title}}">{{.Title}}</div>
     {{end}}
@@ -261,7 +271,10 @@
     </div>
     {{end}}
     {{else}}
-    <div class="text-xs text-neutral-400 mt-2">{{if .OfflineDuration}}{{ t "card.offline_for" }} {{.OfflineDuration}}{{end}}</div>
+    <div class="text-xs text-neutral-400 mt-2">
+        {{if .Unconfirmed}}<span class="status-unavailable">{{ t "card.status_unavailable" }}</span>
+        {{else if .OfflineDuration}}{{ t "card.offline_for" }} {{.OfflineDuration}}{{end}}
+    </div>
     {{end}}
 
     {{if .HasGoal}}

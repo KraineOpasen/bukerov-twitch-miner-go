@@ -100,13 +100,17 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 		configOrder[st.Username] = i
 	}
 
-	var trackedLive, trackedOffline, untracked []StreamerInfo
+	var trackedLive, trackedUnknown, trackedOffline, untracked []StreamerInfo
 
 	for i := range streamers {
 		if st, ok := streamerMap[streamers[i].Name]; ok {
-			streamers[i].IsLive = st.GetIsOnline()
+			status := st.GetStatus()
+			streamers[i].Status = status.String()
+			streamers[i].IsLive = status == models.StatusOnline
+			streamers[i].Unconfirmed = status == models.StatusUnknown
 			streamers[i].Preference = string(st.GetSettings().Preference)
-			if streamers[i].IsLive {
+			switch status {
+			case models.StatusOnline:
 				streamers[i].LiveDuration = util.FormatDuration(time.Since(st.GetOnlineAt()))
 				streamers[i].GameName = st.Stream.GameName()
 				streamers[i].Title = st.Stream.GetTitle()
@@ -123,7 +127,10 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				trackedLive = append(trackedLive, streamers[i])
-			} else {
+			case models.StatusUnknown:
+				// Unknown: distinct group, no offline duration (never claim offline).
+				trackedUnknown = append(trackedUnknown, streamers[i])
+			default:
 				offlineAt := st.GetOfflineAt()
 				if !offlineAt.IsZero() {
 					streamers[i].OfflineDuration = util.FormatDuration(time.Since(offlineAt))
@@ -138,6 +145,9 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(trackedLive, func(i, j int) bool {
 		return configOrder[trackedLive[i].Name] < configOrder[trackedLive[j].Name]
 	})
+	sort.Slice(trackedUnknown, func(i, j int) bool {
+		return configOrder[trackedUnknown[i].Name] < configOrder[trackedUnknown[j].Name]
+	})
 	sort.Slice(trackedOffline, func(i, j int) bool {
 		return configOrder[trackedOffline[i].Name] < configOrder[trackedOffline[j].Name]
 	})
@@ -147,6 +157,7 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 
 	gridData := StreamerGridData{
 		TrackedLive:    trackedLive,
+		TrackedUnknown: trackedUnknown,
 		TrackedOffline: trackedOffline,
 		Untracked:      untracked,
 	}

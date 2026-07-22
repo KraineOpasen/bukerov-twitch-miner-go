@@ -14,7 +14,7 @@ import (
 func TestNoteStreakProgressSilentAfterGrantOnSameBroadcast(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
-	s.IsOnline = true
+	s.SetConfirmedOnline()
 
 	s.Stream.Update("bid-1", "t", nil, nil, 1)
 	s.UpdateHistory("WATCH_STREAK", 300) // grant lands on bid-1

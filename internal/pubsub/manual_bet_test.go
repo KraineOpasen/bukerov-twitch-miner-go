@@ -49,7 +49,7 @@ func (f *fakePlacer) callCount() int {
 func newTestStreamer(points int) *models.Streamer {
 	s := models.NewStreamer("streamer", models.DefaultStreamerSettings())
 	s.ChannelID = "chan-1"
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	s.SetChannelPoints(points)
 	return s
 }
@@ -213,7 +213,7 @@ func TestManualBetCanceledRound(t *testing.T) {
 func TestManualBetOfflineStreamer(t *testing.T) {
 	pool := newTestPool(&fakePlacer{})
 	s := newTestStreamer(100000)
-	s.SetOffline()
+	s.SetConfirmedOffline()
 	addRound(pool, s, "e1")
 
 	_, err := pool.PlaceManualBet("e1", "o1", 500)

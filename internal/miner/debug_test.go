@@ -124,7 +124,9 @@ type snapshotStreamerClient struct{}
 
 func (snapshotStreamerClient) GetChannelID(u string) (string, error)           { return "ch-" + u, nil }
 func (snapshotStreamerClient) LoadChannelPointsContext(*models.Streamer) error { return nil }
-func (snapshotStreamerClient) CheckStreamerOnline(*models.Streamer)            {}
+func (snapshotStreamerClient) CheckStreamerOnline(*models.Streamer) models.StatusTransition {
+	return models.StatusTransition{}
+}
 
 // TestBuildDebugSnapshotIncludesBroadcastID guards that the per-streamer debug
 // snapshot surfaces the Twitch broadcast ID for an online streamer, so an
@@ -138,7 +140,7 @@ func TestBuildDebugSnapshotIncludesBroadcastID(t *testing.T) {
 	if s == nil {
 		t.Fatal("streamer not loaded")
 	}
-	s.SetOnline()
+	s.SetConfirmedOnline()
 	s.Stream.Update("bc-xyz-9", "Ranked", nil, nil, 1234)
 
 	m := &Miner{config: &config.Config{Username: "tester"}, streamers: mgr}

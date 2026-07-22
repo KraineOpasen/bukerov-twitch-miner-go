@@ -11,7 +11,7 @@ import (
 func TestGetOnlineStreamersExcludesDisabled(t *testing.T) {
 	w, _ := newTestWatcher(3)
 	for _, s := range w.streamers {
-		s.SetOnline()
+		s.SetConfirmedOnline()
 		// Backdate so the 30s "settle" guard doesn't exclude them.
 		s.OnlineAt = time.Now().Add(-time.Minute)
 	}
@@ -36,7 +36,7 @@ func TestGetOnlineStreamersExcludesDisabled(t *testing.T) {
 // online (this is what distinguishes it from "avoid").
 func TestDisabledExcludedEvenWhenOnlyOnline(t *testing.T) {
 	w, _ := newTestWatcher(1)
-	w.streamers[0].SetOnline()
+	w.streamers[0].SetConfirmedOnline()
 	w.streamers[0].OnlineAt = time.Now().Add(-time.Minute)
 
 	ds := w.streamers[0].GetSettings()

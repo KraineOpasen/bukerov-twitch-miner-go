@@ -196,7 +196,14 @@ type PostponedSwapOut struct {
 
 // StreamerState is the per-streamer section of the snapshot.
 type StreamerState struct {
-	Username      string `json:"username"`
+	Username string `json:"username"`
+	// Status is the tri-state liveness: "unknown" | "online" | "offline".
+	Status string `json:"status"`
+	// StatusReason is a privacy-safe code for the current status (mainly why it
+	// is unknown), e.g. "transport_error", "persisted_query_not_found". Never
+	// carries any raw payload, token, cookie, header, or claim identifier.
+	StatusReason string `json:"statusReason,omitempty"`
+	// Online is a derived back-compat flag: true ONLY for confirmed online.
 	Online        bool   `json:"online"`
 	Watching      bool   `json:"watching"`
 	Reason        string `json:"reason"`
