@@ -16,7 +16,7 @@ func streamerWithChat(name string, mode models.ChatPresence) *models.Streamer {
 // already-established IRC connection, so we can observe whether ToggleChat leaves
 // it (removes it) or retains it.
 func (m *ChatManager) seedConnection(s *models.Streamer) {
-	m.clients[s.Username] = NewIRCClient(m.username, m.token, s, m.logger, false, m.mentionHandler)
+	m.clients[s.Username] = NewIRCClient(m.username, m.tokenFn, s, m.logger, false, m.mentionHandler)
 }
 
 func (m *ChatManager) hasConnection(username string) bool {
@@ -30,7 +30,7 @@ func (m *ChatManager) hasConnection(username string) bool {
 // ChatOnline, an online→unknown blip must NOT tear down an established IRC
 // connection over transient uncertainty.
 func TestChatOnlineUnknownKeepsConnection(t *testing.T) {
-	m := NewChatManager("bot", "tok", nil, false, nil)
+	m := NewChatManager("bot", StaticToken("tok"), nil, false, nil)
 	s := streamerWithChat("chan", models.ChatOnline)
 	s.SetConfirmedOnline()
 	m.seedConnection(s)
@@ -45,7 +45,7 @@ func TestChatOnlineUnknownKeepsConnection(t *testing.T) {
 
 // TestChatOnlineOfflineLeaves confirms an authoritative offline still leaves chat.
 func TestChatOnlineOfflineLeaves(t *testing.T) {
-	m := NewChatManager("bot", "tok", nil, false, nil)
+	m := NewChatManager("bot", StaticToken("tok"), nil, false, nil)
 	s := streamerWithChat("chan", models.ChatOnline)
 	s.SetConfirmedOnline()
 	m.seedConnection(s)
@@ -63,7 +63,7 @@ func TestChatOnlineOfflineLeaves(t *testing.T) {
 // established while confirmed-offline is retained through an unknown blip and no
 // offline-specific action fires.
 func TestChatOfflineUnknownNotTreatedAsOffline(t *testing.T) {
-	m := NewChatManager("bot", "tok", nil, false, nil)
+	m := NewChatManager("bot", StaticToken("tok"), nil, false, nil)
 	s := streamerWithChat("chan", models.ChatOffline)
 	s.SetConfirmedOffline()
 	m.seedConnection(s) // joined because it was confirmed offline
@@ -78,7 +78,7 @@ func TestChatOfflineUnknownNotTreatedAsOffline(t *testing.T) {
 
 // TestChatOfflineOnlineLeaves confirms ChatOffline leaves when confirmed online.
 func TestChatOfflineOnlineLeaves(t *testing.T) {
-	m := NewChatManager("bot", "tok", nil, false, nil)
+	m := NewChatManager("bot", StaticToken("tok"), nil, false, nil)
 	s := streamerWithChat("chan", models.ChatOffline)
 	s.SetConfirmedOffline()
 	m.seedConnection(s)

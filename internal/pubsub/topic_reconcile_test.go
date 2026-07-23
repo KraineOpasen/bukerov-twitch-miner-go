@@ -14,7 +14,7 @@ import (
 // dials: send() no-ops on the nil conn, so Listen/Unlisten topic bookkeeping
 // is exercised without a network.
 func newFakeOpenClient(index int) *WebSocketClient {
-	ws := NewWebSocketClient(index, "", 60, 60, nil, nil)
+	ws := NewWebSocketClient(index, nil, 60, 60, nil, nil)
 	ws.isOpened = true
 	return ws
 }
@@ -215,7 +215,7 @@ func TestEnsureTopicLeavesUserTopicsAlone(t *testing.T) {
 // parked in pendingTopics) must stick — the post-connect replay re-checks the
 // field per topic and must not resurrect the removed subscription.
 func TestUnsubscribeDuringReconnectNotResurrectedByReplay(t *testing.T) {
-	ws := NewWebSocketClient(0, "", 60, 60, nil, nil)
+	ws := NewWebSocketClient(0, nil, 60, 60, nil, nil)
 	raid := NewTopic(TopicRaid, "chan-1")
 	keep := NewTopic(TopicVideoPlaybackByID, "chan-1")
 
@@ -251,7 +251,7 @@ func TestUnsubscribeDuringReconnectNotResurrectedByReplay(t *testing.T) {
 // the dead conn); the post-connect replay promotes it exactly once, and the
 // parked topic still counts toward connection capacity and dedup scans.
 func TestTopicListenDuringReconnectParksUntilReplay(t *testing.T) {
-	ws := NewWebSocketClient(0, "", 60, 60, nil, nil)
+	ws := NewWebSocketClient(0, nil, 60, 60, nil, nil)
 	topic := NewTopic(TopicRaid, "chan-1")
 
 	// Mid-reconnect (or pre-connect): the conn is not usable.

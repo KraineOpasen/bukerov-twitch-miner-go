@@ -196,12 +196,15 @@ type roundControl struct {
 }
 
 type WebSocketPool struct {
-	clients     []*WebSocketClient
-	actor       channelActor
-	placer      predictionPlacer
-	checker     streamChecker
-	streamers   []*models.Streamer
-	authToken   string
+	clients   []*WebSocketClient
+	actor     channelActor
+	placer    predictionPlacer
+	checker   streamChecker
+	streamers []*models.Streamer
+	// tokenFn supplies the current auth snapshot to every connection this pool
+	// creates (including reconnect-era ones), so user-topic LISTENs always
+	// carry the current token rather than a startup-time copy.
+	tokenFn     AuthTokenProvider
 	settings    config.RateLimitSettings
 	predictions map[string]*models.EventPrediction
 	control     map[string]*roundControl
@@ -234,13 +237,13 @@ type WebSocketPool struct {
 	mu sync.RWMutex
 }
 
-func NewWebSocketPool(twitchClient *api.TwitchClient, authToken string, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
+func NewWebSocketPool(twitchClient *api.TwitchClient, tokenFn AuthTokenProvider, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
 	return &WebSocketPool{
 		actor:       twitchClient,
 		placer:      twitchClient,
 		checker:     twitchClient,
 		streamers:   streamers,
-		authToken:   authToken,
+		tokenFn:     tokenFn,
 		settings:    settings,
 		predictions: make(map[string]*models.EventPrediction),
 		control:     make(map[string]*roundControl),
@@ -257,6 +260,24 @@ func (p *WebSocketPool) SetStatusHandler(handler StatusHandler) {
 
 func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
 	p.onAuthError = handler
+}
+
+// ReauthorizeUserTopics runs one bounded post-rotation sweep: every pool
+// connection re-LISTENs its wire-applied user topics with the current auth
+// snapshot. Called by the miner's rotation callback after a new credential
+// generation is published — exactly once per rotation, never on a healthy
+// hourly validation. Channel topics carry no auth_token and are untouched; the
+// topic ledger (applied/pending/debt) is not modified, so BKM-008
+// canonicalization invariants hold.
+func (p *WebSocketPool) ReauthorizeUserTopics() {
+	p.mu.RLock()
+	clients := make([]*WebSocketClient, len(p.clients))
+	copy(clients, p.clients)
+	p.mu.RUnlock()
+
+	for _, ws := range clients {
+		ws.RelistenUserTopics()
+	}
 }
 
 // SetBetResultHandler registers the sink for settled-bet records (ROI analytics).
@@ -465,7 +486,7 @@ func (p *WebSocketPool) connectNewClientLocked() (*WebSocketClient, error) {
 	if p.newClient != nil {
 		return p.newClient(len(p.clients))
 	}
-	ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
+	ws := NewWebSocketClient(len(p.clients), p.tokenFn, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
 	// Wire the reconnect counter before Connect() starts the read/ping loops,
 	// so the handler is set before any reconnect can fire.
 	ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
