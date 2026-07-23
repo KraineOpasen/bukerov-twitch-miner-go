@@ -9,8 +9,11 @@ import (
 )
 
 type ChatManager struct {
-	username         string
-	token            string
+	username string
+	// tokenFn supplies the CURRENT OAuth token to every IRC client this
+	// manager creates, so joins and reconnects after a token rotation
+	// authenticate with the rotated token. Set once, immutable.
+	tokenFn          func() string
 	clients          map[string]*IRCClient
 	logger           ChatLogger
 	globalChatLogsOn bool
@@ -24,10 +27,10 @@ type ChatManager struct {
 	mu sync.RWMutex
 }
 
-func NewChatManager(username, token string, logger ChatLogger, globalChatLogsOn bool, mentionHandler MentionHandler) *ChatManager {
+func NewChatManager(username string, tokenFn func() string, logger ChatLogger, globalChatLogsOn bool, mentionHandler MentionHandler) *ChatManager {
 	return &ChatManager{
 		username:         username,
-		token:            token,
+		tokenFn:          tokenFn,
 		clients:          make(map[string]*IRCClient),
 		logger:           logger,
 		globalChatLogsOn: globalChatLogsOn,
@@ -87,7 +90,7 @@ func (m *ChatManager) joinChat(streamer *models.Streamer) {
 	}
 
 	logChat := m.shouldLogChat(streamer)
-	client := NewIRCClient(m.username, m.token, streamer, m.logger, logChat, m.mentionHandler)
+	client := NewIRCClient(m.username, m.tokenFn, streamer, m.logger, logChat, m.mentionHandler)
 	if m.dialFn != nil {
 		client.dialFn = m.dialFn
 	}

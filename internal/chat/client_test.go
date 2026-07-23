@@ -53,7 +53,7 @@ func (f *fakeTransport) dials() int32 { return atomic.LoadInt32(&f.dialCount) }
 
 func newTestClient(f *fakeTransport) *IRCClient {
 	streamer := &models.Streamer{Username: "somechannel"}
-	c := NewIRCClient("miner", "sometoken", streamer, nil, false, nil)
+	c := NewIRCClient("miner", func() string { return "sometoken" }, streamer, nil, false, nil)
 	c.dialFn = f.dial
 	return c
 }

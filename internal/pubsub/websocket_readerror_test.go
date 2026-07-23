@@ -100,7 +100,7 @@ func (ts *wsTestServer) serve(conn *websocket.Conn) {
 // pacing is observable without real seconds.
 func newTestClient(t *testing.T, url string, reconnectDelayMs int) *WebSocketClient {
 	t.Helper()
-	ws := NewWebSocketClient(0, "", 3600, reconnectDelayMs, nil, nil)
+	ws := NewWebSocketClient(0, nil, 3600, reconnectDelayMs, nil, nil)
 	ws.url = url
 	ws.delayUnit = time.Millisecond
 	t.Cleanup(ws.Close)

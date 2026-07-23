@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -84,6 +85,10 @@ type Miner struct {
 	// shutdownFn cancels the run context so an applied binary update can ask
 	// the miner to exit cleanly (exit 0) and let the supervisor restart it.
 	shutdownFn context.CancelFunc
+	// runCtx is the run-scoped context, captured in Run before any component
+	// starts. Auth recovery triggered from long-lived consumers (PubSub
+	// ERR_BADAUTH) is bound to it so shutdown releases recovery waiters.
+	runCtx context.Context
 
 	nextStreamCheck    time.Time
 	streamCheckTrigger chan struct{}
@@ -97,7 +102,11 @@ type Miner struct {
 	connectionDegraded       bool
 	connectionDegradedDetail string
 
-	authErrOnce sync.Once
+	// reauthNotified dedupes the operator "reauthorization required"
+	// notification per outage (guarded by mu). Unlike the old sync.Once it is
+	// RESET when a credential rotation succeeds, so a later, separate outage
+	// notifies again and a recovered session never keeps a stale banner.
+	reauthNotified bool
 
 	// autoRedeemState tracks in-memory auto-redeem runtime per streamer
 	// (points spent so far and which rewards were already redeemed in the
@@ -182,6 +191,7 @@ func (m *Miner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	m.shutdownFn = cancel
+	m.runCtx = ctx
 
 	if err := m.initialize(); err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
@@ -242,6 +252,9 @@ func (m *Miner) authenticate(ctx context.Context) error {
 	slog.Info("Authenticating with Twitch")
 
 	m.auth = auth.NewTwitchAuth(m.config.Username, m.deviceID)
+	// Recovery-owner work (refresh, device-flow polling) is bounded by the run
+	// context, not by whichever rejected request happened to trigger it.
+	m.auth.SetLifecycleContext(ctx)
 
 	if m.webServer != nil {
 		broadcaster := m.webServer.GetStatusBroadcaster()
@@ -259,7 +272,7 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		})
 	}
 
-	if err := m.auth.Login(); err != nil {
+	if err := m.auth.Login(ctx); err != nil {
 		return err
 	}
 
@@ -300,6 +313,15 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		// overlay would keep showing the last error until loadStreamers runs.
 		retryBroadcaster.SetStatus(web.StatusLoadingStreamers, "Loading streamers...")
 	}
+	// Explicit identity-binding guard: the token session's confirmed user ID
+	// (from /oauth2/validate or the stored record) must be the account the
+	// CONFIGURED username resolves to. Full rename reconciliation is BKM-006;
+	// this only refuses to silently bind another account's credentials to this
+	// profile (nothing is deleted — the operator decides).
+	if err := verifyIdentityBinding(m.auth.GetUserID(), userID); err != nil {
+		return fmt.Errorf("%w: stored credentials belong to a different Twitch account than %q; remove cookies/%s.json or fix the configured username",
+			err, m.config.Username, m.config.Username)
+	}
 	m.auth.SetUserID(userID)
 
 	if err := m.auth.SaveAuth(); err != nil {
@@ -335,15 +357,31 @@ func (m *Miner) loadStreamers() error {
 func (m *Miner) setupComponents(ctx context.Context) {
 	streamers := m.streamers.All()
 
-	m.wsPool = pubsub.NewWebSocketPool(m.client, m.auth.GetAuthToken(), streamers, m.config.RateLimits)
+	m.wsPool = pubsub.NewWebSocketPool(m.client, func() pubsub.AuthSnapshot {
+		snap := m.auth.Snapshot()
+		return pubsub.AuthSnapshot{Token: snap.AccessToken, Generation: snap.Generation}
+	}, streamers, m.config.RateLimits)
 	m.wsPool.SetMessageHandler(m.handlePubSubMessage)
 	m.wsPool.SetBetHealthGate(minerBetHealthGate{m})
 	m.wsPool.SetRiskSettings(m.config.PredictionRisk)
 	m.wsPool.SetStatusHandler(m.handleStatusChange)
-	m.wsPool.SetAuthErrorHandler(func(error) { m.handleAuthError() })
+	m.wsPool.SetAuthErrorHandler(m.handlePubSubAuthError)
 	if m.analyticsSvc != nil {
 		m.wsPool.SetBetResultHandler(m.recordBetResult)
 	}
+
+	// Registered AFTER m.wsPool is assigned (SetRotationCallback's mutex
+	// gives the flight goroutines a happens-before edge to that write, so the
+	// callback's m.wsPool read is race-free). After a successful credential
+	// rotation (refresh or device flow): clear any reauth-required state and
+	// run the bounded PubSub user-topic re-authorization sweep. IRC and GQL
+	// read the current token per dial/request and need no sweep. The callback
+	// receives only the generation number, never token material.
+	m.auth.SetRotationCallback(func(generation uint64) {
+		slog.Info("Twitch credentials rotated; re-authorizing PubSub user topics", "generation", generation)
+		m.clearReauthRequired()
+		m.wsPool.ReauthorizeUserTopics()
+	})
 
 	if m.config.EnableAnalytics {
 		if m.externalAnalytics && m.analyticsSvc != nil {
@@ -429,7 +467,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if chatLogsEnabled && m.analyticsSvc != nil {
 		chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
 	}
-	m.chatManager = chat.NewChatManager(m.config.Username, m.auth.GetAuthToken(), chatLogger, chatLogsEnabled, mentionHandler)
+	m.chatManager = chat.NewChatManager(m.config.Username, m.auth.GetAuthToken, chatLogger, chatLogsEnabled, mentionHandler)
 
 	var watchTimeStore *watcher.WatchTimeStore
 	if m.db != nil {
@@ -659,6 +697,10 @@ func (m *Miner) startMining(ctx context.Context) {
 	go m.healthWatchdogLoop(ctx)
 	go m.bonusPollLoop(ctx)
 	go m.subscriptionProbeLoop(ctx)
+	// Hourly token validation is a Twitch requirement (validate on startup —
+	// done inside Login — and hourly thereafter). One validator per session;
+	// it joins the shared single-flight recovery on an authoritative 401.
+	go m.auth.RunHourlyValidation(ctx)
 	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
 		go m.dailySummaryLoop(ctx)
 	}
@@ -919,28 +961,91 @@ func (m *Miner) recordBetResult(r pubsub.BetResult) {
 	})
 }
 
-// handleAuthError is called the first time a Twitch API request or PubSub
-// connection is rejected for an invalid/expired/revoked OAuth token. It logs
-// an ERROR, notifies Discord (if enabled), and surfaces a dashboard banner
-// telling the operator to reauthorize - fires once per process lifetime since
-// this codebase has no mid-run token refresh, so the miner needs a restart
-// and fresh login regardless of how many requests fail afterward.
+// verifyIdentityBinding refuses to bind credentials whose confirmed session
+// user ID belongs to a different account than the one the configured username
+// resolved to. An empty session ID (fresh login not yet bound) always passes.
+func verifyIdentityBinding(sessionUserID, resolvedUserID string) error {
+	if sessionUserID == "" || sessionUserID == resolvedUserID {
+		return nil
+	}
+	return auth.ErrIdentityMismatch
+}
+
+// handlePubSubAuthError reacts to a PubSub ERR_BADAUTH: it funnels the
+// rejected credential generation into the shared single-flight auth recovery
+// on a separate goroutine (the pool invokes this on a read-loop goroutine that
+// must not block on a refresh or a device flow). A stale BADAUTH for an
+// already-rotated generation returns immediately from Recover without a second
+// refresh; concurrent BADAUTHs from several sockets join the same flight. On
+// success the rotation callback runs the bounded user-topic re-authorization
+// sweep; only a DEFINITIVE recovery failure escalates to the reauth-required
+// path — a transient endpoint failure or a shutdown cancellation does not.
+func (m *Miner) handlePubSubAuthError(err error) {
+	var authErr *pubsub.AuthError
+	rejectedGen := m.auth.Generation()
+	if errors.As(err, &authErr) {
+		rejectedGen = authErr.Generation
+	}
+
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		if _, rerr := m.auth.Recover(ctx, rejectedGen); rerr != nil {
+			transient := errors.Is(rerr, auth.ErrAuthTransient) ||
+				errors.Is(rerr, context.Canceled) ||
+				errors.Is(rerr, context.DeadlineExceeded)
+			slog.Error("PubSub auth rejection: recovery failed", "error", rerr, "retryable", transient)
+			if !transient {
+				m.handleAuthError()
+			}
+		}
+	}()
+}
+
+// handleAuthError marks the session as needing reauthorization after a
+// DEFINITIVE recovery failure (recovery itself already ran and could not
+// restore credentials). Notified at most once per outage; a subsequent
+// successful rotation clears the state (see clearReauthRequired) so the banner
+// never outlives the outage and a later separate outage notifies again.
 func (m *Miner) handleAuthError() {
-	m.authErrOnce.Do(func() {
-		slog.Error("Twitch authorization expired or was revoked - reauthorization required")
-
-		m.mu.Lock()
-		m.reauthRequired = true
+	m.mu.Lock()
+	if m.reauthNotified {
 		m.mu.Unlock()
+		return
+	}
+	m.reauthNotified = true
+	m.reauthRequired = true
+	m.mu.Unlock()
 
-		if m.notifications != nil {
-			m.notifications.NotifyReauthRequired("Restart the miner and complete the Twitch device login again.")
-		}
+	slog.Error("Twitch authorization expired or was revoked - reauthorization required")
 
-		if m.webServer != nil {
-			m.webServer.GetStatusBroadcaster().SetReauthRequired(true, "Twitch authorization expired or was revoked. Restart the miner and log in again.")
-		}
-	})
+	if m.notifications != nil {
+		m.notifications.NotifyReauthRequired("Open the dashboard to complete the Twitch device login (or restart the miner).")
+	}
+
+	if m.webServer != nil {
+		m.webServer.GetStatusBroadcaster().SetReauthRequired(true, "Twitch authorization expired or was revoked. Open the dashboard to complete the device login, or restart the miner.")
+	}
+}
+
+// clearReauthRequired retracts the reauthorization banner/alert state after a
+// successful credential rotation.
+func (m *Miner) clearReauthRequired() {
+	m.mu.Lock()
+	wasRequired := m.reauthRequired
+	m.reauthRequired = false
+	m.reauthNotified = false
+	m.mu.Unlock()
+
+	if !wasRequired {
+		return
+	}
+	slog.Info("Twitch authorization recovered; clearing the reauthorization-required state")
+	if m.webServer != nil {
+		m.webServer.GetStatusBroadcaster().SetReauthRequired(false, "")
+	}
 }
 
 // subscriptionProbeInterval is the base cadence of the discovery subscription

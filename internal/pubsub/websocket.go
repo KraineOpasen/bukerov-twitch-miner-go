@@ -42,7 +42,20 @@ type WebSocketClient struct {
 	// recorded and write failures injected deterministically.
 	writeTopicFrameHook func(frameType string, topic Topic) error
 
-	authToken      string
+	// tokenFn supplies the CURRENT auth snapshot at every user-topic frame
+	// write, so a LISTEN after a token rotation (including one written by a
+	// reconnect replay) always carries the rotated token instead of a
+	// startup-time copy. Set once at construction, immutable afterwards.
+	tokenFn AuthTokenProvider
+	// lastAuthGen is the credential generation whose token was last written in
+	// a user-topic LISTEN on this connection; userFrameGens attributes each
+	// outstanding user-topic frame's nonce to the exact generation it
+	// presented, so a queued ERR_BADAUTH for an OLD frame arriving after a
+	// rotation sweep is never misattributed to the new credentials (which
+	// would trigger a spurious refresh). Both guarded by ws.mu; the map is
+	// reset on every reconnect (the old socket's frames are void).
+	lastAuthGen    uint64
+	userFrameGens  map[string]uint64
 	pingInterval   int
 	reconnectDelay int
 
@@ -80,10 +93,10 @@ type WebSocketClient struct {
 	stopChan chan struct{}
 }
 
-func NewWebSocketClient(index int, authToken string, pingInterval int, reconnectDelay int, onMessage func(*PubSubMessage), onError func(error)) *WebSocketClient {
+func NewWebSocketClient(index int, tokenFn AuthTokenProvider, pingInterval int, reconnectDelay int, onMessage func(*PubSubMessage), onError func(error)) *WebSocketClient {
 	return &WebSocketClient{
 		index:          index,
-		authToken:      authToken,
+		tokenFn:        tokenFn,
 		pingInterval:   pingInterval,
 		reconnectDelay: reconnectDelay,
 		url:            constants.PubSubURL,
@@ -119,8 +132,10 @@ func (ws *WebSocketClient) Connect() error {
 	ws.lastPong = time.Now()
 	ws.lastConnectedAt = time.Now()
 	// A fresh usable generation: writes captured against an older generation
-	// commit nothing (see connGen).
+	// commit nothing (see connGen), and the old socket's outstanding frame
+	// attributions are void with it.
 	ws.connGen++
+	ws.userFrameGens = nil
 	resubscribed := len(ws.pendingTopics)
 	// The loops below get THIS generation's stop channel and conn as
 	// parameters, snapshotted under mu. Selecting on the ws.stopChan field
@@ -256,6 +271,76 @@ func topicAppendUnique(list []Topic, topic Topic) []Topic {
 // The write error, if any, is returned; on error the topic stays in
 // pendingTopics (desired, retryable by an identical EnsureTopic or the next
 // reconnect replay) and is never falsely marked wire-applied.
+// AuthSnapshot is the minimal credential view a PubSub connection needs to
+// sign user-topic LISTEN frames: the current access token and the generation
+// it belongs to. It never carries the refresh token.
+type AuthSnapshot struct {
+	Token      string
+	Generation uint64
+}
+
+// AuthTokenProvider supplies the current AuthSnapshot at frame-write time. In
+// production the miner adapts auth.TwitchAuth.Snapshot; tests may pass nil
+// (empty snapshot) or a static provider.
+type AuthTokenProvider func() AuthSnapshot
+
+// StaticAuthToken wraps a fixed token as a provider, for tests and library use
+// where no rotation exists.
+func StaticAuthToken(token string) AuthTokenProvider {
+	return func() AuthSnapshot { return AuthSnapshot{Token: token} }
+}
+
+// authSnapshot resolves the provider (nil-safe).
+func (ws *WebSocketClient) authSnapshot() AuthSnapshot {
+	if ws.tokenFn == nil {
+		return AuthSnapshot{}
+	}
+	return ws.tokenFn()
+}
+
+// RelistenUserTopics re-sends a LISTEN for every user topic currently
+// wire-applied on this connection, carrying the CURRENT auth snapshot. It is
+// the bounded post-rotation sweep: a Twitch LISTEN for an already-subscribed
+// topic is idempotent, so this re-authorizes the subscription without tearing
+// the connection or touching the topic ledger. Runs under writeMu (the same
+// linearization as Listen/Unlisten; lock order writeMu -> ws.mu); a mid-sweep
+// reconnect voids the remaining writes — the reconnect replay re-LISTENs the
+// parked topics with the current token anyway.
+func (ws *WebSocketClient) RelistenUserTopics() {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+
+	ws.mu.Lock()
+	if !ws.isOpened {
+		ws.mu.Unlock()
+		return
+	}
+	conn := ws.conn
+	gen := ws.connGen
+	var userTopics []Topic
+	for _, t := range ws.topics {
+		if t.IsUserTopic() {
+			userTopics = append(userTopics, t)
+		}
+	}
+	ws.mu.Unlock()
+
+	for _, t := range userTopics {
+		ws.mu.RLock()
+		stillCurrent := gen == ws.connGen
+		ws.mu.RUnlock()
+		if !stillCurrent {
+			return
+		}
+		if err := ws.writeTopicFrame(conn, "LISTEN", t); err != nil {
+			// Broken socket: the read-loop reconnect owns recovery, and its
+			// replay re-LISTENs with the current token. Privacy-safe log only.
+			slog.Warn("Re-authorizing user topic after token rotation failed; reconnect replay will retry", "index", ws.index, "error", err)
+			return
+		}
+	}
+}
+
 func (ws *WebSocketClient) Listen(topic Topic) error {
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()
@@ -370,10 +455,37 @@ func (ws *WebSocketClient) Unlisten(topic Topic) error {
 	return nil
 }
 
+// maxTrackedAuthNonces bounds the per-connection nonce->generation attribution
+// ledger; beyond it the oldest information is discarded wholesale (attribution
+// then falls back to lastAuthGen). User-topic frames are rare, so this is a
+// defensive cap, not a working limit.
+const maxTrackedAuthNonces = 128
+
 // writeTopicFrame writes one LISTEN/UNLISTEN frame for the topic. Caller must
 // hold writeMu and must NOT hold ws.mu. Only the error ever surfaces to
 // callers/logs — never the frame, token, or payload.
 func (ws *WebSocketClient) writeTopicFrame(conn *websocket.Conn, frameType string, topic Topic) error {
+	var authToken string
+	nonce := generateNonce()
+	if topic.IsUserTopic() {
+		// Read the CURRENT credential snapshot at write time and record which
+		// generation THIS frame (by nonce) presented, so a later ERR_BADAUTH
+		// RESPONSE is attributed to the exact credential set of the frame it
+		// answers — not to whatever was written most recently. lastAuthGen is
+		// the LISTEN-only fallback for responses without a tracked nonce.
+		snap := ws.authSnapshot()
+		authToken = snap.Token
+		ws.mu.Lock()
+		if ws.userFrameGens == nil || len(ws.userFrameGens) > maxTrackedAuthNonces {
+			ws.userFrameGens = make(map[string]uint64)
+		}
+		ws.userFrameGens[nonce] = snap.Generation
+		if frameType == "LISTEN" {
+			ws.lastAuthGen = snap.Generation
+		}
+		ws.mu.Unlock()
+	}
+
 	if hook := ws.writeTopicFrameHook; hook != nil {
 		return hook(frameType, topic)
 	}
@@ -387,11 +499,11 @@ func (ws *WebSocketClient) writeTopicFrame(conn *websocket.Conn, frameType strin
 		Topics: []string{topic.String()},
 	}
 	if topic.IsUserTopic() {
-		data.AuthToken = ws.authToken
+		data.AuthToken = authToken
 	}
 	msg := WSMessage{
 		Type:  frameType,
-		Nonce: generateNonce(),
+		Nonce: nonce,
 		Data:  data,
 	}
 	payload, err := json.Marshal(msg)
@@ -609,8 +721,27 @@ func (ws *WebSocketClient) handleMessage(msg WSMessage) {
 		if msg.Error != "" {
 			slog.Error("WebSocket response error", "index", ws.index, "error", msg.Error)
 			if ws.onError != nil && msg.Error == "ERR_BADAUTH" {
-				ws.onError(ErrBadAuth)
+				// Attribute the rejection to the exact frame it answers (by
+				// nonce); fall back to the last-written LISTEN generation for
+				// untracked nonces.
+				ws.mu.Lock()
+				gen := ws.lastAuthGen
+				if g, ok := ws.userFrameGens[msg.Nonce]; ok {
+					gen = g
+				}
+				delete(ws.userFrameGens, msg.Nonce)
+				ws.mu.Unlock()
+				ws.onError(&AuthError{Message: "ERR_BADAUTH", Generation: gen})
+			} else {
+				ws.mu.Lock()
+				delete(ws.userFrameGens, msg.Nonce)
+				ws.mu.Unlock()
 			}
+		} else {
+			// Successful RESPONSE settles its nonce's attribution entry.
+			ws.mu.Lock()
+			delete(ws.userFrameGens, msg.Nonce)
+			ws.mu.Unlock()
 		}
 
 	case "RECONNECT":
@@ -797,10 +928,24 @@ func generateNonce() string {
 
 var ErrBadAuth = &AuthError{Message: "ERR_BADAUTH"}
 
+// AuthError reports a Twitch PubSub auth rejection (ERR_BADAUTH). Generation
+// is the credential generation whose token was last written in a user-topic
+// LISTEN on the failing connection — the recovery layer uses it to tell a
+// stale rejection of an already-rotated token from one of the current
+// credentials. It never carries token material.
 type AuthError struct {
-	Message string
+	Message    string
+	Generation uint64
 }
 
 func (e *AuthError) Error() string {
 	return e.Message
+}
+
+// Is matches any AuthError with the same message, so
+// errors.Is(err, ErrBadAuth) keeps working for instances that carry a
+// generation.
+func (e *AuthError) Is(target error) bool {
+	t, ok := target.(*AuthError)
+	return ok && t.Message == e.Message
 }

@@ -113,7 +113,7 @@ func (r *wireRecorder) attemptCountFor(frameType string, topic Topic) int {
 // newWireClient returns an open client whose topic frames go through the
 // recorder instead of a socket.
 func newWireClient(rec *wireRecorder) *WebSocketClient {
-	ws := NewWebSocketClient(0, "", 60, 60, nil, nil)
+	ws := NewWebSocketClient(0, nil, 60, 60, nil, nil)
 	ws.isOpened = true
 	ws.writeTopicFrameHook = rec.hook
 	return ws
@@ -127,7 +127,7 @@ func newWirePool(rec *wireRecorder) *WebSocketPool {
 		control:     make(map[string]*roundControl),
 	}
 	p.newClient = func(index int) (*WebSocketClient, error) {
-		ws := NewWebSocketClient(index, "", 60, 60, nil, nil)
+		ws := NewWebSocketClient(index, nil, 60, 60, nil, nil)
 		ws.isOpened = true
 		ws.writeTopicFrameHook = rec.hook
 		return ws, nil

@@ -13,7 +13,7 @@ import (
 // newWireClientAt returns an open recorder-backed client with the given pool
 // index (each client gets its OWN recorder so frames are attributable).
 func newWireClientAt(rec *wireRecorder, index int) *WebSocketClient {
-	ws := NewWebSocketClient(index, "", 60, 60, nil, nil)
+	ws := NewWebSocketClient(index, nil, 60, 60, nil, nil)
 	ws.isOpened = true
 	ws.writeTopicFrameHook = rec.hook
 	return ws

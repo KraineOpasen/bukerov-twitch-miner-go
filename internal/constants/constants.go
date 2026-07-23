@@ -1,14 +1,15 @@
 package constants
 
 const (
-	TwitchURL      = "https://www.twitch.tv"
-	GQLURL         = "https://gql.twitch.tv/gql"
-	PubSubURL      = "wss://pubsub-edge.twitch.tv/v1"
-	OAuthDeviceURL = "https://id.twitch.tv/oauth2/device"
-	OAuthTokenURL  = "https://id.twitch.tv/oauth2/token"
-	IRCURL         = "irc.chat.twitch.tv"
-	IRCPortTLS     = 6697
-	UsherURL       = "https://usher.ttvnw.net"
+	TwitchURL        = "https://www.twitch.tv"
+	GQLURL           = "https://gql.twitch.tv/gql"
+	PubSubURL        = "wss://pubsub-edge.twitch.tv/v1"
+	OAuthDeviceURL   = "https://id.twitch.tv/oauth2/device"
+	OAuthTokenURL    = "https://id.twitch.tv/oauth2/token"
+	OAuthValidateURL = "https://id.twitch.tv/oauth2/validate"
+	IRCURL           = "irc.chat.twitch.tv"
+	IRCPortTLS       = 6697
+	UsherURL         = "https://usher.ttvnw.net"
 
 	ClientIDTV      = "ue6666qo983tsx6so1t0vnawi233wa"
 	ClientIDBrowser = "kimne78kx3ncx6brgo4mv6wki5h1ko"

@@ -32,8 +32,11 @@ type ChatMessageData struct {
 }
 
 type IRCClient struct {
-	username       string
-	token          string
+	username string
+	// tokenFn supplies the CURRENT OAuth token at authentication time, so a
+	// dial or internal reconnect after a token rotation presents the rotated
+	// token instead of a construction-time copy. Set once, immutable.
+	tokenFn        func() string
 	channel        string
 	streamer       *models.Streamer
 	logger         ChatLogger
@@ -58,11 +61,11 @@ type IRCClient struct {
 	mu sync.RWMutex
 }
 
-func NewIRCClient(username, token string, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
+func NewIRCClient(username string, tokenFn func() string, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
 	slog.Debug("Creating IRC client", "channel", streamer.Username, "logChat", logChat, "hasLogger", logger != nil)
 	return &IRCClient{
 		username:       username,
-		token:          token,
+		tokenFn:        tokenFn,
 		channel:        "#" + strings.ToLower(streamer.Username),
 		streamer:       streamer,
 		logger:         logger,
@@ -116,13 +119,21 @@ func (c *IRCClient) Connect() error {
 	return nil
 }
 
+// currentToken resolves the token provider (nil-safe for library/test use).
+func (c *IRCClient) currentToken() string {
+	if c.tokenFn == nil {
+		return ""
+	}
+	return c.tokenFn()
+}
+
 func (c *IRCClient) authenticate() error {
 	if c.logChat {
 		if err := c.send("CAP REQ :twitch.tv/tags twitch.tv/commands"); err != nil {
 			return err
 		}
 	}
-	if err := c.send(fmt.Sprintf("PASS oauth:%s", c.token)); err != nil {
+	if err := c.send(fmt.Sprintf("PASS oauth:%s", c.currentToken())); err != nil {
 		return err
 	}
 	return c.send(fmt.Sprintf("NICK %s", c.username))

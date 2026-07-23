@@ -198,6 +198,11 @@ type TwitchClient struct {
 
 	authErrorHandler func()
 
+	// recoverFn, when set (tests only), replaces the real single-flight auth
+	// recovery so replay semantics can be exercised deterministically without
+	// an OAuth endpoint. Nil in production (recoverAuth calls auth.Recover).
+	recoverFn func(rejectedGeneration uint64) (auth.Snapshot, error)
+
 	healthMu    sync.RWMutex
 	lastSuccess time.Time
 
@@ -302,9 +307,13 @@ func (c *TwitchClient) handleUnauthorized() {
 }
 
 // isAuthError reports whether an HTTP status code or GQL response body
-// indicates the OAuth token was rejected.
+// indicates the OAuth token was rejected. Only HTTP 401 is an authoritative
+// token rejection per the official Twitch contract; HTTP 403 is a
+// permission/scope/business rejection and deliberately does NOT count — it
+// must never trigger a token refresh or device flow. The body checks cover the
+// documented GQL Unauthorized shapes that arrive with HTTP 200.
 func isAuthError(statusCode int, result map[string]interface{}) bool {
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+	if statusCode == http.StatusUnauthorized {
 		return true
 	}
 
@@ -344,33 +353,82 @@ func (c *TwitchClient) PostGQLBatch(operations []constants.GQLOperation) ([]map[
 	return c.postGQLBatchRequest(operations)
 }
 
+// gqlSingleRoundTrip performs one complete single-operation GQL cycle (client
+// ID fallback + transient retry + parse) signed with the given token, and
+// reports whether the outcome was an authoritative auth rejection. The
+// marshaled body is reused verbatim across recovery replays, so a replayed
+// request is byte-identical to the original.
+func (c *TwitchClient) gqlSingleRoundTrip(body []byte, operationName, token string) (result map[string]interface{}, authRejected bool, err error) {
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, operationName, token)
+	if err != nil {
+		// Includes ErrPersistedQueryNotFound when every candidate client ID
+		// returned PersistedQueryNotFound. Returning it here (instead of an empty
+		// map) is what stops callers from misreading a stale hash as "streamer
+		// does not exist" or wiping their last-known state.
+		return nil, false, err
+	}
+
+	// HTTP 401 is the authoritative token rejection regardless of body shape.
+	if statusCode == http.StatusUnauthorized {
+		return nil, true, nil
+	}
+	// HTTP 403 is a permission/scope/business rejection: NOT an auth
+	// rejection (no refresh, no device flow) and NOT data either — its error
+	// body must never reach per-operation parsers as if it were a result, nor
+	// refresh the connection-health timestamp.
+	if statusCode == http.StatusForbidden {
+		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
+	}
+
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil, false, fmt.Errorf("twitch GQL %s: empty response body", operationName)
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, false, fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
+	}
+
+	return result, isAuthError(statusCode, result), nil
+}
+
 func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[string]interface{}, error) {
 	body, err := json.Marshal(operation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal operation: %w", err)
 	}
 
-	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, operation.OperationName)
+	// Capture the credential snapshot the request is signed with; its
+	// Generation is what a recovery is keyed on, so a rejection of an
+	// already-rotated token never triggers a second refresh.
+	snap := c.auth.Snapshot()
+	result, authRejected, err := c.gqlSingleRoundTrip(body, operation.OperationName, snap.AccessToken)
 	if err != nil {
-		// Includes ErrPersistedQueryNotFound when every candidate client ID
-		// returned PersistedQueryNotFound. Returning it here (instead of an empty
-		// map) is what stops callers from misreading a stale hash as "streamer
-		// does not exist" or wiping their last-known state.
 		return nil, err
 	}
 
-	if len(bytes.TrimSpace(respBody)) == 0 {
-		return nil, fmt.Errorf("twitch GQL %s: empty response body", operation.OperationName)
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal %s response: %w", operation.OperationName, err)
-	}
-
-	if isAuthError(statusCode, result) {
-		c.handleUnauthorized()
-		return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+	if authRejected {
+		// Serialized recovery + exactly ONE replay of the identical body. A
+		// replay that is rejected again surfaces ErrUnauthorized with no
+		// further recovery and no third request.
+		newSnap, rerr := c.recoverAuth(snap.Generation)
+		if rerr != nil {
+			// Only a DEFINITIVE recovery failure escalates to the operator
+			// reauth path; a transient endpoint failure or a bounded-wait
+			// timeout (recovery still running) stays a retryable
+			// ErrUnauthorized for this one request.
+			if !isTransientRecoveryFailure(rerr) {
+				c.handleUnauthorized()
+			}
+			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
+		result, authRejected, err = c.gqlSingleRoundTrip(body, operation.OperationName, newSnap.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		if authRejected {
+			c.handleUnauthorized()
+			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
 	}
 
 	// A top-level "errors" array means Twitch rejected the operation at the GQL
@@ -387,6 +445,70 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 	return result, nil
 }
 
+// authRecoveryWait bounds how long a rejected request waits for the shared
+// auth recovery before giving up with ErrUnauthorized. A refresh completes
+// well within it; a device-flow recovery (minutes, needs the user) keeps
+// running in its owner — this caller just stops waiting, and later requests
+// pick up the rotated credentials once published.
+const authRecoveryWait = 60 * time.Second
+
+// isTransientRecoveryFailure reports whether a recovery error proves nothing
+// about the credentials being unrecoverable: a transient auth-endpoint
+// failure, or this caller's own bounded wait expiring while the shared
+// recovery keeps running (device flow needs the user and takes minutes).
+func isTransientRecoveryFailure(err error) bool {
+	return errors.Is(err, auth.ErrAuthTransient) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
+// recoverAuth funnels an authoritative rejection of the given credential
+// generation into the auth layer's single-flight recovery and returns the
+// rotated snapshot to replay with.
+func (c *TwitchClient) recoverAuth(rejectedGeneration uint64) (auth.Snapshot, error) {
+	if c.recoverFn != nil {
+		return c.recoverFn(rejectedGeneration)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), authRecoveryWait)
+	defer cancel()
+	return c.auth.Recover(ctx, rejectedGeneration)
+}
+
+// gqlBatchRoundTrip is the batch twin of gqlSingleRoundTrip: one complete
+// batch GQL cycle signed with the given token, reporting an authoritative auth
+// rejection (HTTP 401 or a documented Unauthorized body on any entry).
+func (c *TwitchClient) gqlBatchRoundTrip(body []byte, label, token string) (result []map[string]interface{}, authRejected bool, err error) {
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, label, token)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Status checks come BEFORE the unmarshal: a real 401/403 carries an
+	// OBJECT error body that cannot unmarshal into the batch's []map shape —
+	// checking after parsing would make these branches unreachable.
+	if statusCode == http.StatusUnauthorized {
+		return nil, true, nil
+	}
+	if statusCode == http.StatusForbidden {
+		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", label)
+	}
+
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil, false, fmt.Errorf("twitch GQL %s: empty response body", label)
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, false, fmt.Errorf("failed to unmarshal %s response: %w", label, err)
+	}
+
+	for _, item := range result {
+		if isAuthError(statusCode, item) {
+			return result, true, nil
+		}
+	}
+	return result, false, nil
+}
+
 func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) ([]map[string]interface{}, error) {
 	body, err := json.Marshal(operations)
 	if err != nil {
@@ -397,30 +519,31 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	for i, op := range operations {
 		names[i] = op.OperationName
 	}
-
 	label := strings.Join(names, ",")
-	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, label)
+
+	// Same snapshot/recover/replay-once contract as postGQLRequest, applied to
+	// the whole batch (the batch is one HTTP request and is replayed as one).
+	snap := c.auth.Snapshot()
+	result, authRejected, err := c.gqlBatchRoundTrip(body, label, snap.AccessToken)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(bytes.TrimSpace(respBody)) == 0 {
-		return nil, fmt.Errorf("twitch GQL %s: empty response body", label)
-	}
-
-	var result []map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal %s response: %w", label, err)
-	}
-
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-		c.handleUnauthorized()
-		return nil, fmt.Errorf("%w (status %d)", ErrUnauthorized, statusCode)
-	}
-	for _, item := range result {
-		if isAuthError(statusCode, item) {
+	if authRejected {
+		newSnap, rerr := c.recoverAuth(snap.Generation)
+		if rerr != nil {
+			if !isTransientRecoveryFailure(rerr) {
+				c.handleUnauthorized()
+			}
+			return nil, fmt.Errorf("%w: batch %s", ErrUnauthorized, label)
+		}
+		result, authRejected, err = c.gqlBatchRoundTrip(body, label, newSnap.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		if authRejected {
 			c.handleUnauthorized()
-			return nil, ErrUnauthorized
+			return nil, fmt.Errorf("%w: batch %s", ErrUnauthorized, label)
 		}
 	}
 
@@ -534,7 +657,7 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // because the hash itself is stale — one ERROR is logged and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
-func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel string) ([]byte, int, error) {
+func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel, token string) ([]byte, int, error) {
 	candidates := c.candidateClientIDs(operationLabel)
 
 	var (
@@ -544,7 +667,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 	)
 
 	for i, clientID := range candidates {
-		respBody, statusCode, err = c.doGQLRequestWithRetry(body, operationLabel, clientID)
+		respBody, statusCode, err = c.doGQLRequestWithRetry(body, operationLabel, clientID, token)
 		if err != nil {
 			return respBody, statusCode, err
 		}
@@ -576,7 +699,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 // the computed backoff (see gqlRetryWait). Other HTTP errors (4xx auth/logic
 // errors) are returned immediately since retrying them would just reproduce the
 // same failure. A successful response never incurs a wait.
-func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID string) ([]byte, int, error) {
+func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
@@ -584,7 +707,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
 		}
-		c.setGQLHeaders(req, clientID)
+		c.setGQLHeaders(req, clientID, token)
 
 		respBody, statusCode, retryAfter, err := c.doGQLOnce(req)
 		if err == nil {
@@ -702,8 +825,8 @@ func gqlBackoffDuration(attempt int) time.Duration {
 	return backoff + jitter
 }
 
-func (c *TwitchClient) setGQLHeaders(req *http.Request, clientID string) {
-	req.Header.Set("Authorization", "OAuth "+c.auth.GetAuthToken())
+func (c *TwitchClient) setGQLHeaders(req *http.Request, clientID, token string) {
+	req.Header.Set("Authorization", "OAuth "+token)
 	req.Header.Set("Client-Id", clientID)
 	req.Header.Set("Client-Session-Id", c.clientSession)
 	req.Header.Set("Client-Version", c.getClientVersion())
