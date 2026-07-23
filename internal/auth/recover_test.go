@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // --- D. Single-flight refresh ---
@@ -150,10 +151,13 @@ func TestCancelledWaiterExitsOwnerFinishes(t *testing.T) {
 }
 
 // D9-D10: an owner failure wakes all waiters with one error and clears the
-// flight, so a later independent attempt becomes a fresh owner.
+// flight, so a later independent attempt becomes a fresh owner (once the
+// P2-C3 backoff window for the failed generation has elapsed).
 func TestOwnerFailureWakesWaitersAndAllowsNewOwner(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
+	clock := newTestClock()
+	a.now = clock.Now
 	a.token = "test-access-1"
 	a.refreshToken = "test-refresh-1"
 
@@ -181,7 +185,9 @@ func TestOwnerFailureWakesWaitersAndAllowsNewOwner(t *testing.T) {
 		t.Fatalf("failed recovery must not publish a generation")
 	}
 
-	// Next independent attempt becomes a new owner and succeeds.
+	// Past the backoff window, the next independent attempt becomes a new
+	// owner and succeeds.
+	clock.Advance(time.Hour)
 	f.mu.Lock()
 	f.refreshHandler = nil
 	f.mu.Unlock()
@@ -306,6 +312,8 @@ func TestRefreshMalformedNoAccessTokenNotPublished(t *testing.T) {
 func TestRefreshMalformedNoReplacementDropsOldOneTimeToken(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
+	clock := newTestClock()
+	a.now = clock.Now
 	a.token = "test-access-1"
 	a.refreshToken = "test-refresh-1"
 
@@ -322,6 +330,7 @@ func TestRefreshMalformedNoReplacementDropsOldOneTimeToken(t *testing.T) {
 		t.Fatalf("possibly-consumed one-time refresh token retained")
 	}
 
+	clock.Advance(time.Hour) // past the P2-C3 backoff window
 	if _, err := a.Recover(context.Background(), 0); err != nil {
 		t.Fatalf("second recover: %v", err)
 	}

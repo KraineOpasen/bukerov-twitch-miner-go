@@ -102,14 +102,14 @@ type Miner struct {
 	connectionDegraded       bool
 	connectionDegradedDetail string
 
-	// authRecoveryObserver/authRecoveryLastStart bound the consumer-triggered
-	// recovery path (see recoverFromRejectedGeneration): one observer
-	// goroutine at a time, new observations at most once per cooldown.
-	// authRecoverFn is the tests-only seam over auth.Recover (nil in
-	// production).
-	authRecoveryObserver  atomic.Bool
-	authRecoveryLastStart atomic.Int64
-	authRecoverFn         func(ctx context.Context, rejectedGen uint64) error
+	// authRecoveryObserver bounds the consumer-triggered recovery path (see
+	// recoverFromRejectedGeneration) to ONE observer goroutine at a time — a
+	// goroutine-population guard only. Retry PACING is owned entirely by the
+	// auth layer's per-generation backoff gate (auth.ErrRecoveryBackoff); the
+	// miner imposes no cooldown of its own. authRecoverFn is the tests-only
+	// seam over auth.Recover (nil in production).
+	authRecoveryObserver atomic.Bool
+	authRecoverFn        func(ctx context.Context, rejectedGen uint64) error
 
 	// reauthNotified dedupes the operator "reauthorization required"
 	// notification per outage (guarded by mu). Unlike the old sync.Once it is
@@ -322,16 +322,18 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		// overlay would keep showing the last error until loadStreamers runs.
 		retryBroadcaster.SetStatus(web.StatusLoadingStreamers, "Loading streamers...")
 	}
-	// Explicit identity-binding guard: the token session's confirmed user ID
-	// (from /oauth2/validate or the stored record) must be the account the
-	// CONFIGURED username resolves to. Full rename reconciliation is BKM-006;
-	// this only refuses to silently bind another account's credentials to this
-	// profile (nothing is deleted — the operator decides).
+	// Explicit identity-binding guard. The token session's user ID (validated
+	// via /oauth2/validate at login/promotion, or loaded from the stored
+	// record on a degraded startup) is the identity source; GetChannelID's
+	// resolution of the configured username is only a CROSS-CHECK, never a
+	// substitute for it — an empty session ID after a successful Login is an
+	// invariant violation that fails startup rather than fabricating
+	// authority from the lookup. Full rename reconciliation is BKM-006; a
+	// mismatch fails closed (nothing is deleted — the operator decides).
 	if err := verifyIdentityBinding(m.auth.GetUserID(), userID); err != nil {
-		return fmt.Errorf("%w: stored credentials belong to a different Twitch account than %q; remove cookies/%s.json or fix the configured username",
+		return fmt.Errorf("%w: session/profile identity binding failed for %q; remove cookies/%s.json or fix the configured username",
 			err, m.config.Username, m.config.Username)
 	}
-	m.auth.SetUserID(userID)
 
 	if err := m.auth.SaveAuth(); err != nil {
 		slog.Warn("Failed to save auth", "error", err)
@@ -978,14 +980,20 @@ func (m *Miner) recordBetResult(r pubsub.BetResult) {
 	})
 }
 
-// verifyIdentityBinding refuses to bind credentials whose confirmed session
-// user ID belongs to a different account than the one the configured username
-// resolved to. An empty session ID (fresh login not yet bound) always passes.
+// verifyIdentityBinding refuses to bind credentials whose session user ID
+// belongs to a different account than the one the configured username
+// resolved to. An EMPTY session ID fails closed: a successful Login always
+// leaves a session identity (validated at promotion, or disk-loaded on a
+// degraded startup), so its absence means no identity was ever established —
+// the username lookup must not be promoted into one.
 func verifyIdentityBinding(sessionUserID, resolvedUserID string) error {
-	if sessionUserID == "" || sessionUserID == resolvedUserID {
-		return nil
+	if sessionUserID == "" {
+		return fmt.Errorf("%w: login completed without a session user ID", auth.ErrIdentityMismatch)
 	}
-	return auth.ErrIdentityMismatch
+	if sessionUserID != resolvedUserID {
+		return auth.ErrIdentityMismatch
+	}
+	return nil
 }
 
 // handlePubSubAuthError reacts to a PubSub ERR_BADAUTH: it funnels the
@@ -1006,13 +1014,6 @@ func (m *Miner) handlePubSubAuthError(err error) {
 	m.recoverFromRejectedGeneration(rejectedGen, "pubsub")
 }
 
-// authConsumerRecoveryCooldown throttles how often a long-lived consumer
-// event (PubSub BADAUTH, IRC login-failed NOTICE) may START a new recovery
-// observation. IRC's reconnect loop can deliver a rejection every second or
-// two during an outage; without this floor each cycle would spawn a fresh
-// refresh attempt against the OAuth endpoint.
-const authConsumerRecoveryCooldown = 30 * time.Second
-
 // authConsumerRecoveryWait bounds how long one consumer-triggered observer
 // goroutine waits on the shared recovery flight before giving up its watch (a
 // device-flow flight runs for minutes; a later rejection re-arms a fresh
@@ -1021,12 +1022,15 @@ const authConsumerRecoveryWait = 2 * time.Minute
 
 // recoverFromRejectedGeneration funnels an authoritative rejection of the
 // given credential generation (from any long-lived consumer) into the shared
-// single-flight recovery. At most ONE observer goroutine exists at a time and
-// new observations start at most once per cooldown window, so a fast
-// rejection loop (IRC redial cycles) can never turn into an OAuth-endpoint
-// storm or unbounded goroutine growth. Only a definitive failure escalates to
-// the reauth-required path — a transient endpoint failure, an inconclusive
-// outcome, or a shutdown/watch-timeout cancellation does not.
+// single-flight recovery. At most ONE observer goroutine exists at a time — a
+// goroutine-population guard, nothing more: retry PACING is the auth layer's
+// sole authority (its per-generation backoff gate answers a too-soon attempt
+// with the retryable auth.ErrRecoveryBackoff and zero network traffic), so a
+// fast rejection loop (IRC redial cycles) can never turn into an
+// OAuth-endpoint storm or unbounded goroutine growth. Only a definitive
+// failure escalates to the reauth-required path — a transient endpoint
+// failure, an inconclusive outcome, a backoff refusal, or a
+// shutdown/watch-timeout cancellation does not.
 func (m *Miner) recoverFromRejectedGeneration(rejectedGen uint64, source string) {
 	if m.auth.Generation() > rejectedGen {
 		return // stale: already rotated past the rejected credentials
@@ -1034,13 +1038,6 @@ func (m *Miner) recoverFromRejectedGeneration(rejectedGen uint64, source string)
 	if !m.authRecoveryObserver.CompareAndSwap(false, true) {
 		return // one observer is already watching the shared flight
 	}
-	now := time.Now()
-	last := time.Unix(0, m.authRecoveryLastStart.Load())
-	if now.Sub(last) < authConsumerRecoveryCooldown {
-		m.authRecoveryObserver.Store(false)
-		return
-	}
-	m.authRecoveryLastStart.Store(now.UnixNano())
 
 	parent := m.runCtx
 	if parent == nil {
@@ -1060,6 +1057,7 @@ func (m *Miner) recoverFromRejectedGeneration(rejectedGen uint64, source string)
 		if rerr := recoverFn(ctx, rejectedGen); rerr != nil {
 			transient := errors.Is(rerr, auth.ErrAuthTransient) ||
 				errors.Is(rerr, auth.ErrRecoveryInconclusive) ||
+				errors.Is(rerr, auth.ErrRecoveryBackoff) ||
 				errors.Is(rerr, context.Canceled) ||
 				errors.Is(rerr, context.DeadlineExceeded)
 			slog.Error("Auth rejection: recovery failed", "source", source, "error", rerr, "retryable", transient)

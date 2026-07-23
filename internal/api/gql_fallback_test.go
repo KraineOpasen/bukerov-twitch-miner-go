@@ -26,7 +26,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *TwitchClient {
 	t.Cleanup(srv.Close)
 
 	a := auth.NewTwitchAuth("tester", "device-id")
-	a.SetToken("dummy-token")
+	a.ReplaceCredentials(auth.TokenResponse{AccessToken: "dummy-token"})
 	a.SetUserID("100")
 
 	c := NewTwitchClient(a, "device-id")

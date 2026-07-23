@@ -468,14 +468,17 @@ const authRecoveryWait = 60 * time.Second
 // isTransientRecoveryFailure reports whether a recovery error proves nothing
 // about the credentials being unrecoverable: a transient auth-endpoint
 // failure, an INCONCLUSIVE outcome (undocumented refresh 400 — fail-closed,
-// retryable), or this caller's own bounded wait expiring while the shared
-// recovery keeps running (device flow needs the user and takes minutes). None
-// of these may escalate the operator reauth path. A definitive protocol
-// failure (e.g. a malformed refresh success, which consumed the one-time
-// refresh token) is NOT in this set and escalates.
+// retryable), a backoff refusal (the auth layer's per-generation retry gate
+// pacing sequential attempts — retryable by definition, zero traffic), or
+// this caller's own bounded wait expiring while the shared recovery keeps
+// running (device flow needs the user and takes minutes). None of these may
+// escalate the operator reauth path. A definitive protocol failure (e.g. a
+// malformed refresh success, which consumed the one-time refresh token) is
+// NOT in this set and escalates.
 func isTransientRecoveryFailure(err error) bool {
 	return errors.Is(err, auth.ErrAuthTransient) ||
 		errors.Is(err, auth.ErrRecoveryInconclusive) ||
+		errors.Is(err, auth.ErrRecoveryBackoff) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled)
 }

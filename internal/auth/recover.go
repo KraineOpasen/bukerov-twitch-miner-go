@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ErrRecoveryFailed wraps a recovery attempt that completed without publishing
@@ -24,6 +25,13 @@ var ErrRecoveryFailed = errors.New("twitch auth recovery failed")
 // ErrAuthProtocol so a MALFORMED refresh success (which consumes the refresh
 // token and therefore definitively needs the operator soon) still escalates.
 var ErrRecoveryInconclusive = errors.New("inconclusive twitch auth recovery outcome")
+
+// ErrRecoveryBackoff marks a recovery attempt refused because a previous
+// attempt for the SAME credential generation recently failed and the
+// deterministic retry backoff has not yet elapsed. It is retryable and
+// non-escalating (like a transient failure), carries no secret material, and
+// causes zero network traffic.
+var ErrRecoveryBackoff = errors.New("twitch auth recovery is backing off after a recent failure")
 
 // refreshClass classifies one refresh-grant round trip.
 type refreshClass int
@@ -59,24 +67,37 @@ const (
 const invalidRefreshTokenMessage = "invalid refresh token"
 
 // Recover is the single entry point for reacting to an authoritative
-// credential rejection (GQL 401, PubSub ERR_BADAUTH, validate 401).
-// rejectedGeneration must be the Snapshot.Generation the rejected request was
-// signed with.
+// credential rejection (GQL 401, PubSub ERR_BADAUTH, IRC login-failure
+// NOTICE, validate 401). rejectedGeneration must be the Snapshot.Generation
+// the rejected request was signed with. It is also the single retry
+// authority: consumers never impose their own recovery pacing on top.
 //
-// Guarantees:
+// Check order and guarantees:
 //
-//   - If the current generation is already newer than rejectedGeneration,
-//     another caller has recovered: the current snapshot is returned with no
-//     network I/O (a stale rejection never triggers a second refresh).
-//   - If a recovery for this generation is already in flight, the caller
-//     waits for that owner's result (or its own ctx cancellation, which
-//     releases only the waiter — the owner keeps going).
-//   - Otherwise the caller becomes the single owner: refresh first when a
+//  1. Stale fast-path: if the current generation is already newer than
+//     rejectedGeneration, another caller has recovered — the current
+//     snapshot is returned with no network I/O, and the backoff gate is
+//     untouched.
+//  2. Join: if a recovery for this generation is already in flight, the
+//     caller waits for that owner's result (or its own ctx cancellation,
+//     which releases only the waiter — the owner keeps going). Joining is
+//     never gated: it causes no new traffic.
+//  3. Pending-candidate priority: a new owner whose generation has a
+//     privately staged (granted-but-unverified) candidate re-VALIDATES that
+//     candidate instead of contacting the token endpoint — a consumed
+//     one-time refresh grant is never repeated.
+//  4. Backoff gate: after a failed owner flight for this same generation, a
+//     new owner is refused with ErrRecoveryBackoff (retryable,
+//     non-escalating, zero network) until the deterministic capped
+//     exponential backoff elapses. Success and new generations clear it.
+//  5. Otherwise the caller becomes the single owner: refresh first when a
 //     refresh token is available; device flow only on the documented
-//     authoritative refresh rejections (never on transient failures).
-//   - The owner publishes at most one new generation and wakes all waiters
-//     with one result. After a failed recovery the flight is cleared, so a
-//     later independent rejection may start a fresh owner.
+//     authoritative refresh rejections (never on transient failures). Every
+//     granted pair is validated as a candidate before publication.
+//
+// The owner publishes at most one new generation and wakes all waiters with
+// one result. After a failed recovery the flight is cleared, so a later
+// independent rejection may start a fresh owner (subject to the gate).
 func (a *TwitchAuth) Recover(ctx context.Context, rejectedGeneration uint64) (Snapshot, error) {
 	a.mu.Lock()
 	if a.generation > rejectedGeneration {
@@ -90,24 +111,44 @@ func (a *TwitchAuth) Recover(ctx context.Context, rejectedGeneration uint64) (Sn
 		done = a.recoverDone
 		a.mu.Unlock()
 	} else {
-		// Become the owner: start exactly one flight. The refresh token is
-		// captured under the lock so it is used by exactly one flight. The
-		// flight runs on the LIFECYCLE context, detached from every caller's
-		// context: a caller with a bounded wait (GQL replay) or a cancelled
-		// waiter must not abort the shared flight mid-refresh or
-		// mid-device-flow — otherwise every rejected request would spawn (and
-		// kill) its own device code. Only process shutdown cancels it.
+		// Pending-candidate priority (see check order above): decide the
+		// flight's work while still under the lock.
+		pending := a.pendingCandidate
+		if pending != nil && pending.forGeneration != a.generation {
+			pending = nil
+		}
+		// Backoff gate for a fresh owner of a recently failed generation.
+		if a.gateFailures > 0 && a.gateGen == a.generation {
+			if wait := a.gateNextAllowed.Sub(a.now()); wait > 0 {
+				a.mu.Unlock()
+				return Snapshot{}, fmt.Errorf("%w: retry allowed in %s",
+					ErrRecoveryBackoff, wait.Round(time.Second))
+			}
+		}
+		// Become the owner: start exactly one flight. The refresh token (or
+		// staged candidate) is captured under the lock so it is used by
+		// exactly one flight. The flight runs on the LIFECYCLE context,
+		// detached from every caller's context: a caller with a bounded wait
+		// (GQL replay) or a cancelled waiter must not abort the shared flight
+		// mid-refresh or mid-device-flow — otherwise every rejected request
+		// would spawn (and kill) its own device code. Only process shutdown
+		// cancels it.
 		a.recovering = true
 		a.recoverDone = make(chan struct{})
 		done = a.recoverDone
-		refreshToken := a.refreshToken
+		ownerGen := a.generation
+		var refreshToken string
+		if pending == nil {
+			refreshToken = a.refreshToken
+		}
 		a.mu.Unlock()
 
 		go func() {
-			err := a.runRecovery(a.recoveryContext(), refreshToken)
+			err := a.runRecovery(a.recoveryContext(), ownerGen, pending, refreshToken)
 			a.mu.Lock()
 			a.recovering = false
 			a.recoverErr = err
+			a.noteRecoveryOutcomeLocked(ownerGen, err, classifyGateFailure)
 			close(done)
 			a.mu.Unlock()
 		}()
@@ -130,18 +171,58 @@ func (a *TwitchAuth) Recover(ctx context.Context, rejectedGeneration uint64) (Sn
 	return Snapshot{}, ErrRecoveryFailed
 }
 
-// runRecovery executes one owned recovery flight: refresh when possible,
-// device flow only on an authoritative refresh rejection (or when no refresh
-// token exists). On success the new pair is published (one generation bump)
-// and persisted via the pending-persistence policy. All I/O runs outside the
-// state lock.
-func (a *TwitchAuth) runRecovery(ctx context.Context, refreshToken string) error {
+// classifyGateFailure maps a failed flight's error to a redacted diagnostics
+// class for the backoff gate (never any secret or body material).
+func classifyGateFailure(err error) string {
+	switch {
+	case errors.Is(err, ErrRecoveryBackoff):
+		return "backoff"
+	case errors.Is(err, ErrIdentityMismatch):
+		return "identity_mismatch"
+	case errors.Is(err, ErrRecoveryInconclusive):
+		return "inconclusive"
+	case errors.Is(err, ErrAuthTransient):
+		return "transient"
+	case errors.Is(err, ErrAuthProtocol):
+		return "protocol"
+	default:
+		return "failed"
+	}
+}
+
+// runRecovery executes one owned recovery flight. A staged pending candidate
+// is re-validated FIRST (its grant is already spent and must not be
+// repeated); otherwise refresh when possible, device flow only on an
+// authoritative refresh rejection (or when no refresh token exists). EVERY
+// granted pair is a private candidate: publication happens only inside
+// resolveCandidate after the authoritative validation passes, via the single
+// compare-and-promote point. All I/O runs outside the state lock.
+func (a *TwitchAuth) runRecovery(ctx context.Context, ownerGen uint64, pending *tokenCandidate, refreshToken string) error {
+	if pending != nil {
+		promoted, err := a.resolveCandidate(ctx, pending)
+		if err != nil {
+			return err
+		}
+		if promoted {
+			slog.Info("Recovered Twitch session by validating the staged candidate pair")
+		}
+		return nil
+	}
+
 	if refreshToken != "" {
 		token, class, err := a.requestRefresh(ctx, refreshToken)
 		switch class {
 		case refreshOK:
-			slog.Info("Recovered Twitch session via refresh token")
-			a.adoptTokenPair(token)
+			promoted, rerr := a.resolveCandidate(ctx, &tokenCandidate{
+				pair: token, forGeneration: ownerGen,
+				source: "refresh", consumedRefreshToken: refreshToken,
+			})
+			if rerr != nil {
+				return rerr
+			}
+			if promoted {
+				slog.Info("Recovered Twitch session via refresh token")
+			}
 			return nil
 		case refreshTransient, refreshInconclusive:
 			// Nothing proved; the stored pair (and the refresh token) stays
@@ -176,8 +257,16 @@ func (a *TwitchAuth) runRecovery(ctx context.Context, refreshToken string) error
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
 	}
-	a.adoptTokenPair(token)
-	a.emitEvent(AuthEvent{Type: AuthEventCompleted})
+	promoted, rerr := a.resolveCandidate(ctx, &tokenCandidate{
+		pair: token, forGeneration: ownerGen, source: "device",
+	})
+	if rerr != nil {
+		a.emitEvent(AuthEvent{Type: AuthEventError, Error: rerr})
+		return rerr
+	}
+	if promoted {
+		a.emitEvent(AuthEvent{Type: AuthEventCompleted})
+	}
 	return nil
 }
 

@@ -117,7 +117,8 @@ func TestLoginMissingScopesDegraded(t *testing.T) {
 }
 
 // C5 / M1: validate 401 + refresh success -> startup continues on the rotated
-// pair with no device flow.
+// pair with no device flow. The 401 applies only to the OLD token; the
+// refresh-granted candidate validates cleanly (P2: publication requires it).
 func TestLoginValidate401RefreshSuccess(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
@@ -127,7 +128,13 @@ func TestLoginValidate401RefreshSuccess(t *testing.T) {
 	seedStoredAuth(t, a)
 
 	f.mu.Lock()
-	f.validateHandler = func(w http.ResponseWriter, r *http.Request) { f.oauthError(w, 401, "invalid access token") }
+	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
+		if authHeaderToken(r) == "test-access-1" {
+			f.oauthError(w, 401, "invalid access token")
+			return
+		}
+		validFor(f, a, w)
+	}
 	f.mu.Unlock()
 
 	if err := a.Login(context.Background()); err != nil {
@@ -142,7 +149,9 @@ func TestLoginValidate401RefreshSuccess(t *testing.T) {
 	}
 }
 
-// C6: validate 401 with no refresh token -> exactly one device flow.
+// C6: validate 401 with no refresh token -> exactly one device flow. The 401
+// applies only to the OLD token; the device-granted candidate validates
+// cleanly.
 func TestLoginValidate401NoRefreshTokenOneDeviceFlow(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
@@ -151,7 +160,13 @@ func TestLoginValidate401NoRefreshTokenOneDeviceFlow(t *testing.T) {
 	seedStoredAuth(t, a)
 
 	f.mu.Lock()
-	f.validateHandler = func(w http.ResponseWriter, r *http.Request) { f.oauthError(w, 401, "invalid access token") }
+	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
+		if authHeaderToken(r) == "test-access-1" {
+			f.oauthError(w, 401, "invalid access token")
+			return
+		}
+		validFor(f, a, w)
+	}
 	f.mu.Unlock()
 
 	if err := a.Login(context.Background()); err != nil {
@@ -291,10 +306,15 @@ func TestLoginIdentityMismatchStartsFreshDeviceFlow(t *testing.T) {
 
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
-		f.writeJSON(w, 200, validateResponse{
-			ClientID: a.clientID, Login: "someoneelse",
-			Scopes: requiredScopes(), UserID: "uid-OTHER", ExpiresIn: 5000,
-		})
+		if authHeaderToken(r) == "test-access-1" {
+			f.writeJSON(w, 200, validateResponse{
+				ClientID: a.clientID, Login: "someoneelse",
+				Scopes: requiredScopes(), UserID: "uid-OTHER", ExpiresIn: 5000,
+			})
+			return
+		}
+		// The fresh device-flow candidate belongs to this profile.
+		validFor(f, a, w)
 	}
 	f.mu.Unlock()
 
@@ -324,10 +344,15 @@ func TestLoginDiskLoadedRenameShapeFailsClosed(t *testing.T) {
 
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
-		f.writeJSON(w, 200, validateResponse{
-			ClientID: a.clientID, Login: "renamed-login",
-			Scopes: requiredScopes(), UserID: "uid-1", ExpiresIn: 5000,
-		})
+		if authHeaderToken(r) == "test-access-1" {
+			f.writeJSON(w, 200, validateResponse{
+				ClientID: a.clientID, Login: "renamed-login",
+				Scopes: requiredScopes(), UserID: "uid-1", ExpiresIn: 5000,
+			})
+			return
+		}
+		// The fresh device-flow candidate belongs to this profile.
+		validFor(f, a, w)
 	}
 	f.mu.Unlock()
 

@@ -123,10 +123,13 @@ func TestPersistFailureKeepsRotatedPairAuthoritative(t *testing.T) {
 		return os.Rename(oldPath, newPath)
 	}
 
-	a.adoptTokenPair(&TokenResponse{
+	a.publishTokenPair(&TokenResponse{
 		AccessToken: "test-access-2", RefreshToken: "test-refresh-2",
 		ExpiresIn: 14000, TokenType: "bearer",
 	})
+	if err := a.SaveAuth(); err == nil {
+		t.Fatalf("expected the injected rename failure to surface")
+	}
 
 	if a.GetAuthToken() != "test-access-2" {
 		t.Fatalf("rotated pair lost from memory after persist failure")

@@ -82,6 +82,9 @@ func TestTransientRecoveryFailureDoesNotEscalate(t *testing.T) {
 		"transient-endpoint": fmt.Errorf("%w: %w", auth.ErrRecoveryFailed, auth.ErrAuthTransient),
 		"wait-timeout":       context.DeadlineExceeded,
 		"shutdown":           context.Canceled,
+		// P2-C3: the auth layer's sequential-retry gate is retryable by
+		// definition (zero traffic happened) — never an operator escalation.
+		"backoff-gate": fmt.Errorf("%w: retry allowed in 30s", auth.ErrRecoveryBackoff),
 	}
 	for name, rerr := range cases {
 		t.Run(name, func(t *testing.T) {

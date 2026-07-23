@@ -42,8 +42,11 @@ func TestReauthRequiredClearsOnRotationAndCanRelatch(t *testing.T) {
 // Regression: credentials confirmed for a different account than the
 // configured username resolves to are never silently bound to this profile.
 func TestVerifyIdentityBinding(t *testing.T) {
-	if err := verifyIdentityBinding("", "uid-1"); err != nil {
-		t.Fatalf("fresh session (no bound ID) must pass: %v", err)
+	// P2: a successful Login always leaves a session identity; an empty one
+	// is an invariant violation and fails closed instead of letting the
+	// username lookup fabricate authority.
+	if err := verifyIdentityBinding("", "uid-1"); !errors.Is(err, auth.ErrIdentityMismatch) {
+		t.Fatalf("empty session ID must fail closed with ErrIdentityMismatch, got %v", err)
 	}
 	if err := verifyIdentityBinding("uid-1", "uid-1"); err != nil {
 		t.Fatalf("matching identity must pass: %v", err)

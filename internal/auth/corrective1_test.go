@@ -374,7 +374,11 @@ func TestConfirmedUserIDRenameIsNotForeign(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
 	a.token = "test-access-1"
-	a.SetUserID("uid-1") // runtime-confirmed binding (miner GetChannelID path)
+	// Runtime-confirmed binding. P2: only an authoritative validate
+	// application (or candidate promotion) confers confirmation — SetUserID
+	// deliberately cannot — so the provenance is seeded directly here.
+	a.userID = "uid-1"
+	a.userIDAuthoritative = true
 
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +406,15 @@ func TestIdentityMismatchPreservesFileAndFreshLoginIsClean(t *testing.T) {
 	before := seedStoredAuth(t, a)
 
 	f.mu.Lock()
-	f.validateHandler = foreignValidateHandler(f, a.clientID, requiredScopes())
+	foreign := foreignValidateHandler(f, a.clientID, requiredScopes())
+	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
+		if authHeaderToken(r) == "test-access-1" {
+			foreign(w, r)
+			return
+		}
+		// The fresh device-flow candidate belongs to this profile.
+		validFor(f, a, w)
+	}
 	f.mu.Unlock()
 
 	// Phase 1: device flow fails -> original file untouched.

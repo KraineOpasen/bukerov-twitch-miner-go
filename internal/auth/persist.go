@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -10,9 +12,15 @@ import (
 	"time"
 )
 
-// SaveAuth persists the current auth for this user with an atomic replace, so
-// the final file is never observed partially written and a crash mid-save
-// leaves the previous record intact. When TWITCH_AUTH_ENCRYPTION_KEY is set,
+// SaveAuth persists the current auth for this user via a full temp write +
+// fsync + rename replacement (see atomicWriteFile for the exact guarantee).
+// Platform scope of that guarantee: on Unix/Linux — the production Docker
+// target — the replace is an atomic same-directory, same-filesystem rename,
+// so the final file is never observed partially written and a crash mid-save
+// leaves the previous record intact; on non-Unix platforms (the shipped
+// Windows binary) os.Rename is documented as NOT atomic even within one
+// directory, so no crash-preservation claim is made for the replace step
+// itself there. When TWITCH_AUTH_ENCRYPTION_KEY is set,
 // the record is AES-256-GCM encrypted at rest; otherwise it is written in
 // plaintext (with a one-time warning). The file is always mode 0600 regardless
 // of format. Concurrent saves are serialized; each save snapshots the state at
@@ -82,17 +90,21 @@ func (a *TwitchAuth) SaveAuth() error {
 }
 
 // ownTempPrefix is the profile-scoped temp-file prefix for the given final
-// auth path (e.g. ".tester.json.auth-"). Binding temps to the exact final
-// filename is what lets one profile's startup sweep remove only its OWN
-// orphans — never another profile's (possibly live) temp in the shared
-// cookies directory. It carries the profile basename only, never any secret.
-// Glob/temp-pattern metacharacters in the basename are neutralized so a
-// hostile or malformed username can neither break os.CreateTemp's pattern nor
-// widen a match onto another profile's files.
+// auth path: ".auth-" + the full-length SHA-256 hex digest of the exact
+// cleaned final path + "-". Binding temps to the final path is what lets one
+// profile's startup sweep remove only its OWN orphans — never another
+// profile's (possibly live) temp in the shared cookies directory.
+//
+// The full-length hash namespace is COLLISION-FREE across distinct final
+// paths (the previous lossy metacharacter sanitization mapped e.g. "b?b.json"
+// and "b*b.json" to the same prefix, letting one profile's sweep delete
+// another's live temp). It is deterministic per path, cross-platform safe
+// (fixed-alphabet hex, no filesystem metacharacters, bounded length), matched
+// literally (never as a glob), and its input is only the path — never any
+// secret. The final auth filename itself is unchanged.
 func ownTempPrefix(finalPath string) string {
-	base := filepath.Base(finalPath)
-	base = strings.NewReplacer("*", "_", "?", "_", "[", "_", "]", "_").Replace(base)
-	return "." + base + ".auth-"
+	sum := sha256.Sum256([]byte(filepath.Clean(finalPath)))
+	return ".auth-" + hex.EncodeToString(sum[:]) + "-"
 }
 
 // atomicWriteFile replaces path with data safely: a same-directory,

@@ -25,18 +25,21 @@ func TestLoginRefreshRecoveredForeignIdentityFailsClosed(t *testing.T) {
 	a.username = "tester"
 	seedStoredAuth(t, a)
 
-	var validations atomic.Int64
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
-		if validations.Add(1) == 1 {
+		switch authHeaderToken(r) {
+		case "test-access-old":
 			f.oauthError(w, 401, "invalid access token")
-			return
+		case "test-access-2":
+			// The refresh handed out a FOREIGN account's credentials.
+			f.writeJSON(w, 200, validateResponse{
+				ClientID: a.clientID, Login: "someoneelse",
+				Scopes: requiredScopes(), UserID: "uid-FOREIGN", ExpiresIn: 5000,
+			})
+		default:
+			// The fresh device-flow candidate belongs to this profile.
+			validFor(f, a, w)
 		}
-		// The refresh handed out a FOREIGN account's credentials.
-		f.writeJSON(w, 200, validateResponse{
-			ClientID: a.clientID, Login: "someoneelse",
-			Scopes: requiredScopes(), UserID: "uid-FOREIGN", ExpiresIn: 5000,
-		})
 	}
 	f.mu.Unlock()
 
@@ -62,7 +65,7 @@ func TestHourlyIdentityMismatchSurfacesErrorEvent(t *testing.T) {
 	a := newLifecycleAuth(t, f)
 	a.token = "test-access-1"
 	a.userID = "uid-1"
-	a.SetUserID("uid-1") // runtime-confirmed binding
+	a.userIDAuthoritative = true // runtime-confirmed provenance (validate/promotion)
 
 	var identityErrors atomic.Int64
 	a.SetEventCallback(func(ev AuthEvent) {
@@ -110,8 +113,15 @@ func TestTempSweepMetacharacterUsernameSafe(t *testing.T) {
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("metacharacter username's sweep deleted another profile's temp")
 	}
-	if !strings.Contains(ownTempPrefix(weird.cookiesPath()), "b_b") {
-		t.Fatalf("metacharacters not neutralized in the temp prefix: %q", ownTempPrefix(weird.cookiesPath()))
+	// P2-C4: the hash namespace carries no filesystem metacharacters and is
+	// distinct per final path — "b?b" and "b*b" can no longer collide onto a
+	// shared sanitized prefix.
+	prefix := ownTempPrefix(weird.cookiesPath())
+	if strings.ContainsAny(prefix, `*?[]\/`) {
+		t.Fatalf("temp prefix carries filesystem metacharacters: %q", prefix)
+	}
+	if prefix == ownTempPrefix("cookies/b*b.json") {
+		t.Fatalf("distinct profiles share a temp prefix: %q", prefix)
 	}
 }
 

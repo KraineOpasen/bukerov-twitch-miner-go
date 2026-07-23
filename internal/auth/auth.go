@@ -196,6 +196,30 @@ type TwitchAuth struct {
 	recoverDone chan struct{}
 	recoverErr  error
 
+	// pendingCandidate is a PRIVATE in-memory slot holding a granted-but-not-
+	// yet-validated token pair whose validation ended transiently or
+	// inconclusively (for a refresh grant the one-time refresh token is
+	// already consumed, so the pair must not be discarded and the grant must
+	// not be repeated). It is invisible to every credential reader
+	// (Snapshot/GetAuthToken/SaveAuth) and is never serialized; the next
+	// recovery for the same generation re-validates it INSTEAD of contacting
+	// the token endpoint. Any publication (promotion or external replacement)
+	// discards it.
+	pendingCandidate *tokenCandidate
+
+	// Sequential-recovery backoff gate (guarded by mu): after a failed
+	// recovery flight for gateGen, a new OWNER for that same generation is
+	// refused with ErrRecoveryBackoff until gateNextAllowed. Joining an
+	// in-flight recovery and stale-generation fast-paths are never gated (they
+	// cause no network traffic). The gate is keyed to the failed generation,
+	// so a rotation to a NEW generation is never blocked by an old gate, and
+	// clearing happens on any successful publication. gateClass is
+	// diagnostics-only (failure classification, never secret material).
+	gateGen         uint64
+	gateFailures    int
+	gateClass       string
+	gateNextAllowed time.Time
+
 	validatorRunning bool
 
 	// saveMu serializes whole SaveAuth cycles (snapshot, marshal, atomic
@@ -250,24 +274,58 @@ func (a *TwitchAuth) GetUsername() string {
 	return a.username
 }
 
-// SetToken replaces the access token (library/test use; production tokens are
-// published by device flow and refresh). It bumps the credential generation so
-// any in-flight validation or recovery keyed on the previous token becomes
-// stale — the generation guards stay sound for external callers too.
-func (a *TwitchAuth) SetToken(token string) {
+// ReplaceCredentials installs a COMPLETE externally supplied credential set
+// (library/test use; production credentials are only published after candidate
+// validation). It is deliberately all-or-nothing: every credential and
+// metadata field is replaced by the given pair's values (absent fields are
+// CLEARED, never inherited from the previous set), the validation state resets
+// to "unknown", any privately staged recovery candidate and recovery backoff
+// state are discarded, and the generation is bumped exactly once — so no
+// reader can ever observe a mix of old and new credential fields, and any
+// in-flight validation or recovery keyed on the previous generation becomes
+// stale. The set is marked persist-pending; callers own invoking SaveAuth.
+func (a *TwitchAuth) ReplaceCredentials(token TokenResponse) uint64 {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.token = token
+	a.token = token.AccessToken
+	a.refreshToken = token.RefreshToken
+	a.tokenType = token.TokenType
+	a.scopes = slices.Clone(token.Scope)
+	if token.ExpiresIn > 0 {
+		a.expiresAt = a.now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	} else {
+		a.expiresAt = time.Time{}
+	}
+	// A raw replacement asserts NO identity or validation history: the user ID
+	// and its provenance are cleared so they must be re-earned via
+	// /oauth2/validate. Everything is replaced under one lock so no reader ever
+	// observes a mix of old and new fields.
+	a.userID = ""
+	a.userIDAuthoritative = false
 	a.generation++
+	gen := a.generation
+	a.validationState = "unknown"
+	a.validatedAt = time.Time{}
+	a.persistDirty = true
+	a.pendingCandidate = nil
+	a.clearRecoveryGateLocked()
+	a.mu.Unlock()
+	slog.Info("Replaced Twitch credentials (external complete-set replacement)", "generation", gen)
+	return gen
 }
 
+// SetUserID records the session user ID. Setting a value NEVER confers
+// runtime confirmation — userIDAuthoritative is granted only by an
+// authoritative /oauth2/validate application (or candidate promotion), so an
+// unvalidated token can never be made authoritative through this setter.
+// Clearing the ID (or changing it to a different value) also clears any
+// existing confirmation.
 func (a *TwitchAuth) SetUserID(userID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if userID == "" || userID != a.userID {
+		a.userIDAuthoritative = false
+	}
 	a.userID = userID
-	// The one production caller resolves the ID authoritatively (miner
-	// GetChannelID binding); clearing the ID clears the confirmation.
-	a.userIDAuthoritative = userID != ""
 }
 
 // Snapshot returns a mutually consistent view of the current credential set.
@@ -486,24 +544,25 @@ func (a *TwitchAuth) Login(ctx context.Context) error {
 			case ValidateStatusValid:
 				return nil
 			case ValidateStatusUnauthorized:
-				if _, rerr := a.Recover(ctx, rejectedGen); rerr != nil {
-					return rerr
-				}
-				// A refresh success proves liveness, NOT identity: re-validate
-				// the rotated credentials so the identity-first checks apply
-				// to them too. A mismatch falls through to a fresh device
-				// login exactly like the direct-validation mismatch below;
-				// any degraded outcome is tolerated as usual.
-				status2, _, _ := a.validateAndApplyCurrent(ctx)
-				if status2 != ValidateStatusIdentityMismatch {
+				_, rerr := a.Recover(ctx, rejectedGen)
+				if rerr == nil {
+					// Recovery publishes ONLY candidate pairs that already
+					// passed the authoritative /oauth2/validate checks
+					// (structure, client ID, identity, scopes) — no second
+					// validation round trip is needed here.
 					return nil
 				}
+				if !errors.Is(rerr, ErrIdentityMismatch) {
+					return rerr
+				}
+				// The recovered candidate belongs to a different account than
+				// this profile: fall through to a fresh device login exactly
+				// like the direct-validation mismatch below.
 				fallthrough
 			case ValidateStatusIdentityMismatch:
-				// Fall through to a fresh device login for this profile; the
-				// foreign credentials are neither adopted nor deleted. The
-				// foreign user ID loaded from the record must not leak into
-				// the fresh session either.
+				// Fresh device login for this profile; the foreign credentials
+				// are neither adopted nor deleted. The foreign user ID loaded
+				// from the record must not leak into the fresh session either.
 				slog.Warn("Stored Twitch credentials belong to a different account; starting a fresh device login for this profile")
 				a.SetUserID("")
 			default:
@@ -519,18 +578,35 @@ func (a *TwitchAuth) Login(ctx context.Context) error {
 	return a.DeviceFlowLogin(ctx)
 }
 
-// DeviceFlowLogin runs one complete device-code authorization and publishes
-// the resulting token pair. Auth events (Started/Code/Completed/Error) are
-// emitted exactly once per flow.
+// DeviceFlowLogin runs one complete device-code authorization. The granted
+// pair is a PRIVATE CANDIDATE: it becomes active credentials only after the
+// authoritative /oauth2/validate confirms its structure, client ID, identity
+// (the configured profile), and required scopes — a token-endpoint 200 alone
+// never publishes anything. Auth events (Started/Code/Completed/Error) are
+// emitted exactly once per flow; Completed only after actual promotion.
 func (a *TwitchAuth) DeviceFlowLogin(ctx context.Context) error {
+	a.mu.Lock()
+	ownerGen := a.generation
+	a.mu.Unlock()
+
 	token, err := a.deviceFlowAuthenticate(ctx)
 	if err != nil {
 		return err
 	}
 
-	a.adoptTokenPair(token)
-
-	a.emitEvent(AuthEvent{Type: AuthEventCompleted})
+	promoted, err := a.resolveCandidate(ctx, &tokenCandidate{
+		pair: token, forGeneration: ownerGen, source: "device",
+	})
+	if err != nil {
+		a.emitEvent(AuthEvent{Type: AuthEventError, Error: err})
+		return err
+	}
+	if promoted {
+		a.emitEvent(AuthEvent{Type: AuthEventCompleted})
+	}
+	// promoted==false with a nil error: a concurrent publication superseded
+	// this flow — valid credentials exist, but they are not this flow's, so
+	// no Completed event is emitted for it.
 	return nil
 }
 
@@ -569,39 +645,14 @@ func (a *TwitchAuth) deviceFlowAuthenticate(ctx context.Context) (*TokenResponse
 	return token, nil
 }
 
-// adoptTokenPair publishes a granted token pair as the new authoritative
-// credential generation, persists it, and only THEN notifies rotation
-// consumers. Persisting first keeps the crash window for the freshly rotated
-// one-time refresh token as narrow as the disk write itself — a consumer sweep
-// (PubSub re-LISTENs, network I/O of unbounded duration) must never sit
-// between Twitch consuming the old token and the new pair reaching disk. A
-// persistence failure never discards the pair: it stays authoritative in
-// memory, is marked persist-pending, and is retried at the next safe
-// checkpoint (hourly validation, next rotation, explicit SaveAuth).
-//
-// The rotation callback runs on its own goroutine so a slow consumer sweep
-// cannot block the recovery flight's completion (waiters are released by the
-// flight, not by the sweep).
-func (a *TwitchAuth) adoptTokenPair(token *TokenResponse) {
-	gen := a.publishTokenPair(token)
-
-	if err := a.SaveAuth(); err != nil {
-		slog.Warn("Failed to persist rotated Twitch credentials; keeping the new pair authoritative in memory and retrying at the next checkpoint",
-			"generation", gen, "error", err)
-	}
-
-	a.mu.Lock()
-	cb := a.rotationCallback
-	a.mu.Unlock()
-	if cb != nil {
-		go cb(gen)
-	}
-}
-
 // publishTokenPair installs the complete pair under the state lock and bumps
 // the generation exactly once. Old and new fields are never observable
-// interleaved: every reader goes through the same mutex. Notification and
-// persistence are owned by adoptTokenPair.
+// interleaved: every reader goes through the same mutex. Publication
+// invalidates any privately staged candidate (its target generation is now
+// stale) and clears the recovery backoff gate (new credentials, fresh retry
+// budget). Persistence and notification are owned by the callers
+// (promoteCandidate for validated candidates; ReplaceCredentials for external
+// complete-set replacement).
 func (a *TwitchAuth) publishTokenPair(token *TokenResponse) uint64 {
 	a.mu.Lock()
 	a.token = token.AccessToken
@@ -618,6 +669,8 @@ func (a *TwitchAuth) publishTokenPair(token *TokenResponse) uint64 {
 	a.validationState = "valid"
 	a.validatedAt = a.now()
 	a.persistDirty = true
+	a.pendingCandidate = nil
+	a.clearRecoveryGateLocked()
 	a.mu.Unlock()
 
 	slog.Info("Published rotated Twitch credentials", "generation", gen)

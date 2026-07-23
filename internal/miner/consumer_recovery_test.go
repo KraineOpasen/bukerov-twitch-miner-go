@@ -10,12 +10,15 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 )
 
-// Review regression: a fast consumer rejection loop (IRC redials every
-// second) must not spawn one recovery observer per event — at most ONE
-// observer exists at a time and new observations start at most once per
-// cooldown window, so neither goroutines nor OAuth traffic can grow with the
-// event rate.
-func TestConsumerRecoveryObserverBoundedAndThrottled(t *testing.T) {
+// Review regression (P2-C3 contract): a fast consumer rejection loop (IRC
+// redials every second) must not spawn one recovery observer per event — at
+// most ONE observer goroutine exists at a time, so the goroutine population
+// never grows with the event rate. Retry PACING is the auth layer's job (its
+// per-generation backoff gate), NOT this guard's: once the observer slot is
+// free again, a new rejection may observe immediately and the auth layer
+// answers it with ErrRecoveryBackoff and zero network traffic if it is too
+// soon.
+func TestConsumerRecoveryObserverBounded(t *testing.T) {
 	m := &Miner{auth: auth.NewTwitchAuth("tester", "device-xyz")}
 
 	var calls atomic.Int64
@@ -44,21 +47,45 @@ func TestConsumerRecoveryObserverBoundedAndThrottled(t *testing.T) {
 	}
 
 	close(release)
-	// Wait for the observer slot to free, then hit the cooldown gate: a new
-	// rejection immediately after a completed observation must NOT start
-	// another one within the cooldown window.
+	// Once the observer slot frees, a NEW rejection may observe again — the
+	// miner imposes no cooldown of its own (the auth backoff gate owns
+	// pacing).
 	for m.authRecoveryObserver.Load() && time.Now().Before(deadline) {
 	}
 	m.recoverFromRejectedGeneration(0, "test")
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("cooldown did not throttle a fresh observation: %d calls", got)
+	for calls.Load() < 2 && time.Now().Before(deadline) {
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("freed observer slot did not allow a new observation: %d calls", got)
 	}
 
 	// A stale rejection (generation already rotated past) never observes.
-	m.authRecoveryLastStart.Store(0) // cooldown elapsed
-	m.auth.SetToken("rotated")       // bumps the generation past 0
+	for m.authRecoveryObserver.Load() && time.Now().Before(deadline) {
+	}
+	m.auth.ReplaceCredentials(auth.TokenResponse{AccessToken: "rotated"}) // bumps the generation past 0
 	m.recoverFromRejectedGeneration(0, "test")
-	if got := calls.Load(); got != 1 {
+	if got := calls.Load(); got != 2 {
 		t.Fatalf("stale rejection started an observation: %d calls", got)
+	}
+}
+
+// P2-C3: a backoff refusal from the auth layer is retryable — it must never
+// escalate the operator reauth path.
+func TestBackoffRefusalDoesNotEscalateReauth(t *testing.T) {
+	m := &Miner{auth: auth.NewTwitchAuth("tester", "device-xyz")}
+	m.authRecoverFn = func(ctx context.Context, gen uint64) error {
+		return auth.ErrRecoveryBackoff
+	}
+
+	m.recoverFromRejectedGeneration(0, "test")
+	deadline := time.Now().Add(5 * time.Second)
+	for m.authRecoveryObserver.Load() && time.Now().Before(deadline) {
+	}
+
+	m.mu.Lock()
+	notified, required := m.reauthNotified, m.reauthRequired
+	m.mu.Unlock()
+	if notified || required {
+		t.Fatalf("backoff refusal escalated the reauth path (notified=%v required=%v)", notified, required)
 	}
 }

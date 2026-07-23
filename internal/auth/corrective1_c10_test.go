@@ -42,7 +42,9 @@ func TestTempSweepIsProfileScoped(t *testing.T) {
 	}
 }
 
-// C10.4: the temp naming carries the profile basename but no secret material.
+// C10.4 (P2-C4 form): the temp naming derives ONLY from the final path —
+// deterministic per profile, distinct across profiles, and free of any
+// secret material.
 func TestTempNamingCarriesNoSecrets(t *testing.T) {
 	a := newAuth(t, "tester", "very-secret-token-value")
 	a.refreshToken = "very-secret-refresh-value"
@@ -53,7 +55,10 @@ func TestTempNamingCarriesNoSecrets(t *testing.T) {
 	if strings.Contains(prefix, "secret") {
 		t.Fatalf("temp prefix leaks secret material: %q", prefix)
 	}
-	if !strings.Contains(prefix, "tester.json") {
+	if prefix != ownTempPrefix(a.cookiesPath()) {
+		t.Fatalf("temp prefix is not deterministic for one profile")
+	}
+	if prefix == ownTempPrefix("cookies/other.json") {
 		t.Fatalf("temp prefix is not profile-scoped: %q", prefix)
 	}
 }

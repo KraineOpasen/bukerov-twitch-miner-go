@@ -179,7 +179,13 @@ func TestHourly401JoinsExistingRecovery(t *testing.T) {
 	a.userID = "uid-1"
 
 	f.mu.Lock()
-	f.validateHandler = func(w http.ResponseWriter, r *http.Request) { f.oauthError(w, 401, "invalid access token") }
+	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
+		if authHeaderToken(r) == "test-access-1" {
+			f.oauthError(w, 401, "invalid access token")
+			return
+		}
+		validFor(f, a, w)
+	}
 	release := make(chan struct{})
 	f.refreshHandler = func(w http.ResponseWriter, r *http.Request) {
 		<-release
