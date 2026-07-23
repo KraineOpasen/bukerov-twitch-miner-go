@@ -468,6 +468,17 @@ func (ws *WebSocketClient) HasTopicApplied(topic Topic) bool {
 	return topicIn(ws.topics, topic)
 }
 
+// HasUnlistenDebt reports whether this connection owes a failed-UNLISTEN retry
+// for the topic. While the debt stands, the topic's wire subscription may
+// still exist HERE — so a pool-level re-enable must stay on this connection
+// (its Listen settles the debt) instead of subscribing elsewhere and leaving a
+// duplicate plus an eternal debt behind.
+func (ws *WebSocketClient) HasUnlistenDebt(topic Topic) bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return topicIn(ws.unlistenRetry, topic)
+}
+
 func (ws *WebSocketClient) send(msg WSMessage) error {
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()

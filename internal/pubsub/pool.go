@@ -502,18 +502,64 @@ func (p *WebSocketPool) EnsureTopic(topic Topic, desired bool) error {
 	if !desired {
 		return p.unsubscribeAllLocked(topic)
 	}
+	return p.ensureSubscribedLocked(topic)
+}
 
-	for _, ws := range p.clients {
+// ensureSubscribedLocked canonicalizes desired=true pool-wide. Caller must
+// hold p.mu.
+//
+// One canonical owner is picked deterministically — an already wire-applied
+// owner first, else a desired-pending owner, else a failed-UNLISTEN debt
+// owner (whose wire subscription may still exist THERE, so the re-enable must
+// stay on that client rather than migrate and leave a duplicate plus an
+// eternal debt), else the normal bounded capacity target. The canonical owner
+// is driven to desired=true first (its Listen settles a same-client debt),
+// then EVERY other client is swept to desired=false best-effort — pending
+// duplicates dropped, applied duplicates UNLISTENed, foreign debts retried —
+// so finding one applied owner never short-circuits the cleanup of the rest.
+// The first error is returned after the full sweep; every failed transition
+// stays retryable by the identical apply.
+func (p *WebSocketPool) ensureSubscribedLocked(topic Topic) error {
+	canonical := -1
+	for i, ws := range p.clients {
 		if ws.HasTopicApplied(topic) {
-			return nil
+			canonical = i
+			break
 		}
 	}
-	for _, ws := range p.clients {
-		if ws.HasTopic(topic) {
-			return ws.Listen(topic)
+	if canonical < 0 {
+		for i, ws := range p.clients {
+			if ws.HasTopic(topic) {
+				canonical = i
+				break
+			}
 		}
 	}
-	return p.submitLocked(topic)
+	if canonical < 0 {
+		for i, ws := range p.clients {
+			if ws.HasUnlistenDebt(topic) {
+				canonical = i
+				break
+			}
+		}
+	}
+	if canonical < 0 {
+		return p.submitLocked(topic)
+	}
+
+	var firstErr error
+	if err := p.clients[canonical].Listen(topic); err != nil {
+		firstErr = err
+	}
+	for i, ws := range p.clients {
+		if i == canonical {
+			continue
+		}
+		if err := ws.Unlisten(topic); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (p *WebSocketPool) Close() {
