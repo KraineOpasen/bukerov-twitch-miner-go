@@ -56,7 +56,7 @@ func NewEventPrediction(
 		CreatedAt:               createdAt,
 		PredictionWindowSeconds: predictionWindowSeconds,
 		Status:                  PredictionStatus(status),
-		Bet:                     NewBet(outcomes, streamer.Settings.Bet),
+		Bet:                     NewBet(outcomes, streamer.GetSettings().Bet),
 	}
 }
 

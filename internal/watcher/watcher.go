@@ -875,7 +875,7 @@ func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
 	filtered := make([]int, 0, len(onlineIndexes))
 	var avoided []string
 	for _, idx := range onlineIndexes {
-		if w.streamers[idx].Settings.Preference == models.PreferenceAvoid {
+		if w.streamers[idx].GetSettings().Preference == models.PreferenceAvoid {
 			avoided = append(avoided, w.streamers[idx].Username)
 			w.noteSelection(idx, `excluded from watching: preference is set to "avoid" and other channels are online`)
 			continue
@@ -899,7 +899,7 @@ func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
 
 // isPreferred reports whether the streamer at idx is marked PreferencePrefer.
 func (w *MinuteWatcher) isPreferred(idx int) bool {
-	return w.streamers[idx].Settings.Preference == models.PreferencePrefer
+	return w.streamers[idx].GetSettings().Preference == models.PreferencePrefer
 }
 
 // selectRotating implements the fair watch-pair rotation for the case where
@@ -1348,7 +1348,7 @@ func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 	if s.DropsCondition() {
 		return true
 	}
-	return s.Settings.WatchStreak &&
+	return s.GetSettings().WatchStreak &&
 		s.Stream.StreakPending() &&
 		(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
 		!w.streakPursuitExhausted(idx)
@@ -1386,7 +1386,7 @@ func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
 // completing none of them.
 func (w *MinuteWatcher) streakInProgress(idx int) bool {
 	s := w.streamers[idx]
-	return s.Settings.WatchStreak &&
+	return s.GetSettings().WatchStreak &&
 		s.Stream.StreakPending() &&
 		s.Stream.GetMinuteWatched() > 0 &&
 		!w.streakPursuitExhausted(idx)
@@ -1446,7 +1446,7 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 // enough yet" from "watched enough but Twitch never granted it".
 func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	s := w.streamers[idx]
-	if !s.Settings.WatchStreak || !s.Stream.StreakPending() {
+	if !s.GetSettings().WatchStreak || !s.Stream.StreakPending() {
 		// Streak disabled, already earned for THIS broadcast (including a
 		// re-armed pursuit on the same broadcast after a blip or restart), or
 		// deferred until the broadcast is identified: drop any pursuit state
@@ -1568,7 +1568,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 		case config.PriorityStreak:
 			for _, idx := range onlineIndexes {
 				s := w.streamers[idx]
-				if s.Settings.WatchStreak &&
+				if s.GetSettings().WatchStreak &&
 					s.Stream.StreakPending() &&
 					(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
 					s.Stream.GetMinuteWatched() < watchStreakThresholdMinutes {

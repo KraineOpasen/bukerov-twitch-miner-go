@@ -159,7 +159,7 @@ func TestReadErrorTriggersReconnectAndResubscribe(t *testing.T) {
 	if err := ws.Connect(); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	ws.Listen(NewTopic(TopicVideoPlaybackByID, "123"))
+	_ = ws.Listen(NewTopic(TopicVideoPlaybackByID, "123"))
 	waitUntil(t, "first LISTEN to arrive", 3*time.Second, func() bool { return ts.listenCount() >= 1 })
 
 	close(kill)

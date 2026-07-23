@@ -39,12 +39,17 @@ var (
 	// ErrStreamerNotLive is used for a status-unknown (unconfirmed) streamer,
 	// distinct from the authoritative-offline ErrStreamerOffline defined below.
 	ErrStreamerNotLive = errors.New("streamer is not currently live")
+	// ErrPredictionsUserDisabled is returned for a manual bet on a round whose
+	// streamer had MakePredictions switched off after the round was tracked.
+	ErrPredictionsUserDisabled = errors.New("predictions are disabled in this streamer's settings")
 )
 
 // manualBetGateError maps an ineligible decision to a user-safe error, keeping
 // capability-disabled, capability-unknown, offline, and status-unknown distinct.
 func manualBetGateError(d eligibility.Decision) error {
 	switch d.Reason {
+	case eligibility.ReasonUserDisabled:
+		return ErrPredictionsUserDisabled
 	case eligibility.ReasonCapabilityDisabled:
 		return ErrChannelPointsDisabled
 	case eligibility.ReasonCapabilityUnknown:
@@ -157,6 +162,18 @@ type streamChecker interface {
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
+// channelActor is the narrow slice of the Twitch client the message handlers
+// need for per-channel actions (bonus claims, raid joins, moment claims,
+// community-goal contributions). Kept as an interface so the queued-event
+// setting gates can be unit-tested without real Twitch calls;
+// *api.TwitchClient satisfies it.
+type channelActor interface {
+	ClaimBonus(streamer *models.Streamer, claimID string) error
+	JoinRaid(streamer *models.Streamer, raid *models.Raid) error
+	ClaimMoment(streamer *models.Streamer, momentID string) error
+	ContributeToCommunityGoal(streamer *models.Streamer, goalID, goalTitle string, amount int) error
+}
+
 // roundControl is the per-round transient state backing manual betting and the
 // per-round auto-bet suppression. One entry lives alongside each tracked
 // prediction in the pool and is removed together with it, so the state can
@@ -180,7 +197,7 @@ type roundControl struct {
 
 type WebSocketPool struct {
 	clients     []*WebSocketClient
-	client      *api.TwitchClient
+	actor       channelActor
 	placer      predictionPlacer
 	checker     streamChecker
 	streamers   []*models.Streamer
@@ -188,6 +205,11 @@ type WebSocketPool struct {
 	settings    config.RateLimitSettings
 	predictions map[string]*models.EventPrediction
 	control     map[string]*roundControl
+
+	// newClient creates and connects one pool member. It is nil in production
+	// (connectNewClientLocked dials Twitch); tests inject a factory returning a
+	// pre-opened fake so topic reconciliation is exercised without a network.
+	newClient func(index int) (*WebSocketClient, error)
 
 	onMessage      MessageHandler
 	onStatusChange StatusHandler
@@ -214,7 +236,7 @@ type WebSocketPool struct {
 
 func NewWebSocketPool(twitchClient *api.TwitchClient, authToken string, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
 	return &WebSocketPool{
-		client:      twitchClient,
+		actor:       twitchClient,
 		placer:      twitchClient,
 		checker:     twitchClient,
 		streamers:   streamers,
@@ -416,20 +438,128 @@ func (p *WebSocketPool) RecentReconnects(window time.Duration) int {
 func (p *WebSocketPool) Submit(topic Topic) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.submitLocked(topic)
+}
 
+// submitLocked appends the topic to the last connection, growing the pool by
+// one bounded connection when the last one is full. Caller must hold p.mu. A
+// failed connect leaves the pool untouched (the topic is tracked nowhere) and
+// a failed LISTEN write leaves the topic parked as desired-pending on its
+// client — either way the same subscription stays retryable on the next
+// reconcile, and the error reaches the caller.
+func (p *WebSocketPool) submitLocked(topic Topic) error {
 	if len(p.clients) == 0 || p.clients[len(p.clients)-1].TopicCount() >= constants.MaxTopicsPerConnection {
-		ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
-		// Wire the reconnect counter before Connect() starts the read/ping loops,
-		// so the handler is set before any reconnect can fire.
-		ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
-		if err := ws.Connect(); err != nil {
+		ws, err := p.connectNewClientLocked()
+		if err != nil {
 			return err
 		}
 		p.clients = append(p.clients, ws)
 	}
 
-	p.clients[len(p.clients)-1].Listen(topic)
-	return nil
+	return p.clients[len(p.clients)-1].Listen(topic)
+}
+
+// connectNewClientLocked creates and connects the next pool member (or defers
+// to the injected test factory). Caller must hold p.mu.
+func (p *WebSocketPool) connectNewClientLocked() (*WebSocketClient, error) {
+	if p.newClient != nil {
+		return p.newClient(len(p.clients))
+	}
+	ws := NewWebSocketClient(len(p.clients), p.authToken, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
+	// Wire the reconnect counter before Connect() starts the read/ping loops,
+	// so the handler is set before any reconnect can fire.
+	ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
+	if err := ws.Connect(); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
+
+// EnsureTopic reconciles ONE topic to its desired state across the whole pool,
+// idempotently AND retryably.
+//
+// desired=true: if the topic is wire-APPLIED on any connection this is a no-op
+// — no duplicate subscription and no extra LISTEN is ever produced, including
+// at the topic-capacity boundary where the owning connection is full and a
+// newer one has room. If the topic is merely desired-pending on a connection
+// (parked for a reconnect replay, or a previous LISTEN write FAILED), that
+// client's write is driven now, so an identical apply retries the known-failed
+// operation instead of no-opping. Otherwise the topic is subscribed through
+// the normal bounded connection/listen path. Connect and write failures are
+// returned to the caller; the subscription always remains retryable.
+//
+// desired=false: the topic is removed from EVERY connection (cleaning up any
+// historical duplicates); repeating it is a safe no-op once truly converged. A
+// FAILED UNLISTEN write is returned as an error and retried by the next
+// identical apply (the client keeps the debt in its unlistenRetry ledger).
+// Other topics are never touched. Callers reconcile only per-channel
+// capability topics through this — the global user topics are not part of any
+// per-streamer desired state.
+func (p *WebSocketPool) EnsureTopic(topic Topic, desired bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !desired {
+		return p.unsubscribeAllLocked(topic)
+	}
+	return p.ensureSubscribedLocked(topic)
+}
+
+// ensureSubscribedLocked canonicalizes desired=true pool-wide. Caller must
+// hold p.mu.
+//
+// One canonical owner is picked deterministically — an already wire-applied
+// owner first, else a desired-pending owner, else a failed-UNLISTEN debt
+// owner (whose wire subscription may still exist THERE, so the re-enable must
+// stay on that client rather than migrate and leave a duplicate plus an
+// eternal debt), else the normal bounded capacity target. The canonical owner
+// is driven to desired=true first (its Listen settles a same-client debt),
+// then EVERY other client is swept to desired=false best-effort — pending
+// duplicates dropped, applied duplicates UNLISTENed, foreign debts retried —
+// so finding one applied owner never short-circuits the cleanup of the rest.
+// The first error is returned after the full sweep; every failed transition
+// stays retryable by the identical apply.
+func (p *WebSocketPool) ensureSubscribedLocked(topic Topic) error {
+	canonical := -1
+	for i, ws := range p.clients {
+		if ws.HasTopicApplied(topic) {
+			canonical = i
+			break
+		}
+	}
+	if canonical < 0 {
+		for i, ws := range p.clients {
+			if ws.HasTopic(topic) {
+				canonical = i
+				break
+			}
+		}
+	}
+	if canonical < 0 {
+		for i, ws := range p.clients {
+			if ws.HasUnlistenDebt(topic) {
+				canonical = i
+				break
+			}
+		}
+	}
+	if canonical < 0 {
+		return p.submitLocked(topic)
+	}
+
+	var firstErr error
+	if err := p.clients[canonical].Listen(topic); err != nil {
+		firstErr = err
+	}
+	for i, ws := range p.clients {
+		if i == canonical {
+			continue
+		}
+		if err := ws.Unlisten(topic); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (p *WebSocketPool) Close() {
@@ -442,15 +572,27 @@ func (p *WebSocketPool) Close() {
 	p.clients = nil
 }
 
+// Unsubscribe removes the topic from EVERY connection in the pool, not just
+// the first match, so a historical duplicate (the same topic subscribed on two
+// connections) is fully cleaned up. Repeating it is a safe no-op. Write errors
+// are swallowed here — reconciliation paths that need them use EnsureTopic.
 func (p *WebSocketPool) Unsubscribe(topic Topic) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	_ = p.unsubscribeAllLocked(topic)
+}
 
+// unsubscribeAllLocked drops the topic from all connections, returning the
+// first UNLISTEN write error (the affected client keeps the retry debt).
+// Caller must hold p.mu.
+func (p *WebSocketPool) unsubscribeAllLocked(topic Topic) error {
+	var firstErr error
 	for _, ws := range p.clients {
-		if ws.Unlisten(topic) {
-			return
+		if err := ws.Unlisten(topic); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
+	return firstErr
 }
 
 func (p *WebSocketPool) UpdateStreamers(streamers []*models.Streamer) {
@@ -561,7 +703,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 					logSkippedPointsAction(streamer, "bonus claim", d)
 					return
 				}
-				if err := p.client.ClaimBonus(streamer, claimID); err != nil {
+				if err := p.actor.ClaimBonus(streamer, claimID); err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
 				} else {
 					events.Record(events.TypeBonusClaimed, streamer.Username, "bonus claimed")
@@ -636,7 +778,10 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 }
 
 func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer) {
-	if msg.Type != "raid_update_v2" || !streamer.Settings.FollowRaid {
+	// Re-read the CURRENT settings snapshot at action time: an UNLISTEN cannot
+	// un-deliver an already-queued frame, so a raid event arriving after
+	// FollowRaid was switched off must not start a join.
+	if msg.Type != "raid_update_v2" || !streamer.GetSettings().FollowRaid {
 		return
 	}
 
@@ -659,7 +804,7 @@ func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer
 			RaidID:      raidID,
 			TargetLogin: targetLogin,
 		}
-		if err := p.client.JoinRaid(streamer, raid); err != nil {
+		if err := p.actor.JoinRaid(streamer, raid); err != nil {
 			slog.Error("Failed to join raid", "error", err)
 		} else {
 			events.Record(events.TypeRaidJoined, streamer.Username, "raid to "+targetLogin)
@@ -668,7 +813,9 @@ func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer
 }
 
 func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Streamer) {
-	if msg.Type != "active" || !streamer.Settings.ClaimMoments {
+	// Current-settings snapshot at action time (see handleRaid): a queued moment
+	// frame delivered after ClaimMoments was switched off must not claim.
+	if msg.Type != "active" || !streamer.GetSettings().ClaimMoments {
 		return
 	}
 
@@ -677,7 +824,7 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 	}
 
 	if momentID, ok := msg.Data["moment_id"].(string); ok {
-		if err := p.client.ClaimMoment(streamer, momentID); err != nil {
+		if err := p.actor.ClaimMoment(streamer, momentID); err != nil {
 			slog.Error("Failed to claim moment", "error", err)
 		} else {
 			events.Record(events.TypeMomentClaimed, streamer.Username, "moment claimed")
@@ -686,10 +833,6 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 }
 
 func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *models.Streamer) {
-	if !streamer.Settings.MakePredictions {
-		return
-	}
-
 	if msg.Data == nil {
 		return
 	}
@@ -704,6 +847,16 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 
 	switch msg.Type {
 	case "event-created":
+		// Gate NEW rounds on the CURRENT settings snapshot: a queued
+		// event-created frame delivered after MakePredictions was switched off
+		// must not schedule an auto-bet. event-updated below is deliberately NOT
+		// gated on the toggle — it performs no Twitch mutation, and an
+		// already-tracked round must keep its bookkeeping and terminal cleanup
+		// (result/refund correlation) working across a mid-round disable.
+		if !streamer.GetSettings().MakePredictions {
+			return
+		}
+
 		p.mu.RLock()
 		_, exists := p.predictions[eventID]
 		p.mu.RUnlock()
@@ -744,12 +897,12 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 			return
 		}
 
-		if streamer.Settings.Bet.MinimumPoints > 0 &&
-			streamer.GetChannelPoints() <= streamer.Settings.Bet.MinimumPoints {
+		if minPoints := streamer.GetSettings().Bet.MinimumPoints; minPoints > 0 &&
+			streamer.GetChannelPoints() <= minPoints {
 			slog.Info("Not enough points for prediction",
 				"streamer", streamer.Username,
 				"points", streamer.GetChannelPoints(),
-				"minimum", streamer.Settings.Bet.MinimumPoints,
+				"minimum", minPoints,
 			)
 			return
 		}
@@ -931,6 +1084,18 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 
 	rc.placeMu.Lock()
 	defer rc.placeMu.Unlock()
+
+	// Placement-time gate: re-evaluate the CURRENT user settings and eligibility
+	// immediately before the Twitch mutation. The event-created gate ran when the
+	// bet was scheduled, but MakePredictions can be switched off (or the channel
+	// can stop being eligible) while the bet timer is pending, and an UNLISTEN
+	// cannot recall this already-scheduled action. Skipping here leaves the round
+	// tracked, so result/refund correlation for any previously placed bet is
+	// untouched, and nothing re-schedules the skipped placement on re-enable.
+	if d := pointsEligibility.EvaluatePointsTask(event.Streamer, eligibility.TaskPrediction); !d.Eligible {
+		logSkippedPointsAction(event.Streamer, "auto prediction placement", d)
+		return
+	}
 
 	// Decide + gate under the pool lock; the network call is the only thing done
 	// outside it (serialized instead by placeMu).
@@ -1222,7 +1387,9 @@ func humanizeBetError(err error) string {
 }
 
 func (p *WebSocketPool) handleCommunityPointsChannel(msg *PubSubMessage, streamer *models.Streamer) {
-	if !streamer.Settings.CommunityGoals {
+	// Current-settings snapshot at action time (see handleRaid): a queued goal
+	// frame delivered after CommunityGoals was switched off is ignored entirely.
+	if !streamer.GetSettings().CommunityGoals {
 		return
 	}
 
@@ -1255,12 +1422,14 @@ func (p *WebSocketPool) handleCommunityPointsChannel(msg *PubSubMessage, streame
 
 func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
 	// Centralized gate: contribute points to community goals only when the task
-	// is eligible (confirmed online, Channel Points enabled). Disabled/unknown
-	// capability never starts a new contribution.
+	// is eligible (user setting on, confirmed online, Channel Points enabled).
+	// The evaluator re-reads the CURRENT settings snapshot, so a queued goal
+	// event delivered after CommunityGoals was switched off never contributes.
 	if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskCommunityGoal); !d.Eligible {
 		logSkippedPointsAction(streamer, "community goal", d)
 		return
 	}
+	settings := streamer.GetSettings()
 	for _, goal := range streamer.CommunityGoals {
 		if goal.Status != models.CommunityGoalStarted || !goal.IsInStock {
 			continue
@@ -1272,18 +1441,18 @@ func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
 			continue
 		}
 
-		amount := computeGoalContribution(goal, points, streamer.Settings)
+		amount := computeGoalContribution(goal, points, settings)
 		if amount <= 0 {
 			slog.Info("Skipping community goal contribution: configured limit resolves to zero",
 				"streamer", streamer.Username,
 				"goal", goal.Title,
 				"balance", points,
-				"maxPercent", streamer.Settings.CommunityGoalsMaxPercent,
-				"maxAmount", streamer.Settings.CommunityGoalsMaxAmount)
+				"maxPercent", settings.CommunityGoalsMaxPercent,
+				"maxAmount", settings.CommunityGoalsMaxAmount)
 			continue
 		}
 
-		if err := p.client.ContributeToCommunityGoal(streamer, goal.GoalID, goal.Title, amount); err != nil {
+		if err := p.actor.ContributeToCommunityGoal(streamer, goal.GoalID, goal.Title, amount); err != nil {
 			slog.Error("Failed to contribute to community goal", "error", err)
 		}
 	}
