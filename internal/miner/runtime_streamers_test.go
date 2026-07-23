@@ -121,7 +121,7 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	}
 
 	mgr := streamer.NewManager(fakeStreamerAPI{}, cfg.StreamerSettings)
-	if added, _ := mgr.ApplySettings(cfg.Streamers, cfg.StreamerSettings); len(added) != 1 {
+	if added, _, _ := mgr.ApplySettings(cfg.Streamers, cfg.StreamerSettings); len(added) != 1 {
 		t.Fatalf("seeding the manager failed: added=%d, want 1", len(added))
 	}
 

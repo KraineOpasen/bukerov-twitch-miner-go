@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -203,9 +204,29 @@ func (m *Manager) PointsMap() map[string]int {
 	return points
 }
 
+// SettingsChange records one EXISTING streamer whose effective settings were
+// replaced by an ApplySettings call, with the before/after snapshots. Added and
+// removed streamers are never reported here — they appear only in their own
+// lists — so a caller can reconcile each roster member exactly once.
+type SettingsChange struct {
+	Streamer *models.Streamer
+	Old      models.StreamerSettings
+	New      models.StreamerSettings
+}
+
+// settingsEqual compares two effective settings snapshots by value, following
+// pointers (ChatLogs) so nil ("inherit global") stays distinct from an explicit
+// false override.
+func settingsEqual(a, b models.StreamerSettings) bool {
+	return reflect.DeepEqual(a, b)
+}
+
 // ApplySettings updates settings for streamers based on config.
-// Returns lists of added and removed streamers.
-func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models.StreamerSettings) (added, removed []*models.Streamer) {
+// Returns the added and removed streamers plus a change record for every
+// existing streamer whose effective settings actually differ, so the caller
+// can reconcile runtime capabilities (PubSub topics, chat presence) without a
+// restart. Kept objects retain their identity — ChannelID included.
+func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models.StreamerSettings) (added, removed []*models.Streamer, changed []SettingsChange) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -223,11 +244,16 @@ func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models
 
 	for _, streamer := range m.streamers {
 		if sc, ok := configMap[streamer.Username]; ok {
+			next := defaults
 			if sc.Settings != nil {
-				streamer.SetSettings(*sc.Settings)
-			} else {
-				streamer.SetSettings(defaults)
+				next = *sc.Settings
 			}
+			old := streamer.GetSettings()
+			if settingsEqual(old, next) {
+				continue
+			}
+			streamer.SetSettings(next)
+			changed = append(changed, SettingsChange{Streamer: streamer, Old: old, New: next})
 		}
 	}
 
@@ -279,7 +305,7 @@ func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models
 	}
 	m.streamers = remaining
 
-	return added, removed
+	return added, removed, changed
 }
 
 // CheckOnlineStatus checks the online status for all streamers.

@@ -62,6 +62,15 @@ type Miner struct {
 	notifications    *notifications.Manager
 	debugServer      *debug.Server
 
+	// capabilityTopics/chatPresence are the runtime-capability reconciliation
+	// seams: nil in production (the real wsPool/chatManager are used), injected
+	// by tests to observe the desired-state plan without network side effects.
+	// reconcileMu serializes whole reconciliation sweeps (see
+	// reconcileRuntimeCapabilities); it is never held while mu is being taken.
+	capabilityTopics topicReconciler
+	chatPresence     chatToggler
+	reconcileMu      sync.Mutex
+
 	deviceID          string
 	externalAnalytics bool
 	// ownsDB is true only when initialize() opened the database itself
@@ -573,23 +582,13 @@ func (m *Miner) subscribeToTopics() error {
 
 	for _, s := range m.streamers.All() {
 		channelID := s.ChannelID
+		desired := desiredCapabilityTopics(s.GetSettings())
 
-		_ = m.wsPool.Submit(pubsub.NewTopic(pubsub.TopicVideoPlaybackByID, channelID))
-
-		if s.Settings.FollowRaid {
-			_ = m.wsPool.Submit(pubsub.NewTopic(pubsub.TopicRaid, channelID))
-		}
-
-		if s.Settings.MakePredictions {
-			_ = m.wsPool.Submit(pubsub.NewTopic(pubsub.TopicPredictionsChannel, channelID))
-		}
-
-		if s.Settings.ClaimMoments {
-			_ = m.wsPool.Submit(pubsub.NewTopic(pubsub.TopicCommunityMomentsChannel, channelID))
-		}
-
-		if s.Settings.CommunityGoals {
-			_ = m.wsPool.Submit(pubsub.NewTopic(pubsub.TopicCommunityPointsChannel, channelID))
+		for _, tt := range capabilityTopicOrder {
+			if !desired[tt] {
+				continue
+			}
+			_ = m.wsPool.EnsureTopic(pubsub.NewTopic(tt, channelID), true)
 		}
 	}
 
@@ -1204,7 +1203,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.DiscoveryPreferSubscribed, m.config.RateLimits)
 	}
 
-	added, removed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
+	added, removed, changed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
 
 	discordCfg := m.config.Discord
 	notifCfg := m.config.Notifications
@@ -1225,38 +1224,8 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		wsPool.SetRiskSettings(riskCfg)
 	}
 
-	for _, streamer := range added {
-		if wsPool != nil {
-			_ = wsPool.Submit(pubsub.NewTopic(pubsub.TopicVideoPlaybackByID, streamer.ChannelID))
-
-			if streamer.Settings.FollowRaid {
-				_ = wsPool.Submit(pubsub.NewTopic(pubsub.TopicRaid, streamer.ChannelID))
-			}
-			if streamer.Settings.MakePredictions {
-				_ = wsPool.Submit(pubsub.NewTopic(pubsub.TopicPredictionsChannel, streamer.ChannelID))
-			}
-			if streamer.Settings.ClaimMoments {
-				_ = wsPool.Submit(pubsub.NewTopic(pubsub.TopicCommunityMomentsChannel, streamer.ChannelID))
-			}
-			if streamer.Settings.CommunityGoals {
-				_ = wsPool.Submit(pubsub.NewTopic(pubsub.TopicCommunityPointsChannel, streamer.ChannelID))
-			}
-		}
-	}
-
-	for _, streamer := range removed {
-		if wsPool != nil {
-			wsPool.Unsubscribe(pubsub.NewTopic(pubsub.TopicVideoPlaybackByID, streamer.ChannelID))
-			wsPool.Unsubscribe(pubsub.NewTopic(pubsub.TopicRaid, streamer.ChannelID))
-			wsPool.Unsubscribe(pubsub.NewTopic(pubsub.TopicPredictionsChannel, streamer.ChannelID))
-			wsPool.Unsubscribe(pubsub.NewTopic(pubsub.TopicCommunityMomentsChannel, streamer.ChannelID))
-			wsPool.Unsubscribe(pubsub.NewTopic(pubsub.TopicCommunityPointsChannel, streamer.ChannelID))
-		}
-		if m.chatManager != nil {
-			m.chatManager.Leave(streamer.Username)
-		}
-	}
-
+	// Propagate the new roster BEFORE topic reconciliation, so a frame arriving
+	// on a just-subscribed topic can already resolve its streamer.
 	if len(added) > 0 || len(removed) > 0 {
 		allStreamers := m.streamers.All()
 		if wsPool != nil {
@@ -1273,6 +1242,13 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		}
 		m.triggerStreamCheck()
 	}
+
+	// Reconcile runtime capabilities (per-channel PubSub topics + IRC presence)
+	// for the WHOLE roster — added, removed, changed AND unchanged streamers —
+	// with no miner lock held. The desired-state sweep is what applies an
+	// existing streamer's toggles immediately and re-attempts any subscription a
+	// previous apply left failed.
+	m.reconcileRuntimeCapabilities(added, removed, changed)
 
 	if notifMgr != nil {
 		if err := notifMgr.UpdateDiscordConfig(&discordCfg); err != nil {

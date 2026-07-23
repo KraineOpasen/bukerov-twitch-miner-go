@@ -1119,7 +1119,7 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 	// stale against an older one. BeginPlaybackRefreshObservation advances both
 	// counters under one Stream.mu hold, so the two domains keep the same relative
 	// ordering with no window in between (see PlaybackRefreshObservation).
-	claimDrops := streamer.Settings.ClaimDrops
+	claimDrops := streamer.GetSettings().ClaimDrops
 	observation := streamer.Stream.BeginPlaybackRefreshObservation(fetchStreamInfo && claimDrops)
 	obs := observation.SessionID
 	availObs := observation.CampaignAvailabilityID
@@ -1479,7 +1479,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 			}
 		}
 	}
-	if streamer.Settings.CommunityGoals {
+	if streamer.GetSettings().CommunityGoals {
 		if settings, ok := channel["communityPointsSettings"].(map[string]interface{}); ok {
 			if raw, present := settings["goals"]; present {
 				if goals, ok := raw.([]interface{}); ok {

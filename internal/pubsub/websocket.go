@@ -94,7 +94,7 @@ func (ws *WebSocketClient) Connect() error {
 	ws.isClosed = false
 	ws.lastPong = time.Now()
 	ws.lastConnectedAt = time.Now()
-	pending := ws.pendingTopics
+	resubscribed := len(ws.pendingTopics)
 	// The loops below get THIS generation's stop channel and conn as
 	// parameters, snapshotted under mu. Selecting on the ws.stopChan field
 	// would race with reconnect() replacing it — and worse, an old loop
@@ -104,18 +104,13 @@ func (ws *WebSocketClient) Connect() error {
 	stop := ws.stopChan
 	ws.mu.Unlock()
 
-	// Resubscribe outside the lock (Listen takes ws.mu itself). isOpened is now
-	// true, so each Listen sends its LISTEN frame immediately rather than
-	// re-parking the topic in pendingTopics.
-	for _, topic := range pending {
-		ws.Listen(topic)
-	}
+	// Drain the parked set one topic at a time, re-checking pendingTopics
+	// membership under the lock per topic. Replaying a pre-unlock snapshot
+	// instead would resurrect a topic a concurrent Unlisten (runtime capability
+	// disable) had just removed from the field.
+	ws.replayPendingTopics()
 
-	ws.mu.Lock()
-	ws.pendingTopics = nil
-	ws.mu.Unlock()
-
-	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", len(pending))
+	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", resubscribed)
 
 	go ws.readLoop(stop, conn)
 	go ws.pingLoop(stop)
@@ -169,10 +164,14 @@ func (ws *WebSocketClient) SetReconnectHandler(h func()) {
 	ws.mu.Unlock()
 }
 
+// TopicCount reports how many topics this connection is responsible for,
+// counting parked pendingTopics too: during a reconnect the live set sits in
+// pendingTopics, and ignoring it would let the pool pack new topics onto an
+// effectively full connection past MaxTopicsPerConnection.
 func (ws *WebSocketClient) TopicCount() int {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
-	return len(ws.topics)
+	return len(ws.topics) + len(ws.pendingTopics)
 }
 
 // state returns an atomic read-only view of this connection for the pool's
@@ -198,15 +197,32 @@ func (ws *WebSocketClient) Listen(topic Topic) {
 			return
 		}
 	}
-	ws.topics = append(ws.topics, topic)
 
 	if !ws.isOpened {
+		// Not connected (initial dial pending, or a reconnect swapped the
+		// generation): PARK the topic only — the post-connect replay sends its
+		// LISTEN. Appending to the live set and writing here would push the
+		// frame into a dead conn, silently stranding the topic as
+		// tracked-but-never-subscribed (which a desired-state sweep could then
+		// never heal, since HasTopic would claim ownership).
+		for _, t := range ws.pendingTopics {
+			if t.String() == topic.String() {
+				ws.mu.Unlock()
+				return
+			}
+		}
 		ws.pendingTopics = append(ws.pendingTopics, topic)
 		ws.mu.Unlock()
 		return
 	}
+	ws.topics = append(ws.topics, topic)
 	ws.mu.Unlock()
 
+	ws.sendListen(topic)
+}
+
+// sendListen writes one LISTEN frame for the topic on the current connection.
+func (ws *WebSocketClient) sendListen(topic Topic) {
 	data := &WSData{
 		Topics: []string{topic.String()},
 	}
@@ -221,6 +237,27 @@ func (ws *WebSocketClient) Listen(topic Topic) {
 	}
 
 	_ = ws.send(msg)
+}
+
+// replayPendingTopics promotes parked topics onto the live connection one at a
+// time. Each iteration pops the head and promotes it into ws.topics under a
+// SINGLE lock hold, so (a) a topic a concurrent Unlisten already removed from
+// pendingTopics is never replayed, and (b) from the instant of promotion a
+// later Unlisten finds the topic in the live set and issues its own UNLISTEN.
+func (ws *WebSocketClient) replayPendingTopics() {
+	for {
+		ws.mu.Lock()
+		if !ws.isOpened || len(ws.pendingTopics) == 0 {
+			ws.mu.Unlock()
+			return
+		}
+		topic := ws.pendingTopics[0]
+		ws.pendingTopics = ws.pendingTopics[1:]
+		ws.topics = append(ws.topics, topic)
+		ws.mu.Unlock()
+
+		ws.sendListen(topic)
+	}
 }
 
 func (ws *WebSocketClient) Unlisten(topic Topic) bool {
@@ -267,10 +304,18 @@ func (ws *WebSocketClient) Unlisten(topic Topic) bool {
 	return found
 }
 
+// HasTopic reports whether this connection owns the topic, counting topics
+// parked in pendingTopics (a reconnect in flight moves the live set there) so
+// a pool-wide dedup scan cannot double-subscribe a topic mid-reconnect.
 func (ws *WebSocketClient) HasTopic(topic Topic) bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 	for _, t := range ws.topics {
+		if t.String() == topic.String() {
+			return true
+		}
+	}
+	for _, t := range ws.pendingTopics {
 		if t.String() == topic.String() {
 			return true
 		}
@@ -539,6 +584,11 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	ws.stopChan = make(chan struct{})
 	ws.pendingTopics = restore
 	ws.topics = nil
+	// The connection is no longer usable from this point: a Listen arriving
+	// during the redial must PARK its topic (picked up by the post-connect
+	// replay) instead of writing a LISTEN frame into the dead old conn and
+	// stranding the topic as tracked-but-never-subscribed.
+	ws.isOpened = false
 	ws.mu.Unlock()
 
 	if err := ws.Connect(); err != nil {

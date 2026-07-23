@@ -2,6 +2,7 @@ package chat
 
 import (
 	"log/slog"
+	"net"
 	"sync"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -14,6 +15,11 @@ type ChatManager struct {
 	logger           ChatLogger
 	globalChatLogsOn bool
 	mentionHandler   MentionHandler
+
+	// dialFn, when set, is handed to every IRC client this manager creates. It
+	// is nil in production (clients dial Twitch IRC over TLS); tests inject an
+	// in-memory transport so presence transitions run without a network.
+	dialFn func() (net.Conn, error)
 
 	mu sync.RWMutex
 }
@@ -29,8 +35,14 @@ func NewChatManager(username, token string, logger ChatLogger, globalChatLogsOn 
 	}
 }
 
+// ToggleChat reconciles the streamer's IRC presence with its CURRENT Chat
+// setting, idempotently: joining when already joined and leaving when already
+// left are no-ops, so it is safe to invoke immediately on every runtime
+// settings apply as well as from the periodic stream-check loop.
 func (m *ChatManager) ToggleChat(streamer *models.Streamer) {
-	switch streamer.Settings.Chat {
+	// Snapshot under the streamer lock: Settings is replaced wholesale by a
+	// runtime settings apply, concurrent with this reconciliation.
+	switch streamer.GetSettings().Chat {
 	case models.ChatAlways:
 		m.joinChat(streamer)
 	case models.ChatNever:
@@ -58,8 +70,8 @@ func (m *ChatManager) ToggleChat(streamer *models.Streamer) {
 }
 
 func (m *ChatManager) shouldLogChat(streamer *models.Streamer) bool {
-	if streamer.Settings.ChatLogs != nil {
-		return *streamer.Settings.ChatLogs
+	if logs := streamer.GetSettings().ChatLogs; logs != nil {
+		return *logs
 	}
 	return m.globalChatLogsOn
 }
@@ -76,6 +88,9 @@ func (m *ChatManager) joinChat(streamer *models.Streamer) {
 
 	logChat := m.shouldLogChat(streamer)
 	client := NewIRCClient(m.username, m.token, streamer, m.logger, logChat, m.mentionHandler)
+	if m.dialFn != nil {
+		client.dialFn = m.dialFn
+	}
 	if err := client.Connect(); err != nil {
 		slog.Error("Failed to join IRC chat", "channel", streamer.Username, "error", err)
 		return

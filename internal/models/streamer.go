@@ -692,8 +692,11 @@ func (s *Streamer) TotalPointsMultiplier() float64 {
 }
 
 func (s *Streamer) GetPredictionWindow(predictionWindowSeconds float64) float64 {
-	delayMode := s.Settings.Bet.DelayMode
-	delay := s.Settings.Bet.Delay
+	// Snapshot under the lock: Settings is replaced wholesale by a runtime
+	// SetSettings, and this runs on the PubSub read-loop goroutine.
+	bet := s.GetSettings().Bet
+	delayMode := bet.DelayMode
+	delay := bet.Delay
 
 	switch delayMode {
 	case DelayModeFromStart:
