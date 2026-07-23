@@ -80,7 +80,7 @@ func spadeErr(stage, reason string) error { return &errSpadeDiscovery{stage: sta
 // turn a successful network fetch into a silent partial publication. Any failure
 // returns a redacted error; the caller leaves the last-known session intact.
 func (c *TwitchClient) discoverSpadeURL(ctx context.Context, streamer *models.Streamer) (string, error) {
-	channelURL := fmt.Sprintf("%s/%s", c.twitchBaseURL, streamer.Username)
+	channelURL := fmt.Sprintf("%s/%s", c.twitchBaseURL, streamer.GetUsername())
 	channelBody, err := c.fetchSpadeAsset(ctx, "channel_page", channelURL, c.maxChannelPageBytes, false)
 	if err != nil {
 		return "", err

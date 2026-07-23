@@ -101,8 +101,8 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 
 	if mode == ModeRotation && w.rotation.hasPair {
 		st.ActivePair = []string{
-			w.streamers[w.rotation.activePair[0]].Username,
-			w.streamers[w.rotation.activePair[1]].Username,
+			w.streamers[w.rotation.activePair[0]].GetUsername(),
+			w.streamers[w.rotation.activePair[1]].GetUsername(),
 		}
 		st.PairSince = w.rotation.lastSwitch
 		st.NextRotationAt = w.rotation.lastSwitch.Add(w.rotation.nextInterval)
@@ -114,7 +114,7 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 			for idx := range w.rotation.deferredFor {
 				if idx >= 0 && idx < len(w.streamers) {
 					st.PostponedSwapOuts = append(st.PostponedSwapOuts, PostponedSwapOut{
-						Username: w.streamers[idx].Username,
+						Username: w.streamers[idx].GetUsername(),
 						Until:    st.NextRotationAt,
 					})
 				}
@@ -139,7 +139,7 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 			}
 		}
 		st.Decisions = append(st.Decisions, WatchDecision{
-			Username: s.Username,
+			Username: s.GetUsername(),
 			Watching: watchingSet[idx],
 			Reason:   reason,
 		})

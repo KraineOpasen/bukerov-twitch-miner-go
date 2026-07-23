@@ -189,7 +189,7 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 			streamer: s, origin: OriginConfigured, idx: idx,
 			reasonCode: rc, reason: reason, campaign: camp, selectedAt: now,
 		})
-		seen[s.Username] = true
+		seen[s.GetUsername()] = true
 	}
 
 	var waiting []WaitingChannel
@@ -197,7 +197,7 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 		if c.Streamer == nil {
 			continue
 		}
-		login := c.Streamer.Username
+		login := c.Streamer.GetUsername()
 		if seen[login] {
 			// One channel can never occupy two slots (e.g. a discovered
 			// channel that is also on the configured list).
@@ -228,7 +228,7 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 
 		evicted := slots[victim]
 		waiting = append(waiting, WaitingChannel{
-			Channel:    evicted.streamer.Username,
+			Channel:    evicted.streamer.GetUsername(),
 			Origin:     evicted.origin,
 			ReasonCode: ReasonLowerPriority,
 			Reason:     "displaced this tick by a higher-priority " + c.Origin + " channel",
@@ -236,7 +236,7 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 		if evicted.idx >= 0 {
 			w.noteSelection(evicted.idx, "not watched this tick: displaced by a higher-priority "+c.Origin+" channel ("+reason+")")
 		}
-		delete(seen, evicted.streamer.Username)
+		delete(seen, evicted.streamer.GetUsername())
 		slots[victim] = incoming
 		seen[login] = true
 	}
@@ -369,14 +369,14 @@ func (w *MinuteWatcher) publishBrokerSnapshot(slots []slotOccupant, waiting []Wa
 	for i, s := range slots {
 		snap.Slots = append(snap.Slots, SlotAssignment{
 			Slot:       i + 1,
-			Channel:    s.streamer.Username,
+			Channel:    s.streamer.GetUsername(),
 			Origin:     s.origin,
 			ReasonCode: s.reasonCode,
 			Reason:     s.reason,
 			Campaign:   s.campaign,
 			SelectedAt: s.selectedAt,
 		})
-		watching[s.streamer.Username] = true
+		watching[s.streamer.GetUsername()] = true
 	}
 	snap.Waiting = waiting
 
@@ -451,7 +451,7 @@ type slotLogState struct {
 func (w *MinuteWatcher) logSlotChanges(slots []slotOccupant) {
 	current := make(map[string]slotLogState, len(slots))
 	for _, s := range slots {
-		current[s.streamer.Username] = slotLogState{
+		current[s.streamer.GetUsername()] = slotLogState{
 			reason:    s.reasonCode,
 			broadcast: s.streamer.Stream.GetBroadcastID(),
 		}
@@ -509,7 +509,7 @@ func (w *MinuteWatcher) resetLostSlotContinuity(slots []slotOccupant) {
 	watched := make(map[string]*models.Streamer, len(slots))
 	for _, s := range slots {
 		if s.idx >= 0 {
-			watched[s.streamer.Username] = s.streamer
+			watched[s.streamer.GetUsername()] = s.streamer
 		}
 	}
 	for login, streamer := range w.lastConfiguredWatched {

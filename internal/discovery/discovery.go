@@ -310,11 +310,11 @@ func (m *Manager) RefreshSubscribedSet(probe func(login string) bool) {
 	m.mu.Lock()
 	poolLogins := make([]string, 0, len(m.pool))
 	for _, ch := range m.pool {
-		poolLogins = append(poolLogins, ch.Streamer.Username)
+		poolLogins = append(poolLogins, ch.Streamer.GetUsername())
 	}
 	current := ""
 	if m.current != nil {
-		current = m.current.Streamer.Username
+		current = m.current.Streamer.GetUsername()
 	}
 	targets := m.rotateProbeTargetsLocked(poolLogins, current)
 	m.mu.Unlock()
@@ -778,11 +778,11 @@ func (m *Manager) StreamerFor(login string) *models.Streamer {
 
 func (m *Manager) findExistingLocked(login string) *Channel {
 	for _, ch := range m.pool {
-		if ch.Streamer.Username == login {
+		if ch.Streamer.GetUsername() == login {
 			return ch
 		}
 	}
-	if m.current != nil && m.current.Streamer.Username == login {
+	if m.current != nil && m.current.Streamer.GetUsername() == login {
 		return m.current
 	}
 	return nil
@@ -794,7 +794,7 @@ func (m *Manager) clearPool() {
 	var game, login string
 	if hadCurrent != nil {
 		game = hadCurrent.Game
-		login = hadCurrent.Streamer.Username
+		login = hadCurrent.Streamer.GetUsername()
 	}
 	m.pool = nil
 	m.current = nil
@@ -874,11 +874,11 @@ func (m *Manager) prepareCurrent() *Channel {
 		m.setCurrent(next)
 		game, _, viewers, _ := m.channelFacts(next)
 		slog.Info("Discovered channel selected",
-			"channel", next.Streamer.Username,
+			"channel", next.Streamer.GetUsername(),
 			"game", game,
 			"viewers", viewers,
 			"reason", "best available drops-enabled channel by viewer count")
-		events.Record(events.TypeDiscoverySelected, next.Streamer.Username,
+		events.Record(events.TypeDiscoverySelected, next.Streamer.GetUsername(),
 			"directory candidate: "+game)
 		current = next
 	}
@@ -906,7 +906,7 @@ func (m *Manager) prepareCurrent() *Channel {
 			m.mu.Unlock()
 			game, _, _, _ := m.channelFacts(current)
 			slog.Info("Switching discovered channel",
-				"from", current.Streamer.Username, "to", "",
+				"from", current.Streamer.GetUsername(), "to", "",
 				"game", game, "reason", reason)
 			m.logPoolEmpty(games)
 			m.triggerResync()
@@ -915,13 +915,13 @@ func (m *Manager) prepareCurrent() *Channel {
 		m.setCurrent(next)
 		game, _, viewers, _ := m.channelFacts(next)
 		slog.Info("Switching discovered channel",
-			"from", current.Streamer.Username,
-			"to", next.Streamer.Username,
+			"from", current.Streamer.GetUsername(),
+			"to", next.Streamer.GetUsername(),
 			"game", game,
 			"viewers", viewers,
 			"reason", reason)
-		events.Record(events.TypeDiscoverySwitched, next.Streamer.Username,
-			"from "+current.Streamer.Username+": "+reason)
+		events.Record(events.TypeDiscoverySwitched, next.Streamer.GetUsername(),
+			"from "+current.Streamer.GetUsername()+": "+reason)
 		current = next
 	}
 
@@ -954,13 +954,13 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 		// watching itself must be yielded so discovery does not duplicate the
 		// watch (a channel the broker placed on discovery's own proposal keeps
 		// origin == discovery and is left alone by watchedByRotation).
-		if !m.isTracked(ch.Streamer.Username) {
+		if !m.isTracked(ch.Streamer.GetUsername()) {
 			return "channel is no longer on the configured streamer list (tracked-only discovery)", true
 		}
-		if m.watchedByRotation(ch.Streamer.Username) {
+		if m.watchedByRotation(ch.Streamer.GetUsername()) {
 			return "channel is already watched by the rotation (no duplicate watch)", true
 		}
-	} else if m.isTracked(ch.Streamer.Username) {
+	} else if m.isTracked(ch.Streamer.GetUsername()) {
 		return "channel is now on the configured streamer list (rotation covers it)", true
 	}
 	if ch.Streamer.GetStatus() == models.StatusOffline {
@@ -975,7 +975,7 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	if !m.channelCarriesActiveCampaign(ch) {
 		return "channel no longer carries an active unclaimed drop campaign", true
 	}
-	if m.isAvoided(ch.Streamer.Username) {
+	if m.isAvoided(ch.Streamer.GetUsername()) {
 		return "temporarily excluded by the drop-progress watchdog (stalled progress)", true
 	}
 	return "", false
@@ -1015,16 +1015,16 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 			// one the rotation is already watching — proposing an already-watched
 			// channel would just duplicate the watch instead of filling an idle
 			// slot with a different tracked channel.
-			if !m.isTracked(ch.Streamer.Username) {
+			if !m.isTracked(ch.Streamer.GetUsername()) {
 				continue
 			}
-			if m.isWatchingSlot(ch.Streamer.Username) {
+			if m.isWatchingSlot(ch.Streamer.GetUsername()) {
 				continue
 			}
-		} else if m.isTracked(ch.Streamer.Username) {
+		} else if m.isTracked(ch.Streamer.GetUsername()) {
 			continue
 		}
-		if m.isAvoided(ch.Streamer.Username) {
+		if m.isAvoided(ch.Streamer.GetUsername()) {
 			continue
 		}
 		if !m.gameStillActive(gameID) {
@@ -1157,24 +1157,24 @@ func (m *Manager) State() State {
 	watched := func(login string) bool {
 		return m.slotStatus != nil && m.slotStatus.IsWatching(login)
 	}
-	if m.current != nil && watched(m.current.Streamer.Username) {
-		st.Watching = m.current.Streamer.Username
+	if m.current != nil && watched(m.current.Streamer.GetUsername()) {
+		st.Watching = m.current.Streamer.GetUsername()
 	}
 
 	seen := make(map[string]bool, len(m.pool)+1)
 	appendChannel := func(ch *Channel) {
-		if seen[ch.Streamer.Username] {
+		if seen[ch.Streamer.GetUsername()] {
 			return
 		}
-		seen[ch.Streamer.Username] = true
+		seen[ch.Streamer.GetUsername()] = true
 
 		cs := ChannelState{
-			Login:   ch.Streamer.Username,
+			Login:   ch.Streamer.GetUsername(),
 			Game:    ch.Game,
 			Viewers: ch.Viewers,
 		}
 		switch {
-		case m.current == ch && watched(ch.Streamer.Username):
+		case m.current == ch && watched(ch.Streamer.GetUsername()):
 			cs.Status = "watching"
 			cs.MinutesWatched = ch.Streamer.Stream.GetMinuteWatched()
 		case ch.offline:

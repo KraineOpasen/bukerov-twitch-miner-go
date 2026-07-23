@@ -125,7 +125,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 	if m.streamers != nil {
 		for _, s := range m.streamers.All() {
 			st := debug.StreamerState{
-				Username:      s.Username,
+				Username:      s.GetUsername(),
 				Status:        s.GetStatus().String(),
 				StatusReason:  string(s.GetStatusReason()),
 				Online:        s.GetIsOnline(),
@@ -133,7 +133,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 				Preference:    string(s.GetSettings().Preference),
 			}
 
-			if d, ok := decisions[s.Username]; ok {
+			if d, ok := decisions[s.GetUsername()]; ok {
 				st.Watching = d.Watching
 				st.Reason = d.Reason
 				st.WatchedMinutesWindow = d.WatchedMinutesWindow
@@ -178,7 +178,7 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 				}
 			}
 
-			st.ActivePrediction = activePredictions[s.Username]
+			st.ActivePrediction = activePredictions[s.GetUsername()]
 			snap.Streamers = append(snap.Streamers, st)
 		}
 	}

@@ -96,8 +96,8 @@ func (s *Server) handleAPIStreamers(w http.ResponseWriter, r *http.Request) {
 	streamerMap := make(map[string]*models.Streamer)
 	configOrder := make(map[string]int)
 	for i, st := range s.streamers {
-		streamerMap[st.Username] = st
-		configOrder[st.Username] = i
+		streamerMap[st.GetUsername()] = st
+		configOrder[st.GetUsername()] = i
 	}
 
 	var trackedLive, trackedUnknown, trackedOffline, untracked []StreamerInfo

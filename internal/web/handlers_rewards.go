@@ -111,7 +111,7 @@ func (s *Server) streamerBalance(name string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, st := range s.streamers {
-		if st.Username == name {
+		if st.GetUsername() == name {
 			return st.GetChannelPoints()
 		}
 	}

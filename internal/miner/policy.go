@@ -181,7 +181,7 @@ func (m *Miner) policyScoresByLogin(byID map[string]policy.Decision) map[string]
 			}
 		}
 		if has {
-			scores[s.Username] = best
+			scores[s.GetUsername()] = best
 		}
 	}
 	return scores

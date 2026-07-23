@@ -1065,7 +1065,7 @@ func hasNextPage(follows map[string]interface{}) bool {
 
 func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]interface{}, error) {
 	op := constants.VideoPlayerStreamInfoOverlayChannel.WithVariables(map[string]interface{}{
-		"channel": streamer.Username,
+		"channel": streamer.GetUsername(),
 	})
 
 	resp, err := c.postGQLRequest(op)
@@ -1219,7 +1219,7 @@ func (c *TwitchClient) observeCampaignAvailability(streamer *models.Streamer, ga
 	if game != nil && game.Name != "" && game.ID != "" {
 		if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
 			slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
-				"streamer", streamer.Username, "error", err)
+				"streamer", streamer.GetUsername(), "error", err)
 		} else {
 			pend.known, pend.ids = true, campaignIDs
 		}
@@ -1355,7 +1355,7 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 			haveAvail = true
 		}
 
-		cand = cand.WithPayload(streamer.ChannelID, broadcastID, c.auth.GetUserID(), streamer.Username, game)
+		cand = cand.WithPayload(streamer.ChannelID, broadcastID, c.auth.GetUserID(), streamer.GetUsername(), game)
 	}
 
 	if cand.IsEmpty() {
@@ -1428,13 +1428,13 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 			// A Spade fetch failure is inconclusive (UNKNOWN), NOT evidence the
 			// channel is offline — never SetOffline here.
 			slog.Debug("Cannot fetch Spade URL; recording status as unknown (not offline)",
-				"streamer", streamer.Username, "reason", string(models.ReasonSpadeUnavailable))
+				"streamer", streamer.GetUsername(), "reason", string(models.ReasonSpadeUnavailable))
 			return streamer.ApplyCheckResultIfCurrent(obsSeq, models.StatusUnknown, models.ReasonSpadeUnavailable)
 		case res.Stale:
 			// A newer observation superseded this refresh: inconclusive. A stale
 			// (old/superseded) check must NOT confirm online over the newer session.
 			slog.Debug("Bring-online session superseded by a newer observation; recording unknown (not online)",
-				"streamer", streamer.Username, "reason", string(models.ReasonSessionStale))
+				"streamer", streamer.GetUsername(), "reason", string(models.ReasonSessionStale))
 			return streamer.ApplyCheckResultIfCurrent(obsSeq, models.StatusUnknown, models.ReasonSessionStale)
 		}
 
@@ -1444,12 +1444,12 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 			// Log only on a genuine transition (not a recovery continuation), so
 			// racing detectors don't print a duplicate "Streamer is online".
 			slog.Info("Streamer is online",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"channelID", streamer.ChannelID,
 				"broadcastID", streamer.Stream.GetBroadcastID())
 		} else if tr.Current == models.StatusUnknown && !tr.Stale {
 			slog.Debug("Cannot confirm stream status; keeping state as unknown (not offline)",
-				"streamer", streamer.Username, "reason", string(reason))
+				"streamer", streamer.GetUsername(), "reason", string(reason))
 		}
 		return tr
 	}
@@ -1465,12 +1465,12 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 	switch {
 	case tr.OfflineConfirmed:
 		slog.Info("Streamer went offline",
-			"streamer", streamer.Username,
+			"streamer", streamer.GetUsername(),
 			"channelID", streamer.ChannelID,
 			"broadcastID", streamer.Stream.GetBroadcastID())
 	case tr.Current == models.StatusUnknown && tr.Changed():
 		slog.Warn("Cannot refresh stream info; status is unknown, keeping last-known state (not offline)",
-			"streamer", streamer.Username, "reason", string(reason))
+			"streamer", streamer.GetUsername(), "reason", string(reason))
 	}
 	return tr
 }
@@ -1554,7 +1554,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	}
 
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
-		"channelLogin": streamer.Username,
+		"channelLogin": streamer.GetUsername(),
 	})
 
 	resp, err := c.postGQLRequest(op)
@@ -1649,7 +1649,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	res := streamer.ApplyChannelPointsContext(obsID, snap)
 	if res.Stale {
 		slog.Debug("Dropping stale channel-points context (a newer observation already published)",
-			"streamer", streamer.Username)
+			"streamer", streamer.GetUsername())
 		return nil
 	}
 
@@ -1667,7 +1667,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 			}
 		} else {
 			slog.Debug("Skipping bonus claim from context: not reserved",
-				"streamer", streamer.Username, "reason", r.Reason.String())
+				"streamer", streamer.GetUsername(), "reason", r.Reason.String())
 		}
 	}
 
@@ -1684,7 +1684,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 // than PubSub - caught it.
 func (c *TwitchClient) ClaimAvailableBonus(streamer *models.Streamer) (bool, error) {
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
-		"channelLogin": streamer.Username,
+		"channelLogin": streamer.GetUsername(),
 	})
 
 	resp, err := c.postGQLRequest(op)
@@ -1737,7 +1737,7 @@ func availableClaimID(resp map[string]interface{}) string {
 }
 
 func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) error {
-	slog.Info("Claiming bonus", "streamer", streamer.Username)
+	slog.Info("Claiming bonus", "streamer", streamer.GetUsername())
 
 	op := constants.ClaimCommunityPoints.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
@@ -1763,7 +1763,7 @@ func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) err
 		// Privacy-safe: outcome class only — never the payload, claim ID, token,
 		// or headers. No success log/event is emitted for a non-accepted claim.
 		slog.Warn("Channel points bonus claim not accepted by Twitch",
-			"streamer", streamer.Username,
+			"streamer", streamer.GetUsername(),
 			"outcome", string(status),
 			"retryable", status.Retryable())
 		return fmt.Errorf("%w: %s", ErrClaimNotAccepted, status)
@@ -1772,7 +1772,7 @@ func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) err
 }
 
 func (c *TwitchClient) ClaimMoment(streamer *models.Streamer, momentID string) error {
-	slog.Info("Claiming moment", "streamer", streamer.Username)
+	slog.Info("Claiming moment", "streamer", streamer.GetUsername())
 
 	op := constants.CommunityMomentCalloutClaim.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
@@ -1789,7 +1789,7 @@ func (c *TwitchClient) JoinRaid(streamer *models.Streamer, raid *models.Raid) er
 		return nil
 	}
 
-	slog.Info("Joining raid", "from", streamer.Username, "to", raid.TargetLogin)
+	slog.Info("Joining raid", "from", streamer.GetUsername(), "to", raid.TargetLogin)
 
 	op := constants.JoinRaid.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{
@@ -2074,7 +2074,7 @@ func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goal
 	streamer.SetChannelPoints(streamer.GetChannelPoints() - amount)
 
 	slog.Info("Contributed to community goal",
-		"streamer", streamer.Username,
+		"streamer", streamer.GetUsername(),
 		"goal", title,
 		"amount", amount,
 		"remainingBalance", streamer.GetChannelPoints())
@@ -2090,7 +2090,7 @@ func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goal
 // can immediately compare cost against balance.
 func (c *TwitchClient) GetCustomRewards(streamer *models.Streamer) ([]*models.CustomReward, error) {
 	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
-		"channelLogin": streamer.Username,
+		"channelLogin": streamer.GetUsername(),
 	})
 
 	resp, err := c.postGQLRequest(op)
@@ -2165,7 +2165,7 @@ func channelPointsChannel(resp map[string]interface{}) map[string]interface{} {
 // ErrRewardUnavailable or a descriptive error, never a panic. On success the
 // streamer's cached balance is decremented by the cost.
 func (c *TwitchClient) RedeemCustomReward(streamer *models.Streamer, reward *models.CustomReward, textInput string) error {
-	slog.Info("Redeeming custom reward", "streamer", streamer.Username, "reward", reward.Title, "cost", reward.Cost)
+	slog.Info("Redeeming custom reward", "streamer", streamer.GetUsername(), "reward", reward.Title, "cost", reward.Cost)
 
 	input := map[string]interface{}{
 		"channelID":     streamer.ChannelID,

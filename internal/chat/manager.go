@@ -94,10 +94,12 @@ func (m *ChatManager) shouldLogChat(streamer *models.Streamer) bool {
 }
 
 func (m *ChatManager) joinChat(streamer *models.Streamer) {
+	login := streamer.GetUsername()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if client, exists := m.clients[streamer.Username]; exists {
+	if client, exists := m.clients[login]; exists {
 		if client.IsRunning() {
 			return
 		}
@@ -110,20 +112,22 @@ func (m *ChatManager) joinChat(streamer *models.Streamer) {
 		client.dialFn = m.dialFn
 	}
 	if err := client.Connect(); err != nil {
-		slog.Error("Failed to join IRC chat", "channel", streamer.Username, "error", err)
+		slog.Error("Failed to join IRC chat", "channel", login, "error", err)
 		return
 	}
 
-	m.clients[streamer.Username] = client
+	m.clients[login] = client
 }
 
 func (m *ChatManager) leaveChat(streamer *models.Streamer) {
+	login := streamer.GetUsername()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if client, exists := m.clients[streamer.Username]; exists {
+	if client, exists := m.clients[login]; exists {
 		client.Stop()
-		delete(m.clients, streamer.Username)
+		delete(m.clients, login)
 	}
 }
 

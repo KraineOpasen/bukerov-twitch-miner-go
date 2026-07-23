@@ -330,7 +330,7 @@ func (c *Canary) streamerFor(ctx context.Context, channel string) (*models.Strea
 	c.mu.Lock()
 	cached := c.streamer
 	c.mu.Unlock()
-	if cached != nil && strings.EqualFold(cached.Username, channel) {
+	if cached != nil && strings.EqualFold(cached.GetUsername(), channel) {
 		return cached, nil
 	}
 

@@ -300,7 +300,7 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		retryBroadcaster = m.webServer.GetStatusBroadcaster()
 	}
 	retried := false
-	userID, err := retryStartupLookup(ctx, func() (string, error) {
+	lookupID, lookupErr := retryStartupLookup(ctx, func() (string, error) {
 		return m.client.GetChannelID(m.config.Username)
 	}, func(attempt int, err error, next time.Duration) {
 		retried = true
@@ -314,12 +314,10 @@ func (m *Miner) authenticate(ctx context.Context) error {
 					attempt, int(next.Seconds())))
 		}
 	})
-	if err != nil {
-		return fmt.Errorf("failed to get user ID: %w", err)
-	}
 	if retried && retryBroadcaster != nil {
-		// Clear the retry banner now that Twitch answered; without this the
-		// overlay would keep showing the last error until loadStreamers runs.
+		// Clear the retry banner now that Twitch answered (or fail-fast'd);
+		// without this the overlay would keep showing the last error until
+		// loadStreamers runs.
 		retryBroadcaster.SetStatus(web.StatusLoadingStreamers, "Loading streamers...")
 	}
 	// Explicit identity-binding guard. The token session's user ID (validated
@@ -328,11 +326,23 @@ func (m *Miner) authenticate(ctx context.Context) error {
 	// resolution of the configured username is only a CROSS-CHECK, never a
 	// substitute for it — an empty session ID after a successful Login is an
 	// invariant violation that fails startup rather than fabricating
-	// authority from the lookup. Full rename reconciliation is BKM-006; a
-	// mismatch fails closed (nothing is deleted — the operator decides).
-	if err := verifyIdentityBinding(m.auth.GetUserID(), userID); err != nil {
+	// authority from the lookup. A RENAMED owner login (Twitch reports the
+	// configured username as not-found) does not abort startup, though:
+	// resolveStartupIdentity falls back to the already-validated session
+	// identity (BKM-006 P) instead of treating a stale config username as a
+	// fatal mismatch. Any other mismatch still fails closed — nothing is
+	// deleted, the operator decides.
+	userID, staleLogin, err := resolveStartupIdentity(m.auth.GetUserID(), lookupID, lookupErr)
+	if err != nil {
+		if lookupErr != nil && !errors.Is(lookupErr, api.ErrStreamerDoesNotExist) {
+			return fmt.Errorf("failed to get user ID: %w", err)
+		}
 		return fmt.Errorf("%w: session/profile identity binding failed for %q; remove cookies/%s.json or fix the configured username",
 			err, m.config.Username, m.config.Username)
+	}
+	if staleLogin {
+		slog.Warn("Configured username appears to have been renamed on Twitch; proceeding with the validated session identity",
+			"username", m.config.Username)
 	}
 
 	if err := m.auth.SaveAuth(); err != nil {
@@ -818,18 +828,18 @@ func (m *Miner) pollBonuses() {
 		// Centralized capability gate: the polling fallback must not claim a bonus
 		// when Channel Points are confirmed disabled or not yet confirmed.
 		if err := pointsActionGate(s, eligibility.TaskBonusClaim); err != nil {
-			slog.Debug("Skipping bonus poll: not eligible", "streamer", s.Username, "reason", err.Error())
+			slog.Debug("Skipping bonus poll: not eligible", "streamer", s.GetUsername(), "reason", err.Error())
 			m.evaluateAutoRedeem(s)
 			continue
 		}
 
 		claimed, err := m.client.ClaimAvailableBonus(s)
 		if err != nil {
-			slog.Debug("Bonus poll failed", "streamer", s.Username, "error", err)
+			slog.Debug("Bonus poll failed", "streamer", s.GetUsername(), "error", err)
 		} else if claimed {
 			slog.Info("Claimed channel points bonus via GQL fallback poll (PubSub missed the claim-available event)",
-				"streamer", s.Username)
-			events.Record(events.TypeBonusClaimed, s.Username, "bonus claimed (GQL fallback)")
+				"streamer", s.GetUsername())
+			events.Record(events.TypeBonusClaimed, s.GetUsername(), "bonus claimed (GQL fallback)")
 		}
 
 		m.evaluateAutoRedeem(s)
@@ -907,7 +917,7 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 						// in-memory MarkStreakEarned already happened in
 						// UpdateHistory on the pool's own handling path.
 						if reasonCode == "WATCH_STREAK" && m.streamers != nil {
-							m.streamers.RecordStreakGrant(s.Username)
+							m.streamers.RecordStreakGrant(s.GetUsername())
 						}
 
 						if m.analyticsSvc != nil {
@@ -929,7 +939,7 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 			}
 
 			if m.notifications != nil {
-				m.notifications.NotifyPointsReached(s.Username, s.GetChannelPoints())
+				m.notifications.NotifyPointsReached(s.GetUsername(), s.GetChannelPoints())
 			}
 		case "points-spent":
 			if m.analyticsSvc != nil {
@@ -994,6 +1004,46 @@ func verifyIdentityBinding(sessionUserID, resolvedUserID string) error {
 		return auth.ErrIdentityMismatch
 	}
 	return nil
+}
+
+// resolveStartupIdentity decides which Twitch user ID the miner binds its own
+// identity to at startup, reconciling BKM-005's session-is-authoritative
+// stance with BKM-006's config-driven rename reconciliation: GetChannelID
+// resolves the CONFIGURED username, which may have been renamed on Twitch,
+// while the OAuth session's own validated user ID never depends on that
+// login at all. It is a pure decision function — the caller (authenticate)
+// owns all I/O and logging — so every branch is directly unit-testable.
+//
+//   - lookupErr == nil: the lookup succeeded, so it is cross-checked against
+//     the session identity exactly as before (verifyIdentityBinding); on
+//     success userID is resolvedUserID (== sessionUserID) and staleLogin is
+//     false.
+//   - errors.Is(lookupErr, api.ErrStreamerDoesNotExist) with a non-empty
+//     sessionUserID: the configured login no longer resolves (most likely
+//     renamed away), but the session already carries a validated identity —
+//     proceed with it instead of aborting startup. staleLogin is true so the
+//     caller can log ONE privacy-safe warning.
+//   - an empty sessionUserID: fails closed regardless of lookupErr — a
+//     successful Login always leaves a session identity, so its absence is
+//     an invariant violation, never a reason to fabricate one from the
+//     lookup.
+//   - anything else (token rejection, transport exhaustion that outlived the
+//     retry loop, a cancelled context, ...): passed through verbatim; the
+//     caller decides how to report it.
+func resolveStartupIdentity(sessionUserID, resolvedUserID string, lookupErr error) (userID string, staleLogin bool, err error) {
+	if lookupErr == nil {
+		if err := verifyIdentityBinding(sessionUserID, resolvedUserID); err != nil {
+			return "", false, err
+		}
+		return resolvedUserID, false, nil
+	}
+	if errors.Is(lookupErr, api.ErrStreamerDoesNotExist) && sessionUserID != "" {
+		return sessionUserID, true, nil
+	}
+	if sessionUserID == "" {
+		return "", false, auth.ErrIdentityMismatch
+	}
+	return "", false, lookupErr
 }
 
 // handlePubSubAuthError reacts to a PubSub ERR_BADAUTH: it funnels the
@@ -1372,7 +1422,17 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.DiscoveryPreferSubscribed, m.config.RateLimits)
 	}
 
-	added, removed, changed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
+	added, removed, changed, renamed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
+
+	// Config surgery for each confirmed rename (BKM-006): update the persisted
+	// entry's Username in place (settings pointer untouched), migrate its
+	// AutoRedeem entry, then backfill ChannelID onto every surviving entry
+	// from the reconciled roster. Pure in-memory work on m.config, still
+	// under the miner lock — no I/O here (that happens below, unlocked).
+	if len(renamed) > 0 {
+		applyConfigRenames(m.config, renamed)
+	}
+	backfillChannelIDs(m.config, m.streamers.All())
 
 	discordCfg := m.config.Discord
 	notifCfg := m.config.Notifications
@@ -1384,6 +1444,7 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	minuteWatcher := m.watcher
 	dropsTracker := m.dropsTracker
 	riskCfg := m.config.PredictionRisk
+	analyticsSvc := m.analyticsSvc
 
 	m.mu.Unlock()
 
@@ -1416,8 +1477,24 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	// for the WHOLE roster — added, removed, changed AND unchanged streamers —
 	// with no miner lock held. The desired-state sweep is what applies an
 	// existing streamer's toggles immediately and re-attempts any subscription a
-	// previous apply left failed.
-	m.reconcileRuntimeCapabilities(added, removed, changed)
+	// previous apply left failed. renamed carries each old login so the stale
+	// IRC join is explicitly left exactly once (PubSub needs no equivalent
+	// action: topics are keyed by ChannelID, which a rename never changes).
+	m.reconcileRuntimeCapabilities(added, removed, changed, renamed)
+
+	// Migrate each rename's analytics history to the new login and emit the
+	// one privacy-safe rename log, outside the miner lock (analytics performs
+	// real DB I/O). A conflict is logged and skipped, never fatal to the
+	// settings apply. analyticsSvc is passed only when non-nil: assigning a
+	// nil *analytics.Service to the renameAnalyticsService interface would
+	// otherwise produce a non-nil interface wrapping a nil pointer.
+	if len(renamed) > 0 {
+		var svc renameAnalyticsService
+		if analyticsSvc != nil {
+			svc = analyticsSvc
+		}
+		m.migrateRenamesToPersistence(renamed, svc)
+	}
 
 	if notifMgr != nil {
 		if err := notifMgr.UpdateDiscordConfig(&discordCfg); err != nil {

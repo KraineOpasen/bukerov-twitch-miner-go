@@ -119,12 +119,13 @@ func (s *MinuteSender) Send(streamer *models.Streamer) SendResult {
 		return SendResult{Failure: &WatchFailure{Stage: StageSessionSnapshot, ErrorCode: "no_payload"}}
 	}
 
-	sig, token, err := s.client.GetPlaybackAccessToken(streamer.Username)
+	login := streamer.GetUsername()
+	sig, token, err := s.client.GetPlaybackAccessToken(login)
 	if err != nil {
 		return SendResult{Failure: &WatchFailure{Stage: StagePlaybackToken, ErrorCode: "playback_token_error"}}
 	}
 
-	_, _, simulateErr := s.simulateWatching(context.Background(), streamer.Username, sig, token)
+	_, _, simulateErr := s.simulateWatching(context.Background(), login, sig, token)
 
 	status, stale, beaconErr := s.postBeacon(context.Background(), streamer, session)
 	switch {
@@ -166,12 +167,13 @@ func (s *MinuteSender) Probe(ctx context.Context, streamer *models.Streamer) Pro
 		return probeFail(StageSessionSnapshot, 0, elapsed())
 	}
 
-	sig, token, err := s.client.GetPlaybackAccessToken(streamer.Username)
+	login := streamer.GetUsername()
+	sig, token, err := s.client.GetPlaybackAccessToken(login)
 	if err != nil {
 		return probeFail(StagePlaybackToken, 0, elapsed())
 	}
 
-	if stage, status, err := s.simulateWatching(ctx, streamer.Username, sig, token); err != nil {
+	if stage, status, err := s.simulateWatching(ctx, login, sig, token); err != nil {
 		return probeFail(stage, status, elapsed())
 	}
 

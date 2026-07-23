@@ -216,6 +216,15 @@ type AutoRedeemConfig struct {
 type StreamerConfig struct {
 	Username string                   `json:"username"`
 	Settings *models.StreamerSettings `json:"settings,omitempty"`
+
+	// ChannelID is the stable Twitch channel identity behind Username, kept
+	// in sync by the miner's ID-first reconciliation (BKM-006) after every
+	// settings apply: reconciliation always re-resolves Username against the
+	// live Twitch API rather than trusting this value, so ChannelID is purely
+	// informational/best-effort here. Absent on config files written before
+	// this field existed — fully backward compatible, the entry is simply
+	// treated as unconfirmed until the next successful resolution.
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 type RateLimitSettings struct {

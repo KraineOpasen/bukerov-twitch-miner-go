@@ -187,7 +187,7 @@ func (w *MinuteWatcher) orderByCampaignScore(indexes []int) []int {
 	ordered := make([]int, len(indexes))
 	copy(ordered, indexes)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return scores[w.streamers[ordered[i]].Username] > scores[w.streamers[ordered[j]].Username]
+		return scores[w.streamers[ordered[i]].GetUsername()] > scores[w.streamers[ordered[j]].GetUsername()]
 	})
 	return ordered
 }
@@ -297,7 +297,7 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 
 	slotted := make(map[string]*models.Streamer, len(slots))
 	for _, sl := range slots {
-		slotted[sl.streamer.Username] = sl.streamer
+		slotted[sl.streamer.GetUsername()] = sl.streamer
 	}
 
 	now := time.Now()
@@ -493,8 +493,8 @@ func (w *MinuteWatcher) noteReportOutcome(login string, ok bool, now time.Time) 
 func (w *MinuteWatcher) publishReportStats(slots []slotOccupant) {
 	pruned := make(map[string]ReportStats, len(slots))
 	for _, sl := range slots {
-		if s, ok := w.reportStats[sl.streamer.Username]; ok {
-			pruned[sl.streamer.Username] = s
+		if s, ok := w.reportStats[sl.streamer.GetUsername()]; ok {
+			pruned[sl.streamer.GetUsername()] = s
 		}
 	}
 	w.reportStats = pruned

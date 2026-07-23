@@ -119,20 +119,20 @@ func (m *Miner) chatPresenceReconciler() chatToggler {
 // subscription: the reconcile target is the pool's actual state, so drift
 // heals on the next apply with no extra bookkeeping.
 func (m *Miner) buildCapabilityPlan(added, removed []*models.Streamer, changed []streamer.SettingsChange) runtimeCapabilityPlan {
-	addedSet := make(map[string]bool, len(added))
+	addedSet := make(map[*models.Streamer]bool, len(added))
 	for _, s := range added {
-		addedSet[s.Username] = true
+		addedSet[s] = true
 	}
-	changedSet := make(map[string]bool, len(changed))
+	changedSet := make(map[*models.Streamer]bool, len(changed))
 	for _, c := range changed {
-		changedSet[c.Streamer.Username] = true
+		changedSet[c.Streamer] = true
 	}
 
 	var plan runtimeCapabilityPlan
 	for _, s := range removed {
 		plan.actions = append(plan.actions, runtimeCapabilityAction{
 			channelID: s.ChannelID,
-			username:  s.Username,
+			username:  s.GetUsername(),
 			streamer:  s,
 			removed:   true,
 			reason:    capabilityRemoved,
@@ -141,14 +141,14 @@ func (m *Miner) buildCapabilityPlan(added, removed []*models.Streamer, changed [
 	for _, s := range m.streamers.All() {
 		reason := capabilityRepair
 		switch {
-		case addedSet[s.Username]:
+		case addedSet[s]:
 			reason = capabilityAdded
-		case changedSet[s.Username]:
+		case changedSet[s]:
 			reason = capabilitySettingsChanged
 		}
 		plan.actions = append(plan.actions, runtimeCapabilityAction{
 			channelID: s.ChannelID,
-			username:  s.Username,
+			username:  s.GetUsername(),
 			streamer:  s,
 			desired:   desiredCapabilityTopics(s.GetSettings()),
 			reason:    reason,
@@ -211,25 +211,43 @@ func (m *Miner) executeCapabilityPlan(plan runtimeCapabilityPlan) runtimeCapabil
 // presence) in line with the just-saved settings for the whole roster, without
 // a restart. Called from ApplySettings AFTER the miner lock is released.
 //
+// renamed carries each config-driven rename ApplySettings just reconciled in
+// place (BKM-006). PubSub needs no special handling for it — topics are keyed
+// by ChannelID, which a rename never changes, so the normal per-streamer sweep
+// below (now reading the streamer's CURRENT login) already reconciles the
+// unchanged topic set with zero churn. IRC does need one explicit action: the
+// old login's channel is joined under a name nothing will ever address again,
+// so it is left exactly once, here, before the normal sweep's ToggleChat joins
+// the new login if the streamer's Chat setting calls for it. A repeated apply
+// with no new rename makes this a no-op (renamed is empty).
+//
 // reconcileMu serializes concurrent sweeps end-to-end (plan build + execution).
 // Each sweep builds its plan from the CURRENT roster/settings snapshots, so
 // whichever concurrent apply reconciles last converges the runtime onto the
 // latest saved settings instead of leaving an out-of-order sweep's state
 // behind. It is a dedicated lock: no miner/manager/streamer mutex is held
 // across the side effects.
-func (m *Miner) reconcileRuntimeCapabilities(added, removed []*models.Streamer, changed []streamer.SettingsChange) {
+func (m *Miner) reconcileRuntimeCapabilities(added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
+
+	if len(renamed) > 0 {
+		if chatMgr := m.chatPresenceReconciler(); chatMgr != nil {
+			for _, r := range renamed {
+				chatMgr.Leave(r.OldLogin)
+			}
+		}
+	}
 
 	plan := m.buildCapabilityPlan(added, removed, changed)
 	result := m.executeCapabilityPlan(plan)
 	if result.failures > 0 {
 		slog.Warn("Runtime capability reconciliation finished with failures; drift remains until the next settings apply",
 			"streamers", result.reconciled, "failures", result.failures,
-			"added", len(added), "removed", len(removed), "changed", len(changed))
+			"added", len(added), "removed", len(removed), "changed", len(changed), "renamed", len(renamed))
 		return
 	}
 	slog.Info("Runtime capabilities reconciled",
 		"streamers", result.reconciled,
-		"added", len(added), "removed", len(removed), "changed", len(changed))
+		"added", len(added), "removed", len(removed), "changed", len(changed), "renamed", len(renamed))
 }

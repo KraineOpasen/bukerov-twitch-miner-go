@@ -210,6 +210,14 @@ type Streamer struct {
 	Raid                  *Raid
 	History               map[string]*HistoryEntry
 
+	// loginObs is the monotonic login-observation generation (mirrors capObs
+	// for the Channel Points context). BeginLoginObservation begins a new
+	// generation BEFORE a reconciliation resolves this streamer's new login,
+	// and RenameIfCurrent only commits Username when its passed-in generation
+	// is still the latest — so a slow/stale rename decision can never roll
+	// back a login a newer reconciliation already applied (BKM-006 I12).
+	loginObs uint64
+
 	mu sync.RWMutex
 }
 
@@ -232,7 +240,48 @@ func NewStreamer(username string, settings StreamerSettings) *Streamer {
 }
 
 func (s *Streamer) String() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return fmt.Sprintf("Streamer(%s, %d points)", s.Username, s.ChannelPoints)
+}
+
+// GetUsername returns the streamer's current login under the streamer lock.
+// Username is mutated in place on a config-driven rename (RenameIfCurrent),
+// so any reader that can run concurrently with a rename must use this
+// accessor instead of the exported field directly (BKM-006 I7/race-safety).
+func (s *Streamer) GetUsername() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Username
+}
+
+// BeginLoginObservation starts a new login-resolution generation for this
+// streamer and returns it. A caller planning a possible rename (a config
+// entry whose resolved ChannelID matches this streamer but whose login
+// differs) must capture this BEFORE it starts the Twitch resolution that
+// decides the new login, then pass it back to RenameIfCurrent — so a newer,
+// faster reconciliation cannot be clobbered by this call's stale result.
+func (s *Streamer) BeginLoginObservation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loginObs++
+	return s.loginObs
+}
+
+// RenameIfCurrent commits newLogin as Username, but ONLY if obs (captured via
+// BeginLoginObservation before the caller resolved newLogin) is still the
+// latest login-observation generation. A stale call — one where a newer
+// observation has begun in the meantime — is discarded and returns false, so
+// ChannelID stays the sole immutable identity while Username tracks the most
+// recently confirmed login, never a rolled-back one (BKM-006 I2/I12).
+func (s *Streamer) RenameIfCurrent(newLogin string, obs uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if obs != s.loginObs {
+		return false
+	}
+	s.Username = newLogin
+	return true
 }
 
 // watchStreakContinuityGrace is how briefly a streamer may drop offline and
@@ -334,15 +383,19 @@ func (s *Streamer) applyStatusLocked(next StreamerStatus, reason StatusReason) S
 	return tr
 }
 
-// emitTransition records the diagnostic event for a genuine confirmed transition,
-// after the Streamer lock is released. Exactly-once per logical transition: only
-// the goroutine that actually flipped the state gets OnlineConfirmed/OfflineConfirmed.
-func (s *Streamer) emitTransition(tr StatusTransition) {
+// emitTransition records the diagnostic event for a genuine confirmed
+// transition, after the Streamer lock is released. Exactly-once per logical
+// transition: only the goroutine that actually flipped the state gets
+// OnlineConfirmed/OfflineConfirmed. username must be captured under the
+// Streamer lock (alongside the transition itself) by the caller — Username
+// can be mutated in place by a concurrent rename, so reading s.Username here,
+// after mu is already released, would race it.
+func (s *Streamer) emitTransition(tr StatusTransition, username string) {
 	switch {
 	case tr.OnlineConfirmed:
-		events.Record(events.TypeStreamerOnline, s.Username, "")
+		events.Record(events.TypeStreamerOnline, username, "")
 	case tr.OfflineConfirmed:
-		events.Record(events.TypeStreamerOffline, s.Username, "")
+		events.Record(events.TypeStreamerOffline, username, "")
 	}
 }
 
@@ -354,8 +407,9 @@ func (s *Streamer) emitTransition(tr StatusTransition) {
 func (s *Streamer) SetConfirmedOnline() StatusTransition {
 	s.mu.Lock()
 	tr := s.applyStatusLocked(StatusOnline, "")
+	username := s.Username
 	s.mu.Unlock()
-	s.emitTransition(tr)
+	s.emitTransition(tr, username)
 	return tr
 }
 
@@ -366,8 +420,9 @@ func (s *Streamer) SetConfirmedOnline() StatusTransition {
 func (s *Streamer) SetConfirmedOffline() StatusTransition {
 	s.mu.Lock()
 	tr := s.applyStatusLocked(StatusOffline, "")
+	username := s.Username
 	s.mu.Unlock()
-	s.emitTransition(tr)
+	s.emitTransition(tr, username)
 	return tr
 }
 
@@ -380,8 +435,9 @@ func (s *Streamer) SetConfirmedOffline() StatusTransition {
 func (s *Streamer) SetUnknown(reason StatusReason) StatusTransition {
 	s.mu.Lock()
 	tr := s.applyStatusLocked(StatusUnknown, reason)
+	username := s.Username
 	s.mu.Unlock()
-	s.emitTransition(tr)
+	s.emitTransition(tr, username)
 	return tr
 }
 
@@ -400,8 +456,9 @@ func (s *Streamer) ApplyCheckResultIfCurrent(obsSeq uint64, next StreamerStatus,
 		return StatusTransition{Previous: cur, Current: cur, Reason: reason, Stale: true}
 	}
 	tr := s.applyStatusLocked(next, reason)
+	username := s.Username
 	s.mu.Unlock()
-	s.emitTransition(tr)
+	s.emitTransition(tr, username)
 	return tr
 }
 
