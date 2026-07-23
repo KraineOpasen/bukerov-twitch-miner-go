@@ -50,20 +50,22 @@ func TestDeviceFlowAnomalousCandidateNotPublished(t *testing.T) {
 	}
 }
 
-// P2-C1.6/P2-C1.8: a transiently unverifiable device candidate is staged
-// privately — invisible to every credential reader — and the next recovery
-// re-validates it WITHOUT a second device flow.
-func TestDeviceFlowTransientValidationStagesCandidate(t *testing.T) {
+// P2-C1.6/P2-C1.8 (Corrective Pass 3): a device-flow candidate stays a private
+// candidate under revalidation through a /validate outage longer than the old
+// finite budget (5), then promotes within the same flight — the interactive
+// grant is never re-prompted and the candidate never leaks before promotion.
+func TestDeviceFlowCandidateSurvivesLongValidateOutage(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
-	clock := newTestClock()
-	a.now = clock.Now
 
-	var stillTransient atomic.Bool
-	stillTransient.Store(true)
+	var validates atomic.Int64
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
-		if stillTransient.Load() {
+		if validates.Add(1) <= 8 {
+			// Before promotion the candidate must be invisible to every reader.
+			if a.GetAuthToken() != "" || a.Snapshot().AccessToken != "" || a.Generation() != 0 {
+				t.Errorf("candidate leaked into active readers during revalidation")
+			}
 			w.WriteHeader(503)
 			return
 		}
@@ -71,29 +73,11 @@ func TestDeviceFlowTransientValidationStagesCandidate(t *testing.T) {
 	}
 	f.mu.Unlock()
 
-	err := a.DeviceFlowLogin(context.Background())
-	if err == nil {
-		t.Fatalf("transient candidate validation must fail the login attempt")
+	if err := a.DeviceFlowLogin(context.Background()); err != nil {
+		t.Fatalf("a long transient validate outage must not fail the device flow: %v", err)
 	}
-	if !errors.Is(err, ErrAuthTransient) {
-		t.Fatalf("transient candidate validation error = %v, want ErrAuthTransient", err)
-	}
-	// The staged candidate is invisible to every reader.
-	if a.GetAuthToken() != "" || a.Snapshot().AccessToken != "" || a.Generation() != 0 {
-		t.Fatalf("staged candidate leaked into the active credential readers")
-	}
-	if _, err := os.Stat(a.cookiesPath()); !os.IsNotExist(err) {
-		t.Fatalf("staged candidate was persisted")
-	}
-
-	stillTransient.Store(false)
-	clock.Advance(time.Hour)
-	snap, rerr := a.Recover(context.Background(), 0)
-	if rerr != nil {
-		t.Fatalf("staged device candidate retry: %v", rerr)
-	}
-	if snap.AccessToken != "test-access-df" || a.Generation() != 1 {
-		t.Fatalf("staged device candidate not promoted on retry: %+v", snap)
+	if a.GetAuthToken() != "test-access-df" || a.Generation() != 1 {
+		t.Fatalf("device candidate not promoted after the outage cleared")
 	}
 	if device, _, _, _ := f.counts(); device != 1 {
 		t.Fatalf("device flows = %d, want exactly 1 (the granted pair must be reused, not re-prompted)", device)
@@ -148,12 +132,18 @@ func TestRefreshCandidateRejectionDropsConsumedTokenDurably(t *testing.T) {
 	}
 }
 
-// P2-C2.6/P2-C2.7: while a candidate is staged, the persisted record and
-// every snapshot still carry ONLY the old published set — candidate material
-// is never serialized.
+// P2-C2.6/P2-C2.7 (Corrective Pass 3): while a candidate is under revalidation
+// (a permanent /validate outage), the persisted record and every snapshot still
+// carry ONLY the old published set — candidate material is never serialized and
+// never visible to a reader. The revalidation loop is left running on a
+// cancellable context and stopped at the end.
 func TestStagedCandidateNeverSerializedOrSnapshotted(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
+	// A manual (parking) timer so the revalidation loop stages once and then
+	// blocks on the paced wait — never a busy spin on the permanent outage.
+	mt := newManualTimer()
+	a.timerAfter = mt.after
 	a.token = "test-access-1"
 	a.refreshToken = "test-refresh-1"
 	seedStoredAuth(t, a)
@@ -162,9 +152,20 @@ func TestStagedCandidateNeverSerializedOrSnapshotted(t *testing.T) {
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }
 	f.mu.Unlock()
 
-	if _, err := a.Recover(context.Background(), 0); err == nil {
-		t.Fatalf("expected a retryable staging failure")
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _, _ = a.Recover(ctx, 0); close(done) }()
+
+	// Wait until the refresh candidate is privately staged and parked on a
+	// paced wait before inspecting the reader-visible state.
+	waitCond(t, "candidate to be staged", func() bool {
+		a.mu.Lock()
+		staged := a.pendingCandidate != nil
+		a.mu.Unlock()
+		return staged && mt.waitCount() >= 1
+	})
+
 	if snap := a.Snapshot(); snap.AccessToken != "test-access-1" || snap.Generation != 0 {
 		t.Fatalf("staged candidate visible in Snapshot: %+v", snap)
 	}
@@ -180,6 +181,13 @@ func TestStagedCandidateNeverSerializedOrSnapshotted(t *testing.T) {
 	if !strings.Contains(body, "test-refresh-1") {
 		t.Fatalf("old published record damaged during staging")
 	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("revalidation owner did not stop on cancellation")
+	}
 }
 
 // P2-C2.8: a staged candidate whose RE-validation is authoritatively rejected
@@ -193,14 +201,18 @@ func TestStagedCandidateRevalidationRejectedFallsToDeviceFlow(t *testing.T) {
 	a.token = "test-access-1"
 	a.refreshToken = "test-refresh-1"
 
-	var rejectNow atomic.Bool // false: candidate validate is transient; true: candidate validate is rejected
+	// The refresh candidate (test-access-2) validates transiently past the old
+	// finite budget (5), then is authoritatively rejected within the same
+	// flight -> discarded (consumed refresh dropped) -> the next recovery falls
+	// to device flow.
+	var refreshValidates atomic.Int64
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
 		if authHeaderToken(r) == "test-access-2" {
-			if rejectNow.Load() {
-				f.oauthError(w, 401, "invalid access token")
-			} else {
+			if refreshValidates.Add(1) <= 8 {
 				w.WriteHeader(503)
+			} else {
+				f.oauthError(w, 401, "invalid access token")
 			}
 			return
 		}
@@ -209,17 +221,12 @@ func TestStagedCandidateRevalidationRejectedFallsToDeviceFlow(t *testing.T) {
 	f.mu.Unlock()
 
 	if _, err := a.Recover(context.Background(), 0); err == nil {
-		t.Fatalf("staging attempt should fail retryably")
-	}
-	rejectNow.Store(true)
-	clock.Advance(time.Hour)
-	if _, err := a.Recover(context.Background(), 0); err == nil {
-		t.Fatalf("rejected revalidation should fail the second attempt")
+		t.Fatalf("an authoritative candidate rejection must fail the recovery")
 	}
 	if a.Health().HasRefreshToken {
 		t.Fatalf("consumed refresh token survived the candidate rejection")
 	}
-	clock.Advance(time.Hour)
+	clock.Advance(time.Hour) // clear the per-generation backoff window
 	if _, err := a.Recover(context.Background(), 0); err != nil {
 		t.Fatalf("device-flow recovery after discard: %v", err)
 	}

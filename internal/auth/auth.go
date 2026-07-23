@@ -154,12 +154,13 @@ type TwitchAuth struct {
 	refreshToken string
 	userID       string
 	// userIDAuthoritative records whether userID was confirmed at RUNTIME by
-	// an authoritative source (/oauth2/validate 200 application, or the
-	// miner's GetChannelID binding via SetUserID) — as opposed to merely
-	// loaded from the on-disk record. A disk-loaded userID is never trusted
-	// to authorize a login that differs from the configured profile (a
-	// manipulated/copied plaintext record must not mask a foreign identity);
-	// rename tolerance applies only to a runtime-confirmed identity.
+	// an authoritative source — a successful /oauth2/validate 200 application
+	// or a validated candidate promotion — as opposed to merely loaded from
+	// the on-disk record. SetUserID never confers this provenance. A
+	// disk-loaded userID is never trusted to authorize a login that differs
+	// from the configured profile (a manipulated/copied plaintext record must
+	// not mask a foreign identity); rename tolerance applies only to a
+	// runtime-confirmed identity.
 	userIDAuthoritative bool
 	tokenType           string
 	scopes              []string

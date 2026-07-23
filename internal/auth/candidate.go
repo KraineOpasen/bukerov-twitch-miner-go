@@ -127,49 +127,58 @@ func (a *TwitchAuth) validateCandidate(ctx context.Context, cand *tokenCandidate
 //     same generation re-validates the staged pair instead of re-contacting
 //     the token endpoint.
 func (a *TwitchAuth) resolveCandidate(ctx context.Context, cand *tokenCandidate) (bool, error) {
-	a.mu.Lock()
-	stale := a.generation != cand.forGeneration
-	if stale && a.pendingCandidate == cand {
-		a.pendingCandidate = nil
-	}
-	a.mu.Unlock()
-	if stale {
-		// Already superseded by a concurrent publication: skip the validation
-		// round trip entirely — this flight has nothing left to publish.
-		return false, nil
-	}
+	backoff := candidateValidateBackoffBase
+	for {
+		// Re-check the generation before every validation round trip and before
+		// any publication: an external replacement while we waited makes this
+		// candidate stale — discard it and publish nothing.
+		a.mu.Lock()
+		stale := a.generation != cand.forGeneration
+		if stale && a.pendingCandidate == cand {
+			a.pendingCandidate = nil
+		}
+		a.mu.Unlock()
+		if stale {
+			return false, nil
+		}
 
-	// A candidate's /oauth2/validate spends no grant and is idempotent, so a
-	// transient validation outcome is retried in-flight a bounded number of
-	// times before the candidate is staged. This revalidates the SAME granted
-	// pair WITHOUT performing another refresh (the one-time refresh grant that
-	// produced it is already spent), so a brief validate blip during startup
-	// or recovery does not strand the rotation and does not abort startup.
-	res, outcome, verr := a.validateCandidate(ctx, cand)
-	for attempt := 0; outcome == candidateUnverified && attempt < candidateValidateRetries; attempt++ {
+		res, outcome, verr := a.validateCandidate(ctx, cand)
+		switch outcome {
+		case candidatePromote:
+			return a.promoteCandidate(cand, res), nil
+		case candidateForeign:
+			a.discardCandidate(cand)
+			slog.Warn("Freshly granted Twitch credentials belong to a different account than this profile; not adopted")
+			return false, fmt.Errorf("%w: %w", ErrRecoveryFailed, ErrIdentityMismatch)
+		case candidateRejected:
+			a.discardCandidate(cand)
+			return false, fmt.Errorf("%w: %w: freshly granted token failed authoritative validation", ErrRecoveryFailed, ErrAuthProtocol)
+		case candidateAnomalous:
+			a.discardCandidate(cand)
+			return false, fmt.Errorf("%w: %w", ErrRecoveryFailed, verr)
+		default: // candidateUnverified — transient/inconclusive, retried below
+		}
+
+		// Transient/inconclusive: keep the candidate privately staged (never
+		// serialized, never visible to credential readers) and wait, paced,
+		// before revalidating the SAME access token. The attempt count is
+		// unbounded (only the delay is capped), so a long /oauth2/validate
+		// outage never abandons a freshly granted pair or aborts startup — only
+		// a stale generation or ctx cancellation ends the loop.
+		a.stageCandidate(cand)
 		select {
 		case <-ctx.Done():
-			attempt = candidateValidateRetries // stop retrying; stage below
-		case <-a.timerAfter(candidateValidateRetryWait):
-			res, outcome, verr = a.validateCandidate(ctx, cand)
+			// Shutdown / owner abort: publish nothing; the candidate stays
+			// staged in memory only.
+			return false, ctx.Err()
+		case <-a.timerAfter(backoff):
 		}
-	}
-	switch outcome {
-	case candidatePromote:
-		return a.promoteCandidate(cand, res), nil
-	case candidateUnverified:
-		a.stageCandidate(cand)
-		return false, fmt.Errorf("%w: %w", ErrRecoveryFailed, verr)
-	case candidateForeign:
-		a.discardCandidate(cand)
-		slog.Warn("Freshly granted Twitch credentials belong to a different account than this profile; not adopted")
-		return false, fmt.Errorf("%w: %w", ErrRecoveryFailed, ErrIdentityMismatch)
-	case candidateRejected:
-		a.discardCandidate(cand)
-		return false, fmt.Errorf("%w: %w: freshly granted token failed authoritative validation", ErrRecoveryFailed, ErrAuthProtocol)
-	default: // candidateAnomalous
-		a.discardCandidate(cand)
-		return false, fmt.Errorf("%w: %w", ErrRecoveryFailed, verr)
+		if backoff < candidateValidateBackoffCap {
+			backoff *= 2
+			if backoff > candidateValidateBackoffCap {
+				backoff = candidateValidateBackoffCap
+			}
+		}
 	}
 }
 
@@ -258,14 +267,16 @@ func (a *TwitchAuth) discardCandidate(cand *tokenCandidate) {
 	}
 }
 
-// candidateValidateRetries bounds how many times a candidate's
-// /oauth2/validate is retried when the validation itself is transient
-// (transport / 429 / 5xx / malformed). Retrying spends no grant and is
-// idempotent, so it rides out a brief blip: a single transient validate must
-// not strand a freshly rotated pair or abort startup.
+// Candidate-validation pacing. A candidate's /oauth2/validate spends no grant
+// and is idempotent, so a transient/inconclusive outcome is retried against the
+// SAME candidate with capped exponential backoff — the DELAY is bounded, the
+// NUMBER of attempts is not — until an authoritative outcome, a stale
+// generation, or context cancellation. A long validate outage therefore paces
+// network traffic without ever abandoning a freshly granted (possibly already
+// spent) pair or aborting startup.
 const (
-	candidateValidateRetries   = 4
-	candidateValidateRetryWait = 2 * time.Second
+	candidateValidateBackoffBase = 2 * time.Second
+	candidateValidateBackoffCap  = 60 * time.Second
 )
 
 // --- Sequential-recovery backoff gate ---

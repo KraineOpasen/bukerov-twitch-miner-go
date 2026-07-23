@@ -158,23 +158,22 @@ func TestRefreshCandidateRejectedNotPublished(t *testing.T) {
 	}
 }
 
-// P2-C2.3/P2-C2.15: a transient candidate validation stages the pair
-// privately (the one-time refresh token is already consumed) — nothing is
-// published, and the NEXT recovery for the same generation re-validates the
-// staged candidate instead of spending a second refresh grant.
+// P2-C2.3/P2-C2.15 (Corrective Pass 3): a transient candidate validation keeps
+// the pair a private candidate under revalidation — the one-time refresh grant
+// is spent exactly once and the SAME candidate is revalidated (never a second
+// refresh) until an authoritative outcome. Here /validate stays transient well
+// past the old finite retry budget (5) before it recovers, and recovery still
+// converges within one flight.
 func TestRefreshTransientValidationStagedNoSecondRefresh(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
-	clock := newTestClock()
-	a.now = clock.Now
 	a.token = "test-access-1"
 	a.refreshToken = "test-refresh-1"
 
-	var stillTransient atomic.Bool
-	stillTransient.Store(true)
+	var validates atomic.Int64
 	f.mu.Lock()
 	f.validateHandler = func(w http.ResponseWriter, r *http.Request) {
-		if stillTransient.Load() {
+		if authHeaderToken(r) == "test-access-2" && validates.Add(1) <= 8 {
 			w.WriteHeader(503)
 			return
 		}
@@ -182,24 +181,12 @@ func TestRefreshTransientValidationStagedNoSecondRefresh(t *testing.T) {
 	}
 	f.mu.Unlock()
 
-	_, err := a.Recover(context.Background(), 0)
-	if err == nil {
-		t.Fatalf("transient candidate validation must surface a retryable failure, not success")
-	}
-	if a.Generation() != 0 || a.GetAuthToken() != "test-access-1" {
-		t.Fatalf("candidate published despite an unvalidated (transient) outcome")
-	}
-
-	stillTransient.Store(false)
-	// Past any backoff window, the same-generation retry must re-validate the
-	// staged candidate — never present the consumed refresh token again.
-	clock.Advance(time.Hour)
 	snap, err := a.Recover(context.Background(), 0)
 	if err != nil {
-		t.Fatalf("staged-candidate retry: %v", err)
+		t.Fatalf("a long transient validate outage must not fail recovery: %v", err)
 	}
 	if snap.AccessToken != "test-access-2" || a.Generation() != 1 {
-		t.Fatalf("staged candidate not promoted on retry: %+v", snap)
+		t.Fatalf("candidate not promoted after the outage cleared: %+v", snap)
 	}
 	if _, _, refresh, _ := f.counts(); refresh != 1 {
 		t.Fatalf("refresh grants = %d, want exactly 1 (consumed token must never be re-presented)", refresh)
