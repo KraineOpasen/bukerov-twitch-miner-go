@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -105,10 +106,13 @@ func (a *TwitchAuth) validateAndApplyCurrent(ctx context.Context) (ValidateStatu
 		st, aerr := a.applyValidation(res, gen)
 		return st, gen, aerr
 	case ValidateStatusUnauthorized:
-		a.setValidationState("degraded:unauthorized")
+		// Generation-aware like every other outcome: a stale 401 for an
+		// already-rotated token must not degrade the new generation's health
+		// (the caller's Recover(gen) fast-paths on the same guard).
+		a.setValidationStateForGeneration(gen, "degraded:unauthorized")
 		return status, gen, nil
 	default:
-		a.setValidationState("degraded:" + string(status))
+		a.setValidationStateForGeneration(gen, "degraded:"+string(status))
 		return status, gen, err
 	}
 }
@@ -155,78 +159,125 @@ func (a *TwitchAuth) validateOnce(ctx context.Context, token string) (validateRe
 	}
 }
 
-// applyValidation applies a structurally valid 200 to the auth state: client
-// ID, scope, and identity checks first (each classified without destroying
-// anything), then an atomic metadata update — guarded by validatedGen so a
-// validation that raced a rotation can never stamp the OLD token's metadata
-// over the newer credential set. A pending persistence is retried afterwards
-// as a safe checkpoint.
+// applyValidation applies a structurally valid 200 to the auth state. The
+// whole application runs in ONE mu section that first re-checks validatedGen —
+// a validation that raced a rotation applies NOTHING (no metadata, no
+// degradation) to the newer credential set. Check order within the current
+// generation is security-ordered: authoritative IDENTITY first (a foreign
+// token must never hide behind a lesser client-ID/scope anomaly), then client
+// ID, then required scopes, then the metadata apply (authoritative user ID,
+// expiry, and the authoritative scope snapshot — adopted only when the scope
+// SET actually changed, so healthy hourly validations cause no churn). A
+// pending persistence is retried afterwards as a safe checkpoint.
 func (a *TwitchAuth) applyValidation(res validateResponse, validatedGen uint64) (ValidateStatus, error) {
+	a.mu.Lock()
+	if a.generation != validatedGen {
+		// A rotation superseded this validation mid-flight; its outcome
+		// belongs to the old token and must not touch the new set's state.
+		a.mu.Unlock()
+		return ValidateStatusValid, nil
+	}
+
+	// 1. Authoritative identity. A runtime-confirmed userID anchors the
+	// account (login change = rename observation, BKM-006 territory); a
+	// disk-loaded userID is NOT trusted to authorize a foreign login — the
+	// configured profile name is the anchor then.
+	foreign := false
+	rename := false
+	switch {
+	case a.userIDAuthoritative && a.userID != "":
+		if res.UserID != a.userID {
+			foreign = true
+		} else if a.username != "" && !strings.EqualFold(a.username, res.Login) {
+			rename = true
+		}
+	default:
+		if a.username != "" && !strings.EqualFold(a.username, res.Login) {
+			foreign = true
+		}
+	}
+	if foreign {
+		a.validationState = "degraded:" + string(ValidateStatusIdentityMismatch)
+		a.validatedAt = a.now()
+		profile := a.username
+		a.mu.Unlock()
+		slog.Warn("Validated Twitch token belongs to a different account than this profile", "profile", profile)
+		return ValidateStatusIdentityMismatch, ErrIdentityMismatch
+	}
+
+	// 2. Client ID: the token was issued to a different client ID than this
+	// miner uses. Classified, degraded, nothing destroyed: GQL may still
+	// work, and an authoritative 401 (not this anomaly) triggers recovery.
 	if res.ClientID != a.clientID {
-		// The token was issued to a different client ID than this miner uses.
-		// Classified, degraded, nothing destroyed: GQL may still work, and an
-		// authoritative 401 (not this anomaly) is what triggers recovery.
-		a.setValidationState("degraded:" + string(ValidateStatusClientIDMismatch))
+		a.validationState = "degraded:" + string(ValidateStatusClientIDMismatch)
+		a.validatedAt = a.now()
+		a.mu.Unlock()
 		slog.Warn("Stored Twitch token was issued for an unexpected client ID; keeping it but flagging validation as degraded")
 		return ValidateStatusClientIDMismatch, nil
 	}
+
+	// 3. Required scopes.
 	if !hasAllScopes(res.Scopes, requiredScopes()) {
-		a.setValidationState("degraded:" + string(ValidateStatusMissingScopes))
+		a.validationState = "degraded:" + string(ValidateStatusMissingScopes)
+		a.validatedAt = a.now()
+		a.mu.Unlock()
 		slog.Warn("Stored Twitch token is missing required scopes; keeping it but flagging validation as degraded")
 		return ValidateStatusMissingScopes, nil
 	}
 
-	a.mu.Lock()
-	if a.generation != validatedGen {
-		// A rotation superseded this validation mid-flight; its metadata
-		// belongs to the old token and must not be stamped over the new set.
-		// The new set was validated fresh by its own publication.
-		a.mu.Unlock()
-		return ValidateStatusValid, nil
-	}
-	switch {
-	case a.userID != "" && res.UserID != a.userID:
-		// The validated token belongs to a different account than the one this
-		// profile is bound to. Never adopt foreign credentials.
-		a.mu.Unlock()
-		a.setValidationState("degraded:" + string(ValidateStatusIdentityMismatch))
-		slog.Warn("Validated Twitch token belongs to a different account than this profile", "profile", a.GetUsername())
-		return ValidateStatusIdentityMismatch, ErrIdentityMismatch
-	case a.userID == "" && a.username != "" && !strings.EqualFold(a.username, res.Login):
-		// No user ID on record to compare, and the token's login is not the
-		// configured profile: same foreign-credentials protection.
-		a.mu.Unlock()
-		a.setValidationState("degraded:" + string(ValidateStatusIdentityMismatch))
-		slog.Warn("Validated Twitch token login does not match this profile", "profile", a.GetUsername())
-		return ValidateStatusIdentityMismatch, ErrIdentityMismatch
-	}
-	if a.username != "" && !strings.EqualFold(a.username, res.Login) {
-		// Same user ID, different login: a Twitch rename. Full reconciliation
-		// is BKM-006; here it is only surfaced, never treated as a mismatch.
-		slog.Warn("Twitch login differs from the configured profile name (account rename?); continuing with the confirmed user ID",
-			"profile", a.username)
-	}
+	// 4. Metadata apply (current generation only, checked above).
 	a.userID = res.UserID
+	a.userIDAuthoritative = true
 	a.expiresAt = a.now().Add(time.Duration(res.ExpiresIn) * time.Second)
 	a.validatedAt = a.now()
 	a.validationState = "valid"
+	if !sameScopeSet(a.scopes, res.Scopes) {
+		// The validate response is the authoritative scope snapshot. Adopted
+		// (and marked for a one-time persist) only when the SET changed —
+		// order-only differences must not churn memory or disk.
+		a.scopes = slices.Clone(res.Scopes)
+		a.persistDirty = true
+	}
 	dirty := a.persistDirty
 	a.mu.Unlock()
 
+	if rename {
+		// Same confirmed user ID, different login: a Twitch rename. Full
+		// reconciliation is BKM-006; here it is only surfaced.
+		slog.Warn("Twitch login differs from the configured profile name (account rename?); continuing with the confirmed user ID",
+			"profile", a.GetUsername())
+	}
+
 	if dirty {
-		// Safe checkpoint: retry persisting a rotation whose save failed.
+		// Safe checkpoint: retry persisting a rotation whose save failed (or
+		// persist a scope-metadata upgrade exactly once).
 		if err := a.SaveAuth(); err != nil {
-			slog.Warn("Retried persisting rotated Twitch credentials at validation checkpoint; still failing", "error", err)
+			slog.Warn("Retried persisting Twitch credentials at validation checkpoint; still failing", "error", err)
 		}
 	}
 	return ValidateStatusValid, nil
 }
 
-func (a *TwitchAuth) setValidationState(state string) {
+// sameScopeSet compares two scope lists as SETS (order- and
+// duplicate-insensitive), so authoritative order changes never register as a
+// scope change.
+func sameScopeSet(a, b []string) bool {
+	return hasAllScopes(a, b) && hasAllScopes(b, a)
+}
+
+// setValidationStateForGeneration records a validation outcome's diagnostics
+// ONLY if the credentials the outcome belongs to are still current. A stale
+// outcome (its generation was rotated away mid-flight) applies nothing and
+// returns false.
+func (a *TwitchAuth) setValidationStateForGeneration(validatedGen uint64, state string) bool {
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.generation != validatedGen {
+		return false
+	}
 	a.validationState = state
 	a.validatedAt = a.now()
-	a.mu.Unlock()
+	return true
 }
 
 // AuthHealth is redacted validation/persistence metadata for diagnostics. It
@@ -305,6 +356,12 @@ func (a *TwitchAuth) hourlyTick(ctx context.Context) {
 			slog.Warn("Hourly token validation: recovery did not complete; will retry on the next validation or authoritative rejection",
 				"error", rerr)
 		}
+	case ValidateStatusIdentityMismatch:
+		// Authoritative foreign-identity detection at runtime: no automatic
+		// interactive flow (that is a startup decision), but it must be
+		// loudly surfaced, not filed under "inconclusive".
+		slog.Error("Hourly token validation: credentials belong to a different Twitch account than this profile; operator action required")
+		a.emitEvent(AuthEvent{Type: AuthEventError, Error: ErrIdentityMismatch})
 	default:
 		slog.Warn("Hourly token validation inconclusive; keeping the current session",
 			"status", string(status), "error", err)

@@ -309,9 +309,13 @@ func TestLoginIdentityMismatchStartsFreshDeviceFlow(t *testing.T) {
 	}
 }
 
-// Rename (same user ID, different login) is NOT an identity mismatch — BKM-006
-// territory, surfaced but not acted on.
-func TestLoginRenameSameUserIDIsNotMismatch(t *testing.T) {
+// A DISK-loaded userID is not trusted to authorize a login that differs from
+// the configured profile (Corrective Pass 1, C4.5): the same-uid-but-renamed
+// shape coming purely from the on-disk record is indistinguishable from a
+// copied/manipulated foreign record, so startup runs a fresh device login.
+// Rename tolerance for a RUNTIME-confirmed userID is covered by
+// TestConfirmedUserIDRenameIsNotForeign.
+func TestLoginDiskLoadedRenameShapeFailsClosed(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
 	a.token = "test-access-1"
@@ -330,10 +334,7 @@ func TestLoginRenameSameUserIDIsNotMismatch(t *testing.T) {
 	if err := a.Login(context.Background()); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if device, _, _, _ := f.counts(); device != 0 {
-		t.Fatalf("rename treated as mismatch (device flow started)")
-	}
-	if a.Health().ValidationState != "valid" {
-		t.Fatalf("rename should still validate as healthy, got %q", a.Health().ValidationState)
+	if device, _, _, _ := f.counts(); device != 1 {
+		t.Fatalf("disk-loaded identity with a foreign login must fail closed to exactly one device flow, got %d", device)
 	}
 }

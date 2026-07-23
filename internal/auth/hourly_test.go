@@ -84,6 +84,9 @@ func TestHourlyTickValidatesOncePerHourNoChurn(t *testing.T) {
 	a := newLifecycleAuth(t, f)
 	a.token = "test-access-1"
 	a.userID = "uid-1"
+	// Steady-state record: scopes already present, so no one-time C6 scope
+	// upgrade persist is due — healthy hourly ticks must then write nothing.
+	a.scopes = requiredScopes()
 	if err := a.SaveAuth(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

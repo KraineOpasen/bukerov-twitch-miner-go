@@ -310,21 +310,34 @@ func (c *TwitchClient) handleUnauthorized() {
 // indicates the OAuth token was rejected. Only HTTP 401 is an authoritative
 // token rejection per the official Twitch contract; HTTP 403 is a
 // permission/scope/business rejection and deliberately does NOT count — it
-// must never trigger a token refresh or device flow. The body checks cover the
-// documented GQL Unauthorized shapes that arrive with HTTP 200.
+// must never trigger a token refresh or device flow.
+//
+// The 200-body checks are a strict ALLOWLIST of the two shapes evidenced in
+// this repository (private GQL error shapes are not publicly documented, so
+// nothing beyond repo evidence is trusted):
+//   - top-level {"error":"Unauthorized", ...} — the long-standing contract
+//     this client has checked since the original implementation;
+//   - errors[].message EXACTLY "Unauthorized" — the fixture shape in
+//     claim_test.go, matched by normalized equality, never by substring: a
+//     business/permission message that merely CONTAINS the word (e.g.
+//     "unauthorized entitlement") is an ordinary GQL error, and treating it
+//     as a token rejection would spend a one-time refresh grant per
+//     occurrence.
 func isAuthError(statusCode int, result map[string]interface{}) bool {
 	if statusCode == http.StatusUnauthorized {
 		return true
 	}
 
-	if errMsg, ok := result["error"].(string); ok && strings.EqualFold(errMsg, "Unauthorized") {
+	if errMsg, ok := result["error"].(string); ok && strings.EqualFold(strings.TrimSpace(errMsg), "Unauthorized") {
 		return true
 	}
 
 	if errs, ok := result["errors"].([]interface{}); ok {
 		for _, e := range errs {
 			if em, ok := e.(map[string]interface{}); ok {
-				if msg, ok := em["message"].(string); ok && strings.Contains(strings.ToLower(msg), "unauthorized") {
+				// Byte-exact match of the one evidenced fixture shape; even a
+				// case variant is not trusted to mean a token rejection.
+				if msg, ok := em["message"].(string); ok && strings.TrimSpace(msg) == "Unauthorized" {
 					return true
 				}
 			}
@@ -454,10 +467,15 @@ const authRecoveryWait = 60 * time.Second
 
 // isTransientRecoveryFailure reports whether a recovery error proves nothing
 // about the credentials being unrecoverable: a transient auth-endpoint
-// failure, or this caller's own bounded wait expiring while the shared
-// recovery keeps running (device flow needs the user and takes minutes).
+// failure, an INCONCLUSIVE outcome (undocumented refresh 400 — fail-closed,
+// retryable), or this caller's own bounded wait expiring while the shared
+// recovery keeps running (device flow needs the user and takes minutes). None
+// of these may escalate the operator reauth path. A definitive protocol
+// failure (e.g. a malformed refresh success, which consumed the one-time
+// refresh token) is NOT in this set and escalates.
 func isTransientRecoveryFailure(err error) bool {
 	return errors.Is(err, auth.ErrAuthTransient) ||
+		errors.Is(err, auth.ErrRecoveryInconclusive) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled)
 }

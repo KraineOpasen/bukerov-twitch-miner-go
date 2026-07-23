@@ -31,12 +31,50 @@ type ChatMessageData struct {
 	Color       string
 }
 
+// TokenSnapshot is the credential view an IRC client needs at authentication
+// time: the current access token and the credential generation it belongs to,
+// so an authentication rejection can be attributed to the exact credential
+// set that was presented. Never carries the refresh token.
+type TokenSnapshot struct {
+	Token      string
+	Generation uint64
+}
+
+// TokenProvider supplies the current TokenSnapshot at dial/reconnect time.
+type TokenProvider func() TokenSnapshot
+
+// StaticToken wraps a fixed token as a provider, for tests and library use.
+func StaticToken(token string) TokenProvider {
+	return func() TokenSnapshot { return TokenSnapshot{Token: token} }
+}
+
+// loginAuthFailedNotice is the OFFICIALLY documented Twitch IRC response to a
+// failed login authentication (dev.twitch.tv/docs/irc/authenticate-bot). It
+// is matched by exact equality of the trimmed line — never by substring — so
+// no other NOTICE can be misread as a credential rejection.
+const loginAuthFailedNotice = ":tmi.twitch.tv NOTICE * :Login authentication failed"
+
+// isLoginAuthFailedNotice classifies one raw IRC line against the documented
+// authentication-rejection shape (exact trimmed equality only).
+func isLoginAuthFailedNotice(line string) bool {
+	return strings.TrimSpace(line) == loginAuthFailedNotice
+}
+
 type IRCClient struct {
 	username string
-	// tokenFn supplies the CURRENT OAuth token at authentication time, so a
-	// dial or internal reconnect after a token rotation presents the rotated
-	// token instead of a construction-time copy. Set once, immutable.
-	tokenFn        func() string
+	// tokenFn supplies the CURRENT OAuth credential snapshot at
+	// authentication time, so a dial or internal reconnect after a token
+	// rotation presents the rotated token instead of a construction-time
+	// copy. Set once, immutable.
+	tokenFn TokenProvider
+	// authErrorFn, when set, is invoked (on its own goroutine, never blocking
+	// the read loop) with the credential generation whose token this
+	// connection last presented, when the server answers with the documented
+	// login-authentication-failed NOTICE. Set once at construction.
+	authErrorFn func(rejectedGeneration uint64)
+	// lastAuthGen is the generation of the token last sent in a PASS line
+	// (guarded by mu).
+	lastAuthGen    uint64
 	channel        string
 	streamer       *models.Streamer
 	logger         ChatLogger
@@ -61,7 +99,7 @@ type IRCClient struct {
 	mu sync.RWMutex
 }
 
-func NewIRCClient(username string, tokenFn func() string, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
+func NewIRCClient(username string, tokenFn TokenProvider, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
 	slog.Debug("Creating IRC client", "channel", streamer.Username, "logChat", logChat, "hasLogger", logger != nil)
 	return &IRCClient{
 		username:       username,
@@ -119,12 +157,19 @@ func (c *IRCClient) Connect() error {
 	return nil
 }
 
-// currentToken resolves the token provider (nil-safe for library/test use).
+// currentToken resolves the token provider (nil-safe for library/test use)
+// and records which credential generation is being presented, so a later
+// login-failed NOTICE is attributed to the exact snapshot this connection
+// authenticated with — not to whatever is current when the NOTICE arrives.
 func (c *IRCClient) currentToken() string {
 	if c.tokenFn == nil {
 		return ""
 	}
-	return c.tokenFn()
+	snap := c.tokenFn()
+	c.mu.Lock()
+	c.lastAuthGen = snap.Generation
+	c.mu.Unlock()
+	return snap.Token
 }
 
 func (c *IRCClient) authenticate() error {
@@ -290,6 +335,22 @@ func (c *IRCClient) handleMessage(line string) {
 	if strings.HasPrefix(line, "PING") {
 		pongMsg := strings.Replace(line, "PING", "PONG", 1)
 		_ = c.send(pongMsg)
+		return
+	}
+
+	// The officially documented authentication rejection. Attributed to the
+	// generation this connection last presented and reported on a separate
+	// goroutine — the read loop never blocks on recovery; the existing
+	// backoff reconnect keeps redialing and picks up the rotated token.
+	if isLoginAuthFailedNotice(line) {
+		slog.Warn("IRC login authentication failed; reporting for credential recovery", "channel", c.channel)
+		c.mu.RLock()
+		gen := c.lastAuthGen
+		handler := c.authErrorFn
+		c.mu.RUnlock()
+		if handler != nil {
+			go handler(gen)
+		}
 		return
 	}
 

@@ -153,9 +153,17 @@ type TwitchAuth struct {
 	token        string
 	refreshToken string
 	userID       string
-	tokenType    string
-	scopes       []string
-	expiresAt    time.Time
+	// userIDAuthoritative records whether userID was confirmed at RUNTIME by
+	// an authoritative source (/oauth2/validate 200 application, or the
+	// miner's GetChannelID binding via SetUserID) — as opposed to merely
+	// loaded from the on-disk record. A disk-loaded userID is never trusted
+	// to authorize a login that differs from the configured profile (a
+	// manipulated/copied plaintext record must not mask a foreign identity);
+	// rename tolerance applies only to a runtime-confirmed identity.
+	userIDAuthoritative bool
+	tokenType           string
+	scopes              []string
+	expiresAt           time.Time
 	// generation is the monotonic credential-set revision: bumped exactly once
 	// per published token pair (device login or refresh), never on
 	// metadata-only validation updates.
@@ -242,16 +250,24 @@ func (a *TwitchAuth) GetUsername() string {
 	return a.username
 }
 
+// SetToken replaces the access token (library/test use; production tokens are
+// published by device flow and refresh). It bumps the credential generation so
+// any in-flight validation or recovery keyed on the previous token becomes
+// stale — the generation guards stay sound for external callers too.
 func (a *TwitchAuth) SetToken(token string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.token = token
+	a.generation++
 }
 
 func (a *TwitchAuth) SetUserID(userID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.userID = userID
+	// The one production caller resolves the ID authoritatively (miner
+	// GetChannelID binding); clearing the ID clears the confirmation.
+	a.userIDAuthoritative = userID != ""
 }
 
 // Snapshot returns a mutually consistent view of the current credential set.
@@ -413,6 +429,8 @@ func (a *TwitchAuth) applyStored(stored StoredAuth) {
 	defer a.mu.Unlock()
 	a.token = stored.AuthToken
 	a.userID = stored.UserID
+	// A disk-loaded userID is NOT runtime-confirmed (see userIDAuthoritative).
+	a.userIDAuthoritative = false
 	// The CONFIGURED profile name stays authoritative: adopting the file's
 	// username would silently re-key cookiesPath (and thus every later save)
 	// to whatever identity the record claims — a foreign record could then
@@ -468,8 +486,19 @@ func (a *TwitchAuth) Login(ctx context.Context) error {
 			case ValidateStatusValid:
 				return nil
 			case ValidateStatusUnauthorized:
-				_, rerr := a.Recover(ctx, rejectedGen)
-				return rerr
+				if _, rerr := a.Recover(ctx, rejectedGen); rerr != nil {
+					return rerr
+				}
+				// A refresh success proves liveness, NOT identity: re-validate
+				// the rotated credentials so the identity-first checks apply
+				// to them too. A mismatch falls through to a fresh device
+				// login exactly like the direct-validation mismatch below;
+				// any degraded outcome is tolerated as usual.
+				status2, _, _ := a.validateAndApplyCurrent(ctx)
+				if status2 != ValidateStatusIdentityMismatch {
+					return nil
+				}
+				fallthrough
 			case ValidateStatusIdentityMismatch:
 				// Fall through to a fresh device login for this profile; the
 				// foreign credentials are neither adopted nor deleted. The
@@ -721,8 +750,12 @@ func classifyOAuthFailure(resp *http.Response) error {
 }
 
 func (a *TwitchAuth) requestToken(ctx context.Context, deviceCode string) (*TokenResponse, error) {
+	// The official device-grant token exchange requires the scopes parameter
+	// alongside client_id/device_code/grant_type (same set as the device-code
+	// request; constants.OAuthScopes is unchanged by this code).
 	data := url.Values{
 		"client_id":   {a.clientID},
+		"scopes":      {constants.OAuthScopes},
 		"device_code": {deviceCode},
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 	}

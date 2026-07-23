@@ -102,6 +102,15 @@ type Miner struct {
 	connectionDegraded       bool
 	connectionDegradedDetail string
 
+	// authRecoveryObserver/authRecoveryLastStart bound the consumer-triggered
+	// recovery path (see recoverFromRejectedGeneration): one observer
+	// goroutine at a time, new observations at most once per cooldown.
+	// authRecoverFn is the tests-only seam over auth.Recover (nil in
+	// production).
+	authRecoveryObserver  atomic.Bool
+	authRecoveryLastStart atomic.Int64
+	authRecoverFn         func(ctx context.Context, rejectedGen uint64) error
+
 	// reauthNotified dedupes the operator "reauthorization required"
 	// notification per outage (guarded by mu). Unlike the old sync.Once it is
 	// RESET when a credential rotation succeeds, so a later, separate outage
@@ -467,7 +476,15 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if chatLogsEnabled && m.analyticsSvc != nil {
 		chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
 	}
-	m.chatManager = chat.NewChatManager(m.config.Username, m.auth.GetAuthToken, chatLogger, chatLogsEnabled, mentionHandler)
+	m.chatManager = chat.NewChatManager(m.config.Username, func() chat.TokenSnapshot {
+		snap := m.auth.Snapshot()
+		return chat.TokenSnapshot{Token: snap.AccessToken, Generation: snap.Generation}
+	}, chatLogger, chatLogsEnabled, mentionHandler)
+	// A documented IRC login-authentication-failed NOTICE joins the same
+	// generation-keyed single-flight recovery as GQL 401s and PubSub BADAUTHs.
+	m.chatManager.SetAuthErrorHandler(func(rejectedGeneration uint64) {
+		m.recoverFromRejectedGeneration(rejectedGeneration, "irc")
+	})
 
 	var watchTimeStore *watcher.WatchTimeStore
 	if m.db != nil {
@@ -986,17 +1003,66 @@ func (m *Miner) handlePubSubAuthError(err error) {
 	if errors.As(err, &authErr) {
 		rejectedGen = authErr.Generation
 	}
+	m.recoverFromRejectedGeneration(rejectedGen, "pubsub")
+}
 
-	ctx := m.runCtx
-	if ctx == nil {
-		ctx = context.Background()
+// authConsumerRecoveryCooldown throttles how often a long-lived consumer
+// event (PubSub BADAUTH, IRC login-failed NOTICE) may START a new recovery
+// observation. IRC's reconnect loop can deliver a rejection every second or
+// two during an outage; without this floor each cycle would spawn a fresh
+// refresh attempt against the OAuth endpoint.
+const authConsumerRecoveryCooldown = 30 * time.Second
+
+// authConsumerRecoveryWait bounds how long one consumer-triggered observer
+// goroutine waits on the shared recovery flight before giving up its watch (a
+// device-flow flight runs for minutes; a later rejection re-arms a fresh
+// observer). Keeps the goroutine population bounded at one.
+const authConsumerRecoveryWait = 2 * time.Minute
+
+// recoverFromRejectedGeneration funnels an authoritative rejection of the
+// given credential generation (from any long-lived consumer) into the shared
+// single-flight recovery. At most ONE observer goroutine exists at a time and
+// new observations start at most once per cooldown window, so a fast
+// rejection loop (IRC redial cycles) can never turn into an OAuth-endpoint
+// storm or unbounded goroutine growth. Only a definitive failure escalates to
+// the reauth-required path — a transient endpoint failure, an inconclusive
+// outcome, or a shutdown/watch-timeout cancellation does not.
+func (m *Miner) recoverFromRejectedGeneration(rejectedGen uint64, source string) {
+	if m.auth.Generation() > rejectedGen {
+		return // stale: already rotated past the rejected credentials
+	}
+	if !m.authRecoveryObserver.CompareAndSwap(false, true) {
+		return // one observer is already watching the shared flight
+	}
+	now := time.Now()
+	last := time.Unix(0, m.authRecoveryLastStart.Load())
+	if now.Sub(last) < authConsumerRecoveryCooldown {
+		m.authRecoveryObserver.Store(false)
+		return
+	}
+	m.authRecoveryLastStart.Store(now.UnixNano())
+
+	parent := m.runCtx
+	if parent == nil {
+		parent = context.Background()
 	}
 	go func() {
-		if _, rerr := m.auth.Recover(ctx, rejectedGen); rerr != nil {
+		defer m.authRecoveryObserver.Store(false)
+		ctx, cancel := context.WithTimeout(parent, authConsumerRecoveryWait)
+		defer cancel()
+		recoverFn := m.authRecoverFn
+		if recoverFn == nil {
+			recoverFn = func(ctx context.Context, gen uint64) error {
+				_, err := m.auth.Recover(ctx, gen)
+				return err
+			}
+		}
+		if rerr := recoverFn(ctx, rejectedGen); rerr != nil {
 			transient := errors.Is(rerr, auth.ErrAuthTransient) ||
+				errors.Is(rerr, auth.ErrRecoveryInconclusive) ||
 				errors.Is(rerr, context.Canceled) ||
 				errors.Is(rerr, context.DeadlineExceeded)
-			slog.Error("PubSub auth rejection: recovery failed", "error", rerr, "retryable", transient)
+			slog.Error("Auth rejection: recovery failed", "source", source, "error", rerr, "retryable", transient)
 			if !transient {
 				m.handleAuthError()
 			}

@@ -17,6 +17,14 @@ import (
 // wrapped cause (ErrAuthTransient => retryable).
 var ErrRecoveryFailed = errors.New("twitch auth recovery failed")
 
+// ErrRecoveryInconclusive marks a recovery outcome that neither proved nor
+// disproved the credentials (an undocumented refresh 400): fail-closed, no
+// device flow, nothing destroyed — and, unlike a definitive failure, it must
+// not escalate the operator reauth path. Deliberately distinct from
+// ErrAuthProtocol so a MALFORMED refresh success (which consumes the refresh
+// token and therefore definitively needs the operator soon) still escalates.
+var ErrRecoveryInconclusive = errors.New("inconclusive twitch auth recovery outcome")
+
 // refreshClass classifies one refresh-grant round trip.
 type refreshClass int
 
@@ -26,15 +34,29 @@ const (
 	// refreshTransient: transport / 429 / 5xx / undocumented status — proves
 	// nothing about the refresh token; retry later, never device flow.
 	refreshTransient
-	// refreshInvalid: the documented authoritative rejections (HTTP 400
-	// "Invalid refresh token" and HTTP 401) — the refresh token is dead and
-	// device flow is the only recovery.
+	// refreshInvalid: the documented authoritative rejections (HTTP 400 whose
+	// parsed message is exactly the documented "Invalid refresh token"
+	// discriminator, and HTTP 401) — the refresh token is dead and device
+	// flow is the only recovery.
 	refreshInvalid
 	// refreshMalformed: HTTP 200 whose payload is structurally incomplete.
 	// Twitch may have consumed the one-time refresh token, so it must not be
 	// reused — but no partial credentials are published either.
 	refreshMalformed
+	// refreshInconclusive: an HTTP 400 WITHOUT the documented discriminator
+	// (unrelated message, malformed or empty body). It proves nothing about
+	// the refresh token, so it must not trigger a device flow and must not
+	// destroy state — but unlike a plain transient it is a fail-closed
+	// protocol outcome (ErrAuthProtocol). A later independent authoritative
+	// rejection may retry recovery.
+	refreshInconclusive
 )
+
+// invalidRefreshTokenMessage is the documented discriminator of the
+// authoritative refresh rejection ({"status":400,"message":"Invalid refresh
+// token"}). Matched by normalized EXACT equality — never by substring — so an
+// unrelated 400 can never be misread as a dead refresh token.
+const invalidRefreshTokenMessage = "invalid refresh token"
 
 // Recover is the single entry point for reacting to an authoritative
 // credential rejection (GQL 401, PubSub ERR_BADAUTH, validate 401).
@@ -121,9 +143,10 @@ func (a *TwitchAuth) runRecovery(ctx context.Context, refreshToken string) error
 			slog.Info("Recovered Twitch session via refresh token")
 			a.adoptTokenPair(token)
 			return nil
-		case refreshTransient:
-			// Nothing proved; the stored pair stays authoritative and a later
-			// rejection or validation retries. Never device flow here.
+		case refreshTransient, refreshInconclusive:
+			// Nothing proved; the stored pair (and the refresh token) stays
+			// authoritative and a later rejection or validation retries.
+			// Never device flow here.
 			return fmt.Errorf("%w: %w", ErrRecoveryFailed, err)
 		case refreshMalformed:
 			// Twitch may have accepted (and thus consumed) the one-time
@@ -198,11 +221,21 @@ func (a *TwitchAuth) requestRefresh(ctx context.Context, refreshToken string) (*
 			return nil, refreshMalformed, fmt.Errorf("%w: incomplete refresh response", ErrAuthProtocol)
 		}
 		return &token, refreshOK, nil
-	case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized:
-		// The documented authoritative rejections ("Invalid refresh token" /
-		// re-consent required). The body is intentionally not inspected beyond
-		// the status: both documented 400/401 shapes mean the grant is dead.
+	case resp.StatusCode == http.StatusUnauthorized:
+		// Documented authoritative rejection: re-consent required.
 		return nil, refreshInvalid, fmt.Errorf("refresh token authoritatively rejected (status %d)", resp.StatusCode)
+	case resp.StatusCode == http.StatusBadRequest:
+		// A 400 is authoritative ONLY with the documented discriminator
+		// message; the parsed message is used purely as an in-classifier
+		// discriminator (bounded read, normalized exact match) and never
+		// propagated. Any other/empty/malformed 400 body proves nothing about
+		// the refresh token: fail-closed inconclusive, no device flow, no
+		// state destruction.
+		msg := strings.ToLower(strings.TrimSpace(decodeOAuthError(resp.Body).Message))
+		if msg == invalidRefreshTokenMessage {
+			return nil, refreshInvalid, fmt.Errorf("refresh token authoritatively rejected (status %d)", resp.StatusCode)
+		}
+		return nil, refreshInconclusive, fmt.Errorf("%w: %w: unrecognized refresh rejection (status 400)", ErrRecoveryInconclusive, ErrAuthProtocol)
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError:
 		return nil, refreshTransient, fmt.Errorf("%w: refresh endpoint status class %dxx", ErrAuthTransient, resp.StatusCode/100)
 	default:

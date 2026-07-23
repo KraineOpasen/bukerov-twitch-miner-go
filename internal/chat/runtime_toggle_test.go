@@ -43,7 +43,7 @@ func (fakeAddr) String() string  { return "fake" }
 // newRuntimeChatManager returns a manager whose IRC clients use the in-memory
 // transport, plus a dial counter proving how many real join attempts happened.
 func newRuntimeChatManager() (*ChatManager, *int32) {
-	m := NewChatManager("bot", func() string { return "tok" }, nil, false, nil)
+	m := NewChatManager("bot", StaticToken("tok"), nil, false, nil)
 	var dials int32
 	m.dialFn = func() (net.Conn, error) {
 		atomic.AddInt32(&dials, 1)

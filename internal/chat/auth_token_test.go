@@ -29,7 +29,7 @@ func passLine(t *testing.T, f *fakeTransport) string {
 func TestNextDialUsesCurrentToken(t *testing.T) {
 	var tok atomic.Value
 	tok.Store("tok-old")
-	tokenFn := func() string { return tok.Load().(string) }
+	tokenFn := func() TokenSnapshot { return TokenSnapshot{Token: tok.Load().(string)} }
 
 	f := newFakeTransport()
 	m := NewChatManager("bot", tokenFn, nil, false, nil)

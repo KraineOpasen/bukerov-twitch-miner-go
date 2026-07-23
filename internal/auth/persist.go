@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -80,17 +81,40 @@ func (a *TwitchAuth) SaveAuth() error {
 	return nil
 }
 
-// atomicWriteFile replaces path with data crash-safely: a same-directory temp
-// file (created mode 0600, before any secret byte exists in it) is fully
-// written, fsynced, closed, and atomically renamed over the final path; the
-// directory is then best-effort synced so the rename itself is durable. On any
-// failure the temp file is removed and the previous final file is untouched.
+// ownTempPrefix is the profile-scoped temp-file prefix for the given final
+// auth path (e.g. ".tester.json.auth-"). Binding temps to the exact final
+// filename is what lets one profile's startup sweep remove only its OWN
+// orphans — never another profile's (possibly live) temp in the shared
+// cookies directory. It carries the profile basename only, never any secret.
+// Glob/temp-pattern metacharacters in the basename are neutralized so a
+// hostile or malformed username can neither break os.CreateTemp's pattern nor
+// widen a match onto another profile's files.
+func ownTempPrefix(finalPath string) string {
+	base := filepath.Base(finalPath)
+	base = strings.NewReplacer("*", "_", "?", "_", "[", "_", "]", "_").Replace(base)
+	return "." + base + ".auth-"
+}
+
+// atomicWriteFile replaces path with data safely: a same-directory,
+// profile-scoped temp file (created mode 0600, before any secret byte exists
+// in it) is fully written, fsynced, closed, and renamed over the final path;
+// the directory is then best-effort synced. On any failure the temp file is
+// removed and the previous final file is untouched.
+//
+// Platform guarantee: on Unix/Linux — the production Docker target — the
+// rename is an atomic same-filesystem replacement (POSIX rename(2)
+// semantics), so a crash never leaves a partial or missing final file. On
+// non-Unix platforms (the shipped Windows binary) the official os.Rename
+// documentation states the rename is NOT atomic even within one directory:
+// the write is still safe against partial content (full temp write + sync
+// before the replace) but a crash exactly during the replace step may lose
+// the previous file. No stronger Windows claim is made.
 // The temp name carries no secret material and neither do the returned errors
 // (only paths and OS error text).
 func (a *TwitchAuth) atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 
-	f, err := os.CreateTemp(dir, ".auth-*.tmp")
+	f, err := os.CreateTemp(dir, ownTempPrefix(path)+"*.tmp")
 	if err != nil {
 		return err
 	}
@@ -126,17 +150,34 @@ func (a *TwitchAuth) atomicWriteFile(path string, data []byte) error {
 	return nil
 }
 
-// sweepStaleTempFiles removes .auth-*.tmp files orphaned in the cookies
-// directory by a crash between temp creation and rename/removal. Called only
-// from Login (startup, before any save can be in flight), so it can never race
-// a live save's temp file.
+// sweepStaleTempFiles removes THIS profile's orphaned temp files (crash
+// between temp creation and rename/removal). Called from Login (startup); it
+// additionally serializes on saveMu so it can never observe — let alone
+// delete — a live temp of this instance's own in-flight SaveAuth. The glob is
+// bound to this profile's exact temp prefix, so another profile's (possibly
+// LIVE) temp in the shared cookies directory is never touched; legacy generic
+// .auth-*.tmp orphans from older builds are deliberately left alone rather
+// than deleted blindly — they may belong to another process.
 func (a *TwitchAuth) sweepStaleTempFiles() {
-	matches, err := filepath.Glob(filepath.Join(filepath.Dir(a.cookiesPath()), ".auth-*.tmp"))
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+
+	final := a.cookiesPath()
+	dir := filepath.Dir(final)
+	prefix := ownTempPrefix(final)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, m := range matches {
-		if err := os.Remove(m); err == nil {
+	for _, e := range entries {
+		name := e.Name()
+		// Literal prefix/suffix matching — deliberately NOT a glob, so no
+		// filename metacharacter can ever widen the match beyond this
+		// profile's own temps.
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err == nil {
 			slog.Debug("Removed stale auth temp file left by a previous crash")
 		}
 	}

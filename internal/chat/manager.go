@@ -10,10 +10,15 @@ import (
 
 type ChatManager struct {
 	username string
-	// tokenFn supplies the CURRENT OAuth token to every IRC client this
-	// manager creates, so joins and reconnects after a token rotation
-	// authenticate with the rotated token. Set once, immutable.
-	tokenFn          func() string
+	// tokenFn supplies the CURRENT OAuth credential snapshot to every IRC
+	// client this manager creates, so joins and reconnects after a token
+	// rotation authenticate with the rotated token. Set once, immutable.
+	tokenFn TokenProvider
+	// authErrorHandler, when set (before any join), receives the rejected
+	// credential generation whenever a client observes the documented IRC
+	// login-authentication-failed NOTICE. Wired by the miner into the shared
+	// single-flight recovery.
+	authErrorHandler func(rejectedGeneration uint64)
 	clients          map[string]*IRCClient
 	logger           ChatLogger
 	globalChatLogsOn bool
@@ -27,7 +32,7 @@ type ChatManager struct {
 	mu sync.RWMutex
 }
 
-func NewChatManager(username string, tokenFn func() string, logger ChatLogger, globalChatLogsOn bool, mentionHandler MentionHandler) *ChatManager {
+func NewChatManager(username string, tokenFn TokenProvider, logger ChatLogger, globalChatLogsOn bool, mentionHandler MentionHandler) *ChatManager {
 	return &ChatManager{
 		username:         username,
 		tokenFn:          tokenFn,
@@ -36,6 +41,15 @@ func NewChatManager(username string, tokenFn func() string, logger ChatLogger, g
 		globalChatLogsOn: globalChatLogsOn,
 		mentionHandler:   mentionHandler,
 	}
+}
+
+// SetAuthErrorHandler registers the sink for documented IRC authentication
+// rejections (rejected credential generation only — never token material).
+// Set once at wiring time, before any join.
+func (m *ChatManager) SetAuthErrorHandler(handler func(rejectedGeneration uint64)) {
+	m.mu.Lock()
+	m.authErrorHandler = handler
+	m.mu.Unlock()
 }
 
 // ToggleChat reconciles the streamer's IRC presence with its CURRENT Chat
@@ -91,6 +105,7 @@ func (m *ChatManager) joinChat(streamer *models.Streamer) {
 
 	logChat := m.shouldLogChat(streamer)
 	client := NewIRCClient(m.username, m.tokenFn, streamer, m.logger, logChat, m.mentionHandler)
+	client.authErrorFn = m.authErrorHandler
 	if m.dialFn != nil {
 		client.dialFn = m.dialFn
 	}

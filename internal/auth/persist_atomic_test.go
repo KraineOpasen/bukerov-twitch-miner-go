@@ -19,7 +19,7 @@ func noTempResidue(t *testing.T) {
 		t.Fatalf("read cookies dir: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".auth-") {
+		if strings.Contains(e.Name(), ".auth-") && strings.HasSuffix(e.Name(), ".tmp") {
 			t.Fatalf("temp file residue: %s", e.Name())
 		}
 	}

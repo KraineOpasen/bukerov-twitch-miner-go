@@ -42,6 +42,11 @@ type WebSocketClient struct {
 	// recorded and write failures injected deterministically.
 	writeTopicFrameHook func(frameType string, topic Topic) error
 
+	// reconnectRequestHook, when set (tests only), replaces the real
+	// go-reconnect dispatch of requestAuthReconnect so the bounded
+	// failed-relisten recovery path is observable without a network.
+	reconnectRequestHook func()
+
 	// tokenFn supplies the CURRENT auth snapshot at every user-topic frame
 	// write, so a LISTEN after a token rotation (including one written by a
 	// reconnect replay) always carries the rotated token instead of a
@@ -325,6 +330,7 @@ func (ws *WebSocketClient) RelistenUserTopics() {
 	}
 	ws.mu.Unlock()
 
+	failed := false
 	for _, t := range userTopics {
 		ws.mu.RLock()
 		stillCurrent := gen == ws.connGen
@@ -333,12 +339,42 @@ func (ws *WebSocketClient) RelistenUserTopics() {
 			return
 		}
 		if err := ws.writeTopicFrame(conn, "LISTEN", t); err != nil {
-			// Broken socket: the read-loop reconnect owns recovery, and its
-			// replay re-LISTENs with the current token. Privacy-safe log only.
-			slog.Warn("Re-authorizing user topic after token rotation failed; reconnect replay will retry", "index", ws.index, "error", err)
-			return
+			// Broken socket. Privacy-safe log, then an EXPLICIT bounded
+			// recovery request instead of hoping the read loop notices: the
+			// reconnect's replay re-LISTENs the ledger's desired topics with
+			// the current token. (Requested while writeMu is still held —
+			// see requestAuthReconnect: it only takes a brief ws.mu read and
+			// dispatches on its own goroutine.)
+			slog.Warn("Re-authorizing user topic after token rotation failed; requesting one reconnect", "index", ws.index, "error", err)
+			failed = true
+			break
 		}
 	}
+	if failed {
+		// Safe under the held writeMu: requestAuthReconnect takes only a
+		// brief ws.mu read (the documented writeMu -> ws.mu order) and
+		// dispatches the actual reconnect on its own goroutine.
+		ws.requestAuthReconnect()
+	}
+}
+
+// requestAuthReconnect asks for exactly one reconnect of this connection after
+// a failed post-rotation re-authorization write. Collapsed with any reconnect
+// already in flight (isReconnecting) and suppressed on shutdown (forcedClose/
+// isClosed); the reconnect replay re-subscribes the desired topic ledger with
+// the CURRENT token. Tests observe the request via reconnectRequestHook.
+func (ws *WebSocketClient) requestAuthReconnect() {
+	ws.mu.RLock()
+	skip := ws.isReconnecting || ws.forcedClose || ws.isClosed
+	ws.mu.RUnlock()
+	if skip {
+		return
+	}
+	if hook := ws.reconnectRequestHook; hook != nil {
+		hook()
+		return
+	}
+	go ws.reconnect()
 }
 
 func (ws *WebSocketClient) Listen(topic Topic) error {

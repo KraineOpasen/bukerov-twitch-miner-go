@@ -128,8 +128,8 @@ func TestStaleValidationDoesNotStampNewGeneration(t *testing.T) {
 	}
 }
 
-// Regression: a crash-orphaned temp file (with secret content) is swept at the
-// next startup.
+// Regression: a crash-orphaned temp file (with secret content) belonging to
+// THIS profile is swept at the next startup.
 func TestLoginSweepsStaleTempFiles(t *testing.T) {
 	f := newFakeOAuth(t)
 	a := newLifecycleAuth(t, f)
@@ -138,7 +138,7 @@ func TestLoginSweepsStaleTempFiles(t *testing.T) {
 	if err := a.SaveAuth(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	stale := "cookies/.auth-crashed123.tmp"
+	stale := "cookies/" + ownTempPrefix(a.cookiesPath()) + "crashed123.tmp"
 	if err := os.WriteFile(stale, []byte(`{"auth_token":"orphaned"}`), 0600); err != nil {
 		t.Fatalf("plant stale temp: %v", err)
 	}
