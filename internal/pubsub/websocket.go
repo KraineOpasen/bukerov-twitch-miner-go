@@ -14,10 +14,34 @@ import (
 )
 
 type WebSocketClient struct {
-	index          int
-	conn           *websocket.Conn
-	topics         []Topic
-	pendingTopics  []Topic
+	index int
+	conn  *websocket.Conn
+
+	// Per-topic wire ledger. The three buckets are disjoint per topic:
+	//   - topics: the LISTEN frame was successfully written on the CURRENT
+	//     connection generation (wire-applied).
+	//   - pendingTopics: desired here, but no LISTEN has succeeded on the
+	//     current generation (parked during dial/reconnect, or the last write
+	//     failed and must be retried).
+	//   - unlistenRetry: NOT desired, but the UNLISTEN write failed on the
+	//     current generation — a debt that must be re-sent before the local
+	//     absent state can be trusted against the wire.
+	// All transitions run under writeMu (see Listen/Unlisten), which is what
+	// linearizes LISTEN/UNLISTEN wire order per topic.
+	topics        []Topic
+	pendingTopics []Topic
+	unlistenRetry []Topic
+	// connGen counts connection generations: bumped on every reconnect swap
+	// and every successful Connect. A topic write whose captured generation no
+	// longer matches commits nothing — the old socket (and everything written
+	// to it) is void, and the parked set carried by the swap owns the topic.
+	connGen uint64
+
+	// writeTopicFrameHook, when set (tests only, before any concurrency),
+	// replaces the real LISTEN/UNLISTEN frame write so wire order can be
+	// recorded and write failures injected deterministically.
+	writeTopicFrameHook func(frameType string, topic Topic) error
+
 	authToken      string
 	pingInterval   int
 	reconnectDelay int
@@ -94,6 +118,9 @@ func (ws *WebSocketClient) Connect() error {
 	ws.isClosed = false
 	ws.lastPong = time.Now()
 	ws.lastConnectedAt = time.Now()
+	// A fresh usable generation: writes captured against an older generation
+	// commit nothing (see connGen).
+	ws.connGen++
 	resubscribed := len(ws.pendingTopics)
 	// The loops below get THIS generation's stop channel and conn as
 	// parameters, snapshotted under mu. Selecting on the ws.stopChan field
@@ -165,13 +192,14 @@ func (ws *WebSocketClient) SetReconnectHandler(h func()) {
 }
 
 // TopicCount reports how many topics this connection is responsible for,
-// counting parked pendingTopics too: during a reconnect the live set sits in
-// pendingTopics, and ignoring it would let the pool pack new topics onto an
-// effectively full connection past MaxTopicsPerConnection.
+// counting parked pendingTopics (during a reconnect the live set sits there)
+// and unlistenRetry debts (still occupying a wire slot on Twitch's side until
+// the UNLISTEN lands): ignoring either would let the pool pack new topics
+// onto an effectively full connection past MaxTopicsPerConnection.
 func (ws *WebSocketClient) TopicCount() int {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
-	return len(ws.topics) + len(ws.pendingTopics)
+	return len(ws.topics) + len(ws.pendingTopics) + len(ws.unlistenRetry)
 }
 
 // state returns an atomic read-only view of this connection for the pool's
@@ -189,138 +217,255 @@ func (ws *WebSocketClient) state() ConnState {
 	}
 }
 
-func (ws *WebSocketClient) Listen(topic Topic) {
-	ws.mu.Lock()
-	for _, t := range ws.topics {
+// topicIn reports whether the list contains the topic (by wire string).
+func topicIn(list []Topic, topic Topic) bool {
+	for _, t := range list {
 		if t.String() == topic.String() {
-			ws.mu.Unlock()
-			return
+			return true
 		}
 	}
-
-	if !ws.isOpened {
-		// Not connected (initial dial pending, or a reconnect swapped the
-		// generation): PARK the topic only — the post-connect replay sends its
-		// LISTEN. Appending to the live set and writing here would push the
-		// frame into a dead conn, silently stranding the topic as
-		// tracked-but-never-subscribed (which a desired-state sweep could then
-		// never heal, since HasTopic would claim ownership).
-		for _, t := range ws.pendingTopics {
-			if t.String() == topic.String() {
-				ws.mu.Unlock()
-				return
-			}
-		}
-		ws.pendingTopics = append(ws.pendingTopics, topic)
-		ws.mu.Unlock()
-		return
-	}
-	ws.topics = append(ws.topics, topic)
-	ws.mu.Unlock()
-
-	ws.sendListen(topic)
+	return false
 }
 
-// sendListen writes one LISTEN frame for the topic on the current connection.
-func (ws *WebSocketClient) sendListen(topic Topic) {
+// topicRemove returns the list without the topic.
+func topicRemove(list []Topic, topic Topic) []Topic {
+	var out []Topic
+	for _, t := range list {
+		if t.String() != topic.String() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// topicAppendUnique appends the topic unless already present.
+func topicAppendUnique(list []Topic, topic Topic) []Topic {
+	if topicIn(list, topic) {
+		return list
+	}
+	return append(list, topic)
+}
+
+// Listen reconciles ONE topic to desired=true on this connection. The whole
+// read-decide-write-commit sequence runs under writeMu — the same lock every
+// topic frame write holds — so per-topic LISTEN/UNLISTEN transitions are
+// linearized against the wire: a stale LISTEN can never be the final frame
+// after a newer desired=false (the disable serializes behind the in-flight
+// write and follows with its compensating UNLISTEN), and vice versa.
+//
+// The write error, if any, is returned; on error the topic stays in
+// pendingTopics (desired, retryable by an identical EnsureTopic or the next
+// reconnect replay) and is never falsely marked wire-applied.
+func (ws *WebSocketClient) Listen(topic Topic) error {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+	return ws.listenUnderWriteLock(topic)
+}
+
+// listenUnderWriteLock is Listen's body; caller must hold writeMu (never
+// ws.mu).
+func (ws *WebSocketClient) listenUnderWriteLock(topic Topic) error {
+	ws.mu.Lock()
+	if topicIn(ws.topics, topic) {
+		ws.mu.Unlock()
+		return nil // already wire-applied on the current generation
+	}
+	if !ws.isOpened {
+		// Not connected (initial dial pending, or a reconnect swapped the
+		// generation): PARK the topic only — the post-connect replay owns the
+		// write. Writing here would push the frame into a dead conn and strand
+		// the topic as tracked-but-never-subscribed.
+		ws.pendingTopics = topicAppendUnique(ws.pendingTopics, topic)
+		ws.mu.Unlock()
+		return nil
+	}
+	// The topic stays parked in pendingTopics ACROSS the write: if a reconnect
+	// swaps the generation mid-write, the swap's merge preserves it and the
+	// next replay re-sends it — it can never be lost in limbo.
+	ws.pendingTopics = topicAppendUnique(ws.pendingTopics, topic)
+	conn := ws.conn
+	gen := ws.connGen
+	ws.mu.Unlock()
+
+	err := ws.writeTopicFrame(conn, "LISTEN", topic)
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if gen != ws.connGen {
+		// The connection died and was swapped while writing: whatever reached
+		// the old socket is void. The topic is still parked (the swap's merge
+		// kept it); the new generation's replay owns it. Not an error — the
+		// retry obligation is already recorded in pendingTopics.
+		return nil
+	}
+	if err != nil {
+		// Stays in pendingTopics: desired, NOT applied, retryable.
+		return err
+	}
+	ws.pendingTopics = topicRemove(ws.pendingTopics, topic)
+	ws.topics = topicAppendUnique(ws.topics, topic)
+	// A successful LISTEN settles any failed-UNLISTEN debt: the last confirmed
+	// wire command now matches desired=true.
+	ws.unlistenRetry = topicRemove(ws.unlistenRetry, topic)
+	return nil
+}
+
+// Unlisten reconciles ONE topic to desired=false on this connection, under
+// the same writeMu linearization as Listen (see there). The UNLISTEN write
+// error, if any, is returned; on error the topic is held in unlistenRetry so
+// an identical EnsureTopic(desired=false) re-sends the frame instead of
+// no-opping — the local absent state never silently outruns a known-failed
+// wire operation.
+func (ws *WebSocketClient) Unlisten(topic Topic) error {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+
+	ws.mu.Lock()
+	// Parked-but-never-confirmed: no LISTEN succeeded on this generation, so
+	// dropping the desire is the whole transition — no compensating frame. (A
+	// FAILED earlier LISTEN also lands here: its socket takes no more frames
+	// and dies to a reconnect, which replays desired topics only.)
+	ws.pendingTopics = topicRemove(ws.pendingTopics, topic)
+
+	needWrite := false
+	if topicIn(ws.topics, topic) {
+		ws.topics = topicRemove(ws.topics, topic)
+		needWrite = true
+	} else if topicIn(ws.unlistenRetry, topic) {
+		needWrite = true // previous UNLISTEN write failed — retry the frame
+	}
+	if !needWrite {
+		ws.mu.Unlock()
+		return nil
+	}
+	if !ws.isOpened {
+		// Generation already swapped: the old socket and its subscriptions are
+		// dead, so there is nothing left to compensate on the wire.
+		ws.unlistenRetry = topicRemove(ws.unlistenRetry, topic)
+		ws.mu.Unlock()
+		return nil
+	}
+	// Record the debt BEFORE the write, so no interleaving can leave a
+	// confirmed LISTEN as the final command without a retry obligation.
+	ws.unlistenRetry = topicAppendUnique(ws.unlistenRetry, topic)
+	conn := ws.conn
+	gen := ws.connGen
+	ws.mu.Unlock()
+
+	err := ws.writeTopicFrame(conn, "UNLISTEN", topic)
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if gen != ws.connGen {
+		// Old socket died mid-write; its wire subscriptions die with it and
+		// the swap cleared the debt ledger.
+		return nil
+	}
+	if err != nil {
+		// Debt stays in unlistenRetry: local state is absent AND the failed
+		// UNLISTEN is explicitly recorded for the next identical apply.
+		return err
+	}
+	ws.unlistenRetry = topicRemove(ws.unlistenRetry, topic)
+	return nil
+}
+
+// writeTopicFrame writes one LISTEN/UNLISTEN frame for the topic. Caller must
+// hold writeMu and must NOT hold ws.mu. Only the error ever surfaces to
+// callers/logs — never the frame, token, or payload.
+func (ws *WebSocketClient) writeTopicFrame(conn *websocket.Conn, frameType string, topic Topic) error {
+	if hook := ws.writeTopicFrameHook; hook != nil {
+		return hook(frameType, topic)
+	}
+	if conn == nil {
+		// No transport (library/test construction): matches send()'s
+		// historical nil-conn no-op.
+		return nil
+	}
+
 	data := &WSData{
 		Topics: []string{topic.String()},
 	}
 	if topic.IsUserTopic() {
 		data.AuthToken = ws.authToken
 	}
-
 	msg := WSMessage{
-		Type:  "LISTEN",
+		Type:  frameType,
 		Nonce: generateNonce(),
 		Data:  data,
 	}
-
-	_ = ws.send(msg)
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	slog.Debug("WebSocket send", "index", ws.index, "type", frameType)
+	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-// replayPendingTopics promotes parked topics onto the live connection one at a
-// time. Each iteration pops the head and promotes it into ws.topics under a
-// SINGLE lock hold, so (a) a topic a concurrent Unlisten already removed from
-// pendingTopics is never replayed, and (b) from the instant of promotion a
-// later Unlisten finds the topic in the live set and issues its own UNLISTEN.
+// replayPendingTopics promotes parked topics onto the live connection. Each
+// iteration runs its whole read-decide-write-commit under writeMu — PEEKING
+// the head rather than popping, so a mid-write reconnect merge can never lose
+// the topic — which linearizes the replayed LISTEN against concurrent runtime
+// Listen/Unlisten calls: a disable issued during a replay write serializes
+// behind it and follows with the compensating UNLISTEN, and a disable issued
+// before the topic's iteration removes it from the parked set so it is never
+// written at all. A write failure leaves the topic parked (retryable by an
+// identical EnsureTopic or the next replay) and stops this replay: the socket
+// is broken and the read-loop reconnect owns recovery.
 func (ws *WebSocketClient) replayPendingTopics() {
 	for {
+		ws.writeMu.Lock()
 		ws.mu.Lock()
 		if !ws.isOpened || len(ws.pendingTopics) == 0 {
 			ws.mu.Unlock()
+			ws.writeMu.Unlock()
 			return
 		}
 		topic := ws.pendingTopics[0]
-		ws.pendingTopics = ws.pendingTopics[1:]
-		ws.topics = append(ws.topics, topic)
+		conn := ws.conn
+		gen := ws.connGen
 		ws.mu.Unlock()
 
-		ws.sendListen(topic)
+		err := ws.writeTopicFrame(conn, "LISTEN", topic)
+
+		ws.mu.Lock()
+		stale := gen != ws.connGen
+		if !stale && err == nil {
+			ws.pendingTopics = topicRemove(ws.pendingTopics, topic)
+			ws.topics = topicAppendUnique(ws.topics, topic)
+			ws.unlistenRetry = topicRemove(ws.unlistenRetry, topic)
+		}
+		ws.mu.Unlock()
+		ws.writeMu.Unlock()
+
+		if stale {
+			return // a newer generation owns the parked set now
+		}
+		if err != nil {
+			slog.Warn("WebSocket topic replay write failed; topics stay parked for the next replay",
+				"index", ws.index, "error", err)
+			return
+		}
 	}
 }
 
-func (ws *WebSocketClient) Unlisten(topic Topic) bool {
-	ws.mu.Lock()
-	found := false
-	var remaining []Topic
-	for _, t := range ws.topics {
-		if t.String() == topic.String() {
-			found = true
-		} else {
-			remaining = append(remaining, t)
-		}
-	}
-	ws.topics = remaining
-
-	var remainingPending []Topic
-	for _, t := range ws.pendingTopics {
-		if t.String() != topic.String() {
-			remainingPending = append(remainingPending, t)
-		}
-	}
-	ws.pendingTopics = remainingPending
-
-	isOpened := ws.isOpened
-	ws.mu.Unlock()
-
-	if found && isOpened {
-		data := &WSData{
-			Topics: []string{topic.String()},
-		}
-		if topic.IsUserTopic() {
-			data.AuthToken = ws.authToken
-		}
-
-		msg := WSMessage{
-			Type:  "UNLISTEN",
-			Nonce: generateNonce(),
-			Data:  data,
-		}
-
-		_ = ws.send(msg)
-	}
-
-	return found
-}
-
-// HasTopic reports whether this connection owns the topic, counting topics
-// parked in pendingTopics (a reconnect in flight moves the live set there) so
-// a pool-wide dedup scan cannot double-subscribe a topic mid-reconnect.
+// HasTopic reports whether this connection DESIRES the topic — wire-applied
+// or parked in pendingTopics (a reconnect in flight moves the live set there)
+// — so a pool-wide dedup scan cannot double-subscribe a topic mid-reconnect.
+// A topic owing only a failed-UNLISTEN retry is NOT desired and not counted.
 func (ws *WebSocketClient) HasTopic(topic Topic) bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
-	for _, t := range ws.topics {
-		if t.String() == topic.String() {
-			return true
-		}
-	}
-	for _, t := range ws.pendingTopics {
-		if t.String() == topic.String() {
-			return true
-		}
-	}
-	return false
+	return topicIn(ws.topics, topic) || topicIn(ws.pendingTopics, topic)
+}
+
+// HasTopicApplied reports whether the topic's LISTEN frame was successfully
+// written on this connection's CURRENT generation — the only state in which a
+// desired topic needs no further wire action.
+func (ws *WebSocketClient) HasTopicApplied(topic Topic) bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return topicIn(ws.topics, topic)
 }
 
 func (ws *WebSocketClient) send(msg WSMessage) error {
@@ -584,11 +729,18 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	ws.stopChan = make(chan struct{})
 	ws.pendingTopics = restore
 	ws.topics = nil
+	// The old socket's wire subscriptions die with it, so any failed-UNLISTEN
+	// debt is settled by the socket's death; the new generation replays only
+	// the desired set.
+	ws.unlistenRetry = nil
 	// The connection is no longer usable from this point: a Listen arriving
 	// during the redial must PARK its topic (picked up by the post-connect
 	// replay) instead of writing a LISTEN frame into the dead old conn and
-	// stranding the topic as tracked-but-never-subscribed.
+	// stranding the topic as tracked-but-never-subscribed. Bumping the
+	// generation voids the commit of any topic write already in flight on the
+	// dying socket.
 	ws.isOpened = false
+	ws.connGen++
 	ws.mu.Unlock()
 
 	if err := ws.Connect(); err != nil {

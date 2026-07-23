@@ -84,9 +84,9 @@ func TestEnsureTopicUnsubscribeRemovesFromAllClients(t *testing.T) {
 
 	// Seed a historical duplicate: the same topic on two connections.
 	c0, c1 := newFakeOpenClient(0), newFakeOpenClient(1)
-	c0.Listen(raid)
-	c0.Listen(playback)
-	c1.Listen(raid)
+	_ = c0.Listen(raid)
+	_ = c0.Listen(playback)
+	_ = c1.Listen(raid)
 	p.mu.Lock()
 	p.clients = []*WebSocketClient{c0, c1}
 	p.mu.Unlock()
@@ -227,7 +227,7 @@ func TestUnsubscribeDuringReconnectNotResurrectedByReplay(t *testing.T) {
 	ws.mu.Unlock()
 
 	// The disable arrives mid-reconnect.
-	ws.Unlisten(raid)
+	_ = ws.Unlisten(raid)
 
 	// The connection comes back and drains the parked set.
 	ws.mu.Lock()
@@ -255,7 +255,7 @@ func TestTopicListenDuringReconnectParksUntilReplay(t *testing.T) {
 	topic := NewTopic(TopicRaid, "chan-1")
 
 	// Mid-reconnect (or pre-connect): the conn is not usable.
-	ws.Listen(topic)
+	_ = ws.Listen(topic)
 
 	ws.mu.RLock()
 	live, parked := len(ws.topics), len(ws.pendingTopics)
@@ -271,7 +271,7 @@ func TestTopicListenDuringReconnectParksUntilReplay(t *testing.T) {
 	}
 
 	// Repeated Listen while parked: no duplicate.
-	ws.Listen(topic)
+	_ = ws.Listen(topic)
 	if got := ws.TopicCount(); got != 1 {
 		t.Fatalf("duplicate park: count=%d, want 1", got)
 	}
@@ -290,7 +290,7 @@ func TestTopicListenDuringReconnectParksUntilReplay(t *testing.T) {
 	}
 
 	// Repeated Listen after promotion: still no duplicate.
-	ws.Listen(topic)
+	_ = ws.Listen(topic)
 	if got := ws.TopicCount(); got != 1 {
 		t.Fatalf("duplicate after promotion: count=%d, want 1", got)
 	}

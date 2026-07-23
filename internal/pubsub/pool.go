@@ -443,8 +443,10 @@ func (p *WebSocketPool) Submit(topic Topic) error {
 
 // submitLocked appends the topic to the last connection, growing the pool by
 // one bounded connection when the last one is full. Caller must hold p.mu. A
-// failed connect leaves the pool untouched (the topic is tracked nowhere), so
-// the same subscription stays retryable on the next reconcile.
+// failed connect leaves the pool untouched (the topic is tracked nowhere) and
+// a failed LISTEN write leaves the topic parked as desired-pending on its
+// client — either way the same subscription stays retryable on the next
+// reconcile, and the error reaches the caller.
 func (p *WebSocketPool) submitLocked(topic Topic) error {
 	if len(p.clients) == 0 || p.clients[len(p.clients)-1].TopicCount() >= constants.MaxTopicsPerConnection {
 		ws, err := p.connectNewClientLocked()
@@ -454,8 +456,7 @@ func (p *WebSocketPool) submitLocked(topic Topic) error {
 		p.clients = append(p.clients, ws)
 	}
 
-	p.clients[len(p.clients)-1].Listen(topic)
-	return nil
+	return p.clients[len(p.clients)-1].Listen(topic)
 }
 
 // connectNewClientLocked creates and connects the next pool member (or defers
@@ -475,31 +476,41 @@ func (p *WebSocketPool) connectNewClientLocked() (*WebSocketClient, error) {
 }
 
 // EnsureTopic reconciles ONE topic to its desired state across the whole pool,
-// idempotently.
+// idempotently AND retryably.
 //
-// desired=true: if ANY connection (live or pending a reconnect) already owns
-// the topic this is a no-op — no duplicate subscription and no extra LISTEN is
-// ever produced, including at the topic-capacity boundary where the owning
-// connection is full and a newer one has room. Otherwise the topic is
-// subscribed through the normal bounded connection/listen path; a connect
-// failure is returned to the caller and the subscription remains retryable.
+// desired=true: if the topic is wire-APPLIED on any connection this is a no-op
+// — no duplicate subscription and no extra LISTEN is ever produced, including
+// at the topic-capacity boundary where the owning connection is full and a
+// newer one has room. If the topic is merely desired-pending on a connection
+// (parked for a reconnect replay, or a previous LISTEN write FAILED), that
+// client's write is driven now, so an identical apply retries the known-failed
+// operation instead of no-opping. Otherwise the topic is subscribed through
+// the normal bounded connection/listen path. Connect and write failures are
+// returned to the caller; the subscription always remains retryable.
 //
 // desired=false: the topic is removed from EVERY connection (cleaning up any
-// historical duplicates); repeating it is a safe no-op. Other topics are never
-// touched. Callers reconcile only per-channel capability topics through this —
-// the global user topics are not part of any per-streamer desired state.
+// historical duplicates); repeating it is a safe no-op once truly converged. A
+// FAILED UNLISTEN write is returned as an error and retried by the next
+// identical apply (the client keeps the debt in its unlistenRetry ledger).
+// Other topics are never touched. Callers reconcile only per-channel
+// capability topics through this — the global user topics are not part of any
+// per-streamer desired state.
 func (p *WebSocketPool) EnsureTopic(topic Topic, desired bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if !desired {
-		p.unsubscribeAllLocked(topic)
-		return nil
+		return p.unsubscribeAllLocked(topic)
 	}
 
 	for _, ws := range p.clients {
-		if ws.HasTopic(topic) {
+		if ws.HasTopicApplied(topic) {
 			return nil
+		}
+	}
+	for _, ws := range p.clients {
+		if ws.HasTopic(topic) {
+			return ws.Listen(topic)
 		}
 	}
 	return p.submitLocked(topic)
@@ -517,19 +528,25 @@ func (p *WebSocketPool) Close() {
 
 // Unsubscribe removes the topic from EVERY connection in the pool, not just
 // the first match, so a historical duplicate (the same topic subscribed on two
-// connections) is fully cleaned up. Repeating it is a safe no-op.
+// connections) is fully cleaned up. Repeating it is a safe no-op. Write errors
+// are swallowed here — reconciliation paths that need them use EnsureTopic.
 func (p *WebSocketPool) Unsubscribe(topic Topic) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.unsubscribeAllLocked(topic)
+	_ = p.unsubscribeAllLocked(topic)
 }
 
-// unsubscribeAllLocked drops the topic from all connections. Caller must hold
-// p.mu.
-func (p *WebSocketPool) unsubscribeAllLocked(topic Topic) {
+// unsubscribeAllLocked drops the topic from all connections, returning the
+// first UNLISTEN write error (the affected client keeps the retry debt).
+// Caller must hold p.mu.
+func (p *WebSocketPool) unsubscribeAllLocked(topic Topic) error {
+	var firstErr error
 	for _, ws := range p.clients {
-		ws.Unlisten(topic)
+		if err := ws.Unlisten(topic); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
 func (p *WebSocketPool) UpdateStreamers(streamers []*models.Streamer) {
