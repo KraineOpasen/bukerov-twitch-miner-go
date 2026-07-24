@@ -213,6 +213,11 @@ type TwitchClient struct {
 	// "degraded" signal when the API repeatedly gives up short of a full blackout.
 	gqlFailures eventWindow
 
+	// connAcct tracks GQL request attempts and reachable-but-functional failures,
+	// so the connection-health classifier can tell an idle client (no attempts)
+	// from a failing one. Self-synchronized; see connhealth.go.
+	connAcct apiConnAccount
+
 	// clientIDMu guards the GQL client-ID fallback state below. The same
 	// *TwitchClient is shared across goroutines (watcher, drops sync, discovery,
 	// and the health canary all call it concurrently), so this state must be
@@ -390,6 +395,7 @@ func (c *TwitchClient) gqlSingleRoundTrip(body []byte, operationName, token stri
 	// body must never reach per-operation parsers as if it were a result, nor
 	// refresh the connection-health timestamp.
 	if statusCode == http.StatusForbidden {
+		c.connAcct.markFunctionalFailure(time.Now())
 		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", operationName)
 	}
 
@@ -454,6 +460,8 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 	// parsing behaves exactly as before.
 	if !hasTopLevelGQLErrors(result) {
 		c.markSuccess()
+	} else {
+		c.connAcct.markFunctionalFailure(time.Now())
 	}
 	return result, nil
 }
@@ -511,6 +519,7 @@ func (c *TwitchClient) gqlBatchRoundTrip(body []byte, label, token string) (resu
 		return nil, true, nil
 	}
 	if statusCode == http.StatusForbidden {
+		c.connAcct.markFunctionalFailure(time.Now())
 		return nil, false, fmt.Errorf("twitch GQL %s: permission denied (status 403)", label)
 	}
 
@@ -573,6 +582,7 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	// refresh the connection-health timestamp.
 	for _, item := range result {
 		if hasTopLevelGQLErrors(item) {
+			c.connAcct.markFunctionalFailure(time.Now())
 			return result, nil
 		}
 	}
@@ -679,6 +689,7 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
 func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel, token string) ([]byte, int, error) {
+	c.connAcct.markAttempt(time.Now())
 	candidates := c.candidateClientIDs(operationLabel)
 
 	var (
@@ -710,6 +721,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 		"clientIDsTried", len(candidates),
 	)
 
+	c.connAcct.markFunctionalFailure(time.Now())
 	return respBody, statusCode, fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationLabel, len(candidates))
 }
 

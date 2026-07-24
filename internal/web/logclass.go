@@ -124,7 +124,7 @@ var logMsgRules = []logMsgRule{
 	}, class: "log-settings", emoji: "⚙️"},
 
 	// Health recovery.
-	{exact: []string{"Connection restored - harvesting resumed", "Connection stabilized"},
+	{exact: []string{"Connection restored", "Connection stabilized"},
 		class: "log-health-ok", emoji: "💚"},
 
 	// Database / analytics bookkeeping.

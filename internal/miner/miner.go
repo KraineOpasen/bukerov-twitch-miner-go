@@ -1153,133 +1153,27 @@ func (m *Miner) subscriptionProbeLoop(ctx context.Context) {
 	}
 }
 
-// healthWatchdogLoop periodically checks how long it has been since the API
-// client or the PubSub pool last had confirmed successful contact with
-// Twitch. If neither has responded within the configured threshold, it
-// raises a "connection lost" signal (log + Discord + dashboard banner); once
-// contact resumes, it logs and notifies recovery and clears the banner.
+// healthWatchdogLoop periodically classifies the miner's connectivity to Twitch
+// (GQL API + PubSub) and raises/clears the "connection lost" and "degraded"
+// signals. A connection is only reported LOST when BOTH critical paths are
+// confirmed unavailable; a normal idle API (no requests attempted) is never an
+// outage. See connection_health.go for the classifier and transition rules.
 func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	connectionLost := false
-	connectionDegraded := false
+	var state connHealthState
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.mu.RLock()
-			threshold := time.Duration(m.config.RateLimits.ConnectionTimeoutMinutes) * time.Minute
-			m.mu.RUnlock()
-
 			now := time.Now()
 			m.refreshHealthCenter(now)
 			m.refreshPolicy(now)
-			apiStale := m.client != nil && now.Sub(m.client.LastSuccessAt()) > threshold
-			pubsubStale := m.wsPool != nil && !m.wsPool.LastActivity().IsZero() && now.Sub(m.wsPool.LastActivity()) > threshold
-
-			lost := apiStale || pubsubStale
-
-			if lost && !connectionLost {
-				connectionLost = true
-				detail := connectionLostDetail(apiStale, pubsubStale, threshold)
-				slog.Error("Connection lost - harvesting paused", "apiStale", apiStale, "pubsubStale", pubsubStale, "thresholdMinutes", m.config.RateLimits.ConnectionTimeoutMinutes)
-
-				m.mu.Lock()
-				m.connectionLost = true
-				m.connectionDetail = detail
-				m.mu.Unlock()
-
-				if m.notifications != nil {
-					m.notifications.NotifyConnectionLost(detail)
-				}
-				if m.webServer != nil {
-					m.webServer.GetStatusBroadcaster().SetConnectionLost(true, detail)
-				}
-			} else if !lost && connectionLost {
-				connectionLost = false
-				slog.Info("Connection restored - harvesting resumed")
-
-				m.mu.Lock()
-				m.connectionLost = false
-				m.connectionDetail = ""
-				m.mu.Unlock()
-
-				if m.notifications != nil {
-					m.notifications.NotifyConnectionRestored()
-				}
-				if m.webServer != nil {
-					m.webServer.GetStatusBroadcaster().SetConnectionLost(false, "")
-				}
-			}
-
-			// Degraded (yellow): impaired but not fully lost. Counted only while
-			// !lost so red always wins; the thresholds observe the same window as
-			// "lost" (ConnectionTimeoutMinutes). Surfaced via the dashboard network
-			// icon + Health Center only — no banner, no Discord notification.
-			reconnects := 0
-			gqlFails := 0
-			if m.wsPool != nil {
-				reconnects = m.wsPool.RecentReconnects(threshold)
-			}
-			if m.client != nil {
-				gqlFails = m.client.RecentGQLFailures(threshold)
-			}
-			degraded := !lost && (reconnects >= degradeReconnectThreshold || gqlFails >= degradeGQLFailureThreshold)
-
-			if degraded && !connectionDegraded {
-				connectionDegraded = true
-				detail := connectionDegradedDetail(reconnects, gqlFails, threshold)
-				slog.Warn("Connection degraded", "reconnects", reconnects, "gqlFailures", gqlFails, "windowMinutes", int(threshold.Minutes()))
-
-				m.mu.Lock()
-				m.connectionDegraded = true
-				m.connectionDegradedDetail = detail
-				m.mu.Unlock()
-
-				if m.webServer != nil {
-					m.webServer.GetStatusBroadcaster().SetConnectionDegraded(true, detail)
-				}
-			} else if !degraded && connectionDegraded {
-				connectionDegraded = false
-				slog.Info("Connection stabilized")
-
-				m.mu.Lock()
-				m.connectionDegraded = false
-				m.connectionDegradedDetail = ""
-				m.mu.Unlock()
-
-				if m.webServer != nil {
-					m.webServer.GetStatusBroadcaster().SetConnectionDegraded(false, "")
-				}
-			}
+			m.evaluateConnectionHealth(now, &state)
 		}
-	}
-}
-
-func connectionLostDetail(apiStale, pubsubStale bool, threshold time.Duration) string {
-	minutes := int(threshold.Minutes())
-	switch {
-	case apiStale && pubsubStale:
-		return fmt.Sprintf("No successful Twitch API or PubSub activity for over %d minutes.", minutes)
-	case apiStale:
-		return fmt.Sprintf("No successful Twitch API response for over %d minutes.", minutes)
-	default:
-		return fmt.Sprintf("No PubSub activity for over %d minutes.", minutes)
-	}
-}
-
-func connectionDegradedDetail(reconnects, gqlFails int, window time.Duration) string {
-	minutes := int(window.Minutes())
-	switch {
-	case reconnects >= degradeReconnectThreshold && gqlFails >= degradeGQLFailureThreshold:
-		return fmt.Sprintf("Frequent PubSub reconnects (%d) and repeated API failures (%d) in the last %d minutes.", reconnects, gqlFails, minutes)
-	case reconnects >= degradeReconnectThreshold:
-		return fmt.Sprintf("Frequent PubSub reconnects (%d) in the last %d minutes.", reconnects, minutes)
-	default:
-		return fmt.Sprintf("Repeated API request failures (%d) in the last %d minutes.", gqlFails, minutes)
 	}
 }
 
