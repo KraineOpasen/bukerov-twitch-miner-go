@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -257,6 +258,139 @@ func (w *MinuteWatcher) drainPendingRefreshes() map[string]SessionRefreshRequest
 // the same login/broadcast across ticks. Concurrency-safe.
 func (w *MinuteWatcher) nextRefreshObs() uint64 {
 	return w.refreshObsSeq.Add(1)
+}
+
+// sessionConvergeMaxAttempts bounds how many spade-fetch refreshes
+// convergeIncompleteSlotSessions stages for one incomplete broadcast identity
+// before giving up on it and waiting for a genuinely new broadcast — a
+// persistently unreachable spade endpoint (or a channel Twitch never serves
+// one for) must not be retried forever.
+const sessionConvergeMaxAttempts = 3
+
+// sessionConvergeRetryBackoff is the minimum spacing between two staged
+// spade-fetch attempts for the SAME incomplete broadcast identity. It is
+// deliberately much longer than any realistic MinuteWatchedInterval, so ticks
+// landing inside the backoff window stage nothing: the convergence refresh is
+// event-triggered and bounded-retried, never a new per-tick request cadence.
+const sessionConvergeRetryBackoff = 3 * time.Minute
+
+// sessionConvergeState is the loop-owned bookkeeping convergeIncompleteSlotSessions
+// keeps per currently-slotted login whose session is missing a spade URL: the
+// broadcast identity it is chasing one for, how many bounded spade-fetch
+// attempts have been staged for that identity, and when the last one was
+// staged (the backoff anchor). Like rotation/slotResidence it is written only
+// by the loop goroutine and needs no locking of its own.
+type sessionConvergeState struct {
+	broadcastID string
+	attempts    int
+	lastAttempt time.Time
+}
+
+// convergeIncompleteSlotSessions stages a bounded, deduplicated,
+// event-triggered watch-session refresh (RefreshSession, i.e. a spade
+// re-fetch) for any currently-slotted channel whose session is still missing
+// a spade URL — the gap left by a streamer that first went online through an
+// authoritative signal that never fetched one (e.g. PubSub's "stream-up",
+// which confirms online and then only best-effort-refreshes metadata; see
+// internal/pubsub/pool.go). CheckStreamerOnline only re-fetches a spade URL
+// for a streamer that is NOT yet confirmed online (internal/api/client.go),
+// so such a streamer would otherwise sit in a watch slot delivering nothing,
+// forever. It runs on the loop goroutine, immediately before
+// executeSessionRefreshes, so a refresh staged this tick can execute and land
+// THIS tick.
+//
+// It reuses the existing correlated session-refresh path end to end
+// (RequestSessionRefresh / pendingRefresh / executeSessionRefreshes /
+// RefreshPlaybackSession / the atomic ApplyPlaybackSessionIfCurrent apply) —
+// no new transport and no new fencing. Per residence:
+//
+//   - triggered ONLY while the slot is held AND the session lacks a spade URL
+//     (a coherent session clears any tracked state and stages nothing);
+//   - single-flight and deduplicated per (login, broadcast) identity: at most
+//     one attempt bookkeeping entry per login, and RequestSessionRefresh's own
+//     per-login coalescing means at most one outstanding staged request;
+//   - bounded to sessionConvergeMaxAttempts spade-fetch attempts per broadcast
+//     identity, after which it waits for a genuinely new broadcast;
+//   - silent while pending or inside the backoff window, or once the attempt
+//     cap is reached: a tick landing there stages nothing, so repeated minute
+//     ticks create no additional refresh requests;
+//   - invalidated the instant a login leaves this tick's slots — the tracked
+//     state is pruned unconditionally at the top of every call, before
+//     anything else runs;
+//   - fenced by ExpectedBroadcastID exactly like every other staged refresh
+//     (requestStale / ApplyPlaybackSessionIfCurrent's own preconditions), so a
+//     result racing a broadcast change is rejected as stale and can never
+//     publish over a newer residence or a different broadcast;
+//   - automatically self-stopping: once a spade-bearing session is observed,
+//     the very next check for that login finds HasSpadeURL() true and clears
+//     its tracked state instead of staging anything further.
+func (w *MinuteWatcher) convergeIncompleteSlotSessions(slots []slotOccupant, now time.Time) {
+	// Prune first, unconditionally: a login that no longer holds a slot loses
+	// its convergence ownership immediately, however far its attempts got.
+	slotted := make(map[string]bool, len(slots))
+	for _, sl := range slots {
+		slotted[sl.streamer.GetUsername()] = true
+	}
+	for login := range w.sessionConverge {
+		if !slotted[login] {
+			delete(w.sessionConverge, login)
+		}
+	}
+
+	if w.refresher == nil {
+		// No refresh-capable client (a test harness that never exercises
+		// refreshes): nothing to stage.
+		return
+	}
+
+	for _, sl := range slots {
+		login := sl.streamer.GetUsername()
+		session := sl.streamer.Stream.SessionSnapshot()
+		if session.HasSpadeURL() {
+			// Already deliverable: nothing to converge, and any earlier chase
+			// for this login is done.
+			delete(w.sessionConverge, login)
+			continue
+		}
+
+		cur := sl.streamer.Stream.GetBroadcastID()
+		st := w.sessionConverge[login]
+		if st == nil || st.broadcastID != cur {
+			// New (or first-seen, or changed) broadcast identity: start its own
+			// bounded attempt budget from scratch.
+			if w.sessionConverge == nil {
+				w.sessionConverge = make(map[string]*sessionConvergeState)
+			}
+			st = &sessionConvergeState{broadcastID: cur}
+			w.sessionConverge[login] = st
+		}
+
+		if st.attempts >= sessionConvergeMaxAttempts {
+			// Bounded give-up for this broadcast identity.
+			continue
+		}
+		if st.attempts > 0 && now.Sub(st.lastAttempt) < sessionConvergeRetryBackoff {
+			// Still inside the backoff window: stage nothing.
+			continue
+		}
+
+		w.RequestSessionRefresh(SessionRefreshRequest{
+			RequestID:           fmt.Sprintf("slot-converge-%s-%d", login, st.attempts+1),
+			Login:               login,
+			Mode:                RefreshSession, // fetchSpade=true
+			ExpectedBroadcastID: cur,
+			// Deliberately no ExpectedGeneration: a benign metadata-only
+			// generation bump on the SAME broadcast (e.g. a concurrent
+			// stream-info refresh) must not reject the spade attach.
+			// ExpectedBroadcastID alone still rejects a spade landing against a
+			// NEWER broadcast, via requestStale / ApplyPlaybackSessionIfCurrent's
+			// own preconditions — the existing fencing is reused, not weakened.
+			Signature: "slot_converge",
+			Requested: now,
+		})
+		st.attempts++
+		st.lastAttempt = now
+	}
 }
 
 // executeSessionRefreshes runs the staged refreshes against the channels that

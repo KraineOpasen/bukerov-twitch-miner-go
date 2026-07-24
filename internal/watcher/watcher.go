@@ -146,6 +146,16 @@ type MinuteWatcher struct {
 	// goroutine the single writer of slotted channels' watch sessions.
 	pendingRefresh map[string]SessionRefreshRequest
 
+	// sessionConverge is the loop-owned per-slotted-login bookkeeping for
+	// convergeIncompleteSlotSessions (session.go): which incomplete broadcast
+	// identity a login is chasing a spade URL for, how many bounded spade-fetch
+	// attempts have been staged for it, and the backoff anchor. Like
+	// rotation/slotResidence it is touched only by the loop goroutine and needs
+	// no locking; pruned to the current tick's slots at the top of every
+	// convergeIncompleteSlotSessions call, so a slot release/replacement
+	// immediately invalidates the old convergence ownership.
+	sessionConverge map[string]*sessionConvergeState
+
 	// refreshObsSeq mints a unique, monotonic observation id per refresh
 	// execution so every published outcome is distinguishable for correlation.
 	refreshObsSeq atomic.Uint64
@@ -617,6 +627,14 @@ func (w *MinuteWatcher) processWatching() {
 	// resetLostSlotContinuity). Runs before the no-slots early return below, since
 	// losing every slot is itself a continuity break.
 	w.resetLostSlotContinuity(slots)
+
+	// Stage a bounded, deduplicated, event-triggered convergence refresh for any
+	// committed slot whose session is still missing a spade URL (see
+	// convergeIncompleteSlotSessions for the full contract), so it can converge
+	// instead of being stuck delivering nothing indefinitely. Must run BEFORE
+	// executeSessionRefreshes so a refresh staged this tick can execute and
+	// land this very tick.
+	w.convergeIncompleteSlotSessions(slots, now)
 
 	// Execute any staged watch-session refreshes before the sends, so a
 	// successful refresh takes effect for this very tick. Requests for channels
