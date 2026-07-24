@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	mathrand "math/rand"
 	"sync"
@@ -12,6 +14,30 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/gorilla/websocket"
 )
+
+// pongTimeoutDefault bounds how long a connection may stay silent after a PING
+// was successfully written before it is declared deaf. The deadline is armed
+// only after a successful write (never from a scheduled tick), so the ping
+// scheduler's own delay can never manufacture a timeout. Replaces the old
+// coarse 5-minute idle watchdog with a tight, generation-scoped deadline.
+const pongTimeoutDefault = 15 * time.Second
+
+// errPongTimeout and errPingWrite are the typed lifecycle reasons surfaced to
+// the reconnect owner so a deaf socket or a failed keepalive write is
+// distinguishable in logs from a read-side transport error.
+var (
+	errPongTimeout = errors.New("pubsub: pong deadline exceeded")
+	errPingWrite   = errors.New("pubsub: ping write failed")
+)
+
+// listenAttempt records the topic and connection generation a LISTEN frame was
+// written under, keyed by the frame's nonce, so a permanent-invalid RESPONSE
+// (ERR_BADTOPIC) can be correlated back to the exact topic it rejects and
+// guarded against stale/superseded generations before any eviction.
+type listenAttempt struct {
+	topic Topic
+	gen   uint64
+}
 
 type WebSocketClient struct {
 	index int
@@ -64,6 +90,30 @@ type WebSocketClient struct {
 	pingInterval   int
 	reconnectDelay int
 
+	// listenNonces correlates an outstanding LISTEN frame's nonce to the topic
+	// and connection generation it was written under, so an authoritative
+	// ERR_BADTOPIC RESPONSE names the exact topic to evict. At most one entry
+	// per topic is retained (a re-LISTEN drops the topic's prior nonce), which
+	// is what prevents a stale rejection of a superseded attempt from evicting a
+	// re-desired topic. Bounded and reset per generation, like userFrameGens.
+	listenNonces map[string]listenAttempt
+
+	// pongDeadline* form the single outstanding PONG deadline for the CURRENT
+	// generation. Armed ONLY after a PING write succeeds (pongDeadlineArmed
+	// stays false until then, so no successful write means no timeout can fire);
+	// cleared by a matching PONG on the same generation. All three are guarded
+	// by ws.mu.
+	pongDeadlineArmed bool
+	pongDeadlineGen   uint64
+	pongDeadlineAt    time.Time
+
+	// pongTimeout is how long after a successful PING write a PONG must arrive.
+	// Immutable after construction (a test seam like delayUnit).
+	pongTimeout time.Duration
+	// pingUnit scales the (jittered) ping interval; seconds in production,
+	// milliseconds in tests. Immutable after construction.
+	pingUnit time.Duration
+
 	// url is the WebSocket endpoint to dial. Defaults to constants.PubSubURL;
 	// overridable so tests can point the client at a local server, and a seam
 	// for a future transport abstraction (PubSub -> Hermes).
@@ -80,7 +130,6 @@ type WebSocketClient struct {
 	forcedClose    bool
 
 	lastPong time.Time
-	lastPing time.Time
 	// lastConnectedAt is when the current connection was established. The
 	// read-error reconnect path uses it as an anti-flap guard: only a link
 	// that had been up for at least one reconnectDelay earns an immediate
@@ -92,6 +141,16 @@ type WebSocketClient struct {
 	onMessage   func(*PubSubMessage)
 	onError     func(error)
 	onReconnect func()
+	// onInvalidTopic is fired (with no client lock held) when an authoritative
+	// ERR_BADTOPIC evicts a topic, so the pool can quarantine it from effective
+	// desired state. Wired once (before Connect) by the pool, captured under
+	// ws.mu, invoked with the lock released.
+	onInvalidTopic func(Topic)
+
+	// writePingHook, when set (tests only), replaces the real PING frame write
+	// so a keepalive write failure can be injected deterministically without a
+	// network.
+	writePingHook func() error
 
 	mu       sync.RWMutex
 	writeMu  sync.Mutex
@@ -106,6 +165,8 @@ func NewWebSocketClient(index int, tokenFn AuthTokenProvider, pingInterval int, 
 		reconnectDelay: reconnectDelay,
 		url:            constants.PubSubURL,
 		delayUnit:      time.Second,
+		pongTimeout:    pongTimeoutDefault,
+		pingUnit:       time.Second,
 		onMessage:      onMessage,
 		onError:        onError,
 		stopChan:       make(chan struct{}),
@@ -141,6 +202,12 @@ func (ws *WebSocketClient) Connect() error {
 	// attributions are void with it.
 	ws.connGen++
 	ws.userFrameGens = nil
+	// The old socket's outstanding LISTEN correlations and PONG deadline are
+	// void with its generation: a late ERR_BADTOPIC or PONG for an old frame
+	// must never touch the new connection.
+	ws.listenNonces = nil
+	ws.pongDeadlineArmed = false
+	gen := ws.connGen
 	resubscribed := len(ws.pendingTopics)
 	// The loops below get THIS generation's stop channel and conn as
 	// parameters, snapshotted under mu. Selecting on the ws.stopChan field
@@ -159,10 +226,25 @@ func (ws *WebSocketClient) Connect() error {
 
 	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", resubscribed)
 
-	go ws.readLoop(stop, conn)
-	go ws.pingLoop(stop)
+	// The loops are bound to THIS generation: gen fences the PONG deadline and
+	// invalid-topic correlation, and (stop, conn) fence the I/O, so an old loop
+	// outliving a reconnect can neither read the new conn nor heal/void the new
+	// generation's state.
+	go ws.readLoop(stop, conn, gen)
+	go ws.pingLoop(stop, conn, gen)
 
 	return nil
+}
+
+// SetInvalidTopicHandler registers a callback fired once when an authoritative
+// ERR_BADTOPIC evicts a topic from this connection, so the pool can quarantine
+// it from effective desired state. Wired once (before Connect) by the pool. The
+// handler is captured under ws.mu and invoked with the lock released, so it may
+// safely acquire pool/other locks.
+func (ws *WebSocketClient) SetInvalidTopicHandler(h func(Topic)) {
+	ws.mu.Lock()
+	ws.onInvalidTopic = h
+	ws.mu.Unlock()
 }
 
 func (ws *WebSocketClient) Close() {
@@ -522,6 +604,27 @@ func (ws *WebSocketClient) writeTopicFrame(conn *websocket.Conn, frameType strin
 		ws.mu.Unlock()
 	}
 
+	// Correlate this LISTEN's nonce to its topic and the generation it is
+	// written under, so an authoritative ERR_BADTOPIC can name the exact topic
+	// to evict. Recorded BEFORE the test hook so the correlation is exercised
+	// with fake transports too. Only the latest attempt per topic is kept: a
+	// re-LISTEN drops the topic's prior nonce, so a stale rejection of a
+	// superseded attempt can never evict a re-desired topic (P10).
+	if frameType == "LISTEN" {
+		ws.mu.Lock()
+		if ws.listenNonces == nil || len(ws.listenNonces) > maxTrackedAuthNonces {
+			ws.listenNonces = make(map[string]listenAttempt)
+		}
+		key := topic.String()
+		for n, a := range ws.listenNonces {
+			if a.topic.String() == key {
+				delete(ws.listenNonces, n)
+			}
+		}
+		ws.listenNonces[nonce] = listenAttempt{topic: topic, gen: ws.connGen}
+		ws.mu.Unlock()
+	}
+
 	if hook := ws.writeTopicFrameHook; hook != nil {
 		return hook(frameType, topic)
 	}
@@ -627,43 +730,110 @@ func (ws *WebSocketClient) HasUnlistenDebt(topic Topic) bool {
 	return topicIn(ws.unlistenRetry, topic)
 }
 
-func (ws *WebSocketClient) send(msg WSMessage) error {
+// writePing writes a PING frame to a SPECIFIC generation's conn under writeMu
+// (serialized against topic frames) and returns the write error so the ping
+// loop can react to a failed keepalive instead of silently dropping it. Unlike
+// send(), it writes to the conn the ping loop captured for its generation, not
+// a fresh snapshot, so a ping can never land on a newer connection.
+func (ws *WebSocketClient) writePing(conn *websocket.Conn) error {
+	if hook := ws.writePingHook; hook != nil {
+		return hook()
+	}
 	ws.writeMu.Lock()
 	defer ws.writeMu.Unlock()
-
-	// Snapshot the conn under mu: Connect/reconnect swap it under mu, and
-	// writeMu alone does not order this read against that write.
-	ws.mu.RLock()
-	conn := ws.conn
-	ws.mu.RUnlock()
-
 	if conn == nil {
 		return nil
 	}
-
-	data, err := json.Marshal(msg)
+	data, err := json.Marshal(WSMessage{Type: "PING"})
 	if err != nil {
 		return err
 	}
-
-	slog.Debug("WebSocket send", "index", ws.index, "type", msg.Type)
+	slog.Debug("WebSocket send", "index", ws.index, "type", "PING")
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
+// ping writes a PING using the current connection snapshot, discarding the
+// error. Retained only for the concurrency stress test; the ping loop uses
+// writePing with its captured generation conn and never ignores the error.
 func (ws *WebSocketClient) ping() {
-	msg := WSMessage{Type: "PING"}
-	_ = ws.send(msg)
-
-	ws.mu.Lock()
-	ws.lastPing = time.Now()
-	ws.mu.Unlock()
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+	_ = ws.writePing(conn)
 }
 
-// readLoop reads frames from ONE connection generation: stop and conn are
+// armPongDeadline publishes the single PONG deadline for gen. Called ONLY after
+// a PING write succeeds, so pongDeadlineArmed stays false until a ping is
+// genuinely on the wire (P2/P3): a scheduler delay before the write, or a
+// failed write, can never make a timeout fire. A stale generation arms nothing.
+func (ws *WebSocketClient) armPongDeadline(gen uint64, at time.Time) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if gen != ws.connGen {
+		return
+	}
+	ws.pongDeadlineArmed = true
+	ws.pongDeadlineGen = gen
+	ws.pongDeadlineAt = at
+}
+
+// recordPong records a received PONG for the reader's generation. A PONG from a
+// superseded generation (gen != connGen) is ignored, so a late frame drained by
+// an old reader can neither refresh liveness nor clear the new connection's
+// deadline (P4/P5). A matching PONG clears the current outstanding deadline.
+func (ws *WebSocketClient) recordPong(gen uint64, now time.Time) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if gen != ws.connGen {
+		return
+	}
+	ws.lastPong = now
+	if ws.pongDeadlineArmed && ws.pongDeadlineGen == gen {
+		ws.pongDeadlineArmed = false
+	}
+}
+
+// pongDeadlineExpired reports whether gen's PONG deadline is still armed and has
+// passed. Returns false when no deadline was armed (no successful write, P3),
+// when a matching PONG already cleared it, or when the generation has been
+// superseded — so only a genuine, current, unanswered PING can time out.
+func (ws *WebSocketClient) pongDeadlineExpired(gen uint64, now time.Time) bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	if !ws.pongDeadlineArmed || ws.pongDeadlineGen != gen || gen != ws.connGen {
+		return false
+	}
+	return !now.Before(ws.pongDeadlineAt)
+}
+
+// failConnection converges a ping-write or PONG-deadline failure for a specific
+// generation onto the single reconnect owner (reconnectAfter's isReconnecting
+// guard). A failure observed on an already-superseded generation, or during a
+// deliberate shutdown, reconnects nothing (P6/P7/P9). Holds no lock across the
+// callback or the redial dispatch.
+func (ws *WebSocketClient) failConnection(gen uint64, reason error) {
+	ws.mu.RLock()
+	stale := gen != ws.connGen
+	shuttingDown := ws.forcedClose
+	delay := ws.readErrorReconnectDelayLocked()
+	ws.mu.RUnlock()
+	if stale || shuttingDown {
+		return
+	}
+	slog.Warn("WebSocket connection lifecycle failure; reconnecting",
+		"index", ws.index, "reason", reason.Error(), "delay", delay)
+	if ws.onError != nil {
+		ws.onError(reason)
+	}
+	go ws.reconnectAfter(delay)
+}
+
+// readLoop reads frames from ONE connection generation: stop, conn and gen are
 // snapshotted by Connect under mu, so a loop outliving a reconnect can never
 // adopt the replacement channel/conn from the fields (which would leave it
-// unstoppable, or reading the new conn concurrently with its own reader).
-func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn) {
+// unstoppable, or reading the new conn concurrently with its own reader) and
+// its PONG/ERR_BADTOPIC handling is fenced to its own generation.
+func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn, gen uint64) {
 	for {
 		select {
 		case <-stop:
@@ -714,18 +884,27 @@ func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn) {
 			continue
 		}
 
-		ws.handleMessage(wsMsg)
+		ws.handleMessageForGen(wsMsg, gen)
 	}
 }
 
+// handleMessage dispatches a frame attributed to the CURRENT generation. It is
+// the entry point for direct (test) invocation; the read loop uses
+// handleMessageForGen with its own captured generation so a superseded reader's
+// frames are correctly fenced.
 func (ws *WebSocketClient) handleMessage(msg WSMessage) {
+	ws.mu.RLock()
+	gen := ws.connGen
+	ws.mu.RUnlock()
+	ws.handleMessageForGen(msg, gen)
+}
+
+func (ws *WebSocketClient) handleMessageForGen(msg WSMessage, readerGen uint64) {
 	slog.Debug("WebSocket received", "index", ws.index, "type", msg.Type)
 
 	switch msg.Type {
 	case "PONG":
-		ws.mu.Lock()
-		ws.lastPong = time.Now()
-		ws.mu.Unlock()
+		ws.recordPong(readerGen, time.Now())
 
 	case "MESSAGE":
 		if msg.Data == nil {
@@ -754,31 +933,7 @@ func (ws *WebSocketClient) handleMessage(msg WSMessage) {
 		}
 
 	case "RESPONSE":
-		if msg.Error != "" {
-			slog.Error("WebSocket response error", "index", ws.index, "error", msg.Error)
-			if ws.onError != nil && msg.Error == "ERR_BADAUTH" {
-				// Attribute the rejection to the exact frame it answers (by
-				// nonce); fall back to the last-written LISTEN generation for
-				// untracked nonces.
-				ws.mu.Lock()
-				gen := ws.lastAuthGen
-				if g, ok := ws.userFrameGens[msg.Nonce]; ok {
-					gen = g
-				}
-				delete(ws.userFrameGens, msg.Nonce)
-				ws.mu.Unlock()
-				ws.onError(&AuthError{Message: "ERR_BADAUTH", Generation: gen})
-			} else {
-				ws.mu.Lock()
-				delete(ws.userFrameGens, msg.Nonce)
-				ws.mu.Unlock()
-			}
-		} else {
-			// Successful RESPONSE settles its nonce's attribution entry.
-			ws.mu.Lock()
-			delete(ws.userFrameGens, msg.Nonce)
-			ws.mu.Unlock()
-		}
+		ws.handleListenResponse(msg, readerGen)
 
 	case "RECONNECT":
 		slog.Info("WebSocket reconnect requested", "index", ws.index)
@@ -786,42 +941,181 @@ func (ws *WebSocketClient) handleMessage(msg WSMessage) {
 	}
 }
 
+// listenResponseClass is the typed classification of a Twitch PubSub LISTEN
+// RESPONSE. Only an exact ERR_BADTOPIC is authoritative-permanent; every other
+// non-empty, non-auth error is transient/retryable, so no topic is ever
+// permanently evicted on an ambiguous or unknown string.
+type listenResponseClass int
+
+const (
+	respAccepted     listenResponseClass = iota // error == "": subscription accepted
+	respBadAuth                                 // ERR_BADAUTH: routed to BKM-005 recovery
+	respInvalidTopic                            // ERR_BADTOPIC: authoritative permanent
+	respTransient                               // ERR_SERVER / anything else: retryable
+)
+
+// classifyListenResponse maps a RESPONSE error string to its class. The mapping
+// is deliberately narrow: only the exact ERR_BADTOPIC is permanent.
+func classifyListenResponse(errStr string) listenResponseClass {
+	switch errStr {
+	case "":
+		return respAccepted
+	case "ERR_BADAUTH":
+		return respBadAuth
+	case "ERR_BADTOPIC":
+		return respInvalidTopic
+	default:
+		return respTransient
+	}
+}
+
+// handleListenResponse classifies one RESPONSE and applies exactly one outcome,
+// always settling the frame's nonce attribution:
+//   - accepted / transient: settle the nonce; the topic stays desired (a
+//     transient rejection is retried by the next reconnect replay, P11).
+//   - ERR_BADAUTH: the pre-BKM-012 path, unchanged — attribute the rejection to
+//     the exact frame's credential generation and route it through onError to
+//     the shared OAuth recovery (BKM-005, P12); never an eviction.
+//   - ERR_BADTOPIC: correlate to the exact topic by nonce, guarded by the
+//     reader's connection generation; on a match evict it from the ledger and
+//     quarantine it (P10). A stale/unknown nonce or a superseded generation
+//     evicts nothing (P5/T12).
+func (ws *WebSocketClient) handleListenResponse(msg WSMessage, readerGen uint64) {
+	switch classifyListenResponse(msg.Error) {
+	case respAccepted:
+		ws.mu.Lock()
+		delete(ws.userFrameGens, msg.Nonce)
+		delete(ws.listenNonces, msg.Nonce)
+		ws.mu.Unlock()
+
+	case respBadAuth:
+		slog.Error("WebSocket response error", "index", ws.index, "error", msg.Error)
+		// Attribute the rejection to the exact frame it answers (by nonce);
+		// fall back to the last-written LISTEN generation for untracked nonces.
+		ws.mu.Lock()
+		gen := ws.lastAuthGen
+		if g, ok := ws.userFrameGens[msg.Nonce]; ok {
+			gen = g
+		}
+		delete(ws.userFrameGens, msg.Nonce)
+		delete(ws.listenNonces, msg.Nonce)
+		ws.mu.Unlock()
+		if ws.onError != nil {
+			ws.onError(&AuthError{Message: "ERR_BADAUTH", Generation: gen})
+		}
+
+	case respTransient:
+		slog.Warn("WebSocket transient LISTEN rejection; topic stays desired and retryable",
+			"index", ws.index, "error", msg.Error)
+		ws.mu.Lock()
+		delete(ws.userFrameGens, msg.Nonce)
+		delete(ws.listenNonces, msg.Nonce)
+		ws.mu.Unlock()
+
+	case respInvalidTopic:
+		slog.Error("WebSocket response error", "index", ws.index, "error", msg.Error)
+		ws.mu.Lock()
+		attempt, known := ws.listenNonces[msg.Nonce]
+		delete(ws.listenNonces, msg.Nonce)
+		delete(ws.userFrameGens, msg.Nonce)
+		// Evict only when the rejection names a known frame written on THIS live
+		// generation: current reader, current connection, current attempt.
+		current := known && attempt.gen == readerGen && readerGen == ws.connGen
+		ws.mu.Unlock()
+		if !current {
+			slog.Warn("WebSocket ignoring invalid-topic rejection (stale/unknown nonce or superseded generation)",
+				"index", ws.index, "nonce_known", known)
+			return
+		}
+		ws.evictTopicFromLedger(attempt.topic)
+		ws.mu.RLock()
+		onInvalid := ws.onInvalidTopic
+		ws.mu.RUnlock()
+		if onInvalid != nil {
+			onInvalid(attempt.topic)
+		}
+		slog.Warn("WebSocket permanent-invalid topic evicted from desired state",
+			"index", ws.index, "topic", attempt.topic.String())
+	}
+}
+
+// evictTopicFromLedger removes a permanently-invalid topic from every wire
+// bucket so it is never re-LISTENed (on this generation or via reconnect
+// replay). No frame is written: an ERR_BADTOPIC subscription was never
+// established on the wire. Runs under writeMu -> ws.mu (the ledger's lock order,
+// caller must hold neither) so it linearizes against Listen/Unlisten/replay.
+func (ws *WebSocketClient) evictTopicFromLedger(topic Topic) {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.topics = topicRemove(ws.topics, topic)
+	ws.pendingTopics = topicRemove(ws.pendingTopics, topic)
+	ws.unlistenRetry = topicRemove(ws.unlistenRetry, topic)
+	key := topic.String()
+	for n, a := range ws.listenNonces {
+		if a.topic.String() == key {
+			delete(ws.listenNonces, n)
+		}
+	}
+}
+
 func (ws *WebSocketClient) randomPingInterval() time.Duration {
 	base := float64(ws.pingInterval)
 	jitter := (mathrand.Float64() - 0.5) * 5.0
-	return time.Duration(base+jitter) * time.Second
+	d := base + jitter
+	if d < 0 {
+		d = 0
+	}
+	return time.Duration(d * float64(ws.pingUnit))
 }
 
-// pingLoop drives PINGs and the PONG watchdog for ONE connection generation
-// (see readLoop on why stop is a parameter, not the field).
-func (ws *WebSocketClient) pingLoop(stop chan struct{}) {
-	checkTicker := time.NewTicker(time.Minute)
-	defer checkTicker.Stop()
-
+// pingLoop drives the keepalive PING and its PONG deadline for ONE connection
+// generation (see readLoop on why stop/conn/gen are parameters, not fields).
+//
+// Each cycle: wait a jittered interval, write a PING, and only on a SUCCESSFUL
+// write arm a single PONG deadline for this generation. A matching PONG
+// (recorded by this generation's read loop) clears it; if the deadline passes
+// still armed, the socket is deaf and control converges to the reconnect owner.
+// A ping-write failure arms nothing and converges immediately, so a half-open
+// socket (writes fail, reads block) can never outlive its ping loop — closing
+// the socket via the reconnect owner unblocks the read loop too. The scheduler
+// delay before the write is never part of any deadline (P1-P4/P7, T1-T6).
+func (ws *WebSocketClient) pingLoop(stop chan struct{}, conn *websocket.Conn, gen uint64) {
 	for {
-		pingWait := ws.randomPingInterval()
+		select {
+		case <-stop:
+			return
+		case <-time.After(ws.randomPingInterval()):
+		}
+
+		// Skip pinging into a socket a reconnect is already tearing down; the
+		// generation guard is the real fence, this just avoids a pointless write.
+		ws.mu.RLock()
+		reconnecting := ws.isReconnecting
+		ws.mu.RUnlock()
+		if reconnecting {
+			continue
+		}
+
+		if err := ws.writePing(conn); err != nil {
+			ws.failConnection(gen, fmt.Errorf("%w: %v", errPingWrite, err))
+			return
+		}
+
+		// The PING is on the wire: arm exactly one deadline, measured from AFTER
+		// the successful write.
+		ws.armPongDeadline(gen, time.Now().Add(ws.pongTimeout))
 
 		select {
 		case <-stop:
 			return
-		case <-time.After(pingWait):
-			ws.mu.RLock()
-			isReconnecting := ws.isReconnecting
-			ws.mu.RUnlock()
+		case <-time.After(ws.pongTimeout):
+		}
 
-			if !isReconnecting {
-				ws.ping()
-			}
-		case <-checkTicker.C:
-			ws.mu.RLock()
-			elapsed := time.Since(ws.lastPong)
-			isReconnecting := ws.isReconnecting
-			ws.mu.RUnlock()
-
-			if !isReconnecting && elapsed > 5*time.Minute {
-				slog.Warn("No PONG received for 5 minutes, reconnecting", "index", ws.index)
-				go ws.reconnect()
-			}
+		if ws.pongDeadlineExpired(gen, time.Now()) {
+			ws.failConnection(gen, errPongTimeout)
+			return
 		}
 	}
 }

@@ -234,6 +234,15 @@ type WebSocketPool struct {
 	// RecentReconnects to distinguish a flapping (degraded) link from a clean one.
 	reconnects eventWindow
 
+	// quarantined holds topics an authoritative ERR_BADTOPIC has permanently
+	// rejected, keyed by full Topic.String(). A quarantined topic is dropped
+	// from effective desired state: EnsureTopic/Submit no-op it so it is never
+	// re-LISTENed. Keying on the full identity is what preserves P13 — a
+	// genuinely new topic identity (different channel/user) is a different key
+	// and is attempted normally even if a prior identity was invalid. Guarded by
+	// p.mu.
+	quarantined map[string]struct{}
+
 	mu sync.RWMutex
 }
 
@@ -469,6 +478,11 @@ func (p *WebSocketPool) Submit(topic Topic) error {
 // client — either way the same subscription stays retryable on the next
 // reconcile, and the error reaches the caller.
 func (p *WebSocketPool) submitLocked(topic Topic) error {
+	if p.isQuarantinedLocked(topic) {
+		// Permanently invalid: never (re-)subscribe it, incl. the global user
+		// topics submitted through Submit.
+		return nil
+	}
 	if len(p.clients) == 0 || p.clients[len(p.clients)-1].TopicCount() >= constants.MaxTopicsPerConnection {
 		ws, err := p.connectNewClientLocked()
 		if err != nil {
@@ -487,9 +501,11 @@ func (p *WebSocketPool) connectNewClientLocked() (*WebSocketClient, error) {
 		return p.newClient(len(p.clients))
 	}
 	ws := NewWebSocketClient(len(p.clients), p.tokenFn, p.settings.WebsocketPingInterval, p.settings.ReconnectDelay, p.handleMessage, p.handleError)
-	// Wire the reconnect counter before Connect() starts the read/ping loops,
-	// so the handler is set before any reconnect can fire.
+	// Wire the reconnect counter and invalid-topic quarantine before Connect()
+	// starts the read/ping loops, so both handlers are set before any reconnect
+	// or LISTEN response can fire.
 	ws.SetReconnectHandler(func() { p.reconnects.mark(time.Now()) })
+	ws.SetInvalidTopicHandler(p.quarantineTopic)
 	if err := ws.Connect(); err != nil {
 		return nil, err
 	}
@@ -523,7 +539,39 @@ func (p *WebSocketPool) EnsureTopic(topic Topic, desired bool) error {
 	if !desired {
 		return p.unsubscribeAllLocked(topic)
 	}
+	if p.isQuarantinedLocked(topic) {
+		// Permanently invalid: not part of effective desired state, so a desired
+		// re-drive is a converged no-op and never re-LISTENs it (P10/P14).
+		return nil
+	}
 	return p.ensureSubscribedLocked(topic)
+}
+
+// isQuarantinedLocked reports whether the exact topic identity has been
+// permanently rejected. Caller must hold p.mu.
+func (p *WebSocketPool) isQuarantinedLocked(topic Topic) bool {
+	_, ok := p.quarantined[topic.String()]
+	return ok
+}
+
+// quarantineTopic records an authoritative ERR_BADTOPIC rejection and drops the
+// topic from every connection's ledger (no wire frame — the subscription never
+// took server-side), so it is never re-LISTENed on this or a future generation.
+// Invoked from a connection's read loop with no client lock held; it takes p.mu
+// then the per-client ledger locks (the pool's normal p.mu -> client lock
+// order) and performs no network I/O under any lock (P8).
+func (p *WebSocketPool) quarantineTopic(topic Topic) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.quarantined == nil {
+		p.quarantined = make(map[string]struct{})
+	}
+	p.quarantined[topic.String()] = struct{}{}
+	// The reporting client already evicted the topic locally; sweep the rest so
+	// any historical duplicate is cleared too. Ledger-only, no wire frames.
+	for _, ws := range p.clients {
+		ws.evictTopicFromLedger(topic)
+	}
 }
 
 // ensureSubscribedLocked canonicalizes desired=true pool-wide. Caller must
