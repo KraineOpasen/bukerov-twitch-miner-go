@@ -111,17 +111,17 @@ func buildHealthEvent(prevLevel, newLevel connLevel, out connOutcome, tr connTra
 		return journal.HealthEvent{}, false
 	}
 	return journal.HealthEvent{
-		Type:                journal.HealthTransition,
-		Domain:              "connection",
-		PrevLevel:           levelCode(prevLevel),
-		NewLevel:            levelCode(newLevel),
-		APIState:            apiStateCode(out.apiState),
-		PubSubDown:          out.pubsubDown,
-		PubSubDegraded:      out.pubsubDegraded,
-		Evidence:            evidenceFor(newLevel, out),
-		Recovery:            recoveryFor(tr),
-		Reason:              healthReasonFor(tr),
-		NotificationEmitted: tr.notifyLost || tr.notifyRestored,
+		Type:                  journal.HealthTransition,
+		Domain:                "connection",
+		PrevLevel:             levelCode(prevLevel),
+		NewLevel:              levelCode(newLevel),
+		APIState:              apiStateCode(out.apiState),
+		PubSubDown:            out.pubsubDown,
+		PubSubDegraded:        out.pubsubDegraded,
+		Evidence:              evidenceFor(newLevel, out),
+		Recovery:              recoveryFor(tr),
+		Reason:                healthReasonFor(tr),
+		NotificationRequested: tr.notifyLost || tr.notifyRestored,
 	}, true
 }
 
@@ -136,11 +136,11 @@ func (m *Miner) recordHealthTransition(prevLevel, newLevel connLevel, out connOu
 		m.healthJournalSuppressed++
 		return
 	}
-	// A transition can only actually emit an external alert when the
-	// notifications module is present — the send at evaluateConnectionHealth is
-	// gated on m.notifications != nil. Report the truthful outcome so the journal
-	// never claims an alert that was never sent.
-	ev.NotificationEmitted = ev.NotificationEmitted && m.notifications != nil
+	// The watchdog only INVOKES the notification manager when it is present — the
+	// send at evaluateConnectionHealth is gated on m.notifications != nil. Record
+	// only that narrow fact (a request was made); the journal never claims an
+	// external alert was actually sent or delivered.
+	ev.NotificationRequested = ev.NotificationRequested && m.notifications != nil
 	ev.SuppressedDuplicates = m.healthJournalSuppressed
 	m.healthJournalSuppressed = 0
 	m.healthJournal.Append(ev)

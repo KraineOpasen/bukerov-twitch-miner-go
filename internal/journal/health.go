@@ -78,11 +78,14 @@ type HealthEvent struct {
 	// Reason is a bounded transition code (entered_lost, full_restore, ...).
 	Reason string `json:"reason"`
 
-	// NotificationEmitted is true when this transition actually emitted an
-	// external (Discord/push) connection-lost or connection-restored
-	// notification — i.e. the edge was notification-triggering AND the
-	// notifications module was present to send it.
-	NotificationEmitted bool `json:"notificationEmitted,omitempty"`
+	// NotificationRequested is true when this transition causes the watchdog to
+	// INVOKE the notification manager — i.e. the edge is notification-triggering
+	// (lost/restored) AND the notifications module is present. It is the narrow
+	// fact the caller actually knows: it does NOT prove an external Discord/push
+	// message was sent or delivered. The manager may still decline (system
+	// notifications disabled, no channel/provider configured, config unreadable)
+	// or fail asynchronously — none of which is observable here.
+	NotificationRequested bool `json:"notificationRequested,omitempty"`
 
 	// SuppressedDuplicates is how many identical repeated health ticks were
 	// deduped since the previous recorded transition — the dedupe count.

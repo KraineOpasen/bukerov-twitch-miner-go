@@ -235,7 +235,7 @@ func TestRedactionByConstruction(t *testing.T) {
 	j.Append(HealthEvent{
 		Domain: "connection", PrevLevel: HealthLevelHealthy, NewLevel: HealthLevelLost,
 		APIState: APIStateDown, Evidence: EvidenceAuthoritative, Recovery: RecoveryNone,
-		Reason: HealthReasonEnteredLost, NotificationEmitted: true,
+		Reason: HealthReasonEnteredLost, NotificationRequested: true,
 	})
 	blob, err := json.Marshal(j.Snapshot())
 	if err != nil {
