@@ -102,7 +102,10 @@
 
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "logs.heading" }}</h1>
-    {{if .DebugURL}}<a href="{{.DebugURL}}" target="_blank" rel="noopener" class="btn-secondary text-sm">{{ t "logs.debug_snapshot" }}</a>{{end}}
+    <div class="flex items-center gap-2">
+        {{if .SupportBundleAvailable}}<a href="/api/support-bundle" class="btn-secondary text-sm">{{ t "logs.support_bundle" }}</a>{{end}}
+        {{if .DebugURL}}<a href="{{.DebugURL}}" target="_blank" rel="noopener" class="btn-secondary text-sm">{{ t "logs.debug_snapshot" }}</a>{{end}}
+    </div>
 </div>
 <p class="text-neutral-400 text-sm mb-6">{{ t "logs.description" }}</p>
 

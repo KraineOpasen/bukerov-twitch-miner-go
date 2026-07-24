@@ -146,6 +146,16 @@ type Server struct {
 	// debugSnapshot is the miner's in-process snapshot builder, wired only
 	// when Debug.Enabled is true; nil keeps /api/debug/snapshot a 404.
 	debugSnapshot func() debug.Snapshot
+	// supportBundleSource is the same in-process snapshot builder, but wired
+	// UNCONDITIONALLY (see internal/miner) since the redacted support bundle
+	// is an always-available diagnostic tool, not a debug-mode feature. A
+	// nil source is handled gracefully (empty operational sections), never
+	// as a 404 - see handlers_support_bundle.go.
+	supportBundleSource func() debug.Snapshot
+	// supportBundleClock is a test seam overriding the clock
+	// supportbundle.Build uses for generatedAt/the filename; nil in
+	// production (Build then defaults to time.Now().UTC()).
+	supportBundleClock func() time.Time
 
 	analytics *analytics.Service
 	server    *http.Server
@@ -585,6 +595,15 @@ func (s *Server) handler() http.Handler {
 	// debug server stays localhost-only). 404s until the miner wires the
 	// provider, which only happens when Debug.Enabled is true.
 	mux.HandleFunc(DebugSnapshotPath, s.handleAPIDebugSnapshot)
+
+	// Redacted support bundle: a downloadable ZIP built entirely from an
+	// in-memory, typed allowlist (internal/supportbundle). Unlike the debug
+	// snapshot above, this route is wired unconditionally and additionally
+	// enforces its own real-auth check server-side (see
+	// requireRealDashboardAuth in handlers_support_bundle.go) - it must never
+	// be reachable under DASHBOARD_INSECURE_NO_AUTH=true, even though that
+	// mode leaves every other route unauthenticated.
+	mux.HandleFunc(SupportBundlePath, s.handleSupportBundle)
 
 	// Prediction ROI analytics: summary (filtered by streamer/strategy/period)
 	// and a full-fidelity raw-bets export. Read-only; never places a bet.
