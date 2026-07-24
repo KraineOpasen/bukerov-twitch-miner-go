@@ -31,7 +31,7 @@ func TestPongDeadlineNotArmedUntilPingWritten(t *testing.T) {
 
 	// The write happens now; the deadline is measured from AFTER the write (P2).
 	writeAt := base.Add(time.Hour)
-	ws.armPongDeadline(1, writeAt.Add(ws.pongTimeoutOrDefault()))
+	ws.armPongDeadline(1, writeAt.Add(ws.pongTimeoutOrDefault()), 0)
 	if ws.pongDeadlineExpired(1, writeAt) {
 		t.Fatal("deadline must not be expired at the instant of the write")
 	}
@@ -50,7 +50,7 @@ func TestSuccessfulPingArmsExactlyOneDeadline(t *testing.T) {
 	ws.connGen = 1
 	base := time.Unix(2000, 0)
 
-	ws.armPongDeadline(1, base.Add(10*time.Second))
+	ws.armPongDeadline(1, base.Add(10*time.Second), 0)
 	ws.mu.RLock()
 	armed, gen := ws.pongDeadlineArmed, ws.pongDeadlineGen
 	ws.mu.RUnlock()
@@ -66,7 +66,7 @@ func TestSuccessfulPingArmsExactlyOneDeadline(t *testing.T) {
 
 	// Re-arm (next cycle): the single deadline moves; the old instant no longer
 	// governs.
-	ws.armPongDeadline(1, base.Add(30*time.Second))
+	ws.armPongDeadline(1, base.Add(30*time.Second), 0)
 	if ws.pongDeadlineExpired(1, base.Add(20*time.Second)) {
 		t.Fatal("re-arm must move the single deadline forward, not leave the old one")
 	}
@@ -81,7 +81,7 @@ func TestTimelyPongClearsDeadline(t *testing.T) {
 	ws.connGen = 1
 	base := time.Unix(3000, 0)
 
-	ws.armPongDeadline(1, base.Add(10*time.Second))
+	ws.armPongDeadline(1, base.Add(10*time.Second), 0)
 	ws.recordPong(1, base.Add(5*time.Second))
 
 	if ws.pongDeadlineExpired(1, base.Add(10*time.Second)) {
@@ -99,7 +99,7 @@ func TestOldGenerationPongDoesNotClearNewDeadline(t *testing.T) {
 	ws.connGen = 2 // a reconnect has already advanced to generation 2
 	base := time.Unix(4000, 0)
 
-	ws.armPongDeadline(2, base.Add(10*time.Second))
+	ws.armPongDeadline(2, base.Add(10*time.Second), 0)
 
 	// A late PONG for generation 1 (drained by the old reader) arrives.
 	ws.recordPong(1, base.Add(5*time.Second))
@@ -112,7 +112,7 @@ func TestOldGenerationPongDoesNotClearNewDeadline(t *testing.T) {
 	}
 
 	// Arming for a superseded generation is likewise a no-op.
-	ws.armPongDeadline(1, base.Add(100*time.Second))
+	ws.armPongDeadline(1, base.Add(100*time.Second), 0)
 	ws.mu.RLock()
 	gen := ws.pongDeadlineGen
 	ws.mu.RUnlock()
@@ -141,7 +141,7 @@ func TestUnsolicitedAndDuplicatePongAreHarmless(t *testing.T) {
 	}
 
 	// Duplicate PONG after a deadline was already cleared: still no re-arm.
-	ws.armPongDeadline(1, base.Add(10*time.Second))
+	ws.armPongDeadline(1, base.Add(10*time.Second), ws.pongSeqSnapshot())
 	ws.recordPong(1, base.Add(2*time.Second)) // clears
 	ws.recordPong(1, base.Add(3*time.Second)) // duplicate
 	ws.mu.RLock()
@@ -149,6 +149,27 @@ func TestUnsolicitedAndDuplicatePongAreHarmless(t *testing.T) {
 	ws.mu.RUnlock()
 	if armed {
 		t.Fatal("a duplicate PONG must not re-arm a cleared deadline")
+	}
+}
+
+// T1b — a PONG processed in the window between a successful PING write and the
+// deadline being armed still satisfies that ping's deadline: no false timeout,
+// even when goroutine scheduling delays the arm past the PONG (the F1 window).
+func TestPongInArmWindowIsNotAFalseTimeout(t *testing.T) {
+	ws := &WebSocketClient{}
+	ws.connGen = 1
+	base := time.Unix(6500, 0)
+
+	// The ping loop captures the PONG baseline immediately before the write.
+	baseSeq := ws.pongSeqSnapshot()
+	// The PONG for this ping is processed BEFORE the deadline is armed (the ping
+	// goroutine was preempted between the successful write and armPongDeadline).
+	ws.recordPong(1, base.Add(time.Millisecond))
+	// The deadline is now armed for a ping that was already answered.
+	ws.armPongDeadline(1, base.Add(10*time.Second), baseSeq)
+
+	if ws.pongDeadlineExpired(1, base.Add(10*time.Second)) {
+		t.Fatal("a PONG observed in the write->arm window must satisfy the deadline (no false timeout)")
 	}
 }
 
@@ -344,7 +365,7 @@ func TestPingPongLifecycleStateRace(t *testing.T) {
 	go func() { // arm deadlines
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			ws.armPongDeadline(atomic.LoadUint64(&gen), start.Add(time.Duration(i)*time.Millisecond))
+			ws.armPongDeadline(atomic.LoadUint64(&gen), start.Add(time.Duration(i)*time.Millisecond), 0)
 		}
 	}()
 	go func() { // matching PONGs

@@ -101,11 +101,18 @@ type WebSocketClient struct {
 	// pongDeadline* form the single outstanding PONG deadline for the CURRENT
 	// generation. Armed ONLY after a PING write succeeds (pongDeadlineArmed
 	// stays false until then, so no successful write means no timeout can fire);
-	// cleared by a matching PONG on the same generation. All three are guarded
-	// by ws.mu.
+	// cleared by a matching PONG on the same generation. All guarded by ws.mu.
 	pongDeadlineArmed bool
 	pongDeadlineGen   uint64
 	pongDeadlineAt    time.Time
+	// pongSeq counts PONGs received on the CURRENT generation; pongDeadlineBase
+	// snapshots it just before the PING write. A deadline is satisfied if either
+	// a PONG cleared the armed flag (the common case) OR pongSeq advanced past
+	// the base — which credits a PONG processed in the tiny window between the
+	// successful write and armPongDeadline, so an answered ping can never time
+	// out even under adverse goroutine scheduling.
+	pongSeq          uint64
+	pongDeadlineBase uint64
 
 	// pongTimeout is how long after a successful PING write a PONG must arrive.
 	// Immutable after construction (a test seam like delayUnit).
@@ -766,7 +773,7 @@ func (ws *WebSocketClient) ping() {
 // a PING write succeeds, so pongDeadlineArmed stays false until a ping is
 // genuinely on the wire (P2/P3): a scheduler delay before the write, or a
 // failed write, can never make a timeout fire. A stale generation arms nothing.
-func (ws *WebSocketClient) armPongDeadline(gen uint64, at time.Time) {
+func (ws *WebSocketClient) armPongDeadline(gen uint64, at time.Time, baseSeq uint64) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	if gen != ws.connGen {
@@ -775,6 +782,16 @@ func (ws *WebSocketClient) armPongDeadline(gen uint64, at time.Time) {
 	ws.pongDeadlineArmed = true
 	ws.pongDeadlineGen = gen
 	ws.pongDeadlineAt = at
+	ws.pongDeadlineBase = baseSeq
+}
+
+// pongSeqSnapshot returns the current PONG counter. The ping loop captures it
+// immediately before the PING write so a PONG processed before the deadline is
+// armed is still credited to this ping (see pongDeadlineExpired).
+func (ws *WebSocketClient) pongSeqSnapshot() uint64 {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ws.pongSeq
 }
 
 // recordPong records a received PONG for the reader's generation. A PONG from a
@@ -788,6 +805,9 @@ func (ws *WebSocketClient) recordPong(gen uint64, now time.Time) {
 		return
 	}
 	ws.lastPong = now
+	// Count every current-generation PONG, even one arriving before its ping's
+	// deadline is armed, so the arm-window is credited via pongDeadlineBase.
+	ws.pongSeq++
 	if ws.pongDeadlineArmed && ws.pongDeadlineGen == gen {
 		ws.pongDeadlineArmed = false
 	}
@@ -801,6 +821,12 @@ func (ws *WebSocketClient) pongDeadlineExpired(gen uint64, now time.Time) bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 	if !ws.pongDeadlineArmed || ws.pongDeadlineGen != gen || gen != ws.connGen {
+		return false
+	}
+	// A PONG observed since the ping was initiated (including one processed in
+	// the write→arm window) satisfies the deadline even if it did not clear the
+	// armed flag.
+	if ws.pongSeq != ws.pongDeadlineBase {
 		return false
 	}
 	return !now.Before(ws.pongDeadlineAt)
@@ -1098,6 +1124,10 @@ func (ws *WebSocketClient) pingLoop(stop chan struct{}, conn *websocket.Conn, ge
 			continue
 		}
 
+		// Snapshot the PONG counter BEFORE the write so a PONG processed in the
+		// gap between the successful write and armPongDeadline is still credited
+		// to this ping and cannot cause a false timeout.
+		baseSeq := ws.pongSeqSnapshot()
 		if err := ws.writePing(conn); err != nil {
 			ws.failConnection(gen, fmt.Errorf("%w: %v", errPingWrite, err))
 			return
@@ -1105,7 +1135,7 @@ func (ws *WebSocketClient) pingLoop(stop chan struct{}, conn *websocket.Conn, ge
 
 		// The PING is on the wire: arm exactly one deadline, measured from AFTER
 		// the successful write.
-		ws.armPongDeadline(gen, time.Now().Add(ws.pongTimeout))
+		ws.armPongDeadline(gen, time.Now().Add(ws.pongTimeout), baseSeq)
 
 		select {
 		case <-stop:
