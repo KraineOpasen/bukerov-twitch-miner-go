@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 )
 
 // deterministic clock for the health-journal tests.
@@ -26,8 +27,13 @@ func (c *hClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// journaledMiner is a fully-configured miner: notifications present, so a
+// notification-triggering transition is reported as actually emitted.
 func journaledMiner(clk *hClock) *Miner {
-	return &Miner{healthJournal: journal.New[journal.HealthEvent](64, clk.now)}
+	return &Miner{
+		healthJournal: journal.New[journal.HealthEvent](64, clk.now),
+		notifications: &notifications.Manager{},
+	}
 }
 
 // driveHealth pushes a sequence of classified outcomes through the REAL
@@ -183,11 +189,6 @@ func TestHealthJournalIdleNeverFails(t *testing.T) {
 		outHealthy(apiConnIdle), // recovered by going quiet, not confirmed success
 	})
 	evs := healthEvents(m2)
-	for _, e := range evs {
-		if e.NewLevel == journal.HealthLevelLost && e.Reason != journal.HealthReasonEnteredLost {
-			continue
-		}
-	}
 	restore := evs[len(evs)-1]
 	if restore.NewLevel != journal.HealthLevelHealthy {
 		t.Fatalf("expected a healthy recovery, got %s", restore.NewLevel)
@@ -212,6 +213,24 @@ func TestHealthJournalEnteredLostEvidence(t *testing.T) {
 	e := healthEvents(m)[0]
 	if e.Evidence != journal.EvidenceAuthoritative || e.APIState != journal.APIStateDown || !e.PubSubDown {
 		t.Fatalf("entered_lost evidence/inputs wrong: %+v", e)
+	}
+}
+
+// TestHealthJournalNotificationGatedOnTransport: a notification-triggering
+// transition records NotificationEmitted=false when the notifications module is
+// absent, so the journal never claims an alert that was never sent.
+func TestHealthJournalNotificationGatedOnTransport(t *testing.T) {
+	clk := newHClock()
+	// No notifications module wired.
+	m := &Miner{healthJournal: journal.New[journal.HealthEvent](64, clk.now)}
+	driveHealth(m, clk, []connOutcome{outLost()})
+
+	e := healthEvents(m)[0]
+	if e.Reason != journal.HealthReasonEnteredLost {
+		t.Fatalf("expected entered_lost, got %s", e.Reason)
+	}
+	if e.NotificationEmitted {
+		t.Fatal("with no notifications module, NotificationEmitted must be false")
 	}
 }
 

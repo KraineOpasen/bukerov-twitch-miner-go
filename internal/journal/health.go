@@ -78,8 +78,10 @@ type HealthEvent struct {
 	// Reason is a bounded transition code (entered_lost, full_restore, ...).
 	Reason string `json:"reason"`
 
-	// NotificationEmitted is true when this transition triggered an external
-	// (Discord/push) connection-lost or connection-restored notification.
+	// NotificationEmitted is true when this transition actually emitted an
+	// external (Discord/push) connection-lost or connection-restored
+	// notification — i.e. the edge was notification-triggering AND the
+	// notifications module was present to send it.
 	NotificationEmitted bool `json:"notificationEmitted,omitempty"`
 
 	// SuppressedDuplicates is how many identical repeated health ticks were

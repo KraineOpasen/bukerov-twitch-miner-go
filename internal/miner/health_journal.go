@@ -136,6 +136,11 @@ func (m *Miner) recordHealthTransition(prevLevel, newLevel connLevel, out connOu
 		m.healthJournalSuppressed++
 		return
 	}
+	// A transition can only actually emit an external alert when the
+	// notifications module is present — the send at evaluateConnectionHealth is
+	// gated on m.notifications != nil. Report the truthful outcome so the journal
+	// never claims an alert that was never sent.
+	ev.NotificationEmitted = ev.NotificationEmitted && m.notifications != nil
 	ev.SuppressedDuplicates = m.healthJournalSuppressed
 	m.healthJournalSuppressed = 0
 	m.healthJournal.Append(ev)
