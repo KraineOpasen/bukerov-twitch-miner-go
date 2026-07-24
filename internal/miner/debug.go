@@ -327,6 +327,17 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		snap.Policy = info
 	}
 
+	// Bounded diagnostic journals (BKM-013 slot lifecycle + BKM-014 health
+	// transitions). Read-only, redacted by construction; never affects behavior.
+	var jinfo debug.JournalInfo
+	if m.watcher != nil {
+		jinfo.Slots = m.watcher.SlotJournalSnapshot()
+	}
+	jinfo.Health = m.HealthJournalSnapshot()
+	if len(jinfo.Slots) > 0 || len(jinfo.Health) > 0 {
+		snap.Journal = &jinfo
+	}
+
 	snap.RecentEvents = events.Recent(snapshotRecentEvents)
 	return snap
 }
