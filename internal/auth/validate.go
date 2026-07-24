@@ -178,13 +178,26 @@ func (a *TwitchAuth) applyValidation(res validateResponse, validatedGen uint64) 
 		return ValidateStatusValid, nil
 	}
 
-	// 1. Authoritative identity. A runtime-confirmed userID anchors the
-	// account (login change = rename observation, BKM-006 territory); a
-	// disk-loaded userID is NOT trusted to authorize a foreign login — the
-	// configured profile name is the anchor then.
+	// 1. Authoritative identity. A CONFIGURED pin (a.expectedUserID, BKM-006
+	// Corrective Pass 1 C3 — trusted operator metadata from
+	// config.Config.OwnerUserID, NEVER derived from the cookie/credential
+	// file) is the STRONGEST anchor when set, and applies even on a session
+	// whose disk-loaded userID has not yet been runtime-confirmed THIS
+	// process: a differing user ID is foreign unconditionally; a matching
+	// user ID with a different login is a TOLERATED rename. Without a pin,
+	// the legacy anchor applies unchanged (BKM-005): a runtime-CONFIRMED
+	// userID anchors the account (login change = rename observation); a
+	// disk-loaded (unconfirmed) userID is NOT trusted to authorize a foreign
+	// login — the configured profile name is the anchor then.
 	foreign := false
 	rename := false
 	switch {
+	case a.expectedUserID != "":
+		if res.UserID != a.expectedUserID {
+			foreign = true
+		} else if a.username != "" && !strings.EqualFold(a.username, res.Login) {
+			rename = true
+		}
 	case a.userIDAuthoritative && a.userID != "":
 		if res.UserID != a.userID {
 			foreign = true
@@ -228,6 +241,11 @@ func (a *TwitchAuth) applyValidation(res validateResponse, validatedGen uint64) 
 	// 4. Metadata apply (current generation only, checked above).
 	a.userID = res.UserID
 	a.userIDAuthoritative = true
+	// Record the account's current canonical login (COR-2). Reached only after
+	// the identity checks above passed, so this is never a foreign login; the
+	// miner adopts it for Twitch-/user-facing use while storage stays keyed by
+	// a.username.
+	a.canonicalLogin = res.Login
 	a.expiresAt = a.now().Add(time.Duration(res.ExpiresIn) * time.Second)
 	a.validatedAt = a.now()
 	a.validationState = "valid"

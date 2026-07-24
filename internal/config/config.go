@@ -63,7 +63,37 @@ func NormalizeDiscoveryMode(s string) DiscoveryMode {
 }
 
 type Config struct {
-	Username            string                  `json:"username"`
+	// Username is the account's CURRENT canonical Twitch login — the MUTABLE
+	// authoritative attribute (BKM-006 Corrective Pass 1, COR-2). Every
+	// Twitch-facing and user-facing use reads it live: owner channel-ID
+	// resolution, the IRC NICK, notification labels, and the dashboard. On a
+	// CONFIRMED owner rename (same OwnerUserID, new login) the miner adopts the
+	// new login here and persists it, so a renamed owner shows and operates
+	// under their new name. It is NOT the storage key — see ProfileKey /
+	// StorageKey().
+	Username string `json:"username"`
+	// ProfileKey is the IMMUTABLE local storage key for this profile's
+	// cookies/database/log paths (BKM-006 Corrective Pass 1, COR-2). It is
+	// decoupled from the mutable Twitch login so a rename never re-keys
+	// credentials or history (which would force a fresh Device Flow / split
+	// history). Empty on legacy configs and until the FIRST owner rename;
+	// StorageKey() falls back to Username while empty (so existing installs
+	// keep their exact cookies/db/log paths — no migration). It is pinned to
+	// the pre-rename login exactly once, at the moment a confirmed rename is
+	// about to move Username to the new canonical login.
+	ProfileKey string `json:"profileKey,omitempty"`
+	// OwnerUserID is a TRUSTED, operator-controlled pin of the Twitch account
+	// this profile is bound to (BKM-006 Corrective Pass 1, C3): once set, an
+	// /oauth2/validate identity check anchors on THIS user ID rather than on
+	// the login, so a renamed owner (same account, new login) is tolerated on
+	// every restart with no fresh Device Flow — storage stays keyed by the
+	// stable ProfileKey while Username tracks the new canonical login. It
+	// carries the SAME trust level as Username (both are config-file content
+	// the operator controls) and is NEVER adopted from a cookie/credential
+	// file: only a CONFIRMED (login-matching, at the time the pin was still
+	// empty) validate result ever backfills it automatically. Empty preserves
+	// the exact pre-C3 login-anchor behavior.
+	OwnerUserID         string                  `json:"ownerUserId,omitempty"`
 	ClaimDropsOnStartup bool                    `json:"claimDropsOnStartup"`
 	EnableAnalytics     bool                    `json:"enableAnalytics"`
 	Priority            []Priority              `json:"priority"`
@@ -216,6 +246,19 @@ type AutoRedeemConfig struct {
 type StreamerConfig struct {
 	Username string                   `json:"username"`
 	Settings *models.StreamerSettings `json:"settings,omitempty"`
+
+	// ChannelID is the stable Twitch channel identity behind Username, kept
+	// in sync by the miner's ID-first reconciliation (BKM-006) after every
+	// settings apply. A NON-EMPTY value is an EXPECTED, IMMUTABLE identity
+	// anchor (BKM-006 Corrective Pass 1, C1), not a hint: if Username now
+	// resolves to a DIFFERENT ChannelID, reconciliation refuses to adopt the
+	// foreign identity — no streamer is added/renamed under it and this
+	// field is never silently overwritten with the mismatched value. Only an
+	// EMPTY ChannelID is ever backfilled (first-bind path). Absent on config
+	// files written before this field existed — fully backward compatible,
+	// the entry is simply treated as unconfirmed until the next successful
+	// resolution.
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 type RateLimitSettings struct {
@@ -440,6 +483,20 @@ func DefaultPredictionRiskSettings() PredictionRiskSettings {
 		ReservePoints:     0,
 		HealthGateEnabled: true,
 	}
+}
+
+// StorageKey returns the stable local storage key for this profile's
+// cookies/database/log paths (BKM-006 Corrective Pass 1, COR-2). It is
+// ProfileKey when set, otherwise Username — so legacy configs (and every
+// install before the FIRST owner rename) keep their exact existing paths
+// with no migration, while a renamed owner keeps loading credentials and
+// history from the original, pinned location even though Username has moved
+// to the new canonical login.
+func (c *Config) StorageKey() string {
+	if key := strings.TrimSpace(c.ProfileKey); key != "" {
+		return key
+	}
+	return c.Username
 }
 
 func DefaultConfig() Config {

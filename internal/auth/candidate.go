@@ -87,14 +87,21 @@ func (a *TwitchAuth) validateCandidate(ctx context.Context, cand *tokenCandidate
 	username := a.username
 	userID := a.userID
 	confirmed := a.userIDAuthoritative
+	expected := a.expectedUserID
 	a.mu.Unlock()
 
 	// Identity first (a foreign candidate must never hide behind a lesser
-	// anomaly), mirroring applyValidation's security ordering: a
-	// runtime-confirmed user ID anchors the account (login difference = rename
-	// observation); otherwise the configured profile name is the anchor.
+	// anomaly), mirroring applyValidation's security ordering: a CONFIGURED
+	// pin (BKM-006 Corrective Pass 1 C3) is the strongest anchor when set —
+	// applies even before this session has runtime-confirmed anything —
+	// otherwise a runtime-confirmed user ID anchors the account (login
+	// difference = rename observation, tolerated either way since candidate
+	// promotion never re-keys a.username regardless), otherwise the
+	// configured profile name is the anchor.
 	foreign := false
 	switch {
+	case expected != "":
+		foreign = res.UserID != expected
 	case confirmed && userID != "":
 		foreign = res.UserID != userID
 	default:
@@ -211,6 +218,9 @@ func (a *TwitchAuth) promoteCandidate(cand *tokenCandidate, res validateResponse
 	a.scopes = slices.Clone(res.Scopes)
 	a.userID = res.UserID
 	a.userIDAuthoritative = true
+	// Current canonical login of the promoted account (COR-2); the candidate
+	// already passed the identity check, so this is never a foreign login.
+	a.canonicalLogin = res.Login
 	a.expiresAt = a.now().Add(time.Duration(res.ExpiresIn) * time.Second)
 	a.generation++
 	gen := a.generation

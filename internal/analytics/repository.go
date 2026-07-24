@@ -27,7 +27,20 @@ type Repository interface {
 	DistinctBetStrategies() ([]string, error)
 	EarnedPointsBetween(start, end time.Time) (int, error)
 	CountAnnotationsByType(eventType string, start, end time.Time) (int, error)
+	RenameStreamer(oldName, newName string) error
 	Close() error
+}
+
+// StreamerRenameConflictError means both the old and new analytics streamer
+// rows already exist independently, so RenameStreamer refuses to silently
+// merge two separate histories together. Privacy-safe: it carries only the
+// two login names involved, never a token, URL, header, or payload.
+type StreamerRenameConflictError struct {
+	OldName, NewName string
+}
+
+func (e *StreamerRenameConflictError) Error() string {
+	return fmt.Sprintf("analytics: cannot rename streamer %q to %q: both already have recorded history", e.OldName, e.NewName)
 }
 
 type SQLiteRepository struct {
@@ -187,6 +200,54 @@ func (r *SQLiteRepository) getOrCreateStreamerTx(tx *sql.Tx, name string) (int64
 	}
 
 	return result.LastInsertId()
+}
+
+// RenameStreamer migrates the streamers row from oldName to newName within
+// ONE transaction, preserving its internal autoincrement id so every table
+// keyed by streamer_id (points, annotations, chat_messages, prediction_bets)
+// stays attached to the SAME history after the rename — no schema migration,
+// no new column, no data duplication (BKM-006 I8). It is idempotent: if
+// oldName has no recorded row this is a no-op (nil error), so a repeated
+// settings apply never errors. It fails CLOSED with a typed
+// *StreamerRenameConflictError — no merge, no mutation — when BOTH oldName
+// and newName already have their own independent row: two histories are
+// never silently combined, the caller decides.
+func (r *SQLiteRepository) RenameStreamer(oldName, newName string) error {
+	if oldName == newName {
+		return nil
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var oldID int64
+	err = tx.QueryRow("SELECT id FROM streamers WHERE name = ?", oldName).Scan(&oldID)
+	if err == sql.ErrNoRows {
+		// Nothing recorded yet under the old login: idempotent no-op.
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+
+	var newID int64
+	err = tx.QueryRow("SELECT id FROM streamers WHERE name = ?", newName).Scan(&newID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil {
+		// Both rows exist independently: fail closed rather than guess which
+		// history should win or silently combine them.
+		return &StreamerRenameConflictError{OldName: oldName, NewName: newName}
+	}
+
+	if _, err := tx.Exec("UPDATE streamers SET name = ? WHERE id = ?", newName, oldID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType string) error {

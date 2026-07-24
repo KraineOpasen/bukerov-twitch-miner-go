@@ -1876,7 +1876,7 @@ func campaignAvailabilityFor(state models.CampaignAvailabilityState, ids []strin
 // state — no channel list, no reward IDs.
 func logDropIneligible(streamer *models.Streamer, campaign *models.Campaign, avail eligibility.Availability, reason eligibility.Reason) {
 	slog.Debug("Drop campaign not assigned: not eligible",
-		"streamer", streamer.Username,
+		"streamer", streamer.GetUsername(),
 		"campaign", campaign.Name, "campaignID", campaign.ID,
 		"reason", string(reason),
 		"availability", availabilityLabel(avail),
@@ -2052,19 +2052,19 @@ const progressBarWidth = 100 / progressLogStepPercent
 func (d *DropsTracker) logRestrictedAssignment(
 	streamer *models.Streamer, campaign *models.Campaign, current map[string]struct{},
 ) {
-	key := streamer.Username + "\x00" + campaign.ID
+	key := streamer.GetUsername() + "\x00" + campaign.ID
 	current[key] = struct{}{}
 
 	if _, seen := d.loggedRestrictedAssignments[key]; seen {
 		slog.Debug("Channel-restricted drop campaign still assigned to streamer",
-			"streamer", streamer.Username, "campaign", campaign.Name)
+			"streamer", streamer.GetUsername(), "campaign", campaign.Name)
 		return
 	}
 
 	slog.Info("Channel-restricted drop campaign assigned to streamer",
-		"streamer", streamer.Username, "campaign", campaign.Name)
+		"streamer", streamer.GetUsername(), "campaign", campaign.Name)
 	slog.Debug("Channel-restricted drop campaign allowed-channel list",
-		"streamer", streamer.Username, "campaign", campaign.Name,
+		"streamer", streamer.GetUsername(), "campaign", campaign.Name,
 		"campaignID", campaign.ID, "allowedChannels", campaign.Channels)
 }
 
@@ -2084,7 +2084,7 @@ func (d *DropsTracker) logCampaignProgress(streamer *models.Streamer, campaign *
 	}
 
 	pct := campaign.OverallProgressPercent()
-	line := formatDropProgress(streamer.Username, campaign, pct)
+	line := formatDropProgress(streamer.GetUsername(), campaign, pct)
 
 	bucket := pct / progressLogStepPercent
 	if last, seen := d.loggedProgressBucket[campaign.ID]; !seen || bucket > last {

@@ -68,7 +68,7 @@ func main() {
 		logSettings.FileLevel = "DEBUG"
 	}
 
-	log, err := logger.Setup(cfg.Username, logSettings)
+	log, err := logger.Setup(cfg.StorageKey(), logSettings)
 	if err != nil {
 		setupBasicLogger(*debug)
 		slog.Error("Failed to setup logger", "error", err)
@@ -83,7 +83,11 @@ func main() {
 	// opened here once and closed only by the deferred Close, which runs
 	// AFTER m.Run (and therefore after Miner.stop()) returns. The Miner
 	// receives the handle via SetDatabase and never closes it itself.
-	dbBasePath := filepath.Join("database", cfg.Username)
+	// Storage (database/cookies/logs) is keyed by the STABLE profile key, not
+	// the mutable canonical Twitch login (BKM-006 Corrective Pass 1, COR-2), so
+	// a renamed owner keeps loading the same history/credentials. StorageKey()
+	// == Username until the first rename pins ProfileKey.
+	dbBasePath := filepath.Join("database", cfg.StorageKey())
 	db, err := database.Open(dbBasePath)
 	if err != nil {
 		slog.Error("Failed to open database", "error", err)
