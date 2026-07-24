@@ -142,7 +142,7 @@ func newCapabilityMiner(t *testing.T, usernames ...string) (*Miner, *fakeTopicRe
 	}
 
 	mgr := streamer.NewManager(fakeStreamerAPI{}, cfg.StreamerSettings)
-	if added, _, _ := mgr.ApplySettings(cfg.Streamers, cfg.StreamerSettings); len(added) != len(usernames) {
+	if added, _, _, _ := mgr.ApplySettings(cfg.Streamers, cfg.StreamerSettings); len(added) != len(usernames) {
 		t.Fatalf("seeding failed: added=%d, want %d", len(added), len(usernames))
 	}
 

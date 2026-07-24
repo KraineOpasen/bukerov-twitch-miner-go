@@ -443,13 +443,13 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 	oldList := w.streamers
 	newIndexByLogin := make(map[string]int, len(newList))
 	for i, s := range newList {
-		newIndexByLogin[s.Username] = i
+		newIndexByLogin[s.GetUsername()] = i
 	}
 	translate := func(oldIdx int) (int, bool) {
 		if oldIdx < 0 || oldIdx >= len(oldList) {
 			return -1, false
 		}
-		newIdx, ok := newIndexByLogin[oldList[oldIdx].Username]
+		newIdx, ok := newIndexByLogin[oldList[oldIdx].GetUsername()]
 		return newIdx, ok
 	}
 
@@ -622,7 +622,7 @@ func (w *MinuteWatcher) processWatching() {
 
 	var watchingNames []string
 	for _, sl := range slots {
-		watchingNames = append(watchingNames, sl.streamer.Username)
+		watchingNames = append(watchingNames, sl.streamer.GetUsername())
 	}
 	slog.Debug("Watching streams", "count", len(slots), "max", constants.MaxSimultaneousStreams, "streamers", watchingNames)
 
@@ -649,10 +649,10 @@ func (w *MinuteWatcher) processWatching() {
 			// the new session. It also does not count as delivered lost mining
 			// against Twitch, so leave watchedOK alone.
 			slog.Debug("Skipped minute watched: session changed mid-send (stale)",
-				"streamer", streamer.Username, "origin", sl.origin)
+				"streamer", streamer.GetUsername(), "origin", sl.origin)
 		case res.Failure != nil:
-			w.noteReportOutcome(streamer.Username, false, time.Now())
-			slog.Debug("Failed to send minute watched", "streamer", streamer.Username, "origin", sl.origin,
+			w.noteReportOutcome(streamer.GetUsername(), false, time.Now())
+			slog.Debug("Failed to send minute watched", "streamer", streamer.GetUsername(), "origin", sl.origin,
 				"stage", string(res.Failure.Stage), "code", res.Failure.ErrorCode)
 			// A failed send usually means the stream just ended; re-check the
 			// online state so the next tick drops or switches it (and, for a
@@ -663,16 +663,16 @@ func (w *MinuteWatcher) processWatching() {
 		default:
 			reported = true
 			watchedOK++
-			w.noteReportOutcome(streamer.Username, true, time.Now())
-			slog.Debug("Sent minute watched", "streamer", streamer.Username, "origin", sl.origin, "minutesWatched", streamer.Stream.GetMinuteWatched())
+			w.noteReportOutcome(streamer.GetUsername(), true, time.Now())
+			slog.Debug("Sent minute watched", "streamer", streamer.GetUsername(), "origin", sl.origin, "minutesWatched", streamer.Stream.GetMinuteWatched())
 			delta := streamer.Stream.UpdateMinuteWatched(maxContinuousGap)
 			if sl.idx >= 0 {
 				// Configured channel: credit fair-rotation watch time and track
 				// streak pursuit. Discovery channels are intentionally excluded
 				// from the fairness store and streak accounting.
 				if w.store != nil && delta > 0 {
-					if err := w.store.RecordMinutes(streamer.Username, delta, time.Now()); err != nil {
-						slog.Debug("Failed to record watch time", "streamer", streamer.Username, "error", err)
+					if err := w.store.RecordMinutes(streamer.GetUsername(), delta, time.Now()); err != nil {
+						slog.Debug("Failed to record watch time", "streamer", streamer.GetUsername(), "error", err)
 					}
 				}
 				w.noteStreakProgress(sl.idx)
@@ -717,7 +717,7 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 	}
 	configured := make(map[string]bool, len(w.streamers))
 	for _, s := range w.streamers {
-		configured[s.Username] = true
+		configured[s.GetUsername()] = true
 	}
 	var out []Candidate
 	seen := make(map[string]bool)
@@ -726,7 +726,7 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 			if c.Streamer == nil {
 				continue
 			}
-			login := c.Streamer.Username
+			login := c.Streamer.GetUsername()
 			if configured[login] || seen[login] {
 				continue
 			}
@@ -774,7 +774,7 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 		// its own: the progress watchdog excludes a channel whose drop
 		// progress stalled despite session recovery, so the broker switches
 		// to the next eligible channel instead.
-		if avoid != nil && avoid.IsAvoided(s.Username) {
+		if avoid != nil && avoid.IsAvoided(s.GetUsername()) {
 			w.noteSelection(i, "temporarily avoided by the drop-progress watchdog (stalled progress recovery)")
 			continue
 		}
@@ -825,7 +825,7 @@ func (w *MinuteWatcher) retainsSlotWhileUnknown(s *models.Streamer) bool {
 	if s.GetStatus() != models.StatusUnknown || s.GetLastConfirmedStatus() != models.StatusOnline {
 		return false
 	}
-	if _, held := w.lastConfiguredWatched[s.Username]; !held {
+	if _, held := w.lastConfiguredWatched[s.GetUsername()]; !held {
 		return false
 	}
 	since := s.GetUnknownSince()
@@ -876,7 +876,7 @@ func (w *MinuteWatcher) filterAvoided(onlineIndexes []int) []int {
 	var avoided []string
 	for _, idx := range onlineIndexes {
 		if w.streamers[idx].GetSettings().Preference == models.PreferenceAvoid {
-			avoided = append(avoided, w.streamers[idx].Username)
+			avoided = append(avoided, w.streamers[idx].GetUsername())
 			w.noteSelection(idx, `excluded from watching: preference is set to "avoid" and other channels are online`)
 			continue
 		}
@@ -1076,12 +1076,12 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 // DROPS/STREAK boosts (applyPriorityBoost) don't change the stored pair and so
 // aren't reported here — they'd fire every tick.
 func (w *MinuteWatcher) logPairChange(oldPair [2]int, hadPair bool, newPair [2]int) {
-	newNames := []string{w.streamers[newPair[0]].Username, w.streamers[newPair[1]].Username}
+	newNames := []string{w.streamers[newPair[0]].GetUsername(), w.streamers[newPair[1]].GetUsername()}
 
 	var preferred []string
 	for _, idx := range newPair {
 		if w.isPreferred(idx) {
-			preferred = append(preferred, w.streamers[idx].Username)
+			preferred = append(preferred, w.streamers[idx].GetUsername())
 		}
 	}
 
@@ -1098,12 +1098,12 @@ func (w *MinuteWatcher) logPairChange(oldPair [2]int, hadPair bool, newPair [2]i
 	var swappedIn, swappedOut []string
 	for _, idx := range newPair {
 		if idx != oldPair[0] && idx != oldPair[1] {
-			swappedIn = append(swappedIn, w.streamers[idx].Username)
+			swappedIn = append(swappedIn, w.streamers[idx].GetUsername())
 		}
 	}
 	for _, idx := range oldPair {
 		if idx != newPair[0] && idx != newPair[1] {
-			swappedOut = append(swappedOut, w.streamers[idx].Username)
+			swappedOut = append(swappedOut, w.streamers[idx].GetUsername())
 		}
 	}
 
@@ -1131,7 +1131,7 @@ func (w *MinuteWatcher) watchWeights(onlineIndexes []int, now time.Time) map[int
 
 	usernames := make([]string, len(onlineIndexes))
 	for i, idx := range onlineIndexes {
-		usernames[i] = w.streamers[idx].Username
+		usernames[i] = w.streamers[idx].GetUsername()
 	}
 
 	minutes, err := w.store.WindowMinutes(usernames, now)
@@ -1141,7 +1141,7 @@ func (w *MinuteWatcher) watchWeights(onlineIndexes []int, now time.Time) map[int
 	}
 
 	for _, idx := range onlineIndexes {
-		weights[idx] = minutes[w.streamers[idx].Username]
+		weights[idx] = minutes[w.streamers[idx].GetUsername()]
 	}
 	return weights
 }
@@ -1466,7 +1466,7 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	if !state.pursuing {
 		state.pursuing = true
 		slog.Info("Pursuing watch streak (holding a boost slot until Twitch grants it or the bounded watch window elapses)",
-			"streamer", s.Username,
+			"streamer", s.GetUsername(),
 			"continuousWatchedMinutes", mw,
 			"watchEvents", evidence,
 			"broadcastID", s.Stream.GetBroadcastID())
@@ -1486,7 +1486,7 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	if w.streakPursuitExhausted(idx) && !state.released {
 		state.released = true
 		attrs := []any{
-			"streamer", s.Username,
+			"streamer", s.GetUsername(),
 			"broadcastID", s.Stream.GetBroadcastID(),
 			"continuousWatchedMinutes", mw,
 			"watchEvents", evidence,
@@ -1657,7 +1657,7 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) SendResult {
 	res := w.sender.Send(streamer)
 	if res.SimulateErr != nil {
-		slog.Debug("Failed to simulate watching", "streamer", streamer.Username, "error", res.SimulateErr)
+		slog.Debug("Failed to simulate watching", "streamer", streamer.GetUsername(), "error", res.SimulateErr)
 	}
 	return res
 }

@@ -33,7 +33,7 @@ func configsFor(usernames ...string) []config.StreamerConfig {
 func seededManager(t *testing.T, defaults models.StreamerSettings, usernames ...string) *Manager {
 	t.Helper()
 	m := NewManager(fakeChannelAPI{}, defaults)
-	added, removed, changed := m.ApplySettings(configsFor(usernames...), defaults)
+	added, removed, changed, _ := m.ApplySettings(configsFor(usernames...), defaults)
 	if len(added) != len(usernames) || len(removed) != 0 || len(changed) != 0 {
 		t.Fatalf("seeding: added=%d removed=%d changed=%d, want %d/0/0",
 			len(added), len(removed), len(changed), len(usernames))
@@ -59,7 +59,7 @@ func TestApplySettingsReportsChangedExistingStreamer(t *testing.T) {
 	override := defaults
 	override.FollowRaid = false
 	override.CommunityGoals = true
-	_, _, changed := m.ApplySettings(
+	_, _, changed, _ := m.ApplySettings(
 		[]config.StreamerConfig{{Username: "alpha", Settings: &override}}, defaults)
 
 	if len(changed) != 1 || changed[0].Streamer.Username != "alpha" {
@@ -88,14 +88,14 @@ func TestApplySettingsUnchangedSettingsNotReported(t *testing.T) {
 	defaults := models.DefaultStreamerSettings()
 	m := seededManager(t, defaults, "alpha")
 
-	_, _, changed := m.ApplySettings(configsFor("alpha"), defaults)
+	_, _, changed, _ := m.ApplySettings(configsFor("alpha"), defaults)
 	if len(changed) != 0 {
 		t.Fatalf("identical apply reported changed = %v, want none", changedNames(changed))
 	}
 
 	// An explicit override VALUE-equal to the defaults is also not a change.
 	same := defaults
-	_, _, changed = m.ApplySettings(
+	_, _, changed, _ = m.ApplySettings(
 		[]config.StreamerConfig{{Username: "alpha", Settings: &same}}, defaults)
 	if len(changed) != 0 {
 		t.Fatalf("value-equal explicit override reported changed = %v, want none", changedNames(changed))
@@ -112,7 +112,7 @@ func TestApplySettingsDefaultsToExplicitOverride(t *testing.T) {
 	explicitOff := false
 	override := defaults
 	override.ChatLogs = &explicitOff
-	_, _, changed := m.ApplySettings(
+	_, _, changed, _ := m.ApplySettings(
 		[]config.StreamerConfig{{Username: "alpha", Settings: &override}}, defaults)
 	if len(changed) != 1 {
 		t.Fatalf("defaults->explicit ChatLogs override: changed = %v, want [alpha]", changedNames(changed))
@@ -130,12 +130,12 @@ func TestApplySettingsExplicitOverrideBackToDefaults(t *testing.T) {
 
 	override := defaults
 	override.MakePredictions = false
-	if _, _, changed := m.ApplySettings(
+	if _, _, changed, _ := m.ApplySettings(
 		[]config.StreamerConfig{{Username: "alpha", Settings: &override}}, defaults); len(changed) != 1 {
 		t.Fatalf("setup override apply not reported as change")
 	}
 
-	_, _, changed := m.ApplySettings(configsFor("alpha"), defaults)
+	_, _, changed, _ := m.ApplySettings(configsFor("alpha"), defaults)
 	if len(changed) != 1 || changed[0].New.MakePredictions != true {
 		t.Fatalf("override->defaults: changed=%v newMakePredictions=%v, want one change back to true",
 			changedNames(changed), len(changed) == 1 && changed[0].New.MakePredictions)
@@ -149,7 +149,7 @@ func TestApplySettingsAddedAndRemovedNotDuplicatedInChanged(t *testing.T) {
 	m := seededManager(t, defaults, "alpha", "bravo")
 
 	// One apply: add charlie, remove bravo, keep alpha unchanged.
-	added, removed, changed := m.ApplySettings(configsFor("alpha", "charlie"), defaults)
+	added, removed, changed, _ := m.ApplySettings(configsFor("alpha", "charlie"), defaults)
 	if len(added) != 1 || added[0].Username != "charlie" {
 		t.Fatalf("added = %v, want [charlie]", added)
 	}

@@ -97,14 +97,14 @@ func (s *Server) configuredStreamerNames() []string {
 	seen := make(map[string]struct{}, len(roster))
 	names := make([]string, 0, len(roster))
 	for _, st := range roster {
-		if st == nil || st.Username == "" {
+		if st == nil || st.GetUsername() == "" {
 			continue
 		}
-		if _, dup := seen[st.Username]; dup {
+		if _, dup := seen[st.GetUsername()]; dup {
 			continue
 		}
-		seen[st.Username] = struct{}{}
-		names = append(names, st.Username)
+		seen[st.GetUsername()] = struct{}{}
+		names = append(names, st.GetUsername())
 	}
 	sort.Strings(names)
 	return names

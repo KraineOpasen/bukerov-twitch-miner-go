@@ -26,7 +26,7 @@ var pointsEligibility = eligibility.Evaluator{}
 // unknown, offline, user setting off). No raw Twitch payload is logged.
 func logSkippedPointsAction(streamer *models.Streamer, action string, d eligibility.Decision) {
 	slog.Debug("Skipping channel-points action: not eligible",
-		"action", action, "streamer", streamer.Username,
+		"action", action, "streamer", streamer.GetUsername(),
 		"reason", string(d.Reason), "state", d.State.String())
 }
 
@@ -361,7 +361,7 @@ func (p *WebSocketPool) PredictionsSnapshot() []PredictionSnapshot {
 	snapshots := make([]PredictionSnapshot, 0, len(p.predictions))
 	for id, e := range p.predictions {
 		snap := PredictionSnapshot{
-			Streamer:                e.Streamer.Username,
+			Streamer:                e.Streamer.GetUsername(),
 			EventID:                 e.EventID,
 			Title:                   e.Title,
 			Status:                  string(e.Status),
@@ -690,7 +690,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 					reasonCode = rc
 				}
 				slog.Info("Points earned",
-					"streamer", streamer.Username,
+					"streamer", streamer.GetUsername(),
 					"points", earned,
 					"reason", reasonCode,
 				)
@@ -701,7 +701,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				// the notable reason codes (CLAIM, WATCH_STREAK, RAID, ...)
 				// are recorded.
 				if reasonCode != "WATCH" {
-					events.Record(events.TypePointsEarned, streamer.Username, fmt.Sprintf("+%d (%s)", earned, reasonCode))
+					events.Record(events.TypePointsEarned, streamer.GetUsername(), fmt.Sprintf("+%d (%s)", earned, reasonCode))
 				} else {
 					// A real WATCH credit is evidence Twitch is counting this
 					// view. The watcher uses two of them as the reliable,
@@ -727,7 +727,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				if err := p.actor.ClaimBonus(streamer, claimID); err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
 				} else {
-					events.Record(events.TypeBonusClaimed, streamer.Username, "bonus claimed")
+					events.Record(events.TypeBonusClaimed, streamer.GetUsername(), "bonus claimed")
 				}
 			}
 		}
@@ -745,17 +745,17 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 		tr := streamer.SetConfirmedOnline()
 		if tr.OnlineConfirmed {
 			slog.Info("Streamer is online",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"channelID", streamer.ChannelID,
 				"broadcastID", streamer.Stream.GetBroadcastID())
 			if p.onStatusChange != nil {
-				p.onStatusChange(streamer.Username, models.StatusOnline)
+				p.onStatusChange(streamer.GetUsername(), models.StatusOnline)
 			}
 		}
 		if p.checker != nil {
 			if err := p.checker.UpdateStream(streamer); err != nil {
 				slog.Debug("Metadata refresh after stream-up failed; keeping authoritative online",
-					"streamer", streamer.Username)
+					"streamer", streamer.GetUsername())
 			}
 		}
 	case "stream-down":
@@ -772,17 +772,17 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 		switch {
 		case tr.OfflineConfirmed:
 			slog.Info("Streamer went offline",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"channelID", streamer.ChannelID,
 				"broadcastID", bid)
 			if p.onStatusChange != nil {
-				p.onStatusChange(streamer.Username, models.StatusOffline)
+				p.onStatusChange(streamer.GetUsername(), models.StatusOffline)
 			}
 		case tr.Changed():
 			// First/recovery authoritative offline confirmation: privacy-safe log
 			// only, no notification and no online→offline event.
 			slog.Info("Streamer status confirmed offline",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"channelID", streamer.ChannelID,
 				"broadcastID", bid)
 		}
@@ -792,7 +792,7 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 		if p.checker != nil && streamer.StreamUpElapsed() {
 			tr := p.checker.CheckStreamerOnline(streamer)
 			if tr.OnlineConfirmed && p.onStatusChange != nil {
-				p.onStatusChange(streamer.Username, models.StatusOnline)
+				p.onStatusChange(streamer.GetUsername(), models.StatusOnline)
 			}
 		}
 	}
@@ -828,7 +828,7 @@ func (p *WebSocketPool) handleRaid(msg *PubSubMessage, streamer *models.Streamer
 		if err := p.actor.JoinRaid(streamer, raid); err != nil {
 			slog.Error("Failed to join raid", "error", err)
 		} else {
-			events.Record(events.TypeRaidJoined, streamer.Username, "raid to "+targetLogin)
+			events.Record(events.TypeRaidJoined, streamer.GetUsername(), "raid to "+targetLogin)
 		}
 	}
 }
@@ -848,7 +848,7 @@ func (p *WebSocketPool) handleMoment(msg *PubSubMessage, streamer *models.Stream
 		if err := p.actor.ClaimMoment(streamer, momentID); err != nil {
 			slog.Error("Failed to claim moment", "error", err)
 		} else {
-			events.Record(events.TypeMomentClaimed, streamer.Username, "moment claimed")
+			events.Record(events.TypeMomentClaimed, streamer.GetUsername(), "moment claimed")
 		}
 	}
 }
@@ -921,7 +921,7 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		if minPoints := streamer.GetSettings().Bet.MinimumPoints; minPoints > 0 &&
 			streamer.GetChannelPoints() <= minPoints {
 			slog.Info("Not enough points for prediction",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"points", streamer.GetChannelPoints(),
 				"minimum", minPoints,
 			)
@@ -935,7 +935,7 @@ func (p *WebSocketPool) handlePredictionChannel(msg *PubSubMessage, streamer *mo
 		p.mu.Unlock()
 
 		slog.Info("Prediction event scheduled",
-			"streamer", streamer.Username,
+			"streamer", streamer.GetUsername(),
 			"event", title,
 			"placeIn", closingBetAfter,
 		)
@@ -1014,7 +1014,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		amount := event.Bet.Decision.Amount
 		p.mu.Unlock()
 		slog.Info("Prediction confirmed", "event", event.Title)
-		events.Record(events.TypeBetPlaced, streamer.Username, fmt.Sprintf("bet %d points on %q", amount, event.Title))
+		events.Record(events.TypeBetPlaced, streamer.GetUsername(), fmt.Sprintf("bet %d points on %q", amount, event.Title))
 
 	case "prediction-result":
 		p.mu.RLock()
@@ -1054,7 +1054,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			"result", resultType,
 			"gained", gained,
 		)
-		events.Record(events.TypeBetResult, streamer.Username, fmt.Sprintf("%s %+d points on %q", resultType, gained, event.Title))
+		events.Record(events.TypeBetResult, streamer.GetUsername(), fmt.Sprintf("%s %+d points on %q", resultType, gained, event.Title))
 
 		streamer.UpdateHistory("PREDICTION", gained)
 
@@ -1070,7 +1070,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		if p.onBetResult != nil {
 			p.onBetResult(BetResult{
 				EventID:    eventID,
-				Streamer:   streamer.Username,
+				Streamer:   streamer.GetUsername(),
 				Timestamp:  time.Now(),
 				Strategy:   strategy,
 				ResultType: string(resultType),
@@ -1129,7 +1129,7 @@ func (p *WebSocketPool) placeAutoBet(eventID string) {
 	decision := event.Bet.Calculate(balance)
 	skip, comparedValue := event.Bet.Skip()
 	settings := event.Bet.Settings
-	streamer := event.Streamer.Username
+	streamer := event.Streamer.GetUsername()
 	gate := p.betHealth
 	risk := p.risk
 	p.mu.Unlock()
@@ -1296,9 +1296,9 @@ func (p *WebSocketPool) PlaceManualBet(eventID, outcomeID string, amount int) (s
 	rc.manualErr = ""
 	p.mu.Unlock()
 
-	events.Record(events.TypeBetPlaced, event.Streamer.Username, fmt.Sprintf("manual bet %d points on %q", amount, event.Title))
+	events.Record(events.TypeBetPlaced, event.Streamer.GetUsername(), fmt.Sprintf("manual bet %d points on %q", amount, event.Title))
 	slog.Info("Manual prediction bet placed",
-		"streamer", event.Streamer.Username,
+		"streamer", event.Streamer.GetUsername(),
 		"event", event.Title,
 		"amount", amount,
 	)
@@ -1465,7 +1465,7 @@ func (p *WebSocketPool) contributeToGoals(streamer *models.Streamer) {
 		amount := computeGoalContribution(goal, points, settings)
 		if amount <= 0 {
 			slog.Info("Skipping community goal contribution: configured limit resolves to zero",
-				"streamer", streamer.Username,
+				"streamer", streamer.GetUsername(),
 				"goal", goal.Title,
 				"balance", points,
 				"maxPercent", settings.CommunityGoalsMaxPercent,

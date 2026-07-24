@@ -26,7 +26,7 @@ func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request)
 
 	var streamers []string
 	for _, st := range s.streamers {
-		streamers = append(streamers, st.Username)
+		streamers = append(streamers, st.GetUsername())
 	}
 
 	configValid := true

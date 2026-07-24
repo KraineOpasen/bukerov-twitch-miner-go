@@ -162,9 +162,26 @@ type TwitchAuth struct {
 	// not mask a foreign identity); rename tolerance applies only to a
 	// runtime-confirmed identity.
 	userIDAuthoritative bool
-	tokenType           string
-	scopes              []string
-	expiresAt           time.Time
+	// expectedUserID is a TRUSTED, operator-controlled pin of the Twitch user
+	// ID this profile is expected to authenticate as (BKM-006 Corrective Pass
+	// 1, C3; see SetExpectedUserID). Empty (the default) preserves the exact
+	// legacy login-anchor behavior (BKM-005) — it is NEVER derived from the
+	// cookie/credential file, only from config.Config.OwnerUserID (set by the
+	// miner before Login) or a prior CONFIRMED validate's backfill of it.
+	expectedUserID string
+	// canonicalLogin is the account's CURRENT Twitch login as reported by the
+	// most recent authoritative /oauth2/validate (or a promoted candidate) —
+	// the MUTABLE canonical attribute (BKM-006 Corrective Pass 1, COR-2),
+	// distinct from username (the stable storage key this profile dials
+	// cookies under). Only ever set from a validate result that already
+	// passed the identity check, so it can never carry a foreign login. The
+	// miner reads it (GetCanonicalLogin) after Login to adopt a renamed
+	// owner's new login for Twitch-/user-facing operations while keeping
+	// storage keyed by username.
+	canonicalLogin string
+	tokenType      string
+	scopes         []string
+	expiresAt      time.Time
 	// generation is the monotonic credential-set revision: bumped exactly once
 	// per published token pair (device login or refresh), never on
 	// metadata-only validation updates.
@@ -273,6 +290,53 @@ func (a *TwitchAuth) GetUsername() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.username
+}
+
+// GetCanonicalLogin returns the account's CURRENT Twitch login as reported by
+// the most recent authoritative validate/promotion (BKM-006 Corrective Pass
+// 1, COR-2), or "" if none has been observed yet. It can differ from
+// GetUsername (the stable storage key) after a tolerated owner rename; the
+// miner reads it after Login to adopt the new login for Twitch-/user-facing
+// operations. It is only ever set from a validate result that already passed
+// the identity check, so it never carries a foreign login.
+func (a *TwitchAuth) GetCanonicalLogin() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.canonicalLogin
+}
+
+// SetExpectedUserID pins the TRUSTED Twitch user ID this profile is expected
+// to authenticate as (BKM-006 Corrective Pass 1, C3). The caller (the miner)
+// supplies config.Config.OwnerUserID — trusted operator metadata, the same
+// trust level as the configured username — NEVER a value read from the
+// cookie/credential file. Call before Login. Once set, it anchors BOTH the
+// authoritative validate identity check (applyValidation) and the candidate
+// validate path (candidate.go), even on a session whose disk-loaded userID
+// has not yet been runtime-confirmed this process: a differing user ID is
+// foreign unconditionally; a matching user ID with a different login is a
+// TOLERATED rename (no fresh Device Flow; the auth STORAGE key — a.username,
+// which cookies are dialed under — is never re-keyed, while the new canonical
+// login is surfaced separately via GetCanonicalLogin for the miner to adopt).
+// An empty id (the default, and the only value ever set by a
+// process with no configured pin) preserves the exact pre-C3 legacy
+// login-anchor behavior (BKM-005) untouched.
+func (a *TwitchAuth) SetExpectedUserID(id string) {
+	a.mu.Lock()
+	a.expectedUserID = strings.TrimSpace(id)
+	a.mu.Unlock()
+}
+
+// IsUserIDConfirmed reports whether the current userID was confirmed at
+// RUNTIME by an authoritative source THIS session — a successful
+// /oauth2/validate 200 application or a validated candidate promotion —
+// never merely loaded from the on-disk record (see userIDAuthoritative's doc
+// comment). The miner uses this after a successful Login to decide whether
+// the identity was actually earned this session before backfilling
+// config.Config.OwnerUserID from it (BKM-006 Corrective Pass 1, C3).
+func (a *TwitchAuth) IsUserIDConfirmed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.userIDAuthoritative
 }
 
 // ReplaceCredentials installs a COMPLETE externally supplied credential set

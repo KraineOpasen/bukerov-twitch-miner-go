@@ -53,8 +53,8 @@ func (s *Service) BasePath() string {
 
 func (s *Service) RecordPoints(streamer *models.Streamer, eventType string) {
 	eventType = strings.ReplaceAll(eventType, "_", " ")
-	if err := s.repo.RecordPoints(streamer.Username, streamer.GetChannelPoints(), eventType); err != nil {
-		slog.Error("Failed to record points", "streamer", streamer.Username, "error", err)
+	if err := s.repo.RecordPoints(streamer.GetUsername(), streamer.GetChannelPoints(), eventType); err != nil {
+		slog.Error("Failed to record points", "streamer", streamer.GetUsername(), "error", err)
 	}
 	s.maybePrune()
 }
@@ -73,8 +73,8 @@ func (s *Service) RecordAnnotation(streamer *models.Streamer, eventType, text st
 		return
 	}
 
-	if err := s.repo.RecordAnnotation(streamer.Username, eventType, text, color); err != nil {
-		slog.Error("Failed to record annotation", "streamer", streamer.Username, "error", err)
+	if err := s.repo.RecordAnnotation(streamer.GetUsername(), eventType, text, color); err != nil {
+		slog.Error("Failed to record annotation", "streamer", streamer.GetUsername(), "error", err)
 	}
 }
 
@@ -114,6 +114,19 @@ func (s *Service) RecordBet(b BetRecord) {
 	if err := s.repo.RecordBet(b); err != nil {
 		slog.Error("Failed to record prediction bet", "streamer", b.Streamer, "event", b.EventID, "error", err)
 	}
+}
+
+// RenameStreamer forwards a config-driven login rename (BKM-006) to the
+// repository, preserving the analytics history's internal streamer row — and
+// everything keyed by it: points, annotations, chat messages, prediction bets
+// — under the SAME identity instead of splitting it across two rows. Names
+// are lowercased to match how every other write path here already stores
+// them (streamer.Manager always works with lowercase logins). The error is
+// returned, not swallowed, so the caller can log a privacy-safe conflict
+// without silently losing history — but it is never treated as fatal to the
+// settings apply that triggered it.
+func (s *Service) RenameStreamer(oldName, newName string) error {
+	return s.repo.RenameStreamer(strings.ToLower(oldName), strings.ToLower(newName))
 }
 
 func (s *Service) RecordChatMessage(streamer string, username, displayName, message, emotes, badges, color string) error {

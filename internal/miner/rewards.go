@@ -65,8 +65,8 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 		return humanizeRewardError(err)
 	}
 
-	slog.Info("Redeemed custom reward", "streamer", s.Username, "reward", reward.Title, "cost", reward.Cost)
-	events.Record(events.TypeRewardRedeemed, s.Username, fmt.Sprintf("redeemed %q (-%d)", reward.Title, reward.Cost))
+	slog.Info("Redeemed custom reward", "streamer", s.GetUsername(), "reward", reward.Title, "cost", reward.Cost)
+	events.Record(events.TypeRewardRedeemed, s.GetUsername(), fmt.Sprintf("redeemed %q (-%d)", reward.Title, reward.Cost))
 	return nil
 }
 
@@ -144,7 +144,7 @@ func (m *Miner) SetAutoRedeem(username string, cfg config.AutoRedeemConfig) erro
 // streamer.
 func (m *Miner) evaluateAutoRedeem(s *models.Streamer) {
 	m.mu.RLock()
-	cfg, ok := m.config.AutoRedeem[s.Username]
+	cfg, ok := m.config.AutoRedeem[s.GetUsername()]
 	m.mu.RUnlock()
 
 	if !ok || !cfg.Enabled || cfg.Budget <= 0 || len(cfg.RewardIDs) == 0 {
@@ -153,7 +153,7 @@ func (m *Miner) evaluateAutoRedeem(s *models.Streamer) {
 
 	rewards, err := m.client.GetCustomRewards(s)
 	if err != nil {
-		slog.Debug("Auto-redeem: failed to load rewards", "streamer", s.Username, "error", err)
+		slog.Debug("Auto-redeem: failed to load rewards", "streamer", s.GetUsername(), "error", err)
 		return
 	}
 	byID := make(map[string]*models.CustomReward, len(rewards))
@@ -170,7 +170,7 @@ func (m *Miner) evaluateAutoRedeem(s *models.Streamer) {
 		// A reward that is unavailable re-arms so the next time it becomes
 		// available it can be redeemed again within budget.
 		if !reward.IsAvailable() {
-			m.clearAutoRedeemed(s.Username, rewardID)
+			m.clearAutoRedeemed(s.GetUsername(), rewardID)
 			continue
 		}
 
@@ -180,15 +180,15 @@ func (m *Miner) evaluateAutoRedeem(s *models.Streamer) {
 			continue
 		}
 
-		if m.wasAutoRedeemed(s.Username, rewardID) {
+		if m.wasAutoRedeemed(s.GetUsername(), rewardID) {
 			continue
 		}
 
-		spent := m.autoRedeemSpent(s.Username)
+		spent := m.autoRedeemSpent(s.GetUsername())
 		remaining := cfg.Budget - spent
 		if reward.Cost > remaining {
 			slog.Debug("Auto-redeem: over budget, skipping",
-				"streamer", s.Username, "reward", reward.Title, "cost", reward.Cost, "remaining", remaining)
+				"streamer", s.GetUsername(), "reward", reward.Title, "cost", reward.Cost, "remaining", remaining)
 			continue
 		}
 		if reward.Cost > s.GetChannelPoints() {
@@ -196,19 +196,19 @@ func (m *Miner) evaluateAutoRedeem(s *models.Streamer) {
 		}
 
 		if err := m.client.RedeemCustomReward(s, reward, ""); err != nil {
-			slog.Warn("Auto-redeem failed", "streamer", s.Username, "reward", reward.Title, "error", err)
+			slog.Warn("Auto-redeem failed", "streamer", s.GetUsername(), "reward", reward.Title, "error", err)
 			continue
 		}
 
-		newSpent := m.recordAutoRedeemed(s.Username, rewardID, reward.Cost)
+		newSpent := m.recordAutoRedeemed(s.GetUsername(), rewardID, reward.Cost)
 		slog.Info("Auto-redeemed custom reward",
-			"streamer", s.Username,
+			"streamer", s.GetUsername(),
 			"reward", reward.Title,
 			"cost", reward.Cost,
 			"spentTotal", newSpent,
 			"budgetRemaining", cfg.Budget-newSpent,
 		)
-		events.Record(events.TypeRewardRedeemed, s.Username,
+		events.Record(events.TypeRewardRedeemed, s.GetUsername(),
 			fmt.Sprintf("auto-redeemed %q (-%d, %d/%d budget)", reward.Title, reward.Cost, newSpent, cfg.Budget))
 	}
 }

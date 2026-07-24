@@ -797,6 +797,11 @@
         li.draggable = true;
         li.dataset.index = index;
         li.dataset.username = streamer.username;
+        // Hidden, non-editable: round-trips the persisted stable channel
+        // identity (BKM-006 Corrective Pass 1, C1) through a settings save so
+        // renaming a streamer here doesn't drop the anchor a cold restart
+        // relies on to refuse a foreign broadcaster. Never shown or edited.
+        li.dataset.channelId = streamer.channelId || '';
 
         const hasOverrides = streamer.settings && Object.keys(streamer.settings).length > 0;
         
@@ -1058,8 +1063,11 @@
         items.forEach(item => {
             const username = item.dataset.username;
             const useOverride = item.querySelector('.use-override-checkbox').checked;
-            
+
             const streamer = { username };
+            if (item.dataset.channelId) {
+                streamer.channelId = item.dataset.channelId;
+            }
             if (useOverride) {
                 streamer.settings = gatherStreamerSettings(username);
             }

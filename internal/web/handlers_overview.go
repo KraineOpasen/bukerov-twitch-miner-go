@@ -76,7 +76,7 @@ func (s *Server) ensureStats(streamers []*models.Streamer) (map[string]streamerS
 	total, today := 0, 0
 	if fresh {
 		for _, st := range streamers {
-			if cs, ok := cache[st.Username]; ok {
+			if cs, ok := cache[st.GetUsername()]; ok {
 				today += cs.pointsToday
 			}
 			total += st.GetChannelPoints()
@@ -94,7 +94,7 @@ func (s *Server) ensureStats(streamers []*models.Streamer) (map[string]streamerS
 		total += points
 
 		cs := streamerStats{}
-		data, err := repo.GetStreamerData(st.Username)
+		data, err := repo.GetStreamerData(st.GetUsername())
 		if err == nil && len(data.Series) > 0 {
 			base := -1
 			for i := len(data.Series) - 1; i >= 0; i-- {
@@ -115,7 +115,7 @@ func (s *Server) ensureStats(streamers []*models.Streamer) (map[string]streamerS
 				cs.hasRate = true
 			}
 		}
-		newCache[st.Username] = cs
+		newCache[st.GetUsername()] = cs
 		today += cs.pointsToday
 	}
 
@@ -247,13 +247,13 @@ func (s *Server) buildCards(
 		settings := st.GetSettings()
 		status := st.GetStatus()
 		online := status == models.StatusOnline
-		watchingSlot := watching[st.Username]
+		watchingSlot := watching[st.GetUsername()]
 		// A streamer that went online→unknown while still holding a watch slot is
 		// shown in the live group as "watching" but flagged unconfirmed (never a
 		// red offline); it is not counted in LiveCount.
 		slottedUnconfirmed := status == models.StatusUnknown && watchingSlot
 		card := StreamerInfo{
-			Name:            st.Username,
+			Name:            st.GetUsername(),
 			Points:          st.GetChannelPoints(),
 			PointsFormatted: util.FormatNumber(st.GetChannelPoints()),
 			Status:          status.String(),
@@ -263,7 +263,7 @@ func (s *Server) buildCards(
 			DisableWatch:    settings.DisableWatch,
 		}
 
-		if cs, ok := stats[st.Username]; ok {
+		if cs, ok := stats[st.GetUsername()]; ok {
 			card.PointsToday = util.FormatNumber(cs.pointsToday)
 			if cs.hasRate {
 				card.PointsPerHour = util.FormatNumber(cs.pointsPerHour)
@@ -271,7 +271,7 @@ func (s *Server) buildCards(
 		}
 
 		// Last notable event for this streamer from the in-memory ring.
-		if text, ago := lastEventFor(tr, st.Username); text != "" {
+		if text, ago := lastEventFor(tr, st.GetUsername()); text != "" {
 			card.LastEventText = text
 			card.LastEventAgo = ago
 		}
@@ -283,7 +283,7 @@ func (s *Server) buildCards(
 			card.GoalTitle = g.Title
 			card.GoalPercent = g.Percent
 			ticker = append(ticker, TickerItem{
-				Streamer: st.Username,
+				Streamer: st.GetUsername(),
 				Kind:     "goal",
 				Label:    g.Title,
 				Percent:  g.Percent,
@@ -291,7 +291,7 @@ func (s *Server) buildCards(
 			})
 		}
 
-		card.HasActivePrediction = predByStreamer[st.Username]
+		card.HasActivePrediction = predByStreamer[st.GetUsername()]
 
 		if online || slottedUnconfirmed {
 			// Confirmed online, or holding a slot during a transient unknown blip.
@@ -330,7 +330,7 @@ func (s *Server) buildCards(
 				}
 			}
 
-			card.WatchReason = slots.Reason[st.Username]
+			card.WatchReason = slots.Reason[st.GetUsername()]
 			switch {
 			case settings.DisableWatch:
 				card.State = "disabled"
@@ -350,7 +350,7 @@ func (s *Server) buildCards(
 		} else if status == models.StatusUnknown {
 			// Unknown and NOT holding a slot: its own group, never rendered as a red
 			// offline card and never shown with an offline duration.
-			card.WatchReason = slots.Reason[st.Username]
+			card.WatchReason = slots.Reason[st.GetUsername()]
 			if settings.DisableWatch {
 				card.State = "disabled"
 			} else {
@@ -477,7 +477,7 @@ func (s *Server) buildNowWatching(
 ) NowWatchingView {
 	byName := make(map[string]*models.Streamer, len(streamers))
 	for _, st := range streamers {
-		byName[st.Username] = st
+		byName[st.GetUsername()] = st
 	}
 
 	view := NowWatchingView{Mode: slots.Mode, Stale: stale}
@@ -536,10 +536,10 @@ func (s *Server) buildNowWatching(
 
 	// Queued = online, not watched, not disabled.
 	for _, st := range streamers {
-		if !st.GetIsOnline() || slots.Watching[st.Username] || st.GetSettings().DisableWatch {
+		if !st.GetIsOnline() || slots.Watching[st.GetUsername()] || st.GetSettings().DisableWatch {
 			continue
 		}
-		view.QueuedNames = append(view.QueuedNames, st.Username)
+		view.QueuedNames = append(view.QueuedNames, st.GetUsername())
 	}
 
 	if !slots.NextRotationAt.IsZero() && len(view.Slots) > 0 {

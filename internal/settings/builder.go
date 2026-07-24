@@ -34,8 +34,9 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 	streamers := make([]StreamerConfig, len(cfg.Streamers))
 	for i, sc := range cfg.Streamers {
 		streamers[i] = StreamerConfig{
-			Username: sc.Username,
-			Settings: StreamerSettingsPtrToDTO(sc.Settings),
+			Username:  sc.Username,
+			Settings:  StreamerSettingsPtrToDTO(sc.Settings),
+			ChannelID: sc.ChannelID,
 		}
 	}
 
@@ -105,6 +106,10 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 		streamers[i] = StreamerConfig{
 			Username: sc.Username,
 			Settings: nil,
+			// ChannelID is identity metadata, not a "setting" — a settings
+			// reset must not erase the persisted stored-identity anchor (C1)
+			// that a cold restart depends on.
+			ChannelID: sc.ChannelID,
 		}
 	}
 
@@ -167,16 +172,31 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 	}
 }
 
+// StreamersFromDTO converts a RuntimeSettings DTO's streamer list to
+// config.StreamerConfig entries, verbatim (including ChannelID — BKM-006
+// Corrective Pass 1, C1: it is never trusted as an overwrite authority by
+// itself, since the streamer reconciler treats it as an EXPECTED identity and
+// fails closed on a mismatch against Twitch's own resolution, so a spoofed or
+// stale value here can only ever cause a refused conflict, never an adoption
+// of a foreign channel). Exposed separately from ApplyToConfig so a caller
+// (the miner's rename coordinator) can resolve the intended roster BEFORE
+// deciding how — or whether — to persist the rest of the DTO.
+func StreamersFromDTO(streamers []StreamerConfig) []config.StreamerConfig {
+	out := make([]config.StreamerConfig, len(streamers))
+	for i, sc := range streamers {
+		out[i] = config.StreamerConfig{
+			Username:  sc.Username,
+			Settings:  StreamerSettingsPtrFromDTO(sc.Settings),
+			ChannelID: sc.ChannelID,
+		}
+	}
+	return out
+}
+
 // ApplyToConfig updates a config with values from a RuntimeSettings DTO.
 // Returns the converted streamer configs (for caller to apply to running streamers).
 func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
-	cfg.Streamers = make([]config.StreamerConfig, len(s.Streamers))
-	for i, sc := range s.Streamers {
-		cfg.Streamers[i] = config.StreamerConfig{
-			Username: sc.Username,
-			Settings: StreamerSettingsPtrFromDTO(sc.Settings),
-		}
-	}
+	cfg.Streamers = StreamersFromDTO(s.Streamers)
 
 	cfg.StreamerSettings = StreamerSettingsFromDTO(s.DefaultSettings)
 

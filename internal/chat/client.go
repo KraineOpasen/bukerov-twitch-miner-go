@@ -100,11 +100,17 @@ type IRCClient struct {
 }
 
 func NewIRCClient(username string, tokenFn TokenProvider, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
-	slog.Debug("Creating IRC client", "channel", streamer.Username, "logChat", logChat, "hasLogger", logger != nil)
+	// Captured once, race-safe (Username can be mutated in place by a
+	// concurrent rename): this connection's IRC channel is fixed for its
+	// lifetime, exactly the login it was joined under. A later rename does
+	// not retarget an already-open connection — the caller (ChatManager)
+	// leaves this login's client and joins a fresh one under the new login.
+	login := streamer.GetUsername()
+	slog.Debug("Creating IRC client", "channel", login, "logChat", logChat, "hasLogger", logger != nil)
 	return &IRCClient{
 		username:       username,
 		tokenFn:        tokenFn,
-		channel:        "#" + strings.ToLower(streamer.Username),
+		channel:        "#" + strings.ToLower(login),
 		streamer:       streamer,
 		logger:         logger,
 		logChat:        logChat,
@@ -411,7 +417,7 @@ func (c *IRCClient) handlePrivMsg(line string) {
 			Color:       tags["color"],
 		}
 
-		if err := c.logger.RecordChatMessage(c.streamer.Username, msgData); err != nil {
+		if err := c.logger.RecordChatMessage(c.streamer.GetUsername(), msgData); err != nil {
 			slog.Debug("Failed to log chat message", "error", err)
 		}
 	}
@@ -426,7 +432,7 @@ func (c *IRCClient) handlePrivMsg(line string) {
 		)
 
 		if c.mentionHandler != nil {
-			c.mentionHandler(c.streamer.Username, nick, message)
+			c.mentionHandler(c.streamer.GetUsername(), nick, message)
 		}
 	}
 }
