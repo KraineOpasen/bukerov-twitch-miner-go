@@ -699,7 +699,7 @@ func (m *Manager) NotifyConnectionLost(detail string) {
 	}
 
 	m.dispatchPush(NotificationTypeConnectionLost, "",
-		fmt.Sprintf("🔌 Connection lost - harvesting paused. %s", detail))
+		fmt.Sprintf("🔌 Connection lost. %s", detail))
 
 	if !enabled || discord == nil || cfg.SystemChannelID == "" {
 		slog.Debug("Connection-lost Discord notification skipped: system channel not configured")
@@ -708,7 +708,7 @@ func (m *Manager) NotifyConnectionLost(detail string) {
 
 	notification := Notification{
 		Type:      NotificationTypeConnectionLost,
-		Title:     "🔌 Connection lost - harvesting paused",
+		Title:     "🔌 Connection lost",
 		Message:   detail,
 		ChannelID: cfg.SystemChannelID,
 	}
@@ -739,7 +739,7 @@ func (m *Manager) NotifyConnectionRestored() {
 	}
 
 	m.dispatchPush(NotificationTypeConnectionRestored, "",
-		"✅ Connection restored. Twitch API and PubSub connectivity is back; harvesting has resumed.")
+		"✅ Connection restored. Twitch API and PubSub connectivity is back.")
 
 	if !enabled || discord == nil || cfg.SystemChannelID == "" {
 		slog.Debug("Connection-restored Discord notification skipped: system channel not configured")
@@ -749,7 +749,7 @@ func (m *Manager) NotifyConnectionRestored() {
 	notification := Notification{
 		Type:      NotificationTypeConnectionRestored,
 		Title:     "✅ Connection restored",
-		Message:   "Twitch API and PubSub connectivity is back. Harvesting has resumed.",
+		Message:   "Twitch API and PubSub connectivity is back.",
 		ChannelID: cfg.SystemChannelID,
 	}
 

@@ -97,7 +97,7 @@ func TestClassifyLogLineTable(t *testing.T) {
 		// Settings / health / database.
 		{"settings saved", ts + `level=INFO msg="Settings saved to config file"`, "log-settings", "⚙️"},
 		{"runtime settings", ts + `level=INFO msg="Runtime settings updated"`, "log-settings", "⚙️"},
-		{"health recovered", ts + `level=INFO msg="Connection restored - harvesting resumed"`, "log-health-ok", "💚"},
+		{"health recovered", ts + `level=INFO msg="Connection restored"`, "log-health-ok", "💚"},
 		{"health stabilized", ts + `level=INFO msg="Connection stabilized"`, "log-health-ok", "💚"},
 		{"analytics pruned", ts + `level=INFO msg="Pruned old analytics history" rows=100`, "log-database", "💾"},
 

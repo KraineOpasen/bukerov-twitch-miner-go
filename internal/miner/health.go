@@ -189,12 +189,12 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 	}
 	m.healthCenter.Record(oauth)
 
-	// GQL API + active client ID.
+	// GQL API + active client ID. Classified from the client's attempt/failure
+	// accounting rather than raw last-success staleness, so a normal idle API is
+	// reported IDLE (healthy), never a false FAILED blackout.
 	if m.client != nil {
-		last := m.client.LastSuccessAt()
-		m.healthCenter.Record(stalenessSignal(health.SignalGQLAPI, last, now, threshold,
-			"no successful API response recently",
-			m.client.RecentGQLFailures(threshold), degradeGQLFailureThreshold, "repeated API request failures"))
+		h := m.client.ConnHealth(now, threshold)
+		m.healthCenter.Record(apiConnSignal(classifyAPI(now, threshold, h), h, now))
 		m.healthCenter.SetActiveClientID(m.client.ActiveClientID())
 	}
 
