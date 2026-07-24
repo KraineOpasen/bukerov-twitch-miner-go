@@ -280,6 +280,12 @@ func (m *Miner) evaluateConnectionHealth(now time.Time, state *connHealthState) 
 	newState, tr := nextConnTransition(*state, out)
 	*state = newState
 
+	// Diagnostic-only: journal this transition (deduped, with evidence-quality
+	// and recovery-type labels the state machine leaves implicit). It observes
+	// already-computed outputs and changes no health, notification, or dashboard
+	// decision.
+	m.recordHealthTransition(prevLevel, newState.level, out, tr)
+
 	minutes := int(threshold.Minutes())
 	switch {
 	case tr.enteredLost:
