@@ -8,6 +8,13 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only by default. This workflow runs on pull_request (including from
+# untrusted contributors): it must never hold write scopes, request an OIDC
+# token, push a package, or create an attestation. The docker job validates the
+# image build only (push: false).
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest

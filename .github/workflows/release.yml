@@ -5,13 +5,23 @@ on:
     tags:
       - "v*"
 
+# Least-privilege default. Only the jobs that need elevated scopes declare them
+# at job level (release -> contents:write; docker -> packages/id-token/attestations).
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+# Serialize release runs for the same tag so two concurrent runs cannot race to
+# publish/attest the same immutable version tag. Never cancel an in-flight run:
+# cancelling mid-push could leave partial/misleading metadata.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   lint-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +47,8 @@ jobs:
   build-binaries:
     needs: lint-and-build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -74,15 +86,23 @@ jobs:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # Pass the tag and suffix through the environment instead of
+          # interpolating them straight into the shell command, so a crafted tag
+          # name can never inject shell code. The produced binary is byte-for-byte
+          # identical to the previous inline form for any valid tag.
+          VERSION: ${{ github.ref_name }}
+          SUFFIX: ${{ matrix.suffix }}
         run: |
           go build -trimpath -buildvcs=false \
-            -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${{ github.ref_name }}" \
-            -o twitch-miner-go-${{ matrix.suffix }} \
+            -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${VERSION}" \
+            -o "twitch-miner-go-${SUFFIX}" \
             ./cmd/miner
 
       - name: Compress with UPX
         if: matrix.goos != 'darwin'
-        run: upx --best --lzma twitch-miner-go-${{ matrix.suffix }}
+        env:
+          SUFFIX: ${{ matrix.suffix }}
+        run: upx --best --lzma "twitch-miner-go-${SUFFIX}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -93,6 +113,8 @@ jobs:
   release:
     needs: build-binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +141,12 @@ jobs:
   docker:
     needs: build-binaries
     runs-on: ubuntu-latest
+    # Only this trusted, tag-triggered job holds publish/attestation scopes.
+    permissions:
+      contents: read # checkout
+      packages: write # push image + provenance OCI referrer to GHCR
+      id-token: write # OIDC token for Sigstore keyless signing
+      attestations: write # persist the attestation to the GitHub attestations API
     steps:
       - uses: actions/checkout@v4
 
@@ -148,6 +176,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -159,3 +188,36 @@ jobs:
             VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SBOM: BuildKit's built-in Syft scanner generates an SPDX SBOM per
+          # platform and attaches it to the OCI image index as an attestation
+          # manifest (Docker-native, no third-party generator). provenance is
+          # disabled here so the ONLY provenance record is the signed GitHub
+          # attestation created below, avoiding two conflicting provenance
+          # predicates for the same digest.
+          sbom: true
+          provenance: false
+
+      # Lowercase the owner/repo for the attestation subject: github.repository is
+      # "KraineOpasen/..." but GHCR paths (and the pushed image) are lowercase.
+      # The value passes through an env var and is never interpolated into the
+      # shell command string, so no event field is evaluated by the shell.
+      - name: Resolve image name
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      # Provenance: keyless (GitHub OIDC / Sigstore / Rekor) SLSA build provenance
+      # bound to the exact pushed OCI *index* digest (the digest users pull), and
+      # also pushed to GHCR as an OCI referrer. Runs only after a successful push
+      # (sequential step ordering), so a failed build emits no attestation.
+      # create-storage-record is disabled: storage records only apply to
+      # organization-owned repos, so on this user-owned repo it would be a no-op
+      # and would otherwise require an extra artifact-metadata: write scope.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
