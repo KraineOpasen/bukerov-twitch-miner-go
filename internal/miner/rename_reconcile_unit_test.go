@@ -1,8 +1,6 @@
 package miner
 
 import (
-	"errors"
-	"sync"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -120,20 +118,17 @@ func TestMigrateAutoRedeem_DoesNotClobberExistingDestination_RemovesOldKey(t *te
 }
 
 // TestBackfillChannelIDs_MatchesByCurrentLoginCaseInsensitive proves the
-// backfill stamps ChannelID onto every cfg.Streamers entry by matching the
-// RECONCILED ROSTER's current login, case-insensitively, and never touches
-// an entry it cannot match.
+// backfill stamps ChannelID onto every cfg.Streamers entry by matching a
+// resolved login->ChannelID map case-insensitively, and never touches an
+// entry it cannot match.
 func TestBackfillChannelIDs_MatchesByCurrentLoginCaseInsensitive(t *testing.T) {
 	cfg := &config.Config{Streamers: []config.StreamerConfig{
 		{Username: "Alpha"},
 		{Username: "unresolved"},
 	}}
-	roster := []*models.Streamer{
-		models.NewStreamer("alpha", models.DefaultStreamerSettings()),
-	}
-	roster[0].ChannelID = "id-alpha"
+	resolved := map[string]string{"alpha": "id-alpha"}
 
-	backfillChannelIDs(cfg, roster)
+	backfillChannelIDs(cfg, resolved)
 
 	if cfg.Streamers[0].ChannelID != "id-alpha" {
 		t.Errorf("ChannelID = %q, want id-alpha", cfg.Streamers[0].ChannelID)
@@ -143,68 +138,38 @@ func TestBackfillChannelIDs_MatchesByCurrentLoginCaseInsensitive(t *testing.T) {
 	}
 }
 
-// fakeRenameAnalytics records RenameStreamer calls for
-// migrateRenamesToPersistence's unit tests, optionally returning a
-// pre-programmed error to exercise the conflict-tolerant path.
-type fakeRenameAnalytics struct {
-	mu    sync.Mutex
-	calls []struct{ old, new string }
-	err   error
-}
+// TestBackfillChannelIDs_NeverOverwritesNonEmpty pins BKM-006 Corrective Pass
+// 1, C1: a persisted, non-empty ChannelID is an expected immutable identity —
+// backfillChannelIDs must never overwrite it, even with a DIFFERENT resolved
+// value (that mismatch is streamer.Manager's job to refuse as a conflict, not
+// something this best-effort stamping function silently papers over).
+func TestBackfillChannelIDs_NeverOverwritesNonEmpty(t *testing.T) {
+	cfg := &config.Config{Streamers: []config.StreamerConfig{
+		{Username: "alpha", ChannelID: "id-original"},
+	}}
+	resolved := map[string]string{"alpha": "id-different"}
 
-func (f *fakeRenameAnalytics) RenameStreamer(oldName, newName string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, struct{ old, new string }{oldName, newName})
-	return f.err
-}
+	backfillChannelIDs(cfg, resolved)
 
-// TestMigrateRenamesToPersistence_CallsAnalyticsOncePerEvent proves the
-// straightforward wiring: exactly one RenameStreamer call per RenameEvent,
-// with the correct old/new logins.
-func TestMigrateRenamesToPersistence_CallsAnalyticsOncePerEvent(t *testing.T) {
-	fa := &fakeRenameAnalytics{}
-	m := &Miner{}
-	m.migrateRenamesToPersistence([]streamer.RenameEvent{
-		{OldLogin: "a-old", NewLogin: "a-new", ChannelID: "id-a"},
-		{OldLogin: "b-old", NewLogin: "b-new", ChannelID: "id-b"},
-	}, fa)
-
-	if len(fa.calls) != 2 {
-		t.Fatalf("RenameStreamer called %d times, want 2", len(fa.calls))
-	}
-	if fa.calls[0].old != "a-old" || fa.calls[0].new != "a-new" {
-		t.Errorf("call 0 = %+v", fa.calls[0])
-	}
-	if fa.calls[1].old != "b-old" || fa.calls[1].new != "b-new" {
-		t.Errorf("call 1 = %+v", fa.calls[1])
+	if cfg.Streamers[0].ChannelID != "id-original" {
+		t.Errorf("ChannelID = %q, want id-original (must never be overwritten)", cfg.Streamers[0].ChannelID)
 	}
 }
 
-// TestMigrateRenamesToPersistence_ConflictIsNonFatal: an analytics rename
-// conflict must be tolerated (logged, not propagated/panicked) — it must
-// never abort processing of the remaining rename events.
-func TestMigrateRenamesToPersistence_ConflictIsNonFatal(t *testing.T) {
-	fa := &fakeRenameAnalytics{err: errors.New("simulated conflict")}
-	m := &Miner{}
-
-	// Must not panic and must still process both events.
-	m.migrateRenamesToPersistence([]streamer.RenameEvent{
-		{OldLogin: "a-old", NewLogin: "a-new", ChannelID: "id-a"},
-		{OldLogin: "b-old", NewLogin: "b-new", ChannelID: "id-b"},
-	}, fa)
-
-	if len(fa.calls) != 2 {
-		t.Fatalf("RenameStreamer called %d times despite the first conflict, want 2 (never aborts the batch)", len(fa.calls))
+// TestChannelIDsByLogin_SkipsUnresolvedAndLowercases proves the
+// roster->map adapter backfillChannelIDs' non-plan (legacy) callers use.
+func TestChannelIDsByLogin_SkipsUnresolvedAndLowercases(t *testing.T) {
+	roster := []*models.Streamer{
+		models.NewStreamer("Alpha", models.DefaultStreamerSettings()),
+		models.NewStreamer("noid", models.DefaultStreamerSettings()),
 	}
-}
+	roster[0].ChannelID = "id-alpha"
 
-// TestMigrateRenamesToPersistence_NilAnalyticsService: a nil analytics
-// service (analytics disabled/unavailable) must not panic — only the
-// privacy-safe log line is emitted.
-func TestMigrateRenamesToPersistence_NilAnalyticsService(t *testing.T) {
-	m := &Miner{}
-	m.migrateRenamesToPersistence([]streamer.RenameEvent{
-		{OldLogin: "a-old", NewLogin: "a-new", ChannelID: "id-a"},
-	}, nil)
+	got := channelIDsByLogin(roster)
+	if got["alpha"] != "id-alpha" {
+		t.Errorf("channelIDsByLogin[alpha] = %q, want id-alpha", got["alpha"])
+	}
+	if _, ok := got["noid"]; ok {
+		t.Error("an unresolved streamer (empty ChannelID) must not appear in the map")
+	}
 }

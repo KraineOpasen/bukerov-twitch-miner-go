@@ -89,6 +89,19 @@ type AnalyticsUIConfig struct {
 type StreamerConfig struct {
 	Username string                  `json:"username"`
 	Settings *StreamerSettingsConfig `json:"settings,omitempty"`
+
+	// ChannelID mirrors config.StreamerConfig.ChannelID: the persisted,
+	// EXPECTED IMMUTABLE Twitch channel identity behind Username (BKM-006
+	// Corrective Pass 1, C1). It is carried through BuildRuntimeSettings so a
+	// Username-edit round-trip (the Settings page posting an edited login)
+	// preserves it — reconciliation reads it back as the expected identity,
+	// so a login now resolving to a DIFFERENT channel is a refused conflict,
+	// never a silent overwrite. A client cannot use this field to HIJACK an
+	// identity by posting an arbitrary value: ApplyToConfig copies it through
+	// verbatim, but the reconciler treats any mismatch against Twitch's own
+	// resolution as a fail-closed conflict, never an adoption. Not meant to
+	// be edited directly; the Settings UI treats it as opaque/hidden.
+	ChannelID string `json:"channelId,omitempty"`
 }
 
 // StreamerSettingsConfig is a partial override for a streamer's settings.

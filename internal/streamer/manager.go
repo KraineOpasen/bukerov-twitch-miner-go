@@ -137,6 +137,19 @@ const (
 	// ChannelID. Fail closed: no overwrite, no deletion, no history move —
 	// the already-tracked identity keeps its login ("stored ID wins").
 	ConflictLoginCollision ConflictKind = "login_collision"
+	// ConflictStoredChannelIDMismatch (BKM-006 Corrective Pass 1, C1): a
+	// config entry carries a non-empty, PERSISTED ChannelID (the identity
+	// this exact entry was bound to on a previous successful reconcile), but
+	// its configured login now resolves to a DIFFERENT ChannelID. The stored
+	// identity is an EXPECTED, immutable anchor, not a hint — the freshly
+	// resolved (foreign) identity is never adopted: no streamer is added or
+	// renamed for it, no existing streamer is overwritten, and no analytics
+	// or config mutation of any kind happens for this entry. This is the
+	// cold-restart counterpart of ConflictLoginCollision (which only ever
+	// fires once byID/byLogin are already populated in-process); this kind
+	// fires even from an EMPTY manager, because the expectation is read from
+	// the config entry itself rather than from other tracked streamers.
+	ConflictStoredChannelIDMismatch ConflictKind = "stored_channel_id_mismatch"
 )
 
 // ReconcileConflict is a privacy-safe (logins + ChannelID only — never a
@@ -157,6 +170,9 @@ func (c ReconcileConflict) Error() string {
 	case ConflictLoginCollision:
 		return fmt.Sprintf("streamer reconciliation conflict: login binding for channel %s collides with an existing different channel (%v); identity retained",
 			c.ChannelID, c.Logins)
+	case ConflictStoredChannelIDMismatch:
+		return fmt.Sprintf("streamer reconciliation conflict: login %v now resolves to channel %s, which differs from its persisted stable identity; refusing to adopt the foreign identity",
+			c.Logins, c.ChannelID)
 	default:
 		return fmt.Sprintf("streamer reconciliation conflict (channel %s)", c.ChannelID)
 	}
@@ -171,6 +187,12 @@ type resolvedEntry struct {
 	settings models.StreamerSettings
 	id       string
 	err      error
+	// expectedID is the config entry's PERSISTED ChannelID (config.StreamerConfig.ChannelID),
+	// trimmed. Empty means "no expectation yet" (first-bind path). Non-empty
+	// is an EXPECTED IMMUTABLE identity (BKM-006 Corrective Pass 1, C1): if
+	// the freshly resolved id differs, the entry is a conflict, never a hint
+	// to overwrite.
+	expectedID string
 }
 
 // resolveConfigs performs Phase A of the ID-first reconciliation: it resolves
@@ -206,21 +228,112 @@ func (m *Manager) resolveConfigs(configs []config.StreamerConfig, defaults model
 					"username", login, "error", err)
 			}
 		}
-		out = append(out, resolvedEntry{login: login, settings: effective, id: id, err: err})
+		out = append(out, resolvedEntry{
+			login:      login,
+			settings:   effective,
+			id:         id,
+			err:        err,
+			expectedID: strings.TrimSpace(sc.ChannelID),
+		})
 	}
 	return out
 }
 
-// reconcile is the shared ID-first reconciliation core for both
-// LoadFromConfig (initial, empty roster) and ApplySettings (runtime,
-// existing roster). It resolves every config entry's stable ChannelID
-// (Phase A, unlocked), then groups the survivors by ChannelID and applies the
-// plan under mu (Phase B): rename-in-place, settings update, coalesce of
-// duplicate entries with identical settings, typed conflict on duplicate
-// entries with differing settings or a canonical-login collision, add, and
-// remove. LoadChannelPointsContext for genuinely new streamers runs in
-// Phase C, again unlocked.
-func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.StreamerSettings, onProgress ProgressCallback) (added, removed []*models.Streamer, changed []SettingsChange, renamed []RenameEvent, conflicts []ReconcileConflict) {
+// planStepKind classifies one ReconcilePlan step.
+type planStepKind int
+
+const (
+	// planStepAdd: no streamer is currently tracked for this ChannelID; a new
+	// one will be created.
+	planStepAdd planStepKind = iota
+	// planStepUpdate: an EXISTING tracked streamer (matched by ChannelID) will
+	// be updated in place — a login rename (if canonicalLogin differs from its
+	// current login, guarded by the CAS obs) and/or a settings replacement.
+	planStepUpdate
+)
+
+// planStep is one immutable, already-decided reconciliation action, computed
+// by PlanReconcile under a read lock with no mutation, replayed verbatim by
+// CommitPlan under the write lock.
+type planStep struct {
+	kind           planStepKind
+	channelID      string
+	canonicalLogin string
+	effective      models.StreamerSettings
+	// tracked is non-nil only for planStepUpdate.
+	tracked *models.Streamer
+	// obs is the login-observation generation captured for tracked at PLAN
+	// time (BKM-006 I12) — CommitPlan passes it to RenameIfCurrent unchanged,
+	// so a rename decided from a stale/slow resolution can still be
+	// recognized as superseded by a newer one and discarded rather than
+	// rolling anything back.
+	obs uint64
+	// dupLogins is set (len > 1) when more than one config entry coalesced
+	// into this single step, for the diagnostic "reconciled duplicate config
+	// entries" log line CommitPlan emits.
+	dupLogins []string
+}
+
+// ReconcilePlan is the immutable result of PlanReconcile: everything
+// CommitPlan will do to reconcile the roster, decided under a read lock from
+// a Phase-A resolution that ran fully unlocked — but with NO mutation of the
+// manager or any streamer applied yet (BeginLoginObservation is the sole
+// exception: it must run before Phase A per I12, and is a self-contained
+// per-streamer generation bump that decides nothing by itself). A caller may
+// discard a plan without any side effect ever having occurred. This is what
+// lets the miner's rename coordinator preflight durable persistence
+// (analytics history migration, config.json) BEFORE committing an identity
+// change to the live runtime (BKM-006 Corrective Pass 1, C2).
+type ReconcilePlan struct {
+	steps     []planStep
+	conflicts []ReconcileConflict
+	// survivors are currently-tracked streamers that CommitPlan's removal
+	// sweep must keep even though they own no planStep this cycle (a
+	// conflict, or an unresolved entry, that still names them).
+	survivors map[*models.Streamer]bool
+}
+
+// PlannedRenames returns every login rename this plan intends to commit, by
+// re-reading each planStepUpdate's tracked streamer's CURRENT login at call
+// time (not a value cached during planning) — self-correcting if the
+// streamer already changed login by some other means between PlanReconcile
+// and this call. A caller (the miner's rename coordinator) uses this to
+// preflight durable persistence BEFORE any runtime mutation occurs.
+func (p *ReconcilePlan) PlannedRenames() []RenameEvent {
+	var out []RenameEvent
+	for _, step := range p.steps {
+		if step.kind != planStepUpdate {
+			continue
+		}
+		if current := step.tracked.GetUsername(); current != step.canonicalLogin {
+			out = append(out, RenameEvent{
+				Streamer: step.tracked, OldLogin: current, NewLogin: step.canonicalLogin, ChannelID: step.channelID,
+			})
+		}
+	}
+	return out
+}
+
+// ResolvedChannelIDs returns the stable ChannelID resolved for every entry
+// this plan will track after CommitPlan (added and updated), keyed by the
+// CANONICAL (lowercase) login CommitPlan will assign it. The miner's rename
+// coordinator uses this to stamp config.json's ChannelID fields from the SAME
+// resolution the durable persist step is about to save, entirely before any
+// runtime mutation.
+func (p *ReconcilePlan) ResolvedChannelIDs() map[string]string {
+	out := make(map[string]string, len(p.steps))
+	for _, step := range p.steps {
+		out[step.canonicalLogin] = step.channelID
+	}
+	return out
+}
+
+// PlanReconcile performs Phase A (resolve every config entry's stable
+// ChannelID, unlocked) and Phase B's DECISION-MAKING ONLY (grouping,
+// conflict detection, add-vs-update classification) under a read lock — with
+// NO mutation of the manager or any streamer. See ReconcilePlan's doc comment
+// for why this split exists.
+func (m *Manager) PlanReconcile(configs []config.StreamerConfig, defaults models.StreamerSettings, onProgress ProgressCallback) *ReconcilePlan {
 	// Stamp a login-observation generation for every currently-tracked
 	// streamer BEFORE any Phase A I/O (I12): a rename decision computed from
 	// THIS call's (possibly slow) resolution can then be recognized as stale
@@ -236,9 +349,11 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 
 	entries := m.resolveConfigs(configs, defaults, onProgress)
 
-	m.mu.Lock()
+	plan := &ReconcilePlan{survivors: make(map[*models.Streamer]bool)}
 
-	survivors := make(map[*models.Streamer]bool)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	groups := make(map[string][]resolvedEntry)
 	var order []string
 
@@ -246,9 +361,37 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 		if e.err != nil {
 			// Unresolved this cycle (transient/PQNF/unknown): keep any
 			// already-tracked streamer under that exact login untouched. Never
-			// delete, never rename, never fabricate an identity.
+			// delete, never rename, never fabricate an identity. If the login
+			// lookup misses (e.g. the tracked streamer's current login already
+			// diverged from this stale config entry) but a persisted ChannelID
+			// still names it, fall back to the ID lookup — same fail-closed
+			// "keep whatever is already tracked" intent (C1).
 			if s := m.byLogin[e.login]; s != nil {
-				survivors[s] = true
+				plan.survivors[s] = true
+			} else if e.expectedID != "" {
+				if s := m.byID[e.expectedID]; s != nil {
+					plan.survivors[s] = true
+				}
+			}
+			continue
+		}
+		if e.expectedID != "" && e.expectedID != e.id {
+			// BKM-006 Corrective Pass 1, C1: the persisted ChannelID is an
+			// EXPECTED IMMUTABLE identity, not a hint. A freshly resolved id
+			// that differs is a foreign broadcaster — never adopted, never
+			// overwritten. No add, no rename, no settings change, no analytics
+			// or config mutation for this entry; whatever is ALREADY tracked
+			// under the stored id (if anything, e.g. not on a cold restart) is
+			// kept untouched.
+			plan.conflicts = append(plan.conflicts, ReconcileConflict{
+				Kind:      ConflictStoredChannelIDMismatch,
+				ChannelID: e.expectedID,
+				Logins:    []string{e.login},
+			})
+			slog.Warn("Streamer reconciliation conflict: configured login now resolves to a DIFFERENT channel than its persisted stable identity; refusing to adopt the foreign identity",
+				"login", e.login, "storedChannelID", e.expectedID, "resolvedChannelID", e.id)
+			if s := m.byID[e.expectedID]; s != nil {
+				plan.survivors[s] = true
 			}
 			continue
 		}
@@ -257,8 +400,6 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 		}
 		groups[e.id] = append(groups[e.id], e)
 	}
-
-	var addedStreamers []*models.Streamer
 
 	for _, id := range order {
 		grp := groups[id]
@@ -274,7 +415,7 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 				}
 			}
 			if !allEqual {
-				conflicts = append(conflicts, ReconcileConflict{
+				plan.conflicts = append(plan.conflicts, ReconcileConflict{
 					Kind:      ConflictDuplicateSettings,
 					ChannelID: id,
 					Logins:    loginsOf(grp),
@@ -282,7 +423,7 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 				slog.Warn("Streamer reconciliation conflict: same channel configured more than once with different settings; none applied",
 					"channelID", id, "logins", loginsOf(grp))
 				if s := m.byID[id]; s != nil {
-					survivors[s] = true
+					plan.survivors[s] = true
 				}
 				continue
 			}
@@ -309,30 +450,24 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 				// login was claimed by this conflicting entry instead), so it
 				// must be marked a survivor explicitly or the removal scan
 				// below would delete it merely for being untouched.
-				conflicts = append(conflicts, ReconcileConflict{
+				plan.conflicts = append(plan.conflicts, ReconcileConflict{
 					Kind:      ConflictLoginCollision,
 					ChannelID: id,
 					Logins:    []string{canonicalLogin, owner.GetUsername()},
 				})
 				slog.Warn("Streamer reconciliation conflict: configured login already resolves to a different tracked channel; skipping",
 					"login", canonicalLogin, "channelID", id, "existingChannelID", owner.ChannelID)
-				survivors[owner] = true
+				plan.survivors[owner] = true
 				continue
 			}
 
-			s := models.NewStreamer(canonicalLogin, effective)
-			m.hydrateStreak(s)
-			s.ChannelID = id
-			m.byID[id] = s
-			m.byLogin[canonicalLogin] = s
-			survivors[s] = true
-			addedStreamers = append(addedStreamers, s)
-			added = append(added, s)
-			slog.Info("Added new streamer", "username", canonicalLogin, "channelID", id)
+			var dup []string
 			if len(grp) > 1 {
-				slog.Info("Reconciled duplicate config entries for one channel",
-					"channelID", id, "logins", loginsOf(grp), "canonicalLogin", canonicalLogin)
+				dup = loginsOf(grp)
 			}
+			plan.steps = append(plan.steps, planStep{
+				kind: planStepAdd, channelID: id, canonicalLogin: canonicalLogin, effective: effective, dupLogins: dup,
+			})
 			continue
 		}
 
@@ -340,30 +475,67 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 			// owner's own ChannelID also never appeared in this cycle's
 			// resolved groups (its login was claimed by this entry instead) —
 			// mark it a survivor too so it is not incidentally removed.
-			conflicts = append(conflicts, ReconcileConflict{
+			plan.conflicts = append(plan.conflicts, ReconcileConflict{
 				Kind:      ConflictLoginCollision,
 				ChannelID: id,
 				Logins:    []string{canonicalLogin, owner.GetUsername()},
 			})
 			slog.Warn("Streamer reconciliation conflict: configured login already resolves to a different tracked channel; identity retained",
 				"login", canonicalLogin, "channelID", id, "existingLogin", tracked.GetUsername())
-			survivors[tracked] = true
-			survivors[owner] = true
+			plan.survivors[tracked] = true
+			plan.survivors[owner] = true
 			continue
 		}
 
+		obs, ok := obsSnapshot[tracked]
+		if !ok {
+			obs = tracked.BeginLoginObservation()
+		}
+		var dup []string
+		if len(grp) > 1 {
+			dup = loginsOf(grp)
+		}
+		plan.steps = append(plan.steps, planStep{
+			kind: planStepUpdate, channelID: id, canonicalLogin: canonicalLogin, effective: effective,
+			tracked: tracked, obs: obs, dupLogins: dup,
+		})
+		plan.survivors[tracked] = true
+	}
+
+	return plan
+}
+
+// CommitPlan applies a plan PlanReconcile computed: creates streamers for
+// every planStepAdd, renames/updates settings for every planStepUpdate (a
+// rename is still guarded by the CAS obs captured at plan time — I12 — so a
+// commit that lost a race with a newer reconciliation is discarded rather
+// than rolling anything back), and removes every currently-tracked streamer
+// the plan's survivor set does not name. Defensively re-checks byID/byLogin
+// at commit time before creating a NEW streamer for a planStepAdd: if the
+// manager and this plan were NOT serialized by an external lock (the
+// production miner's rename coordinator does serialize them; see
+// applySettings) and something else raced a create for the same ChannelID in
+// between, this falls back to updating the already-created streamer instead
+// of ever tracking two runtime objects for one immutable identity.
+// LoadChannelPointsContext for genuinely new streamers runs in Phase C,
+// unlocked, exactly as before this pass' PlanReconcile/CommitPlan split.
+func (m *Manager) CommitPlan(plan *ReconcilePlan) (added, removed []*models.Streamer, changed []SettingsChange, renamed []RenameEvent, conflicts []ReconcileConflict) {
+	conflicts = plan.conflicts
+	survivors := plan.survivors
+
+	m.mu.Lock()
+
+	var addedStreamers []*models.Streamer
+
+	applyUpdate := func(tracked *models.Streamer, channelID, canonicalLogin string, effective models.StreamerSettings, obs uint64) {
 		oldLogin := tracked.GetUsername()
 		if oldLogin != canonicalLogin {
-			obs, ok := obsSnapshot[tracked]
-			if !ok {
-				obs = tracked.BeginLoginObservation()
-			}
 			if tracked.RenameIfCurrent(canonicalLogin, obs) {
 				delete(m.byLogin, oldLogin)
 				m.byLogin[canonicalLogin] = tracked
-				renamed = append(renamed, RenameEvent{Streamer: tracked, OldLogin: oldLogin, NewLogin: canonicalLogin, ChannelID: id})
+				renamed = append(renamed, RenameEvent{Streamer: tracked, OldLogin: oldLogin, NewLogin: canonicalLogin, ChannelID: channelID})
 				slog.Debug("Reconciled streamer rename by stable channel ID in place",
-					"channelID", id, "newLogin", canonicalLogin)
+					"channelID", channelID, "newLogin", canonicalLogin)
 			} else {
 				// A newer apply already renamed this streamer; resync the
 				// index to its actual current login instead of clobbering it.
@@ -371,17 +543,59 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 				m.byLogin[actual] = tracked
 			}
 		}
-		if len(grp) > 1 {
-			slog.Info("Reconciled duplicate config entries for one channel",
-				"channelID", id, "logins", loginsOf(grp), "canonicalLogin", canonicalLogin)
-		}
-
 		old := tracked.GetSettings()
 		if !settingsEqual(old, effective) {
 			tracked.SetSettings(effective)
 			changed = append(changed, SettingsChange{Streamer: tracked, Old: old, New: effective})
 		}
 		survivors[tracked] = true
+	}
+
+	for _, step := range plan.steps {
+		switch step.kind {
+		case planStepAdd:
+			if tracked := m.byID[step.channelID]; tracked != nil {
+				// Raced with another commit since planning; see doc comment.
+				if owner := m.byLogin[step.canonicalLogin]; owner != nil && owner != tracked {
+					conflicts = append(conflicts, ReconcileConflict{
+						Kind: ConflictLoginCollision, ChannelID: step.channelID,
+						Logins: []string{step.canonicalLogin, owner.GetUsername()},
+					})
+					survivors[tracked] = true
+					survivors[owner] = true
+					continue
+				}
+				applyUpdate(tracked, step.channelID, step.canonicalLogin, step.effective, tracked.BeginLoginObservation())
+				continue
+			}
+			if owner := m.byLogin[step.canonicalLogin]; owner != nil {
+				conflicts = append(conflicts, ReconcileConflict{
+					Kind: ConflictLoginCollision, ChannelID: step.channelID,
+					Logins: []string{step.canonicalLogin, owner.GetUsername()},
+				})
+				survivors[owner] = true
+				continue
+			}
+			s := models.NewStreamer(step.canonicalLogin, step.effective)
+			m.hydrateStreak(s)
+			s.ChannelID = step.channelID
+			m.byID[step.channelID] = s
+			m.byLogin[step.canonicalLogin] = s
+			survivors[s] = true
+			addedStreamers = append(addedStreamers, s)
+			added = append(added, s)
+			slog.Info("Added new streamer", "username", step.canonicalLogin, "channelID", step.channelID)
+			if len(step.dupLogins) > 1 {
+				slog.Info("Reconciled duplicate config entries for one channel",
+					"channelID", step.channelID, "logins", step.dupLogins, "canonicalLogin", step.canonicalLogin)
+			}
+		case planStepUpdate:
+			applyUpdate(step.tracked, step.channelID, step.canonicalLogin, step.effective, step.obs)
+			if len(step.dupLogins) > 1 {
+				slog.Info("Reconciled duplicate config entries for one channel",
+					"channelID", step.channelID, "logins", step.dupLogins, "canonicalLogin", step.canonicalLogin)
+			}
+		}
 	}
 
 	var kept []*models.Streamer
@@ -415,6 +629,19 @@ func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.Str
 	}
 
 	return added, removed, changed, renamed, conflicts
+}
+
+// reconcile is the shared ID-first reconciliation core for both
+// LoadFromConfig (initial, empty roster) and the LEGACY (non-rename-coordinator)
+// ApplySettings entry point: it composes PlanReconcile immediately followed by
+// CommitPlan, preserving the exact external behavior this function always had.
+// Callers that need to preflight durable persistence BEFORE committing a
+// runtime mutation (the miner's rename coordinator, BKM-006 Corrective Pass 1
+// C2) must call PlanReconcile and CommitPlan directly instead, with their own
+// work in between.
+func (m *Manager) reconcile(configs []config.StreamerConfig, defaults models.StreamerSettings, onProgress ProgressCallback) (added, removed []*models.Streamer, changed []SettingsChange, renamed []RenameEvent, conflicts []ReconcileConflict) {
+	plan := m.PlanReconcile(configs, defaults, onProgress)
+	return m.CommitPlan(plan)
 }
 
 // loginsOf extracts the logins of a resolvedEntry group for a privacy-safe

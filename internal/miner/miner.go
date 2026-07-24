@@ -125,6 +125,17 @@ type Miner struct {
 
 	mu sync.RWMutex
 
+	// coordinatorMu serializes the WHOLE fail-closed settings-apply pipeline
+	// (BKM-006 Corrective Pass 1, C2): resolve+plan, durable persist
+	// (analytics + config.json) for any rename, and the runtime commit. It is
+	// acquired BEFORE mu (lock order: coordinatorMu -> mu -> streamer.Manager.mu
+	// -> models.Streamer.mu) and held across the durable-persist I/O — but mu,
+	// manager.mu, and streamer.mu are never held during that I/O — so two
+	// concurrent settings applies (e.g. two dashboard tabs) can never
+	// interleave their durable-persist steps and leave the runtime, config
+	// file, and analytics history disagreeing about a streamer's identity.
+	coordinatorMu sync.Mutex
+
 	// importMu serializes the read-modify-write in ImportStreamers so two
 	// concurrent imports can't both read the pre-write snapshot and lose one
 	// another's additions. GetRuntimeSettings (RLock) and ApplySettings (Lock)
@@ -240,7 +251,7 @@ func (m *Miner) initialize() error {
 		return fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
-	m.dbBasePath = filepath.Join("database", m.config.Username)
+	m.dbBasePath = filepath.Join("database", m.config.StorageKey())
 
 	// cmd/miner injects the DB via SetDatabase and keeps ownership (its
 	// deferred Close runs after stop()). Opening here is the library-use
@@ -260,10 +271,20 @@ func (m *Miner) initialize() error {
 func (m *Miner) authenticate(ctx context.Context) error {
 	slog.Info("Authenticating with Twitch")
 
-	m.auth = auth.NewTwitchAuth(m.config.Username, m.deviceID)
+	// Auth dials cookies/credentials under the STABLE storage key (COR-2), not
+	// the mutable canonical login — so a renamed owner keeps loading the same
+	// credential file. StorageKey() == config.Username until the first rename.
+	m.auth = auth.NewTwitchAuth(m.config.StorageKey(), m.deviceID)
 	// Recovery-owner work (refresh, device-flow polling) is bounded by the run
 	// context, not by whichever rejected request happened to trigger it.
 	m.auth.SetLifecycleContext(ctx)
+	// BKM-006 Corrective Pass 1, C3: pin the trusted owner identity BEFORE
+	// Login, so a renamed owner (same Twitch account, new login) is tolerated
+	// on this and every future restart with no fresh Device Flow — config.Username
+	// stays the stable profile/cookie/db/log storage key regardless. Empty
+	// when no pin is configured yet, which preserves the exact legacy
+	// login-anchor behavior (BKM-005).
+	m.auth.SetExpectedUserID(m.config.OwnerUserID)
 
 	if m.webServer != nil {
 		broadcaster := m.webServer.GetStatusBroadcaster()
@@ -283,6 +304,43 @@ func (m *Miner) authenticate(ctx context.Context) error {
 
 	if err := m.auth.Login(ctx); err != nil {
 		return err
+	}
+
+	// BKM-006 Corrective Pass 1 (C3 + COR-2): after a confirmed Login, reconcile
+	// the persisted owner identity — in one save.
+	//
+	// (a) COR-2 canonical-login adoption: the authoritative validate reports the
+	//     account's CURRENT Twitch login (GetCanonicalLogin, only ever a login
+	//     that already passed the identity check — never foreign). If it differs
+	//     from config.Username, the owner was renamed: pin ProfileKey to the
+	//     pre-rename login FIRST (so cookies/db/logs stay under the key they were
+	//     created with), then adopt the new canonical login into config.Username
+	//     so every Twitch-/user-facing use (owner channel-ID resolution, IRC
+	//     NICK, notifications, dashboard) tracks the new name. Storage never
+	//     follows the mutable login.
+	// (b) C3 owner-pin backfill: userIDAuthoritative resets to false on every
+	//     fresh process start, so IsUserIDConfirmed() here means THIS Login
+	//     authoritatively confirmed the identity; with no pin configured,
+	//     applyValidation's legacy anchor required the login to have matched (a
+	//     mismatch would have failed closed to a fresh Device Flow), so the
+	//     confirmation is trustworthy. Fires once, then persists.
+	//
+	// A SaveConfig failure is logged, not fatal: both are re-attempted on the
+	// next restart until they persist (and the pin then makes every future
+	// restart rename-tolerant).
+	oldLogin := m.config.Username
+	res := reconcileOwnerIdentity(m.config, m.auth.GetCanonicalLogin(), m.auth.GetUserID(), m.auth.IsUserIDConfirmed())
+	if res.renamed {
+		slog.Info("Owner Twitch login changed; adopting the new canonical login (storage key unchanged)",
+			"oldLogin", oldLogin, "newLogin", m.config.Username)
+	}
+	if res.pinned {
+		slog.Info("Pinned the Twitch owner identity for rename-tolerant startups")
+	}
+	if res.changed() && m.configPath != "" {
+		if err := config.SaveConfig(m.configPath, m.config); err != nil {
+			slog.Warn("Failed to persist owner-identity reconciliation; will retry on the next restart", "error", err)
+		}
 	}
 
 	m.client = api.NewTwitchClient(m.auth, m.deviceID)
@@ -337,8 +395,10 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		if lookupErr != nil && !errors.Is(lookupErr, api.ErrStreamerDoesNotExist) {
 			return fmt.Errorf("failed to get user ID: %w", err)
 		}
+		// The credential file is keyed by the stable StorageKey() (COR-2), which
+		// can differ from the (mutable) canonical login shown for context.
 		return fmt.Errorf("%w: session/profile identity binding failed for %q; remove cookies/%s.json or fix the configured username",
-			err, m.config.Username, m.config.Username)
+			err, m.config.Username, m.config.StorageKey())
 	}
 	if staleLogin {
 		slog.Warn("Configured username appears to have been renamed on Twitch; proceeding with the validated session identity",
@@ -674,7 +734,7 @@ func (m *Miner) startMining(ctx context.Context) {
 	if m.config.Debug.Enabled {
 		logPath := ""
 		if m.config.Logger.Save {
-			logPath = logger.LogFilePath(m.config.Username)
+			logPath = logger.LogFilePath(m.config.StorageKey())
 		}
 		m.debugServer = debug.NewServer(m.config.Debug.Port, m.BuildDebugSnapshot, logPath)
 		if err := m.debugServer.Start(); err != nil {
@@ -1401,38 +1461,189 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 	return settings.BuildDefaultSettings(currentStreamers)
 }
 
+// ApplySettings applies posted runtime settings. It satisfies
+// settings.SettingsUpdateCallback (no return value), so it is a thin,
+// backward-compatible wrapper over applySettings for every existing caller
+// that cannot observe an error (the web server's settings POST handler,
+// ImportStreamers, and most tests): a failed apply is logged, never silently
+// swallowed, and — BKM-006 Corrective Pass 1, C2 — never followed by a
+// misleading "Runtime settings updated" success log, since that log lives
+// only on applySettings' success path. Callers that need to know whether the
+// apply actually committed should call applySettings directly.
 func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
-	m.mu.Lock()
+	if err := m.applySettings(s); err != nil {
+		slog.Error("Settings apply failed; no runtime, config, analytics, or capability state was changed for the affected streamer(s)",
+			"error", err)
+	}
+}
 
+// applySettings is the fail-closed settings-apply coordinator (BKM-006
+// Corrective Pass 1, C2). It resolves the intended streamer roster ONCE
+// (streamer.Manager.PlanReconcile: Twitch resolution unlocked, then a
+// read-locked, non-mutating decision pass) and reuses that SAME plan for
+// whichever path below applies, so Twitch is never queried twice for one
+// apply:
+//
+//   - No rename planned: every other settings field applies directly to the
+//     live config — today's behavior, unchanged (a SaveConfig failure here is
+//     logged and non-fatal, exactly as before this pass, since no non-rename
+//     change can split runtime/config/analytics identity across two owners).
+//   - At least one rename planned: the whole apply becomes a single
+//     transaction. A CANDIDATE config is built and the live config is NEVER
+//     mutated until durable persistence succeeds; the durable stores
+//     (analytics history, then config.json) are committed in order with
+//     compensation on a later failure (commitRenameTransaction); only after
+//     that succeeds is the plan committed to the runtime
+//     (streamer.Manager.CommitPlan) and published as the live config. Any
+//     failure before that point leaves the runtime, in-memory config,
+//     on-disk config, analytics, IRC, and PubSub completely untouched.
+//
+// The whole sequence is serialized by coordinatorMu (lock order:
+// coordinatorMu -> m.mu -> streamer.Manager.mu -> models.Streamer.mu; no
+// Twitch/DB/file I/O ever runs under m.mu, manager.mu, or streamer.mu).
+func (m *Miner) applySettings(s settings.RuntimeSettings) error {
+	m.coordinatorMu.Lock()
+	defer m.coordinatorMu.Unlock()
+
+	streamersCfg := settings.StreamersFromDTO(s.Streamers)
+	defaultSettings := settings.StreamerSettingsFromDTO(s.DefaultSettings)
+	plan := m.streamers.PlanReconcile(streamersCfg, defaultSettings, nil)
+
+	if plannedRenames := plan.PlannedRenames(); len(plannedRenames) > 0 {
+		return m.applySettingsWithRename(s, plan, plannedRenames)
+	}
+	return m.applySettingsNoRename(s, plan)
+}
+
+// applySettingsNoRename is the non-identity-mutating path: every posted
+// setting (including the resolved streamer roster) applies directly to the
+// live config, exactly as ApplySettings always did before this pass.
+func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan) error {
+	m.mu.Lock()
 	oldDiscordEnabled := m.config.Discord.Enabled
 	settings.ApplyToConfig(m.config, s)
+	cfg := m.config
+	m.mu.Unlock()
+
+	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
+	logReconcileConflicts(conflicts)
+	m.finishApply(cfg, added, removed, changed, renamed, oldDiscordEnabled, false)
+	return nil
+}
+
+// applySettingsWithRename is the fail-closed transaction path (C2): builds a
+// candidate config independent of the live one, durably persists analytics +
+// config.json for the planned rename(s) BEFORE any runtime mutation, and only
+// on success commits the plan to the runtime and publishes the candidate as
+// the live config. Returns a typed error with ZERO mutation of runtime,
+// in-memory config, config file, analytics, IRC, or PubSub on any failure.
+func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan, plannedRenames []streamer.RenameEvent) error {
+	m.mu.Lock()
+	oldDiscordEnabled := m.config.Discord.Enabled
+	candidate := m.cloneConfigLocked()
+	configPath := m.configPath
+	analyticsSvc := m.analyticsSvc
+	m.mu.Unlock()
+
+	settings.ApplyToConfig(candidate, s)
+	// Config surgery for each planned rename: update the entry's Username in
+	// place (settings pointer untouched) and stamp ChannelID, then backfill
+	// ChannelID onto every OTHER entry from this SAME plan's resolution — all
+	// on the candidate, still before any durable or runtime commit.
+	applyConfigRenames(candidate, plannedRenames)
+	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
+
+	// analyticsSvc is passed only when non-nil: assigning a nil
+	// *analytics.Service to the renameAnalyticsService interface would
+	// otherwise produce a non-nil interface wrapping a nil pointer.
+	var svc renameAnalyticsService
+	if analyticsSvc != nil {
+		svc = analyticsSvc
+	}
+	if err := commitRenameTransaction(configPath, candidate, plannedRenames, svc); err != nil {
+		return fmt.Errorf("rename transaction aborted: %w", err)
+	}
+
+	// Durable stores now agree with `candidate`. Commit the runtime and
+	// publish it as the live config.
+	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
+	logReconcileConflicts(conflicts)
+	m.finishApply(candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
+	return nil
+}
+
+// logReconcileConflicts emits the same summary warning
+// streamer.Manager.ApplySettings always logged for each reconciliation
+// conflict CommitPlan reports (duplicate settings, a login collision, or a
+// C1 stored-ChannelID mismatch) — the miner's coordinator calls
+// PlanReconcile/CommitPlan directly rather than through that wrapper, so it
+// reproduces the summary log itself. The detailed, privacy-safe warning for
+// each conflict is already emitted at detection time inside PlanReconcile;
+// this is purely an additional summary line for parity.
+func logReconcileConflicts(conflicts []streamer.ReconcileConflict) {
+	for _, c := range conflicts {
+		slog.Warn("Streamer settings not applied due to reconciliation conflict", "detail", c.Error())
+	}
+}
+
+// cloneConfigLocked returns a copy of m.config safe to mutate independently
+// of the live one. config.Config's only reference-typed field the rename
+// transaction path mutates IN PLACE is AutoRedeem (migrateAutoRedeem does a
+// map delete/insert), so that map is deep-copied explicitly; Streamers (and
+// every other slice ApplyToConfig touches) is reassigned wholesale rather
+// than mutated in place, so a shallow struct copy is already independent for
+// it, and every other field is a plain value struct with no aliasable
+// reference. Caller holds m.mu.
+func (m *Miner) cloneConfigLocked() *config.Config {
+	clone := *m.config
+	if m.config.AutoRedeem != nil {
+		clone.AutoRedeem = make(map[string]config.AutoRedeemConfig, len(m.config.AutoRedeem))
+		for k, v := range m.config.AutoRedeem {
+			clone.AutoRedeem[k] = v
+		}
+	}
+	return &clone
+}
+
+// finishApply performs everything that must happen once the roster
+// reconciliation has been committed to the runtime AND — for a rename-
+// carrying apply — durable persistence has already succeeded: publish the new
+// config, migrate the AutoRedeem runtime budget/redeemed state for each
+// rename (BKM-006 Corrective Pass 1, C4 — same locked section as the config
+// swap, so no auto-redeem poll can ever observe an orphaned old-login state
+// or a fresh budget window), wire the updated settings into every dependent
+// component, reconcile runtime capabilities (IRC/PubSub), and — only for a
+// non-rename apply (persisted=false) — persist config.json (non-fatal on
+// failure, exactly as ApplySettings always did before this pass; a
+// rename-carrying apply already persisted newConfig durably in
+// commitRenameTransaction before this ran, so persisted=true skips a
+// redundant save).
+func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, oldDiscordEnabled bool, persisted bool) {
+	m.mu.Lock()
+	m.config = newConfig
+	migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed)
+	// Best-effort backfill of ChannelID onto every entry the JUST-COMMITTED
+	// roster resolved (BKM-006 C1) — e.g. a brand-new streamer added by this
+	// very apply, which a rename-carrying apply's pre-commit backfill
+	// (applySettingsWithRename, from the plan's own resolution) already
+	// covers and this call is then a no-op for (never overwrites a non-empty
+	// ChannelID). Without this, a non-rename apply (the common case: adding a
+	// streamer, toggling a setting) would never persist the stored-identity
+	// anchor a cold restart depends on.
+	backfillChannelIDs(m.config, channelIDsByLogin(m.streamers.All()))
 
 	if m.watcher != nil {
 		m.watcher.UpdateSettings(m.config.Priority, m.config.RateLimits)
 		m.watcher.SetPreferConfiguredOverDiscovery(m.config.DiscoveryPreferTracked)
 	}
-
 	if m.dropsTracker != nil {
 		m.dropsTracker.UpdateBlacklist(m.config.DropBlacklist)
 		m.dropsTracker.UpdateGameFilter(m.config.DropCampaignGameIDs, m.config.DropCampaignGames)
 		m.dropsTracker.UpdateSettings(m.config.RateLimits)
 	}
-
 	if m.discovery != nil {
 		m.discovery.UpdateSettings(m.config.DirectoryGames, m.config.DiscoveryMode, m.config.DiscoveryPreferSubscribed, m.config.RateLimits)
 	}
-
-	added, removed, changed, renamed := m.streamers.ApplySettings(m.config.Streamers, m.config.StreamerSettings)
-
-	// Config surgery for each confirmed rename (BKM-006): update the persisted
-	// entry's Username in place (settings pointer untouched), migrate its
-	// AutoRedeem entry, then backfill ChannelID onto every surviving entry
-	// from the reconciled roster. Pure in-memory work on m.config, still
-	// under the miner lock — no I/O here (that happens below, unlocked).
-	if len(renamed) > 0 {
-		applyConfigRenames(m.config, renamed)
-	}
-	backfillChannelIDs(m.config, m.streamers.All())
 
 	discordCfg := m.config.Discord
 	notifCfg := m.config.Notifications
@@ -1444,7 +1655,6 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	minuteWatcher := m.watcher
 	dropsTracker := m.dropsTracker
 	riskCfg := m.config.PredictionRisk
-	analyticsSvc := m.analyticsSvc
 
 	m.mu.Unlock()
 
@@ -1482,18 +1692,13 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 	// action: topics are keyed by ChannelID, which a rename never changes).
 	m.reconcileRuntimeCapabilities(added, removed, changed, renamed)
 
-	// Migrate each rename's analytics history to the new login and emit the
-	// one privacy-safe rename log, outside the miner lock (analytics performs
-	// real DB I/O). A conflict is logged and skipped, never fatal to the
-	// settings apply. analyticsSvc is passed only when non-nil: assigning a
-	// nil *analytics.Service to the renameAnalyticsService interface would
-	// otherwise produce a non-nil interface wrapping a nil pointer.
-	if len(renamed) > 0 {
-		var svc renameAnalyticsService
-		if analyticsSvc != nil {
-			svc = analyticsSvc
-		}
-		m.migrateRenamesToPersistence(renamed, svc)
+	// The durable analytics migration already ran (and, for a rename-carrying
+	// apply, succeeded) before this — see commitRenameTransaction. This emits
+	// the one privacy-safe rename log per event (old login, new login,
+	// ChannelID only — no tokens/URLs/headers/payloads).
+	for _, r := range renamed {
+		slog.Info("Reconciled streamer rename by stable Twitch channel ID",
+			"oldLogin", r.OldLogin, "newLogin", r.NewLogin, "channelID", r.ChannelID)
 	}
 
 	if notifMgr != nil {
@@ -1527,15 +1732,17 @@ func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
 		webServer.SetDiscordEnabled(discordCfg.Enabled)
 	}
 
-	m.mu.Lock()
-	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
-			slog.Error("Failed to save config", "error", err)
-		} else {
-			slog.Info("Settings saved to config file")
+	if !persisted {
+		m.mu.Lock()
+		if m.configPath != "" {
+			if err := config.SaveConfig(m.configPath, m.config); err != nil {
+				slog.Error("Failed to save config", "error", err)
+			} else {
+				slog.Info("Settings saved to config file")
+			}
 		}
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 
 	slog.Info("Runtime settings updated")
 }
