@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 )
 
 // Snapshot is the JSON document served by GET /debug/snapshot.
@@ -29,7 +30,19 @@ type Snapshot struct {
 	PubSub           *PubSubInfo           `json:"pubsub,omitempty"`
 	ProgressWatchdog *ProgressWatchdogInfo `json:"progressWatchdog,omitempty"`
 	Policy           *PolicyInfo           `json:"policy,omitempty"`
+	Journal          *JournalInfo          `json:"journal,omitempty"`
 	RecentEvents     []events.Event        `json:"recentEvents"`
+}
+
+// JournalInfo carries the bounded diagnostic journals in the debug snapshot: a
+// timestamped, monotonically-sequenced trail of watch-slot lifecycle transitions
+// (BKM-013) and connection-health transitions (BKM-014). Redacted by
+// construction — the journal event types hold only bounded codes, identities,
+// counters, and durations, never tokens, cookies, headers, or URLs. This shape
+// is the read surface a later downloadable support bundle (BKM-016) will consume.
+type JournalInfo struct {
+	Slots  []journal.Record[journal.SlotEvent]   `json:"slots,omitempty"`
+	Health []journal.Record[journal.HealthEvent] `json:"health,omitempty"`
 }
 
 // PubSubInfo is the per-connection view of the PubSub connection pool: one entry

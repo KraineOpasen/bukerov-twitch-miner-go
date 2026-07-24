@@ -476,6 +476,11 @@ func (w *MinuteWatcher) logSlotChanges(slots []slotOccupant) {
 	}
 
 	w.lastSlots = current
+
+	// Diagnostic-only: record the same transitions in the bounded slot journal
+	// (entered/reason_changed/released/replaced), correlating a single swap.
+	// No-op unless a journal is injected; never affects arbitration.
+	w.journalSlotTransitions(slots)
 }
 
 // configuredWatchedIndexes returns the w.streamers indexes of the configured
@@ -515,6 +520,8 @@ func (w *MinuteWatcher) resetLostSlotContinuity(slots []slotOccupant) {
 	for login, streamer := range w.lastConfiguredWatched {
 		if _, stillWatched := watched[login]; !stillWatched {
 			streamer.Stream.ResetWatchContinuity()
+			// Diagnostic-only: record the continuity break with a bounded reason.
+			w.journalContinuityReset(streamer, "slot_lost")
 		}
 	}
 	w.lastConfiguredWatched = watched

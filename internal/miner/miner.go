@@ -24,6 +24,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
@@ -102,6 +103,17 @@ type Miner struct {
 	connectionDegraded       bool
 	connectionDegradedDetail string
 
+	// healthJournal is the bounded diagnostic journal of connection-health
+	// transitions (BKM-014 observability). It observes the outputs of the PR-#112
+	// health state machine — it never reclassifies and never affects
+	// notification/dashboard decisions. Its own lock makes it safe for the debug
+	// reader; recordHealthTransition appends only from the single watchdog
+	// goroutine. healthJournalSuppressed counts consecutive deduped identical
+	// ticks since the last recorded transition and is touched ONLY on that
+	// watchdog goroutine (no lock needed).
+	healthJournal           *journal.Journal[journal.HealthEvent]
+	healthJournalSuppressed int
+
 	// authRecoveryObserver bounds the consumer-triggered recovery path (see
 	// recoverFromRejectedGeneration) to ONE observer goroutine at a time — a
 	// goroutine-population guard only. Retry PACING is owned entirely by the
@@ -169,6 +181,7 @@ func New(cfg *config.Config, configPath string) *Miner {
 		deviceID:           deviceID,
 		streamCheckTrigger: make(chan struct{}, 1),
 		autoRedeemState:    make(map[string]*autoRedeemRuntime),
+		healthJournal:      journal.New[journal.HealthEvent](healthJournalCapacity, nil),
 	}
 }
 
@@ -576,6 +589,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.RateLimits,
 		watchTimeStore,
 	)
+	// Inject the bounded slot-lifecycle diagnostic journal (BKM-013). Diagnostic
+	// only: it observes slot transitions and never affects selection or sending.
+	m.watcher.SetSlotJournal(journal.New[journal.SlotEvent](slotJournalCapacity, nil))
 	// When enabled, tracked streamers keep their watch slot ahead of any
 	// directory-discovered channel (discovery only fills idle slots).
 	m.watcher.SetPreferConfiguredOverDiscovery(m.config.DiscoveryPreferTracked)

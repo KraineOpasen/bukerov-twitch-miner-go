@@ -14,6 +14,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -108,6 +109,21 @@ type MinuteWatcher struct {
 	// recency), so neither channel is starved for the whole uptime. Loop-owned;
 	// only touched from pickDisplaceable during a processWatching tick.
 	displaceParity uint64
+
+	// slotJournal is the optional bounded diagnostic journal of watch-slot
+	// lifecycle transitions (BKM-013). Nil disables all slot journaling, making
+	// every instrumentation hook an immediate no-op — selection and sending
+	// behave identically to a build without it. Injected via SetSlotJournal.
+	// Appended only from the loop() goroutine; the journal carries its own lock
+	// for the cross-goroutine debug reader.
+	slotJournal *journal.Journal[journal.SlotEvent]
+
+	// slotResidence tracks, per currently-slotted login, when the residence
+	// began and its running transport-delivery counters, so terminal journal
+	// events carry residence duration and success/failure totals. Loop-owned
+	// (only journalSlotTransitions / recordSlotDelivery touch it); lazily created
+	// and populated only while slotJournal is set.
+	slotResidence map[string]*slotResidence
 
 	// debugState is the last published watch-decision snapshot, guarded by
 	// debugMu because the debug HTTP endpoint reads it from its own goroutine.
@@ -678,6 +694,11 @@ func (w *MinuteWatcher) processWatching() {
 				w.noteStreakProgress(sl.idx)
 			}
 		}
+
+		// Diagnostic-only: account this send against the slot's residence and
+		// journal the first success / every failure. No-op unless a journal is
+		// injected; never changes control flow above.
+		w.recordSlotDelivery(streamer, res)
 
 		if !w.pace(sleepBetween) {
 			return
