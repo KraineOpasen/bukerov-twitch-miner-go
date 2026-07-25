@@ -39,7 +39,7 @@ func minimalInput() Input {
 			Mode:                 "direct",
 			WatchTimeWindowHours: 24,
 			Slots: []WatchSlot{
-				{Slot: 0, Channel: "streamerone", Source: "configured", ReasonCode: "priority", Reason: "priority: configured channel"},
+				{Slot: 0, Channel: "streamerone", Source: "configured", ReasonCode: "priority"},
 			},
 			Streamers: []StreamerEntry{
 				{Channel: "streamerone", Status: "online", Watching: true, Game: "Just Chatting"},
@@ -324,8 +324,8 @@ func TestStringBoundsAppliedEndToEnd(t *testing.T) {
 
 	in := minimalInput()
 	in.Watching.Streamers = []StreamerEntry{
-		{Channel: "c1", Status: "online", Reason: longSafe},
-		{Channel: "c2", Status: "online", Reason: longUnsafe},
+		{Channel: "c1", Status: "online", Game: longSafe},
+		{Channel: "c2", Status: "online", Game: longUnsafe},
 	}
 	result, err := Build(in, Options{Now: fixedClock(time.Now())})
 	if err != nil {
@@ -339,13 +339,13 @@ func TestStringBoundsAppliedEndToEnd(t *testing.T) {
 	if len(doc.Streamers) != 2 {
 		t.Fatalf("len(Streamers) = %d, want 2", len(doc.Streamers))
 	}
-	if got := len([]rune(doc.Streamers[0].Reason)); got != maxStringLen {
+	if got := len([]rune(doc.Streamers[0].Game)); got != maxStringLen {
 		t.Errorf("long safe string len = %d, want exactly %d", got, maxStringLen)
 	}
-	if doc.Streamers[1].Reason != redactedMarker {
-		t.Errorf("long unsafe string = %q, want the redaction marker", doc.Streamers[1].Reason)
+	if doc.Streamers[1].Game != redactedMarker {
+		t.Errorf("long unsafe string = %q, want the redaction marker", doc.Streamers[1].Game)
 	}
-	if strings.Contains(doc.Streamers[1].Reason, "x") {
+	if strings.Contains(doc.Streamers[1].Game, "x") {
 		t.Error("redacted value leaks a fragment of the original secret")
 	}
 }

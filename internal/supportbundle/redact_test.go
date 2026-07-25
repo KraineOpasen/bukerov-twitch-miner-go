@@ -26,6 +26,21 @@ func TestRedactLeavesBenignStringsAlone(t *testing.T) {
 	}
 }
 
+// TestRedactLeavesChannelPointsReasonUnchanged documents WHY the BKM-016 fix
+// removed supportbundle.WatchSlot.Reason / StreamerEntry.Reason entirely
+// instead of relying on Redact: a channel-points balance embedded in a
+// free-form selection-reason string doesn't match any pattern Redact checks
+// for (no bearer/basic phrase, no key=value assignment, no URL/email/IP/path,
+// no high-entropy run - a bare decimal integer has digits but no letters, so
+// looksHighEntropy never flags it either), so Redact passes it through
+// unchanged.
+func TestRedactLeavesChannelPointsReasonUnchanged(t *testing.T) {
+	s := "watched: selected by POINTS_DESCENDING priority (918273645 channel points)"
+	if got := Redact(s); got != s {
+		t.Errorf("Redact(%q) = %q, want unchanged", s, got)
+	}
+}
+
 func TestRedactCapsLongBenignStrings(t *testing.T) {
 	long := strings.Repeat("word ", 200) // plain prose, no dangerous shape, > maxStringLen
 	got := Redact(long)

@@ -178,12 +178,20 @@ type WatchingSection struct {
 	PubSub               PubSubSection
 }
 
+// WatchSlot is one occupied watch slot in the broker's allocation.
+// Deliberately excludes the free-form watch-selection reason
+// debug.WatchSlot carries: that string can embed a dynamic private value -
+// a channel-points balance under POINTS_ASCENDING/DESCENDING priority, or a
+// subscription points-multiplier under SUBSCRIBED priority (see
+// internal/watcher's noteSelection call sites) - that Redact does not
+// reliably catch, since a bare integer or "2.5x" doesn't match any pattern
+// it looks for. ReasonCode, the small bounded enum, is kept; only the
+// free-form prose is dropped.
 type WatchSlot struct {
 	Slot       int
 	Channel    string
 	Source     string
 	ReasonCode string
-	Reason     string
 	Campaign   string
 }
 
@@ -197,13 +205,18 @@ type WaitingSlot struct {
 // StreamerEntry is one configured/discovered streamer's diagnostic state.
 // Deliberately narrower than debug.StreamerState: no title, no channel
 // points, no online/offline timestamps, no drop-campaign or prediction
-// detail - just enough to explain the watch decision.
+// detail. It also has no substitute for debug.StreamerState.Reason at all
+// (unlike WatchSlot, there is no bounded reason-code field here to keep) -
+// that free-form string can embed a dynamic private value (a channel-points
+// balance or a subscription points-multiplier, depending on watch priority -
+// see internal/watcher's noteSelection call sites) that Redact's pattern
+// checks do not catch, since a bare integer or "2.5x" doesn't match any
+// recognized sensitive shape.
 type StreamerEntry struct {
 	Channel              string
 	Status               string
 	StatusReason         string
 	Watching             bool
-	Reason               string
 	WatchedMinutesWindow float64
 	HasBroadcastID       bool
 	Game                 string

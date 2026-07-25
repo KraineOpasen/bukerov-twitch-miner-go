@@ -236,7 +236,6 @@ func (b *builder) buildWatching(w WatchingSection) watchingDoc {
 			Channel:    Redact(s.Channel),
 			Source:     Redact(s.Source),
 			ReasonCode: Redact(s.ReasonCode),
-			Reason:     Redact(s.Reason),
 			Campaign:   Redact(s.Campaign),
 		})
 	}
@@ -256,7 +255,6 @@ func (b *builder) buildWatching(w WatchingSection) watchingDoc {
 			Status:               Redact(s.Status),
 			StatusReason:         Redact(s.StatusReason),
 			Watching:             s.Watching,
-			Reason:               Redact(s.Reason),
 			WatchedMinutesWindow: s.WatchedMinutesWindow,
 			HasBroadcastID:       s.HasBroadcastID,
 			Game:                 Redact(s.Game),

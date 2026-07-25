@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -207,7 +208,13 @@ func TestSupportBundleTypedAllowlistDropsUnmappedFields(t *testing.T) {
 			Mode:              "direct",
 			ActivePair:        []string{unmapped},
 			PostponedSwapOuts: []debug.PostponedSwapOut{{Username: unmapped}},
+			// BKM-016 future-guard: supportbundle.WatchSlot has no Reason
+			// field at all, so this can only leak if a later change re-adds
+			// one to the mapper/DTO.
+			Slots: []debug.WatchSlot{{Slot: 0, Channel: "somechannel", Source: "configured", ReasonCode: "priority", Reason: unmapped}},
 		},
+		// Same future-guard for supportbundle.StreamerEntry.
+		Streamers: []debug.StreamerState{{Username: "somechannel", Status: "online", Reason: unmapped}},
 		Discovery: &debug.DiscoveryInfo{
 			Games:    []string{unmapped},
 			Watching: unmapped,
@@ -821,5 +828,171 @@ func TestSupportBundleNilSourceGraceful(t *testing.T) {
 	}
 	if _, ok := entries["drops.json"]; ok {
 		t.Error("drops.json should be absent when the snapshot has no Drops section")
+	}
+}
+
+// assertBundleExcludes scans both the raw ZIP bytes and every extracted
+// entry for each string in forbidden, failing the test if any occurrence is
+// found anywhere.
+func assertBundleExcludes(t *testing.T, raw []byte, forbidden []string) {
+	t.Helper()
+	scan := func(where string, data []byte) {
+		s := string(data)
+		for _, f := range forbidden {
+			if strings.Contains(s, f) {
+				t.Errorf("%s leaks %q", where, f)
+			}
+		}
+	}
+	scan("raw zip bytes", raw)
+	for name, data := range zipEntryBytes(t, raw) {
+		scan(name, data)
+	}
+}
+
+// TestSupportBundleNeverLeaksChannelPointsBalance is the BKM-016 regression
+// test for the confirmed privacy leak: under POINTS_ASCENDING/DESCENDING
+// watch priority, internal/watcher embeds the streamer's live channel-points
+// balance into a free-form selection-reason string (see
+// internal/watcher/watcher.go's noteSelection call for the POINTS priority
+// case, e.g. "watched: selected by POINTS_DESCENDING priority (123 channel
+// points)"). That string reaches debug.StreamerState.Reason and
+// debug.WatchSlot.Reason, and Redact does not strip a bare integer, so
+// nothing sanitizes it once it lands in the bundle. The fix removes the
+// free-form Reason field from supportbundle.WatchSlot and
+// supportbundle.StreamerEntry entirely - this test proves neither the
+// balance embedded in each Reason nor the standalone ChannelPoints value
+// ever reaches the ZIP.
+func TestSupportBundleNeverLeaksChannelPointsBalance(t *testing.T) {
+	s := newAuthedServer(t)
+	const channelPointsSentinel = 552104733
+	const descendingSentinel = 918273645
+	const ascendingSentinel = 736459281
+	fixture := debug.Snapshot{
+		Status: debug.StatusRunning,
+		Streamers: []debug.StreamerState{
+			{
+				Username:      "streamerone",
+				Status:        "online",
+				Online:        true,
+				ChannelPoints: channelPointsSentinel,
+				Reason:        fmt.Sprintf("watched: selected by %s priority (%d channel points)", "POINTS_DESCENDING", descendingSentinel),
+			},
+		},
+		Watching: debug.WatchingInfo{
+			Slots: []debug.WatchSlot{
+				{
+					Slot:       0,
+					Channel:    "streamerone",
+					Source:     "configured",
+					ReasonCode: "priority",
+					Reason:     fmt.Sprintf("watched: selected by %s priority (%d channel points)", "POINTS_ASCENDING", ascendingSentinel),
+				},
+			},
+		},
+	}
+	s.SetSupportBundleSource(func() debug.Snapshot { return fixture })
+	h := s.handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedBundleRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body: %s", SupportBundlePath, rec.Code, rec.Body.String())
+	}
+
+	raw := rec.Body.Bytes()
+	assertBundleExcludes(t, raw, []string{
+		"918273645", "736459281", "552104733", "channel points",
+	})
+
+	// Positive guard: only the free-form Reason is removed, so the rest of
+	// the watching section — including the bounded WatchSlot.ReasonCode, an
+	// explicit must-keep field — must still be emitted. This proves the fix
+	// is a targeted leak removal, not an over-broad section deletion.
+	watching, ok := zipEntryBytes(t, raw)["watching.json"]
+	if !ok {
+		t.Fatal("watching.json missing from the bundle")
+	}
+	for _, want := range []string{"streamerone", "priority"} {
+		if !strings.Contains(string(watching), want) {
+			t.Errorf("watching.json should still contain surviving value %q; got: %s", want, watching)
+		}
+	}
+}
+
+// TestSupportBundleNeverLeaksSubscriptionMultiplier is the same leak's
+// SUBSCRIBED-priority variant: internal/watcher embeds a subscription
+// points-multiplier (e.g. "2.5x") into the same free-form selection-reason
+// string, which Redact leaves alone just as it does the channel-points case.
+func TestSupportBundleNeverLeaksSubscriptionMultiplier(t *testing.T) {
+	s := newAuthedServer(t)
+	reason := fmt.Sprintf("watched: selected by %s priority (%.1fx points multiplier)", "SUBSCRIBED", 2.5)
+	fixture := debug.Snapshot{
+		Status: debug.StatusRunning,
+		Streamers: []debug.StreamerState{
+			{Username: "streamertwo", Status: "online", Online: true, Reason: reason},
+		},
+		Watching: debug.WatchingInfo{
+			Slots: []debug.WatchSlot{
+				{Slot: 0, Channel: "streamertwo", Source: "configured", ReasonCode: "priority", Reason: reason},
+			},
+		},
+	}
+	s.SetSupportBundleSource(func() debug.Snapshot { return fixture })
+	h := s.handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedBundleRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body: %s", SupportBundlePath, rec.Code, rec.Body.String())
+	}
+
+	assertBundleExcludes(t, rec.Body.Bytes(), []string{"2.5x", "points multiplier"})
+}
+
+// TestSupportBundleRetainsPolicyFactorPoints guards against an over-broad
+// fix: the policy engine's campaign score/factor points (a small derived
+// integer the engine computes, not a live account balance) must still cross
+// the boundary into drops.json now that Reason is gone from the two
+// watching-section DTOs.
+func TestSupportBundleRetainsPolicyFactorPoints(t *testing.T) {
+	s := newAuthedServer(t)
+	const totalSentinel = 111111
+	const factorPointsSentinel = 222222
+	fixture := debug.Snapshot{
+		Status: debug.StatusRunning,
+		Drops:  &debug.DropsSyncInfo{},
+		Policy: &debug.PolicyInfo{
+			Mode: "smart",
+			Decisions: []debug.PolicyDecision{
+				{
+					Campaign: "Rust Drops",
+					Status:   "eligible",
+					Total:    totalSentinel,
+					Factors: []debug.PolicyLine{
+						{Label: "drop score", Points: factorPointsSentinel},
+					},
+				},
+			},
+		},
+	}
+	s.SetSupportBundleSource(func() debug.Snapshot { return fixture })
+	h := s.handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedBundleRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body: %s", SupportBundlePath, rec.Code, rec.Body.String())
+	}
+
+	entries := zipEntryBytes(t, rec.Body.Bytes())
+	dropsJSON, ok := entries["drops.json"]
+	if !ok {
+		t.Fatal("drops.json missing from the bundle")
+	}
+	for _, want := range []string{"111111", "222222"} {
+		if !strings.Contains(string(dropsJSON), want) {
+			t.Errorf("drops.json should still carry the safe policy score %q (a scoring integer, not an account balance); the Reason-field fix must not have removed it", want)
+		}
 	}
 }

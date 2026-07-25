@@ -294,7 +294,14 @@ func buildSupportBundleHealth(h *debug.HealthInfo) *supportbundle.HealthSection 
 // absent versus debug.StreamerState: Title, ChannelPoints, OnlineSince/
 // OfflineSince, DropCampaigns, ActivePrediction, WatchStreak - the support
 // bundle's streamer entries are deliberately narrower (see
-// supportbundle.StreamerEntry's doc comment).
+// supportbundle.StreamerEntry's doc comment). debug.StreamerState.Reason and
+// debug.WatchSlot.Reason (the free-form watch-selection explanation) are
+// ALSO never copied here (BKM-016): that string can embed a dynamic private
+// value - a channel-points balance under POINTS_ASCENDING/DESCENDING
+// priority, or a subscription points-multiplier under SUBSCRIBED priority -
+// that Redact's pattern checks do not catch. supportbundle.WatchSlot and
+// supportbundle.StreamerEntry have no Reason field at all for this reason;
+// see their doc comments.
 func buildSupportBundleWatching(snap debug.Snapshot) supportbundle.WatchingSection {
 	w := supportbundle.WatchingSection{
 		Mode:                 snap.Watching.Mode,
@@ -307,7 +314,6 @@ func buildSupportBundleWatching(snap debug.Snapshot) supportbundle.WatchingSecti
 			Channel:    sl.Channel,
 			Source:     sl.Source,
 			ReasonCode: sl.ReasonCode,
-			Reason:     sl.Reason,
 			Campaign:   sl.Campaign,
 		})
 	}
@@ -325,7 +331,6 @@ func buildSupportBundleWatching(snap debug.Snapshot) supportbundle.WatchingSecti
 			Status:               st.Status,
 			StatusReason:         st.StatusReason,
 			Watching:             st.Watching,
-			Reason:               st.Reason,
 			WatchedMinutesWindow: st.WatchedMinutesWindow,
 			HasBroadcastID:       st.BroadcastID != "",
 			Game:                 st.Game,

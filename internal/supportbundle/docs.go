@@ -86,7 +86,6 @@ type watchSlotDoc struct {
 	Channel    string `json:"channel"`
 	Source     string `json:"source,omitempty"`
 	ReasonCode string `json:"reasonCode,omitempty"`
-	Reason     string `json:"reason,omitempty"`
 	Campaign   string `json:"campaign,omitempty"`
 }
 
@@ -102,7 +101,6 @@ type streamerEntryDoc struct {
 	Status               string  `json:"status"`
 	StatusReason         string  `json:"statusReason,omitempty"`
 	Watching             bool    `json:"watching"`
-	Reason               string  `json:"reason,omitempty"`
 	WatchedMinutesWindow float64 `json:"watchedMinutesWindow"`
 	HasBroadcastID       bool    `json:"hasBroadcastID"`
 	Game                 string  `json:"game,omitempty"`
