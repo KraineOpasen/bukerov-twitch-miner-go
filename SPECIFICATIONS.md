@@ -942,6 +942,37 @@ A streamer is eligible for drops when:
 - Stream has active campaign IDs
 - Campaign game matches stream game
 
+### Account-Linked Drop Eligibility
+
+Some drop rewards can only be earned once the operator has linked their Twitch
+account to the campaign publisher's account (a **direct in-game entitlement**).
+Twitch reports this via two fields the existing persisted queries already return
+(decoded, not newly requested): the campaign's `self.isAccountConnected` and each
+benefit's `distributionType`.
+
+- **Account connection is tri-state** (`models.AccountConnection`, decoded by
+  `ParseAccountConnection`): a real boolean `true`/`false` is Connected /
+  Disconnected; a null, absent, malformed, or partial value is **Unknown**.
+  Unknown always fails open — it is never treated as a proven disconnection.
+- **Benefit type is typed** (`models.BenefitType` from `distributionType`):
+  `BADGE`, `EMOTE`, `DIRECT_ENTITLEMENT`, or Unknown. Only a direct entitlement
+  requires the publisher link (`Drop.RequiresPublisherLink`); badges, emotes, and
+  unknown/absent types never do.
+
+`DropsTracker.applyAccountLinkFilter` (`internal/drops/drops.go`) excludes a
+reward **only** when `AccountConnection == Disconnected` **and** the reward
+requires the publisher link — the single-source-of-truth rule lives in
+`eligibility.AccountLinkEligible`, and a skip carries the privacy-safe typed
+reason `account_link_required` (no account, publisher, token, or raw-payload
+data). The filter runs once per full sync, after the game/blacklist/claim-history
+filters (so those observe an unchanged drop set and a stripped reward is still
+recorded in the durable "Past" catalog); the lightweight progress sync never
+re-filters. Aggregation is reward-level: a mixed campaign keeps its eligible
+rewards and stays trackable, while a campaign whose rewards are *all* excluded
+becomes untrackable and drops out of the published pool (so the Drops page count
+reflects the trackable set). It never alters watch progress, claim history, or
+the claim gate.
+
 ### Claim History Check
 
 Before a campaign can make a streamer eligible for the `PriorityDrops`
