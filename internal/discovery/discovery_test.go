@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeCampaigns is a canned CampaignsProvider.
@@ -21,7 +21,7 @@ func (f *fakeCampaigns) Campaigns() []*models.Campaign { return f.campaigns }
 type fakeClient struct {
 	online  map[string]bool
 	checked []string
-	streams []api.DirectoryStream
+	streams []twitch.DirectoryStream
 	err     error
 }
 
@@ -33,7 +33,7 @@ func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransi
 	return s.SetConfirmedOffline()
 }
 
-func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]api.DirectoryStream, error) {
+func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]twitch.DirectoryStream, error) {
 	return f.streams, f.err
 }
 
@@ -310,7 +310,7 @@ func TestSyncOnceExcludesTrackedStreamers(t *testing.T) {
 	// Channels already on the configured streamer list belong to the
 	// rotation; discovery must not double-watch them.
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "tracked_streamer", Viewers: 9000, GameID: "g1", DropsEnabled: true},
 		{ChannelID: "2", Login: "free_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
@@ -332,7 +332,7 @@ func TestSyncOnceTrackedOnlyKeepsOnlyTracked(t *testing.T) {
 	// tracked_only inverts the syncOnce exclusion gate: the pool keeps ONLY
 	// channels on the configured streamer list and drops everything else.
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "tracked_streamer", Viewers: 9000, GameID: "g1", DropsEnabled: true},
 		{ChannelID: "2", Login: "free_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
@@ -698,7 +698,7 @@ func TestSyncOnceDisabledClearsPoolAndCurrent(t *testing.T) {
 
 func TestSyncOnceBuildsPoolSortedByViewers(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "2", Login: "mid_channel", Viewers: 500, GameID: "g1", DropsEnabled: true},
 		{ChannelID: "1", Login: "big_channel", Viewers: 9000, GameID: "g1", DropsEnabled: true},
 		// Entry without a login must be dropped.
@@ -723,7 +723,7 @@ func TestSyncOnceBuildsPoolSortedByViewers(t *testing.T) {
 
 func TestSyncOnceFloatsSubscribedWhenPreferOn(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "big_channel", Viewers: 9000, GameID: "g1", DropsEnabled: true},
 		{ChannelID: "2", Login: "small_sub", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
@@ -803,7 +803,7 @@ func TestRefreshSubscribedSetBoundedRotatesAndPrunes(t *testing.T) {
 
 func TestSyncOnceKeepsExistingStreamerObjects(t *testing.T) {
 	provider := &fakeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "sticky_channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 	m := newTestManager([]string{"World of Tanks"}, provider, client)
@@ -824,7 +824,7 @@ func TestSyncOnceKeepsExistingStreamerObjects(t *testing.T) {
 
 func TestSyncOnceSkipsGamesWithoutActiveCampaign(t *testing.T) {
 	provider := &fakeCampaigns{} // no campaigns at all
-	client := &fakeClient{streams: []api.DirectoryStream{
+	client := &fakeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "channel", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 	m := newTestManager([]string{"World of Tanks"}, provider, client)

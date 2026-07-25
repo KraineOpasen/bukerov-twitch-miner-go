@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeRefresher models the api client's atomic session refresh: it records which
@@ -28,9 +28,9 @@ type fakeRefresher struct {
 	beforeApply func(*models.Streamer)
 }
 
-func (f *fakeRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult {
+func (f *fakeRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	f.mu.Lock()
-	res := api.SessionRefreshResult{
+	res := twitch.SessionRefreshResult{
 		CurrentGeneration:  s.Stream.SessionGeneration(),
 		CurrentBroadcastID: s.Stream.GetBroadcastID(),
 	}
@@ -358,7 +358,7 @@ type delayedRefresher struct {
 	inner fakeRefresher
 }
 
-func (d *delayedRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult {
+func (d *delayedRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	if fetchSpade {
 		time.Sleep(d.delay) // spade round
 	}

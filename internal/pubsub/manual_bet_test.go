@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakePlacer is a test double for the Twitch prediction-placement call. It
@@ -261,7 +261,7 @@ func TestManualBetNetworkFailureIsGeneric(t *testing.T) {
 }
 
 func TestManualBetUnauthorizedIsFriendly(t *testing.T) {
-	placer := &fakePlacer{err: api.ErrUnauthorized}
+	placer := &fakePlacer{err: twitch.ErrUnauthorized}
 	pool := newTestPool(placer)
 	addRound(pool, newTestStreamer(100000), "e1")
 

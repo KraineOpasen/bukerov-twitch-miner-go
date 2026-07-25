@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeFollowedProvider satisfies web.FollowedProvider for endpoint tests. It
 // records the logins handed to ImportStreamers so the dedup/skip contract can be
 // asserted without a live miner.
 type fakeFollowedProvider struct {
-	followed    []api.FollowedChannel
+	followed    []twitch.FollowedChannel
 	truncated   bool
 	followedErr error
 	tracked     []string
@@ -22,7 +22,7 @@ type fakeFollowedProvider struct {
 	importedWith []string // captured argument of the last ImportStreamers call
 }
 
-func (f *fakeFollowedProvider) FollowedChannels() ([]api.FollowedChannel, bool, error) {
+func (f *fakeFollowedProvider) FollowedChannels() ([]twitch.FollowedChannel, bool, error) {
 	return f.followed, f.truncated, f.followedErr
 }
 
@@ -51,7 +51,7 @@ func (f *fakeFollowedProvider) ImportStreamers(logins []string) (int, error) {
 func TestFollowedEndpointMarksTrackedAndSorts(t *testing.T) {
 	srv := newStatsTestServer(t)
 	srv.SetFollowedProvider(&fakeFollowedProvider{
-		followed: []api.FollowedChannel{
+		followed: []twitch.FollowedChannel{
 			{Login: "Zeta", DisplayName: "Zeta"},
 			{Login: "Alpha", DisplayName: "Alpha"},
 			{Login: "Beta", DisplayName: "Beta"},

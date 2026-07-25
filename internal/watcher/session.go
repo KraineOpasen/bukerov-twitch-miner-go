@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // This file is the broker's Stage 3 surface for the drop-progress watchdog:
@@ -23,9 +23,9 @@ import (
 // a slotted channel's watch session on demand. It fetches OFF the Stream lock and
 // publishes the whole tuple in ONE atomic, optimistic apply guarded by the
 // expected broadcast/generation. Narrowed to an interface so refresh execution can
-// be tested with a fake. Satisfied by *api.TwitchClient.
+// be tested with a fake. Satisfied by *twitch.TwitchClient.
 type sessionRefresher interface {
-	RefreshPlaybackSession(streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult
+	RefreshPlaybackSession(streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult
 }
 
 // AvoidChecker reports whether a channel is temporarily excluded from watch

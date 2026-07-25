@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
@@ -65,8 +65,8 @@ func (snapshotDropsClient) GetDropCampaignDetails(campaignID string) (map[string
 	}, nil
 }
 
-func (snapshotDropsClient) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
-	return api.ClaimStatusRejected, nil
+func (snapshotDropsClient) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
+	return twitch.ClaimStatusRejected, nil
 }
 
 // TestBuildDebugSnapshotIncludesDropsSection guards the miner wiring that makes

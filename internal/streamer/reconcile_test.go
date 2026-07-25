@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // idFakeClient is a twitchClient fake for the ID-first reconciliation matrix:
@@ -206,7 +206,7 @@ func TestReconcile_TransientResolutionFailure_NoRenameNoDelete(t *testing.T) {
 	}
 	orig := m.Get("steady")
 
-	client.failOn["steady"] = fmt.Errorf("%w: operation GetIDFromLogin", api.ErrPersistedQueryNotFound)
+	client.failOn["steady"] = fmt.Errorf("%w: operation GetIDFromLogin", twitch.ErrPersistedQueryNotFound)
 	added, removed, changed, renamed, conflicts := m.reconcile(
 		[]config.StreamerConfig{{Username: "steady", Settings: &custom}}, models.DefaultStreamerSettings(), nil)
 

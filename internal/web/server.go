@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
@@ -25,6 +24,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 //go:embed templates/*.html templates/partials/*.html
@@ -66,7 +66,7 @@ type DropCatalogProvider interface {
 // tracked, and add selected ones to the tracked streamer list. Satisfied by the
 // miner.
 type FollowedProvider interface {
-	FollowedChannels() ([]api.FollowedChannel, bool, error)
+	FollowedChannels() ([]twitch.FollowedChannel, bool, error)
 	TrackedUsernames() []string
 	ImportStreamers(logins []string) (int, error)
 }
@@ -357,7 +357,7 @@ func (s *Server) SetCampaignsProvider(provider CampaignsProvider) {
 }
 
 // SetGameIDResolver wires the read-only Twitch game-ID lookup backing the
-// Settings "find game ID" helper. Satisfied by *api.TwitchClient.
+// Settings "find game ID" helper. Satisfied by *twitch.TwitchClient.
 func (s *Server) SetGameIDResolver(resolver GameIDResolver) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

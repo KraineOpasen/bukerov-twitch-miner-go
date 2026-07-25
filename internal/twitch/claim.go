@@ -1,4 +1,6 @@
-package api
+package twitch
+
+import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
 
 // ClaimStatus is a stable, privacy-safe classification of the authoritative
 // result of a side-effecting Twitch claim mutation (a channel-points bonus
@@ -99,7 +101,7 @@ func (s ClaimStatus) Retryable() bool {
 // No specific inner success field is required (none is confirmed), so a non-empty
 // error-free node is accepted; only the evidence-free empty object is rejected.
 func classifyCommunityPointsClaim(resp map[string]interface{}) ClaimStatus {
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return ClaimStatusGraphQLError
 	}
 	data, ok := resp["data"].(map[string]interface{})
@@ -144,7 +146,7 @@ func classifyCommunityPointsClaim(resp map[string]interface{}) ClaimStatus {
 // Any other status is an authoritative rejection; a missing/null/malformed node
 // is fail-closed (never treated as success).
 func classifyDropClaim(resp map[string]interface{}) ClaimStatus {
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return ClaimStatusGraphQLError
 	}
 	data, ok := resp["data"].(map[string]interface{})

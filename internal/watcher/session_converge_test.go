@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // This file exercises the fix for the late-online-no-spade delivery gap
@@ -34,9 +34,9 @@ type perLoginFailRefresher struct {
 	failLogins map[string]bool
 }
 
-func (f *perLoginFailRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) api.SessionRefreshResult {
+func (f *perLoginFailRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	if fetchSpade && f.failLogins[s.GetUsername()] {
-		return api.SessionRefreshResult{
+		return twitch.SessionRefreshResult{
 			Stage:              "spade",
 			CurrentGeneration:  s.Stream.SessionGeneration(),
 			CurrentBroadcastID: s.Stream.GetBroadcastID(),

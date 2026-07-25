@@ -7,15 +7,15 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // GameIDResolver resolves an exact game name to its Twitch identity for the
-// Settings "find game ID" helper. Satisfied by *api.TwitchClient. Read-only: it
+// Settings "find game ID" helper. Satisfied by *twitch.TwitchClient. Read-only: it
 // performs a single GQL lookup on an explicit operator action and never mutates
 // config or runtime settings.
 type GameIDResolver interface {
-	GetGameIdentity(gameName string) (api.GameIdentity, error)
+	GetGameIdentity(gameName string) (twitch.GameIdentity, error)
 }
 
 // maxGameNameLookupLen bounds the lookup input so a pasted blob is never sent to

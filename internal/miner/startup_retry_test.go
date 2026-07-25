@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // shrinkStartupBackoff replaces the real backoff schedule with a tiny one for
@@ -29,7 +29,7 @@ func TestRetryStartupLookupRetriesPQNFUntilSuccess(t *testing.T) {
 	fetch := func() (string, error) {
 		calls++
 		if calls < 3 {
-			return "", fmt.Errorf("%w: operation GetIDFromLogin (tried 3 client IDs)", api.ErrPersistedQueryNotFound)
+			return "", fmt.Errorf("%w: operation GetIDFromLogin (tried 3 client IDs)", twitch.ErrPersistedQueryNotFound)
 		}
 		return "user-123", nil
 	}
@@ -37,7 +37,7 @@ func TestRetryStartupLookupRetriesPQNFUntilSuccess(t *testing.T) {
 	attempts := 0
 	id, err := retryStartupLookup(context.Background(), fetch, func(attempt int, err error, next time.Duration) {
 		attempts++
-		if !errors.Is(err, api.ErrPersistedQueryNotFound) {
+		if !errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 			t.Errorf("onAttempt got unexpected error: %v", err)
 		}
 	})
@@ -83,7 +83,7 @@ func TestRetryStartupLookupRetriesUnknownErrors(t *testing.T) {
 // login cannot be cured by retrying — the loop must return immediately after a
 // single fetch, preserving the error's identity for the caller.
 func TestRetryStartupLookupFailsFast(t *testing.T) {
-	for _, sentinel := range []error{api.ErrUnauthorized, api.ErrStreamerDoesNotExist} {
+	for _, sentinel := range []error{twitch.ErrUnauthorized, twitch.ErrStreamerDoesNotExist} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			calls := 0
 			fetch := func() (string, error) {
@@ -112,7 +112,7 @@ func TestRetryStartupLookupCtxCancelAbortsWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	fetch := func() (string, error) {
-		return "", fmt.Errorf("%w: operation GetIDFromLogin", api.ErrPersistedQueryNotFound)
+		return "", fmt.Errorf("%w: operation GetIDFromLogin", twitch.ErrPersistedQueryNotFound)
 	}
 
 	go func() {

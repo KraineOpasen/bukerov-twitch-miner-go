@@ -9,20 +9,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeGameIDResolver records calls so a test can prove the resolver is (or is
 // not) invoked, and returns a scripted identity/error.
 type fakeGameIDResolver struct {
-	identity api.GameIdentity
+	identity twitch.GameIdentity
 	err      error
 	calls    int
 	lastName string
 }
 
-func (f *fakeGameIDResolver) GetGameIdentity(name string) (api.GameIdentity, error) {
+func (f *fakeGameIDResolver) GetGameIdentity(name string) (twitch.GameIdentity, error) {
 	f.calls++
 	f.lastName = name
 	return f.identity, f.err
@@ -38,7 +38,7 @@ func postResolveGameID(t *testing.T, srv *Server, body string) *httptest.Respons
 
 // TestResolveGameIDFound: a known game resolves to its opaque ID + slug.
 func TestResolveGameIDFound(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "27546", Slug: "world-of-tanks"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "27546", Slug: "world-of-tanks"}}
 	srv := &Server{gameIDResolver: res}
 
 	rec := postResolveGameID(t, srv, `{"name":"World of Tanks"}`)
@@ -67,7 +67,7 @@ func TestResolveGameIDFound(t *testing.T) {
 // to drops campaigns at all, so it works with no campaigns provider wired (the
 // empty / all-foreign sync case).
 func TestResolveGameIDCandidateIndependent(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "27546", Slug: "world-of-tanks"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "27546", Slug: "world-of-tanks"}}
 	// No campaignsProvider, no dropCatalogProvider — nothing about drops state.
 	srv := &Server{gameIDResolver: res}
 	if srv.campaignsProvider != nil {
@@ -86,7 +86,7 @@ func TestResolveGameIDCandidateIndependent(t *testing.T) {
 
 // T-H10: the lookup never mutates config/runtime settings.
 func TestResolveGameIDDoesNotTouchSettings(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "27546"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "27546"}}
 	updated := false
 	srv := &Server{
 		gameIDResolver:   res,
@@ -102,7 +102,7 @@ func TestResolveGameIDDoesNotTouchSettings(t *testing.T) {
 
 // unknown game → 200 {found:false}, no fabricated ID.
 func TestResolveGameIDUnknown(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{}} // zero identity
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{}} // zero identity
 	srv := &Server{gameIDResolver: res}
 	rec := postResolveGameID(t, srv, `{"name":"No Such Game"}`)
 	if rec.Code != http.StatusOK {
@@ -129,7 +129,7 @@ func TestResolveGameIDResolverError(t *testing.T) {
 }
 
 func TestResolveGameIDValidation(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "1"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "1"}}
 	srv := &Server{gameIDResolver: res}
 
 	// Empty name → 400, resolver never called.
@@ -147,7 +147,7 @@ func TestResolveGameIDValidation(t *testing.T) {
 }
 
 func TestResolveGameIDMethodAndAvailability(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "1"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "1"}}
 
 	// GET → 405.
 	srv := &Server{gameIDResolver: res}
@@ -167,7 +167,7 @@ func TestResolveGameIDMethodAndAvailability(t *testing.T) {
 // T-H13: a normal Settings GET does not invoke the game-ID resolver (the lookup
 // only runs on an explicit POST to its own endpoint — no network on render).
 func TestResolveGameIDNotCalledOnSettingsRender(t *testing.T) {
-	res := &fakeGameIDResolver{identity: api.GameIdentity{ID: "1"}}
+	res := &fakeGameIDResolver{identity: twitch.GameIdentity{ID: "1"}}
 	srv := &Server{
 		gameIDResolver:   res,
 		settingsProvider: &fakeSettingsProvider{rt: settings.RuntimeSettings{}},

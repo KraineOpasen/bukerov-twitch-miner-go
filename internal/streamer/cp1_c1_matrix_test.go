@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // TestLoadFromConfig_StoredChannelIDMismatch_TransientFailure_ColdRestart_C1B
@@ -18,7 +18,7 @@ import (
 // for this entry, and a later successful resolution recovers normally.
 func TestLoadFromConfig_StoredChannelIDMismatch_TransientFailure_ColdRestart_C1B(t *testing.T) {
 	client := newIDFakeClient()
-	client.failOn["oldlogin"] = fmt.Errorf("%w: operation GetIDFromLogin", api.ErrStreamerDoesNotExist)
+	client.failOn["oldlogin"] = fmt.Errorf("%w: operation GetIDFromLogin", twitch.ErrStreamerDoesNotExist)
 	m := NewManager(client, models.DefaultStreamerSettings())
 
 	err := m.LoadFromConfig([]config.StreamerConfig{
@@ -72,7 +72,7 @@ func TestApplySettings_StoredChannelIDMismatch_TransientFailure_Warm_C1B(t *test
 
 	// Twitch becomes transiently unreachable for this login (network
 	// hiccup) — NOT a genuine rename to a different channel.
-	client.failOn["steady"] = fmt.Errorf("%w: operation GetIDFromLogin", api.ErrPersistedQueryNotFound)
+	client.failOn["steady"] = fmt.Errorf("%w: operation GetIDFromLogin", twitch.ErrPersistedQueryNotFound)
 	_, removed, changed, renamed, conflicts := m.reconcile(
 		[]config.StreamerConfig{{Username: "steady", ChannelID: "id-steady"}}, models.DefaultStreamerSettings(), nil)
 

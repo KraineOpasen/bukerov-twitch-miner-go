@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // TestBaselineIdleAPIIsNotFailed reproduces the confirmed production false
@@ -21,7 +21,7 @@ import (
 // exact idle-blackout misclassification that also drives the false
 // "Connection lost - harvesting paused" Discord alerts.
 func TestBaselineIdleAPIIsNotFailed(t *testing.T) {
-	client := api.NewTwitchClient(auth.NewTwitchAuth("tester", "device"), "device")
+	client := twitch.NewTwitchClient(auth.NewTwitchAuth("tester", "device"), "device")
 	center := health.NewCenter()
 
 	m := &Miner{

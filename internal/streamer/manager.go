@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // ProgressCallback is called during loading to report progress.
@@ -93,7 +93,7 @@ func (m *Manager) RecordStreakGrant(username string) {
 
 // twitchClient is the slice of the Twitch API the manager needs to resolve a
 // streamer's channel ID and hydrate its channel-points context. Narrowed to
-// an interface (satisfied by *api.TwitchClient, the production caller) so the
+// an interface (satisfied by *twitch.TwitchClient, the production caller) so the
 // reconciliation path can be exercised in tests without HTTP.
 type twitchClient interface {
 	GetChannelID(username string) (string, error)
@@ -220,7 +220,7 @@ func (m *Manager) resolveConfigs(configs []config.StreamerConfig, defaults model
 
 		id, err := m.client.GetChannelID(login)
 		if err != nil {
-			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+			if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 				slog.Warn("Could not resolve channel ID: stale Twitch query metadata (not a missing channel); keeping any existing streamer, will retry on next apply",
 					"username", login, "error", err)
 			} else {
@@ -619,7 +619,7 @@ func (m *Manager) CommitPlan(plan *ReconcilePlan) (added, removed []*models.Stre
 	// kept with whatever points it last had (zero for a brand-new one).
 	for _, s := range addedStreamers {
 		if err := m.client.LoadChannelPointsContext(s); err != nil {
-			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+			if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 				slog.Warn("Channel points context unavailable for new streamer (stale Twitch query metadata); keeping streamer",
 					"streamer", s.GetUsername(), "error", err)
 			} else {

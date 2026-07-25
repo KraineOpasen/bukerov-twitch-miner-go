@@ -53,7 +53,8 @@ Entry point: `cmd/miner/main.go` — parses flags, sets up `signal.NotifyContext
 
 Key packages (see `SPECIFICATIONS.md` § Module Structure for the full breakdown):
 - `internal/auth` — Twitch OAuth device-code flow, token persistence in `cookies/`.
-- `internal/api` — Twitch GraphQL client (persisted queries defined in `internal/constants/gql.go`); all Twitch reads/writes (claim bonuses, join raids, place bets, claim drops, etc.) go through here.
+- `internal/gql` — generic GraphQL/HTTP transport primitives (transient-status classification, persisted-query and top-level-error detection, retry/backoff timing). Twitch-agnostic; depends only on the standard library and is imported by `internal/twitch`.
+- `internal/twitch` — Twitch GraphQL client (persisted queries defined in `internal/constants/gql.go`); all Twitch reads/writes (claim bonuses, join raids, place bets, claim drops, etc.) go through here. Imports `internal/gql` for the generic transport helpers.
 - `internal/pubsub` — WebSocket connection pool for Twitch PubSub (`pool.go` manages connections/topics, `websocket.go` is a single connection, `message.go`/`topic.go` handle parsing). Max 50 topics per connection.
 - `internal/chat` — IRC client for Twitch chat presence and optional message logging.
 - `internal/watcher` — simulates minute-watched viewing and reports it to Twitch (the mechanism that actually earns points).

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeUpcomingNotifier records every campaign the tracker forwards for an alert,
@@ -141,7 +141,7 @@ func TestUpcomingCachedOnSyncError(t *testing.T) {
 	}
 
 	// A stale persisted-query hash aborts the whole sync.
-	client.detailsErr = api.ErrPersistedQueryNotFound
+	client.detailsErr = twitch.ErrPersistedQueryNotFound
 	tr.syncCampaigns()
 
 	if !keptIDs(tr.UpcomingCampaigns())["fut"] {
@@ -268,7 +268,7 @@ func TestNotifierNotCalledOnFailedSync(t *testing.T) {
 		dashboard:  dashboardResponse(uS),
 		inventory:  emptyInventoryResponse(),
 		details:    map[string]map[string]interface{}{"wot": uD},
-		detailsErr: api.ErrPersistedQueryNotFound,
+		detailsErr: twitch.ErrPersistedQueryNotFound,
 	}
 	notifier := &fakeUpcomingNotifier{}
 	tr := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)

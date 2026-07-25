@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // pointsEligibility is the single centralized policy used to gate every
@@ -147,7 +147,7 @@ const terminalCleanupGrace = 30 * time.Second
 // predictionPlacer is the narrow slice of the Twitch client the pool needs to
 // place a prediction bet. Kept as an interface so the betting/concurrency logic
 // can be unit-tested and locally dev-simulated without real Twitch calls;
-// *api.TwitchClient satisfies it.
+// *twitch.TwitchClient satisfies it.
 type predictionPlacer interface {
 	PlacePredictionBet(event *models.EventPrediction, outcomeID string, amount int) error
 }
@@ -156,7 +156,7 @@ type predictionPlacer interface {
 // handler needs: a best-effort metadata refresh (after a stream-up) and a full
 // stream-status re-check (after a viewcount). Kept as an interface so the
 // tri-state status wiring can be unit-tested without real Twitch calls;
-// *api.TwitchClient satisfies it.
+// *twitch.TwitchClient satisfies it.
 type streamChecker interface {
 	UpdateStream(streamer *models.Streamer) error
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
@@ -166,7 +166,7 @@ type streamChecker interface {
 // need for per-channel actions (bonus claims, raid joins, moment claims,
 // community-goal contributions). Kept as an interface so the queued-event
 // setting gates can be unit-tested without real Twitch calls;
-// *api.TwitchClient satisfies it.
+// *twitch.TwitchClient satisfies it.
 type channelActor interface {
 	ClaimBonus(streamer *models.Streamer, claimID string) error
 	JoinRaid(streamer *models.Streamer, raid *models.Raid) error
@@ -246,7 +246,7 @@ type WebSocketPool struct {
 	mu sync.RWMutex
 }
 
-func NewWebSocketPool(twitchClient *api.TwitchClient, tokenFn AuthTokenProvider, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
+func NewWebSocketPool(twitchClient *twitch.TwitchClient, tokenFn AuthTokenProvider, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
 	return &WebSocketPool{
 		actor:       twitchClient,
 		placer:      twitchClient,
@@ -1433,10 +1433,10 @@ func humanizeBetError(err error) string {
 	if err == nil {
 		return ""
 	}
-	if errors.Is(err, api.ErrUnauthorized) {
+	if errors.Is(err, twitch.ErrUnauthorized) {
 		return "Twitch rejected the request because the session expired — reauthorize the miner"
 	}
-	if errors.Is(err, api.ErrPersistedQueryNotFound) {
+	if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 		// Retrying cannot help here: every known client ID was already tried and
 		// the outage lasts until Twitch's rotated query hashes are updated, so
 		// the message must not suggest "try again" like the default branch does.

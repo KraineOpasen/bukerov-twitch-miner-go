@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // TestHumanizeBetErrorPersistedQueryNotFound: a stale-hash outage
@@ -15,7 +15,7 @@ import (
 // lasts until the shipped query hashes are updated.
 func TestHumanizeBetErrorPersistedQueryNotFound(t *testing.T) {
 	// Wrapped the same way postGQLRequest returns it.
-	err := fmt.Errorf("%w: operation MakePrediction (tried 3 client IDs)", api.ErrPersistedQueryNotFound)
+	err := fmt.Errorf("%w: operation MakePrediction (tried 3 client IDs)", twitch.ErrPersistedQueryNotFound)
 
 	got := humanizeBetError(err)
 

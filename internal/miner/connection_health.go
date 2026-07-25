@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // This file holds the connection-health state machine. It replaces the old
@@ -37,7 +37,7 @@ const apiDownFailThreshold = degradeGQLFailureThreshold
 // classifyAPI maps an immutable API health snapshot to a connectivity state. It
 // is deliberately NOT staleness-based: idle (no attempts, no failures) is never
 // down, no matter how old the last success is.
-func classifyAPI(now time.Time, threshold time.Duration, h api.APIConnHealth) apiConnState {
+func classifyAPI(now time.Time, threshold time.Duration, h twitch.APIConnHealth) apiConnState {
 	recentSuccess := !h.LastSuccess.IsZero() && now.Sub(h.LastSuccess) <= threshold
 	transportFailing := h.RecentTransportFailures >= apiDownFailThreshold
 	// Degraded uses the SAME failure-count bar as the pre-existing Health-Center
@@ -78,7 +78,7 @@ type connInputs struct {
 	threshold time.Duration
 
 	apiPresent bool
-	api        api.APIConnHealth
+	api        twitch.APIConnHealth
 
 	pubsubPresent      bool
 	pubsubLastActivity time.Time
@@ -170,7 +170,7 @@ func connDegradedDetail(out connOutcome, threshold time.Duration) string {
 // never StatusFailed — and its detail never claims the API is unavailable or
 // that there was "no successful API response", which would be untrue during a
 // normal quiet period.
-func apiConnSignal(state apiConnState, h api.APIConnHealth, now time.Time) health.Signal {
+func apiConnSignal(state apiConnState, h twitch.APIConnHealth, now time.Time) health.Signal {
 	sig := health.Signal{Name: health.SignalGQLAPI, CheckedAt: now}
 	if !h.LastSuccess.IsZero() {
 		sig.CheckedAt = h.LastSuccess

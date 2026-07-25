@@ -1,4 +1,4 @@
-package api
+package twitch
 
 import (
 	"bytes"
@@ -8,18 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
@@ -137,25 +136,8 @@ func classifyCheck(err error) (models.StreamerStatus, models.StatusReason) {
 const (
 	// gqlMaxRetries is the number of retries attempted after the initial try,
 	// i.e. up to gqlMaxRetries+1 total attempts per GQL request.
-	gqlMaxRetries  = 4
-	gqlBaseBackoff = 500 * time.Millisecond
-	gqlMaxBackoff  = 8 * time.Second
-
-	// gqlRetryAfterCap bounds how long a server-supplied Retry-After header is
-	// honored, so a pathological or hostile value can never park a request for
-	// minutes. When Twitch returns 429 with Retry-After, that hint is authoritative
-	// and used in place of the computed exponential backoff (clamped to this cap);
-	// a small jitter is still added so a fleet of requests doesn't resume in lockstep.
-	gqlRetryAfterCap = 30 * time.Second
+	gqlMaxRetries = 4
 )
-
-// isTransientGQLStatus reports whether an HTTP status code represents a
-// transient failure worth retrying (rate limiting or server-side errors).
-// 4xx errors other than 429 (bad auth, bad request, etc.) are not retried
-// since retrying them would just repeat the same failure.
-func isTransientGQLStatus(statusCode int) bool {
-	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
-}
 
 type TwitchClient struct {
 	auth          *auth.TwitchAuth
@@ -352,17 +334,6 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 	return false
 }
 
-// hasTopLevelGQLErrors reports whether a decoded GQL response carries a
-// non-empty top-level "errors" array — Twitch's signal that the operation
-// failed at the GQL layer (including PersistedQueryNotFound) and returned no
-// authoritative data, regardless of HTTP status. Mirrors the same shape check
-// GetDirectoryStreams / GetGameSlug / redeemResponseError already use, and is
-// used to keep such responses from refreshing the connection-health timestamp.
-func hasTopLevelGQLErrors(result map[string]interface{}) bool {
-	errs, ok := result["errors"].([]interface{})
-	return ok && len(errs) > 0
-}
-
 func (c *TwitchClient) PostGQL(operation constants.GQLOperation) (map[string]interface{}, error) {
 	return c.postGQLRequest(operation)
 }
@@ -458,7 +429,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 	// Checked explicitly here rather than via isAuthError, which only covers
 	// token rejection. The result is returned unchanged so per-operation
 	// parsing behaves exactly as before.
-	if !hasTopLevelGQLErrors(result) {
+	if !gql.HasTopLevelErrors(result) {
 		c.markSuccess()
 	} else {
 		c.connAcct.markFunctionalFailure(time.Now())
@@ -581,7 +552,7 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	// top-level "errors" array returned no authoritative data and must not
 	// refresh the connection-health timestamp.
 	for _, item := range result {
-		if hasTopLevelGQLErrors(item) {
+		if gql.HasTopLevelErrors(item) {
 			c.connAcct.markFunctionalFailure(time.Now())
 			return result, nil
 		}
@@ -589,17 +560,6 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 
 	c.markSuccess()
 	return result, nil
-}
-
-// isPersistedQueryNotFound reports whether a GQL response body carries a
-// PersistedQueryNotFound error. Twitch returns this (typically with HTTP 200)
-// when the persisted-query sha256 hash it has on record for the given Client-Id
-// no longer matches — usually because Twitch rotated/invalidated the hashes or
-// the client ID itself. It is detected via a raw substring match so it works
-// for both single and batched responses regardless of the exact error shape
-// (errors[].message vs errorType).
-func isPersistedQueryNotFound(respBody []byte) bool {
-	return bytes.Contains(respBody, []byte("PersistedQueryNotFound"))
 }
 
 // candidateClientIDs returns the ordered client IDs to try for operation, most
@@ -704,7 +664,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 			return respBody, statusCode, err
 		}
 
-		if !isPersistedQueryNotFound(respBody) {
+		if !gql.IsPersistedQueryNotFound(respBody) {
 			c.rememberWorkingClientID(operationLabel, clientID, i > 0)
 			return respBody, statusCode, nil
 		}
@@ -729,7 +689,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 // using the supplied client ID, retrying with exponential backoff on transient
 // failures: network-level errors (timeouts, connection resets) and HTTP 429/5xx
 // responses. A 429's Retry-After header, when present, is honored in place of
-// the computed backoff (see gqlRetryWait). Other HTTP errors (4xx auth/logic
+// the computed backoff (see gql.RetryWait). Other HTTP errors (4xx auth/logic
 // errors) are returned immediately since retrying them would just reproduce the
 // same failure. A successful response never incurs a wait.
 func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
@@ -750,7 +710,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 
 		lastErr = err
 
-		transient := statusCode == 0 || isTransientGQLStatus(statusCode)
+		transient := statusCode == 0 || gql.IsTransientStatus(statusCode)
 		if !transient {
 			return nil, statusCode, err
 		}
@@ -759,7 +719,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 			break
 		}
 
-		wait, via := gqlRetryWait(attempt, retryAfter)
+		wait, via := gql.RetryWait(attempt, retryAfter)
 		slog.Warn("GQL request failed, retrying",
 			"operation", operationLabel,
 			"attempt", attempt+1,
@@ -798,64 +758,12 @@ func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, time.Duration,
 		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if isTransientGQLStatus(resp.StatusCode) {
-		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	if gql.IsTransientStatus(resp.StatusCode) {
+		retryAfter := gql.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return nil, resp.StatusCode, retryAfter, fmt.Errorf("transient GQL error: status %d", resp.StatusCode)
 	}
 
 	return respBody, resp.StatusCode, 0, nil
-}
-
-// parseRetryAfter interprets an HTTP Retry-After header value, which is either a
-// non-negative integer number of seconds or an HTTP-date. It returns the delay
-// (never negative), or 0 when the header is absent, malformed, or in the past —
-// so a bad value simply falls back to the computed backoff rather than skewing
-// the wait.
-func parseRetryAfter(v string, now time.Time) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs <= 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := t.Sub(now); d > 0 {
-			return d
-		}
-	}
-	return 0
-}
-
-// gqlRetryWait picks the delay before the next retry and a label for why. A
-// server-supplied Retry-After (from a 429) is authoritative and wins over the
-// computed backoff: it is clamped to gqlRetryAfterCap (so a hostile/huge value
-// can't park the request) and given a small jitter so a fleet doesn't resume in
-// lockstep. Without one, it falls back to bounded exponential backoff with
-// jitter. Extracted (and jitter-bounded) so the selection is unit-testable
-// without sleeping.
-func gqlRetryWait(attempt int, retryAfter time.Duration) (time.Duration, string) {
-	if retryAfter > 0 {
-		if retryAfter > gqlRetryAfterCap {
-			retryAfter = gqlRetryAfterCap
-		}
-		return retryAfter + time.Duration(rand.Int63n(int64(gqlBaseBackoff))), "retry-after"
-	}
-	return gqlBackoffDuration(attempt), "backoff"
-}
-
-// gqlBackoffDuration returns the exponential backoff delay (with jitter) for
-// the given zero-based retry attempt, capped at gqlMaxBackoff.
-func gqlBackoffDuration(attempt int) time.Duration {
-	backoff := gqlBaseBackoff * time.Duration(1<<uint(attempt))
-	if backoff > gqlMaxBackoff {
-		backoff = gqlMaxBackoff
-	}
-	jitter := time.Duration(rand.Int63n(int64(backoff)/2 + 1))
-	return backoff + jitter
 }
 
 func (c *TwitchClient) setGQLHeaders(req *http.Request, clientID, token string) {
@@ -939,7 +847,7 @@ func (c *TwitchClient) GetChannelID(username string) (string, error) {
 	// ErrStreamerDoesNotExist below would tell callers — including the startup
 	// fail-fast path, which treats "does not exist" as a config typo and exits —
 	// that the login is missing when Twitch merely hiccuped.
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return "", fmt.Errorf("twitch GQL error for %s: user lookup returned no data", op.OperationName)
 	}
 
@@ -1090,7 +998,7 @@ func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]inte
 
 	// A top-level GraphQL "errors" array means Twitch returned no authoritative
 	// data (even at HTTP 200) — inconclusive, not offline.
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return nil, newStreamCheckError(models.ReasonGraphQLError, "twitch GQL %s: top-level errors", op.OperationName)
 	}
 
@@ -1581,7 +1489,7 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	// service-layer error must never be read as an Enabled capability nor update
 	// balance/multipliers/goals nor trigger a bonus claim. LastConfirmed and every
 	// optional field are preserved (applyUnknown writes none of them).
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		applyUnknown(models.CapReasonGraphQLError)
 		return fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
 	}
@@ -1816,7 +1724,7 @@ func (c *TwitchClient) JoinRaid(streamer *models.Streamer, raid *models.Raid) er
 
 	// A 200 carrying a top-level "errors" array (a non-PQNF service failure)
 	// means Twitch did not accept the join, same as the GetChannelID case.
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return fmt.Errorf("twitch GQL error for %s: raid join not accepted", op.OperationName)
 	}
 
@@ -1886,7 +1794,7 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 	// so a transient failure never gets recorded as Known+empty (which the drops
 	// assignment path would read as authoritative "No" and use to clear a valid
 	// assignment mid-farm).
-	if hasTopLevelGQLErrors(resp) {
+	if gql.HasTopLevelErrors(resp) {
 		return nil, fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
 	}
 

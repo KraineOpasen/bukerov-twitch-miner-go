@@ -3,14 +3,14 @@ package miner
 import (
 	"strings"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // FollowedChannels implements web.FollowedProvider: the channels the
 // authenticated user follows (login + display name), paginated up to the API's
 // cap. truncated is true when the cap was hit with more available.
-func (m *Miner) FollowedChannels() ([]api.FollowedChannel, bool, error) {
+func (m *Miner) FollowedChannels() ([]twitch.FollowedChannel, bool, error) {
 	m.mu.RLock()
 	client := m.client
 	m.mu.RUnlock()
