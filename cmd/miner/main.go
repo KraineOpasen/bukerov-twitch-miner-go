@@ -7,19 +7,15 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/app"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
 var (
@@ -30,6 +26,11 @@ var (
 	healthcheck = flag.Bool("healthcheck", false, "Probe the running miner's dashboard and exit 0 (healthy) or 1 (unhealthy); used by the container HEALTHCHECK")
 )
 
+// main is the thin process entry point: it parses flags, handles the standalone
+// healthcheck / generate-config modes, loads config, sets up logging and the
+// signal-scoped context, and then delegates ALL service wiring and lifecycle to
+// the internal/app composition root — Build (construct), Run (start + block),
+// Shutdown (deterministic teardown). It builds no services itself.
 func main() {
 	flag.Parse()
 
@@ -78,58 +79,37 @@ func main() {
 
 	slog.Info("Twitch Channel Points Miner", "version", version.Version)
 
-	// main owns the database: it is needed regardless of EnableAnalytics
-	// (notifications rules, watch-time fairness, drops catalog), so it is
-	// opened here once and closed only by the deferred Close, which runs
-	// AFTER m.Run (and therefore after Miner.stop()) returns. The Miner
-	// receives the handle via SetDatabase and never closes it itself.
-	// Storage (database/cookies/logs) is keyed by the STABLE profile key, not
-	// the mutable canonical Twitch login (BKM-006 Corrective Pass 1, COR-2), so
-	// a renamed owner keeps loading the same history/credentials. StorageKey()
-	// == Username until the first rename pins ProfileKey.
-	dbBasePath := filepath.Join("database", cfg.StorageKey())
-	db, err := database.Open(dbBasePath)
-	if err != nil {
-		slog.Error("Failed to open database", "error", err)
-		os.Exit(1)
-	}
-	defer func() { _ = db.Close() }()
-
-	var analyticsSvc *analytics.Service
-	var webServer *web.Server
-	if cfg.EnableAnalytics {
-		analyticsSvc, err = analytics.NewService(db, dbBasePath, cfg.Analytics.RetentionDays)
-		if err != nil {
-			slog.Error("Failed to create analytics service", "error", err)
-			os.Exit(1)
-		}
-
-		webServer = web.NewServerEarly(cfg.Analytics, cfg.Username, dbBasePath, analyticsSvc)
-		if webServer != nil {
-			// Fail-closed: a non-loopback bind without credentials aborts
-			// startup instead of silently serving an open dashboard.
-			if err := webServer.Start(); err != nil {
-				slog.Error("Refusing to start", "error", err)
-				os.Exit(1)
-			}
-			defer webServer.Stop()
-		}
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	m := miner.New(cfg, *configFile)
-	m.ConfigureAutoUpdate(autoUpdateEnabled(), updater.ParseCheckInterval(os.Getenv("AUTO_UPDATE_CHECK_INTERVAL")))
-	m.SetDatabase(db)
-	if analyticsSvc != nil {
-		m.SetAnalyticsService(analyticsSvc)
+	// Build the whole service graph (database, analytics, web server, miner) in
+	// one place. Build opens owned resources and runs migrations but starts no
+	// runtime loops; a failure here has already unwound anything it opened.
+	application, err := app.Build(ctx, cfg, app.Options{
+		ConfigPath:         *configFile,
+		AutoUpdateEnabled:  autoUpdateEnabled(),
+		AutoUpdateInterval: updater.ParseCheckInterval(os.Getenv("AUTO_UPDATE_CHECK_INTERVAL")),
+	})
+	if err != nil {
+		slog.Error("Failed to build application", "error", err)
+		os.Exit(1)
 	}
-	if webServer != nil {
-		m.SetWebServer(webServer)
+
+	// Run starts the web listener and the miner, blocking until the signal
+	// context is cancelled or a fatal runtime error occurs.
+	runErr := application.Run(ctx)
+
+	// Deterministic graceful teardown of the process-level resources, always on
+	// a fresh context so shutdown proceeds even after the run context was
+	// cancelled.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), app.DefaultShutdownTimeout)
+	defer cancel()
+	if serr := application.Shutdown(shutdownCtx); serr != nil {
+		slog.Error("Graceful shutdown reported errors", "error", serr)
 	}
-	if err := m.Run(ctx); err != nil {
-		slog.Error("Miner error", "error", err)
+
+	if runErr != nil {
+		slog.Error("Miner error", "error", runErr)
 		os.Exit(1)
 	}
 }
