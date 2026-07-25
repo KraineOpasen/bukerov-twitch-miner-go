@@ -1,0 +1,277 @@
+package app
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
+
+	_ "modernc.org/sqlite"
+)
+
+// These tests build a real App over temporary directories and a FRESH,
+// non-singleton *database.DB per Build (via the injectable factories), so many
+// independent Builds can run in one test binary — the production
+// database.Open singleton would otherwise return the first handle to every
+// caller. Run is never exercised here (it performs device-code OAuth); Build
+// and Shutdown are.
+
+// freshDB opens an isolated on-disk SQLite handle under t.TempDir(), matching
+// the production single-connection setting. It bypasses the process-wide
+// database.Open singleton so each test gets its own database.
+func freshDB(t *testing.T) *database.DB {
+	t.Helper()
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "miner.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	return &database.DB{DB: sqlDB}
+}
+
+func testConfig() *config.Config {
+	c := config.DefaultConfig()
+	c.Username = "tester"
+	c.Streamers = []config.StreamerConfig{{Username: "streamer1"}}
+	c.Discord.Enabled = false
+	c.EnableAnalytics = true
+	return &c
+}
+
+func testFactories(t *testing.T, dbOut **database.DB) factories {
+	return factories{
+		openDB: func(string) (*database.DB, error) {
+			db := freshDB(t)
+			if dbOut != nil {
+				*dbOut = db
+			}
+			return db, nil
+		},
+		newAnalytics: func(db *database.DB, _ string, r int) (*analytics.Service, error) {
+			return analytics.NewService(db, t.TempDir(), r)
+		},
+		newWeb:   web.NewServerEarly,
+		newMiner: miner.New,
+	}
+}
+
+func stepNames(a *App) []string {
+	out := make([]string, len(a.steps))
+	for i, s := range a.steps {
+		out[i] = s.name
+	}
+	return out
+}
+
+// C1 / I1 — Build constructs every required dependency and records them as
+// lifecycle steps in construction order.
+func TestBuildConstructsDependencies(t *testing.T) {
+	ctx := context.Background()
+	app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	if app.db == nil {
+		t.Error("db not built")
+	}
+	if app.analytics == nil {
+		t.Error("analytics not built")
+	}
+	if app.web == nil {
+		t.Error("web not built")
+	}
+	if app.runner == nil {
+		t.Error("miner not built")
+	}
+	if got, want := stepNames(app), []string{"database", "analytics", "web"}; !equalStrings(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+}
+
+// C21 / I6 — with analytics disabled, Build opens only the database (no
+// analytics service, no web server) and still succeeds.
+func TestBuildAnalyticsDisabled(t *testing.T) {
+	ctx := context.Background()
+	cfg := testConfig()
+	cfg.EnableAnalytics = false
+
+	app, err := buildWith(ctx, cfg, Options{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	if app.analytics != nil {
+		t.Error("analytics built despite EnableAnalytics=false")
+	}
+	if app.web != nil {
+		t.Error("web built despite EnableAnalytics=false")
+	}
+	if app.runner == nil {
+		t.Error("miner not built")
+	}
+	if got, want := stepNames(app), []string{"database"}; !equalStrings(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+}
+
+// C3 / C4 — a constructor failure after the database is opened closes the
+// database before returning (no leaked handle).
+func TestBuildFailureClosesOpenedResources(t *testing.T) {
+	ctx := context.Background()
+	var opened *database.DB
+	f := testFactories(t, &opened)
+	f.newAnalytics = func(*database.DB, string, int) (*analytics.Service, error) {
+		return nil, errBoom
+	}
+
+	app, err := buildWith(ctx, testConfig(), Options{}, f)
+	if err == nil {
+		t.Fatal("expected Build error")
+	}
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("want errBoom, got %v", err)
+	}
+	if app != nil {
+		t.Fatal("expected nil App on failure")
+	}
+	if opened == nil {
+		t.Fatal("database was never opened")
+	}
+	// The opened database must have been closed by partial-build cleanup.
+	if werr := opened.WithTx(ctx, func(*sql.Tx) error { return nil }); !errors.Is(werr, database.ErrClosed) {
+		t.Fatalf("database not closed after failed Build: %v", werr)
+	}
+}
+
+// C2 / I13 — given an already-open database, Build starts no additional
+// goroutines (no serving loop, no watch/pubsub loop).
+func TestBuildStartsNoGoroutines(t *testing.T) {
+	ctx := context.Background()
+	db := freshDB(t)
+	// Warm the handle so database/sql's own connection opener goroutine is
+	// already counted in the baseline.
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	f := factories{
+		openDB: func(string) (*database.DB, error) { return db, nil },
+		newAnalytics: func(d *database.DB, _ string, r int) (*analytics.Service, error) {
+			return analytics.NewService(d, t.TempDir(), r)
+		},
+		newWeb:   web.NewServerEarly,
+		newMiner: miner.New,
+	}
+
+	runtime.GC()
+	before := runtime.NumGoroutine()
+	app, err := buildWith(ctx, testConfig(), Options{}, f)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	runtime.Gosched()
+	after := runtime.NumGoroutine()
+	if after > before {
+		t.Errorf("Build started goroutines: before=%d after=%d", before, after)
+	}
+}
+
+// C30 — repeated Build/Shutdown cycles leak no goroutines.
+func TestRepeatedBuildShutdownNoLeak(t *testing.T) {
+	ctx := context.Background()
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	for i := 0; i < 10; i++ {
+		app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, nil))
+		if err != nil {
+			t.Fatalf("Build #%d: %v", i, err)
+		}
+		if err := app.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown #%d: %v", i, err)
+		}
+	}
+
+	// Each Build opens a fresh database (one database/sql opener goroutine),
+	// which exits after Close; allow it to settle.
+	if !waitGoroutinesSettle(base+2, 3*time.Second) {
+		t.Errorf("goroutine leak after repeated build/shutdown: base=%d now=%d", base, runtime.NumGoroutine())
+	}
+}
+
+// I14 — after Shutdown the database is closed; any later use is a typed
+// use-after-close error.
+func TestNoDatabaseUseAfterShutdown(t *testing.T) {
+	ctx := context.Background()
+	var opened *database.DB
+	app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, &opened))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if werr := opened.WithTx(ctx, func(*sql.Tx) error { return nil }); !errors.Is(werr, database.ErrClosed) {
+		t.Fatalf("database still usable after Shutdown: %v", werr)
+	}
+}
+
+// Build validates its inputs so it is self-defending for direct callers.
+func TestBuildValidatesConfig(t *testing.T) {
+	ctx := context.Background()
+	f := testFactories(t, nil)
+
+	cases := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{"nil", nil},
+		{"no username", func() *config.Config { c := testConfig(); c.Username = ""; return c }()},
+		{"no streamers", func() *config.Config { c := testConfig(); c.Streamers = nil; return c }()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := buildWith(ctx, tc.cfg, Options{}, f); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func waitGoroutinesSettle(target int, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= target {
+			return true
+		}
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return runtime.NumGoroutine() <= target
+}

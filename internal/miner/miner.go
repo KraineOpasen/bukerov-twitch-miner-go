@@ -99,6 +99,13 @@ type Miner struct {
 
 	deviceID          string
 	externalAnalytics bool
+	// externalWebServer is true when the web server was injected via
+	// SetWebServer (the cmd/app composition root owns its Stop). When the miner
+	// builds its own web server (the library-use fallback in setupComponents),
+	// this stays false and stop() closes it — mirroring ownsDB/externalAnalytics
+	// so an injected server is never double-stopped by both the miner and its
+	// owner.
+	externalWebServer bool
 	// ownsDB is true only when initialize() opened the database itself
 	// (library use); cmd/miner injects the handle via SetDatabase and keeps
 	// ownership of its Close.
@@ -236,8 +243,14 @@ func (m *Miner) SetDatabase(db *database.DB) {
 	m.db = db
 }
 
+// SetWebServer injects an externally-owned web server (the composition root
+// builds it, starts it, and stops it). When set, the miner uses the server and
+// wires itself in as the runtime data provider but neither starts nor stops it;
+// without it the library-use fallback in setupComponents builds and owns its own
+// — exactly one owner either way.
 func (m *Miner) SetWebServer(server *web.Server) {
 	m.webServer = server
+	m.externalWebServer = true
 }
 
 // Run starts the miner and blocks until the context is cancelled.
@@ -851,7 +864,11 @@ func (m *Miner) startMining(ctx context.Context) {
 		m.webServer.SetResourceSnapshotProvider(m.resourceSampler.Latest)
 		go m.resourceSampler.Run(ctx)
 
-		if !m.externalAnalytics {
+		// Start the web server only when the miner built it itself (library
+		// use). An injected server is started AND stopped by its owner (the
+		// composition root), so both halves of its lifecycle key off the same
+		// externalWebServer flag — never analytics ownership.
+		if !m.externalWebServer {
 			// Fail-closed: on a non-loopback bind without credentials the
 			// dashboard stays down (mining continues); the primary
 			// cmd/miner path aborts the whole process for the same error.
@@ -1395,7 +1412,13 @@ func (m *Miner) stop() {
 		m.progressWatchdog.Stop()
 	}
 
-	if m.webServer != nil {
+	// Stop the web server and analytics service only when the miner built them
+	// itself (library use). When they were injected (SetWebServer /
+	// SetAnalyticsService), the composition root owns their teardown and closes
+	// them after Run returns — closing here would be a second close by a second
+	// owner. The debug server is always miner-built, so it is always stopped
+	// here.
+	if m.webServer != nil && !m.externalWebServer {
 		m.webServer.Stop()
 	}
 
@@ -1403,7 +1426,7 @@ func (m *Miner) stop() {
 		m.debugServer.Stop()
 	}
 
-	if m.analyticsSvc != nil {
+	if m.analyticsSvc != nil && !m.externalAnalytics {
 		_ = m.analyticsSvc.Close()
 	}
 
