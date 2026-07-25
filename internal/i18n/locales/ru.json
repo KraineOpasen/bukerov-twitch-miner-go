@@ -680,5 +680,10 @@
   "js.streamer.budget_required": "Укажите бюджет больше 0, чтобы включить автоактивацию.",
   "js.streamer.reward_required": "Отметьте хотя бы одну награду для автоактивации.",
   "js.streamer.auto_saved": "Настройки автоактивации сохранены.",
-  "js.streamer.auto_save_failed": "Не удалось сохранить настройки автоактивации:"
+  "js.streamer.auto_save_failed": "Не удалось сохранить настройки автоактивации:",
+  "rw.section": "Системные ресурсы",
+  "rw.cpu": "CPU",
+  "rw.memory": "Память",
+  "rw.network": "Сеть",
+  "rw.disk": "Диск"
 }

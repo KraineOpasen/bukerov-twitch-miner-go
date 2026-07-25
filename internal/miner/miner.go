@@ -29,6 +29,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
@@ -63,6 +64,10 @@ type Miner struct {
 	webServer        *web.Server
 	notifications    *notifications.Manager
 	debugServer      *debug.Server
+	// resourceSampler feeds the dashboard's resource mini-widgets with local
+	// process/container CPU/Memory/Network/Disk metrics. Started in startMining
+	// and stopped with the run context; nil when there is no web server.
+	resourceSampler *resources.Sampler
 
 	// capabilityTopics/chatPresence are the runtime-capability reconciliation
 	// seams: nil in production (the real wsPool/chatManager are used), injected
@@ -794,6 +799,13 @@ func (m *Miner) startMining(ctx context.Context) {
 	}
 
 	if m.webServer != nil {
+		// Local resource sampler for the dashboard mini-widgets. Reads only the
+		// process/container's own /proc and cgroup counters; no external calls,
+		// no state mutation. Runs on the run context and stops with it.
+		m.resourceSampler = resources.New()
+		m.webServer.SetResourceSnapshotProvider(m.resourceSampler.Latest)
+		go m.resourceSampler.Run(ctx)
+
 		if !m.externalAnalytics {
 			// Fail-closed: on a non-loopback bind without credentials the
 			// dashboard stays down (mining continues); the primary

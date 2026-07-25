@@ -231,7 +231,7 @@
         </aside>
 
         <main class="app-main">
-            <div class="flex items-center justify-end mb-3">
+            <div class="flex items-center justify-end mb-3">{{block "topbar_widgets" .}}{{end}}
                 <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "a11y.language" }}">
                     <button type="button" class="lang-btn{{if eq lang "ru"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"ru"}' hx-swap="none" aria-pressed="{{if eq lang "ru"}}true{{else}}false{{end}}">RU</button>
                     <button type="button" class="lang-btn{{if eq lang "en"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"en"}' hx-swap="none" aria-pressed="{{if eq lang "en"}}true{{else}}false{{end}}">EN</button>
