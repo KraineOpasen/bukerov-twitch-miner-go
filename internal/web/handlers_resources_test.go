@@ -120,7 +120,7 @@ func TestResourcesEndpointGETOnly(t *testing.T) {
 // every other read endpoint — 401 without creds when configured, 200 with them.
 func TestResourcesEndpointAuth(t *testing.T) {
 	s := newRenderServer(t)
-	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: "hunter2"})
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("hunter2")})
 	s.SetResourceSnapshotProvider(populatedSnapshot)
 	h := s.handler()
 

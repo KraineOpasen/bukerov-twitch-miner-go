@@ -126,7 +126,7 @@ func canaryFixtureSnapshot() debug.Snapshot {
 func newAuthedServer(t *testing.T) *Server {
 	t.Helper()
 	s := newRenderServer(t)
-	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: "hunter2"})
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("hunter2")})
 	return s
 }
 

@@ -98,7 +98,7 @@ func TestDebugSnapshotRouteMethods(t *testing.T) {
 // middleware — 401 without credentials, 200 with them.
 func TestDebugSnapshotRouteAuth(t *testing.T) {
 	s := newRenderServer(t)
-	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: "hunter2"})
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("hunter2")})
 	s.SetDebugSnapshotProvider(testSnapshot)
 	h := s.handler()
 

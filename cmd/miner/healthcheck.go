@@ -48,7 +48,7 @@ func runHealthcheck(configPath string, dash runtimeconfig.Dashboard) int {
 	}
 	// The dashboard may require Basic Auth; present the resolved credentials.
 	if dash.AuthEnabled() {
-		req.SetBasicAuth(dash.Username, dash.Password)
+		req.SetBasicAuth(dash.Username, dash.Password.Reveal())
 	}
 
 	client := &http.Client{Timeout: healthcheckTimeout}

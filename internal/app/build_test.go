@@ -126,7 +126,7 @@ func TestBuildPropagatesDashboardToWebServer(t *testing.T) {
 	// A snapshot carrying credentials must reach the web server: if the
 	// SetDashboardConfig propagation in Build were removed, this would fail.
 	rc := runtimeconfig.RuntimeConfig{
-		Dashboard: runtimeconfig.Dashboard{Username: "admin", Password: "pw"},
+		Dashboard: runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("pw")},
 	}
 	appAuth, err := buildWith(ctx, testConfig(), rc, testFactories(t, nil))
 	if err != nil {

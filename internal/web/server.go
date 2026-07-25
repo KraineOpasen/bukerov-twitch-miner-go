@@ -490,7 +490,7 @@ func (s *Server) AuthConfigured() bool {
 }
 
 func basicAuthMiddleware(cfg runtimeconfig.Dashboard, next http.Handler) http.Handler {
-	expectedUser, expectedPass := cfg.Username, cfg.Password
+	expectedUser, expectedPass := cfg.Username, cfg.Password.Reveal()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if expectedUser == "" || expectedPass == "" {
 			next.ServeHTTP(w, r)

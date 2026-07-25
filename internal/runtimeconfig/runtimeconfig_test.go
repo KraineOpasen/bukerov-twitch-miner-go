@@ -1,12 +1,129 @@
 package runtimeconfig
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 )
+
+// secretSentinel is a unique password value used across the formatting matrix:
+// if it ever appears in ANY rendered form of a config type, that form leaks the
+// secret. It is deliberately distinctive so a substring match is unambiguous.
+const secretSentinel = "bkm021-secret-sentinel-never-print"
+
+// snapshotWithSecret resolves a RuntimeConfig whose dashboard password is the
+// sentinel (with a few non-secret fields populated so the redacted forms still
+// carry visible structure).
+func snapshotWithSecret() RuntimeConfig {
+	return Resolve(Flags{ConfigPath: "config.json", Debug: true}, envMap(map[string]string{
+		"DASHBOARD_HOST":            "0.0.0.0",
+		"DASHBOARD_USERNAME":        "admin",
+		"DASHBOARD_PASSWORD":        secretSentinel,
+		"DASHBOARD_TRUSTED_ORIGINS": "proxy.lan:8443",
+	}))
+}
+
+// TestSecretNeverLeaksInFormatting is the secret-formatting matrix: the
+// sentinel password must not appear in ANY fmt verb, Stringer/GoStringer output,
+// fmt.Sprint, a wrong verb, a pointer render, a nested-struct render, an error,
+// or slog (text and JSON) output — for both RuntimeConfig and the nested
+// Dashboard formatted directly.
+func TestSecretNeverLeaksInFormatting(t *testing.T) {
+	rc := snapshotWithSecret()
+	d := rc.Dashboard
+
+	// wrapExported embeds a Dashboard in an EXPORTED field: fmt reaches it
+	// interfaceably and dispatches Dashboard's fmt hooks.
+	type wrapExported struct{ Inner Dashboard }
+	we := wrapExported{Inner: d}
+
+	// wrapUnexported embeds a Dashboard / RuntimeConfig in an UNEXPORTED field —
+	// the exact layout of Server.dashboard and Miner.dashboard. Here fmt CANNOT
+	// invoke the fmt hooks (the value is not interfaceable) and falls back to
+	// reflection; the password stays safe only because it is a Secret whose value
+	// lives in a closure reflection cannot read. This is the regression the fix
+	// closes and the previous matrix missed.
+	type wrapUnexportedDash struct{ inner Dashboard }
+	type wrapUnexportedRC struct{ inner RuntimeConfig }
+	wud := wrapUnexportedDash{inner: d}
+	wur := wrapUnexportedRC{inner: rc}
+
+	renders := map[string]string{
+		"rc %v":                      fmt.Sprintf("%v", rc),
+		"rc %+v":                     fmt.Sprintf("%+v", rc),
+		"rc %#v":                     fmt.Sprintf("%#v", rc),
+		"rc %s":                      fmt.Sprintf("%s", rc),
+		"rc %q":                      fmt.Sprintf("%q", rc),
+		"rc ptr %+v":                 fmt.Sprintf("%+v", &rc),
+		"rc ptr %#v":                 fmt.Sprintf("%#v", &rc),
+		"rc Sprint":                  fmt.Sprint(rc),
+		"rc String()":                rc.String(),
+		"rc GoString()":              rc.GoString(),
+		"dash %v":                    fmt.Sprintf("%v", d),
+		"dash %+v":                   fmt.Sprintf("%+v", d),
+		"dash %#v":                   fmt.Sprintf("%#v", d),
+		"dash %s":                    fmt.Sprintf("%s", d),
+		"dash %q":                    fmt.Sprintf("%q", d),
+		"dash %d wrongverb":          fmt.Sprintf("%d", d),
+		"dash ptr %#v":               fmt.Sprintf("%#v", &d),
+		"dash Sprint":                fmt.Sprint(d),
+		"dash String()":              d.String(),
+		"dash GoString()":            d.GoString(),
+		"exported-nested %v":         fmt.Sprintf("%v", we),
+		"exported-nested %+v":        fmt.Sprintf("%+v", we),
+		"exported-nested %#v":        fmt.Sprintf("%#v", we),
+		"UNEXPORTED-nested dash %v":  fmt.Sprintf("%v", wud),
+		"UNEXPORTED-nested dash %+v": fmt.Sprintf("%+v", wud),
+		"UNEXPORTED-nested dash %#v": fmt.Sprintf("%#v", wud),
+		"UNEXPORTED-nested rc %v":    fmt.Sprintf("%v", wur),
+		"UNEXPORTED-nested rc %+v":   fmt.Sprintf("%+v", wur),
+		"UNEXPORTED-nested rc %#v":   fmt.Sprintf("%#v", wur),
+		"secret %v":                  fmt.Sprintf("%v", d.Password),
+		"secret %+v":                 fmt.Sprintf("%+v", d.Password),
+		"secret %#v":                 fmt.Sprintf("%#v", d.Password),
+		"secret %s":                  fmt.Sprintf("%s", d.Password),
+		"secret String()":            d.Password.String(),
+		"error %v":                   fmt.Errorf("boom: %v", d).Error(),
+		"error %+v rc":               fmt.Errorf("boom: %+v", rc).Error(),
+		"logvalue rc":                rc.LogValue().String(),
+		"logvalue dash":              d.LogValue().String(),
+	}
+
+	for name, out := range renders {
+		if strings.Contains(out, secretSentinel) {
+			t.Errorf("LEAK in %q:\n  %s", name, out)
+		}
+	}
+
+	// slog text + JSON handlers must not leak either (both types implement
+	// slog.LogValuer, and the nested dashboard is embedded as a redacted group).
+	for _, h := range []struct {
+		name string
+		make func(*bytes.Buffer) slog.Handler
+	}{
+		{"text", func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
+		{"json", func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
+	} {
+		var buf bytes.Buffer
+		slog.New(h.make(&buf)).Info("cfg", "rc", rc, "dashboard", d)
+		if strings.Contains(buf.String(), secretSentinel) {
+			t.Errorf("LEAK in slog %s handler:\n  %s", h.name, buf.String())
+		}
+	}
+
+	// The renders that carry password structure must show the redaction marker,
+	// proving redaction actually ran (not that the field was merely omitted).
+	for _, name := range []string{"dash %#v", "dash String()", "rc %#v"} {
+		if !strings.Contains(renders[name], "***") {
+			t.Errorf("%s should show the redaction marker ***: %s", name, renders[name])
+		}
+	}
+}
 
 // envMap builds a Lookup backed by a plain map, so Resolve is tested without
 // touching the real process environment. A key absent from the map reports
@@ -110,9 +227,10 @@ func TestResolveDashboard(t *testing.T) {
 	if d.Username != "admin" {
 		t.Errorf("Username = %q", d.Username)
 	}
-	// Credentials are captured verbatim (surrounding spaces preserved).
-	if d.Password != "  spaced-secret  " {
-		t.Errorf("Password must be captured verbatim, got %q", d.Password)
+	// Credentials are captured verbatim (surrounding spaces preserved) — the
+	// raw value is reachable only via Reveal().
+	if d.Password.Reveal() != "  spaced-secret  " {
+		t.Errorf("Password must be captured verbatim, got %q", d.Password.Reveal())
 	}
 	if !d.AuthEnabled() {
 		t.Error("both credentials set -> AuthEnabled should be true")

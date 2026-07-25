@@ -65,7 +65,7 @@ func requireRealDashboardAuth(cfg runtimeconfig.Dashboard, r *http.Request) bool
 	if !cfg.AuthEnabled() {
 		return false
 	}
-	expectedUser, expectedPass := cfg.Username, cfg.Password
+	expectedUser, expectedPass := cfg.Username, cfg.Password.Reveal()
 	user, pass, ok := r.BasicAuth()
 	if !ok {
 		return false

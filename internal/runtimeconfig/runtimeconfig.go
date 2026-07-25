@@ -55,6 +55,7 @@ package runtimeconfig
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -113,6 +114,68 @@ type Flags struct {
 	Healthcheck bool
 }
 
+// Secret holds a sensitive string (a credential) so that it can NEVER be
+// revealed by formatting or logging — not even through Go reflection.
+//
+// The value lives ONLY inside a closure. This is the key property: fmt's
+// reflection path (used for %v/%+v/%#v when a value is reached through an
+// unexported struct field, where fmt cannot invoke Stringer/GoStringer/Formatter
+// because the value is not interfaceable) can read struct fields but CANNOT read
+// a closure's captured variables — it prints the function pointer instead. So a
+// Secret embedded arbitrarily deep, in an exported or unexported field, is safe
+// under every formatting verb. The interface methods (String/GoString/Format/
+// LogValue) additionally render a clean "***" whenever the Secret is reached
+// interfaceably. Reveal() returns the raw value for the one legitimate consumer
+// (Basic Auth comparison); nothing else should call it.
+type Secret struct {
+	reveal func() string
+}
+
+// NewSecret wraps a sensitive value. An empty value yields the zero Secret
+// (IsSet reports false), so "no credential configured" stays distinguishable.
+func NewSecret(v string) Secret {
+	if v == "" {
+		return Secret{}
+	}
+	return Secret{reveal: func() string { return v }}
+}
+
+// Reveal returns the raw secret. It is the only path to the plaintext and exists
+// solely for the auth comparison; callers must not log or format the result.
+func (s Secret) Reveal() string {
+	if s.reveal == nil {
+		return ""
+	}
+	return s.reveal()
+}
+
+// IsSet reports whether a non-empty secret was configured.
+func (s Secret) IsSet() bool { return s.Reveal() != "" }
+
+// redacted is the single rendered form of a Secret: "***" when set, "" when not.
+func (s Secret) redacted() string {
+	if s.IsSet() {
+		return "***"
+	}
+	return ""
+}
+
+// String / GoString / Format / LogValue all render only the redacted form, so a
+// Secret reached interfaceably (directly, or as an exported field) is clean; the
+// closure is the backstop for the non-interfaceable (reflection) path.
+func (s Secret) String() string { return s.redacted() }
+func (s Secret) GoString() string {
+	return fmt.Sprintf("runtimeconfig.Secret(%q)", s.redacted())
+}
+func (s Secret) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		_, _ = io.WriteString(f, s.GoString())
+		return
+	}
+	_, _ = io.WriteString(f, s.String())
+}
+func (s Secret) LogValue() slog.Value { return slog.StringValue(s.redacted()) }
+
 // Dashboard is the immutable, environment-derived slice of the web dashboard's
 // exposure and authentication configuration. Every field is fully resolved at
 // bootstrap: strings are captured verbatim (or trimmed where the pre-BKM-021
@@ -124,18 +187,21 @@ type Dashboard struct {
 	// overrides config.analytics.host for the effective bind address but is
 	// never persisted back to config.json.
 	HostOverride string
-	// Username / Password are the DASHBOARD_USERNAME / DASHBOARD_PASSWORD Basic
-	// Auth credentials, captured verbatim (no trimming — a credential may be
-	// intentionally surrounded by spaces). Password is a secret and is redacted
-	// by LogValue / String.
+	// Username is the DASHBOARD_USERNAME Basic Auth user, captured verbatim (no
+	// trimming — a credential may be intentionally surrounded by spaces).
 	Username string
-	Password string
+	// Password is the DASHBOARD_PASSWORD Basic Auth secret, held in a Secret so
+	// it can never be revealed by formatting/logging, even through reflection;
+	// read its raw value only via Password.Reveal() for the auth comparison.
+	Password Secret
 	// InsecureNoAuth is the resolved DASHBOARD_INSECURE_NO_AUTH opt-out: true
 	// only when the value parses as a truthy bool, matching strconv.ParseBool.
 	InsecureNoAuth bool
 	// TrustedOrigins is the parsed DASHBOARD_TRUSTED_ORIGINS allowlist (bare
-	// host[:port] values). It is stored as an already-parsed slice so the CSRF
-	// check never re-parses per request; treat it as read-only.
+	// host[:port] values), already parsed so the CSRF check never re-parses per
+	// request. The field is exported for construction; because a slice shares its
+	// backing array across value copies, treat it as read-only and use
+	// TrustedOriginHosts for a defensive copy rather than mutating it in place.
 	TrustedOrigins []string
 	// DevPredictions is the resolved MINER_DEV_PREDICTIONS switch enabling the
 	// local prediction simulator. Off unless explicitly set truthy.
@@ -144,7 +210,7 @@ type Dashboard struct {
 
 // AuthEnabled reports whether Basic Auth is configured (both credentials set).
 func (d Dashboard) AuthEnabled() bool {
-	return d.Username != "" && d.Password != ""
+	return d.Username != "" && d.Password.IsSet()
 }
 
 // TrustedOriginHosts returns a defensive copy of the parsed trusted-origin
@@ -163,19 +229,52 @@ func (d Dashboard) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("hostOverride", d.HostOverride),
 		slog.String("username", d.Username),
-		slog.String("password", redact(d.Password)),
+		slog.String("password", d.Password.redacted()),
 		slog.Bool("insecureNoAuth", d.InsecureNoAuth),
 		slog.Int("trustedOrigins", len(d.TrustedOrigins)),
 		slog.Bool("devPredictions", d.DevPredictions),
 	)
 }
 
+// String makes Dashboard a fmt.Stringer with the password redacted. Note the
+// two layers of protection: the password is a Secret (its value lives in a
+// closure that reflection cannot read), so even when a Dashboard is reached
+// through an UNEXPORTED field of some other struct — where fmt falls back to
+// reflection and cannot invoke these methods — the password is not exposed; and
+// when a Dashboard IS reached interfaceably, this method renders a clean "***".
+func (d Dashboard) String() string {
+	return fmt.Sprintf(
+		"runtimeconfig.Dashboard{hostOverride:%q username:%q password:%q insecureNoAuth:%t trustedOrigins:%d devPredictions:%t}",
+		d.HostOverride, d.Username, d.Password.redacted(), d.InsecureNoAuth, len(d.TrustedOrigins), d.DevPredictions)
+}
+
+// GoString makes Dashboard a fmt.GoStringer with the password redacted under %#v.
+func (d Dashboard) GoString() string {
+	return fmt.Sprintf(
+		"runtimeconfig.Dashboard{HostOverride:%q, Username:%q, Password:%#v, InsecureNoAuth:%#v, TrustedOrigins:%#v, DevPredictions:%#v}",
+		d.HostOverride, d.Username, d.Password, d.InsecureNoAuth, d.TrustedOrigins, d.DevPredictions)
+}
+
+// Format makes Dashboard a fmt.Formatter — the highest-precedence fmt hook,
+// checked before Stringer and GoStringer. It intercepts EVERY verb (%v, %+v,
+// %#v, %s, %q, %d, ...) whenever the Dashboard is interfaceable and routes to
+// the redacted String/GoString forms. (The Secret password stays safe even when
+// the Dashboard is NOT interfaceable — see Secret.)
+func (d Dashboard) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		_, _ = io.WriteString(f, d.GoString())
+		return
+	}
+	_, _ = io.WriteString(f, d.String())
+}
+
 // RuntimeConfig is the immutable, typed process-level runtime configuration
 // snapshot. It is produced once by Resolve and then only read. It is a value
-// type with no exported setters and no shared mutable maps: copying it is
-// enough to hand a service its own safe view, and its only slice
-// (Dashboard.TrustedOrigins) is exposed for mutation only through the
-// defensive-copying accessor.
+// type with no exported setters and no shared mutable maps: copying it hands a
+// service its own safe view. Its only slice (Dashboard.TrustedOrigins) is a
+// read-only field — TrustedOriginHosts returns a defensive copy for any
+// consumer that needs one — and its only secret (Dashboard.Password) is a
+// Secret that never reveals its value through formatting or logging.
 type RuntimeConfig struct {
 	// ConfigPath is the resolved path to config.json (from -config).
 	ConfigPath string
@@ -206,16 +305,31 @@ func (rc RuntimeConfig) LogValue() slog.Value {
 	)
 }
 
-// String redacts secrets so a RuntimeConfig printed with %v / %s never leaks
-// the dashboard password.
+// String redacts secrets so a RuntimeConfig printed with %v / %+v / %s never
+// leaks the dashboard password (it delegates the nested dashboard to the
+// redacted Dashboard.String).
 func (rc RuntimeConfig) String() string {
 	return fmt.Sprintf(
-		"RuntimeConfig{configPath:%q debug:%t autoUpdate:%t interval:%s "+
-			"dashboard:{hostOverride:%q username:%q password:%s insecureNoAuth:%t trustedOrigins:%d devPredictions:%t}}",
-		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval,
-		rc.Dashboard.HostOverride, rc.Dashboard.Username, redact(rc.Dashboard.Password),
-		rc.Dashboard.InsecureNoAuth, len(rc.Dashboard.TrustedOrigins), rc.Dashboard.DevPredictions,
-	)
+		"runtimeconfig.RuntimeConfig{configPath:%q debug:%t autoUpdate:%t interval:%s dashboard:%s}",
+		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.Dashboard.String())
+}
+
+// GoString redacts secrets under %#v: without a GoStringer, %#v would fall back
+// to Go-syntax reflection that prints the nested Dashboard.Password verbatim.
+func (rc RuntimeConfig) GoString() string {
+	return fmt.Sprintf(
+		"runtimeconfig.RuntimeConfig{ConfigPath:%q, Debug:%#v, AutoUpdateEnabled:%#v, AutoUpdateInterval:%#v, Dashboard:%s}",
+		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.Dashboard.GoString())
+}
+
+// Format makes RuntimeConfig a fmt.Formatter so every verb (including a wrong
+// one) is redaction-safe, mirroring Dashboard.Format.
+func (rc RuntimeConfig) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		_, _ = io.WriteString(f, rc.GoString())
+		return
+	}
+	_, _ = io.WriteString(f, rc.String())
 }
 
 // Resolve normalizes the CLI flags and environment (read through env) into the
@@ -243,7 +357,7 @@ func Resolve(flags Flags, env Lookup) RuntimeConfig {
 		Dashboard: Dashboard{
 			HostOverride:   strings.TrimSpace(env.get(envDashboardHost)),
 			Username:       env.get(envDashboardUsername),
-			Password:       env.get(envDashboardPassword),
+			Password:       NewSecret(env.get(envDashboardPassword)),
 			InsecureNoAuth: parseBool(env.get(envDashboardInsecure)),
 			TrustedOrigins: ParseTrustedOrigins(env.get(envDashboardTrustedOrigs)),
 			DevPredictions: parseDevPredictions(env.get(envDevPredictions)),
@@ -306,13 +420,4 @@ func ParseTrustedOrigins(raw string) []string {
 		hosts = append(hosts, entry)
 	}
 	return hosts
-}
-
-// redact hides a secret's value while still signalling whether one was set, so
-// logs distinguish "no password configured" from "password configured".
-func redact(secret string) string {
-	if secret == "" {
-		return ""
-	}
-	return "***"
 }

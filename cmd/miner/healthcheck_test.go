@@ -112,7 +112,7 @@ func TestRunHealthcheckSendsBasicAuth(t *testing.T) {
 	host, port := serverPort(t, srv)
 	cfgPath := writeConfig(t, true, host, port)
 
-	dash := runtimeconfig.Dashboard{Username: "admin", Password: "secret"}
+	dash := runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("secret")}
 	if code := runHealthcheck(cfgPath, dash); code != 0 {
 		t.Fatalf("auth-protected server with resolved creds: exit code = %d, want 0", code)
 	}

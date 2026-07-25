@@ -58,7 +58,7 @@ func TestValidateBindSecurity(t *testing.T) {
 	}
 
 	// Non-loopback with credentials: allowed.
-	withAuth := runtimeconfig.Dashboard{Username: "admin", Password: "secret"}
+	withAuth := runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("secret")}
 	if err := validateBindSecurity(withAuth, "0.0.0.0"); err != nil {
 		t.Fatalf("non-loopback bind with auth should be allowed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 }
 
 func TestBasicAuthMiddleware(t *testing.T) {
-	dash := runtimeconfig.Dashboard{Username: "admin", Password: "secret"}
+	dash := runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("secret")}
 
 	reached := false
 	handler := basicAuthMiddleware(dash, okHandler(&reached))
