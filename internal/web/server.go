@@ -23,6 +23,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
@@ -156,6 +157,11 @@ type Server struct {
 	// supportbundle.Build uses for generatedAt/the filename; nil in
 	// production (Build then defaults to time.Now().UTC()).
 	supportBundleClock func() time.Time
+	// resourceSnapshot returns the resource sampler's latest in-memory snapshot
+	// (CPU/Memory/Network/Disk) for the dashboard mini-widgets. Wired by the
+	// miner once the sampler is running; nil keeps /api/resources a graceful
+	// all-unavailable 200, never a 404.
+	resourceSnapshot func() resources.Snapshot
 
 	analytics *analytics.Service
 	server    *http.Server
@@ -609,6 +615,11 @@ func (s *Server) handler() http.Handler {
 	// and a full-fidelity raw-bets export. Read-only; never places a bet.
 	mux.HandleFunc("/api/predictions/roi", s.handleAPIPredictionsROI)
 	mux.HandleFunc("/api/predictions/roi/export", s.handleAPIPredictionsROIExport)
+
+	// Local resource metrics for the dashboard mini-widgets. Read-only; serves
+	// only the sampler's last in-memory snapshot (no /proc read in the handler,
+	// no external call, no state mutation). Inherits the shared middleware chain.
+	mux.HandleFunc(ResourcesPath, s.handleAPIResources)
 
 	// Status routes
 	mux.HandleFunc("/api/status", s.handleAPIStatus)

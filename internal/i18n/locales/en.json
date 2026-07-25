@@ -680,5 +680,10 @@
   "js.streamer.budget_required": "Set a budget above 0 to enable auto-redeem.",
   "js.streamer.reward_required": "Check at least one reward to auto-redeem.",
   "js.streamer.auto_saved": "Auto-redeem settings saved.",
-  "js.streamer.auto_save_failed": "Failed to save auto-redeem settings:"
+  "js.streamer.auto_save_failed": "Failed to save auto-redeem settings:",
+  "rw.section": "System resources",
+  "rw.cpu": "CPU",
+  "rw.memory": "Memory",
+  "rw.network": "Network",
+  "rw.disk": "Disk I/O"
 }

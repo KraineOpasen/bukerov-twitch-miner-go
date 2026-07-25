@@ -78,6 +78,72 @@
     }
     .sec-accent-pred { background: linear-gradient(180deg, var(--ui-watching), var(--ui-online)); }
     .sec-accent-grid { background: linear-gradient(180deg, var(--ui-online), var(--ui-gain)); }
+
+    /* =====================================================================
+       BKM-022 resource mini-widgets (CPU / Memory / Network / Disk I/O).
+       Plain CSS on the shared token system; four new --rw-* accent vars are
+       ADDED (no existing colour is changed). The strip lives in the base
+       top-bar row (same line as RU/EN), left-aligned via margin-right:auto so
+       RU/EN stays pinned right; it is overview-only via the topbar_widgets
+       block override. Single responsive layout: four compact cards that shrink
+       (minmax floor 0) down to a 2x2 fallback on narrow desktops, capped so 4K
+       never stretches them. Tailwind is not rebuilt for template edits, so this
+       is authored as inline CSS. */
+    :root {
+        --rw-cpu: #2CD4C6;   /* CPU  — teal/cyan */
+        --rw-mem: #F0B429;   /* Mem  — amber/yellow */
+        --rw-net: #A970FF;   /* Net  — purple/violet */
+        --rw-disk: #4C8DF6;  /* Disk — blue */
+    }
+    .rw-strip {
+        margin-right: auto;                 /* claim the left; RU/EN stays right */
+        min-width: 0;                       /* allow shrink within the flex row */
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, clamp(150px, 13.5vw, 224px)));
+        gap: 0.5rem;
+        align-items: stretch;
+    }
+    .rw-card {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-areas: "ico label" "ico values" "spark spark";
+        column-gap: 0.5rem;
+        row-gap: 0.1rem;
+        align-items: center;
+        min-width: 0;
+        padding: 0.4rem 0.6rem 0.45rem;
+        border: 1px solid var(--color-neutral-700);
+        border-top: 2px solid var(--rw-accent);
+        border-radius: 0.6rem;
+        background: var(--color-neutral-800);
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.03),
+            inset 0 14px 22px -18px var(--rw-accent);   /* subtle accent inner glow */
+    }
+    .rw-ico { grid-area: ico; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--rw-accent); }
+    .rw-ico svg { width: 16px; height: 16px; display: block; }
+    .rw-label {
+        grid-area: label; min-width: 0;
+        font-size: 0.6rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+        color: var(--color-neutral-400);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .rw-values { grid-area: values; display: flex; align-items: baseline; gap: 0.35rem; min-width: 0; }
+    .rw-primary { font-size: 1.02rem; font-weight: 700; line-height: 1.15; color: var(--color-neutral-100); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .rw-sub { font-size: 0.62rem; color: var(--color-neutral-400); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Micro-bars: pure DOM, scaled with transform (no per-tick reflow). */
+    .rw-spark { grid-area: spark; display: flex; align-items: flex-end; gap: 1px; height: 16px; margin-top: 0.15rem; overflow: hidden; }
+    .rw-spark > i { flex: 1 1 0; min-width: 0; height: 100%; background: var(--rw-accent); opacity: 0.55; border-radius: 1px; transform: scaleY(0); transform-origin: bottom; transition: transform 0.3s ease; }
+    .rw-card.rw-na { opacity: 0.72; }
+    .rw-card.rw-na .rw-primary { color: var(--color-neutral-500); }
+    .rw-strip.is-stale { opacity: 0.7; filter: saturate(0.75); }   /* transient fetch error; last-good kept */
+    @media (max-width: 860px) {
+        .rw-strip { margin-right: 0.5rem; flex: 1 1 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .rw-spark { height: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .rw-spark > i { transition: none; }
+    }
 </style>
 <div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
@@ -88,6 +154,40 @@
 </dialog>
 
 <div id="toast-container"></div>
+{{end}}
+
+{{/* BKM-022: four resource mini-widgets rendered into the base top-bar row
+     (same line as RU/EN, above the "Обзор" heading). Overview-only — other
+     pages leave the {{block "topbar_widgets"}} default empty. Values and spark
+     bars are filled by the poller in the scripts block; labels/icons render
+     server-side so RU/EN localization and the accessible names are static. */}}
+{{define "topbar_widgets"}}
+<div id="rw-strip" class="rw-strip" role="group" aria-label="{{ t "rw.section" }}">
+    <div class="rw-card" data-rw="cpu" style="--rw-accent:var(--rw-cpu)" role="group" aria-label="{{ t "rw.cpu" }}">
+        <span class="rw-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg></span>
+        <span class="rw-label">{{ t "rw.cpu" }}</span>
+        <span class="rw-values"><span class="rw-primary num" data-rw-primary>—</span><span class="rw-sub num" data-rw-sub></span></span>
+        <span class="rw-spark" aria-hidden="true" data-rw-spark></span>
+    </div>
+    <div class="rw-card" data-rw="memory" style="--rw-accent:var(--rw-mem)" role="group" aria-label="{{ t "rw.memory" }}">
+        <span class="rw-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="8" width="20" height="8" rx="1"/><rect x="5" y="10.5" width="4.5" height="3" rx="0.5"/><rect x="14.5" y="10.5" width="4.5" height="3" rx="0.5"/><path d="M6 16v2M10 16v2M14 16v2M18 16v2"/></svg></span>
+        <span class="rw-label">{{ t "rw.memory" }}</span>
+        <span class="rw-values"><span class="rw-primary num" data-rw-primary>—</span><span class="rw-sub num" data-rw-sub></span></span>
+        <span class="rw-spark" aria-hidden="true" data-rw-spark></span>
+    </div>
+    <div class="rw-card" data-rw="network" style="--rw-accent:var(--rw-net)" role="group" aria-label="{{ t "rw.network" }}">
+        <span class="rw-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M7.3 10.9 15.7 7.1M7.3 13.1 15.7 16.9"/></svg></span>
+        <span class="rw-label">{{ t "rw.network" }}</span>
+        <span class="rw-values"><span class="rw-primary num" data-rw-primary>—</span><span class="rw-sub num" data-rw-sub></span></span>
+        <span class="rw-spark" aria-hidden="true" data-rw-spark></span>
+    </div>
+    <div class="rw-card" data-rw="disk" style="--rw-accent:var(--rw-disk)" role="group" aria-label="{{ t "rw.disk" }}">
+        <span class="rw-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h0M10 16h0"/></svg></span>
+        <span class="rw-label">{{ t "rw.disk" }}</span>
+        <span class="rw-values"><span class="rw-primary num" data-rw-primary>—</span><span class="rw-sub num" data-rw-sub></span></span>
+        <span class="rw-spark" aria-hidden="true" data-rw-spark></span>
+    </div>
+</div>
 {{end}}
 
 {{define "scripts"}}
@@ -420,5 +520,85 @@
 
     document.body.addEventListener('htmx:afterSwap', rehydrateManual);
     rehydrateManual();
+</script>
+
+<script>
+    // =====================================================================
+    // BKM-022 resource mini-widgets poller. Reads the read-only /api/resources
+    // snapshot (~5s), formats its purely-numeric DTO into the four cards, and
+    // drives the micro-bars from each metric's normalized 0..1 history. The
+    // widgets live in the base top-bar row (OUTSIDE #overview-live), so the 30s
+    // htmx swap never touches them and this runs once per full page load; the
+    // __rwPoller guard prevents a duplicate poller/bar set on any re-execution.
+    // =====================================================================
+    (function () {
+        if (window.__rwPoller) return;                 // single-instance guard
+        var strip = document.getElementById('rw-strip');
+        if (!strip) return;                            // overview-only
+        window.__rwPoller = true;
+
+        var BARS = 24, POLL_MS = 5000, REQ_TIMEOUT_MS = 4000; // timeout < interval => no overlap
+        var METRICS = ['cpu', 'memory', 'network', 'disk'];
+        var cards = {};
+        METRICS.forEach(function (m) {
+            var el = strip.querySelector('[data-rw="' + m + '"]');
+            if (!el) return;
+            var spark = el.querySelector('[data-rw-spark]');
+            var bars = [];
+            for (var i = 0; i < BARS; i++) { var b = document.createElement('i'); spark.appendChild(b); bars.push(b); }
+            cards[m] = { card: el, primary: el.querySelector('[data-rw-primary]'), sub: el.querySelector('[data-rw-sub]'), bars: bars };
+        });
+
+        function fmtBytes(n) {
+            if (!isFinite(n) || n <= 0) return '0B';
+            var u = ['B', 'K', 'M', 'G', 'T', 'P'], i = 0;
+            while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+            return (i === 0 ? Math.round(n) : n.toFixed(1)) + u[i];
+        }
+        function fmtRate(n) { return fmtBytes(n) + '/s'; }
+        function fmtCores(c) { return (Math.abs(c - Math.round(c)) < 0.05) ? String(Math.round(c)) : c.toFixed(1); }
+
+        function drawBars(c, hist) {
+            var h = (hist || []).slice(-BARS);
+            while (h.length < BARS) h.unshift(0);
+            for (var i = 0; i < BARS; i++) {
+                var v = h[i]; if (!(v >= 0)) v = 0; else if (v > 1) v = 1;
+                c.bars[i].style.transform = 'scaleY(' + v.toFixed(3) + ')';
+            }
+        }
+        function na(c) { c.card.classList.add('rw-na'); c.primary.textContent = '—'; c.sub.textContent = ''; drawBars(c, []); }
+        function ok(c, primary, sub, hist) { c.card.classList.remove('rw-na'); c.primary.textContent = primary; c.sub.textContent = sub || ''; drawBars(c, hist); }
+
+        function render(data) {
+            var d = data && data.cpu;
+            if (cards.cpu) { (d && d.available) ? ok(cards.cpu, d.percent.toFixed(1) + '%', '/ ' + fmtCores(d.limitCores) + ' CPU', d.history) : na(cards.cpu); }
+            d = data && data.memory;
+            if (cards.memory) { (d && d.available) ? ok(cards.memory, fmtBytes(d.usedBytes), d.limitBytes > 0 ? '/ ' + fmtBytes(d.limitBytes) : '', d.history) : na(cards.memory); }
+            d = data && data.network;
+            if (cards.network) { (d && d.available) ? ok(cards.network, fmtRate(d.rxBytesPerSec) + ' ↓', fmtRate(d.txBytesPerSec) + ' ↑', d.history) : na(cards.network); }
+            d = data && data.disk;
+            if (cards.disk) { (d && d.available) ? ok(cards.disk, fmtRate(d.readBytesPerSec) + ' ↓', fmtRate(d.writeBytesPerSec) + ' ↑', d.history) : na(cards.disk); }
+        }
+
+        var inflight = false, timer = null;
+        function poll() {
+            if (inflight || document.hidden) return;   // never overlap; never poll while hidden
+            inflight = true;
+            var ctl = new AbortController();
+            var to = setTimeout(function () { ctl.abort(); }, REQ_TIMEOUT_MS);
+            fetch('/api/resources', { signal: ctl.signal, headers: { 'Accept': 'application/json' } })
+                .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+                .then(function (data) { strip.classList.remove('is-stale'); render(data); })
+                .catch(function () { strip.classList.add('is-stale'); })   // keep last-good values, mark stale
+                .finally(function () { clearTimeout(to); inflight = false; });
+        }
+        function start() { if (!timer) { poll(); timer = setInterval(poll, POLL_MS); } }
+        function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) { stop(); } else { start(); poll(); }   // immediate refresh on return
+        });
+        start();
+    })();
 </script>
 {{end}}
