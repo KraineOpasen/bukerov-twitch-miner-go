@@ -187,3 +187,57 @@ func TestRemovalPurgesNotificationRowsWithoutLiveManager(t *testing.T) {
 		t.Error("unrelated streamer's point rule was removed")
 	}
 }
+
+// TestStartupReconcilesDurablePendingDeletion verifies the miner wires durable
+// reconciliation: a pending-deletion marker left in the DB (a prior run's failed
+// purge) is discovered and completed by reconcilePendingStreamerDeletions at
+// startup, so the failed purge is not lost across a restart.
+func TestStartupReconcilesDurablePendingDeletion(t *testing.T) {
+	m, _, _ := newCapabilityMiner(t, "keepwire")
+	db, err := database.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	svc, err := analytics.NewService(db, t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	notifRepo, err := notifications.NewRepository(db)
+	if err != nil {
+		t.Fatalf("notif: %v", err)
+	}
+	wt, err := watcher.NewWatchTimeStore(db)
+	if err != nil {
+		t.Fatalf("watch-time: %v", err)
+	}
+	m.db = db
+	m.analyticsSvc = svc
+	m.notificationsRepo = notifRepo
+	m.watchTimeStore = wt
+	m.buildStreamerLifecycle()
+	if m.streamerLifecycle == nil {
+		t.Fatal("coordinator not built")
+	}
+
+	// A streamer with rows + a durable pending-deletion marker (a prior failed purge).
+	if err := svc.Repository().RecordPoints("reconcilewire", 100, "WATCH"); err != nil {
+		t.Fatalf("seed points: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO pending_streamer_deletions (login, channel_id, requested_at, attempts)
+		VALUES (?, ?, ?, 0)`, "reconcilewire", "chan-reconcilewire", 1); err != nil {
+		t.Fatalf("seed pending marker: %v", err)
+	}
+
+	m.reconcilePendingStreamerDeletions()
+
+	if analyticsListed(t, svc, "reconcilewire") {
+		t.Error("startup reconciliation did not purge the pending deletion")
+	}
+	var cnt int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_streamer_deletions WHERE login = 'reconcilewire'`).Scan(&cnt); err != nil {
+		t.Fatalf("count markers: %v", err)
+	}
+	if cnt != 0 {
+		t.Error("durable marker not cleared after successful startup reconciliation")
+	}
+}

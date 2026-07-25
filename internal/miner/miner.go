@@ -159,13 +159,6 @@ type Miner struct {
 	// whenever the streamer's auto-redeem config is edited.
 	autoRedeemState map[string]*autoRedeemRuntime
 
-	// pendingPurges holds removed streamers whose atomic persisted-history purge
-	// failed (rare: disk full / corruption), keyed by ChannelID, so a subsequent
-	// settings apply retries the idempotent purge and drains the backlog instead
-	// of silently leaving orphaned history. Guarded by purgeMu.
-	pendingPurges map[string]*models.Streamer
-	purgeMu       sync.Mutex
-
 	mu sync.RWMutex
 
 	// coordinatorMu serializes the WHOLE fail-closed settings-apply pipeline
@@ -632,6 +625,12 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	// transaction (and arms the resurrection fence). Each store implements both
 	// the purge and the fence; nil subsystems are simply not covered.
 	m.buildStreamerLifecycle()
+
+	// Retry any streamer deletion whose persisted purge did not finish before the
+	// last exit (durable pending-deletion rows). Runs here, before the watch /
+	// pubsub / event loops start, so reinstating a cleaned login cannot race a
+	// live event.
+	m.reconcilePendingStreamerDeletions()
 
 	m.watcher = watcher.NewMinuteWatcher(
 		m.client,
@@ -1518,6 +1517,7 @@ func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *stream
 	candidate := m.cloneConfigLocked()
 	configPath := m.configPath
 	analyticsSvc := m.analyticsSvc
+	coord := m.streamerLifecycle
 	m.mu.Unlock()
 
 	settings.ApplyToConfig(candidate, s)
@@ -1528,11 +1528,17 @@ func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *stream
 	applyConfigRenames(candidate, plannedRenames)
 	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
 
-	// analyticsSvc is passed only when non-nil: assigning a nil
-	// *analytics.Service to the renameAnalyticsService interface would
-	// otherwise produce a non-nil interface wrapping a nil pointer.
+	// Prefer the coordinator as the renamer: it renames analytics + notifications
+	// + watch-time in ONE atomic transaction (all stores move together or none
+	// do), so a successful rename leaves no old-login orphan in ANY store and a
+	// failure leaves every store on the old login. Fall back to analytics-only
+	// when the coordinator is not built (e.g. a unit test with no shared DB). Each
+	// is assigned only when non-nil so the interface never wraps a nil pointer.
 	var svc renameAnalyticsService
-	if analyticsSvc != nil {
+	switch {
+	case coord != nil:
+		svc = coord
+	case analyticsSvc != nil:
 		svc = analyticsSvc
 	}
 	if err := commitRenameTransaction(configPath, candidate, plannedRenames, svc); err != nil {
@@ -1673,12 +1679,6 @@ func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.S
 	// login — the persisted half of BKM-018A, mirroring the runtime teardown
 	// above. Runs off the miner lock.
 	m.applyStreamerDeletions(added, removed)
-
-	// Keep the login-keyed notification + watch-time stores attached to each
-	// renamed streamer's NEW login (analytics + config were already renamed in
-	// commitRenameTransaction), so a rename leaves no old-login records and a
-	// later deletion by the current login stays complete.
-	m.syncRenamedLoginKeyedStores(renamed)
 
 	// The durable analytics migration already ran (and, for a rename-carrying
 	// apply, succeeded) before this — see commitRenameTransaction. This emits

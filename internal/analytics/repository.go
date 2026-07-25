@@ -38,6 +38,10 @@ type Repository interface {
 	EarnedPointsBetween(start, end time.Time) (int, error)
 	CountAnnotationsByType(eventType string, start, end time.Time) (int, error)
 	RenameStreamer(oldName, newName string) error
+	// RenameStreamerTx renames within the caller's transaction (for an atomic
+	// multi-store rename); same idempotent + fail-closed-conflict contract as
+	// RenameStreamer.
+	RenameStreamerTx(tx *sql.Tx, oldName, newName string) error
 	// DeleteStreamerTx deletes every row of one login's analytics history
 	// (points, annotations, chat messages, prediction bets, and the streamers
 	// row itself) within the caller's transaction, so a multi-store purge is
@@ -280,23 +284,30 @@ func (r *SQLiteRepository) RenameStreamer(oldName, newName string) error {
 	if oldName == newName {
 		return nil
 	}
+	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		return r.RenameStreamerTx(tx, oldName, newName)
+	})
+}
 
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
+// RenameStreamerTx is the transaction body of RenameStreamer, exposed so a
+// multi-store rename can run analytics + notifications + watch-time renames in
+// ONE atomic transaction (all move together or none do). It preserves the same
+// idempotent no-op (unknown old login) and fail-closed *StreamerRenameConflictError
+// (both logins already have independent history) contract as RenameStreamer, on
+// the caller's tx. Names are matched exactly; callers pass canonical (lowercase)
+// logins, as every write path here already stores them.
+func (r *SQLiteRepository) RenameStreamerTx(tx *sql.Tx, oldName, newName string) error {
+	if oldName == newName {
+		return nil
 	}
-	defer func() { _ = tx.Rollback() }()
-
 	var oldID int64
-	err = tx.QueryRow("SELECT id FROM streamers WHERE name = ?", oldName).Scan(&oldID)
+	err := tx.QueryRow("SELECT id FROM streamers WHERE name = ?", oldName).Scan(&oldID)
 	if err == sql.ErrNoRows {
-		// Nothing recorded yet under the old login: idempotent no-op.
-		return tx.Commit()
+		return nil // nothing recorded under the old login: idempotent no-op
 	}
 	if err != nil {
 		return err
 	}
-
 	var newID int64
 	err = tx.QueryRow("SELECT id FROM streamers WHERE name = ?", newName).Scan(&newID)
 	if err != nil && err != sql.ErrNoRows {
@@ -307,11 +318,8 @@ func (r *SQLiteRepository) RenameStreamer(oldName, newName string) error {
 		// history should win or silently combine them.
 		return &StreamerRenameConflictError{OldName: oldName, NewName: newName}
 	}
-
-	if _, err := tx.Exec("UPDATE streamers SET name = ? WHERE id = ?", newName, oldID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = tx.Exec("UPDATE streamers SET name = ? WHERE id = ?", newName, oldID)
+	return err
 }
 
 // DeleteStreamerTx removes every trace of one login's analytics history within

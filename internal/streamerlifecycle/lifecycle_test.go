@@ -57,10 +57,14 @@ func newStores(t *testing.T) stores {
 	if err != nil {
 		t.Fatalf("watch-time store: %v", err)
 	}
-	coord := streamerlifecycle.New(db,
+	coord, err := streamerlifecycle.New(db,
 		[]streamerlifecycle.Purger{an, no, wt},
 		[]streamerlifecycle.Fencer{an, no, wt},
+		[]streamerlifecycle.Renamer{an, no, wt},
 	)
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
 	return stores{db: db, an: an, no: no, wt: wt, coord: coord}
 }
 
@@ -245,12 +249,15 @@ func TestAtomicRollback(t *testing.T) {
 	s := newStores(t)
 	s.seedStreamer(t, "rollback", 100)
 
-	coord := streamerlifecycle.New(s.db,
+	coord, err := streamerlifecycle.New(s.db,
 		// analytics deletes first (in-tx), then the injected failure aborts.
 		[]streamerlifecycle.Purger{s.an, failPurger{}},
-		nil,
+		nil, nil,
 	)
-	_, err := coord.Delete(context.Background(), "chan-rollback", "rollback")
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
+	_, err = coord.Delete(context.Background(), "chan-rollback", "rollback")
 	if err == nil {
 		t.Fatal("expected error from injected purge failure")
 	}

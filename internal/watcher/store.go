@@ -112,6 +112,19 @@ func (s *WatchTimeStore) RenameStreamer(oldLogin, newLogin string) error {
 	return err
 }
 
+// RenameStreamerTx is the transaction body of RenameStreamer, exposed so it can
+// join an atomic multi-store rename. No-op when the logins match or either is
+// empty. Case-insensitive.
+func (s *WatchTimeStore) RenameStreamerTx(tx *sql.Tx, oldLogin, newLogin string) error {
+	oldLogin = strings.ToLower(oldLogin)
+	newLogin = strings.ToLower(newLogin)
+	if oldLogin == "" || newLogin == "" || oldLogin == newLogin {
+		return nil
+	}
+	_, err := tx.Exec("UPDATE watch_time_events SET streamer = ? WHERE streamer = ? COLLATE NOCASE", newLogin, oldLogin)
+	return err
+}
+
 // DeleteStreamerTx removes all of one login's watch-time rows within the
 // caller's transaction, joining the atomic multi-store streamer purge. Returns
 // true when any row existed. Idempotent. The caller is expected to have

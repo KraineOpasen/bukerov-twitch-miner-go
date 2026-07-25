@@ -221,36 +221,44 @@ func (r *Repository) DeleteStreamer(ctx context.Context, login string) (bool, er
 // login simply merges (de-duplicated). No-op when the logins match or either is
 // empty. Case-insensitive.
 func (r *Repository) RenameStreamer(oldLogin, newLogin string) error {
+	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		return r.RenameStreamerTx(tx, oldLogin, newLogin)
+	})
+}
+
+// RenameStreamerTx is the transaction body of RenameStreamer, exposed so it can
+// join an atomic multi-store rename (analytics + notifications + watch-time move
+// together or none do). No-op when the logins match or either is empty.
+// Case-insensitive.
+func (r *Repository) RenameStreamerTx(tx *sql.Tx, oldLogin, newLogin string) error {
 	oldLogin = strings.ToLower(oldLogin)
 	newLogin = strings.ToLower(newLogin)
 	if oldLogin == "" || newLogin == "" || oldLogin == newLogin {
 		return nil
 	}
-	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
-		if _, err := tx.Exec("UPDATE point_rules SET streamer = ? WHERE streamer = ? COLLATE NOCASE", newLogin, oldLogin); err != nil {
-			return fmt.Errorf("rename point_rules %q->%q: %w", oldLogin, newLogin, err)
-		}
-		var mentionsJSON, onlineJSON, offlineJSON string
-		err := tx.QueryRow(`SELECT mentions_streamers, online_streamers, offline_streamers
-			FROM notification_config WHERE id = 1`).Scan(&mentionsJSON, &onlineJSON, &offlineJSON)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read notification_config lists: %w", err)
-		}
-		nm, c1 := renameLoginInJSONList(mentionsJSON, oldLogin, newLogin)
-		no, c2 := renameLoginInJSONList(onlineJSON, oldLogin, newLogin)
-		nf, c3 := renameLoginInJSONList(offlineJSON, oldLogin, newLogin)
-		if c1 || c2 || c3 {
-			if _, err := tx.Exec(`UPDATE notification_config
-				SET mentions_streamers = ?, online_streamers = ?, offline_streamers = ?
-				WHERE id = 1`, nm, no, nf); err != nil {
-				return fmt.Errorf("rewrite notification_config lists: %w", err)
-			}
-		}
+	if _, err := tx.Exec("UPDATE point_rules SET streamer = ? WHERE streamer = ? COLLATE NOCASE", newLogin, oldLogin); err != nil {
+		return fmt.Errorf("rename point_rules %q->%q: %w", oldLogin, newLogin, err)
+	}
+	var mentionsJSON, onlineJSON, offlineJSON string
+	err := tx.QueryRow(`SELECT mentions_streamers, online_streamers, offline_streamers
+		FROM notification_config WHERE id = 1`).Scan(&mentionsJSON, &onlineJSON, &offlineJSON)
+	if err == sql.ErrNoRows {
 		return nil
-	})
+	}
+	if err != nil {
+		return fmt.Errorf("read notification_config lists: %w", err)
+	}
+	nm, c1 := renameLoginInJSONList(mentionsJSON, oldLogin, newLogin)
+	no, c2 := renameLoginInJSONList(onlineJSON, oldLogin, newLogin)
+	nf, c3 := renameLoginInJSONList(offlineJSON, oldLogin, newLogin)
+	if c1 || c2 || c3 {
+		if _, err := tx.Exec(`UPDATE notification_config
+			SET mentions_streamers = ?, online_streamers = ?, offline_streamers = ?
+			WHERE id = 1`, nm, no, nf); err != nil {
+			return fmt.Errorf("rewrite notification_config lists: %w", err)
+		}
+	}
+	return nil
 }
 
 // renameLoginInJSONList replaces every case-insensitive occurrence of oldLogin
