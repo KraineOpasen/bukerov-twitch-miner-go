@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -88,5 +89,44 @@ func (c *StreakCache) Record(login, broadcastID string, grantedAt time.Time) {
 	}
 	if err := util.WriteFileAtomic(c.path, data, 0o644); err != nil {
 		slog.Warn("Failed to write streak cache; grants will not survive a restart", "path", c.path, "error", err)
+	}
+}
+
+// Remove deletes login's persisted streak grant so a deleted streamer's grant
+// cannot survive its deletion (or a restart within the 48h TTL) and cannot be
+// re-inherited if the same login is later re-added. Case-insensitive. Fail-safe:
+// a missing or corrupt file is a no-op. Writes are atomic (temp+rename).
+func (c *StreakCache) Remove(login string) {
+	login = strings.ToLower(login)
+	if login == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return // nothing persisted yet
+	}
+	var raw map[string]StreakGrant
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return // corrupt: leave it for loadLocked to ignore
+	}
+	removed := false
+	for k := range raw {
+		if strings.EqualFold(k, login) {
+			delete(raw, k)
+			removed = true
+		}
+	}
+	if !removed {
+		return
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := util.WriteFileAtomic(c.path, out, 0o644); err != nil {
+		slog.Warn("Failed to write streak cache after removing a deleted streamer", "path", c.path, "error", err)
 	}
 }

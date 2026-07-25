@@ -1,17 +1,30 @@
 package notifications
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
+// ErrStreamerDeleted is returned by AddPointRule for a login whose lifecycle is
+// being deleted, so a rule creation that raced a streamer deletion cannot
+// recreate a notification record for the removed streamer.
+var ErrStreamerDeleted = errors.New("notifications: streamer deleted")
+
 type Repository struct {
 	db *database.DB
 	mu sync.RWMutex
+	// deleted is the resurrection fence: tombstoned lowercase logins whose
+	// AddPointRule is refused while a deletion is in flight. Guarded by mu (the
+	// same lock AddPointRule takes), so once Tombstone returns every in-flight
+	// rule insert has completed and every later one observes the tombstone.
+	deleted map[string]struct{}
 }
 
 type NotificationsModule struct{}
@@ -105,11 +118,209 @@ func NewRepository(db *database.DB) (*Repository, error) {
 		return nil, fmt.Errorf("failed to register notifications module: %w", err)
 	}
 
-	return &Repository{db: db}, nil
+	return &Repository{db: db, deleted: make(map[string]struct{})}, nil
 }
 
 func (r *Repository) Close() error {
 	return nil
+}
+
+// Tombstone arms the resurrection fence for login: AddPointRule returns
+// ErrStreamerDeleted while the tombstone is set. Idempotent; see the fence
+// contract on the analytics repository for why the shared mu makes it airtight.
+func (r *Repository) Tombstone(login string) {
+	login = strings.ToLower(login)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted[login] = struct{}{}
+}
+
+// Reinstate clears the fence for login so a re-added streamer can hold rules
+// again. Idempotent.
+func (r *Repository) Reinstate(login string) {
+	login = strings.ToLower(login)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.deleted, login)
+}
+
+func (r *Repository) tombstonedLocked(login string) bool {
+	_, ok := r.deleted[strings.ToLower(login)]
+	return ok
+}
+
+// DeleteStreamerTx scrubs one login's notification state within the caller's
+// transaction: it deletes every point_rules row for the login (case-insensitive,
+// since rules may have been entered in any case) and strips the login from the
+// three notification_config login lists (mentions/online/offline). It runs on
+// the passed *sql.Tx so it joins the atomic multi-store streamer purge. Returns
+// true when anything was actually removed. Idempotent. upcoming_campaign_
+// notifications is keyed by campaign, not streamer, and is deliberately left
+// alone. The caller is expected to have Tombstone()d the login first.
+func (r *Repository) DeleteStreamerTx(tx *sql.Tx, login string) (bool, error) {
+	login = strings.ToLower(login)
+	if login == "" {
+		return false, nil
+	}
+
+	changed := false
+
+	res, err := tx.Exec("DELETE FROM point_rules WHERE streamer = ? COLLATE NOCASE", login)
+	if err != nil {
+		return false, fmt.Errorf("delete point_rules for %q: %w", login, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		changed = true
+	}
+
+	// Strip the login from the three config login-lists (read-modify-write of the
+	// single config row, inside the same tx).
+	var mentionsJSON, onlineJSON, offlineJSON string
+	err = tx.QueryRow(`SELECT mentions_streamers, online_streamers, offline_streamers
+		FROM notification_config WHERE id = 1`).Scan(&mentionsJSON, &onlineJSON, &offlineJSON)
+	if err == sql.ErrNoRows {
+		return changed, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read notification_config lists: %w", err)
+	}
+
+	newMentions, m1 := removeLoginFromJSONList(mentionsJSON, login)
+	newOnline, m2 := removeLoginFromJSONList(onlineJSON, login)
+	newOffline, m3 := removeLoginFromJSONList(offlineJSON, login)
+	if m1 || m2 || m3 {
+		if _, err := tx.Exec(`UPDATE notification_config
+			SET mentions_streamers = ?, online_streamers = ?, offline_streamers = ?
+			WHERE id = 1`, newMentions, newOnline, newOffline); err != nil {
+			return false, fmt.Errorf("rewrite notification_config lists: %w", err)
+		}
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// DeleteStreamer runs DeleteStreamerTx in its own transaction. Convenience for
+// standalone callers/tests.
+func (r *Repository) DeleteStreamer(ctx context.Context, login string) (bool, error) {
+	var existed bool
+	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		existed, e = r.DeleteStreamerTx(tx, login)
+		return e
+	})
+	return existed, err
+}
+
+// RenameStreamer repoints one login's notification state (point rules + the
+// three config login-lists) from oldLogin to newLogin within one transaction,
+// so a config-driven rename keeps notification state attached to the streamer's
+// CURRENT login — mirroring analytics.RenameStreamer and keeping the store
+// deletable by the current login (BKM-018A D15/D16). Best-effort by design:
+// there is no unique constraint to collide on, so a rename onto an existing
+// login simply merges (de-duplicated). No-op when the logins match or either is
+// empty. Case-insensitive.
+func (r *Repository) RenameStreamer(oldLogin, newLogin string) error {
+	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		return r.RenameStreamerTx(tx, oldLogin, newLogin)
+	})
+}
+
+// RenameStreamerTx is the transaction body of RenameStreamer, exposed so it can
+// join an atomic multi-store rename (analytics + notifications + watch-time move
+// together or none do). No-op when the logins match or either is empty.
+// Case-insensitive.
+func (r *Repository) RenameStreamerTx(tx *sql.Tx, oldLogin, newLogin string) error {
+	oldLogin = strings.ToLower(oldLogin)
+	newLogin = strings.ToLower(newLogin)
+	if oldLogin == "" || newLogin == "" || oldLogin == newLogin {
+		return nil
+	}
+	if _, err := tx.Exec("UPDATE point_rules SET streamer = ? WHERE streamer = ? COLLATE NOCASE", newLogin, oldLogin); err != nil {
+		return fmt.Errorf("rename point_rules %q->%q: %w", oldLogin, newLogin, err)
+	}
+	var mentionsJSON, onlineJSON, offlineJSON string
+	err := tx.QueryRow(`SELECT mentions_streamers, online_streamers, offline_streamers
+		FROM notification_config WHERE id = 1`).Scan(&mentionsJSON, &onlineJSON, &offlineJSON)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read notification_config lists: %w", err)
+	}
+	nm, c1 := renameLoginInJSONList(mentionsJSON, oldLogin, newLogin)
+	no, c2 := renameLoginInJSONList(onlineJSON, oldLogin, newLogin)
+	nf, c3 := renameLoginInJSONList(offlineJSON, oldLogin, newLogin)
+	if c1 || c2 || c3 {
+		if _, err := tx.Exec(`UPDATE notification_config
+			SET mentions_streamers = ?, online_streamers = ?, offline_streamers = ?
+			WHERE id = 1`, nm, no, nf); err != nil {
+			return fmt.Errorf("rewrite notification_config lists: %w", err)
+		}
+	}
+	return nil
+}
+
+// renameLoginInJSONList replaces every case-insensitive occurrence of oldLogin
+// with newLogin in a JSON string array, de-duplicating (case-insensitively) so a
+// rename onto a login already present does not create a duplicate entry. Returns
+// the re-encoded array and whether anything changed.
+func renameLoginInJSONList(raw, oldLogin, newLogin string) (string, bool) {
+	var list []string
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &list)
+	}
+	changed := false
+	seen := make(map[string]bool, len(list))
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if strings.EqualFold(s, oldLogin) {
+			s = newLogin
+			changed = true
+		}
+		key := strings.ToLower(s)
+		if seen[key] {
+			changed = true // collapsed a duplicate created by the rename
+			continue
+		}
+		seen[key] = true
+		out = append(out, s)
+	}
+	if !changed {
+		return raw, false
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return raw, false
+	}
+	return string(encoded), true
+}
+
+// removeLoginFromJSONList parses a JSON string array, drops every element that
+// equals login case-insensitively, and returns the re-encoded array plus whether
+// anything was removed. A malformed/empty array yields an empty array unchanged.
+func removeLoginFromJSONList(raw, login string) (string, bool) {
+	var list []string
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &list)
+	}
+	out := make([]string, 0, len(list))
+	removed := false
+	for _, s := range list {
+		if strings.EqualFold(s, login) {
+			removed = true
+			continue
+		}
+		out = append(out, s)
+	}
+	if !removed {
+		return raw, false
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return raw, false
+	}
+	return string(encoded), true
 }
 
 func (r *Repository) GetConfig() (*NotificationConfig, error) {
@@ -223,6 +434,9 @@ func (r *Repository) GetPointRules() ([]PointRule, error) {
 func (r *Repository) AddPointRule(rule *PointRule) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.tombstonedLocked(rule.Streamer) {
+		return ErrStreamerDeleted
+	}
 
 	result, err := r.db.Exec(`
 		INSERT INTO point_rules (streamer, threshold, delete_on_trigger, triggered)

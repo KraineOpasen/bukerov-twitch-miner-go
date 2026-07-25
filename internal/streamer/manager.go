@@ -91,6 +91,25 @@ func (m *Manager) RecordStreakGrant(username string) {
 	m.streakCache.Record(s.GetUsername(), bid, at)
 }
 
+// ForgetStreak drops a deleted streamer's watch-streak grant from BOTH the
+// persisted cache and the in-memory startup hydration snapshot, so the grant
+// cannot outlive the streamer (a restart within the 48h TTL, or re-adding the
+// same login within this process) and re-inherit stale streak state via
+// hydrateStreak. Safe for a login with no grant. Takes Manager.mu only (no
+// Streamer lock), preserving the strict Manager.mu -> Streamer.mu order.
+func (m *Manager) ForgetStreak(login string) {
+	if m.streakCache != nil {
+		m.streakCache.Remove(login)
+	}
+	m.mu.Lock()
+	for k := range m.streakHydration {
+		if strings.EqualFold(k, login) {
+			delete(m.streakHydration, k)
+		}
+	}
+	m.mu.Unlock()
+}
+
 // twitchClient is the slice of the Twitch API the manager needs to resolve a
 // streamer's channel ID and hydrate its channel-points context. Narrowed to
 // an interface (satisfied by *twitch.TwitchClient, the production caller) so the
