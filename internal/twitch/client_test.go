@@ -1,4 +1,4 @@
-package api
+package twitch
 
 import (
 	"testing"
@@ -50,47 +50,6 @@ func TestAvailableClaimIDHandlesMalformedResponses(t *testing.T) {
 		if got := availableClaimID(resp); got != "" {
 			t.Errorf("case %d: expected empty string for malformed response, got %q", i, got)
 		}
-	}
-}
-
-func TestIsPersistedQueryNotFound(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{
-			name: "single response errors[].message",
-			body: `{"errors":[{"message":"PersistedQueryNotFound"}]}`,
-			want: true,
-		},
-		{
-			name: "errorType field",
-			body: `[{"errors":[{"message":"...","extensions":{"code":"PERSISTED_QUERY_NOT_FOUND"}}],"errorType":"PersistedQueryNotFound"}]`,
-			want: true,
-		},
-		{
-			name: "batched response with one failing operation",
-			body: `[{"data":{"user":{"id":"1"}}},{"errors":[{"message":"PersistedQueryNotFound"}]}]`,
-			want: true,
-		},
-		{
-			name: "normal success",
-			body: `{"data":{"user":{"id":"123"}}}`,
-			want: false,
-		},
-		{
-			name: "unrelated error",
-			body: `{"errors":[{"message":"service unavailable"}]}`,
-			want: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isPersistedQueryNotFound([]byte(tc.body)); got != tc.want {
-				t.Errorf("isPersistedQueryNotFound(%q) = %v, want %v", tc.body, got, tc.want)
-			}
-		})
 	}
 }
 

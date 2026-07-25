@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
 
@@ -76,8 +76,8 @@ func (fakeDropsGQL) GetDropCampaignDetails(string) (map[string]interface{}, erro
 	return map[string]interface{}{}, nil
 }
 
-func (fakeDropsGQL) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
-	return api.ClaimStatusRejected, nil
+func (fakeDropsGQL) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
+	return twitch.ClaimStatusRejected, nil
 }
 
 // debugHasDecision reports whether the watcher's last published debug state

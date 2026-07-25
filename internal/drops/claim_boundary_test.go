@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // statusClient is a twitchClient whose ClaimDrop returns a scripted ClaimStatus
@@ -16,12 +16,12 @@ import (
 type statusClient struct {
 	*fakeDropsClient
 	mu     sync.Mutex
-	status api.ClaimStatus
+	status twitch.ClaimStatus
 	err    error
 	calls  int
 }
 
-func (c *statusClient) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
+func (c *statusClient) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
@@ -72,7 +72,7 @@ func TestSyncDropsClaimGatingMatrix(t *testing.T) {
 	cases := []struct {
 		name           string
 		extraSelf      map[string]interface{}
-		status         api.ClaimStatus
+		status         twitch.ClaimStatus
 		err            error
 		wantCalls      int
 		wantSuccesses  int
@@ -81,43 +81,43 @@ func TestSyncDropsClaimGatingMatrix(t *testing.T) {
 		{
 			name:      "no authoritative signal (no instance) -> never calls claim",
 			extraSelf: map[string]interface{}{}, // local minutes complete, but no instance
-			status:    api.ClaimStatusAccepted,
+			status:    twitch.ClaimStatusAccepted,
 			wantCalls: 0, wantSuccesses: 0, wantClaimedSet: false,
 		},
 		{
 			name:      "server isClaimable=false over local 100% -> never calls claim",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1", "isClaimable": false},
-			status:    api.ClaimStatusAccepted,
+			status:    twitch.ClaimStatusAccepted,
 			wantCalls: 0, wantSuccesses: 0, wantClaimedSet: false,
 		},
 		{
 			name:      "hasPreconditionsMet=false blocks -> never calls claim",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1", "hasPreconditionsMet": false},
-			status:    api.ClaimStatusAccepted,
+			status:    twitch.ClaimStatusAccepted,
 			wantCalls: 0, wantSuccesses: 0, wantClaimedSet: false,
 		},
 		{
 			name:      "fresh accept -> exactly one claim, one success, reconciled claimed",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1"},
-			status:    api.ClaimStatusAccepted,
+			status:    twitch.ClaimStatusAccepted,
 			wantCalls: 1, wantSuccesses: 1, wantClaimedSet: true,
 		},
 		{
 			name:      "already-claimed -> one claim, NO success event, reconciled claimed",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1"},
-			status:    api.ClaimStatusAlreadyClaimed,
+			status:    twitch.ClaimStatusAlreadyClaimed,
 			wantCalls: 1, wantSuccesses: 0, wantClaimedSet: true,
 		},
 		{
 			name:      "rejected -> one claim, no success, NOT claimed (retryable)",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1"},
-			status:    api.ClaimStatusRejected,
+			status:    twitch.ClaimStatusRejected,
 			wantCalls: 1, wantSuccesses: 0, wantClaimedSet: false,
 		},
 		{
 			name:      "transient error -> one claim attempt, no success, NOT claimed",
 			extraSelf: map[string]interface{}{"dropInstanceID": "inst-1"},
-			status:    api.ClaimStatus(""),
+			status:    twitch.ClaimStatus(""),
 			err:       errors.New("boom"),
 			wantCalls: 1, wantSuccesses: 0, wantClaimedSet: false,
 		},
@@ -147,7 +147,7 @@ func TestSyncDropsClaimGatingMatrix(t *testing.T) {
 // TestRepeatedSyncNoDuplicateSuccess proves a repeated inventory sync does not
 // re-claim or re-emit a success event once Twitch reports the drop claimed.
 func TestRepeatedSyncNoDuplicateSuccess(t *testing.T) {
-	client := &statusClient{fakeDropsClient: &fakeDropsClient{}, status: api.ClaimStatusAccepted}
+	client := &statusClient{fakeDropsClient: &fakeDropsClient{}, status: twitch.ClaimStatusAccepted}
 	tr, successes := trackerWithHook(t, client)
 	camp := campaignWithDrop("d1", 60)
 
@@ -170,7 +170,7 @@ func TestRepeatedSyncNoDuplicateSuccess(t *testing.T) {
 // already-claimed response reconciles local state to claimed but never emits a
 // user-facing success event.
 func TestAlreadyClaimedReconciliationNoEvent(t *testing.T) {
-	client := &statusClient{fakeDropsClient: &fakeDropsClient{}, status: api.ClaimStatusAlreadyClaimed}
+	client := &statusClient{fakeDropsClient: &fakeDropsClient{}, status: twitch.ClaimStatusAlreadyClaimed}
 	tr, successes := trackerWithHook(t, client)
 	camp := campaignWithDrop("d1", 60)
 
@@ -202,7 +202,7 @@ func TestLightweightProgressSyncNeverClaims(t *testing.T) {
 	}
 	client := &statusClient{
 		fakeDropsClient: &fakeDropsClient{inventory: inventoryWithInProgress(claimable)},
-		status:          api.ClaimStatusAccepted,
+		status:          twitch.ClaimStatusAccepted,
 	}
 	tr, successes := trackerWithHook(t, client)
 	// Seed a tracked campaign so syncProgress has something to refresh.
@@ -268,7 +268,7 @@ func TestFullSyncNoClaimWithoutInstanceID(t *testing.T) {
 		dashboard: dashboardResponse(summary),
 		details:   map[string]map[string]interface{}{"c1": detail},
 		inventory: inventoryWithInProgress(invCampaign),
-	}, status: api.ClaimStatusAccepted}
+	}, status: twitch.ClaimStatusAccepted}
 	tr, successes := trackerWithHook(t, client)
 
 	tr.syncCampaigns()

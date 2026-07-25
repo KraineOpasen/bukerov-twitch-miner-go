@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // startupBackoffSchedule is the base delay before retry N of the startup
@@ -27,9 +27,9 @@ var startupBackoffSchedule = []time.Duration{
 // the loop keeps the process alive and observable instead.
 //
 // Fail-fast is reserved for the errors retrying cannot cure: a rejected token
-// (api.ErrUnauthorized — needs reauthorization) and a login Twitch reports as
-// nonexistent (api.ErrStreamerDoesNotExist — a config typo). Everything else,
-// including api.ErrPersistedQueryNotFound and transport exhaustion (which has
+// (twitch.ErrUnauthorized — needs reauthorization) and a login Twitch reports as
+// nonexistent (twitch.ErrStreamerDoesNotExist — a config typo). Everything else,
+// including twitch.ErrPersistedQueryNotFound and transport exhaustion (which has
 // no sentinel to match on), is retried: an unknown failure is far more likely
 // transient than permanent, and an endless retry is observable via onAttempt
 // while a wrong exit is not.
@@ -43,7 +43,7 @@ func retryStartupLookup(ctx context.Context, fetch func() (string, error), onAtt
 		if err == nil {
 			return id, nil
 		}
-		if errors.Is(err, api.ErrUnauthorized) || errors.Is(err, api.ErrStreamerDoesNotExist) {
+		if errors.Is(err, twitch.ErrUnauthorized) || errors.Is(err, twitch.ErrStreamerDoesNotExist) {
 			return "", err
 		}
 

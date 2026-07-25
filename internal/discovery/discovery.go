@@ -29,10 +29,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
 
@@ -70,10 +70,10 @@ type CampaignsProvider interface {
 
 // twitchAPI is the slice of the Twitch client this subsystem needs; narrowed
 // to an interface so tests can substitute a fake. Satisfied by
-// *api.TwitchClient.
+// *twitch.TwitchClient.
 type twitchAPI interface {
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
-	GetDirectoryStreams(gameName string, limit int) ([]api.DirectoryStream, error)
+	GetDirectoryStreams(gameName string, limit int) ([]twitch.DirectoryStream, error)
 }
 
 // SlotStatus lets discovery ask the slot broker whether its proposed channel
@@ -192,7 +192,7 @@ type Manager struct {
 }
 
 func NewManager(
-	client *api.TwitchClient,
+	client *twitch.TwitchClient,
 	campaigns CampaignsProvider,
 	tracked TrackedLoginsProvider,
 	settings config.RateLimitSettings,
@@ -564,7 +564,7 @@ func (m *Manager) syncOnce() time.Duration {
 	type gameListing struct {
 		game    string
 		gameID  string
-		streams []api.DirectoryStream
+		streams []twitch.DirectoryStream
 		err     error
 	}
 	var (

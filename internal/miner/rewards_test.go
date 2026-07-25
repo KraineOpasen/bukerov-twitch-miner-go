@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // TestHumanizeRewardErrorPersistedQueryNotFound: the rewards modal prints
@@ -14,7 +14,7 @@ import (
 // message without internals ("persisted query", client IDs) and without a
 // retry hint — retrying cannot help until the shipped query hashes are updated.
 func TestHumanizeRewardErrorPersistedQueryNotFound(t *testing.T) {
-	err := fmt.Errorf("%w: operation ChannelPointsContext (tried 3 client IDs)", api.ErrPersistedQueryNotFound)
+	err := fmt.Errorf("%w: operation ChannelPointsContext (tried 3 client IDs)", twitch.ErrPersistedQueryNotFound)
 
 	got := humanizeRewardError(err)
 	if got == nil {
@@ -34,8 +34,8 @@ func TestHumanizeRewardErrorPersistedQueryNotFound(t *testing.T) {
 // sentinels unchanged.
 func TestHumanizeRewardErrorPassesOthersThrough(t *testing.T) {
 	for _, err := range []error{
-		api.ErrInsufficientPoints,
-		api.ErrRewardUnavailable,
+		twitch.ErrInsufficientPoints,
+		twitch.ErrRewardUnavailable,
 		errors.New("some transport hiccup"),
 	} {
 		if got := humanizeRewardError(err); got != err {

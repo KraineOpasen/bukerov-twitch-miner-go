@@ -10,23 +10,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
-// twitchClient is the slice of *api.TwitchClient the drops tracker actually
+// twitchClient is the slice of *twitch.TwitchClient the drops tracker actually
 // uses, narrowed to an interface so the full campaign-sync pipeline can be
 // exercised end-to-end in tests (previously only the pure buildTrackedCampaign
 // helper was testable, so a regression that emptied the live sync path went
-// unnoticed). Satisfied by *api.TwitchClient.
+// unnoticed). Satisfied by *twitch.TwitchClient.
 type twitchClient interface {
 	PostGQL(op constants.GQLOperation) (map[string]interface{}, error)
 	GetDropCampaignDetails(campaignID string) (map[string]interface{}, error)
-	ClaimDrop(drop *models.Drop) (api.ClaimStatus, error)
+	ClaimDrop(drop *models.Drop) (twitch.ClaimStatus, error)
 }
 
 // SyncStatus is a snapshot of the most recent campaign sync. It exists so the
@@ -1070,7 +1070,7 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 			// farming for the whole outage — while also wasting a full client-ID
 			// walk per campaign. Abort the sync instead: the caller keeps the
 			// previously tracked campaigns, exactly like a dashboard-level error.
-			if errors.Is(err, api.ErrPersistedQueryNotFound) {
+			if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 				return nil, nil, dashboardCount, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
 			}
 			// Any other error is campaign-specific (campaign gone, malformed

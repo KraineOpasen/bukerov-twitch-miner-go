@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // These tests pin the connection-health state machine that replaces the naive
@@ -31,36 +31,36 @@ func TestClassifyAPI(t *testing.T) {
 
 	cases := []struct {
 		name string
-		h    api.APIConnHealth
+		h    twitch.APIConnHealth
 		want apiConnState
 	}{
 		{
 			name: "never used is unknown",
-			h:    api.APIConnHealth{},
+			h:    twitch.APIConnHealth{},
 			want: apiConnUnknown,
 		},
 		{
 			// C — idle client startup: constructor stamped a success that has aged,
 			// zero attempts, zero failures. Must be idle, never down.
 			name: "aged constructor success, no attempts, no failures is idle",
-			h:    api.APIConnHealth{LastSuccess: old},
+			h:    twitch.APIConnHealth{LastSuccess: old},
 			want: apiConnIdle,
 		},
 		{
 			// A — production pattern: used a while ago, quiet now, nothing failing.
 			name: "attempted and succeeded long ago, quiet now is idle",
-			h:    api.APIConnHealth{LastAttempt: old, LastSuccess: old},
+			h:    twitch.APIConnHealth{LastAttempt: old, LastSuccess: old},
 			want: apiConnIdle,
 		},
 		{
 			name: "recent useful success is ok",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: recent},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: recent},
 			want: apiConnOK,
 		},
 		{
 			// D — confirmed sustained transport failures with no success in window.
 			name: "transport failing and no recent success is down",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentTransportFailures: 2},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentTransportFailures: 2},
 			want: apiConnDown,
 		},
 		{
@@ -68,33 +68,33 @@ func TestClassifyAPI(t *testing.T) {
 			// preserves the pre-existing auto-bet gate's tolerance for an isolated
 			// blip (degrade tier is degradeGQLFailureThreshold, not 1).
 			name: "one transport failure with recent success is ok not degraded",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentTransportFailures: 1},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentTransportFailures: 1},
 			want: apiConnOK,
 		},
 		{
 			name: "one functional failure with recent success is ok not degraded",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentFunctionalFailures: 1},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentFunctionalFailures: 1},
 			want: apiConnOK,
 		},
 		{
 			// Below the degrade bar and no recent success: absorbed as idle — still
 			// never down.
 			name: "single transport failure without recent success is absorbed (idle)",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentTransportFailures: 1},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentTransportFailures: 1},
 			want: apiConnIdle,
 		},
 		{
 			// M — a success within the window keeps it out of DOWN even if the
 			// failure window still holds recent failures (recovering => degraded).
 			name: "transport failing but recent success is degraded not down",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentTransportFailures: 5},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: recent, RecentTransportFailures: 5},
 			want: apiConnDegraded,
 		},
 		{
 			// J — functional errors (PQNF/403/top-level GQL) are reachable: degraded,
 			// never down (no transport failures recorded).
 			name: "functional failures only are degraded not down",
-			h:    api.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentFunctionalFailures: 3},
+			h:    twitch.APIConnHealth{LastAttempt: recent, LastSuccess: old, RecentFunctionalFailures: 3},
 			want: apiConnDegraded,
 		},
 	}
@@ -114,14 +114,14 @@ func TestClassifyAPI(t *testing.T) {
 func TestClassifyAPIFailureThenIdle(t *testing.T) {
 	now := mkNow()
 	// At failure time: 2 transport failures in window, no recent success -> down.
-	atFailure := api.APIConnHealth{LastAttempt: now, LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 2}
+	atFailure := twitch.APIConnHealth{LastAttempt: now, LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 2}
 	if got := classifyAPI(now, testThreshold, atFailure); got != apiConnDown {
 		t.Fatalf("at failure: classifyAPI = %v, want down", got)
 	}
 	// Later, no attempts happened, so the sliding window has drained to zero and
 	// lastAttempt is now stale. Must be idle, not down.
 	later := now.Add(2 * testThreshold)
-	drained := api.APIConnHealth{LastAttempt: now, LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 0}
+	drained := twitch.APIConnHealth{LastAttempt: now, LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 0}
 	if got := classifyAPI(later, testThreshold, drained); got != apiConnIdle {
 		t.Fatalf("after failures age out with no new attempts: classifyAPI = %v, want idle", got)
 	}
@@ -144,7 +144,7 @@ func TestClassifyAPIThresholdBoundary(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := api.APIConnHealth{LastAttempt: now, LastSuccess: tc.success, RecentTransportFailures: tc.fails}
+			h := twitch.APIConnHealth{LastAttempt: now, LastSuccess: tc.success, RecentTransportFailures: tc.fails}
 			if got := classifyAPI(now, testThreshold, h); got != tc.want {
 				t.Fatalf("classifyAPI = %v, want %v", got, tc.want)
 			}
@@ -156,14 +156,14 @@ func TestClassifyAPIThresholdBoundary(t *testing.T) {
 // classifyConnection — the overall level.
 // ---------------------------------------------------------------------------
 
-func healthyAPI(now time.Time) api.APIConnHealth {
-	return api.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-time.Minute)}
+func healthyAPI(now time.Time) twitch.APIConnHealth {
+	return twitch.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-time.Minute)}
 }
-func idleAPI(now time.Time) api.APIConnHealth {
-	return api.APIConnHealth{LastAttempt: now.Add(-30 * time.Minute), LastSuccess: now.Add(-30 * time.Minute)}
+func idleAPI(now time.Time) twitch.APIConnHealth {
+	return twitch.APIConnHealth{LastAttempt: now.Add(-30 * time.Minute), LastSuccess: now.Add(-30 * time.Minute)}
 }
-func downAPI(now time.Time) api.APIConnHealth {
-	return api.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 3}
+func downAPI(now time.Time) twitch.APIConnHealth {
+	return twitch.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute), RecentTransportFailures: 3}
 }
 
 func activePubSub(now time.Time) time.Time { return now.Add(-time.Minute) }
@@ -235,7 +235,7 @@ func TestClassifyConnectionBothDownIsLost(t *testing.T) {
 // J — functional GQL errors (reachable) with active PubSub are degraded, never lost.
 func TestClassifyConnectionFunctionalErrorsNotLost(t *testing.T) {
 	now := mkNow()
-	funcErr := api.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute), RecentFunctionalFailures: 4}
+	funcErr := twitch.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute), RecentFunctionalFailures: 4}
 	out := classifyConnection(connInputs{
 		now: now, threshold: testThreshold,
 		apiPresent: true, api: funcErr,
@@ -254,7 +254,7 @@ func TestClassifyConnectionFunctionalErrorsNotLost(t *testing.T) {
 func TestClassifyConnectionAuthFailureNotLost(t *testing.T) {
 	now := mkNow()
 	// 401 handling records an attempt but no transport failure (auth lifecycle).
-	authOnly := api.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute)}
+	authOnly := twitch.APIConnHealth{LastAttempt: now.Add(-time.Minute), LastSuccess: now.Add(-30 * time.Minute)}
 	out := classifyConnection(connInputs{
 		now: now, threshold: testThreshold,
 		apiPresent: true, api: authOnly,
@@ -280,7 +280,7 @@ func TestClassifyConnectionProductionTimelineNeverLost(t *testing.T) {
 		in := connInputs{
 			now: now, threshold: testThreshold,
 			apiPresent: true,
-			api:        api.APIConnHealth{LastAttempt: lastSuccess, LastSuccess: lastSuccess},
+			api:        twitch.APIConnHealth{LastAttempt: lastSuccess, LastSuccess: lastSuccess},
 			// PubSub PONGs keep it fresh throughout.
 			pubsubPresent: true, pubsubLastActivity: now.Add(-30 * time.Second),
 		}

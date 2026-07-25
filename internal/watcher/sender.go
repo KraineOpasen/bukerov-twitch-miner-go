@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // MinuteSender performs a single "watch minute" for a streamer: it captures one
@@ -33,7 +33,7 @@ import (
 //
 // playbackTokenProvider is the slice of the Twitch client the sender needs;
 // narrowed to an interface so Probe can be tested without a real client.
-// Satisfied by *api.TwitchClient.
+// Satisfied by *twitch.TwitchClient.
 type playbackTokenProvider interface {
 	GetPlaybackAccessToken(username string) (sig, token string, err error)
 }
@@ -43,7 +43,7 @@ type MinuteSender struct {
 	httpClient *http.Client
 }
 
-func NewMinuteSender(client *api.TwitchClient) *MinuteSender {
+func NewMinuteSender(client *twitch.TwitchClient) *MinuteSender {
 	return &MinuteSender{
 		client:     client,
 		httpClient: &http.Client{Timeout: 20 * time.Second},

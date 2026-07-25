@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/chat"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -32,6 +31,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
@@ -43,7 +43,7 @@ type Miner struct {
 	config     *config.Config
 	configPath string
 	auth       *auth.TwitchAuth
-	client     *api.TwitchClient
+	client     *twitch.TwitchClient
 
 	streamers *streamer.Manager
 
@@ -361,7 +361,7 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		}
 	}
 
-	m.client = api.NewTwitchClient(m.auth, m.deviceID)
+	m.client = twitch.NewTwitchClient(m.auth, m.deviceID)
 	m.client.UpdateClientVersion()
 	m.client.SetAuthErrorHandler(m.handleAuthError)
 
@@ -410,7 +410,7 @@ func (m *Miner) authenticate(ctx context.Context) error {
 	// deleted, the operator decides.
 	userID, staleLogin, err := resolveStartupIdentity(m.auth.GetUserID(), lookupID, lookupErr)
 	if err != nil {
-		if lookupErr != nil && !errors.Is(lookupErr, api.ErrStreamerDoesNotExist) {
+		if lookupErr != nil && !errors.Is(lookupErr, twitch.ErrStreamerDoesNotExist) {
 			return fmt.Errorf("failed to get user ID: %w", err)
 		}
 		// The credential file is keyed by the stable StorageKey() (COR-2), which
@@ -1113,7 +1113,7 @@ func verifyIdentityBinding(sessionUserID, resolvedUserID string) error {
 //     the session identity exactly as before (verifyIdentityBinding); on
 //     success userID is resolvedUserID (== sessionUserID) and staleLogin is
 //     false.
-//   - errors.Is(lookupErr, api.ErrStreamerDoesNotExist) with a non-empty
+//   - errors.Is(lookupErr, twitch.ErrStreamerDoesNotExist) with a non-empty
 //     sessionUserID: the configured login no longer resolves (most likely
 //     renamed away), but the session already carries a validated identity —
 //     proceed with it instead of aborting startup. staleLogin is true so the
@@ -1132,7 +1132,7 @@ func resolveStartupIdentity(sessionUserID, resolvedUserID string, lookupErr erro
 		}
 		return resolvedUserID, false, nil
 	}
-	if errors.Is(lookupErr, api.ErrStreamerDoesNotExist) && sessionUserID != "" {
+	if errors.Is(lookupErr, twitch.ErrStreamerDoesNotExist) && sessionUserID != "" {
 		return sessionUserID, true, nil
 	}
 	if sessionUserID == "" {

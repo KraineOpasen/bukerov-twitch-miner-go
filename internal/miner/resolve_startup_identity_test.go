@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // TestResolveStartupIdentity_SuccessfulLookupDelegatesToVerify covers the
@@ -45,7 +45,7 @@ func TestResolveStartupIdentity_SuccessfulLookupMismatchFailsClosed(t *testing.T
 // the OAuth session already carries a validated identity. Startup must
 // proceed with that session identity instead of aborting.
 func TestResolveStartupIdentity_RenamedOwnerLoginProceedsWithSession(t *testing.T) {
-	lookupErr := fmt.Errorf("wrapped: %w", api.ErrStreamerDoesNotExist)
+	lookupErr := fmt.Errorf("wrapped: %w", twitch.ErrStreamerDoesNotExist)
 	userID, stale, err := resolveStartupIdentity("uid-session", "", lookupErr)
 	if err != nil {
 		t.Fatalf("a renamed owner login with a valid session must not error: %v", err)
@@ -65,8 +65,8 @@ func TestResolveStartupIdentity_RenamedOwnerLoginProceedsWithSession(t *testing.
 // there is no authoritative identity to fall back to.
 func TestResolveStartupIdentity_EmptySessionFailsClosedRegardlessOfLookupError(t *testing.T) {
 	cases := []error{
-		fmt.Errorf("wrapped: %w", api.ErrStreamerDoesNotExist),
-		api.ErrUnauthorized,
+		fmt.Errorf("wrapped: %w", twitch.ErrStreamerDoesNotExist),
+		twitch.ErrUnauthorized,
 		errors.New("transport exhausted"),
 	}
 	for _, lookupErr := range cases {
@@ -87,7 +87,7 @@ func TestResolveStartupIdentity_EmptySessionFailsClosedRegardlessOfLookupError(t
 // rejection, or an unknown error the retry loop gave up on after context
 // cancellation) is returned verbatim — no owner-rename fallback applies.
 func TestResolveStartupIdentity_OtherErrorsPassThrough(t *testing.T) {
-	for _, lookupErr := range []error{api.ErrUnauthorized, errors.New("boom")} {
+	for _, lookupErr := range []error{twitch.ErrUnauthorized, errors.New("boom")} {
 		t.Run(lookupErr.Error(), func(t *testing.T) {
 			_, stale, err := resolveStartupIdentity("uid-session", "", lookupErr)
 			if !errors.Is(err, lookupErr) {

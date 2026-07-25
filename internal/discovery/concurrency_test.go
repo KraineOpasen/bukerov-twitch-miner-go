@@ -4,9 +4,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // Race-safe fakes: everything here is either immutable or mutex-guarded, so
@@ -16,7 +16,7 @@ type safeCampaigns struct{ campaigns []*models.Campaign }
 
 func (f *safeCampaigns) Campaigns() []*models.Campaign { return f.campaigns }
 
-type safeClient struct{ streams []api.DirectoryStream }
+type safeClient struct{ streams []twitch.DirectoryStream }
 
 func (f *safeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
 	if len(s.Stream.CampaignIDs) == 0 {
@@ -25,14 +25,14 @@ func (f *safeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransi
 	return s.SetConfirmedOnline()
 }
 
-func (f *safeClient) GetDirectoryStreams(string, int) ([]api.DirectoryStream, error) {
+func (f *safeClient) GetDirectoryStreams(string, int) ([]twitch.DirectoryStream, error) {
 	return f.streams, nil
 }
 
 func newRaceManager(t *testing.T) *Manager {
 	t.Helper()
 	provider := &safeCampaigns{campaigns: []*models.Campaign{activeCampaign("g1", "World of Tanks")}}
-	client := &safeClient{streams: []api.DirectoryStream{
+	client := &safeClient{streams: []twitch.DirectoryStream{
 		{ChannelID: "1", Login: "chan_a", Viewers: 100, GameID: "g1", DropsEnabled: true},
 	}}
 

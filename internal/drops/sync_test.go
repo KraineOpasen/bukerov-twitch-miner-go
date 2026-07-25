@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 func nowMinusHours(h int) time.Time { return time.Now().Add(-time.Duration(h) * time.Hour) }
@@ -71,8 +71,8 @@ func (f *fakeDropsClient) GetDropCampaignDetails(campaignID string) (map[string]
 	return f.details[campaignID], nil
 }
 
-func (f *fakeDropsClient) ClaimDrop(*models.Drop) (api.ClaimStatus, error) {
-	return api.ClaimStatusRejected, nil
+func (f *fakeDropsClient) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
+	return twitch.ClaimStatusRejected, nil
 }
 
 // dashboardResponse wraps campaign summaries the way ViewerDropsDashboard does.

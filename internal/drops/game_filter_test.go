@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // ---- helpers -------------------------------------------------------------
@@ -61,9 +61,9 @@ type claimRecordingClient struct {
 	claimed []string
 }
 
-func (c *claimRecordingClient) ClaimDrop(d *models.Drop) (api.ClaimStatus, error) {
+func (c *claimRecordingClient) ClaimDrop(d *models.Drop) (twitch.ClaimStatus, error) {
 	c.claimed = append(c.claimed, d.Name)
-	return api.ClaimStatusAccepted, nil
+	return twitch.ClaimStatusAccepted, nil
 }
 
 // ---- T1..T11 : applyGameFilter unit behaviour ---------------------------
@@ -578,13 +578,13 @@ func (c *orderedClaimClient) GetDropCampaignDetails(id string) (map[string]inter
 	return c.details[id], nil
 }
 
-func (c *orderedClaimClient) ClaimDrop(drop *models.Drop) (api.ClaimStatus, error) {
+func (c *orderedClaimClient) ClaimDrop(drop *models.Drop) (twitch.ClaimStatus, error) {
 	c.mu.Lock()
 	c.events = append(c.events, "Claim")
 	c.claims = append(c.claims, claimEvent{DropID: drop.ID, InstanceID: drop.DropInstanceID})
 	c.claimed = true
 	c.mu.Unlock()
-	return api.ClaimStatusAccepted, nil
+	return twitch.ClaimStatusAccepted, nil
 }
 
 func firstIndex(events []string, s string) int {

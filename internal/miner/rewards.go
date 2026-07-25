@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // ListCustomRewards returns the current custom channel-points rewards for a
@@ -51,14 +51,14 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 
 	reward := findReward(rewards, rewardID)
 	if reward == nil || !reward.IsAvailable() {
-		return api.ErrRewardUnavailable
+		return twitch.ErrRewardUnavailable
 	}
 
 	if reward.IsUserInputRequired && strings.TrimSpace(textInput) == "" {
-		return api.ErrRewardInputRequired
+		return twitch.ErrRewardInputRequired
 	}
 	if reward.Cost > s.GetChannelPoints() {
-		return api.ErrInsufficientPoints
+		return twitch.ErrInsufficientPoints
 	}
 
 	if err := m.client.RedeemCustomReward(s, reward, textInput); err != nil {
@@ -78,7 +78,7 @@ func (m *Miner) RedeemCustomReward(username, rewardID, textInput string) error {
 // Every other error passes through unchanged — the api package already phrases
 // those as user-facing sentinels (not enough points, reward unavailable, ...).
 func humanizeRewardError(err error) error {
-	if errors.Is(err, api.ErrPersistedQueryNotFound) {
+	if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
 		return errors.New("twitch is temporarily rejecting the miner's requests (stale query metadata) — redemption is unavailable until it recovers")
 	}
 	return err

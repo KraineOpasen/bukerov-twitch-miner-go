@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // pqnfSummaryAndDetail returns a matching dashboard summary + campaign detail
@@ -56,7 +56,7 @@ func TestSyncCampaignsPQNFDetailsKeepsPreviousCampaigns(t *testing.T) {
 
 	// Twitch rotates the DropCampaignDetails hash: every details call now
 	// fails with ErrPersistedQueryNotFound (the dashboard listing still works).
-	client.detailsErr = fmt.Errorf("%w: operation DropCampaignDetails (tried 3 client IDs)", api.ErrPersistedQueryNotFound)
+	client.detailsErr = fmt.Errorf("%w: operation DropCampaignDetails (tried 3 client IDs)", twitch.ErrPersistedQueryNotFound)
 
 	// Sync 2: must NOT swap in an empty campaign set.
 	tracker.syncCampaigns()

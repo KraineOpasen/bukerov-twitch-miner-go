@@ -10,17 +10,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/api"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // onlineChecker is the slice of the Twitch client the watcher needs to
 // re-verify a stale stream; narrowed to an interface so the broker's send loop
-// can be tested with a fake. Satisfied by *api.TwitchClient.
+// can be tested with a fake. Satisfied by *twitch.TwitchClient.
 type onlineChecker interface {
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
@@ -322,7 +322,7 @@ const streakPursuitCapMinutes = streakExpectedGrantMinutes + streakDeliveryGrace
 const StreakPursuitCapMinutes = streakPursuitCapMinutes
 
 func NewMinuteWatcher(
-	client *api.TwitchClient,
+	client *twitch.TwitchClient,
 	streamers []*models.Streamer,
 	priorities []config.Priority,
 	settings config.RateLimitSettings,
