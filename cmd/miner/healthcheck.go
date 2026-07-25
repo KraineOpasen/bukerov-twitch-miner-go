@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 // healthcheckTimeout bounds the whole probe; Docker's HEALTHCHECK has its own
@@ -24,7 +25,11 @@ const healthcheckTimeout = 5 * time.Second
 // degrades to "the container's main process is running" — which is exactly
 // what being able to execute this subcommand demonstrates — and reports
 // healthy.
-func runHealthcheck(configPath string) int {
+//
+// The dashboard exposure/auth values come from the same immutable snapshot the
+// server binds with (resolved once at bootstrap), so the probe targets exactly
+// the host the server binds and presents the same Basic Auth credentials.
+func runHealthcheck(configPath string, dash runtimeconfig.Dashboard) int {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "healthcheck: cannot read config %s: %v\n", configPath, err)
@@ -35,16 +40,15 @@ func runHealthcheck(configPath string) int {
 		return 0
 	}
 
-	url := healthcheckURL(cfg.Analytics.Host, cfg.Analytics.Port)
+	url := healthcheckURL(dash.HostOverride, cfg.Analytics.Host, cfg.Analytics.Port)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
 		return 1
 	}
-	// The dashboard may require Basic Auth; the probe runs in the same
-	// environment as the server, so the same env vars are available.
-	if user, pass := os.Getenv("DASHBOARD_USERNAME"), os.Getenv("DASHBOARD_PASSWORD"); user != "" && pass != "" {
-		req.SetBasicAuth(user, pass)
+	// The dashboard may require Basic Auth; present the resolved credentials.
+	if dash.AuthEnabled() {
+		req.SetBasicAuth(dash.Username, dash.Password.Reveal())
 	}
 
 	client := &http.Client{Timeout: healthcheckTimeout}
@@ -65,12 +69,12 @@ func runHealthcheck(configPath string) int {
 
 // healthcheckURL picks the address to probe. Wildcard and loopback binds are
 // reachable via 127.0.0.1; a bind to one specific address is probed directly.
-// DASHBOARD_HOST participates with the same precedence the server applies
-// (env over config).
-func healthcheckURL(configHost string, port int) string {
+// The DASHBOARD_HOST override (already resolved into hostOverride) participates
+// with the same precedence the server applies (env over config).
+func healthcheckURL(hostOverride, configHost string, port int) string {
 	host := configHost
-	if env := os.Getenv("DASHBOARD_HOST"); env != "" {
-		host = env
+	if hostOverride != "" {
+		host = hostOverride
 	}
 	switch host {
 	case "", "0.0.0.0", "::":

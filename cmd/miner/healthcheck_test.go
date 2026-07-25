@@ -9,7 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
+
+// The healthcheck no longer reads the process environment: the dashboard
+// exposure/auth values are passed in as a resolved runtimeconfig.Dashboard, so
+// these tests construct it explicitly and set no env.
 
 func writeConfig(t *testing.T, enableAnalytics bool, host string, port int) string {
 	t.Helper()
@@ -35,15 +41,7 @@ func serverPort(t *testing.T, srv *httptest.Server) (string, int) {
 	return u.Hostname(), port
 }
 
-func clearHealthcheckEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{"DASHBOARD_HOST", "DASHBOARD_USERNAME", "DASHBOARD_PASSWORD"} {
-		t.Setenv(key, "")
-	}
-}
-
 func TestRunHealthcheckHealthy(t *testing.T) {
-	clearHealthcheckEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/status" {
 			http.NotFound(w, r)
@@ -56,13 +54,12 @@ func TestRunHealthcheckHealthy(t *testing.T) {
 	host, port := serverPort(t, srv)
 	cfgPath := writeConfig(t, true, host, port)
 
-	if code := runHealthcheck(cfgPath); code != 0 {
+	if code := runHealthcheck(cfgPath, runtimeconfig.Dashboard{}); code != 0 {
 		t.Fatalf("healthy server: exit code = %d, want 0", code)
 	}
 }
 
 func TestRunHealthcheckUnhealthyStatus(t *testing.T) {
-	clearHealthcheckEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -71,44 +68,37 @@ func TestRunHealthcheckUnhealthyStatus(t *testing.T) {
 	host, port := serverPort(t, srv)
 	cfgPath := writeConfig(t, true, host, port)
 
-	if code := runHealthcheck(cfgPath); code != 1 {
+	if code := runHealthcheck(cfgPath, runtimeconfig.Dashboard{}); code != 1 {
 		t.Fatalf("500 server: exit code = %d, want 1", code)
 	}
 }
 
 func TestRunHealthcheckUnreachable(t *testing.T) {
-	clearHealthcheckEnv(t)
 	// A closed server: connection refused.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	host, port := serverPort(t, srv)
 	srv.Close()
 
 	cfgPath := writeConfig(t, true, host, port)
-	if code := runHealthcheck(cfgPath); code != 1 {
+	if code := runHealthcheck(cfgPath, runtimeconfig.Dashboard{}); code != 1 {
 		t.Fatalf("unreachable server: exit code = %d, want 1", code)
 	}
 }
 
 func TestRunHealthcheckAnalyticsDisabled(t *testing.T) {
-	clearHealthcheckEnv(t)
 	cfgPath := writeConfig(t, false, "127.0.0.1", 5000)
-	if code := runHealthcheck(cfgPath); code != 0 {
+	if code := runHealthcheck(cfgPath, runtimeconfig.Dashboard{}); code != 0 {
 		t.Fatalf("analytics disabled: exit code = %d, want 0", code)
 	}
 }
 
 func TestRunHealthcheckMissingConfig(t *testing.T) {
-	clearHealthcheckEnv(t)
-	if code := runHealthcheck(filepath.Join(t.TempDir(), "nope.json")); code != 1 {
+	if code := runHealthcheck(filepath.Join(t.TempDir(), "nope.json"), runtimeconfig.Dashboard{}); code != 1 {
 		t.Fatal("missing config must be unhealthy (exit 1)")
 	}
 }
 
 func TestRunHealthcheckSendsBasicAuth(t *testing.T) {
-	clearHealthcheckEnv(t)
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "secret")
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "admin" || pass != "secret" {
@@ -122,18 +112,17 @@ func TestRunHealthcheckSendsBasicAuth(t *testing.T) {
 	host, port := serverPort(t, srv)
 	cfgPath := writeConfig(t, true, host, port)
 
-	if code := runHealthcheck(cfgPath); code != 0 {
-		t.Fatalf("auth-protected server with creds in env: exit code = %d, want 0", code)
+	dash := runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("secret")}
+	if code := runHealthcheck(cfgPath, dash); code != 0 {
+		t.Fatalf("auth-protected server with resolved creds: exit code = %d, want 0", code)
 	}
 }
 
 func TestHealthcheckURL(t *testing.T) {
-	clearHealthcheckEnv(t)
-
 	cases := []struct {
-		host string
-		env  string
-		want string
+		host         string
+		hostOverride string
+		want         string
 	}{
 		{"0.0.0.0", "", "http://127.0.0.1:5000/api/status"},
 		{"", "", "http://127.0.0.1:5000/api/status"},
@@ -143,9 +132,8 @@ func TestHealthcheckURL(t *testing.T) {
 		{"192.168.1.20", "127.0.0.1", "http://127.0.0.1:5000/api/status"},
 	}
 	for _, tc := range cases {
-		t.Setenv("DASHBOARD_HOST", tc.env)
-		if got := healthcheckURL(tc.host, 5000); got != tc.want {
-			t.Errorf("healthcheckURL(%q) with env %q = %q, want %q", tc.host, tc.env, got, tc.want)
+		if got := healthcheckURL(tc.hostOverride, tc.host, 5000); got != tc.want {
+			t.Errorf("healthcheckURL(override=%q, config=%q) = %q, want %q", tc.hostOverride, tc.host, got, tc.want)
 		}
 	}
 }

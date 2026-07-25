@@ -4,25 +4,16 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 )
 
-// devPredictionsEnabled reports whether the dev-only prediction simulator is
-// turned on. It is off by default and only activates when MINER_DEV_PREDICTIONS
-// is set to a truthy value, so simulated rounds can never appear in a real run
-// or be triggered accidentally.
-func devPredictionsEnabled() bool {
-	switch os.Getenv("MINER_DEV_PREDICTIONS") {
-	case "1", "true", "TRUE", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
+// The dev-only prediction simulator is gated by the injected
+// runtimeconfig.Dashboard.DevPredictions flag (resolved once at bootstrap from
+// MINER_DEV_PREDICTIONS) in Server.handler(), so simulated rounds can never
+// appear in a real run or be triggered accidentally.
 
 // enableDevPredictions swaps in an in-memory simulator as the source of live
 // predictions and the target of manual bets/skips, and registers the dev-only

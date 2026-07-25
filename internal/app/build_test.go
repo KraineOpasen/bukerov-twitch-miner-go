@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 
 	_ "modernc.org/sqlite"
@@ -76,7 +77,7 @@ func stepNames(a *App) []string {
 // lifecycle steps in construction order.
 func TestBuildConstructsDependencies(t *testing.T) {
 	ctx := context.Background()
-	app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, nil))
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -99,6 +100,44 @@ func TestBuildConstructsDependencies(t *testing.T) {
 	}
 }
 
+// BKM-021 — Build must propagate the immutable dashboard snapshot from the
+// RuntimeConfig into the web server it constructs. This is the crux of the
+// refactor: the web layer no longer reads the environment, so if
+// ws.SetDashboardConfig(rc.Dashboard) were dropped the dashboard would silently
+// serve with a zero (no-auth) snapshot — a security regression. AuthConfigured()
+// observes only whether auth is on (never the credentials), so the assertion
+// needs no network bind and leaks no secret.
+func TestBuildPropagatesDashboardToWebServer(t *testing.T) {
+	ctx := context.Background()
+
+	// A zero snapshot leaves dashboard auth disabled.
+	appNoAuth, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = appNoAuth.Shutdown(context.Background()) })
+	if appNoAuth.web == nil {
+		t.Fatal("web server not built")
+	}
+	if appNoAuth.web.AuthConfigured() {
+		t.Error("zero dashboard snapshot must leave dashboard auth DISABLED")
+	}
+
+	// A snapshot carrying credentials must reach the web server: if the
+	// SetDashboardConfig propagation in Build were removed, this would fail.
+	rc := runtimeconfig.RuntimeConfig{
+		Dashboard: runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("pw")},
+	}
+	appAuth, err := buildWith(ctx, testConfig(), rc, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = appAuth.Shutdown(context.Background()) })
+	if !appAuth.web.AuthConfigured() {
+		t.Error("Build must propagate the credentialed dashboard snapshot into the web server")
+	}
+}
+
 // C21 / I6 — with analytics disabled, Build opens only the database (no
 // analytics service, no web server) and still succeeds.
 func TestBuildAnalyticsDisabled(t *testing.T) {
@@ -106,7 +145,7 @@ func TestBuildAnalyticsDisabled(t *testing.T) {
 	cfg := testConfig()
 	cfg.EnableAnalytics = false
 
-	app, err := buildWith(ctx, cfg, Options{}, testFactories(t, nil))
+	app, err := buildWith(ctx, cfg, runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -136,7 +175,7 @@ func TestBuildFailureClosesOpenedResources(t *testing.T) {
 		return nil, errBoom
 	}
 
-	app, err := buildWith(ctx, testConfig(), Options{}, f)
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, f)
 	if err == nil {
 		t.Fatal("expected Build error")
 	}
@@ -177,7 +216,7 @@ func TestBuildStartsNoGoroutines(t *testing.T) {
 
 	runtime.GC()
 	before := runtime.NumGoroutine()
-	app, err := buildWith(ctx, testConfig(), Options{}, f)
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, f)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -198,7 +237,7 @@ func TestRepeatedBuildShutdownNoLeak(t *testing.T) {
 	base := runtime.NumGoroutine()
 
 	for i := 0; i < 10; i++ {
-		app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, nil))
+		app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
 		if err != nil {
 			t.Fatalf("Build #%d: %v", i, err)
 		}
@@ -219,7 +258,7 @@ func TestRepeatedBuildShutdownNoLeak(t *testing.T) {
 func TestNoDatabaseUseAfterShutdown(t *testing.T) {
 	ctx := context.Background()
 	var opened *database.DB
-	app, err := buildWith(ctx, testConfig(), Options{}, testFactories(t, &opened))
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, &opened))
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -246,7 +285,7 @@ func TestBuildValidatesConfig(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := buildWith(ctx, tc.cfg, Options{}, f); err == nil {
+			if _, err := buildWith(ctx, tc.cfg, runtimeconfig.RuntimeConfig{}, f); err == nil {
 				t.Fatal("expected validation error")
 			}
 		})

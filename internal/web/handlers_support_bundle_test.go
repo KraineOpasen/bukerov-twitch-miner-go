@@ -16,6 +16,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 // ---- Canary values (BKM-016 §7 T2) ----
@@ -124,10 +125,9 @@ func canaryFixtureSnapshot() debug.Snapshot {
 
 func newAuthedServer(t *testing.T) *Server {
 	t.Helper()
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "hunter2")
-	return newRenderServer(t)
+	s := newRenderServer(t)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: runtimeconfig.NewSecret("hunter2")})
+	return s
 }
 
 func authedBundleRequest() *http.Request {
@@ -503,10 +503,8 @@ func TestSupportBundleUnauthenticatedDenied(t *testing.T) {
 // even though it leaves every other route unauthenticated - denied with
 // 404 (authEnabled()==false path) and the builder is never invoked.
 func TestSupportBundleDeniedUnderInsecureBypass(t *testing.T) {
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_INSECURE_NO_AUTH", "true")
-
 	s := newRenderServer(t)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true})
 	var calls int32
 	s.SetSupportBundleSource(func() debug.Snapshot {
 		atomic.AddInt32(&calls, 1)
@@ -715,9 +713,8 @@ func TestSupportBundleSnapshotAcquiredBeforeLocking(t *testing.T) {
 // insecure-bypass mode's normal (unauthenticated) behavior on OTHER routes
 // is unchanged - only the support-bundle route itself gets the extra guard.
 func TestSupportBundleDoesNotAffectOtherRoutes(t *testing.T) {
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_INSECURE_NO_AUTH", "true")
 	s := newRenderServer(t)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true})
 	h := s.handler()
 
 	rec := httptest.NewRecorder()
@@ -770,18 +767,16 @@ func TestSupportBundleLogsPageButtonVisibility(t *testing.T) {
 		t.Error("logs page should show the support-bundle link when real auth is configured")
 	}
 
-	// Insecure bypass: authEnabled() is false, so the control must be hidden.
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_INSECURE_NO_AUTH", "true")
+	// Insecure bypass: AuthEnabled() is false, so the control must be hidden.
 	sInsecure := newRenderServer(t)
+	sInsecure.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true})
 	rec2 := httptest.NewRecorder()
 	sInsecure.handleLogsPage(rec2, httptest.NewRequest(http.MethodGet, "/logs", nil))
 	if strings.Contains(rec2.Body.String(), SupportBundlePath) {
 		t.Error("logs page must NOT show the support-bundle link under the insecure bypass")
 	}
 
-	// Auth fully disabled (no env at all): also hidden.
-	clearSecurityEnv(t)
+	// Auth fully disabled (zero Dashboard): also hidden.
 	sDisabled := newRenderServer(t)
 	rec3 := httptest.NewRecorder()
 	sDisabled.handleLogsPage(rec3, httptest.NewRequest(http.MethodGet, "/logs", nil))

@@ -7,14 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/app"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -34,44 +33,56 @@ var (
 func main() {
 	flag.Parse()
 
+	// Resolve the entire process-level runtime configuration ONCE, at the single
+	// bootstrap boundary: CLI flags plus the environment (read only here, via
+	// runtimeconfig.OSLookup) become one immutable, typed snapshot. No downstream
+	// runtime component reads the environment for these inputs again.
+	rc := runtimeconfig.Resolve(runtimeconfig.Flags{
+		ConfigPath:     *configFile,
+		Debug:          *debug,
+		AutoUpdate:     *autoUpdate,
+		GenerateConfig: *genConfig,
+		Healthcheck:    *healthcheck,
+	}, runtimeconfig.OSLookup)
+
 	if *healthcheck {
-		os.Exit(runHealthcheck(*configFile))
+		os.Exit(runHealthcheck(rc.ConfigPath, rc.Dashboard))
 	}
 
 	if *genConfig {
-		setupBasicLogger(*debug)
+		setupBasicLogger(rc.Debug)
 		generateSampleConfig()
 		return
 	}
 
-	cfg, err := loadOrCreateConfig(*configFile)
+	cfg, err := loadOrCreateConfig(rc.ConfigPath)
 	if err != nil {
-		setupBasicLogger(*debug)
+		setupBasicLogger(rc.Debug)
 		slog.Error("Failed to load configuration", "error", err)
 		os.Exit(1)
 	}
 
 	if cfg.Username == "" {
-		setupBasicLogger(*debug)
+		setupBasicLogger(rc.Debug)
 		slog.Error("Username is required in configuration")
 		os.Exit(1)
 	}
 
 	if len(cfg.Streamers) == 0 {
-		setupBasicLogger(*debug)
+		setupBasicLogger(rc.Debug)
 		slog.Error("At least one streamer is required in configuration")
 		os.Exit(1)
 	}
 
 	logSettings := cfg.Logger
-	if *debug {
+	if rc.Debug {
 		logSettings.ConsoleLevel = "DEBUG"
 		logSettings.FileLevel = "DEBUG"
 	}
 
 	log, err := logger.Setup(cfg.StorageKey(), logSettings)
 	if err != nil {
-		setupBasicLogger(*debug)
+		setupBasicLogger(rc.Debug)
 		slog.Error("Failed to setup logger", "error", err)
 		os.Exit(1)
 	}
@@ -83,13 +94,10 @@ func main() {
 	defer stop()
 
 	// Build the whole service graph (database, analytics, web server, miner) in
-	// one place. Build opens owned resources and runs migrations but starts no
-	// runtime loops; a failure here has already unwound anything it opened.
-	application, err := app.Build(ctx, cfg, app.Options{
-		ConfigPath:         *configFile,
-		AutoUpdateEnabled:  autoUpdateEnabled(),
-		AutoUpdateInterval: updater.ParseCheckInterval(os.Getenv("AUTO_UPDATE_CHECK_INTERVAL")),
-	})
+	// one place from the immutable runtime snapshot. Build opens owned resources
+	// and runs migrations but starts no runtime loops; a failure here has already
+	// unwound anything it opened.
+	application, err := app.Build(ctx, cfg, rc)
 	if err != nil {
 		slog.Error("Failed to build application", "error", err)
 		os.Exit(1)
@@ -112,19 +120,6 @@ func main() {
 		slog.Error("Miner error", "error", runErr)
 		os.Exit(1)
 	}
-}
-
-// autoUpdateEnabled resolves whether self-update is on. The -auto-update flag
-// takes precedence; otherwise the AUTO_UPDATE env var (true/1/yes) enables it,
-// which is how the Docker image opts in without changing the entrypoint.
-func autoUpdateEnabled() bool {
-	if *autoUpdate {
-		return true
-	}
-	if v, err := strconv.ParseBool(os.Getenv("AUTO_UPDATE")); err == nil {
-		return v
-	}
-	return false
 }
 
 func setupBasicLogger(debug bool) {

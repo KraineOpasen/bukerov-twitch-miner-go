@@ -6,12 +6,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
-// This file implements the dashboard's exposure model:
+// This file implements the dashboard's exposure model. Every decision reads the
+// immutable runtimeconfig.Dashboard snapshot resolved once at bootstrap (see
+// internal/runtimeconfig) and injected via Server.SetDashboardConfig — the web
+// layer never reads the process environment itself:
 //
 //   - The server binds to loopback by default; a non-loopback bind must be
 //     requested explicitly (analytics.host in config.json, or the
@@ -31,12 +34,12 @@ import (
 //     that rewrite Host.
 
 // resolveBindHost returns the effective bind host and where it came from.
-// The DASHBOARD_HOST env var takes precedence over the config value but is
-// never written back to config.json, so a container-supplied override can't
-// leak into the user's persisted settings.
-func resolveBindHost(configHost string) (host, source string) {
-	if env := strings.TrimSpace(os.Getenv("DASHBOARD_HOST")); env != "" {
-		return env, "DASHBOARD_HOST env"
+// The DASHBOARD_HOST override (captured in the snapshot) takes precedence over
+// the config value but is never written back to config.json, so a
+// container-supplied override can't leak into the user's persisted settings.
+func resolveBindHost(cfg runtimeconfig.Dashboard, configHost string) (host, source string) {
+	if cfg.HostOverride != "" {
+		return cfg.HostOverride, "DASHBOARD_HOST env"
 	}
 	return configHost, "config analytics.host"
 }
@@ -53,22 +56,17 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-func insecureNoAuthAllowed() bool {
-	v, err := strconv.ParseBool(os.Getenv("DASHBOARD_INSECURE_NO_AUTH"))
-	return err == nil && v
-}
-
 // validateBindSecurity is the fail-closed gate run before the dashboard
 // starts listening: loopback binds are always fine, non-loopback binds need
 // credentials or the explicit DASHBOARD_INSECURE_NO_AUTH opt-out.
-func validateBindSecurity(host string) error {
+func validateBindSecurity(cfg runtimeconfig.Dashboard, host string) error {
 	if isLoopbackHost(host) {
 		return nil
 	}
-	if authEnabled() {
+	if cfg.AuthEnabled() {
 		return nil
 	}
-	if insecureNoAuthAllowed() {
+	if cfg.InsecureNoAuth {
 		slog.Warn("DASHBOARD_INSECURE_NO_AUTH=true: dashboard is reachable on a non-loopback address WITHOUT authentication",
 			"host", host)
 		return nil
@@ -107,15 +105,16 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 // provenance (Sec-Fetch-Site, Origin, Referer) points at a different origin.
 // Safe methods pass through untouched, so the SSE stream (a GET) is never
 // affected. Requests carrying none of those headers pass too: they come from
-// non-browser clients (curl, scripts), which are not CSRF vectors.
-func csrfProtectMiddleware(next http.Handler) http.Handler {
+// non-browser clients (curl, scripts), which are not CSRF vectors. The trusted
+// origins come from the injected snapshot (already parsed at bootstrap).
+func csrfProtectMiddleware(cfg runtimeconfig.Dashboard, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
 			return
 		}
-		if err := checkSameOrigin(r); err != nil {
+		if err := checkSameOrigin(cfg, r); err != nil {
 			slog.Warn("Blocked cross-origin state-changing request",
 				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "reason", err.Error())
 			http.Error(w, "Forbidden: cross-origin request blocked", http.StatusForbidden)
@@ -125,7 +124,7 @@ func csrfProtectMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func checkSameOrigin(r *http.Request) error {
+func checkSameOrigin(cfg runtimeconfig.Dashboard, r *http.Request) error {
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
 		if site == "same-origin" || site == "none" {
 			return nil
@@ -133,15 +132,15 @@ func checkSameOrigin(r *http.Request) error {
 		return fmt.Errorf("Sec-Fetch-Site is %q", site)
 	}
 	if origin := r.Header.Get("Origin"); origin != "" {
-		return matchesRequestHost(origin, r.Host)
+		return matchesRequestHost(cfg, origin, r.Host)
 	}
 	if referer := r.Header.Get("Referer"); referer != "" {
-		return matchesRequestHost(referer, r.Host)
+		return matchesRequestHost(cfg, referer, r.Host)
 	}
 	return nil
 }
 
-func matchesRequestHost(rawURL, requestHost string) error {
+func matchesRequestHost(cfg runtimeconfig.Dashboard, rawURL, requestHost string) error {
 	if rawURL == "null" {
 		return fmt.Errorf(`opaque "null" origin`)
 	}
@@ -152,34 +151,10 @@ func matchesRequestHost(rawURL, requestHost string) error {
 	if strings.EqualFold(u.Host, requestHost) {
 		return nil
 	}
-	for _, trusted := range trustedOriginHosts() {
+	for _, trusted := range cfg.TrustedOrigins {
 		if strings.EqualFold(u.Host, trusted) {
 			return nil
 		}
 	}
 	return fmt.Errorf("origin host %q does not match request host %q", u.Host, requestHost)
-}
-
-// trustedOriginHosts parses the DASHBOARD_TRUSTED_ORIGINS env var: a
-// comma-separated list of extra allowed origins for setups where a reverse
-// proxy rewrites the Host header. Entries may be full origins
-// ("https://miner.example.com") or bare host[:port] values.
-func trustedOriginHosts() []string {
-	raw := os.Getenv("DASHBOARD_TRUSTED_ORIGINS")
-	if raw == "" {
-		return nil
-	}
-	var hosts []string
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if u, err := url.Parse(entry); err == nil && u.Host != "" {
-			hosts = append(hosts, u.Host)
-			continue
-		}
-		hosts = append(hosts, entry)
-	}
-	return hosts
 }

@@ -6,14 +6,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 // TestDevPredictionsEndToEnd exercises the full route dispatch: with the dev
 // simulator enabled, the Overview renders fake bettable rounds with manual
 // controls, and the /api/prediction/bet route places against the simulator.
 func TestDevPredictionsEndToEnd(t *testing.T) {
-	t.Setenv("MINER_DEV_PREDICTIONS", "1")
 	srv, _, _ := newOverviewTestServer(t)
+	srv.SetDashboardConfig(runtimeconfig.Dashboard{DevPredictions: true})
 	h := srv.handler()
 
 	rr := httptest.NewRecorder()

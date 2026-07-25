@@ -29,6 +29,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
@@ -43,8 +44,15 @@ import (
 type Miner struct {
 	config     *config.Config
 	configPath string
-	auth       *auth.TwitchAuth
-	client     *twitch.TwitchClient
+	// dashboard is the immutable, environment-derived dashboard exposure/auth
+	// snapshot (resolved once at the cmd/miner bootstrap and injected via
+	// SetDashboardConfig). It is used only by the fallback web-server build in
+	// start() — the library path where App did not already inject a web server;
+	// in the App-driven process App injects the same snapshot into the web
+	// server it builds. The zero value means "no override, no auth" (loopback).
+	dashboard runtimeconfig.Dashboard
+	auth      *auth.TwitchAuth
+	client    *twitch.TwitchClient
 
 	streamers *streamer.Manager
 
@@ -228,6 +236,14 @@ type autoUpdateConfig struct {
 // logs/notifies when a newer release exists, but never replaces the binary.
 func (m *Miner) ConfigureAutoUpdate(enabled bool, interval time.Duration) {
 	m.autoUpdate = &autoUpdateConfig{enabled: enabled, interval: interval}
+}
+
+// SetDashboardConfig injects the resolved, immutable dashboard exposure/auth
+// snapshot. App calls it during composition; it is consumed only by the
+// fallback web-server build in start() (the library path where App did not
+// inject a web server). Called before Run.
+func (m *Miner) SetDashboardConfig(d runtimeconfig.Dashboard) {
+	m.dashboard = d
 }
 
 func (m *Miner) SetAnalyticsService(svc *analytics.Service) {
@@ -541,6 +557,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 				streamers,
 			)
 			if m.webServer != nil {
+				m.webServer.SetDashboardConfig(m.dashboard)
 				m.webServer.SetSettingsProvider(m)
 				m.webServer.SetSettingsUpdateCallback(m.ApplySettings)
 				m.webServer.SetNextStreamCheckProvider(m)

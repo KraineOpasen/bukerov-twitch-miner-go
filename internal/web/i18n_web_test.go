@@ -20,7 +20,6 @@ func langPost(origin string) *http.Request {
 // TestLangEndpointSetsCookieAndRefresh verifies a same-origin POST persists the
 // language cookie and asks the client to refresh.
 func TestLangEndpointSetsCookieAndRefresh(t *testing.T) {
-	clearSecurityEnv(t)
 	s := newRenderServer(t)
 	handler := s.handler()
 
@@ -50,7 +49,6 @@ func TestLangEndpointSetsCookieAndRefresh(t *testing.T) {
 // TestLangEndpointCSRF proves /api/lang is inside the shared csrfProtectMiddleware
 // chain: a cross-origin POST is rejected, a same-origin POST passes.
 func TestLangEndpointCSRF(t *testing.T) {
-	clearSecurityEnv(t)
 	handler := newRenderServer(t).handler()
 
 	// Cross-origin POST: blocked by the CSRF layer before reaching the handler.
@@ -70,7 +68,6 @@ func TestLangEndpointCSRF(t *testing.T) {
 
 // TestLangEndpointRejectsNonPost verifies the endpoint is POST-only.
 func TestLangEndpointRejectsNonPost(t *testing.T) {
-	clearSecurityEnv(t)
 	handler := newRenderServer(t).handler()
 
 	rec := httptest.NewRecorder()
