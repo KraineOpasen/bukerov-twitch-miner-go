@@ -44,6 +44,14 @@ type Campaign struct {
 	Drops       []*Drop
 	DateMatch   bool
 
+	// AccountConnection is the tri-state decode of the campaign's
+	// `self.isAccountConnected` flag (Unknown / Connected / Disconnected),
+	// populated by NewCampaignFromGQL. It gates only rewards that require the
+	// publisher link, and only on an authoritative Disconnected — Unknown always
+	// fails open. The zero value (AccountConnectionUnknown) is the safe default
+	// for directly-constructed campaigns and old cached/persisted data.
+	AccountConnection AccountConnection
+
 	// ClaimStatus and ClaimedDropNames are populated by ApplyClaimHistory
 	// and reflect the account's Twitch-wide claim history rather than just
 	// this campaign instance's own progress.
@@ -93,6 +101,12 @@ func NewCampaignFromGQL(data map[string]interface{}) *Campaign {
 
 	now := time.Now()
 	c.DateMatch = c.StartAt.Before(now) && c.EndAt.After(now)
+
+	// Tri-state account-connection status from the campaign's `self` object.
+	// Absent/null/malformed -> Unknown (fails open); only a real boolean is
+	// authoritative. Additive: neither this nor the ACL/date parsing above alters
+	// the wire request — it decodes fields the persisted queries already return.
+	c.AccountConnection = ParseAccountConnection(data)
 
 	// Build the authoritative typed ACL from the raw `allow` block (handles
 	// isEnabled, missing/malformed channels, dedup and deterministic order), then

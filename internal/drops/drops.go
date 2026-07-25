@@ -893,6 +893,19 @@ func (d *DropsTracker) syncCampaigns() {
 	campaigns, filteredByGame := d.applyGameFilter(campaigns)
 	afterGameFilter := len(campaigns)
 
+	// Reward-level account-linked-drop eligibility (BKM-026): exclude only rewards
+	// proven ineligible (account authoritatively not connected AND the reward
+	// requires the publisher link). Runs last among the reward/campaign filters so
+	// a campaign removed by the blacklist/game filter is never miscounted here, and
+	// after recordCatalog so an excluded campaign still exists in the durable
+	// "Past" catalog. Unlike the blacklist/game filters (which count excluded
+	// CAMPAIGNS), this is a reward-level filter: filteredRewardsByAccountLink counts
+	// excluded REWARDS (a mixed campaign loses rewards but stays trackable; one
+	// whose rewards are all excluded is dropped, which shows up as an afterGameFilter
+	// -> afterAccountLink campaign-count drop).
+	campaigns, filteredRewardsByAccountLink := d.applyAccountLinkFilter(campaigns)
+	afterAccountLink := len(campaigns)
+
 	slog.Debug("Drops sync: campaign counts through the pipeline",
 		"dashboardCount", dashboardCount,
 		"fromDashboard", fromDashboard,
@@ -902,7 +915,9 @@ func (d *DropsTracker) syncCampaigns() {
 		"afterBlacklist", afterBlacklist,
 		"filteredByBlacklist", filteredByBlacklist,
 		"afterGameFilter", afterGameFilter,
-		"filteredByGame", filteredByGame)
+		"filteredByGame", filteredByGame,
+		"afterAccountLink", afterAccountLink,
+		"filteredRewardsByAccountLink", filteredRewardsByAccountLink)
 
 	// Reconcile each fresh campaign's ACL against the previously-published ACL
 	// for the same campaign instance BEFORE publishing, so a transient
@@ -943,20 +958,23 @@ func (d *DropsTracker) syncCampaigns() {
 		summaryArgs = []any{
 			"tracked", len(campaigns), "dashboardCampaigns", dashboardCount,
 			"recoveredFromInventory", recovered, "filteredByBlacklist", filteredByBlacklist,
-			"filteredByGame", filteredByGame, "campaigns", names,
+			"filteredByGame", filteredByGame, "filteredRewardsByAccountLink", filteredRewardsByAccountLink,
+			"campaigns", names,
 		}
 	case dashboardCount == 0 && recovered == 0:
 		summaryMsg = "Drops sync complete: Twitch reports no active drop campaigns for this account"
 	default:
 		summaryMsg = "Drops sync complete: active drop campaigns exist on Twitch but none are trackable " +
-			"(all filtered out by date window, claim history, blacklist, or game filter; run with -debug for per-campaign reasons)"
+			"(all filtered out by date window, claim history, blacklist, game filter, or account-link requirement; " +
+			"run with -debug for per-campaign reasons)"
 		summaryArgs = []any{
 			"dashboardCampaigns", dashboardCount, "recoveredFromInventory", recovered,
 			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame,
+			"filteredRewardsByAccountLink", filteredRewardsByAccountLink,
 		}
 	}
 
-	fingerprint := syncSummaryFingerprint(campaigns, dashboardCount, recovered, filteredByBlacklist, filteredByGame)
+	fingerprint := syncSummaryFingerprint(campaigns, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink)
 	d.mu.Lock()
 	changed := fingerprint != d.lastSummaryFingerprint
 	recovering := d.lastSyncErr != ""
@@ -1024,14 +1042,18 @@ func (d *DropsTracker) notifyUpcoming(upcoming []*models.Campaign) {
 // excludes timestamps, map iteration order, pointer addresses, request IDs,
 // volatile progress values and raw payloads, so two syncs that reached the same
 // outcome produce the same fingerprint.
-func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recovered, filteredByBlacklist, filteredByGame int) string {
+func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink int) string {
 	ids := make([]string, 0, len(campaigns))
 	for _, c := range campaigns {
 		ids = append(ids, c.ID)
 	}
 	sort.Strings(ids)
-	return fmt.Sprintf("tracked=%d[%s]|dashboard=%d|recovered=%d|blacklist=%d|game=%d",
-		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame)
+	// filteredRewardsByAccountLink is included so a reward-level exclusion on a
+	// campaign that keeps its tracked ID (a mixed campaign losing a link-required
+	// reward) still counts as a changed outcome and refreshes the INFO summary,
+	// rather than being demoted to DEBUG because the tracked ID set is unchanged.
+	return fmt.Sprintf("tracked=%d[%s]|dashboard=%d|recovered=%d|blacklist=%d|game=%d|acctlink=%d",
+		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink)
 }
 
 func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign, dashboardTotal int, err error) {
@@ -1148,6 +1170,17 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 	}
 	if campaign.Game == nil && summaryCampaign.Game != nil {
 		campaign.Game = summaryCampaign.Game
+	}
+
+	// Backfill the tri-state account-connection status from the dashboard summary
+	// only when the details response did not authoritatively carry it. This never
+	// downgrades a known value to Unknown (a proven connected/disconnected from
+	// details is kept); it only fills an Unknown from whichever source supplied an
+	// authoritative boolean, mirroring the date/game backfill above and keeping the
+	// filter fail-open when neither source reported it.
+	if campaign.AccountConnection == models.AccountConnectionUnknown &&
+		summaryCampaign.AccountConnection != models.AccountConnectionUnknown {
+		campaign.AccountConnection = summaryCampaign.AccountConnection
 	}
 
 	// Backfill the campaign-level date window from the summary when the details
@@ -1707,6 +1740,73 @@ func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*mo
 		kept = append(kept, c)
 	}
 	return kept, filtered
+}
+
+// applyAccountLinkFilter is the reward-level account-linked-drop eligibility pass
+// (BKM-026). For each campaign it excludes only the rewards that Twitch proves
+// ineligible: the account is authoritatively NOT connected for the campaign
+// (Campaign.AccountConnection == Disconnected) AND the reward requires a linked
+// publisher account (a direct in-game entitlement). The single-source-of-truth
+// rule lives in eligibility.AccountLinkEligible, so this pass and its tests share
+// one decision — a reward is excluded iff that decision is not Eligible.
+//
+// Everything else fails open and is left untouched: a Connected or Unknown
+// campaign (null/absent/malformed/partial isAccountConnected), and every
+// badge/emote/unknown-typed reward — so a BADGE or EMOTE is never blocked and a
+// missing benefit type is never treated as requiring a link.
+//
+// Aggregation follows the task's rule: a mixed campaign keeps its eligible
+// rewards and stays trackable; a campaign whose rewards are ALL excluded becomes
+// untrackable and is dropped from the returned set (so the dashboard count
+// reflects the trackable set and updateStreamerCampaigns, which requires
+// len(Drops) > 0, never assigns it). A campaign that arrived with no drops (e.g.
+// an already-claimed campaign kept by applyClaimHistory) is left as-is.
+//
+// It never mutates watch progress, claim history, the claim gate, or any published
+// snapshot — the campaigns here are freshly built and not yet published, exactly
+// like the blacklist/claim-history passes it mirrors. Returns the surviving
+// campaigns and the number of rewards excluded (for the sync summary).
+func (d *DropsTracker) applyAccountLinkFilter(campaigns []*models.Campaign) (kept []*models.Campaign, excludedRewards int) {
+	kept = make([]*models.Campaign, 0, len(campaigns))
+	for _, c := range campaigns {
+		before := len(c.Drops)
+		if before == 0 {
+			kept = append(kept, c)
+			continue
+		}
+
+		remaining := make([]*models.Drop, 0, before)
+		for _, drop := range c.Drops {
+			if eligibility.AccountLinkEligible(c.AccountConnection, drop.RequiresPublisherLink()).Eligible {
+				remaining = append(remaining, drop)
+			}
+		}
+
+		excluded := before - len(remaining)
+		if excluded == 0 {
+			kept = append(kept, c) // fail-open path: Connected/Unknown, or no link-required reward.
+			continue
+		}
+
+		excludedRewards += excluded
+		c.Drops = remaining
+		if len(c.Drops) == 0 {
+			// Every reward required the (missing) publisher link -> not trackable.
+			slog.Debug("Skipping drop campaign: all rewards require a linked publisher account (account not connected)",
+				"campaign", c.Name, "campaignID", c.ID,
+				"reason", string(eligibility.ReasonAccountLinkRequired), "excludedRewards", excluded)
+			continue
+		}
+
+		// Mixed campaign: the account-link-required rewards are excluded but at
+		// least one eligible reward remains, so the campaign stays trackable.
+		slog.Debug("Excluding account-link-required reward(s) from drop campaign; other rewards remain trackable",
+			"campaign", c.Name, "campaignID", c.ID,
+			"reason", string(eligibility.ReasonAccountLinkRequired),
+			"excludedRewards", excluded, "remainingRewards", len(c.Drops))
+		kept = append(kept, c)
+	}
+	return kept, excludedRewards
 }
 
 // gameIDAllowed reports whether a campaign passes the operator's game filter for

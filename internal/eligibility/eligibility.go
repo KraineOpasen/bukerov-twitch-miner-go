@@ -105,6 +105,13 @@ const (
 	ReasonImpossibleBeforeDeadline Reason = "impossible_before_deadline"
 	ReasonGameMismatch             Reason = "game_mismatch"
 	ReasonNoWatchableTask          Reason = "no_watchable_task"
+	// ReasonAccountLinkRequired: the reward can only be earned with a linked
+	// publisher account and Twitch authoritatively reports the account as NOT
+	// connected. It is privacy-safe by construction — it names neither the
+	// account, the publisher, a token, nor any raw payload — and is emitted ONLY
+	// on an authoritative Disconnected combined with a publisher-link-requiring
+	// reward (never on Unknown, never on a badge/emote/unknown reward type).
+	ReasonAccountLinkRequired Reason = "account_link_required"
 )
 
 // Decision is the immutable result of an eligibility evaluation.
@@ -285,6 +292,29 @@ func (e Evaluator) EvaluateDrops(s *models.Streamer, campaign *models.Campaign, 
 		return blocked(ReasonCampaignNotAvailable)
 	}
 
+	return eligible()
+}
+
+// AccountLinkEligible is the single source of truth for the account-linked-drop
+// eligibility rule (BKM-026). It decides, for one reward, whether an
+// authoritatively-unlinked account excludes it:
+//
+//	eligible = conn != Disconnected  OR  !requiresPublisherLink
+//	skip     = conn == Disconnected  AND  requiresPublisherLink
+//
+// Both conditions must hold to exclude a reward:
+//   - conn is the campaign's tri-state AccountConnection. Only an authoritative
+//     Disconnected (a real isAccountConnected==false) can exclude; Connected and
+//     Unknown (null/absent/malformed/partial) both fail open.
+//   - requiresPublisherLink is the reward's own property (a direct in-game
+//     entitlement). Badge/emote and unknown/absent reward types fail open.
+//
+// The decision is pure — no clock, no network, no locks — so it is identical in
+// the sync filter and in tests. A skip yields ReasonAccountLinkRequired.
+func AccountLinkEligible(conn models.AccountConnection, requiresPublisherLink bool) Decision {
+	if conn == models.AccountConnectionDisconnected && requiresPublisherLink {
+		return blocked(ReasonAccountLinkRequired)
+	}
 	return eligible()
 }
 

@@ -35,7 +35,13 @@ type Drop struct {
 	// (this repo's fixtures) does NOT currently carry it, so it is parsed
 	// additively and is frequently empty; identity/claim-matching treats it as
 	// strong evidence only when present, and never fabricates it.
-	BenefitID             string
+	BenefitID string
+	// BenefitType is the typed classification of the reward's benefit, decoded
+	// from benefitEdges[0].benefit.distributionType (BADGE / EMOTE /
+	// DIRECT_ENTITLEMENT). It drives the account-link eligibility decision:
+	// only a direct entitlement requires a linked publisher account. An
+	// absent/unknown type is BenefitTypeUnknown and fails open.
+	BenefitType           BenefitType
 	ImageURL              string
 	MinutesRequired       int
 	CurrentMinutesWatched int
@@ -74,6 +80,10 @@ func NewDropFromGQL(data map[string]interface{}) *Drop {
 	}
 
 	if benefitEdges, ok := data["benefitEdges"].([]interface{}); ok && len(benefitEdges) > 0 {
+		// Typed benefit classification (distributionType) is read from the same
+		// first edge as the fields below; a missing/malformed value yields
+		// BenefitTypeUnknown, which fails open (never treated as requiring a link).
+		drop.BenefitType = parseDropBenefitType(benefitEdges)
 		if edge, ok := benefitEdges[0].(map[string]interface{}); ok {
 			if benefit, ok := edge["benefit"].(map[string]interface{}); ok {
 				if name, ok := benefit["name"].(string); ok {
@@ -194,6 +204,15 @@ func (d *Drop) deriveClaimability(selfData map[string]interface{}) Claimability 
 // locally-counted progress or a full progress bar alone.
 func (d *Drop) CanClaim() bool {
 	return d.Claimability == ClaimabilityKnownTrue && d.DropInstanceID != "" && !d.IsClaimed
+}
+
+// RequiresPublisherLink reports whether this drop's reward can only be earned
+// with a linked publisher account (a direct in-game entitlement). Badge/emote
+// and unknown/absent benefit types fail open (false), so such rewards are never
+// account-link-blocked. Combined with the owning campaign's AccountConnection,
+// this is the sole additional input to the account-link eligibility decision.
+func (d *Drop) RequiresPublisherLink() bool {
+	return d.BenefitType.RequiresPublisherLink()
 }
 
 func (d *Drop) DateTimeMatch() bool {
