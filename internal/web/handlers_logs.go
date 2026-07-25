@@ -36,13 +36,14 @@ func (s *Server) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 
 	lines, enabled := s.readLogTail()
 	data := LogsPageData{
-		Username:       s.username,
-		RefreshMinutes: refresh,
-		Version:        version.Version,
-		DiscordEnabled: discordEnabled,
-		DebugURL:       debugURL,
-		Lines:          lines,
-		FileLogging:    enabled,
+		Username:               s.username,
+		RefreshMinutes:         refresh,
+		Version:                version.Version,
+		DiscordEnabled:         discordEnabled,
+		DebugURL:               debugURL,
+		SupportBundleAvailable: authEnabled(),
+		Lines:                  lines,
+		FileLogging:            enabled,
 	}
 	s.renderPage(w, r, "logs.html", data)
 }

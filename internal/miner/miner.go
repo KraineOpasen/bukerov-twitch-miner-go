@@ -704,6 +704,13 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.webServer.SetHealthProvider(m)
 		m.webServer.SetDropProgressProvider(m)
 		m.webServer.SetPolicyProvider(m)
+		// Wired unconditionally (unlike SetDebugSnapshotProvider below, which
+		// is gated on Debug.Enabled): the redacted support bundle is an
+		// always-available diagnostic download, not a debug-mode feature. The
+		// same in-process snapshot builder feeds both; the web layer's own
+		// typed allowlist (internal/supportbundle) decides what actually
+		// leaves the process.
+		m.webServer.SetSupportBundleSource(m.BuildDebugSnapshot)
 	}
 
 	if m.config.ClaimDropsOnStartup {

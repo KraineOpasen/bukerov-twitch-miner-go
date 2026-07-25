@@ -348,7 +348,14 @@ type LogsPageData struct {
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
-	Lines          []LogLineView
+	// SupportBundleAvailable shows the redacted support-bundle download link.
+	// True only when the dashboard has REAL authentication configured
+	// (authEnabled()) - the server-side guard in handleSupportBundle is the
+	// actual enforcement; this only avoids offering a link that would 404
+	// (auth disabled) or that a bypassed, unauthenticated dashboard shouldn't
+	// advertise (DASHBOARD_INSECURE_NO_AUTH=true).
+	SupportBundleAvailable bool
+	Lines                  []LogLineView
 	// FileLogging is false when the log file doesn't exist (file logging off),
 	// so the page can explain how to enable it.
 	FileLogging bool
