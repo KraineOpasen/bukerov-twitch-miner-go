@@ -1,14 +1,24 @@
 package analytics
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
+
+// ErrStreamerDeleted is returned by the write paths (RecordPoints, RecordAnnotation,
+// RecordChatMessage, RecordBet) for a streamer whose lifecycle is being deleted:
+// a late event that lost the race with a DeleteStreamer must NOT resurrect the
+// streamer's row via getOrCreateStreamer. Callers treat it as a benign drop.
+var ErrStreamerDeleted = errors.New("analytics: streamer deleted")
 
 type Repository interface {
 	RecordPoints(streamer string, points int, eventType string) error
@@ -28,6 +38,21 @@ type Repository interface {
 	EarnedPointsBetween(start, end time.Time) (int, error)
 	CountAnnotationsByType(eventType string, start, end time.Time) (int, error)
 	RenameStreamer(oldName, newName string) error
+	// DeleteStreamerTx deletes every row of one login's analytics history
+	// (points, annotations, chat messages, prediction bets, and the streamers
+	// row itself) within the caller's transaction, so a multi-store purge is
+	// atomic. Returns true when a streamers row existed. Idempotent: an unknown
+	// or already-deleted login is (false, nil). The shared hidden drops bucket is
+	// never touched.
+	DeleteStreamerTx(tx *sql.Tx, login string) (bool, error)
+	// DeleteStreamer runs DeleteStreamerTx in its own transaction (convenience
+	// for standalone callers/tests).
+	DeleteStreamer(ctx context.Context, login string) (bool, error)
+	// Tombstone / Reinstate arm and clear the in-memory resurrection fence for a
+	// login. While tombstoned, the write paths return ErrStreamerDeleted instead
+	// of recreating the streamer row.
+	Tombstone(login string)
+	Reinstate(login string)
 	Close() error
 }
 
@@ -46,6 +71,15 @@ func (e *StreamerRenameConflictError) Error() string {
 type SQLiteRepository struct {
 	db       *database.DB
 	basePath string
+
+	// mu serializes the write paths (RecordPoints/Annotation/ChatMessage/Bet)
+	// against the resurrection fence. A write holds mu across its check+insert;
+	// Tombstone takes mu too, so once Tombstone returns every in-flight write has
+	// finished (its row now exists and is deleted by the purge) and every later
+	// write observes the tombstone. deleted holds the tombstoned lowercase
+	// logins.
+	mu      sync.Mutex
+	deleted map[string]struct{}
 }
 
 type AnalyticsModule struct{}
@@ -164,9 +198,39 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 	repo := &SQLiteRepository{
 		db:       db,
 		basePath: basePath,
+		deleted:  make(map[string]struct{}),
 	}
 
 	return repo, nil
+}
+
+// Tombstone arms the resurrection fence for login: subsequent write paths
+// (RecordPoints/Annotation/ChatMessage/Bet) return ErrStreamerDeleted instead
+// of recreating the streamers row. Because it takes mu — the same lock every
+// write holds across its check+insert — once Tombstone returns, every in-flight
+// write has finished (its row now exists, to be removed by the purge that
+// follows) and every later write observes the tombstone: an airtight barrier
+// with no window for a late event to slip a row past the delete. Idempotent.
+func (r *SQLiteRepository) Tombstone(login string) {
+	login = strings.ToLower(login)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleted[login] = struct{}{}
+}
+
+// Reinstate clears the fence for login so a re-added streamer of the same login
+// can record fresh history again. Idempotent.
+func (r *SQLiteRepository) Reinstate(login string) {
+	login = strings.ToLower(login)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.deleted, login)
+}
+
+// tombstonedLocked reports whether login is fenced. Caller holds mu.
+func (r *SQLiteRepository) tombstonedLocked(login string) bool {
+	_, ok := r.deleted[strings.ToLower(login)]
+	return ok
 }
 
 func (r *SQLiteRepository) getOrCreateStreamer(name string) (int64, error) {
@@ -250,7 +314,62 @@ func (r *SQLiteRepository) RenameStreamer(oldName, newName string) error {
 	return tx.Commit()
 }
 
+// DeleteStreamerTx removes every trace of one login's analytics history within
+// the caller's transaction: the child rows (points, annotations, chat_messages,
+// prediction_bets) keyed by the resolved streamers.id, then the streamers row
+// itself. It runs on the passed *sql.Tx so a full multi-store streamer purge is
+// one atomic transaction (foreign keys are not enforced in this codebase, so the
+// children are deleted explicitly rather than via ON DELETE CASCADE). Returns
+// true when a streamers row existed. Idempotent: an unknown login is (false,
+// nil). The shared hidden drops bucket ("(drops)") is never deleted — it is
+// global claim-accounting, not a streamer. The caller is expected to have
+// Tombstone()d the login first so no concurrent write recreates the row.
+func (r *SQLiteRepository) DeleteStreamerTx(tx *sql.Tx, login string) (bool, error) {
+	login = strings.ToLower(login)
+	if login == "" || login == DropsBucket {
+		return false, nil
+	}
+
+	var id int64
+	err := tx.QueryRow("SELECT id FROM streamers WHERE name = ?", login).Scan(&id)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	for _, table := range []string{"points", "annotations", "chat_messages", "prediction_bets"} {
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE streamer_id = ?", id); err != nil {
+			return false, fmt.Errorf("delete %s for streamer_id %d: %w", table, id, err)
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM streamers WHERE id = ?", id); err != nil {
+		return false, fmt.Errorf("delete streamers row %d: %w", id, err)
+	}
+	return true, nil
+}
+
+// DeleteStreamer runs DeleteStreamerTx in its own transaction on the shared
+// handle. Convenience for standalone callers/tests; the miner's lifecycle
+// coordinator uses DeleteStreamerTx to purge several stores in one transaction.
+func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bool, error) {
+	var existed bool
+	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		var e error
+		existed, e = r.DeleteStreamerTx(tx, login)
+		return e
+	})
+	return existed, err
+}
+
 func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tombstonedLocked(streamer) {
+		return ErrStreamerDeleted
+	}
+
 	streamerID, err := r.getOrCreateStreamer(streamer)
 	if err != nil {
 		return err
@@ -264,6 +383,12 @@ func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType s
 }
 
 func (r *SQLiteRepository) RecordAnnotation(streamer string, eventType, text, color string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tombstonedLocked(streamer) {
+		return ErrStreamerDeleted
+	}
+
 	streamerID, err := r.getOrCreateStreamer(streamer)
 	if err != nil {
 		return err
@@ -517,13 +642,19 @@ func (r *SQLiteRepository) ListStreamers() ([]StreamerInfo, error) {
 }
 
 func (r *SQLiteRepository) RecordChatMessage(streamer string, msg ChatMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tombstonedLocked(streamer) {
+		return ErrStreamerDeleted
+	}
+
 	streamerID, err := r.getOrCreateStreamer(streamer)
 	if err != nil {
 		return err
 	}
 
 	_, err = r.db.Exec(
-		`INSERT INTO chat_messages (streamer_id, timestamp, username, display_name, message, emotes, badges, color) 
+		`INSERT INTO chat_messages (streamer_id, timestamp, username, display_name, message, emotes, badges, color)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		streamerID, time.Now().UnixMilli(), msg.Username, msg.DisplayName, msg.Message, msg.Emotes, msg.Badges, msg.Color,
 	)
@@ -647,6 +778,12 @@ func (r *SQLiteRepository) SearchChatMessages(streamer string, query string, lim
 // that is logged, not silently swallowed. streamer_id integrity is guaranteed by
 // resolving/creating the parent streamer row first.
 func (r *SQLiteRepository) RecordBet(b BetRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tombstonedLocked(b.Streamer) {
+		return ErrStreamerDeleted
+	}
+
 	streamerID, err := r.getOrCreateStreamer(b.Streamer)
 	if err != nil {
 		return err

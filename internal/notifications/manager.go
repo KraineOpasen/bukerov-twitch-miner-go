@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -408,6 +409,20 @@ func (m *Manager) UpdatePointRule(rule *PointRule) error {
 func (m *Manager) DeletePointRule(id int64) error {
 	return m.repo.DeletePointRule(id)
 }
+
+// DeleteStreamerTx scrubs one login's notification state (point rules + config
+// login-lists) within the caller's transaction, so the streamer-deletion
+// coordinator can purge every store atomically. Returns true when anything was
+// removed.
+func (m *Manager) DeleteStreamerTx(tx *sql.Tx, login string) (bool, error) {
+	return m.repo.DeleteStreamerTx(tx, login)
+}
+
+// Tombstone / Reinstate arm and clear the notification resurrection fence for a
+// login (see Repository), so a rule creation racing a deletion cannot recreate a
+// record and a later re-add starts clean.
+func (m *Manager) Tombstone(login string) { m.repo.Tombstone(login) }
+func (m *Manager) Reinstate(login string) { m.repo.Reinstate(login) }
 
 // NotifyMention sends a mention notification.
 func (m *Manager) NotifyMention(streamer, fromUser, message string) {

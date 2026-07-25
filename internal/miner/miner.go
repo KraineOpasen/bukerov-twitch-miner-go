@@ -31,6 +31,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
@@ -63,7 +64,25 @@ type Miner struct {
 	analyticsSvc     *analytics.Service
 	webServer        *web.Server
 	notifications    *notifications.Manager
-	debugServer      *debug.Server
+	// notificationsRepo is a standalone notification repository over the shared
+	// DB, created whenever the DB exists regardless of whether a Discord Manager
+	// is live. It ensures a removed streamer's point_rules / config-list rows are
+	// purged (and renamed) even when notifications are disabled — those rows
+	// persist in the file independently of the Manager. When a Manager IS live the
+	// coordinator prefers it (so the fence also covers its AddPointRule); both
+	// instances share the same tables.
+	notificationsRepo *notifications.Repository
+	debugServer       *debug.Server
+	// watchTimeStore is the persisted rotation-fairness store; kept here (not
+	// only inside the watcher) so the streamer-deletion coordinator can purge a
+	// removed streamer's watch-time rows in the same atomic transaction.
+	watchTimeStore *watcher.WatchTimeStore
+	// streamerLifecycle purges a removed streamer's PERSISTED bot-owned state
+	// (analytics history, notification rules + config lists, watch-time rows) in
+	// one atomic transaction and arms/clears the resurrection fence. Built once
+	// the persisted stores exist; nil disables persisted purge (fields still
+	// tear down runtime state).
+	streamerLifecycle *streamerlifecycle.Coordinator
 	// resourceSampler feeds the dashboard's resource mini-widgets with local
 	// process/container CPU/Memory/Network/Disk metrics. Started in startMining
 	// and stopped with the run context; nil when there is no web server.
@@ -139,6 +158,13 @@ type Miner struct {
 	// current availability window). Guarded by mu; reset on restart and
 	// whenever the streamer's auto-redeem config is edited.
 	autoRedeemState map[string]*autoRedeemRuntime
+
+	// pendingPurges holds removed streamers whose atomic persisted-history purge
+	// failed (rare: disk full / corruption), keyed by ChannelID, so a subsequent
+	// settings apply retries the idempotent purge and drains the backlog instead
+	// of silently leaving orphaned history. Guarded by purgeMu.
+	pendingPurges map[string]*models.Streamer
+	purgeMu       sync.Mutex
 
 	mu sync.RWMutex
 
@@ -584,8 +610,28 @@ func (m *Miner) setupComponents(ctx context.Context) {
 			events.Record(events.TypeModuleInitFailed, "", "watch_time: "+err.Error())
 		} else {
 			watchTimeStore = store
+			m.watchTimeStore = store
 		}
 	}
+
+	// A standalone notifications repository over the shared DB, independent of
+	// whether Discord/notifications are enabled, so a streamer's point_rules and
+	// config-list membership are purged (and rename-synced) even with Discord off
+	// — those rows persist in the file regardless of a live Manager.
+	if m.db != nil && m.notificationsRepo == nil {
+		if repo, err := notifications.NewRepository(m.db); err != nil {
+			slog.Error("Failed to create notifications repository for streamer-deletion purge", "error", err)
+		} else {
+			m.notificationsRepo = repo
+		}
+	}
+
+	// Build the streamer-deletion coordinator over every login-keyed persisted
+	// store that exists, so removing a streamer purges its analytics history,
+	// notification rules/config-lists, and watch-time rows in ONE atomic
+	// transaction (and arms the resurrection fence). Each store implements both
+	// the purge and the fence; nil subsystems are simply not covered.
+	m.buildStreamerLifecycle()
 
 	m.watcher = watcher.NewMinuteWatcher(
 		m.client,
@@ -1621,6 +1667,19 @@ func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.S
 	// action: topics are keyed by ChannelID, which a rename never changes).
 	m.reconcileRuntimeCapabilities(added, removed, changed, renamed)
 
+	// Purge every removed streamer's PERSISTED bot-owned state (analytics
+	// history, notification rules/config-lists, watch-time rows) in one atomic
+	// transaction, clear its streak grant, and lift the fence for any re-added
+	// login — the persisted half of BKM-018A, mirroring the runtime teardown
+	// above. Runs off the miner lock.
+	m.applyStreamerDeletions(added, removed)
+
+	// Keep the login-keyed notification + watch-time stores attached to each
+	// renamed streamer's NEW login (analytics + config were already renamed in
+	// commitRenameTransaction), so a rename leaves no old-login records and a
+	// later deletion by the current login stays complete.
+	m.syncRenamedLoginKeyedStores(renamed)
+
 	// The durable analytics migration already ran (and, for a rename-carrying
 	// apply, succeeded) before this — see commitRenameTransaction. This emits
 	// the one privacy-safe rename log per event (old login, new login,
@@ -1654,6 +1713,14 @@ func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.S
 			if webServer != nil {
 				webServer.SetNotificationManager(newNotifMgr)
 			}
+
+			// The deletion coordinator was built at startup without a
+			// notifications manager (Discord was off then); rebuild it now that one
+			// exists so a later streamer removal also purges its notification
+			// rules and config-list membership. Safe here: the whole apply
+			// pipeline (this finishApply included) runs under coordinatorMu, the
+			// only reader of m.streamerLifecycle.
+			m.buildStreamerLifecycle()
 		}
 	}
 

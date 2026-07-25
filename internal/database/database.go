@@ -1,7 +1,9 @@
 package database
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,9 +15,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// ErrClosed is returned by lifecycle-aware operations (WithTx) invoked after
+// the shared handle has been closed, so a use-after-close is a typed,
+// recognizable error instead of a raw driver "database is closed" string.
+var ErrClosed = errors.New("database is closed")
+
 type DB struct {
 	*sql.DB
 	mu sync.RWMutex
+	// closed marks the handle as shut down. Guarded by mu. Once true it never
+	// flips back (the singleton is process-wide); Close is idempotent and
+	// WithTx refuses to start new work.
+	closed bool
 }
 
 type Module interface {
@@ -212,10 +223,55 @@ func (db *DB) getModuleVersion(moduleName string) (int, error) {
 	return version, err
 }
 
+// Close shuts the shared handle down. It is idempotent and safe to call from
+// any goroutine: a second Close (or a Close racing shutdown paths) is a no-op
+// that returns nil rather than double-closing the underlying *sql.DB. Committed
+// data is never lost — SQLite has already fsynced each committed transaction;
+// Close only tears down the connection.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.closed {
+		return nil
+	}
+	db.closed = true
 	return db.DB.Close()
+}
+
+// WithTx runs fn inside a single transaction on the shared handle: it begins a
+// context-aware transaction, invokes fn with it, and commits on a nil return or
+// rolls back on any error (or panic). It is the one entry point for multi-table
+// mutations that must be atomic — a purge that spans several modules' tables
+// either lands whole or not at all. Returns ErrClosed without touching the
+// driver once the handle has been closed, so a read-only or shutdown path never
+// silently reopens a connection. The read lock it holds lets an in-flight
+// transaction settle before Close (which takes the write lock) can proceed.
+func (db *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) (err error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return ErrClosed
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err = fn(tx); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	return err
 }
 
 func (db *DB) RLock() {

@@ -530,7 +530,59 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 		}
 	}
 
+	// Deterministically drop login-keyed loop-owned state for streamers that
+	// left the roster, so a removed streamer leaves no runtime residue and a
+	// same-process re-add of the login starts clean (BKM-018A). Most of these
+	// maps already self-prune to the current slots within a tick or two, but
+	// doing it here — on the loop goroutine, their sole writer — closes the one
+	// genuine lifetime leak (refreshOutcomes, a merged copy-on-write map never
+	// otherwise pruned and user-visible via LastSessionRefresh) and releases the
+	// *models.Streamer pointer lastConfiguredWatched would otherwise retain.
+	// delete on a nil (lazily-created) map is a safe no-op.
+	for _, s := range oldList {
+		login := s.GetUsername()
+		if _, kept := newIndexByLogin[login]; kept {
+			continue
+		}
+		delete(w.lastSlots, login)
+		delete(w.lastConfiguredWatched, login)
+		delete(w.reportStats, login)
+		delete(w.pendingRefresh, login)
+		delete(w.sessionConverge, login)
+		delete(w.slotResidence, login)
+	}
+	w.pruneRefreshOutcomes(newIndexByLogin)
+
 	w.streamers = newList
+}
+
+// pruneRefreshOutcomes drops published session-refresh outcomes for any login no
+// longer in the roster (keys of current). Copy-on-write like publishRefreshOutcomes
+// and, like it, runs only on the loop goroutine, so the atomic swap is the single
+// writer's. A no-op when nothing must be dropped, so the common tick pays only a
+// scan.
+func (w *MinuteWatcher) pruneRefreshOutcomes(current map[string]int) {
+	prev := w.refreshOutcomes.Load()
+	if prev == nil || len(*prev) == 0 {
+		return
+	}
+	drop := false
+	for login := range *prev {
+		if _, ok := current[login]; !ok {
+			drop = true
+			break
+		}
+	}
+	if !drop {
+		return
+	}
+	next := make(map[string]SessionRefreshOutcome, len(*prev))
+	for login, o := range *prev {
+		if _, ok := current[login]; ok {
+			next[login] = o
+		}
+	}
+	w.refreshOutcomes.Store(&next)
 }
 
 func (w *MinuteWatcher) randomizedDelay(base time.Duration) time.Duration {
