@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 func populatedSnapshot() resources.Snapshot {
@@ -118,10 +119,8 @@ func TestResourcesEndpointGETOnly(t *testing.T) {
 // TestResourcesEndpointAuth: inherits the dashboard's Basic Auth exactly like
 // every other read endpoint — 401 without creds when configured, 200 with them.
 func TestResourcesEndpointAuth(t *testing.T) {
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "hunter2")
-
 	s := newRenderServer(t)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: "hunter2"})
 	s.SetResourceSnapshotProvider(populatedSnapshot)
 	h := s.handler()
 
@@ -143,8 +142,7 @@ func TestResourcesEndpointAuth(t *testing.T) {
 // TestResourcesEndpointOpenWhenAuthDisabled: no creds configured -> open, like
 // every other read route.
 func TestResourcesEndpointOpenWhenAuthDisabled(t *testing.T) {
-	t.Setenv("DASHBOARD_USERNAME", "")
-	t.Setenv("DASHBOARD_PASSWORD", "")
+	// No dashboard credentials configured -> auth disabled (zero Dashboard).
 	s := newRenderServer(t)
 	s.SetResourceSnapshotProvider(populatedSnapshot)
 	h := s.handler()

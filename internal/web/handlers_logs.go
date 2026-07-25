@@ -32,6 +32,7 @@ func (s *Server) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
 	debugURL := s.debugURL
+	authEnabled := s.dashboard.AuthEnabled()
 	s.mu.RUnlock()
 
 	lines, enabled := s.readLogTail()
@@ -41,7 +42,7 @@ func (s *Server) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		Version:                version.Version,
 		DiscordEnabled:         discordEnabled,
 		DebugURL:               debugURL,
-		SupportBundleAvailable: authEnabled(),
+		SupportBundleAvailable: authEnabled,
 		Lines:                  lines,
 		FileLogging:            enabled,
 	}

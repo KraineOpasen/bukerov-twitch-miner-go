@@ -10,6 +10,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/supportbundle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
@@ -60,11 +61,11 @@ func (s *Server) setSupportBundleClock(fn func() time.Time) {
 // bundle must NEVER be reachable in that mode: an insecure-bypass dashboard
 // serves every other route unauthenticated, but a bundle download is
 // sensitive enough to demand real credentials every time, with no exceptions.
-func requireRealDashboardAuth(r *http.Request) bool {
-	if !authEnabled() {
+func requireRealDashboardAuth(cfg runtimeconfig.Dashboard, r *http.Request) bool {
+	if !cfg.AuthEnabled() {
 		return false
 	}
-	expectedUser, expectedPass := getAuthCredentials()
+	expectedUser, expectedPass := cfg.Username, cfg.Password
 	user, pass, ok := r.BasicAuth()
 	if !ok {
 		return false
@@ -86,8 +87,9 @@ func (s *Server) handleSupportBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !requireRealDashboardAuth(r) {
-		if !authEnabled() {
+	dash := s.dashboardConfig()
+	if !requireRealDashboardAuth(dash, r) {
+		if !dash.AuthEnabled() {
 			// No real auth configured (disabled OR the explicit insecure
 			// bypass): fail closed with 404, exactly like the debug
 			// snapshot route, so the endpoint's existence isn't even
@@ -176,6 +178,7 @@ var activeClientAllowlist = map[string]bool{
 func (s *Server) buildSupportBundleInput(snap debug.Snapshot) supportbundle.Input {
 	s.mu.RLock()
 	notifMgr := s.notificationManager
+	dash := s.dashboard
 	s.mu.RUnlock()
 
 	in := supportbundle.Input{
@@ -185,7 +188,7 @@ func (s *Server) buildSupportBundleInput(snap debug.Snapshot) supportbundle.Inpu
 		Arch:          runtime.GOARCH,
 		UptimeSeconds: snap.UptimeSeconds,
 		MinerStatus:   snap.Status,
-		Runtime:       buildSupportBundleRuntimeInfo(snap, notifMgr),
+		Runtime:       buildSupportBundleRuntimeInfo(dash, snap, notifMgr),
 		Watching:      buildSupportBundleWatching(snap),
 		Journals:      buildSupportBundleJournals(snap),
 	}
@@ -201,12 +204,12 @@ func (s *Server) buildSupportBundleInput(snap debug.Snapshot) supportbundle.Inpu
 // buildSupportBundleRuntimeInfo derives the dashboard/runtime-facts section.
 // Every value here is either a small bounded enum, a count, or a boolean -
 // never a config value, a secret, or free text.
-func buildSupportBundleRuntimeInfo(snap debug.Snapshot, notifMgr *notifications.Manager) supportbundle.RuntimeInfo {
+func buildSupportBundleRuntimeInfo(cfg runtimeconfig.Dashboard, snap debug.Snapshot, notifMgr *notifications.Manager) supportbundle.RuntimeInfo {
 	authMode := "disabled"
 	switch {
-	case authEnabled():
+	case cfg.AuthEnabled():
 		authMode = "authenticated"
-	case insecureNoAuthAllowed():
+	case cfg.InsecureNoAuth:
 		authMode = "insecure_bypass"
 	}
 

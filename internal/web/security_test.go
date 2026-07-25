@@ -5,33 +5,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
-// clearSecurityEnv resets every env var the security layer reads so tests
-// are hermetic regardless of the environment they run in.
-func clearSecurityEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{
-		"DASHBOARD_HOST",
-		"DASHBOARD_USERNAME",
-		"DASHBOARD_PASSWORD",
-		"DASHBOARD_INSECURE_NO_AUTH",
-		"DASHBOARD_TRUSTED_ORIGINS",
-	} {
-		t.Setenv(key, "")
-	}
-}
+// The security layer no longer reads the process environment: every decision
+// takes a runtimeconfig.Dashboard snapshot, so these tests construct the
+// snapshot explicitly and are hermetic with no t.Setenv.
 
 func TestResolveBindHost(t *testing.T) {
-	clearSecurityEnv(t)
-
-	host, source := resolveBindHost("127.0.0.1")
+	host, source := resolveBindHost(runtimeconfig.Dashboard{}, "127.0.0.1")
 	if host != "127.0.0.1" || source != "config analytics.host" {
 		t.Fatalf("expected config host, got %q from %q", host, source)
 	}
 
-	t.Setenv("DASHBOARD_HOST", "0.0.0.0")
-	host, source = resolveBindHost("127.0.0.1")
+	host, source = resolveBindHost(runtimeconfig.Dashboard{HostOverride: "0.0.0.0"}, "127.0.0.1")
 	if host != "0.0.0.0" || source != "DASHBOARD_HOST env" {
 		t.Fatalf("expected env override, got %q from %q", host, source)
 	}
@@ -53,15 +41,13 @@ func TestIsLoopbackHost(t *testing.T) {
 }
 
 func TestValidateBindSecurity(t *testing.T) {
-	clearSecurityEnv(t)
-
 	// Loopback: always fine, no credentials needed.
-	if err := validateBindSecurity("127.0.0.1"); err != nil {
+	if err := validateBindSecurity(runtimeconfig.Dashboard{}, "127.0.0.1"); err != nil {
 		t.Fatalf("loopback bind should not require auth: %v", err)
 	}
 
 	// Non-loopback without credentials: fail-closed with an actionable message.
-	err := validateBindSecurity("0.0.0.0")
+	err := validateBindSecurity(runtimeconfig.Dashboard{}, "0.0.0.0")
 	if err == nil {
 		t.Fatal("non-loopback bind without auth must be rejected")
 	}
@@ -72,17 +58,14 @@ func TestValidateBindSecurity(t *testing.T) {
 	}
 
 	// Non-loopback with credentials: allowed.
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "secret")
-	if err := validateBindSecurity("0.0.0.0"); err != nil {
+	withAuth := runtimeconfig.Dashboard{Username: "admin", Password: "secret"}
+	if err := validateBindSecurity(withAuth, "0.0.0.0"); err != nil {
 		t.Fatalf("non-loopback bind with auth should be allowed: %v", err)
 	}
 
 	// Non-loopback with the explicit opt-out: allowed.
-	t.Setenv("DASHBOARD_USERNAME", "")
-	t.Setenv("DASHBOARD_PASSWORD", "")
-	t.Setenv("DASHBOARD_INSECURE_NO_AUTH", "true")
-	if err := validateBindSecurity("0.0.0.0"); err != nil {
+	insecure := runtimeconfig.Dashboard{InsecureNoAuth: true}
+	if err := validateBindSecurity(insecure, "0.0.0.0"); err != nil {
 		t.Fatalf("explicit insecure opt-out should be allowed: %v", err)
 	}
 }
@@ -96,8 +79,6 @@ func okHandler(reached *bool) http.Handler {
 }
 
 func TestCSRFProtectMiddleware(t *testing.T) {
-	clearSecurityEnv(t)
-
 	cases := []struct {
 		name       string
 		method     string
@@ -125,7 +106,7 @@ func TestCSRFProtectMiddleware(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			reached := false
-			handler := csrfProtectMiddleware(okHandler(&reached))
+			handler := csrfProtectMiddleware(runtimeconfig.Dashboard{}, okHandler(&reached))
 
 			req := httptest.NewRequest(tc.method, "http://10.100.102.24:5000/api/settings", nil)
 			for k, v := range tc.headers {
@@ -148,11 +129,14 @@ func TestCSRFProtectMiddleware(t *testing.T) {
 }
 
 func TestCSRFTrustedOrigins(t *testing.T) {
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_TRUSTED_ORIGINS", "https://miner.example.com, proxy.lan:8443")
+	// The trusted origins come pre-parsed in the snapshot (parsing itself is
+	// covered by runtimeconfig.TestParseTrustedOrigins).
+	dash := runtimeconfig.Dashboard{
+		TrustedOrigins: runtimeconfig.ParseTrustedOrigins("https://miner.example.com, proxy.lan:8443"),
+	}
 
 	reached := false
-	handler := csrfProtectMiddleware(okHandler(&reached))
+	handler := csrfProtectMiddleware(dash, okHandler(&reached))
 
 	for _, origin := range []string{"https://miner.example.com", "https://proxy.lan:8443"} {
 		reached = false
@@ -207,12 +191,10 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 }
 
 func TestBasicAuthMiddleware(t *testing.T) {
-	clearSecurityEnv(t)
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "secret")
+	dash := runtimeconfig.Dashboard{Username: "admin", Password: "secret"}
 
 	reached := false
-	handler := basicAuthMiddleware(okHandler(&reached))
+	handler := basicAuthMiddleware(dash, okHandler(&reached))
 
 	// No credentials: 401 with a challenge.
 	req := httptest.NewRequest(http.MethodGet, "http://10.100.102.24:5000/", nil)
@@ -248,8 +230,6 @@ func TestBasicAuthMiddleware(t *testing.T) {
 // Server.handler(): GETs stay reachable, a mutating route is blocked
 // cross-origin but allowed same-origin, and headers are applied everywhere.
 func TestHandlerChainCSRFAndHeaders(t *testing.T) {
-	clearSecurityEnv(t)
-
 	s := newRenderServer(t)
 	handler := s.handler()
 

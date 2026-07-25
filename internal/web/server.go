@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
@@ -144,6 +144,15 @@ type Server struct {
 	streamers      []*models.Streamer
 	discordEnabled bool
 	debugURL       string
+
+	// dashboard is the immutable, environment-derived dashboard exposure/auth
+	// configuration (DASHBOARD_* / MINER_DEV_PREDICTIONS), resolved once at the
+	// cmd/miner bootstrap and injected via SetDashboardConfig before Start. The
+	// web layer never reads the process environment itself: every auth/CSRF/dev
+	// decision reads this snapshot (captured by value into the middleware at
+	// handler build time). The zero value is "no override, no auth, loopback
+	// bind" — exactly the behavior of an unset environment.
+	dashboard runtimeconfig.Dashboard
 	// debugSnapshot is the miner's in-process snapshot builder, wired only
 	// when Debug.Enabled is true; nil keeps /api/debug/snapshot a 404.
 	debugSnapshot func() debug.Snapshot
@@ -453,18 +462,36 @@ func (s *Server) SetDebugURL(url string) {
 	s.debugURL = url
 }
 
-func getAuthCredentials() (username, password string) {
-	return os.Getenv("DASHBOARD_USERNAME"), os.Getenv("DASHBOARD_PASSWORD")
+// SetDashboardConfig injects the resolved, immutable dashboard exposure/auth
+// snapshot. It is called once during composition (by internal/app, or by the
+// miner's fallback web build) before Start; the web layer reads no process
+// environment of its own.
+func (s *Server) SetDashboardConfig(d runtimeconfig.Dashboard) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dashboard = d
 }
 
-func authEnabled() bool {
-	username, password := getAuthCredentials()
-	return username != "" && password != ""
+// dashboardConfig returns the injected dashboard snapshot (a value copy, safe
+// to read without further synchronization).
+func (s *Server) dashboardConfig() runtimeconfig.Dashboard {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dashboard
 }
 
-func basicAuthMiddleware(next http.Handler) http.Handler {
+// AuthConfigured reports whether the dashboard requires Basic Auth (both
+// credentials present in the injected snapshot). It lets the composition root
+// and diagnostics observe whether auth is on WITHOUT exposing the credentials
+// themselves. Do not call it while already holding s.mu (it takes the read
+// lock; sync.RWMutex is not reentrant).
+func (s *Server) AuthConfigured() bool {
+	return s.dashboardConfig().AuthEnabled()
+}
+
+func basicAuthMiddleware(cfg runtimeconfig.Dashboard, next http.Handler) http.Handler {
+	expectedUser, expectedPass := cfg.Username, cfg.Password
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		expectedUser, expectedPass := getAuthCredentials()
 		if expectedUser == "" || expectedPass == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -487,17 +514,18 @@ func basicAuthMiddleware(next http.Handler) http.Handler {
 // exposure rules (see security.go), and begins serving in the background.
 // A non-loopback bind without credentials is a startup error, not a warning.
 func (s *Server) Start() error {
-	host, source := resolveBindHost(s.host)
+	dash := s.dashboardConfig()
+	host, source := resolveBindHost(dash, s.host)
 	s.host = host
-	if err := validateBindSecurity(host); err != nil {
+	if err := validateBindSecurity(dash, host); err != nil {
 		return err
 	}
 
 	handler := s.handler()
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
-	slog.Info("Web server bind resolved", "host", host, "source", source, "authEnabled", authEnabled())
-	if authEnabled() {
+	slog.Info("Web server bind resolved", "host", host, "source", source, "authEnabled", dash.AuthEnabled())
+	if dash.AuthEnabled() {
 		slog.Info("Web server authentication enabled")
 	}
 
@@ -527,6 +555,7 @@ func (s *Server) Start() error {
 // when configured). Split out from Start so it can be exercised directly in
 // tests and tooling.
 func (s *Server) handler() http.Handler {
+	dash := s.dashboardConfig()
 	mux := http.NewServeMux()
 
 	// Static files
@@ -566,7 +595,7 @@ func (s *Server) handler() http.Handler {
 	// Dev-only prediction simulator (fixtures + a fake Twitch placer), disabled
 	// by default and only wired when MINER_DEV_PREDICTIONS is set, so simulated
 	// rounds can never leak into a real run.
-	if devPredictionsEnabled() {
+	if dash.DevPredictions {
 		s.enableDevPredictions(mux)
 	}
 
@@ -663,9 +692,9 @@ func (s *Server) handler() http.Handler {
 	// Middleware chain (outermost first): security headers on every
 	// response, then Basic Auth when configured, then the same-origin check
 	// guarding all state-changing requests.
-	h := http.Handler(csrfProtectMiddleware(mux))
-	if authEnabled() {
-		h = basicAuthMiddleware(h)
+	h := http.Handler(csrfProtectMiddleware(dash, mux))
+	if dash.AuthEnabled() {
+		h = basicAuthMiddleware(dash, h)
 	}
 	return securityHeadersMiddleware(h)
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
@@ -58,21 +59,6 @@ var (
 	// begun. Once an App has been torn down it cannot be restarted.
 	ErrShutDown = errors.New("app: Run called after Shutdown")
 )
-
-// Options carries the process-resolved settings the composition root needs but
-// does not itself discover. main resolves CLI flags and environment variables
-// (auto-update on/off and its interval, the config path) and passes them in, so
-// App reads no environment of its own.
-type Options struct {
-	// ConfigPath is the on-disk config file path, forwarded to the miner so a
-	// runtime owner-identity or rename reconciliation can persist back to it.
-	ConfigPath string
-	// AutoUpdateEnabled and AutoUpdateInterval configure the miner's background
-	// release-update watcher (resolved by main from the -auto-update flag /
-	// AUTO_UPDATE and AUTO_UPDATE_CHECK_INTERVAL env vars).
-	AutoUpdateEnabled  bool
-	AutoUpdateInterval time.Duration
-}
 
 // runner is the runtime engine App drives. *miner.Miner satisfies it. It is an
 // interface so lifecycle tests can inject a fake runtime without the miner's
@@ -146,11 +132,11 @@ func defaultFactories() factories {
 // The context is accepted for symmetry with Run/Shutdown and reserved for
 // future ctx-aware construction; Build's current work is entirely local and
 // non-blocking, so it completes without observing cancellation.
-func Build(ctx context.Context, cfg *config.Config, opts Options) (*App, error) {
-	return buildWith(ctx, cfg, opts, defaultFactories())
+func Build(ctx context.Context, cfg *config.Config, rc runtimeconfig.RuntimeConfig) (*App, error) {
+	return buildWith(ctx, cfg, rc, defaultFactories())
 }
 
-func buildWith(ctx context.Context, cfg *config.Config, opts Options, f factories) (a *App, err error) {
+func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.RuntimeConfig, f factories) (a *App, err error) {
 	if verr := validateConfig(cfg); verr != nil {
 		return nil, verr
 	}
@@ -200,8 +186,10 @@ func buildWith(ctx context.Context, cfg *config.Config, opts Options, f factorie
 		// loading/auth-status overlay is live during the device-code flow the
 		// miner runs under Run. It is constructed here but NOT started: Start
 		// (which binds the listener and spawns the serving goroutine) is a Run
-		// step.
+		// step. The immutable dashboard exposure/auth snapshot (resolved once at
+		// the cmd/miner bootstrap) is injected so the web layer reads no env.
 		ws := f.newWeb(cfg.Analytics, cfg.Username, basePath, svc)
+		ws.SetDashboardConfig(rc.Dashboard)
 		app.web = ws
 		app.steps = append(app.steps, lifecycleStep{
 			name:  "web",
@@ -215,8 +203,11 @@ func buildWith(ctx context.Context, cfg *config.Config, opts Options, f factorie
 	// miner receives the App-owned database/analytics/web as external
 	// dependencies (it neither opens nor closes them — App does), so ownership
 	// is single and unambiguous.
-	m := f.newMiner(cfg, opts.ConfigPath)
-	m.ConfigureAutoUpdate(opts.AutoUpdateEnabled, opts.AutoUpdateInterval)
+	m := f.newMiner(cfg, rc.ConfigPath)
+	m.ConfigureAutoUpdate(rc.AutoUpdateEnabled, rc.AutoUpdateInterval)
+	// The miner's fallback web build (used only when App does not inject a web
+	// server) reads the same immutable dashboard snapshot rather than the env.
+	m.SetDashboardConfig(rc.Dashboard)
 	m.SetDatabase(db)
 	if app.analytics != nil {
 		m.SetAnalyticsService(app.analytics)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 func testSnapshot() debug.Snapshot {
@@ -96,10 +97,8 @@ func TestDebugSnapshotRouteMethods(t *testing.T) {
 // TestDebugSnapshotRouteAuth: the route inherits the dashboard's Basic Auth
 // middleware — 401 without credentials, 200 with them.
 func TestDebugSnapshotRouteAuth(t *testing.T) {
-	t.Setenv("DASHBOARD_USERNAME", "admin")
-	t.Setenv("DASHBOARD_PASSWORD", "hunter2")
-
 	s := newRenderServer(t)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{Username: "admin", Password: "hunter2"})
 	s.SetDebugSnapshotProvider(testSnapshot)
 	h := s.handler()
 
