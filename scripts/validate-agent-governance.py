@@ -435,6 +435,38 @@ def check_settings_schema():
     report("settings-json-schema-sanity", not details, details)
 
 
+def check_settings_mcp_mutations_denied():
+    """Regression guard for the final-audit F-M1 fix: server-side GitHub write
+    tools must be denied outright (they bypass the local branch gate), and
+    update_pull_request must at least be gated to ask (a draft->ready flip is a
+    non-delegable action that must never happen autonomously)."""
+    details = []
+    try:
+        with open(SETTINGS_PATH) as f:
+            settings = json.load(f)
+    except Exception as e:
+        report("settings-mcp-mutations-denied", False, ["could not parse: %s" % e])
+        return
+    perms = settings.get("permissions", {})
+    deny = set(perms.get("deny", []))
+    ask = set(perms.get("ask", []))
+    must_deny = [
+        "mcp__github__merge_pull_request",
+        "mcp__github__enable_pr_auto_merge",
+        "mcp__github__actions_run_trigger",
+        "mcp__github__push_files",
+        "mcp__github__create_or_update_file",
+        "mcp__github__delete_file",
+    ]
+    for name in must_deny:
+        if name not in deny:
+            details.append("%s must be in permissions.deny" % name)
+    if "mcp__github__update_pull_request" not in (deny | ask):
+        details.append("mcp__github__update_pull_request must be denied or gated to ask "
+                       "(draft->ready flip is non-delegable)")
+    report("settings-mcp-mutations-denied", not details, details)
+
+
 def check_rules_frontmatter_and_uniqueness():
     details = []
     if not os.path.isdir(RULES_DIR):
@@ -514,6 +546,7 @@ ALL_CHECKS = [
     check_patch_marker_balance,
     check_application_paths_untouched,
     check_settings_schema,
+    check_settings_mcp_mutations_denied,
     check_rules_frontmatter_and_uniqueness,
     check_hidden_unicode,
 ]

@@ -3,14 +3,21 @@
 
 Mechanically enforces a slice of CLAUDE.md's "Claude Code Governance (v2)" section
 and docs/agents/*.md: fails closed on Bash commands that push/force-push, push to
-main, tag/release-push, mutate GitHub via `gh` (including GraphQL mutations and
-`gh pr edit --ready`), reach a remote host, restart/redeploy infra, or write into
-the governance layer; and on Edit/Write/NotebookEdit touching .git/**, the
-settings/hooks layer, or a tracked file on main/master. It also unwraps common
-shell-indirection tricks (`bash -c`, `eval`, `env`, `xargs`) and inspects the
-left side of a pipe into a bare shell interpreter, rather than only matching the
-outermost command. Stdlib only, offline, deterministic. Run
-`python3 governance-policy.py --self-test` for the vector table.
+main (in any form, including the remote-only / `-u origin` / `origin HEAD` shapes),
+tag/release-push, mutate GitHub via `gh` (including single- and multi-line GraphQL
+mutations and `gh pr edit --ready`), reach a remote host, restart/redeploy infra,
+or write into the governance layer; and on Edit/Write/NotebookEdit touching
+.git/**, the settings/hooks layer, or a tracked file on main/master (even when the
+checkout happens to live under /tmp). It unwraps common shell-indirection tricks
+(`bash -c`, `eval`, `env`, `xargs`) and inspects the left side of a pipe into a
+bare shell interpreter, rather than only matching the outermost command.
+
+Read-only work is preserved: reads of the policy layer (`grep`/`cat`/`rg` over
+.claude/hooks/) and read-only `gh` verbs with substituted arguments
+(`gh pr view $PR`) are allowed; only writes and mutations fail closed.
+
+Stdlib only, offline, deterministic. Run `python3 governance-policy.py --self-test`
+for the vector table.
 Exit codes: 0 = allow, 2 = deny (reason on stderr, prefixed "governance-policy: ").
 """
 import json
@@ -148,6 +155,8 @@ def check_git_push(tokens, subcommand, get_branch, cwd):
         return "git push with --force/-f/--force-with-lease/+refspec is always blocked"
     if "--mirror" in rest:
         return "git push --mirror is always blocked"
+    if "--all" in rest:
+        return "git push --all pushes every local branch (incl. main/master) and is always blocked"
     if "--tags" in rest:
         return "git push --tags is always blocked (no release/tag)"
     for t in rest:
@@ -158,11 +167,23 @@ def check_git_push(tokens, subcommand, get_branch, cwd):
                 return "git push targeting main/master is always blocked"
             if part.startswith("refs/tags/"):
                 return "git push targeting refs/tags/ is always blocked (no release/tag)"
+    # Determine whether this pushes the *current* branch — which, on main/master,
+    # is a direct push to main even with no `main` token in sight. Positional
+    # args after `push` are [remote?] [refspec...]. The current branch is what
+    # gets pushed when there is no explicit refspec (bare `git push`,
+    # `git push origin`, `git push -u origin`) or when a refspec's source side
+    # is HEAD/@ (`git push origin HEAD`). An explicit source branch name
+    # (`git push origin feature`) pushes that branch, not the current one, so it
+    # is left to the main/master token check above.
     non_flag = [t for t in rest if not t.startswith("-")]
-    if not non_flag:
+    refspecs = non_flag[1:] if non_flag else []
+    pushes_current_branch = (not refspecs) or any(
+        r.split(":", 1)[0] in ("head", "@") for r in refspecs
+    )
+    if pushes_current_branch:
         branch = get_branch(cwd)
         if branch is None or branch in ("main", "master"):
-            return "bare git push while on main/master (or branch undeterminable) is blocked"
+            return "git push of the current branch while on main/master (or branch undeterminable) is blocked"
     return None
 
 def check_git_commit(tokens, sub, get_branch, cwd):
@@ -202,6 +223,37 @@ VAR_SUBST_RE = re.compile(r"\$\{|\$\(|\$[a-z_]|`")
 # refspec that could resolve to `main` at shell-execution time.
 SENSITIVE_GIT_VERBS = {"push", "commit", "config", "remote"} | DANGEROUS_GIT_VERBS
 
+# gh subcommands that mutate. Read-only gh verbs (view/list/status/...) may take
+# a substituted argument (`gh pr view $PR`) without failing closed; a mutating
+# gh verb reached or parameterized through substitution must fail closed.
+GH_MUTATING_FIRST = {"release", "secret", "variable", "auth"}
+GH_MUTATING_PAIRS = {
+    ("pr", "merge"), ("pr", "ready"), ("pr", "edit"), ("pr", "create"),
+    ("pr", "close"), ("pr", "reopen"), ("pr", "comment"),
+    ("issue", "create"), ("issue", "edit"), ("issue", "close"),
+    ("issue", "comment"), ("issue", "delete"), ("issue", "reopen"),
+    ("workflow", "run"), ("workflow", "enable"), ("workflow", "disable"),
+    ("run", "rerun"), ("run", "cancel"), ("run", "delete"),
+    ("repo", "edit"), ("repo", "delete"), ("repo", "create"),
+}
+
+def gh_is_readonly(tokens):
+    """True when the gh invocation is a known read-only shape. `gh api` is
+    treated read-only for REST (GET is the default) but NOT for graphql, whose
+    payload may be a mutation — so a substituted graphql query fails closed."""
+    if len(tokens) < 2:
+        return True
+    sub = tokens[1]
+    if sub in GH_MUTATING_FIRST:
+        return False
+    positionals = [t for t in tokens[2:] if not t.startswith("-")]
+    second = positionals[0] if positionals else None
+    if sub == "api":
+        return second != "graphql"
+    if (sub, second) in GH_MUTATING_PAIRS:
+        return False
+    return True
+
 def check_var_substitution_before_verb(tokens, sub, get_branch, cwd):
     """If `git`/`gh`'s verb position is reached through a shell variable or
     command substitution, the verb is non-deterministic at hook-analysis time
@@ -210,7 +262,11 @@ def check_var_substitution_before_verb(tokens, sub, get_branch, cwd):
     the verb IS one that feeds a deny check on its own arguments (`push`'s
     refspec, above all), scan every argument too — not just up to the verb —
     so `git push origin $V` / `${BR}` / `` `echo main` `` fail closed as well,
-    while leaving unrelated verbs (`git log --format=$FMT`) untouched."""
+    while leaving unrelated verbs (`git log --format=$FMT`) untouched.
+
+    For `gh`, only fail closed when the subcommand is substituted (unclassifiable)
+    or is a known mutating verb; read-only `gh pr view $PR` / `gh run view $ID`
+    stay allowed."""
     if not tokens:
         return None
     if tokens[0] == "git":
@@ -222,16 +278,16 @@ def check_var_substitution_before_verb(tokens, sub, get_branch, cwd):
             end = (idx + 1) if idx is not None else len(tokens)
             scan_range = tokens[1:end]
     elif tokens[0] == "gh":
+        if len(tokens) > 1 and VAR_SUBST_RE.search(tokens[1]):
+            return "variable/command substitution in the gh subcommand position is non-deterministic — fail closed"
+        if gh_is_readonly(tokens):
+            return None
         scan_range = tokens[1:]
     else:
         return None
     if any(VAR_SUBST_RE.search(t) for t in scan_range):
         return "variable/command substitution near the git/gh verb or its arguments makes it non-deterministic — fail closed"
     return None
-
-GH_MUTATION_SUBCMD_RE = re.compile(
-    r"\bgh\b[^|;&]*\b(pr\s+merge|pr\s+ready|release|workflow\s+run|run\s+rerun|secret|variable|repo\s+edit)\b"
-)
 
 def check_gh(tokens, sub, get_branch, cwd):
     if not tokens or tokens[0] != "gh" or len(tokens) < 2:
@@ -262,6 +318,20 @@ def check_gh(tokens, sub, get_branch, cwd):
                 return "gh api with a mutating method (--method=) is blocked"
         if rest and rest[0] == "graphql" and "mutation" in sub:
             return "gh api graphql containing a GraphQL mutation is blocked"
+    return None
+
+GH_GRAPHQL_RE = re.compile(r"\bgh\b.*\bgraphql\b")
+
+def check_gh_graphql_mutation(normalized_full):
+    """`normalize` turns newlines into `;`, which would otherwise split a
+    multi-line `-f query=$'\\nmutation{...}'` payload into a separate statement
+    from the `gh ... graphql` invocation and hide the mutation from the
+    per-subcommand check. Detect the (gh, graphql, mutation) triple on the full
+    normalized string instead. A read-only `query{...}` has no `mutation` token
+    and stays allowed; a legit query that happens to contain the substring
+    `mutation` is an acceptable fail-closed false positive."""
+    if GH_GRAPHQL_RE.search(normalized_full) and "mutation" in normalized_full:
+        return "gh api graphql containing a GraphQL mutation is blocked"
     return None
 
 REMOTE_HOST_RE = re.compile(r"^[\w.\-]+@[\w.\-]+:")
@@ -332,16 +402,47 @@ def check_pipe_into_shell(normalized_full):
         code_text = m.group(1)
         if re.search(r"\bgit\b[^|;&]*\bpush\b", code_text):
             return "left side of a pipe into a bare shell looks like `git push` — blocked"
-        if GH_MUTATION_SUBCMD_RE.search(code_text):
+        if re.search(r"\bgh\b[^|;&]*\b(pr\s+merge|pr\s+ready|release|workflow\s+run|run\s+rerun|secret|variable|repo\s+edit)\b", code_text):
             return "left side of a pipe into a bare shell looks like a gh mutation — blocked"
     return None
 
 PROTECTED_PATH_SUBSTR = (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/", ".git/hooks/")
-WRITE_INDICATOR_RE = re.compile(r"(>{1,2}|\btee\b|\bcp\b|\bmv\b|\brm\b|\bchmod\b)")
+REDIR_TARGET_RE = re.compile(r">>?\s*([^\s|;&<>]+)")
+WRITE_COMMANDS = {"tee", "cp", "mv", "rm", "chmod", "chown", "ln", "install", "truncate", "dd"}
+INPLACE_EDITORS = {"sed", "perl", "awk", "ruby"}
+INTERPRETERS = {"python", "python3", "node", "ruby", "perl"}
+
+def _references_protected(text):
+    return any(p in text for p in PROTECTED_PATH_SUBSTR)
 
 def check_protected_write(tokens, sub, get_branch, cwd):
-    if any(p in sub for p in PROTECTED_PATH_SUBSTR) and WRITE_INDICATOR_RE.search(sub):
-        return "writing into the governance policy layer (.claude/settings*.json, .claude/hooks/, .git/hooks/) is blocked"
+    """Block writes INTO the governance policy layer, but not reads OF it.
+    The path must be the target of a write (a redirection target, a write
+    command's positional argument, an in-place editor's file, or an interpreter
+    one-liner) — a protected path appearing only as a search directory or a
+    grep pattern (`grep -rn 'tee' .claude/hooks/`) is a read and stays allowed."""
+    # 1. Redirections whose target is a protected path.
+    for m in REDIR_TARGET_RE.finditer(sub):
+        if _references_protected(m.group(1)):
+            return "redirecting output into the governance policy layer (.claude/settings*.json, .claude/hooks/, .git/hooks/) is blocked"
+    if not tokens:
+        return None
+    cmd0 = tokens[0]
+    # 2. Explicit write commands whose positional target is a protected path.
+    if cmd0 in WRITE_COMMANDS:
+        for t in tokens[1:]:
+            if t.startswith("-"):
+                continue
+            if _references_protected(t):
+                return "%s targeting the governance policy layer is blocked" % cmd0
+    # 3. In-place editors (sed -i, perl -i, ...) rewriting a protected path.
+    if cmd0 in INPLACE_EDITORS and any(t == "-i" or t.startswith("-i") for t in tokens[1:]):
+        for t in tokens[1:]:
+            if not t.startswith("-") and _references_protected(t):
+                return "in-place edit (%s -i) of the governance policy layer is blocked" % cmd0
+    # 4. Interpreter one-liners (python -c, node -e, ...) that name a protected path.
+    if cmd0 in INTERPRETERS and any(t in ("-c", "-e") for t in tokens[1:]) and _references_protected(sub):
+        return "an interpreter one-liner referencing the governance policy layer is blocked (fail closed)"
     return None
 
 SUBCOMMAND_CHECKS = (
@@ -382,6 +483,9 @@ def check_bash(command, cwd, get_branch):
     reason = check_pipe_into_shell(normalized)
     if reason:
         return reason
+    reason = check_gh_graphql_mutation(normalized)
+    if reason:
+        return reason
     for sub in split_subcommands(normalized):
         reason = analyze_subcommand(sub, get_branch, cwd)
         if reason:
@@ -407,10 +511,14 @@ def is_under(path, parent):
     return bool(parent) and (path == parent or path.startswith(parent + "/"))
 
 def is_scratch_allowed(path):
+    """A path under the OS temp root (TMPDIR or /tmp) is a scratch path. The
+    session scratchpad lives under /tmp, so this covers it without a separate
+    substring clause — a loose `/scratchpad/` match anywhere on the filesystem
+    was a bypass and has been removed."""
     for t in (os.environ.get("TMPDIR", "").rstrip("/"), "/tmp"):
         if t and is_under(path, t):
             return True
-    return "/scratchpad/" in path or path.endswith("/scratchpad")
+    return False
 
 def check_edit(file_path, cwd, get_branch, git_is_worktree, git_is_ignored):
     path = resolve_path(file_path, cwd)
@@ -428,12 +536,10 @@ def check_edit(file_path, cwd, get_branch, git_is_worktree, git_is_ignored):
             if nxt.startswith("settings") and nxt.endswith(".json"):
                 return "edits to .claude/settings*.json are blocked (policy self-protection)"
 
-    if is_scratch_allowed(path):
-        return None
-
+    # Branch gate takes precedence over the scratch allowance: a checkout that
+    # happens to live under /tmp (CI, a sandbox worktree) is still a real git
+    # worktree, and a tracked-file edit on main/master there must be blocked.
     wt = git_is_worktree(path)
-    if wt is None:
-        return "could not determine git worktree state for this path — fail closed"
     if wt:
         probe_dir = path if os.path.isdir(path) else (os.path.dirname(path) or ".")
         branch = get_branch(probe_dir)
@@ -442,6 +548,12 @@ def check_edit(file_path, cwd, get_branch, git_is_worktree, git_is_ignored):
         if branch in ("main", "master") and not git_is_ignored(path):
             return "tracked-file edit while on main/master is blocked"
         return None
+
+    # Not inside a git worktree: scratch dirs are fine.
+    if is_scratch_allowed(path):
+        return None
+    if wt is None:
+        return "could not determine git worktree state for this path — fail closed"
 
     if HOME and is_under(path, HOME):
         rel_parts = path_parts(path[len(HOME):])
@@ -514,8 +626,11 @@ def decide(raw_stdin, cwd_override=None):
         return reason is None, reason
 
     # Any other tool is assumed read-only-capable at this layer; permission
-    # deny rules in .claude/settings.json cover known-mutating MCP tools by
-    # exact name. Fail open here — this hook's job is Bash/Edit/Write/NotebookEdit.
+    # deny/ask rules in .claude/settings.json cover known-mutating MCP tools by
+    # exact name (merge/auto-merge/workflow-trigger/create-repo/fork denied;
+    # server-side file writes denied; update_pull_request gated to ask so a
+    # draft->ready flip cannot happen autonomously). Fail open here — this
+    # hook's job is Bash/Edit/Write/NotebookEdit.
     return True, None
 
 def main():
@@ -642,6 +757,35 @@ def run_self_test():
         ("git log --format=$FMT", False, None, "non-sensitive verb with substitution stays allowed"),
         ("echo $HOME", False, None, "plain substitution outside git/gh stays allowed"),
         ("go test -run $TESTNAME ./...", False, None, "non-git substitution stays allowed"),
+        # --- Final audit F-H1: push of the current branch on main in its natural forms ---
+        ("git push origin", True, "main", "F-H1: push origin (current branch) on main"),
+        ("git push origin HEAD", True, "main", "F-H1: push origin HEAD on main"),
+        ("git push -u origin", True, "main", "F-H1: push -u origin on main"),
+        ("git push --set-upstream origin", True, "main", "F-H1: push --set-upstream origin on main"),
+        ("git push origin @", True, "main", "F-H1: push origin @ on main"),
+        ("git push --all", True, "main", "F-H1: push --all on main"),
+        ("git push origin", False, "claude/feature", "F-H1: push origin on feature branch (allowed)"),
+        ("git push origin HEAD", False, "claude/feature", "F-H1: push origin HEAD on feature (allowed)"),
+        ("git push -u origin feature", False, "main", "F-H1: push -u origin feature pushes feature, not main"),
+        ("git push origin feature", False, "main", "F-H1: explicit feature branch on main (allowed)"),
+        # --- Final audit F-H2: multi-line gh graphql mutation ---
+        ("gh api graphql -f query=$'\\nmutation { addComment }'", True, None, "F-H2: multi-line gh graphql mutation"),
+        ("gh api graphql --field query=$'\\n  mutation{x}'", True, None, "F-H2: multi-line graphql mutation, --field"),
+        # --- Final audit F-M2: read-only gh with a substituted argument stays allowed ---
+        ("gh pr view $PR_NUMBER", False, None, "F-M2: read-only gh pr view with variable (allowed)"),
+        ("gh run view $ID", False, None, "F-M2: read-only gh run view with variable (allowed)"),
+        ("gh api repos/$owner/$repo/pulls", False, None, "F-M2: read-only gh api REST with variable (allowed)"),
+        ("gh issue view $N", False, None, "F-M2: read-only gh issue view with variable (allowed)"),
+        ("gh pr merge $PR", True, None, "F-M2: gh pr merge with variable stays blocked"),
+        ("gh release create $TAG", True, None, "F-M2: gh release create with variable stays blocked"),
+        # --- Final audit F-M3: reading the policy layer is not a write ---
+        ("grep -rn 'tee' .claude/hooks/", False, None, "F-M3: grep search inside policy dir (read-only)"),
+        ("rg 'rm' .claude/hooks/governance-policy.py", False, None, "F-M3: ripgrep read of policy file"),
+        ("cat .claude/settings.json", False, None, "F-M3: reading settings.json"),
+        ("git diff .claude/hooks/governance-policy.py", False, None, "F-M3: git diff of policy file"),
+        # --- Final audit F-M5 (partial): in-place editor / interpreter write of policy layer ---
+        ("sed -i s/x/y/ .claude/hooks/governance-policy.py", True, None, "F-M5: sed -i rewriting the hook"),
+        ("python3 -c open('.claude/settings.json','w') ", True, None, "F-M5: python -c writing settings.json"),
     ]
     for cmd, want, branch, label in extra_bash:
         bash(cmd, want, branch=branch or "claude/some-feature", label=label)
@@ -657,6 +801,9 @@ def run_self_test():
         ("internal/foo.go", False, "main", True, True, "internal/foo.go on main but gitignored"),
         ("/tmp/scratch/notes.md", False, "main", False, False, "/tmp write always allowed"),
         (os.path.join(HOME, ".ssh", "id_rsa"), True, "main", False, False, "$HOME/.ssh write"),
+        # --- Final audit F-M4: a checkout under /tmp is still a worktree; main is blocked ---
+        ("/tmp/sandbox/internal/foo.go", True, "main", True, False, "F-M4: /tmp checkout on main still blocked"),
+        ("/tmp/sandbox/internal/foo.go", False, "claude/feature", True, False, "F-M4: /tmp checkout on feature allowed"),
     ]
     for path, want, branch, worktree, ignored, label in extra_edit:
         edit(path, want, branch=branch, worktree=worktree, ignored=ignored, label=label)

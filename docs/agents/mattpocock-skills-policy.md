@@ -131,6 +131,24 @@ auditable review boundary.
   telling an agent to run `make`, `npm run <script>`, `git bisect run <cmd>`, or any other custom/opaque script
   the hook can't see inside of — those are only as safe as what the target script does, since the hook
   inspects the Bash command line's structure, not the body of a script it invokes by name.
+- A direct push of the *current* branch is blocked on main/master in every shape the hook can see —
+  bare `git push`, `git push origin`, `git push origin HEAD`/`@`, `git push -u origin`,
+  `git push --set-upstream origin`, `git push --all`/`--mirror`/`--tags` — not only the explicit
+  `git push origin main` form. A GraphQL mutation via `gh api graphql` is blocked whether it is written on
+  one line or split across a multi-line `-f query=$'\nmutation{...}'` payload. Server-side GitHub file writes
+  (`mcp__github__push_files`/`create_or_update_file`/`delete_file`) are denied outright because they bypass the
+  local branch gate entirely, and `mcp__github__update_pull_request` is gated to `ask` so a draft→ready flip
+  cannot happen autonomously. Reads of the policy layer (`grep`/`cat`/`rg`/`git diff` over `.claude/hooks/` or
+  `.claude/settings.json`) are allowed — only writes into it fail closed. A tracked-file edit on main/master is
+  blocked even when the checkout lives under `/tmp` (a CI or sandbox worktree is still a real worktree).
+- Residual Bash-evasions the hook does **not** catch (outside the errant-agent threat model, all requiring a
+  deliberate obfuscation an ordinary agent would not construct): assembling a command through `$IFS`/word-splitting
+  glue, feeding a here-string or process substitution (`<<<`, `<(...)`) into a bare shell, `xargs` reading its
+  command from stdin rather than its arguments, and an interpreter one-liner (`python -c`, `perl -e`) that opens a
+  protected path through a computed string rather than a literal one. In-place editors (`sed -i`, `perl -i`) and
+  literal-path interpreter one-liners targeting the policy layer *are* blocked. These residuals are the reason the
+  hook is described as a backstop against an agent "getting carried away," not a boundary against a determined
+  adversary — a denylist over shell text can never be exhaustive.
 - Pre-existing `.git/hooks/*` on a contributor's machine are outside this policy's reach.
 - New or unknown MCP tools are not automatically covered — `.claude/settings.json`'s MCP denies are an
   allowlist-style exact-name list, not a pattern match; a newly added MCP tool starts ungoverned until added.
