@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -209,6 +210,28 @@ type Miner struct {
 	// current availability window). Guarded by mu; reset on restart and
 	// whenever the streamer's auto-redeem config is edited.
 	autoRedeemState map[string]*autoRedeemRuntime
+	// autoRedeemGen is the per-streamer (lowercase login) generation of the
+	// auto-redeem runtime window (M2, I5). Guarded by mu. A generation
+	// identifies one continuous budget window: it is bumped when the window
+	// is genuinely invalidated (a successful SetAutoRedeem; a committed
+	// removal; the clash branch of a rename migration) and MIGRATED — not
+	// bumped — across an ORDINARY rename, which continues the same window
+	// under the new login (C4: a rename must never reset or double the
+	// budget). See migrateAutoRedeemGenLocked (rename_reconcile.go) for the
+	// migration rule and bumpAutoRedeemGenLocked (rewards.go) for the bump.
+	// Entries are never deleted (a re-added login must not restart at a
+	// generation a stale evaluator still holds) and are monotonic per key
+	// (never decreased), so a sealed generation can never match again. New()
+	// initializes this map; every helper must still tolerate reading a nil
+	// map (returns the zero value, 0) since struct-literal test Miners never
+	// run New().
+	autoRedeemGen map[string]uint64
+	// rewardsAPI is the tests-only seam over the narrow rewardsClient slice
+	// of the Twitch client (nil in production — see the rewards() accessor
+	// in rewards.go), mirroring this repo's topicReconciler/
+	// renameAnalyticsService seam precedent so reward evaluation/redemption
+	// (I8) is testable without network I/O.
+	rewardsAPI rewardsClient
 
 	mu sync.RWMutex
 
@@ -248,7 +271,30 @@ type Miner struct {
 	// the serialization can be exercised without the network/pubsub side effects
 	// of the real apply path.
 	importApply func(ctx context.Context, s settings.RuntimeSettings) error
+
+	// applyCommitBarrier is a tests-only seam (nil in production; M2 [R2]):
+	// invoked by applySettingsWithRemovals/applySettingsWithRename around
+	// their commit section — applyPreCommit fires after durable prepare
+	// (admission/analytics) but before the commit m.mu.Lock() (the D1
+	// lost-update window: the live config map is still mutable by a
+	// concurrent SetAutoRedeem); applyPostCommit fires after the commit
+	// m.mu.Unlock() but before CommitPlan (the D2 resurrection window: the
+	// new config is published but the runtime roster has not caught up
+	// yet). Lets a test deterministically interleave a SYNCHRONOUS
+	// SetAutoRedeem call inside either window without goroutines/sleeps.
+	applyCommitBarrier func(applyCommitPhase)
 }
+
+// applyCommitPhase identifies which side of an apply's commit section
+// applyCommitBarrier was invoked from — see that field's doc comment.
+type applyCommitPhase int
+
+const (
+	// applyPreCommit fires after durable prepare, before the commit m.mu.Lock.
+	applyPreCommit applyCommitPhase = iota
+	// applyPostCommit fires after the commit m.mu.Unlock, before CommitPlan.
+	applyPostCommit
+)
 
 // autoRedeemRuntime is the per-streamer in-memory budget/window bookkeeping for
 // auto-redeeming custom rewards.
@@ -271,6 +317,7 @@ func New(cfg *config.Config, configPath string) *Miner {
 		deviceID:           deviceID,
 		streamCheckTrigger: make(chan struct{}, 1),
 		autoRedeemState:    make(map[string]*autoRedeemRuntime),
+		autoRedeemGen:      make(map[string]uint64),
 		healthJournal:      journal.New[journal.HealthEvent](healthJournalCapacity, nil),
 	}
 }
@@ -1674,6 +1721,21 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // config writers alike — so durable config persistence and the publication
 // of m.config form one serialized commit sequence with no lost-update window
 // between them.
+//
+// [M2/R6] This lost-update guarantee is tightened further for AutoRedeem
+// specifically: applySettingsWithRemovals and applySettingsWithRename both
+// rebuild candidate.AutoRedeem from the LIVE map at their commit point
+// (refreshCandidateAutoRedeemLocked, rewards.go), in the SAME m.mu section as
+// config.SaveConfig and the m.config publish, so a SetAutoRedeem that commits
+// during THIS apply's earlier unlocked I/O (durable admission, analytics
+// rename) is never silently overwritten (D1), and a removed or renamed
+// login's consent can never resurrect after the commit (D2). This guarantee
+// is scoped to AutoRedeem: ApplyHealthSettings (health.go:424-434) and
+// ApplyCampaignPolicy (policy.go:281-287) still mutate live VALUE fields that
+// cloneConfigLocked's shallow copy already snapshotted by the time this
+// function took m.mu above, so an edit to either landing inside an apply's
+// own unlocked window is still silently overwritten by that apply's publish
+// — a known residual of the same defect class, NOT fixed by this pass.
 func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) error {
 	if !m.beginApply() {
 		return ErrShuttingDown
@@ -1750,12 +1812,20 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 //     sequence runs to completion. (The atomic rename in step 4 is the
 //     durability commit point for FAILURE semantics, not a cancellation
 //     boundary.)
-//  4. THE COMMIT POINT: under m.mu, config.SaveConfig(candidate); on success
-//     publish m.config = candidate IN THE SAME critical section, closing the
-//     lost-update window against the other four config-writers (which all
-//     persist under m.mu too). On failure: AbortAdmission, return — zero
-//     mutation. configPath == "" is a documented no-op success (as every
-//     other non-fatal SaveConfig path already treats it).
+//  4. THE COMMIT POINT: under m.mu, refreshCandidateAutoRedeemLocked first
+//     rebuilds candidate.AutoRedeem from the CURRENT live map and applies
+//     this apply's own removal deletions (I2 — a SetAutoRedeem committed
+//     during step 2's unlocked admission I/O is never lost, D1); then
+//     config.SaveConfig(candidate) runs; on success publish m.config =
+//     candidate AND, in THE SAME critical section, delete
+//     m.autoRedeemState[login] and bump its generation for every committed
+//     removal (I4 — atomic with the publish, so a removed streamer's
+//     consent can never resurrect, D2) — closing the lost-update window
+//     against the other four config-writers (which all persist under m.mu
+//     too). On failure: AbortAdmission, return — zero mutation, including
+//     to AutoRedeem/state/generation. configPath == "" is a documented
+//     no-op success (as every other non-fatal SaveConfig path already
+//     treats it).
 //  5. Past the commit point there is NO abort: CommitPlan + finishApply
 //     (persisted=true) commit the runtime and complete each removal
 //     (CommitRemoval) on critB — a completion failure is logged truthfully
@@ -1772,6 +1842,15 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 	m.mu.Unlock()
 
 	settings.ApplyToConfig(candidate, s)
+
+	// removedLogins is built ONCE per apply, lowercased at construction,
+	// regardless of whether coord is nil — the commit-point AutoRedeem/
+	// runtime-state cleanup below (I2/I4) must happen even when there is no
+	// persisted store to admit removals against.
+	removedLogins := make([]string, 0, len(removals))
+	for _, r := range removals {
+		removedLogins = append(removedLogins, strings.ToLower(r.GetUsername()))
+	}
 
 	var admittedLogins []string
 	if coord != nil {
@@ -1798,7 +1877,11 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 		}
 	}
 
+	if m.applyCommitBarrier != nil {
+		m.applyCommitBarrier(applyPreCommit)
+	}
 	m.mu.Lock()
+	m.refreshCandidateAutoRedeemLocked(candidate, nil, removedLogins)
 	if configPath != "" {
 		if err := config.SaveConfig(configPath, candidate); err != nil {
 			m.mu.Unlock()
@@ -1807,7 +1890,14 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 		}
 	}
 	m.config = candidate
+	for _, login := range removedLogins { // I4: atomic with the publish
+		delete(m.autoRedeemState, login)
+		m.bumpAutoRedeemGenLocked(login)
+	}
 	m.mu.Unlock()
+	if m.applyCommitBarrier != nil {
+		m.applyCommitBarrier(applyPostCommit)
+	}
 	if len(admittedLogins) > 0 {
 		slog.Info("Streamer removal committed", "count", len(admittedLogins))
 	}
@@ -1842,15 +1932,17 @@ func (m *Miner) abortAdmittedRemovals(coord *streamerlifecycle.Coordinator, logi
 
 // applySettingsWithRename is the fail-closed transaction path (BKM-006 C2,
 // extended by M1 for any removal riding along with a rename in the same
-// apply): builds a candidate config independent of the live one, admits any
-// planned removals durably (SRAP prepare phase) BEFORE the rename's own
-// commit, durably persists analytics + config.json for the planned rename(s)
-// (commitRenameTransaction — the commit point for BOTH the rename and any
-// riding removal), and only on success commits the plan to the runtime and
-// publishes the candidate as the live config. A rename-transaction failure
-// compensates the removal admission too (AbortAdmission), so the whole apply
-// stays all-or-nothing: ZERO mutation of runtime, in-memory config, config
-// file, analytics, IRC, or PubSub on any failure.
+// apply, and by M2/I7 for the AutoRedeem commit): builds a candidate config
+// independent of the live one, admits any planned removals durably (SRAP
+// prepare phase) BEFORE the rename's own commit, durably persists analytics
+// off-lock (commitAnalyticsRenames), and THE COMMIT POINT below persists
+// config.json + publishes the candidate + migrates AutoRedeem runtime
+// state/generation all under one m.mu section (split out of the former
+// commitRenameTransaction — see that section's own comment for why). Only on
+// success does it commit the plan to the runtime. A rename-transaction
+// failure compensates the removal admission too (AbortAdmission), so the
+// whole apply stays all-or-nothing: ZERO mutation of runtime, in-memory
+// config, config file, analytics, AutoRedeem, IRC, or PubSub on any failure.
 func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeSettings, plan *streamer.ReconcilePlan, plannedRenames []streamer.RenameEvent, removals []*models.Streamer, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
 	candidate := m.cloneConfigLocked()
@@ -1862,9 +1954,22 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 	// Config surgery for each planned rename: update the entry's Username in
 	// place (settings pointer untouched) and stamp ChannelID, then backfill
 	// ChannelID onto every OTHER entry from this SAME plan's resolution — all
-	// on the candidate, still before any durable or runtime commit.
+	// on the candidate, still before any durable or runtime commit. This
+	// early pass also touches candidate.AutoRedeem, but that result is
+	// discarded: the commit-point refreshCandidateAutoRedeemLocked below
+	// replaces candidate.AutoRedeem wholesale from the LIVE map — see
+	// applyConfigRenames' doc comment (rename_reconcile.go).
 	applyConfigRenames(candidate, plannedRenames)
 	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
+
+	// removedLogins is built ONCE per apply, lowercased at construction,
+	// regardless of whether coord is nil — the commit-point AutoRedeem/
+	// runtime-state cleanup below (I2/I4) must happen even when there is no
+	// persisted store to admit removals against.
+	removedLogins := make([]string, 0, len(removals))
+	for _, r := range removals {
+		removedLogins = append(removedLogins, strings.ToLower(r.GetUsername()))
+	}
 
 	var admittedLogins []string
 	if coord != nil && len(removals) > 0 {
@@ -1898,9 +2003,50 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 	case analyticsSvc != nil:
 		svc = analyticsSvc
 	}
-	if err := commitRenameTransaction(configPath, candidate, plannedRenames, svc); err != nil {
+	rollback, err := commitAnalyticsRenames(plannedRenames, svc)
+	if err != nil {
 		m.abortAdmittedRemovals(coord, admittedLogins, "the rename transaction failed")
 		return fmt.Errorf("rename transaction aborted: %w", err)
+	}
+
+	// THE COMMIT POINT (I7, fixes D7): config.SaveConfig, the m.config
+	// publish, and the AutoRedeem runtime-state/generation migration all run
+	// in ONE m.mu critical section — closing both the D1 lost-update window
+	// (a SetAutoRedeem committing during the unlocked admission/analytics I/O
+	// above must never be silently overwritten) and the concurrent-map panic
+	// a rename's SaveConfig running off m.mu used to risk: candidate.DropRules
+	// aliases the LIVE map (cloneConfigLocked deep-copies only AutoRedeem),
+	// and SetDropRule (policy.go) writes that live map under m.mu while an
+	// unlocked json.MarshalIndent of an old candidate iterates it —
+	// "concurrent map iteration and map write". This is a hard constraint: a
+	// candidate's config.SaveConfig must never move back off m.mu on this
+	// path.
+	if m.applyCommitBarrier != nil {
+		m.applyCommitBarrier(applyPreCommit)
+	}
+	m.mu.Lock()
+	clashes := m.refreshCandidateAutoRedeemLocked(candidate, plannedRenames, removedLogins)
+	if configPath != "" {
+		if err := config.SaveConfig(configPath, candidate); err != nil {
+			m.mu.Unlock()
+			rollback() // reverse the committed analytics renames (off-lock)
+			m.abortAdmittedRemovals(coord, admittedLogins, "config.json persistence failed")
+			return fmt.Errorf("rename transaction aborted: persisting config: %w", err)
+		}
+	}
+	m.config = candidate
+	stateClashes := migrateAutoRedeemRuntimeState(m.autoRedeemState, plannedRenames) // C4: same section as the publish
+	for k := range stateClashes {
+		clashes[k] = true
+	}
+	m.migrateAutoRedeemGenLocked(plannedRenames, clashes)
+	for _, login := range removedLogins { // I4: atomic with the publish
+		delete(m.autoRedeemState, login)
+		m.bumpAutoRedeemGenLocked(login)
+	}
+	m.mu.Unlock()
+	if m.applyCommitBarrier != nil {
+		m.applyCommitBarrier(applyPostCommit)
 	}
 	if len(admittedLogins) > 0 {
 		slog.Info("Streamer removal committed", "count", len(admittedLogins))
@@ -1932,13 +2078,27 @@ func logReconcileConflicts(conflicts []streamer.ReconcileConflict) {
 }
 
 // cloneConfigLocked returns a copy of m.config safe to mutate independently
-// of the live one. config.Config's only reference-typed field the rename
-// transaction path mutates IN PLACE is AutoRedeem (migrateAutoRedeem does a
-// map delete/insert), so that map is deep-copied explicitly; Streamers (and
-// every other slice ApplyToConfig touches) is reassigned wholesale rather
-// than mutated in place, so a shallow struct copy is already independent for
-// it, and every other field is a plain value struct with no aliasable
-// reference. Caller holds m.mu.
+// of the live one. config.Config's only reference-typed field any pre-commit
+// candidate mutation touches IN PLACE is AutoRedeem (applyConfigRenames'
+// early, discarded migrateAutoRedeem pass — see that function's doc
+// comment), so that map is deep-copied explicitly here; it is later REBUILT
+// WHOLESALE and authoritatively from the LIVE map by
+// refreshCandidateAutoRedeemLocked at the actual commit point (I1/I2,
+// rewards.go), so this copy only needs to survive mutation up to that point,
+// not to publish. Streamers (and every other slice ApplyToConfig touches) is
+// reassigned wholesale rather than mutated in place, so a shallow struct copy
+// is already independent for it.
+//
+// DropRules is deliberately NOT deep-copied: no candidate-config code path
+// mutates it, only aliases it to the live map. [R7] This is load-bearing, not
+// an oversight — SetDropRule (policy.go) writes that live map under m.mu, so
+// any candidate carrying the aliased map must have its own config.SaveConfig
+// run under m.mu too, or an unlocked json.MarshalIndent iterating it can race
+// a concurrent write ("concurrent map iteration and map write" — a real
+// panic the M2/D7 fix eliminated by moving the rename path's SaveConfig under
+// m.mu; see applySettingsWithRename's commit-point comment). Never move a
+// candidate's config.SaveConfig back off m.mu. Every other field is a plain
+// value struct with no aliasable reference. Caller holds m.mu.
 func (m *Miner) cloneConfigLocked() *config.Config {
 	clone := *m.config
 	if m.config.AutoRedeem != nil {
@@ -1953,19 +2113,47 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 // finishApply performs everything that must happen once the roster
 // reconciliation has been committed to the runtime AND — for a rename-
 // carrying apply — durable persistence has already succeeded: publish the new
-// config, migrate the AutoRedeem runtime budget/redeemed state for each
-// rename (BKM-006 Corrective Pass 1, C4 — same locked section as the config
-// swap, so no auto-redeem poll can ever observe an orphaned old-login state
-// or a fresh budget window), wire the updated settings into every dependent
-// component, reconcile runtime capabilities (IRC/PubSub), reconcile the
-// write-once notifications manager's Discord config (M4 — see
-// notificationManager()/initNotificationManager; there is no longer a
-// runtime create-or-rebuild branch here, only an UpdateDiscordConfig call
-// against whatever the accessor returns), and — only for a non-rename apply
-// (persisted=false) — persist config.json (non-fatal on failure, exactly as
-// ApplySettings always did before this pass; a rename-carrying apply already
-// persisted newConfig durably in commitRenameTransaction before this ran, so
-// persisted=true skips a redundant save).
+// config, wire the updated settings into every dependent component,
+// reconcile runtime capabilities (IRC/PubSub), reconcile the write-once
+// notifications manager's Discord config (M4 — see notificationManager()/
+// initNotificationManager; there is no longer a runtime create-or-rebuild
+// branch here, only an UpdateDiscordConfig call against whatever the
+// accessor returns), and — only for a non-rename apply (persisted=false) —
+// persist config.json (non-fatal on failure, exactly as ApplySettings always
+// did before this pass; a rename-carrying apply already persisted newConfig
+// durably at its own commit point in applySettingsWithRename before this
+// ran, so persisted=true skips a redundant save).
+//
+// [M2] The AutoRedeem runtime-STATE migration for a rename (BKM-006
+// Corrective Pass 1, C4) now happens PRIMARILY at the rename's own commit
+// point (applySettingsWithRename), in the SAME m.mu section as the config
+// publish and the generation migration — so no auto-redeem poll can ever
+// observe an orphaned old-login state or a fresh budget window. The
+// migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed) call retained
+// below is an IDEMPOTENT BACKSTOP, not a second real migration: by the time
+// finishApply runs, the old-login key is already gone from
+// m.autoRedeemState, so this re-run is a no-op (hadOld is false for every
+// rename) except for a non-rename-carrying apply, where renamed is simply
+// empty. finishApply performs NO generation migration of its own [R1] — a
+// second gen-migration pass here would bump PAST the already-migrated
+// generation and sever the budget-window continuity
+// migrateAutoRedeemGenLocked exists to preserve.
+//
+// [R8] This split leaves one bounded, fail-closed window: between the rename
+// commit (config/state/gen already migrated to the new login) and CommitPlan
+// (called by the caller just before this function) the runtime roster still
+// resolves the streamer under its OLD login — so an evaluateAutoRedeem cycle
+// racing that window looks up cfg.AutoRedeem under the old login (its helper
+// key, s.GetUsername(), hasn't been renamed in the runtime yet) and finds
+// nothing (already migrated away), so auto-redeem simply no-ops for that
+// streamer until CommitPlan repoints the roster a few lines later. [RR7] This
+// relies on the standing assumption that CommitPlan actually confirms the
+// very rename the commit section just migrated for: a RenameIfCurrent CAS
+// discard inside CommitPlan (production-unreachable, since coordinatorMu
+// serializes applies end to end) would leave the migrated AutoRedeem key with
+// no matching roster entry — auto-redeem silently stays off for that
+// streamer — a pre-existing shape of this design, not a regression it
+// introduces.
 //
 // ctx and coord are the SAME values the caller (applySettingsNoRename /
 // applySettingsWithRemovals / applySettingsWithRename) already resolved for
@@ -2058,9 +2246,10 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	m.applyStreamerDeletions(ctx, coord, added, removed)
 
 	// The durable analytics migration already ran (and, for a rename-carrying
-	// apply, succeeded) before this — see commitRenameTransaction. This emits
-	// the one privacy-safe rename log per event (old login, new login,
-	// ChannelID only — no tokens/URLs/headers/payloads).
+	// apply, succeeded) before this — see commitAnalyticsRenames and
+	// applySettingsWithRename's commit point. This emits the one
+	// privacy-safe rename log per event (old login, new login, ChannelID
+	// only — no tokens/URLs/headers/payloads).
 	for _, r := range renamed {
 		slog.Info("Reconciled streamer rename by stable Twitch channel ID",
 			"oldLogin", r.OldLogin, "newLogin", r.NewLogin, "channelID", r.ChannelID)
