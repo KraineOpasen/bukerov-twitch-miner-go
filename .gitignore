@@ -47,3 +47,4 @@ __debug_bin*
 CLAUDE.local.md
 .scratch/
 .claude/scheduled_tasks.lock
+__pycache__/
