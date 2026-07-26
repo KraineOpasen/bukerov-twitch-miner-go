@@ -6,8 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 )
 
 // This file covers the SRAP rename+removal interaction (M1 QA follow-up F2):
@@ -247,5 +250,114 @@ func TestApplySettingsRenameWithRidingRemoval_RenameTxFailureCompensatesRemoval(
 	// No IRC action for a transaction that never committed.
 	if got := chatRec.leaveCount(oldLogin); got != 0 {
 		t.Errorf("chat left %s %d times despite the failed transaction, want 0", oldLogin, got)
+	}
+}
+
+// admissionRowObservingFencer wraps a real Fencer and, the moment Tombstone
+// fires for the login this test cares about, synchronously records whether a
+// row for it already existed in the SRAP prepare-phase ledger
+// (streamer_deletion_admissions) — queried directly against the SAME db
+// handle, no channel/goroutine needed, since Tombstone runs synchronously on
+// the test's own goroutine inside applySettings, well before the coordinator
+// ever gets a chance to move or clear that row. Tombstone is CommitRemoval's
+// very first action (see lifecycle.go), called only after
+// commitRenameTransaction has already committed and only BEFORE
+// movePendingTx moves the row out of the admissions table — so this is
+// exactly the window between "the rename transaction's commit" and
+// "CommitRemoval's completion" the durability claim needs pinned.
+type admissionRowObservingFencer struct {
+	inner    streamerlifecycle.Fencer
+	db       *database.DB
+	login    string
+	observed *bool
+}
+
+func (f admissionRowObservingFencer) Tombstone(login string) {
+	if login == f.login {
+		var n int
+		if err := f.db.QueryRow(`SELECT COUNT(*) FROM streamer_deletion_admissions WHERE login = ?`, login).Scan(&n); err == nil && n > 0 {
+			*f.observed = true
+		}
+	}
+	f.inner.Tombstone(login)
+}
+
+func (f admissionRowObservingFencer) Reinstate(login string) { f.inner.Reinstate(login) }
+
+// TestApplySettingsRenameWithRidingRemoval_AdmissionRowExistsBetweenRenameCommitAndPurge
+// closes MUT-X5b: disabling applySettingsWithRename's entire AdmitRemovals
+// block survives on end-state assertions alone, because movePendingTx
+// UPSERTs the pending-purge row unconditionally regardless of whether an
+// admissions row ever existed — TestApplySettingsRenameWithRidingRemoval_
+// Success's post-apply state (removed, purged, no owed row) is IDENTICAL
+// whether or not the removal was ever durably admitted before the rename's
+// own commit point. This test instead observes the DURABLE LEDGER'S EXISTENCE
+// synchronously, at the exact instant between commitRenameTransaction's
+// commit and CommitRemoval's own completion (via admissionRowObservingFencer,
+// hooked into Tombstone — CommitRemoval's first action): a streamer_deletion_
+// admissions row for the removed login MUST already exist there, proving
+// AdmitRemovals genuinely ran (and committed) before the rename's commit
+// point, not merely that SOME row exists by the time the apply returns.
+func TestApplySettingsRenameWithRidingRemoval_AdmissionRowExistsBetweenRenameCommitAndPurge(t *testing.T) {
+	const oldLogin, newLogin, removeLogin, keepLogin = "f2existold", "f2existnew", "f2existremoveme", "f2existkeep"
+
+	client := newRenameCapableAPI()
+	client.set(oldLogin, "id-f2exist")
+	m, _, _ := newRenameTestMiner(t, client, oldLogin, removeLogin, keepLogin)
+
+	db := openRawMinerDB(t, filepath.Join(t.TempDir(), "miner.db"))
+	an, err := analytics.NewSQLiteRepository(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("analytics repo: %v", err)
+	}
+
+	var observedAdmissionRow bool
+	coord, err := streamerlifecycle.New(db,
+		[]streamerlifecycle.Purger{an},
+		[]streamerlifecycle.Fencer{admissionRowObservingFencer{inner: an, db: db, login: removeLogin, observed: &observedAdmissionRow}},
+		[]streamerlifecycle.Renamer{an},
+	)
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
+	m.db = db
+	m.streamerLifecycle = coord
+
+	if err := an.RecordPoints(oldLogin, 100, "WATCH"); err != nil {
+		t.Fatalf("seed old login points: %v", err)
+	}
+	if err := an.RecordPoints(removeLogin, 50, "WATCH"); err != nil {
+		t.Fatalf("seed removed login points: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	m.configPath = configPath
+	if err := config.SaveConfig(configPath, m.config); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+
+	client.set(newLogin, "id-f2exist") // same stable ID as oldLogin -> detected as a rename
+
+	rs := renameAndRemove(m, oldLogin, newLogin, removeLogin)
+	if err := m.applySettings(context.Background(), rs); err != nil {
+		t.Fatalf("rename+removal apply failed: %v", err)
+	}
+
+	if !observedAdmissionRow {
+		t.Fatal("no streamer_deletion_admissions row existed for the removed login between the rename's commit and CommitRemoval's completion — the removal was never durably admitted before the rename committed")
+	}
+
+	// Sanity: the apply still reaches its normal fully-completed end state.
+	if m.streamers.Get(removeLogin) != nil {
+		t.Error("removed streamer still present in the runtime")
+	}
+	if has, err := coord.HasPending(context.Background(), removeLogin); err != nil || has {
+		t.Errorf("HasPending for the removed streamer = (%v, %v), want (false, nil)", has, err)
+	}
+	if m.streamers.Get(newLogin) == nil {
+		t.Error("new login missing from the runtime after a successful rename")
+	}
+	if m.streamers.Get(keepLogin) == nil {
+		t.Error("unrelated streamer lost from the runtime")
 	}
 }
