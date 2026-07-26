@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
@@ -37,7 +38,9 @@ func (m *Miner) TrackedUsernames() []string {
 // the tracked streamer list with default settings (no per-streamer overrides),
 // skipping any already tracked, then run the standard settings-apply path so the
 // new channels are subscribed and persisted to config.json. Returns how many
-// new entries were added.
+// new entries were added. ctx is the originating request's context, propagated
+// through to the apply step exactly as the Settings POST handler propagates
+// r.Context() — a client disconnect here aborts the same way it would there.
 //
 // The whole read-modify-write is serialized under importMu: GetRuntimeSettings
 // reads under mu.RLock and ApplySettings writes under mu.Lock as two separate
@@ -46,7 +49,7 @@ func (m *Miner) TrackedUsernames() []string {
 // the streamer list) would drop the first's additions. importMu does not cover
 // the broader whole-object POST /api/settings path — that pre-existing
 // last-write-wins concern is out of scope here.
-func (m *Miner) ImportStreamers(logins []string) (int, error) {
+func (m *Miner) ImportStreamers(ctx context.Context, logins []string) (int, error) {
 	m.importMu.Lock()
 	defer m.importMu.Unlock()
 
@@ -64,7 +67,9 @@ func (m *Miner) ImportStreamers(logins []string) (int, error) {
 	if m.importApply != nil {
 		apply = m.importApply
 	}
-	apply(cur)
+	if err := apply(ctx, cur); err != nil {
+		return 0, err
+	}
 	return added, nil
 }
 

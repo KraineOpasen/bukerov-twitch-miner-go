@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
@@ -59,20 +60,44 @@ func (m *Miner) buildStreamerLifecycle() {
 	m.streamerLifecycle = coord
 }
 
-// reconcilePendingStreamerDeletions retries, ONCE at startup, any streamer
-// deletion whose persisted purge did not finish before the process last exited
-// (a durable pending-deletion row survived). Called during initialize, BEFORE
-// any watch/pubsub/event loop starts, so reinstating a cleaned login cannot race
-// a live event. Never fatal: a still-failing purge stays durably queued for the
-// next startup.
+// reconcilePendingStreamerDeletions runs ONCE at startup, BEFORE any
+// watch/pubsub/event loop starts, so reinstating a cleaned/aborted login
+// cannot race a live event:
+//
+//  1. ArbitratePrepared resolves every row left in the SRAP prepare-phase
+//     ledger by an unclean shutdown (M1) — a removal whose caller never
+//     confirmed whether its own commit point (config.json) was reached.
+//     The keep predicate is built from m.config.Streamers AS LOADED FROM
+//     DISK (loadStreamers already ran before this — see Run), matched by
+//     canonical login with the config entry's own stored ChannelID for the
+//     channel-aware identity check (package streamerlifecycle's doc
+//     comment).
+//  2. Reconcile retries every row left in the pending-purge ledger (its
+//     original, unchanged meaning) — including any row ArbitratePrepared
+//     just promoted into it on THIS pass.
+//
+// Uses context.Background()+startupReconcileBudget rather than m.runCtx: a
+// SIGTERM arriving mid-pass must not abort it halfway (an idempotent pass
+// that completes as a unit is easier to reason about than one that stops
+// with some rows resolved and others not — see the M1 design manifest).
+// Never fatal: anything unresolved stays durably queued for the next
+// startup.
 func (m *Miner) reconcilePendingStreamerDeletions() {
 	if m.streamerLifecycle == nil {
 		return
 	}
-	ctx := m.runCtx
-	if ctx == nil {
-		ctx = context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), startupReconcileBudget)
+	defer cancel()
+
+	aborted, promoted, err := m.streamerLifecycle.ArbitratePrepared(ctx, m.arbitrationKeepFunc())
+	switch {
+	case err != nil:
+		slog.Error("Some prepared streamer removals could not be arbitrated at startup; they remain durably queued for the next startup",
+			"aborted", aborted, "promoted", promoted, "error", err)
+	case aborted > 0 || promoted > 0:
+		slog.Info("Arbitrated streamer removals recovered after an unclean shutdown", "aborted", aborted, "promoted", promoted)
 	}
+
 	n, err := m.streamerLifecycle.Reconcile(ctx)
 	if err != nil {
 		slog.Error("Some pending streamer deletions could not be reconciled at startup; they remain durably queued for the next startup",
@@ -84,6 +109,27 @@ func (m *Miner) reconcilePendingStreamerDeletions() {
 	}
 }
 
+// arbitrationKeepFunc builds ArbitratePrepared's keep predicate from the
+// on-disk config loaded for this run (m.config.Streamers, as loadStreamers
+// left it — read here with no lock since arbitration runs before any other
+// goroutine can touch m.config): a canonical (ToLower(TrimSpace)) login ->
+// stored ChannelID map, matching the exact identity anchor
+// applySettingsWithRemovals/applySettingsWithRename admit against.
+func (m *Miner) arbitrationKeepFunc() func(login, channelID string) (configured bool, cfgChannelID string) {
+	byLogin := make(map[string]string, len(m.config.Streamers))
+	for _, sc := range m.config.Streamers {
+		login := strings.ToLower(strings.TrimSpace(sc.Username))
+		if login == "" {
+			continue
+		}
+		byLogin[login] = sc.ChannelID
+	}
+	return func(login, _ string) (bool, string) {
+		cfgChannelID, configured := byLogin[login]
+		return configured, cfgChannelID
+	}
+}
+
 // applyStreamerDeletions is the deletion half of a committed settings apply: for
 // every streamer this apply REMOVED from the roster it purges all bot-owned
 // persisted state (one atomic transaction) and clears the runtime streak grant,
@@ -92,24 +138,23 @@ func (m *Miner) reconcilePendingStreamerDeletions() {
 // lifecycle. Runtime capability teardown (PubSub topics, IRC presence) has
 // already run in reconcileRuntimeCapabilities; the watcher's own login-keyed maps
 // are pruned by applyStreamerList. Called at the end of finishApply, off the
-// miner lock. Safe (and a near no-op) when nothing was added or removed.
+// miner lock, on the SAME ctx/coord the caller resolved for this one apply
+// (never re-reads m.runCtx/m.streamerLifecycle — see finishApply's doc
+// comment). Safe (and a near no-op) when nothing was added or removed, or
+// coord is nil (no persisted store exists).
 //
 // Failed purges are NOT tracked in memory — they persist as durable
-// pending-deletion rows and are retried by reconcilePendingStreamerDeletions on
-// the next startup (and here on a re-add), so a failure survives a restart.
-func (m *Miner) applyStreamerDeletions(added, removed []*models.Streamer) {
-	ctx := m.runCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
+// admission/pending-deletion rows and are retried by
+// reconcilePendingStreamerDeletions on the next startup (and here on a
+// re-add), so a failure survives a restart.
+func (m *Miner) applyStreamerDeletions(ctx context.Context, coord *streamerlifecycle.Coordinator, added, removed []*models.Streamer) {
 	// Purge every streamer removed by THIS apply, and clear its streak grant.
 	for _, s := range removed {
 		// Streak state (persisted cache file + in-memory hydration snapshot) is
 		// not a DB table; clear it alongside the transactional purge so the grant
 		// cannot outlive the streamer or be re-inherited on a same-login re-add.
 		m.streamers.ForgetStreak(s.GetUsername())
-		m.purgeRemovedStreamer(ctx, s)
+		m.purgeRemovedStreamer(ctx, coord, s)
 	}
 
 	// Re-adds: if a durable purge is still owed for the login (an earlier
@@ -117,33 +162,39 @@ func (m *Miner) applyStreamerDeletions(added, removed []*models.Streamer) {
 	// starts clean; then lift the fence so fresh events record. If that purge
 	// fails again the streamer stays fenced (inert) rather than inheriting stale
 	// history — the durable marker keeps it queued for the next startup.
-	if m.streamerLifecycle != nil {
+	if coord != nil {
 		for _, s := range added {
 			login := s.GetUsername()
-			if _, err := m.streamerLifecycle.ReconcileLogin(ctx, login); err != nil {
+			if _, err := coord.ReconcileLogin(ctx, login); err != nil {
 				slog.Error("Re-added streamer's stale-history purge failed; keeping it fenced until the deletion reconciles",
 					"streamer", login, "channelID", s.ChannelID, "error", err)
 				continue
 			}
-			m.streamerLifecycle.Reinstate(login)
+			coord.Reinstate(login)
 		}
 	}
 }
 
-// purgeRemovedStreamer runs the atomic, durably-tracked persisted purge for one
-// removed streamer, keyed by its stable ChannelID (primary identity) and current
-// login (the login-keyed stores' lookup key). On failure the streamer is already
-// out of the runtime roster and config — inert and fenced, never half-active —
-// and a DURABLE pending-deletion row remains, so the purge is retried on the
-// next startup (survives a restart) rather than reported as a success.
-func (m *Miner) purgeRemovedStreamer(ctx context.Context, s *models.Streamer) {
-	if m.streamerLifecycle == nil {
+// purgeRemovedStreamer runs SRAP's COMPLETE phase (CommitRemoval) for one
+// streamer whose removal has ALREADY been durably admitted and committed
+// (config.json persisted) by the caller — this is only ever invoked after
+// that commit point, in every apply path (legacy no-removal applies never
+// reach here with a real removed streamer; SRAP and rename-with-removal
+// applies both call AdmitRemovals before their own commit). That is what
+// makes the failure log below truthful in every branch: a durable row
+// (admissions, if only the move-to-pending step failed, or pending, if only
+// the purge itself failed) provably exists the instant CommitRemoval returns
+// an error — see that function's doc comment. A completion failure is
+// logged, never returned: "committed, purge still owed" is success for the
+// user's intent (the streamer IS removed), not a failed apply.
+func (m *Miner) purgeRemovedStreamer(ctx context.Context, coord *streamerlifecycle.Coordinator, s *models.Streamer) {
+	if coord == nil {
 		return
 	}
 	login := s.GetUsername()
-	res, err := m.streamerLifecycle.Delete(ctx, s.ChannelID, login)
+	res, err := coord.CommitRemoval(ctx, s.ChannelID, login)
 	if err != nil {
-		slog.Error("Streamer removed from runtime but persisted-history purge failed; durably queued to retry on the next startup",
+		slog.Error("Streamer removed and removal committed, but persisted-history purge failed; durably queued to retry on the next startup",
 			"streamer", login, "channelID", s.ChannelID, "error", err)
 		return
 	}

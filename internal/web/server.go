@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"fmt"
@@ -68,7 +69,7 @@ type DropCatalogProvider interface {
 type FollowedProvider interface {
 	FollowedChannels() ([]twitch.FollowedChannel, bool, error)
 	TrackedUsernames() []string
-	ImportStreamers(logins []string) (int, error)
+	ImportStreamers(ctx context.Context, logins []string) (int, error)
 }
 
 // DiscoveryProvider exposes the directory-discovery subsystem's state so the
@@ -339,11 +340,20 @@ func (s *Server) GetBasePath() string {
 	return s.basePath
 }
 
+// SetSettingsProvider and SetSettingsUpdateCallback are guarded by s.mu (like
+// every other setter on Server) so a request landing between the two calls
+// during startup wiring can never observe settingsProvider != nil with
+// onSettingsUpdate still nil — the handlers below read both together under
+// one RLock and refuse (503) unless BOTH are set.
 func (s *Server) SetSettingsProvider(provider settings.SettingsProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.settingsProvider = provider
 }
 
 func (s *Server) SetSettingsUpdateCallback(callback settings.SettingsUpdateCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.onSettingsUpdate = callback
 }
 

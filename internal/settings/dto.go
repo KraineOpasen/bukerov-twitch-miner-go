@@ -1,5 +1,21 @@
 package settings
 
+import (
+	"context"
+	"errors"
+)
+
+// ErrShuttingDown is returned by a SettingsUpdateCallback (and by
+// miner.ApplySettings/applySettings, whose failure it wraps) when the caller
+// has begun — or already completed — shutdown: nothing was mutated. It lives
+// here, not in internal/miner, purely so internal/web can recognize it via
+// errors.Is without importing internal/miner (which itself imports
+// internal/web — importing it back would cycle); internal/settings already
+// sits below both packages. Web callers map this to 503 Service Unavailable:
+// retrying shortly, or after the process restarts, is the correct client
+// behavior, since a fail-closed apply never mutates anything on this error.
+var ErrShuttingDown = errors.New("settings apply refused: shutting down")
+
 // RuntimeSettings is the JSON shape exchanged with the analytics UI for configuration.
 // It contains all settings that can be modified at runtime, including streamers,
 // priorities, rate limits, logger, and analytics display settings.
@@ -147,9 +163,16 @@ type StreamersConfig struct {
 	Streamers       []StreamerConfig       `json:"streamers"`
 }
 
-// SettingsUpdateCallback is invoked when the user submits new settings from the UI.
-// The callback should apply the changes atomically and persist them to the config file.
-type SettingsUpdateCallback func(settings RuntimeSettings)
+// SettingsUpdateCallback is invoked when the user submits new settings from
+// the UI. The callback applies the changes atomically and persists them to
+// the config file, fail-closed: a non-nil error means NOTHING was mutated
+// (see miner.ApplySettings/applySettings — BKM-006 corrective pass M1, the
+// Streamer Removal Admission Protocol) and ctx bounds/cancels the request
+// exactly like an http.Handler's r.Context(). Callers map the returned error
+// to an HTTP status (ErrShuttingDown, or the underlying database's ErrClosed,
+// both mean "retry is safe" -> 503; anything else -> 500) and MUST NOT treat
+// a non-nil error as a partial success.
+type SettingsUpdateCallback func(ctx context.Context, settings RuntimeSettings) error
 
 // SettingsProvider exposes current and default runtime settings for the analytics UI.
 // It is implemented by the miner to provide read access to configuration.

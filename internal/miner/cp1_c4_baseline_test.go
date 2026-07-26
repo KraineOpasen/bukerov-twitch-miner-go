@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"testing"
 )
 
@@ -27,7 +28,7 @@ func TestApplySettings_Rename_MigratesAutoRedeemRuntimeState_BaselineC4(t *testi
 	}
 
 	client.set("newlogin", "id-c4")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 
 	if _, stillOld := m.autoRedeemState["oldlogin"]; stillOld {
 		t.Error("auto-redeem runtime state is orphaned under the old login after the rename")

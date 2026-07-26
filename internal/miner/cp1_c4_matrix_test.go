@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
@@ -29,7 +30,7 @@ func TestApplySettings_Rename_AutoRedeemRuntimeState_DestinationCollision_C4B(t 
 	}
 
 	client.set("newlogin", "id-c4b")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 
 	if _, stillOld := m.autoRedeemState["oldlogin"]; stillOld {
 		t.Error("old-login auto-redeem runtime state must be removed after a collision merge")

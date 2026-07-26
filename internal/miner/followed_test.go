@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -54,13 +55,14 @@ func TestImportStreamersConcurrentExactlyOnce(t *testing.T) {
 	// Stand in for ApplySettings: persist the streamer list back into m.config
 	// under mu, exactly as ApplyToConfig's wholesale replace would, but without
 	// the network/pubsub side effects of the real apply path.
-	m.importApply = func(s settings.RuntimeSettings) {
+	m.importApply = func(ctx context.Context, s settings.RuntimeSettings) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.config.Streamers = make([]config.StreamerConfig, len(s.Streamers))
 		for i, sc := range s.Streamers {
 			m.config.Streamers[i] = config.StreamerConfig{Username: sc.Username}
 		}
+		return nil
 	}
 
 	const goroutines = 12
@@ -70,7 +72,7 @@ func TestImportStreamersConcurrentExactlyOnce(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			// "common" is imported by every goroutine; "chan_i" is unique.
-			if _, err := m.ImportStreamers([]string{"common", fmt.Sprintf("chan_%d", i)}); err != nil {
+			if _, err := m.ImportStreamers(context.Background(), []string{"common", fmt.Sprintf("chan_%d", i)}); err != nil {
 				t.Errorf("ImportStreamers: %v", err)
 			}
 		}(i)

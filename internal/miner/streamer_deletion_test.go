@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 			t.Fatalf("seed watch-time %s: %v", s, err)
 		}
 	}
-	m.ApplySettings(m.GetRuntimeSettings()) // seed runtime topic state
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings()) // seed runtime topic state
 
 	// Remove the victim from the roster.
 	rs := m.GetRuntimeSettings()
@@ -83,7 +84,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 		}
 	}
 	rs.Streamers = keepList
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	// Roster gone.
 	if m.streamers.Get(victim) != nil {
@@ -111,7 +112,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 	// Re-add the same login: fence lifted, records fresh history.
 	rs2 := m.GetRuntimeSettings()
 	rs2.Streamers = append(rs2.Streamers, settings.StreamerConfig{Username: victim})
-	m.ApplySettings(rs2)
+	_ = m.ApplySettings(context.Background(), rs2)
 	if m.streamers.Get(victim) == nil {
 		t.Fatal("re-added streamer missing from roster")
 	}
@@ -157,7 +158,7 @@ func TestRemovalPurgesNotificationRowsWithoutLiveManager(t *testing.T) {
 			t.Fatalf("seed rule %s: %v", s, err)
 		}
 	}
-	m.ApplySettings(m.GetRuntimeSettings())
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings())
 
 	// Remove the victim.
 	rs := m.GetRuntimeSettings()
@@ -168,7 +169,7 @@ func TestRemovalPurgesNotificationRowsWithoutLiveManager(t *testing.T) {
 		}
 	}
 	rs.Streamers = keepList
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	rules, _ := notifRepo.GetPointRules()
 	victimRule, keepRule := false, false

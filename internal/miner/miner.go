@@ -41,6 +41,34 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
+// ErrShuttingDown is miner's name for settings.ErrShuttingDown (defined there
+// so internal/web can recognize it via errors.Is without an import cycle —
+// see that package's doc comment). Kept as a miner-local alias so production
+// and test code in this package can refer to it as miner.ErrShuttingDown.
+var ErrShuttingDown = settings.ErrShuttingDown
+
+// SRAP (Streamer Removal Admission Protocol, M1) budget vars — package-level
+// so a test can shrink them to exercise a deterministic timeout without a
+// real multi-second wait. Each bounds a WithTimeout(WithoutCancel(reqCtx), …)
+// derived context (see applySettingsWithRemovals/applySettingsWithRename):
+// WithoutCancel so a hard-closed HTTP connection (web.Server.Stop is
+// http.Server.Close, not a graceful Shutdown) cannot abort a sequence that is
+// at or past its commit point; WithTimeout so a wedged SQLite/coordinatorMu
+// fails bounded rather than wedging every future settings apply forever.
+var (
+	// admissionBudget bounds AdmitRemovals/AbortAdmission (the PREPARE phase,
+	// before any visible mutation).
+	admissionBudget = 5 * time.Second
+	// purgeBudget bounds CommitRemoval (the COMPLETE phase, after the commit
+	// point — its failure is logged and durably retried, never fails the API).
+	purgeBudget = 15 * time.Second
+	// startupReconcileBudget bounds the one-time startup pass
+	// (ArbitratePrepared then Reconcile), run on context.Background() rather
+	// than the run context so a SIGTERM arriving mid-pass cannot abort it
+	// halfway and leave some rows resolved and others not.
+	startupReconcileBudget = 60 * time.Second
+)
+
 type Miner struct {
 	config     *config.Config
 	configPath string
@@ -187,6 +215,21 @@ type Miner struct {
 	// file, and analytics history disagreeing about a streamer's identity.
 	coordinatorMu sync.Mutex
 
+	// applyMu/applyWG/applyDraining are the shutdown/settings-apply interlock
+	// (M1): beginApply refuses a NEW apply once applyDraining is set or
+	// m.runCtx is already cancelled, and registers an accepted one in
+	// applyWG; endApply (deferred by every accepted apply) removes it. stop()
+	// sets applyDraining and calls applyWG.Wait() BEFORE any other teardown,
+	// so no apply is ever in flight when the DB is later closed (App.Shutdown
+	// closes it only after Run — and therefore stop() — returns). applyMu
+	// makes "check draining, then Add(1)" atomic with "set draining, then
+	// Wait()" — without it, an apply could observe draining=false and call
+	// Add(1) AFTER Wait() has already seen the counter reach zero and
+	// returned, which is a data race on sync.WaitGroup's own contract.
+	applyMu       sync.Mutex
+	applyWG       sync.WaitGroup
+	applyDraining bool
+
 	// importMu serializes the read-modify-write in ImportStreamers so two
 	// concurrent imports can't both read the pre-write snapshot and lose one
 	// another's additions. GetRuntimeSettings (RLock) and ApplySettings (Lock)
@@ -196,7 +239,7 @@ type Miner struct {
 	// production (falls back to ApplySettings). It exists only as a test seam so
 	// the serialization can be exercised without the network/pubsub side effects
 	// of the real apply path.
-	importApply func(settings.RuntimeSettings)
+	importApply func(ctx context.Context, s settings.RuntimeSettings) error
 }
 
 // autoRedeemRuntime is the per-streamer in-memory budget/window bookkeeping for
@@ -1417,6 +1460,16 @@ func (m *Miner) handleStatusChange(username string, status models.StreamerStatus
 }
 
 func (m *Miner) stop() {
+	// Drain in-flight settings applies FIRST, before anything else tears
+	// down: App.Shutdown closes the DB only after Run (and therefore this
+	// function) returns, so once applyWG.Wait() returns here no apply can
+	// still be mid-flight when that close happens (M1: closes the same race
+	// class as the cancelled-runCtx hazard, but for the DB handle itself).
+	m.applyMu.Lock()
+	m.applyDraining = true
+	m.applyMu.Unlock()
+	m.applyWG.Wait()
+
 	m.chatManager.Close()
 	m.wsPool.Close()
 	m.watcher.Stop()
@@ -1475,64 +1528,117 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 	return settings.BuildDefaultSettings(currentStreamers)
 }
 
+// beginApply registers the caller as an in-flight settings apply, refusing
+// (false) once the miner has started draining (Stop, in progress or done) or
+// its run context is already cancelled — the latter closes the same window
+// the cancelled-runCtx hazard exploited: a POST arriving after runCtx.Done()
+// fires but before the web listener is actually closed (web.Server.Stop is a
+// hard Close, not a graceful Shutdown; nothing else joins an in-flight apply —
+// see the M1 design manifest). Every accepted apply MUST defer endApply.
+func (m *Miner) beginApply() bool {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	if m.applyDraining {
+		return false
+	}
+	if m.runCtx != nil && m.runCtx.Err() != nil {
+		return false
+	}
+	m.applyWG.Add(1)
+	return true
+}
+
+// endApply releases the registration beginApply made. Always deferred
+// immediately after a successful beginApply.
+func (m *Miner) endApply() {
+	m.applyWG.Done()
+}
+
 // ApplySettings applies posted runtime settings. It satisfies
-// settings.SettingsUpdateCallback (no return value), so it is a thin,
-// backward-compatible wrapper over applySettings for every existing caller
-// that cannot observe an error (the web server's settings POST handler,
-// ImportStreamers, and most tests): a failed apply is logged, never silently
+// settings.SettingsUpdateCallback: ctx bounds/cancels the request exactly
+// like an http.Handler's r.Context(), and the returned error is
+// applySettings' own, verbatim — a failed apply is ALSO logged here (so
+// every caller gets a diagnostic even if it discards the error, e.g.
+// ImportStreamers' fire-and-forget legacy callers), never silently
 // swallowed, and — BKM-006 Corrective Pass 1, C2 — never followed by a
 // misleading "Runtime settings updated" success log, since that log lives
-// only on applySettings' success path. Callers that need to know whether the
-// apply actually committed should call applySettings directly.
-func (m *Miner) ApplySettings(s settings.RuntimeSettings) {
-	if err := m.applySettings(s); err != nil {
+// only on applySettings' success path.
+func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) error {
+	if err := m.applySettings(ctx, s); err != nil {
 		slog.Error("Settings apply failed; no runtime, config, analytics, or capability state was changed for the affected streamer(s)",
 			"error", err)
+		return err
 	}
+	return nil
 }
 
 // applySettings is the fail-closed settings-apply coordinator (BKM-006
-// Corrective Pass 1, C2). It resolves the intended streamer roster ONCE
+// Corrective Pass 1, C2; extended by M1's Streamer Removal Admission
+// Protocol, SRAP, for any apply that removes a streamer). It gates on
+// beginApply (refusing with ErrShuttingDown before touching anything if the
+// miner is draining or already shut down), captures the streamer-deletion
+// coordinator ONCE for the whole apply (so a mid-apply rebuild — e.g. Discord
+// flipping on inside finishApply — can never affect an apply already in
+// flight), then resolves the intended streamer roster ONCE
 // (streamer.Manager.PlanReconcile: Twitch resolution unlocked, then a
 // read-locked, non-mutating decision pass) and reuses that SAME plan for
 // whichever path below applies, so Twitch is never queried twice for one
 // apply:
 //
-//   - No rename planned: every other settings field applies directly to the
-//     live config — today's behavior, unchanged (a SaveConfig failure here is
-//     logged and non-fatal, exactly as before this pass, since no non-rename
-//     change can split runtime/config/analytics identity across two owners).
-//   - At least one rename planned: the whole apply becomes a single
-//     transaction. A CANDIDATE config is built and the live config is NEVER
-//     mutated until durable persistence succeeds; the durable stores
-//     (analytics history, then config.json) are committed in order with
-//     compensation on a later failure (commitRenameTransaction); only after
-//     that succeeds is the plan committed to the runtime
-//     (streamer.Manager.CommitPlan) and published as the live config. Any
-//     failure before that point leaves the runtime, in-memory config,
-//     on-disk config, analytics, IRC, and PubSub completely untouched.
+//   - No rename AND no removal planned: every other settings field applies
+//     directly to the live config — today's behavior, unchanged (a SaveConfig
+//     failure here is logged and non-fatal, exactly as before this pass,
+//     since no non-rename, non-removal change can split runtime/config/
+//     analytics identity across two owners, or leave an unaccounted-for
+//     purge).
+//   - A removal planned, no rename: SRAP's own two-phase protocol — see
+//     applySettingsWithRemovals.
+//   - At least one rename planned (with or without a removal riding along):
+//     the whole apply becomes a single transaction — see
+//     applySettingsWithRename. A CANDIDATE config is built and the live
+//     config is NEVER mutated until durable persistence succeeds.
 //
-// The whole sequence is serialized by coordinatorMu (lock order:
-// coordinatorMu -> m.mu -> streamer.Manager.mu -> models.Streamer.mu; no
-// Twitch/DB/file I/O ever runs under m.mu, manager.mu, or streamer.mu).
-func (m *Miner) applySettings(s settings.RuntimeSettings) error {
+// The whole sequence is serialized by coordinatorMu (lock order: coordinatorMu
+// -> m.mu -> streamer.Manager.mu -> models.Streamer.mu; no Twitch/DB/file I/O
+// ever runs under m.mu, manager.mu, or streamer.mu).
+func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) error {
+	if !m.beginApply() {
+		return ErrShuttingDown
+	}
+	defer m.endApply()
+
 	m.coordinatorMu.Lock()
 	defer m.coordinatorMu.Unlock()
+
+	m.mu.RLock()
+	coord := m.streamerLifecycle
+	m.mu.RUnlock()
 
 	streamersCfg := settings.StreamersFromDTO(s.Streamers)
 	defaultSettings := settings.StreamerSettingsFromDTO(s.DefaultSettings)
 	plan := m.streamers.PlanReconcile(streamersCfg, defaultSettings, nil)
 
-	if plannedRenames := plan.PlannedRenames(); len(plannedRenames) > 0 {
-		return m.applySettingsWithRename(s, plan, plannedRenames)
+	plannedRenames := plan.PlannedRenames()
+	plannedRemovals := plan.PlannedRemovals(m.streamers)
+
+	switch {
+	case len(plannedRenames) > 0:
+		return m.applySettingsWithRename(ctx, s, plan, plannedRenames, plannedRemovals, coord)
+	case len(plannedRemovals) > 0:
+		return m.applySettingsWithRemovals(ctx, s, plan, plannedRemovals, coord)
+	default:
+		return m.applySettingsNoRename(s, plan, coord)
 	}
-	return m.applySettingsNoRename(s, plan)
 }
 
-// applySettingsNoRename is the non-identity-mutating path: every posted
-// setting (including the resolved streamer roster) applies directly to the
-// live config, exactly as ApplySettings always did before this pass.
-func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan) error {
+// applySettingsNoRename is the non-identity-mutating, non-removing path
+// (PlannedRenames and PlannedRemovals are BOTH empty — the caller already
+// checked): every posted setting (including the resolved streamer roster)
+// applies directly to the live config, exactly as ApplySettings always did
+// before the M1 pass. Zero behavior change: applyStreamerDeletions still runs
+// (for any RE-ADD's owed-purge reconciliation) on m.runCtx exactly as before,
+// since there is no removal in this apply to admit or commit.
+func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
 	oldDiscordEnabled := m.config.Discord.Enabled
 	settings.ApplyToConfig(m.config, s)
@@ -1541,23 +1647,139 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 
 	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
 	logReconcileConflicts(conflicts)
-	m.finishApply(cfg, added, removed, changed, renamed, oldDiscordEnabled, false)
+
+	ctx := m.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.finishApply(ctx, coord, cfg, added, removed, changed, renamed, oldDiscordEnabled, false)
 	return nil
 }
 
-// applySettingsWithRename is the fail-closed transaction path (C2): builds a
-// candidate config independent of the live one, durably persists analytics +
-// config.json for the planned rename(s) BEFORE any runtime mutation, and only
-// on success commits the plan to the runtime and publishes the candidate as
-// the live config. Returns a typed error with ZERO mutation of runtime,
-// in-memory config, config file, analytics, IRC, or PubSub on any failure.
-func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan, plannedRenames []streamer.RenameEvent) error {
+// applySettingsWithRemovals is SRAP's no-rename removal path (M1): a
+// CANDIDATE config is built and the live config is never touched until the
+// durable admission AND the config.json commit both succeed, so any failure
+// leaves the runtime, in-memory config, on-disk config, and every persisted
+// store completely untouched — "settings apply rejected; no changes were
+// made" is then literally true, not just a log message.
+//
+// Sequence (see the M1 design manifest §5/§7 for the full state machine):
+//  1. Build the candidate; ctx already cancelled -> abort, nothing touched.
+//  2. AdmitRemovals on critA (WithTimeout(WithoutCancel(ctx), admissionBudget))
+//     durably prepares every removal in ONE transaction. coord == nil means no
+//     persisted store exists at all (nothing to admit) — the rest of this
+//     function's config/runtime discipline still applies unchanged.
+//  3. A LAST pre-commit cancellation check on the ORIGINAL ctx (critA never
+//     observes cancellation by design): cancelled -> AbortAdmission + return,
+//     zero mutation.
+//  4. THE COMMIT POINT: under m.mu, config.SaveConfig(candidate); on success
+//     publish m.config = candidate IN THE SAME critical section, closing the
+//     lost-update window against the other four config-writers (which all
+//     persist under m.mu too). On failure: AbortAdmission, return — zero
+//     mutation. configPath == "" is a documented no-op success (as every
+//     other non-fatal SaveConfig path already treats it).
+//  5. Past the commit point there is NO abort: CommitPlan + finishApply
+//     (persisted=true) commit the runtime and complete each removal
+//     (CommitRemoval) on critB — a completion failure is logged truthfully
+//     and durably retried, never fails this function (a committed removal
+//     with a purge still owed IS a success).
+func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.RuntimeSettings, plan *streamer.ReconcilePlan, removals []*models.Streamer, coord *streamerlifecycle.Coordinator) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("settings apply rejected; no changes were made: %w", err)
+	}
+
+	m.mu.Lock()
+	oldDiscordEnabled := m.config.Discord.Enabled
+	candidate := m.cloneConfigLocked()
+	configPath := m.configPath
+	m.mu.Unlock()
+
+	settings.ApplyToConfig(candidate, s)
+
+	var admittedLogins []string
+	if coord != nil {
+		batch := make([]streamerlifecycle.Removal, 0, len(removals))
+		channelIDs := make([]string, 0, len(removals))
+		for _, r := range removals {
+			login := r.GetUsername()
+			batch = append(batch, streamerlifecycle.Removal{ChannelID: r.ChannelID, Login: login})
+			admittedLogins = append(admittedLogins, login)
+			channelIDs = append(channelIDs, r.ChannelID)
+		}
+
+		critA, cancelA := context.WithTimeout(context.WithoutCancel(ctx), admissionBudget)
+		admitErr := coord.AdmitRemovals(critA, batch)
+		cancelA()
+		if admitErr != nil {
+			return fmt.Errorf("settings apply rejected; no changes were made: admit streamer removal(s): %w", admitErr)
+		}
+		slog.Info("Prepared streamer removal(s)", "count", len(batch), "channelIDs", channelIDs)
+
+		if err := ctx.Err(); err != nil {
+			m.abortAdmittedRemovals(coord, admittedLogins, "the request was cancelled before config.json could be committed")
+			return fmt.Errorf("settings apply rejected; no changes were made: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	if configPath != "" {
+		if err := config.SaveConfig(configPath, candidate); err != nil {
+			m.mu.Unlock()
+			m.abortAdmittedRemovals(coord, admittedLogins, "config.json persistence failed")
+			return fmt.Errorf("settings apply rejected; no changes were made: persist config: %w", err)
+		}
+	}
+	m.config = candidate
+	m.mu.Unlock()
+	if len(admittedLogins) > 0 {
+		slog.Info("Streamer removal committed", "count", len(admittedLogins))
+	}
+
+	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
+	logReconcileConflicts(conflicts)
+
+	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
+	defer cancelB()
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
+	return nil
+}
+
+// abortAdmittedRemovals compensates AdmitRemovals for an apply that never
+// reached its commit point, on a fresh WithoutCancel+WithTimeout context
+// (the original request ctx may already be the reason this is being called).
+// A no-op when logins is empty (coord == nil, or nothing was admitted this
+// apply) or coord is nil. A failed compensation is logged but never returned
+// — the rows it leaves behind are deterministically resolved by
+// ArbitratePrepared at the next startup (see that function's doc comment).
+func (m *Miner) abortAdmittedRemovals(coord *streamerlifecycle.Coordinator, logins []string, reason string) {
+	if coord == nil || len(logins) == 0 {
+		return
+	}
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), admissionBudget)
+	defer cancel()
+	if err := coord.AbortAdmission(abortCtx, logins); err != nil {
+		slog.Error("Failed to compensate a prepared streamer removal after "+reason+"; startup arbitration will resolve it on the next restart",
+			"streamers", logins, "error", err)
+	}
+}
+
+// applySettingsWithRename is the fail-closed transaction path (BKM-006 C2,
+// extended by M1 for any removal riding along with a rename in the same
+// apply): builds a candidate config independent of the live one, admits any
+// planned removals durably (SRAP prepare phase) BEFORE the rename's own
+// commit, durably persists analytics + config.json for the planned rename(s)
+// (commitRenameTransaction — the commit point for BOTH the rename and any
+// riding removal), and only on success commits the plan to the runtime and
+// publishes the candidate as the live config. A rename-transaction failure
+// compensates the removal admission too (AbortAdmission), so the whole apply
+// stays all-or-nothing: ZERO mutation of runtime, in-memory config, config
+// file, analytics, IRC, or PubSub on any failure.
+func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeSettings, plan *streamer.ReconcilePlan, plannedRenames []streamer.RenameEvent, removals []*models.Streamer, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
 	oldDiscordEnabled := m.config.Discord.Enabled
 	candidate := m.cloneConfigLocked()
 	configPath := m.configPath
 	analyticsSvc := m.analyticsSvc
-	coord := m.streamerLifecycle
 	m.mu.Unlock()
 
 	settings.ApplyToConfig(candidate, s)
@@ -1567,6 +1789,25 @@ func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *stream
 	// on the candidate, still before any durable or runtime commit.
 	applyConfigRenames(candidate, plannedRenames)
 	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
+
+	var admittedLogins []string
+	if coord != nil && len(removals) > 0 {
+		batch := make([]streamerlifecycle.Removal, 0, len(removals))
+		channelIDs := make([]string, 0, len(removals))
+		for _, r := range removals {
+			login := r.GetUsername()
+			batch = append(batch, streamerlifecycle.Removal{ChannelID: r.ChannelID, Login: login})
+			admittedLogins = append(admittedLogins, login)
+			channelIDs = append(channelIDs, r.ChannelID)
+		}
+		critA, cancelA := context.WithTimeout(context.WithoutCancel(ctx), admissionBudget)
+		admitErr := coord.AdmitRemovals(critA, batch)
+		cancelA()
+		if admitErr != nil {
+			return fmt.Errorf("settings apply rejected; no changes were made: admit streamer removal(s): %w", admitErr)
+		}
+		slog.Info("Prepared streamer removal(s)", "count", len(batch), "channelIDs", channelIDs)
+	}
 
 	// Prefer the coordinator as the renamer: it renames analytics + notifications
 	// + watch-time in ONE atomic transaction (all stores move together or none
@@ -1582,14 +1823,21 @@ func (m *Miner) applySettingsWithRename(s settings.RuntimeSettings, plan *stream
 		svc = analyticsSvc
 	}
 	if err := commitRenameTransaction(configPath, candidate, plannedRenames, svc); err != nil {
+		m.abortAdmittedRemovals(coord, admittedLogins, "the rename transaction failed")
 		return fmt.Errorf("rename transaction aborted: %w", err)
+	}
+	if len(admittedLogins) > 0 {
+		slog.Info("Streamer removal committed", "count", len(admittedLogins))
 	}
 
 	// Durable stores now agree with `candidate`. Commit the runtime and
 	// publish it as the live config.
 	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
 	logReconcileConflicts(conflicts)
-	m.finishApply(candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
+
+	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
+	defer cancelB()
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
 	return nil
 }
 
@@ -1639,7 +1887,14 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 // rename-carrying apply already persisted newConfig durably in
 // commitRenameTransaction before this ran, so persisted=true skips a
 // redundant save).
-func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, oldDiscordEnabled bool, persisted bool) {
+//
+// ctx and coord are the SAME values the caller (applySettingsNoRename /
+// applySettingsWithRemovals / applySettingsWithRename) already resolved for
+// this one apply — passed through to applyStreamerDeletions rather than
+// re-read from m.runCtx/m.streamerLifecycle here, so a mid-function
+// coordinator rebuild (the buildStreamerLifecycle call below, when Discord
+// flips on) can never affect the CURRENT apply's own purge/reconcile step.
+func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, oldDiscordEnabled bool, persisted bool) {
 	m.mu.Lock()
 	m.config = newConfig
 	migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed)
@@ -1717,8 +1972,8 @@ func (m *Miner) finishApply(newConfig *config.Config, added, removed []*models.S
 	// history, notification rules/config-lists, watch-time rows) in one atomic
 	// transaction, clear its streak grant, and lift the fence for any re-added
 	// login — the persisted half of BKM-018A, mirroring the runtime teardown
-	// above. Runs off the miner lock.
-	m.applyStreamerDeletions(added, removed)
+	// above. Runs off the miner lock, on THIS apply's own captured coord/ctx.
+	m.applyStreamerDeletions(ctx, coord, added, removed)
 
 	// The durable analytics migration already ran (and, for a rename-carrying
 	// apply, succeeded) before this — see commitRenameTransaction. This emits

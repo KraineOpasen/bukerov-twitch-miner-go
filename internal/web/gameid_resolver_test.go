@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -90,7 +91,7 @@ func TestResolveGameIDDoesNotTouchSettings(t *testing.T) {
 	updated := false
 	srv := &Server{
 		gameIDResolver:   res,
-		onSettingsUpdate: func(settings.RuntimeSettings) { updated = true },
+		onSettingsUpdate: func(context.Context, settings.RuntimeSettings) error { updated = true; return nil },
 	}
 	if rec := postResolveGameID(t, srv, `{"name":"World of Tanks"}`); rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)

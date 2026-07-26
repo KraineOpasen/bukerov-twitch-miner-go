@@ -39,12 +39,17 @@ func (s *Server) handleAPIStreamerQuickAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if s.settingsProvider == nil || s.onSettingsUpdate == nil {
+	s.mu.RLock()
+	provider := s.settingsProvider
+	callback := s.onSettingsUpdate
+	s.mu.RUnlock()
+
+	if provider == nil || callback == nil {
 		writeServiceUnavailable(w, "Settings not available")
 		return
 	}
 
-	rt := s.settingsProvider.GetRuntimeSettings()
+	rt := provider.GetRuntimeSettings()
 
 	idx := -1
 	for i := range rt.Streamers {
@@ -97,7 +102,10 @@ func (s *Server) handleAPIStreamerQuickAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.onSettingsUpdate(rt)
+	if err := callback(r.Context(), rt); err != nil {
+		writeApplyError(w, err)
+		return
+	}
 
 	writeJSONOK(w, map[string]interface{}{
 		"success":      true,

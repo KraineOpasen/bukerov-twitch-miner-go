@@ -347,6 +347,30 @@ func (p *ReconcilePlan) ResolvedChannelIDs() map[string]string {
 	return out
 }
 
+// PlannedRemovals returns every currently-tracked streamer this plan will
+// remove, computed under a READ lock with NO mutation by mirroring exactly
+// the survivor sweep CommitPlan runs under its write lock (manager.go, the
+// "var kept []*models.Streamer" loop): any tracked streamer this plan's
+// survivor set does not name. Like PlannedRenames, this lets a caller (the
+// miner's fail-closed settings-apply coordinator, SRAP) learn what a plan
+// WILL do before committing it — specifically, which streamers to durably
+// admit for removal before any runtime or config mutation occurs. Callers
+// must invoke this with the manager in the SAME state PlanReconcile observed
+// (coordinatorMu-serialized applies guarantee this: CommitPlan and
+// LoadFromConfig are the only mutators of byID/byLogin/m.streamers, and
+// neither runs between a PlanReconcile call and its matching CommitPlan).
+func (p *ReconcilePlan) PlannedRemovals(m *Manager) []*models.Streamer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var removed []*models.Streamer
+	for _, s := range m.streamers {
+		if !p.survivors[s] {
+			removed = append(removed, s)
+		}
+	}
+	return removed
+}
+
 // PlanReconcile performs Phase A (resolve every config entry's stable
 // ChannelID, unlocked) and Phase B's DECISION-MAKING ONLY (grouping,
 // conflict detection, add-vs-update classification) under a read lock — with

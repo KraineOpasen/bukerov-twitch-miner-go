@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestApplySettings_Rename_PubSubZeroChurn(t *testing.T) {
 	client.set("oldlogin", "id-h")
 	m, topics, _ := newRenameTestMiner(t, client, "oldlogin")
 
-	m.ApplySettings(m.GetRuntimeSettings()) // establish the initial topic set
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings()) // establish the initial topic set
 
 	channelTopics := []pubsub.TopicType{
 		pubsub.TopicVideoPlaybackByID,
@@ -129,7 +130,7 @@ func TestApplySettings_Rename_PubSubZeroChurn(t *testing.T) {
 	}
 
 	client.set("newlogin", "id-h")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 
 	for _, tt := range channelTopics {
 		if got := topics.listenCount(idTopic(tt, "id-h")); got != before[tt] {
@@ -204,19 +205,19 @@ func TestApplySettings_Rename_LeavesOldChatChannelOnce(t *testing.T) {
 	client.set("oldlogin", "id-k")
 	m, _, chatRec := newRenameTestMiner(t, client, "oldlogin")
 
-	m.ApplySettings(m.GetRuntimeSettings()) // baseline: no rename yet
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings()) // baseline: no rename yet
 	if got := chatRec.leaveCount("oldlogin"); got != 0 {
 		t.Fatalf("baseline apply left oldlogin %d times, want 0", got)
 	}
 
 	client.set("newlogin", "id-k")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 	if got := chatRec.leaveCount("oldlogin"); got != 1 {
 		t.Fatalf("rename must Leave(oldlogin) exactly once, got %d", got)
 	}
 
 	// Repeated apply with no further rename: no additional leave (renamed is empty).
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 	if got := chatRec.leaveCount("oldlogin"); got != 1 {
 		t.Fatalf("repeated apply changed oldlogin leave count to %d, want 1 (no new rename)", got)
 	}
@@ -250,7 +251,7 @@ func TestApplySettings_Rename_ConfigSurgeryAndAnalyticsIntegration(t *testing.T)
 	}
 
 	client.set("newlogin", "id-wiring")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 
 	// Config surgery: exactly one entry, new login, ChannelID stamped.
 	if len(m.config.Streamers) != 1 {
@@ -288,7 +289,7 @@ func TestApplySettings_Rename_ConfigSurgeryAndAnalyticsIntegration(t *testing.T)
 
 	// Repeated identical apply is a no-op: still one entry, no error, no
 	// duplicate migration attempt (RenameStreamer is idempotent by contract).
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 	if len(m.config.Streamers) != 1 {
 		t.Fatalf("repeated apply changed entry count: %d, want 1", len(m.config.Streamers))
 	}
@@ -311,13 +312,13 @@ func TestApplySettings_Rename_ConfigRestart_IDFirstReconstructsOneStreamer(t *te
 			rs.Streamers[i].Settings = &settings.StreamerSettingsConfig{FollowRaid: &custom}
 		}
 	}
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 	if got := m.streamers.Get("oldlogin").GetSettings().FollowRaid; got {
 		t.Fatal("setup: custom FollowRaid=false did not apply")
 	}
 
 	client.set("newlogin", "id-g")
-	m.ApplySettings(renameRuntimeStreamers(m, "oldlogin", "newlogin"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "oldlogin", "newlogin"))
 
 	persisted := m.config.Streamers
 	if len(persisted) != 1 || persisted[0].Username != "newlogin" || persisted[0].ChannelID != "id-g" {
