@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -194,7 +196,11 @@ func (s *Server) handleAPINotificationsTest(w http.ResponseWriter, r *http.Reque
 
 	sent, err := notifMgr.SendTestNotifications()
 	if err != nil {
-		writeInternalError(w, "Failed to send test notifications: "+err.Error())
+		// Discord-only path; err here is a static/DB-derived message with no
+		// M5/M6 material, but it is still not for the network response — log
+		// server-side and return a static message.
+		slog.Error("Failed to send test notifications", "error", err)
+		writeInternalError(w, "Failed to send test notifications")
 		return
 	}
 
@@ -220,7 +226,7 @@ func (s *Server) handleAPITestNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	results := notifMgr.TestAllProviders(r.Context())
+	results := sanitizeProviderTestResults(notifMgr.TestAllProviders(r.Context()))
 
 	// "ok" when every provider succeeded, "partial" when at least one failed,
 	// and still "ok" (with an explanatory message) when nothing is enabled.
@@ -241,4 +247,55 @@ func (s *Server) handleAPITestNotification(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSONOK(w, resp)
+}
+
+// percentEscapePattern matches any %-escape triplet (e.g. a URL-encoded
+// secret component like %3A or %2F), so the fail-closed check below also
+// catches encoded forms that slip past a plain substring match.
+var percentEscapePattern = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
+
+// sanitizeProviderTestResults is the LAST barrier before provider test
+// results reach the network. internal/notifications already returns fully
+// classified, URL-free errors (see notifications.SendError), but this
+// endpoint is reachable WITHOUT authentication whenever Basic Auth is
+// unconfigured (server.go's basicAuthMiddleware wiring) and without a CSRF
+// token for header-less requests (security.go's checkSameOrigin allowance),
+// so it does not simply trust the DTO: it copies ONLY whitelisted fields and,
+// as a fail-closed backstop, replaces any Error text that still looks
+// URL/credential-shaped. Do not remove this as "redundant" with the
+// notifications-package sanitization — it is an intentionally independent
+// second layer for exactly the case where that layer regresses.
+func sanitizeProviderTestResults(in []notifications.ProviderTestResult) []notifications.ProviderTestResult {
+	out := make([]notifications.ProviderTestResult, len(in))
+	for i, r := range in {
+		out[i] = notifications.ProviderTestResult{
+			Provider: r.Provider,
+			OK:       r.OK,
+			Error:    r.Error,
+			Stage:    r.Stage,
+			Class:    r.Class,
+			Status:   r.Status,
+		}
+		if looksLikeLeakedCredential(out[i].Error) {
+			out[i].Error = "delivery failed"
+		}
+	}
+	return out
+}
+
+// looksLikeLeakedCredential fails closed: any of these substrings/patterns in
+// a provider-test error message is treated as still possibly URL- or
+// credential-bearing, even though a conforming provider should never produce
+// one. Matching is intentionally broad (it may reject a legitimate-looking
+// message) because the cost of a false positive here is a generic "delivery
+// failed" string, while the cost of a false negative is a leaked secret.
+func looksLikeLeakedCredential(s string) bool {
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "://") ||
+		strings.Contains(lower, "token=") ||
+		strings.Contains(lower, "token%3d") ||
+		strings.Contains(s, "@") {
+		return true
+	}
+	return percentEscapePattern.MatchString(s)
 }
