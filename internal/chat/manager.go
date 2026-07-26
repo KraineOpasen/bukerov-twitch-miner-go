@@ -24,6 +24,10 @@ type ChatManager struct {
 	globalChatLogsOn bool
 	mentionHandler   MentionHandler
 
+	// rosterMembership, when set, gates joinChat: a streamer pointer is only
+	// joined if this reports true for it. See SetRosterMembership.
+	rosterMembership func(*models.Streamer) bool
+
 	// dialFn, when set, is handed to every IRC client this manager creates. It
 	// is nil in production (clients dial Twitch IRC over TLS); tests inject an
 	// in-memory transport so presence transitions run without a network.
@@ -49,6 +53,25 @@ func NewChatManager(username string, tokenFn TokenProvider, logger ChatLogger, g
 func (m *ChatManager) SetAuthErrorHandler(handler func(rejectedGeneration uint64)) {
 	m.mu.Lock()
 	m.authErrorHandler = handler
+	m.mu.Unlock()
+}
+
+// SetRosterMembership registers the predicate joinChat uses to reject a
+// streamer pointer that is no longer the roster's live tracked object for its
+// login (a stale pointer surviving a removal, or one that never belonged to
+// the roster at all). Set ONCE at wiring time, before any join; nil preserves
+// standalone behavior, where every join is permitted (the pre-M3 behavior,
+// and the default for library/test use with no roster of its own).
+//
+// The predicate runs with ChatManager.mu HELD: it must never call back into
+// ChatManager (that would deadlock, sync.RWMutex is not reentrant), and may
+// only acquire locks BELOW ChatManager.mu in the documented lock order
+// (coordinatorMu -> {miner.mu | reconcileMu} -> ChatManager.mu ->
+// Manager.mu -> Streamer.mu, IRCClient.mu leaf) — i.e. streamer.Manager's
+// lock and/or a models.Streamer's own lock, never anything above.
+func (m *ChatManager) SetRosterMembership(fn func(*models.Streamer) bool) {
+	m.mu.Lock()
+	m.rosterMembership = fn
 	m.mu.Unlock()
 }
 
@@ -94,10 +117,20 @@ func (m *ChatManager) shouldLogChat(streamer *models.Streamer) bool {
 }
 
 func (m *ChatManager) joinChat(streamer *models.Streamer) {
-	login := streamer.GetUsername()
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	login := streamer.GetUsername()
+
+	if m.rosterMembership != nil && !m.rosterMembership(streamer) {
+		// A stale or foreign streamer pointer: the roster no longer tracks
+		// THIS object under its login (removed, or it never belonged), so
+		// joining here would create a ghost IRC client nothing will ever
+		// leave. Reject before any client lookup/creation. Login only —
+		// never any other streamer field — stays in the log line.
+		slog.Debug("Rejected joinChat for non-roster streamer", "channel", login)
+		return
+	}
 
 	if client, exists := m.clients[login]; exists {
 		if client.IsRunning() {
