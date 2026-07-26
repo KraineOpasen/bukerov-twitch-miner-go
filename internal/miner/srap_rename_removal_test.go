@@ -15,7 +15,8 @@ import (
 
 // This file covers the SRAP rename+removal interaction (M1 QA follow-up F2):
 // applySettingsWithRename admits any RIDING removal durably BEFORE its own
-// commitRenameTransaction commit point, and compensates that admission
+// commit point (commitAnalyticsRenames, then the SaveConfig+publish commit
+// section in applySettingsWithRename), and compensates that admission
 // (AbortAdmission) on a rename-transaction failure — the same fail-closed
 // discipline applySettingsWithRemovals gives a removal-only apply, but for
 // the branch where a rename rides along in the SAME apply. Neither existing
@@ -46,7 +47,8 @@ func renameAndRemove(m *Miner, oldLogin, newLogin, removeLogin string) settings.
 // TestApplySettingsRenameWithRidingRemoval_Success covers F2(a): a single
 // apply that both renames one streamer and removes another must complete
 // BOTH correctly — the removal's durable admission (SRAP prepare) runs
-// before commitRenameTransaction's own commit point, and its completion
+// before applySettingsWithRename's own commit point (commitAnalyticsRenames,
+// then the SaveConfig+publish commit section), and its completion
 // (purge) runs after, exactly as a removal-only apply's admission/commit/
 // complete sequence does; the rename's own config-surgery/analytics-migration
 // invariants (pinned elsewhere for rename-only applies) are unaffected by the
@@ -130,9 +132,10 @@ func TestApplySettingsRenameWithRidingRemoval_Success(t *testing.T) {
 
 // TestApplySettingsRenameWithRidingRemoval_RenameTxFailureCompensatesRemoval
 // covers F2(b): the rename transaction's own commit point
-// (commitRenameTransaction, via an unwritable configPath — the same
-// deterministic seam TestApplySettingsWithRename_SaveConfigFailure_
-// NothingRenamed_C2B uses) fails AFTER the riding removal's admission
+// (applySettingsWithRename's SaveConfig+publish commit section, via an
+// unwritable configPath — the same deterministic seam
+// TestApplySettingsWithRename_SaveConfigFailure_NothingRenamed_C2B uses)
+// fails AFTER the riding removal's admission
 // already succeeded. The whole apply must be all-or-nothing: ZERO mutation
 // of runtime/config/analytics for EITHER the rename or the removal, and the
 // removal's prepared admission row must be compensated (AbortAdmission) —
@@ -161,7 +164,7 @@ func TestApplySettingsRenameWithRidingRemoval_RenameTxFailureCompensatesRemoval(
 	}
 	m.configPath = configPath
 
-	// Force the NEXT SaveConfig (commitRenameTransaction's own commit point)
+	// Force the NEXT SaveConfig (applySettingsWithRename's own commit point)
 	// to fail deterministically — the riding removal's AdmitRemovals has
 	// already committed by the time this is reached.
 	breakConfigPathForNextSave(t, configPath)
@@ -261,7 +264,8 @@ func TestApplySettingsRenameWithRidingRemoval_RenameTxFailureCompensatesRemoval(
 // the test's own goroutine inside applySettings, well before the coordinator
 // ever gets a chance to move or clear that row. Tombstone is CommitRemoval's
 // very first action (see lifecycle.go), called only after
-// commitRenameTransaction has already committed and only BEFORE
+// applySettingsWithRename's commit point (commitAnalyticsRenames, then the
+// SaveConfig+publish commit section) has already committed and only BEFORE
 // movePendingTx moves the row out of the admissions table — so this is
 // exactly the window between "the rename transaction's commit" and
 // "CommitRemoval's completion" the durability claim needs pinned.
@@ -292,8 +296,8 @@ func (f admissionRowObservingFencer) Reinstate(login string) { f.inner.Reinstate
 // Success's post-apply state (removed, purged, no owed row) is IDENTICAL
 // whether or not the removal was ever durably admitted before the rename's
 // own commit point. This test instead observes the DURABLE LEDGER'S EXISTENCE
-// synchronously, at the exact instant between commitRenameTransaction's
-// commit and CommitRemoval's own completion (via admissionRowObservingFencer,
+// synchronously, at the exact instant between applySettingsWithRename's
+// commit-point commit and CommitRemoval's own completion (via admissionRowObservingFencer,
 // hooked into Tombstone — CommitRemoval's first action): a streamer_deletion_
 // admissions row for the removed login MUST already exist there, proving
 // AdmitRemovals genuinely ran (and committed) before the rename's commit

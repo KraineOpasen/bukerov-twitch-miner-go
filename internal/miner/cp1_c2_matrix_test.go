@@ -80,8 +80,8 @@ func TestApplySettingsWithRename_SaveConfigFailure_NothingRenamed_C2B(t *testing
 	}
 	m.configPath = configPath
 
-	// Force the NEXT SaveConfig (the one commitRenameTransaction is about to
-	// attempt) to fail deterministically.
+	// Force the NEXT SaveConfig (the one applySettingsWithRename's commit
+	// point is about to attempt) to fail deterministically.
 	breakConfigPathForNextSave(t, configPath)
 
 	client.set("c2bnew", "id-c2b")

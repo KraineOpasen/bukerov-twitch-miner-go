@@ -134,6 +134,7 @@ func TestEvaluateAutoRedeem_StaleGenerationBeforeGate_NoRedeem(t *testing.T) {
 	if s == nil {
 		t.Fatal("setup: streamer missing")
 	}
+	s.SetChannelPoints(10000) // must clear the insufficient-points gate to reach RedeemCustomReward
 
 	done := make(chan struct{})
 	go func() {
@@ -242,6 +243,7 @@ func TestEvaluateAutoRedeem_BudgetChangeDuringEvaluationTakesEffectNextCycle(t *
 	if s == nil {
 		t.Fatal("setup: streamer missing")
 	}
+	s.SetChannelPoints(10000) // must clear the insufficient-points gate to reach RedeemCustomReward
 
 	done := make(chan struct{})
 	go func() {
@@ -290,6 +292,7 @@ func TestEvaluateAutoRedeem_CancelledRunContextBlocksRedemption(t *testing.T) {
 	if s == nil {
 		t.Fatal("setup: streamer missing")
 	}
+	s.SetChannelPoints(10000) // must clear the insufficient-points gate to reach RedeemCustomReward
 	m.evaluateAutoRedeem(s)
 
 	if got := fake.redeemCount(); got != 0 {

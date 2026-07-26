@@ -77,8 +77,9 @@ func applyConfigRenames(cfg *config.Config, renamed []streamer.RenameEvent) {
 // context, matching I13's log budget in spirit even though this specific
 // warning is diagnostic, not the rename notice itself). [R5] When this runs
 // from the commit-point refresh (rewards.go), it runs under m.mu — slog.Warn
-// already runs under m.mu on other paths in this package (miner.go:2090,
-// policy.go via persistLocked, health.go:430), so this is not a new pattern.
+// already runs under m.mu on other paths in this package (finishApply's
+// non-persisted SaveConfig branch, miner.go; policy.go via persistLocked;
+// health.go:430), so this is not a new pattern.
 //
 // Returns true when the clash (destination-wins) branch fired, so a caller
 // tracking commit-time AutoRedeem generations (migrateAutoRedeemGenLocked)
