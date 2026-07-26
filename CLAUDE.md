@@ -77,3 +77,86 @@ Key packages (see `SPECIFICATIONS.md` § Module Structure for the full breakdown
 - The `analytics` package must stay HTTP-free — dashboard/HTTP concerns belong in `web`, not `analytics`.
 - New DB schema changes should add a migration under the appropriate module in `internal/database`/`internal/analytics`/`internal/notifications` and bump that module's version in `schema_versions`, not touch other modules' versions.
 - Version string is injected at build time via `-ldflags -X .../internal/version.Version=...` (see `Makefile`/`Dockerfile`) — don't hardcode versions elsewhere.
+
+## Claude Code Governance (v2)
+
+Repo identity: `KraineOpasen/bukerov-twitch-miner-go`, default branch `main`. Verify this exact repo/branch
+before any GitHub-facing action — see "GitHub verification" below.
+
+### Policy precedence
+
+1. An explicit task contract (`docs/agents/task-contract.md`) for the current session.
+2. This file + `.claude/rules/*.md`.
+3. Vendored project skills (`.claude/skills/**`, with local patches).
+4. Upstream skill defaults (unpatched vendored content).
+5. Generic model behavior.
+
+A task contract can **never** authorize merge, auto-merge, release/tag, deploy, or production access — those
+always require a separate, direct user command, and even then are not executed autonomously under this policy.
+
+### Default mode: READ_ONLY
+
+No contract → `READ_ONLY`. See `docs/agents/operation-modes.md` (modes, transitions, expiry triggers),
+`docs/agents/task-contract.md` (schema, mandatory re-check points), `docs/agents/quality-gates.md` (Q0–Q3).
+
+### Non-delegable prohibitions
+
+No contract, and no vendored skill, may authorize:
+
+- Marking a PR ready for review, or merge/auto-merge.
+- Release, tag, or deploy — including to production or TrueNAS.
+- Triggering or rerunning a GitHub Actions workflow.
+- Changing GitHub repo settings or secrets.
+- Force push, or any direct push to `main`/`master`.
+
+These require a separate, explicit, direct user command outside this policy — and even then this policy does
+not execute them autonomously.
+
+### GitHub verification
+
+Before any GitHub-facing action, verify: exact repo (`KraineOpasen/bukerov-twitch-miner-go`), exact branch,
+base SHA, current HEAD SHA, PR state, and CI state. Don't assume a previous turn's verification still holds —
+re-check at the points listed in `docs/agents/task-contract.md`.
+
+### Agent orchestration
+
+- One production writer per task; every other agent is read-only (research, review, planning).
+- Keep an explicit role ledger when multiple agents are involved — who is writing, who is reviewing.
+- No recursive subagent spawning; respect the task contract's `agent_cap`.
+- Reviewer/analysis agents never write to tracked files or push.
+- Background subagents run only inside a live session — never claim work continued or completed after the
+  session that spawned them ended.
+
+### Secrets
+
+Never display, test, or reuse credentials (tokens, cookies, webhook URLs, passwords). Represent any secret
+value that must be referenced as `[REDACTED]`.
+
+### Production logs
+
+When reporting on production/log output: lead with the verdict, separate normal operation from actual errors,
+cite exact evidence (timestamps, log lines) for any claim, and never assert a deploy or fix happened without
+direct evidence it did.
+
+### Skills
+
+Vendored third-party skills (Matt Pocock's `mattpocock/skills`, reviewed and audited) live in
+`.claude/skills/**`. See `docs/agents/mattpocock-skills-policy.md` (policy, update/rollback procedure),
+`docs/agents/mattpocock-skills-manifest.json` (installed set, classification), and
+`docs/agents/mattpocock-skills-patches.md` (every local patch, by skill).
+
+#### Agent skills
+
+##### Issue tracker
+
+GitHub Issues, default read-only, tracker mutations require an explicit task contract. See
+`docs/agents/issue-tracker.md`.
+
+##### Triage labels
+
+Five canonical roles mapped to same-named GitHub labels (documentation only — no labels created by this task).
+See `docs/agents/triage-labels.md`.
+
+##### Domain docs
+
+Single-context layout: `CONTEXT.md` at the repo root, ADRs under `docs/adr/`. See `docs/agents/domain.md`.

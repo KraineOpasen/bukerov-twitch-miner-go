@@ -1,0 +1,352 @@
+{
+  "upstream_repo": "https://github.com/mattpocock/skills",
+  "upstream_commit": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+  "upstream_tree": "04b0fcb78e3de7c58744fcba2528354cc64ab988",
+  "upstream_current_head": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+  "upstream_version": "1.1.0",
+  "reviewed_at": "2026-07-26T10:57:34Z",
+  "reviewed_by": "Claude Code Governance v2 task (design manifest arbitration, single production writer)",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "notes": "package.json version is 1.1.0 (released); .claude-plugin/plugin.json is pre-bumped to 1.2.0 with pending changesets not yet released. Manifest records the released version. See docs/agents/mattpocock-skills-policy.md for the drift note.",
+  "skills": [
+    {
+      "name": "ask-matt",
+      "category": "engineering",
+      "path": ".claude/skills/ask-matt",
+      "upstream_path": "skills/engineering/ask-matt",
+      "upstream_blob_sha": "70b807b35f85859b0c6cced1919f56e024e6a753",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["ask-matt-setup-pointer"]
+    },
+    {
+      "name": "code-review",
+      "category": "engineering",
+      "path": ".claude/skills/code-review",
+      "upstream_path": "skills/engineering/code-review",
+      "upstream_blob_sha": "2a0b5240731b927caa9ac0bf43c3e2af9dc3f0a7",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["code-review-read-only"]
+    },
+    {
+      "name": "codebase-design",
+      "category": "engineering",
+      "path": ".claude/skills/codebase-design",
+      "upstream_path": "skills/engineering/codebase-design",
+      "upstream_blob_sha": "16620c24528b737408e78d95dd6a0e01a98d3d63",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["design-it-twice-cap"]
+    },
+    {
+      "name": "diagnosing-bugs",
+      "category": "engineering",
+      "path": ".claude/skills/diagnosing-bugs",
+      "upstream_path": "skills/engineering/diagnosing-bugs",
+      "upstream_blob_sha": "f400de7c1937377fec7ff9bae3b0c072670f1e81",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["diagnosing-bugs-commit-note"]
+    },
+    {
+      "name": "domain-modeling",
+      "category": "engineering",
+      "path": ".claude/skills/domain-modeling",
+      "upstream_path": "skills/engineering/domain-modeling",
+      "upstream_blob_sha": "d0f7e1a5ccb06a7184056ff9af02b67bc77f9dda",
+      "classification": "SAFE_WITH_PROJECT_POLICY",
+      "invocation": "model",
+      "locally_modified": false,
+      "patch_ids": []
+    },
+    {
+      "name": "grill-me",
+      "category": "productivity",
+      "path": ".claude/skills/grill-me",
+      "upstream_path": "skills/productivity/grill-me",
+      "upstream_blob_sha": "9470cfcfe231a35e46494cddbacdd395991afb1e",
+      "classification": "SAFE_AS_IS",
+      "invocation": "user",
+      "locally_modified": false,
+      "patch_ids": []
+    },
+    {
+      "name": "grill-with-docs",
+      "category": "engineering",
+      "path": ".claude/skills/grill-with-docs",
+      "upstream_path": "skills/engineering/grill-with-docs",
+      "upstream_blob_sha": "bed05d2bd3245306267cea57cd696b5dd94d50fe",
+      "classification": "SAFE_AS_IS",
+      "invocation": "user",
+      "locally_modified": false,
+      "patch_ids": []
+    },
+    {
+      "name": "grilling",
+      "category": "productivity",
+      "path": ".claude/skills/grilling",
+      "upstream_path": "skills/productivity/grilling",
+      "upstream_blob_sha": "52d8eb3cadd2dca62634d5dccfa73ea6b725b117",
+      "classification": "SAFE_AS_IS",
+      "invocation": "model",
+      "locally_modified": false,
+      "patch_ids": []
+    },
+    {
+      "name": "handoff",
+      "category": "productivity",
+      "path": ".claude/skills/handoff",
+      "upstream_path": "skills/productivity/handoff",
+      "upstream_blob_sha": "043d9e13dc7eca3002a47d3ab9865c568f647863",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["handoff-scratch-redact"]
+    },
+    {
+      "name": "implement",
+      "category": "engineering",
+      "path": ".claude/skills/implement",
+      "upstream_path": "skills/engineering/implement",
+      "upstream_blob_sha": "7a0b11f5f4fe9505ea5c7983c3083ba1bf754f69",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["implement-commit-envelope"]
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "category": "engineering",
+      "path": ".claude/skills/improve-codebase-architecture",
+      "upstream_path": "skills/engineering/improve-codebase-architecture",
+      "upstream_blob_sha": "b56969e92f0705d70700f908b8ec929a1edfa782",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["architecture-selfcontained-html", "architecture-no-autoopen"]
+    },
+    {
+      "name": "prototype",
+      "category": "engineering",
+      "path": ".claude/skills/prototype",
+      "upstream_path": "skills/engineering/prototype",
+      "upstream_blob_sha": "e75d5331ceffd9b2c5a9554c3db124d848afa054",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["prototype-disposable"]
+    },
+    {
+      "name": "research",
+      "category": "engineering",
+      "path": ".claude/skills/research",
+      "upstream_path": "skills/engineering/research",
+      "upstream_blob_sha": "0ba594a07f306479baa67104381f48e209ab6aae",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["research-read-only"]
+    },
+    {
+      "name": "resolving-merge-conflicts",
+      "category": "engineering",
+      "path": ".claude/skills/resolving-merge-conflicts",
+      "upstream_path": "skills/engineering/resolving-merge-conflicts",
+      "upstream_blob_sha": "aadb3fcb1dfb43413dff30c2fb4b18b7cf58e90e",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["merge-conflicts-read-only"]
+    },
+    {
+      "name": "tdd",
+      "category": "engineering",
+      "path": ".claude/skills/tdd",
+      "upstream_path": "skills/engineering/tdd",
+      "upstream_blob_sha": "9a2e1d2a1ad856b0d5903dd002209ff8c32c9a48",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "model",
+      "locally_modified": true,
+      "patch_ids": ["tdd-seam-preagreed"]
+    },
+    {
+      "name": "teach",
+      "category": "productivity",
+      "path": ".claude/skills/teach",
+      "upstream_path": "skills/productivity/teach",
+      "upstream_blob_sha": "b1603e5ac536d2b5c29496c06df4db0bb9f74e69",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["teach-workspace"]
+    },
+    {
+      "name": "to-spec",
+      "category": "engineering",
+      "path": ".claude/skills/to-spec",
+      "upstream_path": "skills/engineering/to-spec",
+      "upstream_blob_sha": "f3cca8d3dbdb7c22e11447f1d13011a78ca6efba",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["to-spec-local-first"]
+    },
+    {
+      "name": "to-tickets",
+      "category": "engineering",
+      "path": ".claude/skills/to-tickets",
+      "upstream_path": "skills/engineering/to-tickets",
+      "upstream_blob_sha": "96deac51d4391a3f691478d48f85f43261516c08",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["to-tickets-local-first"]
+    },
+    {
+      "name": "triage",
+      "category": "engineering",
+      "path": ".claude/skills/triage",
+      "upstream_path": "skills/engineering/triage",
+      "upstream_blob_sha": "be47b78100c8524c3af3681790d2bb8b9ff150b7",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["triage-read-only-default"]
+    },
+    {
+      "name": "wayfinder",
+      "category": "engineering",
+      "path": ".claude/skills/wayfinder",
+      "upstream_path": "skills/engineering/wayfinder",
+      "upstream_blob_sha": "42e3644cc57e41a1b87482754f25b4d9462d4bbc",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "invocation": "user",
+      "locally_modified": true,
+      "patch_ids": ["wayfinder-local-default"]
+    },
+    {
+      "name": "writing-great-skills",
+      "category": "productivity",
+      "path": ".claude/skills/writing-great-skills",
+      "upstream_path": "skills/productivity/writing-great-skills",
+      "upstream_blob_sha": "82abd0dce264eecb3ed461b3eac17bdafb52f84b",
+      "classification": "SAFE_AS_IS",
+      "invocation": "user",
+      "locally_modified": false,
+      "patch_ids": []
+    }
+  ],
+  "excluded": [
+    {
+      "name": "setup-matt-pocock-skills",
+      "category": "engineering",
+      "reason": "Only promoted skill that edits the project's root CLAUDE.md; its one-time setup function (issue tracker, triage labels, domain doc layout) is performed deterministically by this governance task instead — see docs/agents/issue-tracker.md, docs/agents/domain.md, docs/agents/triage-labels.md."
+    },
+    {
+      "name": "design-an-interface",
+      "category": "deprecated",
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored codebase-design skill's Design-It-Twice pattern (DESIGN-IT-TWICE.md)."
+    },
+    {
+      "name": "qa",
+      "category": "deprecated",
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored triage skill's issue-tracker workflow."
+    },
+    {
+      "name": "request-refactor-plan",
+      "category": "deprecated",
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored to-tickets/wayfinder flow."
+    },
+    {
+      "name": "ubiquitous-language",
+      "category": "deprecated",
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored domain-modeling skill."
+    },
+    {
+      "name": "batch-grill-me",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project."
+    },
+    {
+      "name": "claude-handoff",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; overlaps with the vendored handoff skill, which is the reviewed/patched one this project uses."
+    },
+    {
+      "name": "loop-me",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project."
+    },
+    {
+      "name": "setup-ts-deep-modules",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill for TypeScript repos (dependency-cruiser wiring); this project is Go, and it is not in plugin.json skills[]."
+    },
+    {
+      "name": "to-questionnaire",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project."
+    },
+    {
+      "name": "wizard",
+      "category": "in-progress",
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; generates interactive setup wizards, out of scope for this project's governance."
+    },
+    {
+      "name": "writing-beats",
+      "category": "in-progress",
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+    },
+    {
+      "name": "writing-fragments",
+      "category": "in-progress",
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+    },
+    {
+      "name": "writing-shape",
+      "category": "in-progress",
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+    },
+    {
+      "name": "git-guardrails-claude-code",
+      "category": "misc",
+      "reason": "Not in plugin.json skills[]. This project already has a project-specific PreToolUse hook (.claude/hooks/governance-policy.py) covering equivalent and additional ground; installing a second, unreviewed git-safety skill risks duplicate or conflicting hook logic."
+    },
+    {
+      "name": "migrate-to-shoehorn",
+      "category": "misc",
+      "reason": "Not in plugin.json skills[]; TypeScript-specific test-migration tooling, not applicable to this Go project."
+    },
+    {
+      "name": "scaffold-exercises",
+      "category": "misc",
+      "reason": "Not in plugin.json skills[]; course/exercise scaffolding, not applicable to this project."
+    },
+    {
+      "name": "setup-pre-commit",
+      "category": "misc",
+      "reason": "Not in plugin.json skills[]; assumes Husky/npm/lint-staged tooling not used in this Go project (which uses golangci-lint via `make lint`)."
+    },
+    {
+      "name": "edit-article",
+      "category": "personal",
+      "reason": "Not in plugin.json skills[]; the skill author's personal article-editing workflow, not general engineering tooling."
+    },
+    {
+      "name": "obsidian-vault",
+      "category": "personal",
+      "reason": "Not in plugin.json skills[]; the skill author's personal Obsidian note-taking integration, not applicable to this project."
+    },
+    {
+      "name": "agents/openai.yaml (all skills)",
+      "category": "metadata",
+      "reason": "Every promoted skill ships an agents/openai.yaml sidecar with Codex-specific agent metadata. Claude Code does not read this file, so it was not vendored for any skill (including the 21 installed above) — see docs/agents/mattpocock-skills-policy.md."
+    }
+  ]
+}
