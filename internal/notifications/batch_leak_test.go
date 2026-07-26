@@ -1,14 +1,19 @@
 package notifications
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 // TestBatcherFlushLogsSendErrorWithoutSentinel is scenario (a): a conforming
@@ -107,4 +112,80 @@ func TestBatcherFlushLogNonEmptyNegativeControl(t *testing.T) {
 	if !strings.Contains(out, "error.op=send") {
 		t.Errorf("expected the failed operation to be logged: %s", out)
 	}
+}
+
+// syncWriter is a mutex-guarded io.Writer wrapping a bytes.Buffer. A plain
+// bytes.Buffer is not safe for concurrent use: dispatchPush logs from a
+// spawned goroutine, so a test polling the buffer's content from a different
+// goroutine needs a writer whose Write and String are both synchronized.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// captureLogsConcurrentSafe mirrors captureLogs (discord_config_test.go) —
+// same save/restore-slog.Default idiom — but backs the handler with a
+// *syncWriter instead of a *bytes.Buffer, so it is safe to read from a
+// goroutine other than the one slog writes from.
+func captureLogsConcurrentSafe(t *testing.T) *syncWriter {
+	t.Helper()
+	w := &syncWriter{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return w
+}
+
+// TestDispatchPushLogsRegressedProviderWithoutSentinel is dispatchPush's
+// counterpart to TestBatcherFlushLogsRegressedProviderWithoutSentinel: the
+// same fail-closed safeSendErrorAttr call exists at manager.go's
+// dispatchPush, on its own, independent code path (a goroutine per batcher,
+// not Flush), and had no regression test of its own. A regressed provider
+// returning a raw fmt.Errorf("%w", urlErr) instead of a *SendError must still
+// log only the "unclassified provider send failure" summary plus a bare type
+// name — never the sentinel-bearing URL wrapped inside it.
+func TestDispatchPushLogsRegressedProviderWithoutSentinel(t *testing.T) {
+	buf := captureLogsConcurrentSafe(t)
+
+	regressed := fmt.Errorf("webhook request failed: %w", &url.Error{
+		Op: "Post", URL: sentinelWebhookURL, Err: errors.New("refused"),
+	})
+	send := func(context.Context, Message) error { return regressed }
+
+	m, _ := newManager(t, config.DiscordSettings{})
+	// Batching disabled -> Batcher.Add sends immediately and returns the send
+	// error, exercising dispatchPush's goroutine/log path rather than Flush's.
+	b := NewBatcher("webhook", BatchConfig{Enabled: false}, send)
+	m.batchers = map[string]*Batcher{"webhook": b}
+
+	m.dispatchPush(NotificationTypeOnline, "streamerA", "line1")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(buf.String(), "Failed to dispatch push notification") {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the dispatch failure to be logged; log so far: %s", buf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "provider=webhook") {
+		t.Errorf("expected a provider=webhook attr in the log line: %s", out)
+	}
+	if !strings.Contains(out, "unclassified provider send failure") {
+		t.Errorf("expected the fail-closed summary: %s", out)
+	}
+	assertNoSentinel(t, out, allSentinels...)
 }

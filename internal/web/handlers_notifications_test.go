@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -270,5 +271,30 @@ func TestSanitizeProviderTestResults(t *testing.T) {
 				t.Errorf("whitelisted fields altered: %+v", out[0])
 			}
 		})
+	}
+}
+
+// TestHandleAPITestNotificationRoutesThroughSanitizer is a static call-site
+// pin, following the exact precedent of
+// internal/notifications/discord_lifecycle_test.go's
+// TestNoSecretLeakingFormatDirectives (a source-scan test already used in
+// this repo to lock a security-relevant call shape, not just its runtime
+// behavior). sanitizeProviderTestResults is a defence-in-depth barrier: when
+// internal/notifications' SendError-based sanitization (layer 1) is healthy,
+// wiring or not wiring this call produces byte-identical HTTP responses in
+// every black-box test — an "equivalent mutant" that no behavioral test can
+// distinguish. The only way to guard against someone quietly unwiring the
+// call (e.g. "simplifying" it back to
+// "notifMgr.TestAllProviders(r.Context())") is to pin the call site in
+// source, so this reads the file straight from disk and asserts the
+// sanitizer still wraps the DTO before it can reach the network.
+func TestHandleAPITestNotificationRoutesThroughSanitizer(t *testing.T) {
+	src, err := os.ReadFile("handlers_notifications.go")
+	if err != nil {
+		t.Fatalf("read handlers_notifications.go: %v", err)
+	}
+	const wantCallSite = "sanitizeProviderTestResults(notifMgr.TestAllProviders("
+	if !strings.Contains(string(src), wantCallSite) {
+		t.Fatalf("handlers_notifications.go no longer routes TestAllProviders' results through sanitizeProviderTestResults (expected to find %q) — this is the last barrier before provider test results reach an unauthenticated network response, see sanitizeProviderTestResults' doc comment", wantCallSite)
 	}
 }
