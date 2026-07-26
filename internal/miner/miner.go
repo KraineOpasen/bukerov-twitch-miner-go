@@ -105,12 +105,16 @@ type Miner struct {
 	webServer        *web.Server
 	notifications    *notifications.Manager
 	// notificationsRepo is a standalone notification repository over the shared
-	// DB, created whenever the DB exists regardless of whether a Discord Manager
-	// is live. It ensures a removed streamer's point_rules / config-list rows are
-	// purged (and renamed) even when notifications are disabled — those rows
-	// persist in the file independently of the Manager. When a Manager IS live the
-	// coordinator prefers it (so the fence also covers its AddPointRule); both
-	// instances share the same tables.
+	// DB, created whenever the DB exists regardless of whether a notifications
+	// Manager was constructed successfully. Since M4 a Manager is built at
+	// startup for every DB (Discord and every push provider may both be off —
+	// see initNotificationManager), so this repository's purge/fence is only
+	// ever preferred over the Manager's own in the rare case NewManager itself
+	// failed; it still ensures a removed streamer's point_rules / config-list
+	// rows are purged (and renamed) even then — those rows persist in the file
+	// independently of the Manager. When a Manager IS live the coordinator
+	// prefers it (so the fence also covers its AddPointRule); both instances
+	// share the same tables.
 	notificationsRepo *notifications.Repository
 	debugServer       *debug.Server
 	// watchTimeStore is the persisted rotation-fairness store; kept here (not
@@ -615,45 +619,22 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		}
 	}
 
-	streamerNames := m.streamers.Names()
-
-	if m.config.Discord.Enabled || notifications.AnyMessageProviderConfigured(m.config.Username) {
-		notifMgr, err := notifications.NewManager(&m.config.Discord, &m.config.Notifications, m.db, streamerNames, m.config.Username)
-		if err != nil {
-			slog.Error("Failed to create notification manager; notifications stay DISABLED until the underlying problem is fixed", "error", err)
-			events.Record(events.TypeModuleInitFailed, "", "notifications: "+err.Error())
-		} else {
-			m.notifications = notifMgr
-			m.notifications.InitializePointsTracking(m.streamers.PointsMap())
-
-			if err := m.notifications.Start(ctx); err != nil {
-				slog.Error("Failed to start notification manager", "error", err)
-			}
-		}
-	}
-
-	if m.webServer != nil {
-		m.webServer.SetDiscordEnabled(m.config.Discord.Enabled)
-		if m.notifications != nil {
-			m.webServer.SetNotificationManager(m.notifications)
-		}
-	}
+	m.initNotificationManager(ctx)
 
 	// Resolve the dashboard/notification display time zone once (from the logger
 	// config; production sets Asia/Jerusalem) and share it, so absolute times on
 	// the Drops "Upcoming" tab and in the upcoming-campaign alert match. Standard
 	// time.Location handles DST; an empty/invalid zone falls back to local time.
-	displayLoc := resolveDisplayLocation(m.config.Logger.TimeZone)
+	// initNotificationManager already resolved and pushed the same location into
+	// the notifications manager itself, before publishing it (I8) — only the web
+	// side still needs it here.
 	if m.webServer != nil {
-		m.webServer.SetDisplayLocation(displayLoc)
-	}
-	if m.notifications != nil {
-		m.notifications.SetDisplayLocation(displayLoc)
+		m.webServer.SetDisplayLocation(resolveDisplayLocation(m.config.Logger.TimeZone))
 	}
 
 	var mentionHandler chat.MentionHandler
-	if m.notifications != nil {
-		mentionHandler = m.notifications.NotifyMention
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		mentionHandler = notifMgr.NotifyMention
 	}
 
 	var chatLogger chat.ChatLogger
@@ -734,9 +715,10 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.dropsTracker.UpdateGameFilter(m.config.DropCampaignGameIDs, m.config.DropCampaignGames)
 
 	// Alert (opt-in, off by default) when Twitch first reports a new relevant
-	// upcoming campaign. The adapter reads m.notifications at call time and the
-	// manager owns the opt-in gate + durable dedupe, so no alert is ever sent
-	// unless the operator enabled the event.
+	// upcoming campaign. The adapter reads the write-once notification manager
+	// via the shared accessor at call time, and the manager owns the opt-in
+	// gate + durable dedupe, so no alert is ever sent unless the operator
+	// enabled the event.
 	m.dropsTracker.SetUpcomingNotifier(minerUpcomingNotifier{m})
 
 	// Durably record each drop claim (under a hidden analytics bucket) so the
@@ -794,7 +776,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.healthCenter,
 		m.client,
 		watcher.NewMinuteSender(m.client),
-		minerHealthNotifier{m}, // reads m.notifications at call time (it may be created later)
+		minerHealthNotifier{m}, // reads the write-once notification manager via the accessor at call time
 		m.watcher,
 		healthCanaryConfig(m.config.Health),
 	)
@@ -814,7 +796,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.dropsTracker,
 		m.watcher,
 		watcher.NewMinuteSender(m.client),
-		minerDropNotifier{m}, // reads m.notifications at call time
+		minerDropNotifier{m}, // reads the write-once notification manager via the accessor at call time
 		m.avoidList,
 		m.resolveStreamer,
 		healthWatchdogConfig(m.config.Health),
@@ -842,6 +824,87 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	if m.config.ClaimDropsOnStartup {
 		slog.Info("Claiming all drops from inventory on startup")
+	}
+}
+
+// notificationManager returns the write-once notifications Manager published
+// by initNotificationManager (nil when the miner runs without a database, or
+// when construction itself failed at startup). This is the ONLY way any
+// other code in this package may observe m.notifications: it takes a brief
+// RLock, copies the pointer, and releases the lock before returning, so a
+// caller never holds m.mu while calling into the Manager (UpdateDiscordConfig
+// and several Notify* methods perform Discord network I/O or a SQLite read)
+// and never races the one-time publish. An AST boundary test
+// (m4_boundary_test.go) enforces at build-test time that no other production
+// code in this package reads the field directly.
+func (m *Miner) notificationManager() *notifications.Manager {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.notifications
+}
+
+// initNotificationManager builds and publishes the miner's notifications
+// Manager (M4). It is the ONLY assignment to m.notifications anywhere in
+// production code — every other reader goes through the notificationManager()
+// accessor above. Called once from setupComponents, strictly before
+// startMining launches any goroutine that could read m.notifications, so
+// every later reader observes either nil (no database, or a failed
+// construction — see the log/events branch below) or a fully constructed,
+// already-started Manager — never a partially built one and never a torn
+// write. (This replaces the fix's confirmed data race: the prior version
+// created the Manager lazily, at RUNTIME, from inside finishApply when
+// Discord first flipped on, so a concurrent reader elsewhere could observe a
+// manager that was still mid-construction.)
+//
+// A Manager is constructed whenever a database exists, regardless of whether
+// Discord or any push provider is actually enabled (NewManager tolerates both
+// being off) — so a LATER runtime enable (finishApply's UpdateDiscordConfig
+// call) never needs to create or replace the pointer, only reconfigure the
+// one that already exists; there is no more create-or-rebuild branch at
+// runtime at all. Points tracking and the display time zone are both set
+// BEFORE publication, so a reader that observes a non-nil manager never sees
+// one with stale/zero-value tracking state. Web wiring order matters too:
+// SetNotificationManager always runs before SetDiscordEnabled, and
+// SetDiscordEnabled is only ever true when a manager actually exists — so the
+// dashboard can never believe Discord is live while there is no manager
+// behind it (this holds both here and in finishApply's runtime reconcile).
+func (m *Miner) initNotificationManager(ctx context.Context) {
+	var notifMgr *notifications.Manager
+	if m.db != nil {
+		mgr, err := notifications.NewManager(&m.config.Discord, &m.config.Notifications, m.db, m.streamers.Names(), m.config.Username)
+		if err != nil {
+			// Unlike before this pass, there is no off->on retry path left: the
+			// runtime creation branch that used to give a second chance (when
+			// Discord was later enabled) is gone, since the Manager is now
+			// always constructed here, once. A failed construction therefore
+			// disables notifications for the rest of this process's life.
+			slog.Error("Failed to create notification manager; notifications stay DISABLED until the miner is restarted", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "notifications: "+err.Error())
+		} else {
+			notifMgr = mgr
+		}
+	}
+
+	if notifMgr != nil {
+		notifMgr.InitializePointsTracking(m.streamers.PointsMap())
+		notifMgr.SetDisplayLocation(resolveDisplayLocation(m.config.Logger.TimeZone))
+
+		m.mu.Lock()
+		m.notifications = notifMgr
+		m.mu.Unlock()
+	}
+
+	if m.webServer != nil {
+		if notifMgr != nil {
+			m.webServer.SetNotificationManager(notifMgr)
+		}
+		m.webServer.SetDiscordEnabled(m.config.Discord.Enabled && notifMgr != nil)
+	}
+
+	if notifMgr != nil {
+		if err := notifMgr.Start(ctx); err != nil {
+			slog.Error("Failed to start notification manager", "error", err)
+		}
 	}
 }
 
@@ -986,16 +1049,13 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 }
 
 // notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
-// update-available notification. Reads the notifications manager under lock so
-// it works even if Discord was toggled on after startup.
+// update-available notification. Reads the write-once notifications manager
+// via the shared accessor so it works even if Discord was toggled on after
+// startup.
 func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
 	events.Record(events.TypeUpdateAvailable, "", fmt.Sprintf("%s -> %s", current, latest))
 
-	m.mu.RLock()
-	notifMgr := m.notifications
-	m.mu.RUnlock()
-
-	if notifMgr != nil {
+	if notifMgr := m.notificationManager(); notifMgr != nil {
 		notifMgr.NotifyUpdateAvailable(current, latest, releaseURL)
 	}
 }
@@ -1006,11 +1066,7 @@ func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
 func (m *Miner) notifyUpdateFailed(current, latest, reason string) {
 	events.Record(events.TypeUpdateFailed, "", fmt.Sprintf("%s -> %s: %s", current, latest, reason))
 
-	m.mu.RLock()
-	notifMgr := m.notifications
-	m.mu.RUnlock()
-
-	if notifMgr != nil {
+	if notifMgr := m.notificationManager(); notifMgr != nil {
 		notifMgr.NotifyUpdateFailed(current, latest, reason)
 	}
 }
@@ -1159,8 +1215,8 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 				}
 			}
 
-			if m.notifications != nil {
-				m.notifications.NotifyPointsReached(s.GetUsername(), s.GetChannelPoints())
+			if notifMgr := m.notificationManager(); notifMgr != nil {
+				notifMgr.NotifyPointsReached(s.GetUsername(), s.GetChannelPoints())
 			}
 		case "points-spent":
 			if m.analyticsSvc != nil {
@@ -1356,8 +1412,8 @@ func (m *Miner) handleAuthError() {
 
 	slog.Error("Twitch authorization expired or was revoked - reauthorization required")
 
-	if m.notifications != nil {
-		m.notifications.NotifyReauthRequired("Open the dashboard to complete the Twitch device login (or restart the miner).")
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		notifMgr.NotifyReauthRequired("Open the dashboard to complete the Twitch device login (or restart the miner).")
 	}
 
 	if m.webServer != nil {
@@ -1449,7 +1505,12 @@ func (m *Miner) healthWatchdogLoop(ctx context.Context) {
 }
 
 func (m *Miner) handleStatusChange(username string, status models.StreamerStatus) {
-	if m.notifications == nil {
+	// notifMgr is nil only when the miner runs without a database (or startup
+	// construction itself failed) — never a race with startup, since the
+	// write-once manager is published before this handler's goroutine can
+	// even be reached (see initNotificationManager).
+	notifMgr := m.notificationManager()
+	if notifMgr == nil {
 		return
 	}
 
@@ -1457,9 +1518,9 @@ func (m *Miner) handleStatusChange(username string, status models.StreamerStatus
 	// notification, so a transient check failure never fires a false "went offline".
 	switch status {
 	case models.StatusOnline:
-		m.notifications.NotifyOnline(username)
+		notifMgr.NotifyOnline(username)
 	case models.StatusOffline:
-		m.notifications.NotifyOffline(username)
+		notifMgr.NotifyOffline(username)
 	}
 }
 
@@ -1504,8 +1565,8 @@ func (m *Miner) stop() {
 		_ = m.analyticsSvc.Close()
 	}
 
-	if m.notifications != nil {
-		m.notifications.Stop()
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		notifMgr.Stop()
 	}
 
 	// Close the DB only when the miner opened it itself (library use). In
@@ -1581,9 +1642,12 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // Protocol, SRAP, for any apply that removes a streamer). It gates on
 // beginApply (refusing with ErrShuttingDown before touching anything if the
 // miner is draining or already shut down), captures the streamer-deletion
-// coordinator ONCE for the whole apply (so a mid-apply rebuild — e.g. Discord
-// flipping on inside finishApply — can never affect an apply already in
-// flight), then resolves the intended streamer roster ONCE
+// coordinator ONCE for the whole apply (m.streamerLifecycle is built once at
+// startup and — since M4 removed finishApply's runtime create-or-rebuild
+// branch for the notifications manager — is never rebuilt mid-run in
+// production; the single capture here still gives the apply a stable,
+// self-consistent view even if a caller, e.g. a test, swaps the coordinator
+// concurrently), then resolves the intended streamer roster ONCE
 // (streamer.Manager.PlanReconcile: Twitch resolution unlocked, then a
 // read-locked, non-mutating decision pass) and reuses that SAME plan for
 // whichever path below applies, so Twitch is never queried twice for one
@@ -1649,7 +1713,6 @@ func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) e
 // since there is no removal in this apply to admit or commit.
 func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
-	oldDiscordEnabled := m.config.Discord.Enabled
 	settings.ApplyToConfig(m.config, s)
 	cfg := m.config
 	m.mu.Unlock()
@@ -1661,7 +1724,7 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.finishApply(ctx, coord, cfg, added, removed, changed, renamed, oldDiscordEnabled, false)
+	m.finishApply(ctx, coord, cfg, added, removed, changed, renamed, false)
 	return nil
 }
 
@@ -1704,7 +1767,6 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 	}
 
 	m.mu.Lock()
-	oldDiscordEnabled := m.config.Discord.Enabled
 	candidate := m.cloneConfigLocked()
 	configPath := m.configPath
 	m.mu.Unlock()
@@ -1755,7 +1817,7 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, true)
 	return nil
 }
 
@@ -1791,7 +1853,6 @@ func (m *Miner) abortAdmittedRemovals(coord *streamerlifecycle.Coordinator, logi
 // file, analytics, IRC, or PubSub on any failure.
 func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeSettings, plan *streamer.ReconcilePlan, plannedRenames []streamer.RenameEvent, removals []*models.Streamer, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
-	oldDiscordEnabled := m.config.Discord.Enabled
 	candidate := m.cloneConfigLocked()
 	configPath := m.configPath
 	analyticsSvc := m.analyticsSvc
@@ -1852,7 +1913,7 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, oldDiscordEnabled, true)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, true)
 	return nil
 }
 
@@ -1896,20 +1957,22 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 // rename (BKM-006 Corrective Pass 1, C4 — same locked section as the config
 // swap, so no auto-redeem poll can ever observe an orphaned old-login state
 // or a fresh budget window), wire the updated settings into every dependent
-// component, reconcile runtime capabilities (IRC/PubSub), and — only for a
-// non-rename apply (persisted=false) — persist config.json (non-fatal on
-// failure, exactly as ApplySettings always did before this pass; a
-// rename-carrying apply already persisted newConfig durably in
-// commitRenameTransaction before this ran, so persisted=true skips a
-// redundant save).
+// component, reconcile runtime capabilities (IRC/PubSub), reconcile the
+// write-once notifications manager's Discord config (M4 — see
+// notificationManager()/initNotificationManager; there is no longer a
+// runtime create-or-rebuild branch here, only an UpdateDiscordConfig call
+// against whatever the accessor returns), and — only for a non-rename apply
+// (persisted=false) — persist config.json (non-fatal on failure, exactly as
+// ApplySettings always did before this pass; a rename-carrying apply already
+// persisted newConfig durably in commitRenameTransaction before this ran, so
+// persisted=true skips a redundant save).
 //
 // ctx and coord are the SAME values the caller (applySettingsNoRename /
 // applySettingsWithRemovals / applySettingsWithRename) already resolved for
 // this one apply — passed through to applyStreamerDeletions rather than
-// re-read from m.runCtx/m.streamerLifecycle here, so a mid-function
-// coordinator rebuild (the buildStreamerLifecycle call below, when Discord
-// flips on) can never affect the CURRENT apply's own purge/reconcile step.
-func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, oldDiscordEnabled bool, persisted bool) {
+// re-read from m.runCtx/m.streamerLifecycle here, so this function never
+// second-guesses the caller's own resolution of either value.
+func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, persisted bool) {
 	m.mu.Lock()
 	m.config = newConfig
 	migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed)
@@ -1937,10 +2000,6 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	}
 
 	discordCfg := m.config.Discord
-	notifCfg := m.config.Notifications
-	notifUsername := m.config.Username
-	displayTZ := m.config.Logger.TimeZone
-	notifMgr := m.notifications
 	webServer := m.webServer
 	wsPool := m.wsPool
 	minuteWatcher := m.watcher
@@ -1948,6 +2007,14 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	riskCfg := m.config.PredictionRisk
 
 	m.mu.Unlock()
+
+	// Snapshot the write-once notifications manager AFTER releasing m.mu
+	// (never convert this into an in-lock read: the accessor itself only
+	// ever takes a brief RLock, but UpdateDiscordConfig below performs
+	// Discord Connect/Disconnect network I/O, which must never run while
+	// m.mu is held, or every other m.mu reader in the miner would be
+	// blocked on a Discord round trip).
+	notifMgr := m.notificationManager()
 
 	// Push the updated GLOBAL prediction risk gates to the auto-bet path outside
 	// the miner lock (SetRiskSettings takes the pool lock itself).
@@ -1999,43 +2066,21 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 			"oldLogin", r.OldLogin, "newLogin", r.NewLogin, "channelID", r.ChannelID)
 	}
 
+	// Reconcile the write-once manager's Discord settings (M4): the manager
+	// itself decides whether a reconnect/disconnect is actually needed
+	// (UpdateDiscordConfig's own idempotent CASE A-H reconciliation). A nil
+	// notifMgr means the miner runs without a database (or the one-time
+	// startup construction failed — there is no retry path for that short of
+	// restarting the process), so Discord simply cannot be turned on for this
+	// run and the web dashboard must never claim otherwise.
 	if notifMgr != nil {
 		if err := notifMgr.UpdateDiscordConfig(&discordCfg); err != nil {
 			slog.Error("Failed to update Discord config", "error", err)
 		}
-	} else if discordCfg.Enabled && !oldDiscordEnabled {
-		newNotifMgr, err := notifications.NewManager(&discordCfg, &notifCfg, m.db, m.streamers.Names(), notifUsername)
-		if err != nil {
-			slog.Error("Failed to create notification manager", "error", err)
-			events.Record(events.TypeModuleInitFailed, "", "notifications: "+err.Error())
-		} else {
-			m.mu.Lock()
-			m.notifications = newNotifMgr
-			m.mu.Unlock()
-
-			newNotifMgr.InitializePointsTracking(m.streamers.PointsMap())
-			newNotifMgr.SetDisplayLocation(resolveDisplayLocation(displayTZ))
-
-			if err := newNotifMgr.Start(context.Background()); err != nil {
-				slog.Error("Failed to start notification manager", "error", err)
-			}
-
-			if webServer != nil {
-				webServer.SetNotificationManager(newNotifMgr)
-			}
-
-			// The deletion coordinator was built at startup without a
-			// notifications manager (Discord was off then); rebuild it now that one
-			// exists so a later streamer removal also purges its notification
-			// rules and config-list membership. Safe here: the whole apply
-			// pipeline (this finishApply included) runs under coordinatorMu, the
-			// only reader of m.streamerLifecycle.
-			m.buildStreamerLifecycle()
-		}
 	}
 
 	if webServer != nil {
-		webServer.SetDiscordEnabled(discordCfg.Enabled)
+		webServer.SetDiscordEnabled(discordCfg.Enabled && notifMgr != nil)
 	}
 
 	if !persisted {

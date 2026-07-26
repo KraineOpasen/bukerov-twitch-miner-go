@@ -137,10 +137,14 @@ func (m *Miner) recordHealthTransition(prevLevel, newLevel connLevel, out connOu
 		return
 	}
 	// The watchdog only INVOKES the notification manager when it is present — the
-	// send at evaluateConnectionHealth is gated on m.notifications != nil. Record
-	// only that narrow fact (a request was made); the journal never claims an
-	// external alert was actually sent or delivered.
-	ev.NotificationRequested = ev.NotificationRequested && m.notifications != nil
+	// send at evaluateConnectionHealth is gated on the same accessor. Record only
+	// that narrow fact (a request was made); the journal never claims an external
+	// alert was actually sent or delivered. With the write-once manager (M4) this
+	// is only ever false when the miner runs without a database, or when
+	// NewManager itself failed at startup (initNotificationManager never
+	// publishes a manager in that case either) — Discord/push being disabled
+	// no longer implies a nil manager.
+	ev.NotificationRequested = ev.NotificationRequested && m.notificationManager() != nil
 	ev.SuppressedDuplicates = m.healthJournalSuppressed
 	m.healthJournalSuppressed = 0
 	m.healthJournal.Append(ev)

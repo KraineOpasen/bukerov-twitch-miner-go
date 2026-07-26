@@ -301,11 +301,14 @@ func (m *Miner) evaluateConnectionHealth(now time.Time, state *connHealthState) 
 	}
 
 	// Transition-only Discord notifications, performed outside any miner lock.
-	if tr.notifyLost && m.notifications != nil {
-		m.notifications.NotifyConnectionLost(out.lostDetail)
+	// Snapshotted once per tick via the shared accessor (I2) rather than two
+	// separate raw field reads.
+	notifMgr := m.notificationManager()
+	if tr.notifyLost && notifMgr != nil {
+		notifMgr.NotifyConnectionLost(out.lostDetail)
 	}
-	if tr.notifyRestored && m.notifications != nil {
-		m.notifications.NotifyConnectionRestored()
+	if tr.notifyRestored && notifMgr != nil {
+		notifMgr.NotifyConnectionRestored()
 	}
 
 	// Reflect the current level in the miner fields + dashboard banner, but only

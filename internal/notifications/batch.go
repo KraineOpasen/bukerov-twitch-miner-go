@@ -81,6 +81,34 @@ type Batcher struct {
 	groups map[string][]string
 	order  []string
 
+	// started is set to true, under mu, BEFORE Start does anything else: it is
+	// set FIRST, and only THEN — after mu is released — does Start either
+	// close done directly (disabled config, no loop to launch) or spawn the
+	// background loop goroutine (enabled config); it is not set "at the same
+	// moment" as either of those, just strictly before both. Stop consults it
+	// to decide whether there is anything to join: Stop is safe to call on a
+	// Batcher whose Start was never invoked (see TestBatcherStopFlushesPending
+	// — an enabled batcher driven purely through Add/Stop) precisely because
+	// it skips the join in that case rather than waiting on channels nothing
+	// will ever close.
+	started bool
+
+	// stopCh signals the background loop to exit WITHOUT performing its own
+	// flush. Stop always performs the final flush itself, AFTER joining the
+	// loop (see Stop's doc comment), so the loop's stopCh branch and Stop's
+	// own Flush can never run CONCURRENTLY and split one logical batch across
+	// two partial sends. ctx.Done() is the OTHER way the loop exits, and that
+	// path DOES flush from inside the loop, since a plain context
+	// cancellation with no explicit Stop call still needs a final flush on
+	// its way out. The two signals can legitimately race in production (e.g.
+	// the miner's shutdown cancels the run ctx around the same time
+	// Manager.Stop calls this Stop): if the loop happens to take the
+	// ctx.Done branch and flush first, Stop's own join simply waits for done
+	// to close (from EITHER branch) and then still calls Flush itself
+	// afterward — a harmless SECOND, sequential flush of an already-drained
+	// (now empty) buffer, never a concurrent one, because the join is what
+	// orders it strictly after the loop has already exited.
+	stopCh   chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
 }
@@ -93,15 +121,30 @@ func NewBatcher(name string, cfg BatchConfig, send sendFunc) *Batcher {
 		cfg:    cfg,
 		send:   send,
 		groups: make(map[string][]string),
+		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
 }
 
 // Start launches the background flush loop, which flushes accumulated events
-// every cfg.Interval and performs a final flush when ctx is cancelled. When
-// batching is disabled Start is a no-op (events are sent immediately by Add).
+// every cfg.Interval and exits either on ctx cancellation (performing its own
+// final flush) or on Stop's signal (stopCh — Stop performs the final flush
+// itself, AFTER joining, so the two can never race). When batching is
+// disabled Start is a no-op aside from immediately closing done (there is no
+// loop to join). Calling Start more than once is a no-op after the first
+// call: a second call would otherwise double-close done and panic, since
+// this repo's channel-close idiom is close-once.
 func (b *Batcher) Start(ctx context.Context) {
-	if !b.cfg.Enabled {
+	b.mu.Lock()
+	if b.started {
+		b.mu.Unlock()
+		return
+	}
+	b.started = true
+	enabled := b.cfg.Enabled
+	b.mu.Unlock()
+
+	if !enabled {
 		close(b.done)
 		return
 	}
@@ -115,10 +158,18 @@ func (b *Batcher) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				// Final flush on shutdown using a fresh, short-lived context
-				// since ctx is already cancelled.
+				// since ctx is already cancelled. Only reached when the loop
+				// exits via a plain ctx cancellation rather than an explicit
+				// Stop call (Stop signals stopCh instead — see below — and
+				// performs the final flush itself after joining).
 				flushCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				b.Flush(flushCtx)
 				cancel()
+				return
+			case <-b.stopCh:
+				// Stop() already signalled and is waiting to join before
+				// performing the final flush itself; exit WITHOUT flushing
+				// here so the two flushes can never race.
 				return
 			case <-ticker.C:
 				b.Flush(ctx)
@@ -183,12 +234,34 @@ func (b *Batcher) Flush(ctx context.Context) {
 	}
 }
 
-// Stop performs a final synchronous flush and waits for the background loop
-// (if any) to finish. It is safe to call multiple times.
+// Stop signals the background loop (if one was ever started) to exit, JOINS
+// it — bounded by ctx, never an unbounded wait, since Manager.Stop calls this
+// while holding discordLifecycleMu and a wedged loop must not wedge shutdown
+// forever — and only THEN performs the final flush itself, so it is provably
+// the LAST flush and can never race a concurrent loop-driven one (see
+// Start's stopCh branch). Safe to call multiple times: the second call finds
+// stopCh and done already closed, so it joins instantly and just re-flushes
+// an already-empty buffer. Safe to call when Start was never invoked (an
+// enabled batcher driven purely through Add/Flush): with no goroutine to
+// signal, the join is skipped entirely rather than blocking on channels
+// nothing will ever close.
 func (b *Batcher) Stop(ctx context.Context) {
 	b.stopOnce.Do(func() {
-		b.Flush(ctx)
+		close(b.stopCh)
 	})
+
+	b.mu.Lock()
+	started := b.started
+	b.mu.Unlock()
+
+	if started {
+		select {
+		case <-b.done:
+		case <-ctx.Done():
+		}
+	}
+
+	b.Flush(ctx)
 }
 
 // titleForGroup builds the message title for a group of events.
