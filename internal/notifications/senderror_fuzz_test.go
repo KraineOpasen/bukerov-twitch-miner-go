@@ -74,9 +74,27 @@ func FuzzSendErrorNeverLeaksSecret(f *testing.F) {
 	})
 }
 
+// expectedCategoryToken returns the safe, stage-derived failure-category
+// phrase that Error() (and everything textually derived from it) must still
+// contain, so a real operator diagnostic survives even though no secret
+// material does. Derived from se.Stage()/se.Class() rather than hardcoded so
+// this doesn't over-constrain the property across the fuzz corpus's inputs
+// (which all land on StageTransport today via newTransportError, but the
+// helper stays correct if that ever changes).
+func expectedCategoryToken(se *SendError) string {
+	switch se.Stage() {
+	case StageResponse:
+		return "endpoint returned HTTP"
+	case StageRequest:
+		return "request could not be built"
+	default:
+		return string(se.Class()) + " error"
+	}
+}
+
 // checkSendErrorNeverLeaks asserts every rendering of se is free of secret,
 // its query/path-escaped forms, and the original urlStr, while still being a
-// non-empty, provider-naming diagnostic.
+// non-empty, provider- and failure-category-naming diagnostic.
 func checkSendErrorNeverLeaks(t *testing.T, se *SendError, urlStr, secret string) {
 	t.Helper()
 
@@ -85,13 +103,26 @@ func checkSendErrorNeverLeaks(t *testing.T, se *SendError, urlStr, secret string
 		forbidden = append(forbidden, urlStr)
 	}
 
-	outputs := []string{
+	// Textual renderings that go straight through Error()/GoString(): these
+	// must retain the safe failure-category phrase, not just be free of
+	// secrets. slog's structured output (checked separately below) renders
+	// stage/class as separate key=value attrs rather than this exact phrase,
+	// so it is not held to the same substring check ("where applicable").
+	category := expectedCategoryToken(se)
+	textualOutputs := []string{
 		se.Error(),
 		fmt.Sprintf("%v", se),
 		fmt.Sprintf(verbPlusV, se),
 		fmt.Sprintf(verbHashV, se),
 		fmt.Sprintf("%q", se),
 	}
+	for _, out := range textualOutputs {
+		if !strings.Contains(out, category) {
+			t.Fatalf("output missing expected failure-category token %q: %s", category, out)
+		}
+	}
+
+	outputs := append([]string(nil), textualOutputs...)
 
 	// Drop the timestamp attribute: it is real-clock noise (digits/letters
 	// that can coincidentally collide with a fuzzed secret) with nothing to

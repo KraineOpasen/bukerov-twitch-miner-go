@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -29,12 +30,22 @@ var allSentinels = []string{
 	sentinelWebhookPath, sentinelWebhookQuery, sentinelWebhookFragment,
 }
 
-// assertNoSentinelInString fails the test if s contains any sentinel.
+// assertNoSentinelInString fails the test if s contains any sentinel, in its
+// raw form or its url.QueryEscape/url.PathEscape encoded form (a naive filter
+// that only looks for the plaintext value is defeated by re-encoding — see
+// internal/notifications' assertNoSentinel, which this mirrors at the API
+// response boundary).
 func assertNoSentinelInString(t *testing.T, s string) {
 	t.Helper()
 	for _, sentinel := range allSentinels {
 		if strings.Contains(s, sentinel) {
-			t.Errorf("leaked sentinel %q in: %s", sentinel, s)
+			t.Errorf("leaked raw sentinel %q in: %s", sentinel, s)
+		}
+		if q := url.QueryEscape(sentinel); strings.Contains(s, q) {
+			t.Errorf("leaked query-escaped sentinel %q (as %q) in: %s", sentinel, q, s)
+		}
+		if p := url.PathEscape(sentinel); strings.Contains(s, p) {
+			t.Errorf("leaked path-escaped sentinel %q (as %q) in: %s", sentinel, p, s)
 		}
 	}
 }
