@@ -554,6 +554,14 @@ func (c *Coordinator) Reconcile(ctx context.Context) (int, error) {
 // and fence remain, so the re-added streamer stays inert rather than inheriting
 // stale history). It does NOT lift the fence — the caller decides that once it
 // knows the purge succeeded.
+//
+// CALLER CONTRACT: only ever call this for a login being (re-)ADDED, never
+// for one that is currently tracked/configured. HasPending (which this uses)
+// now also reports a merely-PREPARED row (streamer_deletion_admissions) —
+// intent recorded, not yet confirmed committed — so calling this for a
+// login whose prepared row leaked from an aborted or still-uncommitted apply
+// would tombstone and purge a LIVE streamer's history. Today's only caller
+// (applyStreamerDeletions' added-loop) satisfies this by construction.
 func (c *Coordinator) ReconcileLogin(ctx context.Context, login string) (bool, error) {
 	login = canonicalLogin(login)
 	if login == "" {
