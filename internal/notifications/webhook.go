@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // WebhookProvider delivers notifications as a JSON POST to an arbitrary URL. It
@@ -55,21 +54,29 @@ func (p *WebhookProvider) Send(ctx context.Context, msg Message) error {
 		return fmt.Errorf("failed to encode webhook payload: %w", err)
 	}
 
+	// p.url is itself the secret here (it may carry userinfo, a secret path,
+	// query, or fragment) — it must never leave this function via a returned
+	// error. Request-build and transport failures below are reported through
+	// SendError, which discards the underlying *url.Error (and therefore this
+	// URL) entirely — see senderror.go's package doc comment.
+	const op = "send"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("failed to build webhook request: %w", err)
+		return newRequestError(p.Name(), op)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook request failed: %w", err)
+		return newTransportError(p.Name(), op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		// The response body is remote/attacker-controlled and must never enter
+		// an error, log, or API response — drain and discard it.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return newResponseError(p.Name(), op, resp.StatusCode)
 	}
 
 	return nil

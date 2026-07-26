@@ -3,6 +3,7 @@ package notifications
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -253,8 +254,10 @@ func (m *Manager) dispatchPush(eventType NotificationType, group, line string) {
 		batcher := b
 		go func() {
 			if err := batcher.Add(context.Background(), ev); err != nil {
+				// safeSendErrorAttr is the only way a send error may be logged
+				// here — see the identical rationale at batch.go's Flush.
 				slog.Error("Failed to dispatch push notification",
-					"provider", batcher.name, "type", eventType, "error", err)
+					"provider", batcher.name, "type", eventType, safeSendErrorAttr(err))
 			}
 		}()
 	}
@@ -270,11 +273,39 @@ func (m *Manager) NotifyEvent(eventType NotificationType, group, line string) {
 }
 
 // ProviderTestResult reports the outcome of a test notification for a single
-// provider.
+// provider. Error/Stage/Class/Status are always a safe, already-classified
+// summary — never a raw error string — because this DTO crosses the JSON API
+// boundary in internal/web/handlers_notifications.go, an endpoint reachable
+// without authentication whenever Basic Auth is unconfigured. See
+// newProviderTestFailure, the only place a failed result is built.
 type ProviderTestResult struct {
 	Provider string `json:"provider"`
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
+	Stage    string `json:"stage,omitempty"`
+	Class    string `json:"class,omitempty"`
+	Status   int    `json:"status,omitempty"`
+}
+
+// newProviderTestFailure builds a failed ProviderTestResult from a provider
+// Send error WITHOUT ever calling err.Error() on anything but a *SendError:
+// only a *SendError's already-classified, safe fields are copied out. A
+// provider that returns something else (a regression — every push provider
+// and the Discord path must fail closed here) is reduced to a fixed message;
+// its raw text is never read, not even for an instant, since the DTO
+// immediately crosses the JSON API boundary.
+func newProviderTestFailure(name string, err error) ProviderTestResult {
+	var se *SendError
+	if errors.As(err, &se) {
+		return ProviderTestResult{
+			Provider: name,
+			Error:    se.Error(),
+			Stage:    string(se.Stage()),
+			Class:    string(se.Class()),
+			Status:   se.StatusCode(),
+		}
+	}
+	return ProviderTestResult{Provider: name, Error: "delivery failed"}
 }
 
 // TestAllProviders sends a test notification to every enabled provider (Discord
@@ -296,8 +327,12 @@ func (m *Manager) TestAllProviders(ctx context.Context) []ProviderTestResult {
 		res := ProviderTestResult{Provider: "discord", OK: true}
 		cfg, err := m.repo.GetConfig()
 		if err != nil {
+			// A SQLite/filesystem error here is not M5/M6 material, but it is
+			// still not for the network response: log the detail server-side
+			// and return a static message.
+			slog.Error("Failed to load notification config for provider test", "error", err)
 			res.OK = false
-			res.Error = "failed to load config: " + err.Error()
+			res.Error = "failed to load config"
 		} else {
 			channelID := firstNonEmpty(cfg.SystemChannelID, cfg.OnlineChannelID,
 				cfg.OfflineChannelID, cfg.MentionsChannelID, cfg.PointsChannelID)
@@ -311,8 +346,10 @@ func (m *Manager) TestAllProviders(ctx context.Context) []ProviderTestResult {
 				ChannelID: channelID,
 				Color:     ColorConnectionRestored,
 			}); err != nil {
-				res.OK = false
-				res.Error = err.Error()
+				// discordgo errors may embed discord.com URLs; route through the
+				// same fail-closed helper as the push providers rather than
+				// trusting err.Error() (accepted diagnostic reduction).
+				res = newProviderTestFailure("discord", err)
 			}
 		}
 		results = append(results, res)
@@ -325,8 +362,7 @@ func (m *Manager) TestAllProviders(ctx context.Context) []ProviderTestResult {
 			Title: testTitle,
 			Body:  testBody,
 		}); err != nil {
-			res.OK = false
-			res.Error = err.Error()
+			res = newProviderTestFailure(p.Name(), err)
 		}
 		results = append(results, res)
 	}

@@ -55,22 +55,32 @@ func (p *GotifyProvider) Send(ctx context.Context, msg Message) error {
 		return fmt.Errorf("failed to encode gotify payload: %w", err)
 	}
 
+	// The token intentionally stays in the query string here — this is
+	// Gotify's documented authentication mechanism (see NewGotifyProviderFromEnv)
+	// and a test asserts the outgoing request still carries it. It must never
+	// leave this function via a returned error: request-build and transport
+	// failures below are reported through SendError, which discards the
+	// underlying *url.Error (and therefore this URL) entirely — see
+	// senderror.go's package doc comment.
 	url := fmt.Sprintf("%s/message?token=%s", p.serverURL, p.token)
+	const op = "send"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("failed to build gotify request: %w", err)
+		return newRequestError(p.Name(), op)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("gotify request failed: %w", err)
+		return newTransportError(p.Name(), op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("gotify returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		// The response body is remote/attacker-controlled and must never enter
+		// an error, log, or API response — drain and discard it.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return newResponseError(p.Name(), op, resp.StatusCode)
 	}
 
 	return nil

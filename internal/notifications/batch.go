@@ -172,8 +172,12 @@ func (b *Batcher) Flush(ctx context.Context) {
 				Body:  strings.Join(chunk, "\n"),
 			}
 			if err := b.send(ctx, msg); err != nil {
+				// safeSendErrorAttr is the only way a send error may be logged
+				// here: b.send is always a provider's Send (see NewBatcher's
+				// caller, manager.go), and a provider must never have its raw
+				// error text (which may be a regressed *url.Error) printed.
 				slog.Error("Failed to flush notification batch",
-					"provider", b.name, "group", group, "error", err)
+					"provider", b.name, "group", group, safeSendErrorAttr(err))
 			}
 		}
 	}
