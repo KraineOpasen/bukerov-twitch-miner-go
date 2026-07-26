@@ -142,7 +142,7 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 		Username: "beta",
 		Settings: &settings.StreamerSettingsConfig{DisableWatch: &disableWatch, ClaimDrops: &claimDrops},
 	})
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	beta := mgr.Get("beta")
 	if beta == nil {
@@ -181,7 +181,7 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 		}
 	}
 	rs2.Streamers = keep
-	m.ApplySettings(rs2)
+	_ = m.ApplySettings(context.Background(), rs2)
 
 	// Watcher leg (remove): the next tick drops beta from the loop's roster.
 	ctx2, cancel2 := context.WithCancel(context.Background())

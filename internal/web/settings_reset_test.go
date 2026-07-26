@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,10 @@ func TestSettingsResetKeepsHealthGateEnabled(t *testing.T) {
 		settingsProvider: resetSettingsProvider{streamers: []config.StreamerConfig{
 			{Username: "alice"}, {Username: "bob"},
 		}},
-		onSettingsUpdate: func(rt settings.RuntimeSettings) { applied = append(applied, rt) },
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
+			applied = append(applied, rt)
+			return nil
+		},
 	}
 
 	rec := httptest.NewRecorder()

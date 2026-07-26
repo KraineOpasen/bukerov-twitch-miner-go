@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func (f *fakeFollowedProvider) FollowedChannels() ([]twitch.FollowedChannel, boo
 
 func (f *fakeFollowedProvider) TrackedUsernames() []string { return f.tracked }
 
-func (f *fakeFollowedProvider) ImportStreamers(logins []string) (int, error) {
+func (f *fakeFollowedProvider) ImportStreamers(ctx context.Context, logins []string) (int, error) {
 	f.importedWith = logins
 	// Mirror the real dedup contract: only logins not already tracked count.
 	tracked := map[string]bool{}

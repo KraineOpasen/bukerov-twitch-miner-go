@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
@@ -43,7 +44,7 @@ func TestApplySettings_Rename_FailClosedOnAnalyticsConflict_BaselineC2(t *testin
 	m.analyticsSvc = svc
 
 	client.set("c2new", "id-c2")
-	m.ApplySettings(renameRuntimeStreamers(m, "c2old", "c2new"))
+	_ = m.ApplySettings(context.Background(), renameRuntimeStreamers(m, "c2old", "c2new"))
 
 	if m.streamers.Get("c2old") == nil {
 		t.Error("runtime was renamed away from c2old even though the durable analytics migration failed (not fail-closed)")

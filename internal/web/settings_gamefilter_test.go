@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,7 +22,10 @@ func gameFilterServer(applied *[]settings.RuntimeSettings) *Server {
 	}
 	return &Server{
 		settingsProvider: &fakeSettingsProvider{rt: current},
-		onSettingsUpdate: func(rt settings.RuntimeSettings) { *applied = append(*applied, rt) },
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
+			*applied = append(*applied, rt)
+			return nil
+		},
 	}
 }
 
@@ -110,11 +114,12 @@ func TestGameFilterAbsentKeepThroughBuildRuntimeSettings(t *testing.T) {
 		settingsProvider: &funcSettingsProvider{get: func() settings.RuntimeSettings {
 			return settings.BuildRuntimeSettings(&cfg)
 		}},
-		onSettingsUpdate: func(rt settings.RuntimeSettings) {
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
 			settings.ApplyToConfig(&cfg, rt)
 			if err := config.SaveConfig(cfgPath, &cfg); err != nil {
 				t.Fatalf("SaveConfig: %v", err)
 			}
+			return nil
 		},
 	}
 

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,8 +39,9 @@ func mergeTestServer(applied *[]settings.RuntimeSettings) *Server {
 
 	return &Server{
 		settingsProvider: &fakeSettingsProvider{rt: current},
-		onSettingsUpdate: func(rt settings.RuntimeSettings) {
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
 			*applied = append(*applied, rt)
+			return nil
 		},
 	}
 }
@@ -226,12 +228,13 @@ func TestSettingsPostPartialRoundTripThroughConfigFile(t *testing.T) {
 		settingsProvider: &funcSettingsProvider{get: func() settings.RuntimeSettings {
 			return settings.BuildRuntimeSettings(&cfg)
 		}},
-		onSettingsUpdate: func(rt settings.RuntimeSettings) {
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
 			settings.ApplyToConfig(&cfg, rt)
 			if err := config.SaveConfig(cfgPath, &cfg); err != nil {
 				t.Fatalf("SaveConfig: %v", err)
 			}
 			afterApply = settings.BuildRuntimeSettings(&cfg)
+			return nil
 		},
 	}
 
@@ -309,8 +312,9 @@ func TestSettingsPostInvalidJSONRejected(t *testing.T) {
 // applying a zero-seeded (i.e. wiping) body.
 func TestSettingsPostWithoutProviderUnavailable(t *testing.T) {
 	var applied []settings.RuntimeSettings
-	srv := &Server{onSettingsUpdate: func(rt settings.RuntimeSettings) {
+	srv := &Server{onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
 		applied = append(applied, rt)
+		return nil
 	}}
 
 	rec := postSettings(t, srv, `{}`)

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
@@ -17,7 +18,7 @@ func TestApplySettings_NonRenameApply_BackfillsChannelID_C1(t *testing.T) {
 
 	rs := m.GetRuntimeSettings()
 	rs.Streamers = append(rs.Streamers, settings.StreamerConfig{Username: "freshadd"})
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	if len(m.config.Streamers) != 1 {
 		t.Fatalf("cfg.Streamers = %d entries, want 1", len(m.config.Streamers))

@@ -184,7 +184,7 @@ func TestApplySettingsCapabilityTogglesReconcileExisting(t *testing.T) {
 
 	// Initial apply: defaults (FollowRaid/MakePredictions/ClaimMoments on,
 	// CommunityGoals off).
-	m.ApplySettings(m.GetRuntimeSettings())
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings())
 
 	for _, tt := range []pubsub.TopicType{pubsub.TopicVideoPlaybackByID, pubsub.TopicRaid, pubsub.TopicPredictionsChannel, pubsub.TopicCommunityMomentsChannel} {
 		if !topics.has(channelTopic(tt, "alpha")) {
@@ -203,7 +203,7 @@ func TestApplySettingsCapabilityTogglesReconcileExisting(t *testing.T) {
 		sc.CommunityGoals = boolPtr(true)
 		sc.ClaimMoments = boolPtr(false)
 	})
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	if topics.has(channelTopic(pubsub.TopicRaid, "alpha")) {
 		t.Fatal("raid topic still present after FollowRaid=false")
@@ -228,7 +228,7 @@ func TestApplySettingsCapabilityTogglesReconcileExisting(t *testing.T) {
 	}
 
 	// Repeated identical apply: no new LISTEN transitions, nothing lost.
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 	if got := topics.listenCount(channelTopic(pubsub.TopicCommunityPointsChannel, "alpha")); got != 1 {
 		t.Fatalf("identical re-apply produced a duplicate LISTEN: transitions = %d", got)
 	}
@@ -261,14 +261,14 @@ func TestApplySettingsCapabilityFlagCycles(t *testing.T) {
 
 			rs := m.GetRuntimeSettings()
 			overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { tc.set(sc, false) })
-			m.ApplySettings(rs)
+			_ = m.ApplySettings(context.Background(), rs)
 			if topics.has(topic) {
 				t.Fatalf("%s=false: topic present", tc.name)
 			}
 
 			rs = m.GetRuntimeSettings()
 			overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { tc.set(sc, true) })
-			m.ApplySettings(rs)
+			_ = m.ApplySettings(context.Background(), rs)
 			if !topics.has(topic) {
 				t.Fatalf("%s=true: topic missing", tc.name)
 			}
@@ -278,7 +278,7 @@ func TestApplySettingsCapabilityFlagCycles(t *testing.T) {
 
 			rs = m.GetRuntimeSettings()
 			overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { tc.set(sc, false) })
-			m.ApplySettings(rs)
+			_ = m.ApplySettings(context.Background(), rs)
 			if topics.has(topic) {
 				t.Fatalf("%s=false (again): topic present", tc.name)
 			}
@@ -301,12 +301,12 @@ func TestApplySettingsPartialFailureRetriesOnIdenticalApply(t *testing.T) {
 	// attempt fails.
 	rs := m.GetRuntimeSettings()
 	overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { sc.FollowRaid = boolPtr(false) })
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	topics.setFailOnce(raid, context.DeadlineExceeded)
 	rs = m.GetRuntimeSettings()
 	overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { sc.FollowRaid = boolPtr(true) })
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	if topics.has(raid) {
 		t.Fatal("setup: first raid subscription attempt should have failed")
@@ -325,7 +325,7 @@ func TestApplySettingsPartialFailureRetriesOnIdenticalApply(t *testing.T) {
 	}
 
 	// Identical second apply heals the drift.
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 	if !topics.has(raid) {
 		t.Fatal("identical re-apply did not retry the failed subscription")
 	}
@@ -340,7 +340,7 @@ func TestApplySettingsPartialFailureRetriesOnIdenticalApply(t *testing.T) {
 // streamer.
 func TestApplySettingsAddRemoveAndTogglesOneApply(t *testing.T) {
 	m, topics, chatRec := newCapabilityMiner(t, "alpha", "bravo", "charlie")
-	m.ApplySettings(m.GetRuntimeSettings()) // seed the runtime topic state
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings()) // seed the runtime topic state
 
 	if !topics.has(channelTopic(pubsub.TopicVideoPlaybackByID, "bravo")) {
 		t.Fatal("setup: bravo playback topic missing")
@@ -358,7 +358,7 @@ func TestApplySettingsAddRemoveAndTogglesOneApply(t *testing.T) {
 		sc.FollowRaid = boolPtr(false)
 		sc.CommunityGoals = boolPtr(true)
 	})
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	// Roster.
 	if m.streamers.Get("bravo") != nil {
@@ -412,7 +412,7 @@ func TestApplySettingsImmediateChatReconcile(t *testing.T) {
 	rs := m.GetRuntimeSettings()
 	chatAlways := string(models.ChatAlways)
 	overrideStreamer(&rs, "alpha", func(sc *settings.StreamerSettingsConfig) { sc.Chat = &chatAlways })
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	if chatRec.toggleCount("alpha") == 0 {
 		t.Fatal("chat mode change was not reconciled immediately within ApplySettings")
@@ -424,7 +424,7 @@ func TestApplySettingsImmediateChatReconcile(t *testing.T) {
 	// Repeated identical apply stays idempotent (ToggleChat is idempotent by
 	// contract; here we just prove it is invoked each apply, never skipped).
 	before := chatRec.toggleCount("alpha")
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 	if chatRec.toggleCount("alpha") <= before {
 		t.Fatal("identical re-apply skipped the chat reconciliation sweep")
 	}
@@ -461,9 +461,9 @@ func TestApplySettingsRuntimeConcurrentStorm(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 15; i++ {
 				if (g+i)%2 == 0 {
-					m.ApplySettings(rsOn)
+					_ = m.ApplySettings(context.Background(), rsOn)
 				} else {
-					m.ApplySettings(rsOff)
+					_ = m.ApplySettings(context.Background(), rsOff)
 				}
 			}
 		}(g)
@@ -484,14 +484,14 @@ func TestApplySettingsRuntimeConcurrentStorm(t *testing.T) {
 	wg.Wait()
 
 	// Converge deterministically and assert the final desired state.
-	m.ApplySettings(rsOff)
+	_ = m.ApplySettings(context.Background(), rsOff)
 	if topics.has(channelTopic(pubsub.TopicRaid, "alpha")) {
 		t.Fatal("raid topic present after final FollowRaid=false")
 	}
 	if !topics.has(channelTopic(pubsub.TopicVideoPlaybackByID, "alpha")) {
 		t.Fatal("playback topic lost during the storm")
 	}
-	m.ApplySettings(rsOn)
+	_ = m.ApplySettings(context.Background(), rsOn)
 	if !topics.has(channelTopic(pubsub.TopicRaid, "alpha")) {
 		t.Fatal("raid topic missing after final FollowRaid=true")
 	}

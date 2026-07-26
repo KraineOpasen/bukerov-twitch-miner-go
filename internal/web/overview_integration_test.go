@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -80,9 +81,10 @@ func newOverviewTestServer(t *testing.T) (*Server, *models.Streamer, *bool) {
 		DefaultSettings: settings.StreamerSettingsToDTO(models.DefaultStreamerSettings()),
 	}}
 	srv.SetSettingsProvider(sp)
-	srv.SetSettingsUpdateCallback(func(rt settings.RuntimeSettings) {
+	srv.SetSettingsUpdateCallback(func(ctx context.Context, rt settings.RuntimeSettings) error {
 		*applied = true
 		sp.rt = rt
+		return nil
 	})
 
 	return srv, online, applied

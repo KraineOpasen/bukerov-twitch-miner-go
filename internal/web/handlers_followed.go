@@ -115,7 +115,7 @@ func (s *Server) handleAPIFollowedImport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	added, err := provider.ImportStreamers(req.Logins)
+	added, err := provider.ImportStreamers(r.Context(), req.Logins)
 	if err != nil {
 		slog.Error("Failed to import followed channels", "error", err)
 		writeInternalError(w, "Failed to import channels")

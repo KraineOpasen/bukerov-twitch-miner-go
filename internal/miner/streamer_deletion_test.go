@@ -1,14 +1,18 @@
 package miner
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
 
@@ -72,7 +76,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 			t.Fatalf("seed watch-time %s: %v", s, err)
 		}
 	}
-	m.ApplySettings(m.GetRuntimeSettings()) // seed runtime topic state
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings()) // seed runtime topic state
 
 	// Remove the victim from the roster.
 	rs := m.GetRuntimeSettings()
@@ -83,7 +87,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 		}
 	}
 	rs.Streamers = keepList
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	// Roster gone.
 	if m.streamers.Get(victim) != nil {
@@ -111,7 +115,7 @@ func TestApplySettingsRemovalPurgesPersistedState(t *testing.T) {
 	// Re-add the same login: fence lifted, records fresh history.
 	rs2 := m.GetRuntimeSettings()
 	rs2.Streamers = append(rs2.Streamers, settings.StreamerConfig{Username: victim})
-	m.ApplySettings(rs2)
+	_ = m.ApplySettings(context.Background(), rs2)
 	if m.streamers.Get(victim) == nil {
 		t.Fatal("re-added streamer missing from roster")
 	}
@@ -157,7 +161,7 @@ func TestRemovalPurgesNotificationRowsWithoutLiveManager(t *testing.T) {
 			t.Fatalf("seed rule %s: %v", s, err)
 		}
 	}
-	m.ApplySettings(m.GetRuntimeSettings())
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings())
 
 	// Remove the victim.
 	rs := m.GetRuntimeSettings()
@@ -168,7 +172,7 @@ func TestRemovalPurgesNotificationRowsWithoutLiveManager(t *testing.T) {
 		}
 	}
 	rs.Streamers = keepList
-	m.ApplySettings(rs)
+	_ = m.ApplySettings(context.Background(), rs)
 
 	rules, _ := notifRepo.GetPointRules()
 	victimRule, keepRule := false, false
@@ -239,5 +243,66 @@ func TestStartupReconcilesDurablePendingDeletion(t *testing.T) {
 	}
 	if cnt != 0 {
 		t.Error("durable marker not cleared after successful startup reconciliation")
+	}
+}
+
+// TestArbitrationKeepFuncCanonicalizesMixedCaseUsername (M1 QA follow-up F4)
+// proves arbitrationKeepFunc's config-side lookup canonicalizes the SAME way
+// AdmitRemovals/listAdmissions canonicalize a prepared row's login (ToLower +
+// TrimSpace): a config entry with a MIXED-CASE Username must still be found
+// for a prepared admissions row recorded under its (already-canonical)
+// lowercase login — losing that canonicalization would make arbitration
+// treat a still-configured, mixed-case-named streamer as absent and wrongly
+// PROMOTE (and then purge) it instead of ABORTing the stale prepared row.
+func TestArbitrationKeepFuncCanonicalizesMixedCaseUsername(t *testing.T) {
+	const mixedCaseUsername = "MixedCase_M1F4"
+	const canonicalLogin = "mixedcase_m1f4" // strings.ToLower(mixedCaseUsername)
+	const channelID = "chan-f4mixedcase"
+
+	dbPath := filepath.Join(t.TempDir(), "miner.db")
+	db := openRawMinerDB(t, dbPath)
+	an, err := analytics.NewSQLiteRepository(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	coord, err := streamerlifecycle.New(db, []streamerlifecycle.Purger{an}, []streamerlifecycle.Fencer{an}, nil)
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
+	if err := an.RecordPoints(canonicalLogin, 100, "WATCH"); err != nil {
+		t.Fatalf("seed points: %v", err)
+	}
+	// AdmitRemovals itself canonicalizes the login it stores — seed the
+	// admissions row directly under the ALREADY-canonical form, matching
+	// what a real admission would have written.
+	if err := coord.AdmitRemovals(context.Background(), []streamerlifecycle.Removal{
+		{ChannelID: channelID, Login: mixedCaseUsername}, // AdmitRemovals lowercases this itself
+	}); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+
+	m := &Miner{
+		config: &config.Config{Streamers: []config.StreamerConfig{
+			{Username: mixedCaseUsername, ChannelID: channelID}, // MIXED CASE, as a real config.json entry would be
+		}},
+		streamerLifecycle: coord,
+	}
+	m.reconcilePendingStreamerDeletions()
+
+	var admissions, pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM streamer_deletion_admissions`).Scan(&admissions); err != nil {
+		t.Fatalf("count admissions: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pending_streamer_deletions`).Scan(&pending); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if admissions != 0 {
+		t.Errorf("admissions=%d, want 0 (the still-configured mixed-case streamer must be ABORTED, not left prepared)", admissions)
+	}
+	if pending != 0 {
+		t.Errorf("pending=%d, want 0 (a still-configured streamer must never be PROMOTED to purge, even under a mixed-case Username)", pending)
+	}
+	if data, _ := an.GetStreamerData(canonicalLogin); len(data.Series) == 0 {
+		t.Error("still-configured mixed-case streamer's history was purged — arbitrationKeepFunc failed to canonicalize the config Username, wrongly treating it as absent")
 	}
 }

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,7 +85,7 @@ func TestApplySettingsWithRename_SaveConfigFailure_NothingRenamed_C2B(t *testing
 	breakConfigPathForNextSave(t, configPath)
 
 	client.set("c2bnew", "id-c2b")
-	if err := m.applySettings(renameRuntimeStreamers(m, "c2bold", "c2bnew")); err == nil {
+	if err := m.applySettings(context.Background(), renameRuntimeStreamers(m, "c2bold", "c2bnew")); err == nil {
 		t.Fatal("expected the rename transaction to fail when SaveConfig fails")
 	}
 
@@ -176,7 +177,7 @@ func TestApplySettingsWithRename_MultiRenameAnalyticsFailure_CompensatesEarlierC
 		}
 	}
 
-	if err := m.applySettings(rs); err == nil {
+	if err := m.applySettings(context.Background(), rs); err == nil {
 		t.Fatal("expected the batch to fail closed on the second rename's analytics collision")
 	}
 
@@ -243,7 +244,7 @@ func TestApplySettingsWithRename_Success_EndToEnd_C2D(t *testing.T) {
 	m.configPath = configPath
 
 	// Establish the initial topic set (mirrors TestApplySettings_Rename_PubSubZeroChurn).
-	m.ApplySettings(m.GetRuntimeSettings())
+	_ = m.ApplySettings(context.Background(), m.GetRuntimeSettings())
 	channelTopics := []pubsub.TopicType{
 		pubsub.TopicVideoPlaybackByID, pubsub.TopicRaid, pubsub.TopicPredictionsChannel, pubsub.TopicCommunityMomentsChannel,
 	}
@@ -259,7 +260,7 @@ func TestApplySettingsWithRename_Success_EndToEnd_C2D(t *testing.T) {
 	}
 
 	client.set("c2dnew", "id-c2d")
-	if err := m.applySettings(renameRuntimeStreamers(m, "c2dold", "c2dnew")); err != nil {
+	if err := m.applySettings(context.Background(), renameRuntimeStreamers(m, "c2dold", "c2dnew")); err != nil {
 		t.Fatalf("rename transaction failed: %v", err)
 	}
 
@@ -321,7 +322,7 @@ func TestApplySettingsWithRename_Success_EndToEnd_C2D(t *testing.T) {
 	// Repeat = no-op: applying the SAME (already-renamed) settings again must
 	// not error, must not touch analytics again, and must not add a second
 	// IRC leave.
-	if err := m.applySettings(renameRuntimeStreamers(m, "c2dold", "c2dnew")); err != nil {
+	if err := m.applySettings(context.Background(), renameRuntimeStreamers(m, "c2dold", "c2dnew")); err != nil {
 		t.Fatalf("repeated identical apply failed: %v", err)
 	}
 	if got := chatRec.leaveCount("c2dold"); got != 1 {
