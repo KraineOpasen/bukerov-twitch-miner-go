@@ -52,9 +52,13 @@ var ErrShuttingDown = settings.ErrShuttingDown
 // real multi-second wait. Each bounds a WithTimeout(WithoutCancel(reqCtx), …)
 // derived context (see applySettingsWithRemovals/applySettingsWithRename):
 // WithoutCancel so a hard-closed HTTP connection (web.Server.Stop is
-// http.Server.Close, not a graceful Shutdown) cannot abort a sequence that is
-// at or past its commit point; WithTimeout so a wedged SQLite/coordinatorMu
-// fails bounded rather than wedging every future settings apply forever.
+// http.Server.Close, not a graceful Shutdown) cannot abort the bounded
+// commit sequence: cancellation is only ever OBSERVED at the explicit
+// pre-commit gates (the entry check and the last check after admission) —
+// past that final gate the sequence runs to completion even if the request
+// context is cancelled while config.SaveConfig is still writing. WithTimeout
+// so a wedged SQLite/coordinatorMu fails bounded rather than wedging every
+// future settings apply forever.
 var (
 	// admissionBudget bounds AdmitRemovals/AbortAdmission (the PREPARE phase,
 	// before any visible mutation).
@@ -1599,8 +1603,13 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 //     config is NEVER mutated until durable persistence succeeds.
 //
 // The whole sequence is serialized by coordinatorMu (lock order: coordinatorMu
-// -> m.mu -> streamer.Manager.mu -> models.Streamer.mu; no Twitch/DB/file I/O
-// ever runs under m.mu, manager.mu, or streamer.mu).
+// -> m.mu -> streamer.Manager.mu -> models.Streamer.mu). No Twitch/network
+// I/O and no SQLite transaction ever runs under m.mu, manager.mu, or
+// streamer.mu. Config-file writes are the one deliberate exception (M1):
+// config.SaveConfig runs UNDER m.mu — in SRAP's commit step and in the other
+// config writers alike — so durable config persistence and the publication
+// of m.config form one serialized commit sequence with no lost-update window
+// between them.
 func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) error {
 	if !m.beginApply() {
 		return ErrShuttingDown
@@ -1671,7 +1680,13 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 //     function's config/runtime discipline still applies unchanged.
 //  3. A LAST pre-commit cancellation check on the ORIGINAL ctx (critA never
 //     observes cancellation by design): cancelled -> AbortAdmission + return,
-//     zero mutation.
+//     zero mutation. This check is the CANCELLATION LINEARIZATION POINT:
+//     cancellation observed at or before it aborts with zero visible
+//     mutation; cancellation arriving after it — including while SaveConfig
+//     is running in step 4 — is never observed again, and the bounded
+//     sequence runs to completion. (The atomic rename in step 4 is the
+//     durability commit point for FAILURE semantics, not a cancellation
+//     boundary.)
 //  4. THE COMMIT POINT: under m.mu, config.SaveConfig(candidate); on success
 //     publish m.config = candidate IN THE SAME critical section, closing the
 //     lost-update window against the other four config-writers (which all
