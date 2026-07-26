@@ -11,11 +11,16 @@ import (
 
 // buildStreamerLifecycle constructs the persisted-deletion coordinator over the
 // login-keyed stores that currently exist (analytics, notifications, watch-time).
-// Each store is BOTH a purger and a fencer. Called once during initialize after
-// those stores are created; a nil subsystem is simply not covered (e.g. no
-// notifications manager means there are no notification rows to purge). Leaves
-// m.streamerLifecycle nil when no persisted store exists, in which case removal
-// still tears down runtime state — there is just nothing persisted to purge.
+// Each store is BOTH a purger and a fencer. Called ONCE, from setupComponents,
+// after those stores (and, since M4, the write-once notifications manager) are
+// created; a nil subsystem is simply not covered (e.g. no notifications manager
+// means there are no notification rows to purge). Before M4 this was also
+// re-invoked at runtime, from finishApply, whenever Discord first flipped on —
+// that rebuild is gone: the manager now exists from startup whenever a database
+// exists, so the startup call above already covers it and no later rebuild is
+// needed. Leaves m.streamerLifecycle nil when no persisted store exists, in
+// which case removal still tears down runtime state — there is just nothing
+// persisted to purge.
 func (m *Miner) buildStreamerLifecycle() {
 	if m.db == nil {
 		return
@@ -32,9 +37,18 @@ func (m *Miner) buildStreamerLifecycle() {
 	// Prefer the live Manager for the fence (so it covers its AddPointRule); the
 	// standalone repository always backs the purge and rename so notification rows
 	// are handled even when Discord is disabled. Both operate on the same tables.
-	if m.notifications != nil {
-		purgers = append(purgers, m.notifications)
-		fencers = append(fencers, m.notifications)
+	// Read via the shared accessor (I2), never m.notifications directly — this
+	// function still runs exactly once, at startup, AFTER initNotificationManager
+	// has already published the write-once manager (see setupComponents'
+	// ordering), so notifMgr is nil here only when the miner has no database OR
+	// when NewManager itself failed at startup (initNotificationManager logs
+	// and leaves m.notifications unpublished in that case) — the
+	// m.notificationsRepo fallback branch immediately below exists precisely
+	// to cover that second case, so a removal's notification-row purge still
+	// runs even without a live Manager.
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		purgers = append(purgers, notifMgr)
+		fencers = append(fencers, notifMgr)
 	} else if m.notificationsRepo != nil {
 		purgers = append(purgers, m.notificationsRepo)
 		fencers = append(fencers, m.notificationsRepo)

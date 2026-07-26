@@ -69,55 +69,47 @@ func resolveDisplayLocation(name string) *time.Location {
 	return loc
 }
 
-// minerHealthNotifier adapts the miner's (possibly late-created) notification
-// manager to health.Notifier, reading m.notifications at call time so the canary
-// still notifies if Discord is enabled after startup.
+// minerHealthNotifier adapts the miner's write-once notification manager to
+// health.Notifier, reading it via the shared notificationManager() accessor at
+// call time so the canary notifies whenever a manager exists (nil only when
+// the miner runs without a database, or when NewManager itself failed at
+// startup — initNotificationManager logs that failure and never publishes a
+// manager in that case either).
 type minerHealthNotifier struct{ m *Miner }
 
 func (n minerHealthNotifier) NotifyHealthTransition(signal string, healthy bool, detail string) {
-	n.m.mu.RLock()
-	mgr := n.m.notifications
-	n.m.mu.RUnlock()
-	if mgr != nil {
+	if mgr := n.m.notificationManager(); mgr != nil {
 		mgr.NotifyHealthTransition(signal, healthy, detail)
 	}
 }
 
-// minerDropNotifier adapts the (possibly late-created) notification manager to
+// minerDropNotifier adapts the write-once notification manager to
 // health.DropNotifier for the progress watchdog's stall/recovery alerts.
 type minerDropNotifier struct{ m *Miner }
 
 func (n minerDropNotifier) NotifyDropStalled(campaign, drop, channel, detail string) {
-	n.m.mu.RLock()
-	mgr := n.m.notifications
-	n.m.mu.RUnlock()
-	if mgr != nil {
+	if mgr := n.m.notificationManager(); mgr != nil {
 		mgr.NotifyDropStalled(campaign, drop, channel, detail)
 	}
 }
 
 func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail string) {
-	n.m.mu.RLock()
-	mgr := n.m.notifications
-	n.m.mu.RUnlock()
-	if mgr != nil {
+	if mgr := n.m.notificationManager(); mgr != nil {
 		mgr.NotifyDropRecovered(campaign, drop, channel, detail)
 	}
 }
 
-// minerUpcomingNotifier adapts the (possibly late-created) notification manager
-// to drops.UpcomingNotifier, so the drops tracker can alert on a newly-announced
-// relevant upcoming campaign through the existing notification system. It reads
-// m.notifications at call time (Discord may be enabled after startup) and does
-// nothing when no manager exists — the manager itself owns the opt-in gate and
-// durable dedupe.
+// minerUpcomingNotifier adapts the write-once notification manager to
+// drops.UpcomingNotifier, so the drops tracker can alert on a newly-announced
+// relevant upcoming campaign through the existing notification system. It
+// reads the manager via the shared accessor at call time and does nothing
+// when none exists (no database, or a failed startup construction — see
+// minerHealthNotifier's doc comment above) — the manager itself owns the
+// opt-in gate and durable dedupe.
 type minerUpcomingNotifier struct{ m *Miner }
 
 func (n minerUpcomingNotifier) NotifyUpcomingCampaign(ctx context.Context, c *models.Campaign) {
-	n.m.mu.RLock()
-	mgr := n.m.notifications
-	n.m.mu.RUnlock()
-	if mgr != nil {
+	if mgr := n.m.notificationManager(); mgr != nil {
 		mgr.NotifyUpcomingDropCampaign(ctx, c)
 	}
 }

@@ -56,16 +56,28 @@ func previousLocalDay(fire time.Time) (start, end time.Time) {
 	return start, end
 }
 
+// dailySummaryTimeSnapshot reads the configured local fire time ("HH:MM")
+// under m.mu (I12): m.config is swapped WHOLESALE by every settings apply
+// (finishApply's `m.config = newConfig`), so a raw `m.config.DailySummary.Time`
+// read on this long-lived goroutine races that pointer swap even though
+// DailySummary.Time itself has no dedicated runtime setter — it is the
+// CONFIG POINTER that is runtime-mutable, not just the field.
+func (m *Miner) dailySummaryTimeSnapshot() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.DailySummary.Time
+}
+
 // dailySummaryLoop sends the operator digest once per day at the configured
 // local time. It recomputes the next fire on every iteration (so it survives DST
 // and clock changes), fires for the previous full local day, and exits cleanly
 // on ctx cancellation. It never fires for a partial current day on startup.
 func (m *Miner) dailySummaryLoop(ctx context.Context) {
-	slog.Info("Daily summary enabled", "time", m.config.DailySummary.Time)
+	slog.Info("Daily summary enabled", "time", m.dailySummaryTimeSnapshot())
 
 	var lastSentDate string // guards against a double-fire within the same day
 	for {
-		next := nextDailySummaryTime(time.Now(), m.config.DailySummary.Time)
+		next := nextDailySummaryTime(time.Now(), m.dailySummaryTimeSnapshot())
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
@@ -90,8 +102,8 @@ func (m *Miner) dailySummaryLoop(ctx context.Context) {
 // once per scheduled send.
 func (m *Miner) sendDailySummary(start, end time.Time) {
 	summary := m.assembleDailySummary(start, end)
-	if m.notifications != nil {
-		m.notifications.NotifyDailySummary(summary)
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		notifMgr.NotifyDailySummary(summary)
 	}
 	slog.Info("Daily summary sent",
 		"date", summary.Date,

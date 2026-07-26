@@ -34,9 +34,16 @@ type Manager struct {
 	// a value copy makes UpdateDiscordConfig's change detection immune to a
 	// caller mutating the original struct in place (pointer aliasing).
 	discordConfig config.DiscordSettings
-	notifConfig   *config.NotificationsSettings
-	username      string
-	discord       discordProvider
+	// notifConfig is stored BY VALUE, with its ProviderBatching map (and every
+	// entry's ImmediateEvents slice) deep-copied at construction — never the
+	// caller's pointer. resolveBatchingSettings reads it only during
+	// construction, but keeping the copy immune to the caller's config.Config
+	// mutating in place (settings-apply reassigns config.Config wholesale)
+	// means this Manager's resolved batching settings can never be
+	// retroactively changed by an edit that has nothing to do with it.
+	notifConfig config.NotificationsSettings
+	username    string
+	discord     discordProvider
 	// newDiscord builds a Discord provider. Production wires the real
 	// *DiscordProvider constructor; tests inject a fake. It is the single place
 	// Discord providers are created so both paths go through the same seam.
@@ -74,6 +81,15 @@ type Manager struct {
 	// in (set from config LoggerSettings.TimeZone via SetDisplayLocation, so the
 	// Discord message matches the dashboard). nil falls back to UTC.
 	displayLoc *time.Location
+
+	// stopOnce makes Stop idempotent (M4, I5): the miner's stop() and a
+	// caller-driven test can both end up calling Stop on the same Manager
+	// (e.g. a shutdown racing an already-stopped path), and without this
+	// guard a second call would re-run Disconnect/Flush/repo.Close, which is
+	// harmless today only by accident (Repository.Close is a deliberate
+	// no-op) — the guard makes "call it more than once" a defined no-op
+	// rather than an unreviewed coincidence.
+	stopOnce sync.Once
 }
 
 // SetDisplayLocation sets the time zone operator-facing notifications render
@@ -119,9 +135,30 @@ func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.Notificatio
 		dc = *discordCfg
 	}
 
+	// Deep-copy the batching config the same way: a shallow `*notifCfg` copy
+	// would still alias the caller's ProviderBatching map and each entry's
+	// ImmediateEvents slice, so a later in-place edit of the caller's
+	// config.Config (settings-apply reassigns it wholesale, but a caller
+	// could still hold and mutate the old value) could otherwise change what
+	// this Manager already resolved at construction. A nil notifCfg (no
+	// batching config supplied — some tests) falls back to the same
+	// built-in defaults resolveBatchingSettings used to return for a nil
+	// pointer.
+	nc := config.DefaultNotificationsSettings()
+	if notifCfg != nil {
+		nc = *notifCfg
+		nc.Batching = cloneBatchingSettings(nc.Batching)
+		if notifCfg.ProviderBatching != nil {
+			nc.ProviderBatching = make(map[string]config.BatchingSettings, len(notifCfg.ProviderBatching))
+			for name, bs := range notifCfg.ProviderBatching {
+				nc.ProviderBatching[name] = cloneBatchingSettings(bs)
+			}
+		}
+	}
+
 	m := &Manager{
 		discordConfig:        dc,
-		notifConfig:          notifCfg,
+		notifConfig:          nc,
 		username:             username,
 		streamers:            streamers,
 		newDiscord:           defaultDiscordFactory,
@@ -149,20 +186,38 @@ func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.Notificatio
 	return m, nil
 }
 
-// resolveBatchingSettings returns the batching settings for a provider, applying
-// the per-provider override when present and falling back to the global config
-// (or built-in defaults when no notification config was supplied).
-func (m *Manager) resolveBatchingSettings(providerName string) config.BatchingSettings {
-	if m.notifConfig == nil {
-		return config.DefaultBatchingSettings()
+// cloneBatchingSettings deep-copies a BatchingSettings value, including its
+// ImmediateEvents slice, so storing it inside the Manager's notifConfig
+// snapshot can never alias a slice the caller's config later mutates in
+// place.
+func cloneBatchingSettings(s config.BatchingSettings) config.BatchingSettings {
+	if s.ImmediateEvents != nil {
+		cp := make([]string, len(s.ImmediateEvents))
+		copy(cp, s.ImmediateEvents)
+		s.ImmediateEvents = cp
 	}
+	return s
+}
+
+// resolveBatchingSettings returns the batching settings for a provider, applying
+// the per-provider override when present and falling back to the global config.
+func (m *Manager) resolveBatchingSettings(providerName string) config.BatchingSettings {
 	if override, ok := m.notifConfig.ProviderBatching[providerName]; ok {
 		return override
 	}
 	return m.notifConfig.Batching
 }
 
-// Start initializes and connects all enabled providers.
+// Start initializes and connects all enabled providers. The per-provider
+// batch flush loops are started UNCONDITIONALLY, independent of whether the
+// Discord connect below succeeds (M4, A3/6.5): a prior version returned
+// early on a Discord Connect failure, before ever reaching the batcher-start
+// loop, which left every push provider's batcher permanently un-started —
+// any batched (non-immediate) event handed to Add would then buffer forever
+// with no loop ever flushing it, until the next full Start (i.e. process
+// restart). Discord being unreachable at startup no longer holds the push
+// providers hostage; the Discord connect error is still returned so the
+// caller can log it.
 func (m *Manager) Start(ctx context.Context) error {
 	m.discordLifecycleMu.Lock()
 	defer m.discordLifecycleMu.Unlock()
@@ -174,15 +229,17 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Connect with no Manager lock held so the network Open never blocks
 	// notification paths.
+	var connectErr error
 	if provider != nil && enabled {
 		if err := provider.Connect(ctx); err != nil {
 			slog.Error("Failed to connect Discord provider", "error", err)
-			return err
+			connectErr = err
 		}
 	}
 
-	// Start the per-provider batch flush loops. Each loop performs a final
-	// flush when ctx is cancelled (graceful shutdown).
+	// Start the per-provider batch flush loops regardless of the Discord
+	// outcome above. Each loop performs a final flush when ctx is cancelled
+	// (graceful shutdown).
 	m.mu.RLock()
 	batchers := make([]*Batcher, 0, len(m.batchers))
 	for _, b := range m.batchers {
@@ -193,44 +250,52 @@ func (m *Manager) Start(ctx context.Context) error {
 		b.Start(ctx)
 	}
 
-	return nil
+	return connectErr
 }
 
 // Stop disconnects all providers, flushes any pending batches, and closes the
-// repository.
+// repository. Idempotent (M4, I5): guarded by stopOnce, so a second call (the
+// miner's stop() and, separately, a test or a second shutdown path both
+// reaching Stop) is a safe no-op rather than a redundant
+// Disconnect/Flush/repo.Close — the second call returns as soon as the
+// first's body has finished running.
 func (m *Manager) Stop() {
-	m.discordLifecycleMu.Lock()
-	defer m.discordLifecycleMu.Unlock()
+	m.stopOnce.Do(func() {
+		m.discordLifecycleMu.Lock()
+		defer m.discordLifecycleMu.Unlock()
 
-	m.mu.RLock()
-	batchers := make([]*Batcher, 0, len(m.batchers))
-	for _, b := range m.batchers {
-		batchers = append(batchers, b)
-	}
-	provider := m.discord
-	repo := m.repo
-	m.mu.RUnlock()
-
-	// Force-flush every pending batch before shutting down so no accumulated
-	// events are lost.
-	if len(batchers) > 0 {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		for _, b := range batchers {
-			b.Stop(flushCtx)
+		m.mu.RLock()
+		batchers := make([]*Batcher, 0, len(m.batchers))
+		for _, b := range m.batchers {
+			batchers = append(batchers, b)
 		}
-		cancel()
-	}
+		provider := m.discord
+		repo := m.repo
+		m.mu.RUnlock()
 
-	// Disconnect with no Manager lock held.
-	if provider != nil {
-		if err := provider.Disconnect(); err != nil {
-			slog.Error("Failed to disconnect Discord provider", "error", err)
+		// Force-flush every pending batch before shutting down so no accumulated
+		// events are lost. Each Batcher.Stop joins its own loop (if started)
+		// before performing this flush, bounded by flushCtx, so a wedged batcher
+		// loop cannot wedge the whole Manager shutdown.
+		if len(batchers) > 0 {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			for _, b := range batchers {
+				b.Stop(flushCtx)
+			}
+			cancel()
 		}
-	}
 
-	if repo != nil {
-		_ = repo.Close()
-	}
+		// Disconnect with no Manager lock held.
+		if provider != nil {
+			if err := provider.Disconnect(); err != nil {
+				slog.Error("Failed to disconnect Discord provider", "error", err)
+			}
+		}
+
+		if repo != nil {
+			_ = repo.Close()
+		}
+	})
 }
 
 // dispatchPush forwards an event to every configured push provider through its
@@ -585,8 +650,32 @@ func (m *Manager) NotifyPointsReached(streamer string, points int) {
 	}
 }
 
+// nothingToNotify reports whether NO provider could possibly receive an
+// event: no Discord provider, Discord disabled, AND no push providers
+// configured. NotifyOnline/NotifyOffline use it to skip the repo.GetConfig
+// read entirely for that hot path — every online/offline stream-status
+// transition otherwise reaches here regardless of whether anything is
+// actually configured, now that the Manager is constructed unconditionally
+// whenever a database exists (M4, A8). Deliberately NOT used by
+// NotifyPointsReached: its pointsPreviousValues bookkeeping (the read-then-
+// store above cfg.PointsChannelID's check) must keep running even with
+// everything off, so a LATER runtime Discord enable does not fire a
+// spurious "goal reached" from stale/uninitialized tracking. Also
+// deliberately NOT HasAnyProvider (wrong semantics: HasAnyProvider ignores
+// discordConfig.Enabled, so a constructed-but-disabled Discord provider
+// would wrongly count as "something to notify").
+func (m *Manager) nothingToNotify() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.discord == nil && !m.discordConfig.Enabled && len(m.messageProviders) == 0
+}
+
 // NotifyOnline sends a streamer online notification.
 func (m *Manager) NotifyOnline(streamer string) {
+	if m.nothingToNotify() {
+		return
+	}
+
 	m.mu.RLock()
 	discord := m.discord
 	enabled := m.discordConfig.Enabled
@@ -641,6 +730,10 @@ func (m *Manager) NotifyOnline(streamer string) {
 
 // NotifyOffline sends a streamer offline notification.
 func (m *Manager) NotifyOffline(streamer string) {
+	if m.nothingToNotify() {
+		return
+	}
+
 	m.mu.RLock()
 	discord := m.discord
 	enabled := m.discordConfig.Enabled
