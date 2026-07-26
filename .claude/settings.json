@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push * --force*)", "Bash(git push * -f *)",
+      "Bash(git push origin main*)", "Bash(git push origin master*)", "Bash(git push * main)", "Bash(git push * master)",
+      "Bash(gh pr merge *)", "Bash(gh pr ready *)", "Bash(gh pr edit * --ready*)", "Bash(gh release *)", "Bash(gh workflow run *)",
+      "Bash(gh run rerun *)", "Bash(gh secret *)", "Bash(gh variable *)", "Bash(gh repo edit *)",
+      "Bash(ssh *)", "Bash(scp *)", "Bash(sudo *)",
+      "Bash(kubectl apply *)", "Bash(kubectl delete *)", "Bash(kubectl rollout *)",
+      "Bash(docker compose up*)", "Bash(docker compose down*)", "Bash(docker compose restart*)",
+      "Bash(docker-compose up*)", "Bash(docker-compose down*)", "Bash(docker-compose restart*)",
+      "Bash(docker restart *)", "Bash(systemctl restart *)", "Bash(systemctl stop *)", "Bash(systemctl start *)",
+      "Edit(.claude/settings.json)", "Edit(.claude/settings.local.json)", "Edit(.claude/hooks/**)", "Edit(.git/**)",
+      "mcp__github__merge_pull_request", "mcp__github__enable_pr_auto_merge",
+      "mcp__github__actions_run_trigger", "mcp__github__create_repository", "mcp__github__fork_repository",
+      "mcp__github__run_secret_scanning"
+    ],
+    "ask": [
+      "mcp__github__issue_write", "mcp__github__sub_issue_write", "mcp__github__pull_request_review_write",
+      "mcp__github__push_files", "mcp__github__create_or_update_file", "mcp__github__delete_file",
+      "Bash(git rebase *)", "Bash(git merge --continue*)", "Bash(git rebase --continue*)",
+      "Edit(CLAUDE.md)", "Edit(.claude/rules/**)", "Edit(.github/workflows/**)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/governance-policy.py\"", "timeout": 15 }] },
+      { "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/governance-policy.py\"", "timeout": 15 }] }
+    ]
+  }
+}
