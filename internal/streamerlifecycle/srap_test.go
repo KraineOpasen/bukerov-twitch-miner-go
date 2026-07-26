@@ -341,6 +341,73 @@ func TestArbitratePreparedChannelAwareRuleTreatsDifferentChannelAsAbsent(t *test
 	}
 }
 
+// TestArbitratePreparedAbortsWhenAdmissionChannelIDEmpty covers the "either
+// side empty" half of the channel-aware rule ArbitratePreparedChannelAware
+// RuleTreatsDifferentChannelAsAbsent otherwise leaves untested: a prepared
+// row recorded with an EMPTY channel_id (e.g. admitted before the caller
+// ever resolved one) against a login the config now reports under a
+// NON-EMPTY ChannelID must still be treated as the SAME identity (an empty
+// recorded ID makes no claim to compare) and ABORTED — never promoted, which
+// would wrongly purge a still-configured, still-identified streamer.
+func TestArbitratePreparedAbortsWhenAdmissionChannelIDEmpty(t *testing.T) {
+	db := openRawDB(t, filepath.Join(t.TempDir(), "miner.db"))
+	_, _, _, coord := buildRawStores(t, db)
+	ctx := context.Background()
+
+	if err := coord.AdmitRemovals(ctx, []streamerlifecycle.Removal{
+		{ChannelID: "", Login: "emptyadmissionid"},
+	}); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+
+	aborted, promoted, err := coord.ArbitratePrepared(ctx, arbitrationKeep(map[string]string{"emptyadmissionid": "chan-configured-nonempty"}))
+	if err != nil {
+		t.Fatalf("arbitrate: %v", err)
+	}
+	if aborted != 1 || promoted != 0 {
+		t.Fatalf("aborted=%d promoted=%d, want 1,0 (an empty recorded channel_id must not block the still-configured abort)", aborted, promoted)
+	}
+	if n := admissionCount(t, db, "emptyadmissionid"); n != 0 {
+		t.Errorf("prepared row survived abort: %d rows", n)
+	}
+	if n := pendingCount(t, db, "emptyadmissionid"); n != 0 {
+		t.Errorf("aborted row was wrongly promoted to pending: %d rows", n)
+	}
+}
+
+// TestArbitratePreparedAbortsWhenConfigChannelIDEmpty covers the OTHER half:
+// a prepared row recorded with a NON-EMPTY channel_id against a login the
+// config now reports under an EMPTY stored ChannelID (e.g. a config entry
+// that has never had its ChannelID backfilled) must ALSO be treated as the
+// same identity and ABORTED — an empty config-side ID makes no claim either,
+// so it can never itself prove "a different identity" strongly enough to
+// justify promoting (and therefore purging) a login still present in config.
+func TestArbitratePreparedAbortsWhenConfigChannelIDEmpty(t *testing.T) {
+	db := openRawDB(t, filepath.Join(t.TempDir(), "miner.db"))
+	_, _, _, coord := buildRawStores(t, db)
+	ctx := context.Background()
+
+	if err := coord.AdmitRemovals(ctx, []streamerlifecycle.Removal{
+		{ChannelID: "chan-recorded-nonempty", Login: "emptyconfigid"},
+	}); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+
+	aborted, promoted, err := coord.ArbitratePrepared(ctx, arbitrationKeep(map[string]string{"emptyconfigid": ""}))
+	if err != nil {
+		t.Fatalf("arbitrate: %v", err)
+	}
+	if aborted != 1 || promoted != 0 {
+		t.Fatalf("aborted=%d promoted=%d, want 1,0 (an empty config-side channel_id must not block the still-configured abort)", aborted, promoted)
+	}
+	if n := admissionCount(t, db, "emptyconfigid"); n != 0 {
+		t.Errorf("prepared row survived abort: %d rows", n)
+	}
+	if n := pendingCount(t, db, "emptyconfigid"); n != 0 {
+		t.Errorf("aborted row was wrongly promoted to pending: %d rows", n)
+	}
+}
+
 // TestArbitratePreparedReAddWithOwedPurgeNotAborted covers the interaction
 // between the two ledgers: a login with an OWED PURGE already sitting in the
 // pending table (no admissions row at all — e.g. an earlier, already-

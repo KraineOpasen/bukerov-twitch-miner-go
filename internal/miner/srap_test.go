@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,15 @@ func TestApplySettingsAdmissionFailureClosedDBZeroMutation(t *testing.T) {
 		t.Fatalf("close db: %v", err)
 	}
 
+	// Capture every log emitted during the failed apply: a pre-commit
+	// admission failure must never claim a removal was durably queued or
+	// committed — no durable row was ever written, so either claim would be
+	// false.
+	cap := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(cap))
+	defer slog.SetDefault(prev)
+
 	rs := removeStreamer(m.GetRuntimeSettings(), victim)
 	err = m.applySettings(context.Background(), rs)
 	if err == nil {
@@ -113,6 +123,12 @@ func TestApplySettingsAdmissionFailureClosedDBZeroMutation(t *testing.T) {
 	}
 	if !errors.Is(err, database.ErrClosed) {
 		t.Errorf("error = %v, want it to wrap database.ErrClosed", err)
+	}
+	if cap.hasSubstring("durably queued") {
+		t.Errorf("log falsely claimed a durably-queued removal despite the admission itself failing: %v", cap.msgs)
+	}
+	if cap.hasSubstring("Streamer removal committed") {
+		t.Errorf("log falsely claimed a committed removal despite the admission itself failing: %v", cap.msgs)
 	}
 
 	// Runtime unchanged.
@@ -238,10 +254,25 @@ func TestApplySettingsSaveConfigFailureCompensatesAdmission(t *testing.T) {
 	// failure test).
 	breakConfigPathForNextSave(t, configPath)
 
+	// Capture every log emitted during the failed apply: admission SUCCEEDED
+	// but the commit point (SaveConfig) never did, so the apply must not
+	// claim a committed OR durably-queued removal — it was compensated
+	// (AbortAdmission), not left owed.
+	cap := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(cap))
+	defer slog.SetDefault(prev)
+
 	rs := removeStreamer(m.GetRuntimeSettings(), victim)
 	err := m.applySettings(context.Background(), rs)
 	if err == nil {
 		t.Fatal("expected SaveConfig's failure to fail the apply")
+	}
+	if cap.hasSubstring("Streamer removal committed") {
+		t.Errorf("log falsely claimed a committed removal despite SaveConfig (the commit point) failing: %v", cap.msgs)
+	}
+	if cap.hasSubstring("durably queued") {
+		t.Errorf("log falsely claimed a durably-queued removal despite the admission being compensated: %v", cap.msgs)
 	}
 
 	// Runtime unchanged.
@@ -386,6 +417,22 @@ func (h *captureHandler) has(msg string) bool {
 	defer h.mu.Unlock()
 	for _, m := range h.msgs {
 		if m == msg {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSubstring reports whether ANY captured message contains sub — used to
+// assert a truthful-durability claim (e.g. "durably queued", "Streamer
+// removal committed") is ABSENT from a branch that never durably admitted or
+// committed anything, where an exact-match check would be too narrow (the
+// claim must not appear in any form, not just verbatim).
+func (h *captureHandler) hasSubstring(sub string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, m := range h.msgs {
+		if strings.Contains(m, sub) {
 			return true
 		}
 	}

@@ -3,12 +3,14 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
@@ -61,6 +63,27 @@ func TestSettingsPostShuttingDownCallbackReturns503(t *testing.T) {
 	rec := postSettings(t, srv, `{}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 for ErrShuttingDown", rec.Code)
+	}
+}
+
+// TestSettingsPostDatabaseClosedCallbackReturns503 (M1 QA follow-up F8) pins
+// the OTHER half of the "by the same code path" claim above with its own
+// assertion: a callback error that wraps database.ErrClosed (as every real
+// admission/persistence failure through a closed DB does — see
+// internal/miner's applySettings*, which always propagates it via %w) must
+// map to 503, exactly like settings.ErrShuttingDown — both mean "retry is
+// safe, nothing changed" — never the generic 500 a hard apply failure gets.
+func TestSettingsPostDatabaseClosedCallbackReturns503(t *testing.T) {
+	srv := &Server{
+		settingsProvider: &fakeSettingsProvider{rt: settings.RuntimeSettings{}},
+		onSettingsUpdate: func(ctx context.Context, rt settings.RuntimeSettings) error {
+			return fmt.Errorf("settings apply rejected; no changes were made: admit streamer removal(s): %w", database.ErrClosed)
+		},
+	}
+
+	rec := postSettings(t, srv, `{}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a wrapped database.ErrClosed", rec.Code)
 	}
 }
 

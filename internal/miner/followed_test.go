@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -95,5 +96,33 @@ func TestImportStreamersConcurrentExactlyOnce(t *testing.T) {
 	// common + one per goroutine, each exactly once.
 	if len(m.config.Streamers) != goroutines+1 {
 		t.Errorf("final list has %d entries, want %d", len(m.config.Streamers), goroutines+1)
+	}
+}
+
+// TestImportStreamersReturnsApplyErrorAddsNothing (M1 QA follow-up F5) pins
+// ImportStreamers' own fail-closed contract: when the apply step fails, the
+// caller must see that EXACT error (not a swallowed/generic one) and a
+// reported count of 0 — never the merged "added" count, which would falsely
+// claim streamers were imported when the underlying apply never committed
+// anything (mergeStreamerLogins' own dedup math is a pure computation,
+// entirely separate from whether the apply actually persisted it).
+func TestImportStreamersReturnsApplyErrorAddsNothing(t *testing.T) {
+	m := &Miner{config: &config.Config{}}
+	errBoom := errors.New("injected import-apply failure")
+	m.importApply = func(ctx context.Context, s settings.RuntimeSettings) error {
+		return errBoom
+	}
+
+	n, err := m.ImportStreamers(context.Background(), []string{"importfailalpha", "importfailbeta"})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("err = %v, want it to wrap the apply's own error", err)
+	}
+	if n != 0 {
+		t.Fatalf("added count = %d, want 0 on a failed apply (nothing was actually committed)", n)
+	}
+	// The merge must never have been persisted anywhere the caller could
+	// observe as "imported" — m.config was never touched by importApply.
+	if len(m.config.Streamers) != 0 {
+		t.Errorf("m.config.Streamers = %+v, want empty (the failing apply must not have persisted anything)", m.config.Streamers)
 	}
 }
