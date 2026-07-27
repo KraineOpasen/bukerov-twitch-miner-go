@@ -699,6 +699,12 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.chatManager.SetAuthErrorHandler(func(rejectedGeneration uint64) {
 		m.recoverFromRejectedGeneration(rejectedGeneration, "irc")
 	})
+	// Gate every join against the LIVE roster (M3): rejects a stale
+	// *models.Streamer surviving a removal (checkAllStreamers/
+	// checkUncheckedStreamers iterating an older All() snapshot, or a
+	// delayed startMining initial sweep) before it can create a ghost IRC
+	// client for a channel Leave already tore down.
+	m.chatManager.SetRosterMembership(m.chatRosterMembership)
 
 	var watchTimeStore *watcher.WatchTimeStore
 	if m.db != nil {
@@ -1192,6 +1198,34 @@ func (m *Miner) streamCheckLoop(ctx context.Context) {
 			m.checkUncheckedStreamers()
 		}
 	}
+}
+
+// chatRosterMembership is the ChatManager.SetRosterMembership predicate
+// (M3): it checks POINTER IDENTITY of s against the live roster's CURRENT
+// object for s's login, not login equality. This rejects (a) a stale pointer
+// after removal (the login no longer maps to s at all, or maps to nothing),
+// (b) a mis-keyed/foreign pointer whose login now resolves to a different
+// tracked object (never true roster membership even though the login
+// matches), and (c) the OLD pointer after a same-login re-add (the roster
+// tracks a NEW object under that login now) — while accepting the NEW
+// pointer after a same-login re-add and a renamed-in-place member (same
+// object, whatever its current login is, since Get resolves by CURRENT
+// login and byLogin/byID are repointed together on a rename).
+//
+// Benign TOCTOU: a rename can commit between s.GetUsername() (read by
+// joinChat, under ChatManager.mu, before this predicate runs) and this
+// method's own m.streamers.Get call. That race makes the join fail closed for
+// one cycle — never a false accept — and the next periodic sweep
+// (checkAllStreamers/checkUncheckedStreamers) or capability reconcile heals
+// it on the very next ToggleChat. Do NOT "fix" this by moving the predicate
+// outside ChatManager.mu; that would reopen the stale-pointer race this
+// predicate exists to close.
+//
+// The nil-guard mirrors the existing m.streamers nil-guard pattern elsewhere
+// in this package (e.g. rewards.go) for struct-literal Miners built directly
+// in tests, which never run New() and so never populate m.streamers.
+func (m *Miner) chatRosterMembership(s *models.Streamer) bool {
+	return m.streamers != nil && m.streamers.Get(s.GetUsername()) == s
 }
 
 func (m *Miner) checkAllStreamers() {
