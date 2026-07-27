@@ -247,9 +247,9 @@ func TestManagerStopIsIdempotent(t *testing.T) {
 	fake := &fakeDiscord{connected: true, botToken: "tok", guildID: "guild"}
 	m.discord = fake
 
-	m.Stop()
-	m.Stop()
-	m.Stop()
+	_ = m.Stop()
+	_ = m.Stop()
+	_ = m.Stop()
 
 	_, disconnect, _, connected := fake.counts()
 	if disconnect != 1 {

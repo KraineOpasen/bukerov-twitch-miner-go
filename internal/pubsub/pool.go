@@ -243,8 +243,17 @@ type WebSocketPool struct {
 	// p.mu.
 	quarantined map[string]struct{}
 
+	// closed marks the pool as shut down (S1): submitLocked and EnsureTopic
+	// must not dial a fresh connection — whose read loop would outlive the
+	// shutdown drain — once Close has run. Guarded by p.mu.
+	closed bool
+
 	mu sync.RWMutex
 }
+
+// ErrPoolClosed is returned by subscription paths once Close has run: a
+// closed pool never dials a new connection.
+var ErrPoolClosed = errors.New("pubsub: pool closed")
 
 func NewWebSocketPool(twitchClient *twitch.TwitchClient, tokenFn AuthTokenProvider, streamers []*models.Streamer, settings config.RateLimitSettings) *WebSocketPool {
 	return &WebSocketPool{
@@ -478,6 +487,9 @@ func (p *WebSocketPool) Submit(topic Topic) error {
 // client — either way the same subscription stays retryable on the next
 // reconcile, and the error reaches the caller.
 func (p *WebSocketPool) submitLocked(topic Topic) error {
+	if p.closed {
+		return ErrPoolClosed
+	}
 	if p.isQuarantinedLocked(topic) {
 		// Permanently invalid: never (re-)subscribe it, incl. the global user
 		// topics submitted through Submit.
@@ -631,14 +643,39 @@ func (p *WebSocketPool) ensureSubscribedLocked(topic Topic) error {
 	return firstErr
 }
 
-func (p *WebSocketPool) Close() {
+// Close shuts every connection down and JOINS their read/ping loops (S1), so
+// an in-flight message handler — which may be recording analytics rows or
+// scheduling a notification dispatch — finishes before the caller proceeds
+// toward closing the shared database handle. The join runs with p.mu
+// RELEASED: a read loop's handler routinely takes the pool lock (findStreamer,
+// handleMessage), so joining under it would deadlock. Connections are closed
+// and joined concurrently, so the pool's worst case is one per-client
+// stopJoinTimeout, not len(clients) times it. Join timeouts are aggregated
+// into the returned explicit shutdown error; Close itself never hangs.
+// Idempotent: a repeated Close is a nil no-op.
+func (p *WebSocketPool) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for _, ws := range p.clients {
-		ws.Close()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
 	}
+	p.closed = true
+	clients := p.clients
 	p.clients = nil
+	p.mu.Unlock()
+
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for i, ws := range clients {
+		i, ws := i, ws
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = ws.Close()
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // Unsubscribe removes the topic from EVERY connection in the pool, not just

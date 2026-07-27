@@ -3,6 +3,7 @@ package chat
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	mathrand "math/rand"
@@ -96,8 +97,41 @@ type IRCClient struct {
 	// tests inject an in-memory transport here.
 	dialFn func() (net.Conn, error)
 
+	// loopWG counts this client's read loops (every generation, including
+	// reconnect-spawned ones) and any in-flight reconnect goroutine (S1).
+	// Every Add happens under mu immediately after a forcedClose check, and
+	// Stop sets forcedClose under the same mu before it waits — so an Add can
+	// never race a Wait that already observed zero. Joining is what lets Stop
+	// guarantee an in-flight chat-message analytics write has finished before
+	// the caller proceeds toward closing the shared database handle.
+	loopWG sync.WaitGroup
+
 	mu sync.RWMutex
 }
+
+// ErrClientStopped is returned by Connect once Stop has been called: a
+// stopped client must never spawn a new read loop (it would outlive the
+// shutdown drain).
+var ErrClientStopped = errors.New("chat: client stopped")
+
+// stopJoinTimeout bounds how long Stop waits for the read loop to drain an
+// in-flight message (which may be writing a chat row) before giving up, so a
+// wedged handler can never block shutdown indefinitely. Package variable so
+// tests can shrink it (the watcher/drops precedent). 3s keeps the aggregate
+// shutdown drain budget documented in miner.stop() under the process-level
+// shutdown deadline; clients are joined concurrently by ChatManager.Close,
+// so this is the manager's worst case too.
+var stopJoinTimeout = 3 * time.Second
+
+// errLoopJoinTimeout is the explicit shutdown error Stop returns when this
+// client's loops did not finish inside stopJoinTimeout.
+var errLoopJoinTimeout = errors.New("chat: client loop join timed out")
+
+// partWriteTimeout bounds the courtesy PART write in Stop. Without a
+// deadline that blocking write could wedge Stop before the join even starts
+// (a full send buffer, or an unread in-memory pipe in tests), making the
+// join bound meaningless.
+var partWriteTimeout = time.Second
 
 func NewIRCClient(username string, tokenFn TokenProvider, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
 	// Captured once, race-safe (Username can be mutated in place by a
@@ -142,6 +176,13 @@ func (c *IRCClient) Connect() error {
 	}
 
 	c.mu.Lock()
+	if c.forcedClose {
+		// Stop landed while this dial was in flight; never bind the fresh
+		// connection to a stopped client.
+		c.mu.Unlock()
+		_ = conn.Close()
+		return ErrClientStopped
+	}
 	c.conn = conn
 	c.reader = bufio.NewReader(conn)
 	c.running = true
@@ -157,7 +198,22 @@ func (c *IRCClient) Connect() error {
 		return fmt.Errorf("failed to join channel: %w", err)
 	}
 
-	go c.readLoop()
+	c.mu.Lock()
+	if c.forcedClose {
+		// Stop raced the handshake; it already closed the conn it saw. Do not
+		// spawn a read loop for a stopped client.
+		c.mu.Unlock()
+		_ = conn.Close()
+		return ErrClientStopped
+	}
+	// Registered under the same mu that checked forcedClose — the
+	// no-Add-after-Wait pairing with Stop (see loopWG).
+	c.loopWG.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.loopWG.Done()
+		c.readLoop()
+	}()
 
 	slog.Info("Joined IRC chat", "channel", c.channel)
 	return nil
@@ -256,8 +312,15 @@ func (c *IRCClient) reconnect() {
 		return
 	}
 	c.reconnecting = true
+	// The reconnect goroutine itself is tracked (admission-checked by the
+	// forcedClose test above): it can sit in a dial for up to the 30s TLS
+	// timeout, and Stop's bounded join is what makes that observable instead
+	// of silently outliving shutdown. The single deferred Done below covers
+	// every return path of the backoff loop.
+	c.loopWG.Add(1)
 	old := c.conn
 	c.mu.Unlock()
+	defer c.loopWG.Done()
 
 	// Closing the old connection unblocks any in-flight ReadString in the
 	// previous readLoop so the stale goroutine exits instead of lingering.
@@ -319,10 +382,21 @@ func (c *IRCClient) reconnect() {
 		}
 
 		c.mu.Lock()
+		if c.forcedClose {
+			// Stop raced the successful redial: never spawn a read loop for a
+			// stopped client.
+			c.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		c.reconnecting = false
+		c.loopWG.Add(1)
 		c.mu.Unlock()
 
-		go c.readLoop()
+		go func() {
+			defer c.loopWG.Done()
+			c.readLoop()
+		}()
 		slog.Info("Reconnected to IRC chat", "channel", c.channel)
 		return
 	}
@@ -448,24 +522,54 @@ func parseTags(tagStr string) map[string]string {
 	return tags
 }
 
-func (c *IRCClient) Stop() {
+// Stop leaves the channel, closes the connection, and joins the client's
+// loops (bounded). On a join timeout it returns the explicit
+// errLoopJoinTimeout and proceeds — it never hangs. A repeated Stop is a nil
+// no-op.
+func (c *IRCClient) Stop() error {
 	c.mu.Lock()
+	if c.forcedClose {
+		// Idempotent: a second Stop must not re-close the stop channel (a
+		// panic before S1) and must not re-join — the first Stop owns the
+		// bounded wait.
+		c.mu.Unlock()
+		return nil
+	}
 	c.running = false
 	c.forcedClose = true
+	conn := c.conn
 	c.mu.Unlock()
 
 	close(c.stopChan)
 
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-
 	if conn != nil {
+		// PART is best-effort courtesy. Without a write deadline this
+		// blocking write could wedge Stop before the join even starts,
+		// making the bound below meaningless.
+		_ = conn.SetWriteDeadline(time.Now().Add(partWriteTimeout))
 		_ = c.send("PART " + c.channel)
-		_ = conn.Close()
+		_ = conn.Close() // unblocks the read loop's pending ReadString
+	}
+
+	// Join the read loop (and any in-flight reconnect) with NO lock held —
+	// the loop's message handling may take c.mu — bounded so a wedged
+	// chat-log write degrades to a warning instead of hanging shutdown (S1).
+	done := make(chan struct{})
+	go func() {
+		c.loopWG.Wait()
+		close(done)
+	}()
+	var joinErr error
+	select {
+	case <-done:
+	case <-time.After(stopJoinTimeout):
+		slog.Warn("IRC client loops did not finish within the stop timeout; proceeding with shutdown",
+			"channel", c.channel, "timeout", stopJoinTimeout)
+		joinErr = fmt.Errorf("%w (%s, %s)", errLoopJoinTimeout, c.channel, stopJoinTimeout)
 	}
 
 	slog.Info("Left IRC chat", "channel", c.channel)
+	return joinErr
 }
 
 func (c *IRCClient) IsRunning() bool {

@@ -103,7 +103,7 @@ func newTestClient(t *testing.T, url string, reconnectDelayMs int) *WebSocketCli
 	ws := NewWebSocketClient(0, nil, 3600, reconnectDelayMs, nil, nil)
 	ws.url = url
 	ws.delayUnit = time.Millisecond
-	t.Cleanup(ws.Close)
+	t.Cleanup(func() { _ = ws.Close() })
 	return ws
 }
 
@@ -205,7 +205,7 @@ func TestDeliberateCloseDoesNotReconnect(t *testing.T) {
 	}
 	waitUntil(t, "first dial", 2*time.Second, func() bool { return ts.dialCount() == 1 })
 
-	ws.Close()
+	_ = ws.Close()
 	time.Sleep(300 * time.Millisecond)
 
 	if got := ts.dialCount(); got != 1 {
@@ -332,7 +332,7 @@ func TestAntiFlapBoundsRedialRate(t *testing.T) {
 	}
 
 	time.Sleep(1500 * time.Millisecond)
-	ws.Close()
+	_ = ws.Close()
 
 	got := ts.dialCount()
 	if got < 2 {

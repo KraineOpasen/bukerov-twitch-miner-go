@@ -357,7 +357,7 @@ func TestApplyVsShutdownDrainNoRaceManagerStoppedOnce(t *testing.T) {
 		m.applyMu.Unlock()
 		m.applyWG.Wait()
 		if notifMgr := m.notificationManager(); notifMgr != nil {
-			notifMgr.Stop()
+			_ = notifMgr.Stop()
 		}
 	}()
 	wg.Wait()
@@ -374,7 +374,7 @@ func TestApplyVsShutdownDrainNoRaceManagerStoppedOnce(t *testing.T) {
 	// Manager.Stop is idempotent (sync.Once-guarded); calling it again here
 	// must be instant and safe, which is only true if the earlier Stop
 	// already ran to completion rather than leaving anything half torn down.
-	after.Stop()
+	_ = after.Stop()
 }
 
 // --- Flagship: real applySettings racing the real health watchdog ---

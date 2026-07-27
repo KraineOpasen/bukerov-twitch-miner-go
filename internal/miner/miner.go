@@ -261,6 +261,22 @@ type Miner struct {
 	applyWG       sync.WaitGroup
 	applyDraining bool
 
+	// loopWG tracks the background loops startMining spawns (stream check,
+	// health watchdog, bonus poll, subscription probe, hourly validation,
+	// resource sampler, daily summary). stop() joins them — bounded by
+	// loopJoinTimeout — after the run context is cancelled, so an in-flight
+	// tick's analytics or notification-config read completes before the
+	// owner closes the shared database handle (S1).
+	//
+	// No admission gate is needed (unlike applyWG): every Add happens on the
+	// goroutine executing startMining, and Run's control flow puts
+	// startMining strictly before <-ctx.Done() and therefore strictly before
+	// stop()'s Wait — program order is the whole no-Add-after-Wait argument.
+	// The rule that preserves it: no loop may be started outside
+	// startMining; a loop started from a settings apply would need the
+	// applyWG-style gate instead.
+	loopWG sync.WaitGroup
+
 	// importMu serializes the read-modify-write in ImportStreamers so two
 	// concurrent imports can't both read the pre-write snapshot and lose one
 	// another's additions. GetRuntimeSettings (RLock) and ApplySettings (Lock)
@@ -400,7 +416,13 @@ func (m *Miner) Run(ctx context.Context) error {
 	<-ctx.Done()
 	slog.Info("Shutting down...")
 
-	m.stop()
+	// A drain timeout is surfaced as an explicit shutdown error (S1): the
+	// teardown itself still completed (stop attempts every step), but the
+	// caller learns that an asynchronous writer had to be abandoned at its
+	// bound instead of the failure hiding in a log line.
+	if derr := m.stop(); derr != nil {
+		return fmt.Errorf("shutdown drain incomplete: %w", derr)
+	}
 
 	return nil
 }
@@ -1042,7 +1064,7 @@ func (m *Miner) startMining(ctx context.Context) {
 		// no state mutation. Runs on the run context and stops with it.
 		m.resourceSampler = resources.New()
 		m.webServer.SetResourceSnapshotProvider(m.resourceSampler.Latest)
-		go m.resourceSampler.Run(ctx)
+		m.startLoop(ctx, m.resourceSampler.Run)
 
 		// Start the web server only when the miner built it itself (library
 		// use). An injected server is started AND stopped by its owner (the
@@ -1059,18 +1081,63 @@ func (m *Miner) startMining(ctx context.Context) {
 		m.webServer.GetStatusBroadcaster().SetStatus(web.StatusRunning, "Mining active")
 	}
 
-	go m.streamCheckLoop(ctx)
-	go m.healthWatchdogLoop(ctx)
-	go m.bonusPollLoop(ctx)
-	go m.subscriptionProbeLoop(ctx)
+	m.startLoop(ctx, m.streamCheckLoop)
+	m.startLoop(ctx, m.healthWatchdogLoop)
+	m.startLoop(ctx, m.bonusPollLoop)
+	m.startLoop(ctx, m.subscriptionProbeLoop)
 	// Hourly token validation is a Twitch requirement (validate on startup —
 	// done inside Login — and hourly thereafter). One validator per session;
 	// it joins the shared single-flight recovery on an authoritative 401.
-	go m.auth.RunHourlyValidation(ctx)
+	m.startLoop(ctx, m.auth.RunHourlyValidation)
 	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
-		go m.dailySummaryLoop(ctx)
+		m.startLoop(ctx, m.dailySummaryLoop)
 	}
 	m.startAutoUpdater(ctx)
+}
+
+// startLoop spawns one of startMining's background loops registered in
+// loopWG, so stop() can join it (bounded) before the shared database handle
+// is closed. Must only be called on the startMining call path (startMining
+// itself and startAutoUpdater, which startMining invokes on the same
+// goroutine) — see loopWG's ordering contract.
+func (m *Miner) startLoop(ctx context.Context, fn func(context.Context)) {
+	m.loopWG.Add(1)
+	go func() {
+		defer m.loopWG.Done()
+		fn(ctx)
+	}()
+}
+
+// loopJoinTimeout bounds how long stop() waits for startMining's background
+// loops to drain their in-flight tick. The run context is already cancelled
+// by the time stop() runs, so the expected real wait is the tail of at most
+// one tick body. Package variable so tests can shrink it (the watcher/drops
+// precedent). 3s keeps the aggregate shutdown drain budget documented in
+// stop() under the process-level shutdown deadline.
+var loopJoinTimeout = 3 * time.Second
+
+// errLoopJoinTimeout is the explicit shutdown error joinLoops returns when
+// the background loops did not finish inside loopJoinTimeout.
+var errLoopJoinTimeout = errors.New("miner: background loop join timed out")
+
+// joinLoops waits — bounded by loopJoinTimeout — for the loops startMining
+// spawned, returning the explicit errLoopJoinTimeout on timeout (it never
+// hangs). A miner whose startMining never ran has an empty loopWG and
+// returns nil immediately.
+func (m *Miner) joinLoops() error {
+	done := make(chan struct{})
+	go func() {
+		m.loopWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(loopJoinTimeout):
+		slog.Warn("Miner background loops did not finish within the stop timeout; proceeding with shutdown",
+			"timeout", loopJoinTimeout)
+		return fmt.Errorf("%w after %s", errLoopJoinTimeout, loopJoinTimeout)
+	}
 }
 
 // startAutoUpdater launches the background release-update watcher when it has
@@ -1098,7 +1165,11 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 		},
 	})
 
-	go upd.Run(ctx)
+	// Tracked like the other startMining loops (S1): the updater's notify
+	// callbacks read the notifications config from SQLite on this goroutine,
+	// so it must be joined before the handle closes. startAutoUpdater runs on
+	// startMining's goroutine, preserving loopWG's program-order argument.
+	m.startLoop(ctx, upd.Run)
 }
 
 // notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
@@ -1605,7 +1676,22 @@ func (m *Miner) handleStatusChange(username string, status models.StreamerStatus
 	}
 }
 
-func (m *Miner) stop() {
+// stop tears the runtime graph down and drains every asynchronous SQLite
+// writer it spawned. It returns the aggregate of the explicit drain-timeout
+// errors (nil on a fully clean drain); every teardown step is attempted
+// regardless of earlier failures, and stop never hangs.
+//
+// Aggregate drain budget (S1): the bounded waits below are serial in the
+// worst case — miner loops 3s, chat 3s (per-client joins run concurrently),
+// pubsub 3s (likewise), watcher 5s, drops 5s, notifications dispatch 5s plus
+// its pre-existing 15s batcher flush — ~39s if literally everything wedges
+// at once, but each bound only spends time when its component is actually
+// stuck; the expected real drain is milliseconds (every loop is already
+// unblocked by the cancelled run context and closed sockets, and in-flight
+// sends are cancelled before the dispatch wait). main's
+// app.DefaultShutdownTimeout (30s) applies to the App steps AFTER Run
+// returns and is unaffected by these bounds.
+func (m *Miner) stop() error {
 	// Drain in-flight settings applies FIRST, before anything else tears
 	// down: App.Shutdown closes the DB only after Run (and therefore this
 	// function) returns, so once applyWG.Wait() returns here no apply can
@@ -1616,8 +1702,21 @@ func (m *Miner) stop() {
 	m.applyMu.Unlock()
 	m.applyWG.Wait()
 
-	m.chatManager.Close()
-	m.wsPool.Close()
+	var drainErrs []error
+
+	// Join the miner's own background loops BEFORE closing the transports
+	// (S1): streamCheckLoop creates IRC clients via ToggleChat and pubsub
+	// topics via the check path, so draining the producer first means the
+	// transports' Close below is not racing a fresh spawn (their own closed
+	// flags are the belt to this braces). The loops exit on the already-
+	// cancelled run context; the join is bounded by loopJoinTimeout.
+	drainErrs = append(drainErrs, m.joinLoops())
+
+	// Both transports JOIN their read loops (bounded): after these two calls
+	// no goroutine can enter analytics or notifications from a network
+	// message, and any handler that was mid-write has finished.
+	drainErrs = append(drainErrs, m.chatManager.Close())
+	drainErrs = append(drainErrs, m.wsPool.Close())
 	m.watcher.Stop()
 	m.dropsTracker.Stop()
 	m.discovery.Stop()
@@ -1642,23 +1741,39 @@ func (m *Miner) stop() {
 		m.debugServer.Stop()
 	}
 
+	// Notifications stop after every Notify* caller above has quiesced (so
+	// legitimate shutdown-time alerts are not refused early) and BEFORE the
+	// analytics close below, keeping the invariant ordering: drain admitted
+	// writers, then close repositories, then the database. The Manager's
+	// Stop performs the S1 dispatch drain — admission closes, in-flight
+	// sends are cancelled, dispatch goroutines (including the
+	// point_rule.triggered persistence that runs after a network send) are
+	// joined, bounded — so no notification writer is in flight once stop()
+	// returns and the owner closes the database.
+	if notifMgr := m.notificationManager(); notifMgr != nil {
+		drainErrs = append(drainErrs, notifMgr.Stop())
+	}
+
 	if m.analyticsSvc != nil && !m.externalAnalytics {
 		_ = m.analyticsSvc.Close()
 	}
 
-	if notifMgr := m.notificationManager(); notifMgr != nil {
-		notifMgr.Stop()
-	}
-
 	// Close the DB only when the miner opened it itself (library use). In
 	// the cmd/miner path main owns the handle and closes it after Run
-	// returns — closing here would cut off writers that stop() does not
-	// join (see Stage E) earlier than necessary.
+	// returns. With the S1 drains above (settings applies, miner loops incl.
+	// the auto-updater, chat/pubsub read loops and reconnect drivers,
+	// watcher, drops, notification dispatch) every asynchronous SQLite
+	// WRITER this runtime spawns has been joined or refused by the time this
+	// line runs. Known read-only residual: the bounded (2-min) auth-recovery
+	// observer can, in a rare recovery race, still perform a notifications
+	// config READ after Run returns — logged, no data loss (see
+	// recoverFromRejectedGeneration).
 	if m.db != nil && m.ownsDB {
 		_ = m.db.Close()
 	}
 
 	m.streamers.PrintReport()
+	return errors.Join(drainErrs...)
 }
 
 func (m *Miner) GetRuntimeSettings() settings.RuntimeSettings {
