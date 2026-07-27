@@ -288,6 +288,42 @@ type Miner struct {
 	// of the real apply path.
 	importApply func(ctx context.Context, s settings.RuntimeSettings) error
 
+	// authenticateFn/loadStreamersFn/subscribeTopicsFn are tests-only seams
+	// over the authenticate/loadStreamers/subscribeToTopics startup stages
+	// (nil in production; S2), following this package's authRecoverFn/
+	// importApply seam precedent. They exist because a direct end-to-end Run
+	// test cannot pass the real authenticate/loadStreamers stages offline
+	// (device-code and streamer-resolution network I/O) — the seams let a
+	// test drive Run's REAL control flow to a chosen startup stage and fail
+	// it there deterministically, so every early-return path's cleanup is
+	// testable without network access.
+	// startMiningFn additionally covers the startMining stage for the two
+	// SUCCESSFUL-startup control-flow tests (normal cancellation and the
+	// auto-update shutdown): the real startMining's drops tracker fires an
+	// immediate campaign sync whose offline GQL retry/backoff tail
+	// (~7.5-11s) exceeds the S1 drain bounds, so a deterministic offline
+	// test must stub the stage; the loops startMining spawns keep their own
+	// S1 coverage (stop_join_test.go and each component's package tests).
+	authenticateFn    func(ctx context.Context) error
+	loadStreamersFn   func() error
+	subscribeTopicsFn func() error
+	startMiningFn     func(ctx context.Context)
+
+	// stopOnce/stopErr make stop() execute its teardown exactly once and
+	// memoize the aggregate result for any later caller (S2): Run's control
+	// flow reaches stop() on exactly one path per run — either the normal
+	// post-<-ctx.Done() shutdown or a startup-failure cleanup — and the once
+	// guard turns that program-order argument into a structural guarantee
+	// (repeated or concurrent calls are safe and observe the first result).
+	stopOnce sync.Once
+	stopErr  error
+	// stopObserver is a tests-only seam (nil in production; S2), following
+	// the applyCommitBarrier precedent: invoked from stop() at the moment
+	// the teardown body actually begins executing (inside the once guard),
+	// so a test can prove a given Run path executed the cleanup exactly
+	// once without timing assertions.
+	stopObserver func()
+
 	// applyCommitBarrier is a tests-only seam (nil in production; M2 [R2]):
 	// invoked by applySettingsWithRemovals/applySettingsWithRename around
 	// their commit section — applyPreCommit fires after durable prepare
@@ -385,6 +421,9 @@ func (m *Miner) SetWebServer(server *web.Server) {
 
 // Run starts the miner and blocks until the context is cancelled.
 // The caller is responsible for handling OS signals and cancelling the context.
+// A Miner is single-run: stop()'s once guard (S2) means a second Run on the
+// same value would skip teardown entirely — construct a fresh Miner per run
+// (App already does; it is itself single-use).
 func (m *Miner) Run(ctx context.Context) error {
 	// Derive a cancelable context so an applied auto-update can request a
 	// clean shutdown (which returns nil from Run -> process exits 0).
@@ -394,24 +433,24 @@ func (m *Miner) Run(ctx context.Context) error {
 	m.runCtx = ctx
 
 	if err := m.initialize(); err != nil {
-		return fmt.Errorf("initialization failed: %w", err)
+		return m.failStartup(fmt.Errorf("initialization failed: %w", err))
 	}
 
-	if err := m.authenticate(ctx); err != nil {
-		return fmt.Errorf("authentication failed: %w", err)
+	if err := m.runAuthenticate(ctx); err != nil {
+		return m.failStartup(fmt.Errorf("authentication failed: %w", err))
 	}
 
-	if err := m.loadStreamers(); err != nil {
-		return fmt.Errorf("failed to load streamers: %w", err)
+	if err := m.runLoadStreamers(); err != nil {
+		return m.failStartup(fmt.Errorf("failed to load streamers: %w", err))
 	}
 
 	m.setupComponents(ctx)
 
-	if err := m.subscribeToTopics(); err != nil {
-		return fmt.Errorf("failed to subscribe to topics: %w", err)
+	if err := m.runSubscribeToTopics(); err != nil {
+		return m.failStartup(fmt.Errorf("failed to subscribe to topics: %w", err))
 	}
 
-	m.startMining(ctx)
+	m.runStartMining(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
@@ -425,6 +464,69 @@ func (m *Miner) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// runAuthenticate dispatches the authenticate startup stage through its
+// tests-only seam (see authenticateFn); production always takes the real
+// authenticate path.
+func (m *Miner) runAuthenticate(ctx context.Context) error {
+	if m.authenticateFn != nil {
+		return m.authenticateFn(ctx)
+	}
+	return m.authenticate(ctx)
+}
+
+// runLoadStreamers dispatches the streamer-loading startup stage through its
+// tests-only seam (see loadStreamersFn); production always takes the real
+// loadStreamers path.
+func (m *Miner) runLoadStreamers() error {
+	if m.loadStreamersFn != nil {
+		return m.loadStreamersFn()
+	}
+	return m.loadStreamers()
+}
+
+// runSubscribeToTopics dispatches the subscribe startup stage through its
+// tests-only seam (see subscribeTopicsFn); production always takes the real
+// subscribeToTopics path.
+func (m *Miner) runSubscribeToTopics() error {
+	if m.subscribeTopicsFn != nil {
+		return m.subscribeTopicsFn()
+	}
+	return m.subscribeToTopics()
+}
+
+// runStartMining dispatches the startMining stage through its tests-only
+// seam (see startMiningFn); production always takes the real startMining
+// path.
+func (m *Miner) runStartMining(ctx context.Context) {
+	if m.startMiningFn != nil {
+		m.startMiningFn(ctx)
+		return
+	}
+	m.startMining(ctx)
+}
+
+// failStartup is the single early-exit cleanup gate for Run (S2): every
+// return after runtime initialization begins routes through it, so a startup
+// failure at any stage tears down exactly the resources acquired or started
+// so far — through the same S1 stop() sequence the normal shutdown uses,
+// never a second, competing teardown. The original startup error stays
+// discoverable via errors.Is/errors.As: it is returned verbatim on a clean
+// cleanup and joined (errors.Join) with the cleanup error otherwise.
+func (m *Miner) failStartup(startupErr error) error {
+	// Cancel the run context FIRST, mirroring the normal shutdown path
+	// (there ctx is already done by the time stop() runs): beginApply starts
+	// refusing new settings applies, and every ctx-bound helper (auth
+	// recovery flights, notification dispatch, the reconcile sweeps) observes
+	// shutdown before the teardown below joins it.
+	if m.shutdownFn != nil {
+		m.shutdownFn()
+	}
+	if cleanupErr := m.stop(); cleanupErr != nil {
+		return errors.Join(startupErr, fmt.Errorf("startup cleanup: %w", cleanupErr))
+	}
+	return startupErr
 }
 
 func (m *Miner) initialize() error {
@@ -1155,14 +1257,7 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 		CheckInterval:  m.autoUpdate.interval,
 		Notify:         m.notifyUpdateAvailable,
 		NotifyFailure:  m.notifyUpdateFailed,
-		OnUpdate: func() {
-			// Cancel the run context so every component shuts down cleanly and
-			// the process exits 0; the container/service supervisor then
-			// restarts on the freshly written binary.
-			if m.shutdownFn != nil {
-				m.shutdownFn()
-			}
-		},
+		OnUpdate:       m.requestUpdateShutdown,
 	})
 
 	// Tracked like the other startMining loops (S1): the updater's notify
@@ -1170,6 +1265,20 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 	// so it must be joined before the handle closes. startAutoUpdater runs on
 	// startMining's goroutine, preserving loopWG's program-order argument.
 	m.startLoop(ctx, upd.Run)
+}
+
+// requestUpdateShutdown is the updater's OnUpdate callback (see
+// startAutoUpdater): after an applied binary update it cancels the run
+// context so every component shuts down cleanly and Run returns nil — the
+// process exits 0 and the container/service supervisor restarts onto the
+// freshly written binary. A method (not an inline closure) so the S2
+// auto-update exit test exercises the exact production callback; the
+// updater's own package tests cover OnUpdate being invoked on an applied
+// update.
+func (m *Miner) requestUpdateShutdown() {
+	if m.shutdownFn != nil {
+		m.shutdownFn()
+	}
 }
 
 // notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
@@ -1691,7 +1800,30 @@ func (m *Miner) handleStatusChange(username string, status models.StreamerStatus
 // sends are cancelled before the dispatch wait). main's
 // app.DefaultShutdownTimeout (30s) applies to the App steps AFTER Run
 // returns and is unaffected by these bounds.
+//
+// stop is idempotent (S2): the teardown body runs exactly once, guarded by
+// stopOnce, and every later or concurrent caller gets the memoized aggregate
+// result. Run reaches it on exactly one path per run — the normal
+// post-<-ctx.Done() shutdown or a startup-failure cleanup (failStartup) —
+// and the once guard makes that structural rather than an ordering argument.
 func (m *Miner) stop() error {
+	m.stopOnce.Do(func() {
+		if m.stopObserver != nil {
+			m.stopObserver()
+		}
+		m.stopErr = m.teardown()
+	})
+	return m.stopErr
+}
+
+// teardown is stop's single-execution body (see stop's once guard). Every
+// component teardown below is nil-guarded (S2): on a startup-failure cleanup
+// the miner may be only partially constructed — a component that was never
+// built has nothing to stop, and one that was built but never started is
+// safe by each component's own stop-without-start contract. Nothing invoked
+// below may call back into stop(): a re-entrant call would deadlock on the
+// once guard.
+func (m *Miner) teardown() error {
 	// Drain in-flight settings applies FIRST, before anything else tears
 	// down: App.Shutdown closes the DB only after Run (and therefore this
 	// function) returns, so once applyWG.Wait() returns here no apply can
@@ -1715,11 +1847,21 @@ func (m *Miner) stop() error {
 	// Both transports JOIN their read loops (bounded): after these two calls
 	// no goroutine can enter analytics or notifications from a network
 	// message, and any handler that was mid-write has finished.
-	drainErrs = append(drainErrs, m.chatManager.Close())
-	drainErrs = append(drainErrs, m.wsPool.Close())
-	m.watcher.Stop()
-	m.dropsTracker.Stop()
-	m.discovery.Stop()
+	if m.chatManager != nil {
+		drainErrs = append(drainErrs, m.chatManager.Close())
+	}
+	if m.wsPool != nil {
+		drainErrs = append(drainErrs, m.wsPool.Close())
+	}
+	if m.watcher != nil {
+		m.watcher.Stop()
+	}
+	if m.dropsTracker != nil {
+		m.dropsTracker.Stop()
+	}
+	if m.discovery != nil {
+		m.discovery.Stop()
+	}
 	if m.canary != nil {
 		m.canary.Stop()
 	}
@@ -1772,7 +1914,9 @@ func (m *Miner) stop() error {
 		_ = m.db.Close()
 	}
 
-	m.streamers.PrintReport()
+	if m.streamers != nil {
+		m.streamers.PrintReport()
+	}
 	return errors.Join(drainErrs...)
 }
 
