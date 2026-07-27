@@ -381,3 +381,48 @@ func TestJoinChatRosterGateConcurrentHammering(t *testing.T) {
 		t.Fatal("the current roster pointer must join after the final re-add")
 	}
 }
+
+// TestJoinChatEvaluatesPredicateUnderManagerLock pins WHERE the roster
+// predicate runs: inside joinChat's m.mu critical section, not before it.
+// That placement is what makes the membership check and the subsequent
+// client-map lookup/creation atomic against a concurrent Leave — evaluating
+// the predicate before m.mu.Lock() would reopen exactly the stale-pointer
+// race this gate exists to close (a Leave could complete between the check
+// and the join). This is a mutation-campaign regression test: a mutant that
+// hoists the predicate call (and the login read) above m.mu.Lock() passes
+// every other test in this file but is caught here.
+//
+// The probe is a single-threaded TryLock: this test runs on one goroutine,
+// so the only way ChatManager.mu can already be held when the predicate
+// fires is joinChat itself holding it (a write lock, non-reentrant). Under
+// the real (correct) code, TryLock deterministically fails inside the
+// predicate; under the surviving mutant, m.mu is not yet held at that point,
+// so TryLock deterministically succeeds — no timing/scheduling variance
+// either way, so no sleeps or extra goroutines are needed to make the
+// assertion reliable.
+func TestJoinChatEvaluatesPredicateUnderManagerLock(t *testing.T) {
+	cm, dials := newRuntimeChatManager()
+	s := streamerWithChat("chan", models.ChatAlways)
+
+	called := false
+	cm.SetRosterMembership(func(*models.Streamer) bool {
+		called = true
+		if cm.mu.TryLock() {
+			cm.mu.Unlock()
+			t.Error("rosterMembership must be evaluated with ChatManager.mu held")
+		}
+		return true
+	})
+
+	cm.ToggleChat(s)
+
+	if !called {
+		t.Fatal("setup: rosterMembership predicate was never invoked")
+	}
+	if !cm.hasConnection("chan") {
+		t.Fatal("predicate returning true must let the join proceed")
+	}
+	if got := atomic.LoadInt32(dials); got != 1 {
+		t.Fatalf("dials = %d, want 1", got)
+	}
+}
