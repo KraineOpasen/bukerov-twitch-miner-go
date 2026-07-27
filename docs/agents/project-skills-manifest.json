@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "ownership_class": "project-first-party",
+  "notes": "First-party, project-owned Claude Code skills authored and reviewed in this repository; see project-skills-policy.md.",
+  "skills": []
+}
