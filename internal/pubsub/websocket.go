@@ -162,7 +162,35 @@ type WebSocketClient struct {
 	mu       sync.RWMutex
 	writeMu  sync.Mutex
 	stopChan chan struct{}
+
+	// loopWG counts the read/ping loops of EVERY connection generation (S1).
+	// The only Add site is Connect's post-dial critical section, under mu and
+	// only when forcedClose is false; Close sets forcedClose under the same
+	// mu before it waits, so an Add can never race a Wait that already
+	// observed zero. Joining the loops is what lets Close guarantee that an
+	// in-flight message handler (which may be writing analytics rows or
+	// scheduling a notification dispatch) has finished before the caller
+	// proceeds toward closing the shared database handle.
+	loopWG sync.WaitGroup
 }
+
+// ErrClientClosed is returned by Connect once Close has been called: a closed
+// client must never spawn new read/ping loops (they would outlive the
+// shutdown drain). reconnectAfter treats it as terminal instead of retrying.
+var ErrClientClosed = errors.New("pubsub: client closed")
+
+// stopJoinTimeout bounds how long Close waits for this connection's read/ping
+// loops to finish draining an in-flight message handler before giving up, so
+// a wedged handler can never block shutdown indefinitely. Package variable so
+// tests can shrink it (the watcher/drops precedent). 3s keeps the aggregate
+// shutdown drain budget documented in miner.stop() under the process-level
+// shutdown deadline; connections are joined concurrently by Pool.Close, so
+// this is the pool's worst case too.
+var stopJoinTimeout = 3 * time.Second
+
+// errLoopJoinTimeout is the explicit shutdown error Close returns when this
+// connection's loops did not finish inside stopJoinTimeout.
+var errLoopJoinTimeout = errors.New("pubsub: connection loop join timed out")
 
 func NewWebSocketClient(index int, tokenFn AuthTokenProvider, pingInterval int, reconnectDelay int, onMessage func(*PubSubMessage), onError func(error)) *WebSocketClient {
 	return &WebSocketClient{
@@ -198,6 +226,15 @@ func (ws *WebSocketClient) Connect() error {
 	}
 
 	ws.mu.Lock()
+	if ws.forcedClose {
+		// Close landed while this dial was in flight (Close cannot see a
+		// socket that does not exist yet). Never spawn loops for a closed
+		// client — they would outlive the shutdown drain — and never
+		// resurrect its state; discard the freshly-dialed connection instead.
+		ws.mu.Unlock()
+		_ = conn.Close()
+		return ErrClientClosed
+	}
 	ws.conn = conn
 	ws.isOpened = true
 	ws.isReconnecting = false
@@ -237,8 +274,38 @@ func (ws *WebSocketClient) Connect() error {
 	// invalid-topic correlation, and (stop, conn) fence the I/O, so an old loop
 	// outliving a reconnect can neither read the new conn nor heal/void the new
 	// generation's state.
-	go ws.readLoop(stop, conn, gen)
-	go ws.pingLoop(stop, conn, gen)
+	// The Add is registered in its own critical section immediately before
+	// the spawns — not up in the state section — so a Close arriving during
+	// replayPendingTopics does not spend its join budget waiting on loops
+	// that were never spawned. Re-checking forcedClose AND that this
+	// generation is still current (a read error during the replay can start
+	// a reconnect, which swaps the stop channel and bumps the generation)
+	// keeps the (stop, conn, gen) triple coherent: stale connects abandon
+	// the socket instead of spawning loops another generation cannot stop.
+	// The forcedClose pairing with Close's set-then-wait (under the same mu)
+	// is the no-Add-after-Wait argument for loopWG.
+	ws.mu.Lock()
+	if ws.forcedClose {
+		ws.mu.Unlock()
+		_ = conn.Close()
+		return ErrClientClosed
+	}
+	if ws.stopChan != stop || ws.connGen != gen {
+		ws.mu.Unlock()
+		_ = conn.Close()
+		return errors.New("pubsub: connection superseded during connect")
+	}
+	ws.loopWG.Add(2)
+	ws.mu.Unlock()
+
+	go func() {
+		defer ws.loopWG.Done()
+		ws.readLoop(stop, conn, gen)
+	}()
+	go func() {
+		defer ws.loopWG.Done()
+		ws.pingLoop(stop, conn, gen)
+	}()
 
 	return nil
 }
@@ -254,12 +321,18 @@ func (ws *WebSocketClient) SetInvalidTopicHandler(h func(Topic)) {
 	ws.mu.Unlock()
 }
 
-func (ws *WebSocketClient) Close() {
+// Close shuts the connection down and joins its loops (bounded). On a join
+// timeout it returns the explicit errLoopJoinTimeout and proceeds — it never
+// hangs. A repeated Close is a nil no-op.
+func (ws *WebSocketClient) Close() error {
 	ws.mu.Lock()
-	// Idempotent: a second Close must not re-close the stop channel.
+	// Idempotent: a second Close must not re-close the stop channel. It also
+	// must not re-join: the first Close owns the bounded wait, and a second
+	// caller returning early is safe because forcedClose already fences any
+	// new loop spawn.
 	if ws.forcedClose {
 		ws.mu.Unlock()
-		return
+		return nil
 	}
 	ws.forcedClose = true
 	ws.isClosed = true
@@ -272,7 +345,25 @@ func (ws *WebSocketClient) Close() {
 	ws.mu.Unlock()
 
 	if conn != nil {
-		_ = conn.Close()
+		_ = conn.Close() // unblocks the read loop's pending ReadMessage
+	}
+
+	// Join the loops with NO lock held: the read loop's message handling
+	// takes ws.mu (and, via onMessage, the pool lock), so waiting under
+	// either would deadlock. Bounded so a wedged handler degrades to a
+	// logged warning instead of hanging shutdown (S1).
+	done := make(chan struct{})
+	go func() {
+		ws.loopWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(stopJoinTimeout):
+		slog.Warn("PubSub connection loops did not finish within the stop timeout; proceeding with shutdown",
+			"index", ws.index, "timeout", stopJoinTimeout)
+		return fmt.Errorf("%w (index %d, %s)", errLoopJoinTimeout, ws.index, stopJoinTimeout)
 	}
 }
 
@@ -1189,9 +1280,22 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	}
 	ws.isReconnecting = true
 	ws.isClosed = true
+	// The reconnect driver itself is tracked (S1): it sleeps and then dials,
+	// so an untracked driver would outlive Close mid-backoff. The Add is
+	// admission-checked by the forcedClose test above, under the same mu
+	// Close uses for its set-then-wait; the single deferred Done covers
+	// every return path. A driver spawned after Close's Wait has already
+	// returned is refused by that same forcedClose check before it can
+	// register, sleep, or dial.
+	ws.loopWG.Add(1)
+	// Snapshot the CURRENT generation's stop channel for the backoff wait
+	// below: Close closes it, waking the sleep; this function swaps it only
+	// AFTER the sleep, so the snapshot is the right channel for the wait.
+	stop := ws.stopChan
 	onReconnect := ws.onReconnect
 	conn := ws.conn
 	ws.mu.Unlock()
+	defer ws.loopWG.Done()
 
 	// Report the reconnect (lock released) so the pool can count churn. Fired
 	// once per reconnect entry, including the self-retry path on a failed dial —
@@ -1206,7 +1310,15 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	}
 
 	slog.Info("Reconnecting WebSocket", "index", ws.index, "delay", delay)
-	time.Sleep(delay)
+	// Interruptible backoff: Close closing the stop channel wakes this wait
+	// so the tracked driver exits promptly (the forcedClose re-check below
+	// refuses the redial) instead of sleeping through the join bound.
+	timer := time.NewTimer(delay)
+	select {
+	case <-timer.C:
+	case <-stop:
+		timer.Stop()
+	}
 
 	ws.mu.Lock()
 	if ws.forcedClose {
@@ -1246,6 +1358,11 @@ func (ws *WebSocketClient) reconnectAfter(delay time.Duration) {
 	ws.mu.Unlock()
 
 	if err := ws.Connect(); err != nil {
+		if errors.Is(err, ErrClientClosed) {
+			// Close won the race with this redial: the client is shut down
+			// for good, so retrying would spin forever against the guard.
+			return
+		}
 		slog.Error("Failed to reconnect", "index", ws.index, "error", err)
 		// Connect() clears isReconnecting only on success, so reopen the guard
 		// here before retrying — otherwise the retry would be swallowed by the

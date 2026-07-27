@@ -90,6 +90,109 @@ type Manager struct {
 	// no-op) — the guard makes "call it more than once" a defined no-op
 	// rather than an unreviewed coincidence.
 	stopOnce sync.Once
+	// stopErr is the first Stop's dispatch-drain outcome, written once inside
+	// stopOnce and returned to every caller so a repeated Stop observes the
+	// same explicit shutdown error.
+	stopErr error
+
+	// dispatchMu guards dispatchDraining and serializes every dispatchWG.Add
+	// against drainDispatch's Wait — the same shutdown/admission interlock as
+	// the miner's beginApply/applyWG (S1): goDispatch refuses a NEW dispatch
+	// goroutine once dispatchDraining is set, and registers an accepted one in
+	// dispatchWG on the CALLER's goroutine before the spawn, so an Add can
+	// never race a Wait that already observed zero.
+	//
+	// LOCK ORDER: dispatchMu is a leaf. It is never held while acquiring mu or
+	// discordLifecycleMu, and drainDispatch must never Wait while either of
+	// those is held — a dispatch goroutine is free to take mu, so waiting for
+	// it under mu would deadlock the shutdown.
+	dispatchMu       sync.Mutex
+	dispatchDraining bool
+	dispatchWG       sync.WaitGroup
+
+	// dispatchCtx bounds the network half of every dispatched goroutine and is
+	// cancelled at the start of the drain, so a wedged provider send aborts
+	// instead of holding shutdown open for the full drain timeout. Derived
+	// from context.Background(), not from the run context: at drain time the
+	// run context is already cancelled, and an admitted dispatch's DB-writing
+	// tail must still be allowed to finish. Created in NewManager (Notify* is
+	// legal without Start); cancelled exactly once, by drainDispatch.
+	dispatchCtx    context.Context
+	dispatchCancel context.CancelFunc
+}
+
+// dispatchDrainTimeout bounds how long Stop waits for in-flight notification
+// dispatch goroutines (which may be persisting point-rule state after their
+// network send) to finish. The expected real drain is one SQLite write:
+// dispatchCtx is cancelled before the wait begins, so a send in flight
+// returns early instead of consuming the budget. Package variable so tests
+// can shrink it (the watcher/drops stopJoinTimeout precedent). 5s keeps the
+// aggregate shutdown drain budget documented in miner.stop() under the
+// process-level shutdown deadline.
+var dispatchDrainTimeout = 5 * time.Second
+
+// errDispatchDrainTimeout is the explicit shutdown error Stop returns when
+// admitted dispatch goroutines did not drain inside dispatchDrainTimeout.
+var errDispatchDrainTimeout = errors.New("notifications: dispatch drain timed out")
+
+// goDispatch runs fn on a background goroutine that Stop drains, handing it
+// the Manager's dispatch context for any network I/O. It returns false —
+// running nothing — once Stop has begun draining, so no new dispatch that
+// could reach the database can start after the drain point. Admission
+// (dispatchWG.Add under dispatchMu, on the caller's goroutine) is what makes
+// the drain account for every accepted dispatch exactly once. This is the
+// only sanctioned way for the Manager to spawn a notification goroutine.
+func (m *Manager) goDispatch(fn func(ctx context.Context)) bool {
+	m.dispatchMu.Lock()
+	if m.dispatchDraining {
+		m.dispatchMu.Unlock()
+		return false
+	}
+	m.dispatchWG.Add(1)
+	ctx := m.dispatchCtx
+	m.dispatchMu.Unlock()
+
+	go func() {
+		defer m.dispatchWG.Done()
+		fn(ctx)
+	}()
+	return true
+}
+
+// drainDispatch closes admission for new dispatch goroutines, cancels the
+// network half of the ones in flight, and waits — bounded by
+// dispatchDrainTimeout — for every admitted dispatch to return, so an
+// in-flight point-rule persistence lands before the caller proceeds toward
+// closing the shared database handle. On timeout it returns the explicit
+// errDispatchDrainTimeout and proceeds — it never hangs. Idempotent. MUST be
+// called with neither mu nor discordLifecycleMu held (see dispatchMu's
+// lock-order note).
+func (m *Manager) drainDispatch() error {
+	m.dispatchMu.Lock()
+	already := m.dispatchDraining
+	m.dispatchDraining = true
+	cancel := m.dispatchCancel
+	m.dispatchMu.Unlock()
+	if already {
+		return nil
+	}
+	if cancel != nil {
+		cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.dispatchWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(dispatchDrainTimeout):
+		slog.Warn("Notification dispatch did not drain within the stop timeout; proceeding with shutdown",
+			"timeout", dispatchDrainTimeout)
+		return fmt.Errorf("%w after %s", errDispatchDrainTimeout, dispatchDrainTimeout)
+	}
 }
 
 // SetDisplayLocation sets the time zone operator-facing notifications render
@@ -156,6 +259,7 @@ func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.Notificatio
 		}
 	}
 
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	m := &Manager{
 		discordConfig:        dc,
 		notifConfig:          nc,
@@ -165,6 +269,8 @@ func NewManager(discordCfg *config.DiscordSettings, notifCfg *config.Notificatio
 		repo:                 repo,
 		pointsPreviousValues: make(map[string]int),
 		batchers:             make(map[string]*Batcher),
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       dispatchCancel,
 	}
 
 	if dc.Enabled {
@@ -253,14 +359,29 @@ func (m *Manager) Start(ctx context.Context) error {
 	return connectErr
 }
 
-// Stop disconnects all providers, flushes any pending batches, and closes the
-// repository. Idempotent (M4, I5): guarded by stopOnce, so a second call (the
-// miner's stop() and, separately, a test or a second shutdown path both
-// reaching Stop) is a safe no-op rather than a redundant
-// Disconnect/Flush/repo.Close — the second call returns as soon as the
-// first's body has finished running.
-func (m *Manager) Stop() {
+// Stop drains the in-flight dispatch goroutines, disconnects all providers,
+// flushes any pending batches, and closes the repository. The dispatch drain
+// runs FIRST (S1): a point-goal dispatch persists point_rule.triggered after
+// its network send, and Stop returning is what lets Miner.Run return and the
+// composition root close the shared SQLite handle — so Stop must not return
+// while such a write can still be in flight. On a drain timeout Stop returns
+// the explicit drain error (and still performs the remaining teardown).
+// Idempotent (M4, I5): guarded by stopOnce, so a second call (the miner's
+// stop() and, separately, a test or a second shutdown path both reaching
+// Stop) is a safe no-op that returns the first call's error rather than a
+// redundant Disconnect/Flush/repo.Close.
+func (m *Manager) Stop() error {
 	m.stopOnce.Do(func() {
+		// Drain with NO Manager lock held: a dispatch goroutine may take mu,
+		// and discordLifecycleMu sits above mu in the documented order, so
+		// waiting under either would invert the lock order. The drain first
+		// CANCELS in-flight network sends (a cancelled send delivers nothing
+		// and correctly persists nothing) and then waits for the admitted
+		// goroutines' DB-writing tails. Draining before the batcher flush
+		// lets a pending gated Batcher.Add land in the final flush; draining
+		// before Disconnect bounds how long a still-live session is held.
+		m.stopErr = m.drainDispatch()
+
 		m.discordLifecycleMu.Lock()
 		defer m.discordLifecycleMu.Unlock()
 
@@ -296,6 +417,7 @@ func (m *Manager) Stop() {
 			_ = repo.Close()
 		}
 	})
+	return m.stopErr
 }
 
 // dispatchPush forwards an event to every configured push provider through its
@@ -317,14 +439,17 @@ func (m *Manager) dispatchPush(eventType NotificationType, group, line string) {
 	ev := BatchEvent{Type: eventType, Group: group, Line: line}
 	for _, b := range batchers {
 		batcher := b
-		go func() {
-			if err := batcher.Add(context.Background(), ev); err != nil {
+		if !m.goDispatch(func(ctx context.Context) {
+			if err := batcher.Add(ctx, ev); err != nil {
 				// safeSendErrorAttr is the only way a send error may be logged
 				// here — see the identical rationale at batch.go's Flush.
 				slog.Error("Failed to dispatch push notification",
 					"provider", batcher.name, "type", eventType, safeSendErrorAttr(err))
 			}
-		}()
+		}) {
+			slog.Debug("Push dispatch skipped: notification manager is shutting down",
+				"provider", batcher.name, "type", eventType)
+		}
 	}
 }
 
@@ -572,11 +697,11 @@ func (m *Manager) NotifyMention(streamer, fromUser, message string) {
 		ChannelID: cfg.MentionsChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send mention notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyPointsReached checks and sends point threshold notifications.
@@ -630,8 +755,13 @@ func (m *Manager) NotifyPointsReached(streamer string, points int) {
 				ChannelID: cfg.PointsChannelID,
 			}
 
-			go func(n Notification, ruleID int64, deleteOnTrigger bool) {
-				if err := discord.Send(context.Background(), n); err != nil {
+			n, ruleID, deleteOnTrigger := notification, rule.ID, rule.DeleteOnTrigger
+			started := m.goDispatch(func(ctx context.Context) {
+				if err := discord.Send(ctx, n); err != nil {
+					// Includes a send cancelled by shutdown: nothing was
+					// delivered, so the rule correctly stays untriggered and
+					// re-fires after the next start (at-least-once, matching
+					// the pre-existing crash semantics).
 					slog.Error("Failed to send points notification", "error", err)
 					return
 				}
@@ -645,7 +775,11 @@ func (m *Manager) NotifyPointsReached(streamer string, points int) {
 						slog.Error("Failed to mark point rule triggered", "error", err)
 					}
 				}
-			}(notification, rule.ID, rule.DeleteOnTrigger)
+			})
+			if !started {
+				slog.Debug("Point-goal notification skipped: notification manager is shutting down",
+					"streamer", streamer, "threshold", rule.Threshold)
+			}
 		}
 	}
 }
@@ -721,11 +855,11 @@ func (m *Manager) NotifyOnline(streamer string) {
 		ChannelID: cfg.OnlineChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send online notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyOffline sends a streamer offline notification.
@@ -777,11 +911,11 @@ func (m *Manager) NotifyOffline(streamer string) {
 		ChannelID: cfg.OfflineChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send offline notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyReauthRequired sends a notification that Twitch authorization has
@@ -817,11 +951,11 @@ func (m *Manager) NotifyReauthRequired(detail string) {
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send reauth-required notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyConnectionLost sends a notification that the miner has lost contact
@@ -857,11 +991,11 @@ func (m *Manager) NotifyConnectionLost(detail string) {
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send connection-lost notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyConnectionRestored sends a notification that connectivity to Twitch
@@ -897,11 +1031,11 @@ func (m *Manager) NotifyConnectionRestored() {
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send connection-restored notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyHealthTransition sends an operator-facing alert when a health signal
@@ -958,11 +1092,11 @@ func (m *Manager) NotifyHealthTransition(signal string, healthy bool, detail str
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send health-transition notification", "error", err)
 		}
-	}()
+	})
 }
 
 // healthSignalLabel maps a health signal name to a human label for alerts.
@@ -1048,11 +1182,11 @@ func (m *Manager) notifyDropTransition(evType NotificationType, title, message s
 		Message:   message,
 		ChannelID: cfg.SystemChannelID,
 	}
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send drop-transition notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyUpdateAvailable sends a notification that a newer miner release is
@@ -1086,11 +1220,11 @@ func (m *Manager) NotifyUpdateAvailable(current, latest, releaseURL string) {
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send update-available notification", "error", err)
 		}
-	}()
+	})
 }
 
 // NotifyUpdateFailed sends a notification that installing an available miner
@@ -1124,11 +1258,11 @@ func (m *Manager) NotifyUpdateFailed(current, latest, reason string) {
 		ChannelID: cfg.SystemChannelID,
 	}
 
-	go func() {
-		if err := discord.Send(context.Background(), notification); err != nil {
+	m.goDispatch(func(ctx context.Context) {
+		if err := discord.Send(ctx, notification); err != nil {
 			slog.Error("Failed to send update-failed notification", "error", err)
 		}
-	}()
+	})
 }
 
 // GetDiscordChannels returns available Discord channels.

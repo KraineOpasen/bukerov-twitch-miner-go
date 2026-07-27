@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
@@ -32,6 +33,11 @@ type ChatManager struct {
 	// is nil in production (clients dial Twitch IRC over TLS); tests inject an
 	// in-memory transport so presence transitions run without a network.
 	dialFn func() (net.Conn, error)
+
+	// closed marks the manager as shut down (S1): joinChat must not create a
+	// fresh IRC client — whose read loop would outlive the shutdown drain —
+	// once Close has run. Guarded by mu.
+	closed bool
 
 	mu sync.RWMutex
 }
@@ -122,6 +128,11 @@ func (m *ChatManager) joinChat(streamer *models.Streamer) {
 
 	login := streamer.GetUsername()
 
+	if m.closed {
+		slog.Debug("Rejected joinChat: chat manager is shutting down", "channel", login)
+		return
+	}
+
 	if m.rosterMembership != nil && !m.rosterMembership(streamer) {
 		// A stale or foreign streamer pointer: the roster no longer tracks
 		// THIS object under its login (removed, or it never belonged), so
@@ -159,7 +170,9 @@ func (m *ChatManager) leaveChat(streamer *models.Streamer) {
 	defer m.mu.Unlock()
 
 	if client, exists := m.clients[login]; exists {
-		client.Stop()
+		// Runtime leave: the join outcome is advisory here (the client logs
+		// its own timeout); only the shutdown path aggregates join errors.
+		_ = client.Stop()
 		delete(m.clients, login)
 	}
 }
@@ -169,17 +182,45 @@ func (m *ChatManager) Leave(username string) {
 	defer m.mu.Unlock()
 
 	if client, exists := m.clients[username]; exists {
-		client.Stop()
+		_ = client.Stop()
 		delete(m.clients, username)
 	}
 }
 
-func (m *ChatManager) Close() {
+// Close stops every IRC client and JOINS their read loops (S1), so an
+// in-flight chat-message analytics write finishes before the caller proceeds
+// toward closing the shared database handle. The joins run with mu RELEASED —
+// a read loop's handler path never takes ChatManager.mu today, but holding a
+// manager-wide lock across N bounded waits would still stall every concurrent
+// ToggleChat for up to the join bound — and CONCURRENTLY, so the manager's
+// worst case is one per-client stopJoinTimeout, not len(clients) times it.
+// Join timeouts are aggregated into the returned explicit shutdown error;
+// Close itself never hangs. Idempotent (a repeated Close is a nil no-op);
+// joinChat refuses new clients once closed.
+func (m *ChatManager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	clients := make([]*IRCClient, 0, len(m.clients))
 	for _, client := range m.clients {
-		client.Stop()
+		clients = append(clients, client)
 	}
 	m.clients = make(map[string]*IRCClient)
+	m.mu.Unlock()
+
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for i, client := range clients {
+		i, client := i, client
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = client.Stop()
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

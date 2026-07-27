@@ -120,7 +120,7 @@ func TestReconnectOnReadError(t *testing.T) {
 	if err := c.Connect(); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer c.Stop()
+	defer func() { _ = c.Stop() }()
 
 	server := recvServer(t, f)
 	drainHandshake(t, f)
@@ -145,7 +145,7 @@ func TestReconnectOnServerCommand(t *testing.T) {
 	if err := c.Connect(); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer c.Stop()
+	defer func() { _ = c.Stop() }()
 
 	server := recvServer(t, f)
 	drainHandshake(t, f)
@@ -187,7 +187,7 @@ func TestStopPreventsReconnect(t *testing.T) {
 		}
 	}()
 
-	c.Stop()
+	_ = c.Stop()
 
 	if c.IsRunning() {
 		t.Fatal("client should not report running after Stop")

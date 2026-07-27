@@ -218,7 +218,10 @@ func (d *DiscordProvider) Send(ctx context.Context, notification Notification) e
 		}
 	}
 
-	_, err := session.ChannelMessageSendEmbed(notification.ChannelID, embed)
+	// The caller's context is threaded into the REST call so a shutdown-time
+	// dispatch drain (Manager.drainDispatch) cancels an in-flight send instead
+	// of waiting out the drain timeout on it.
+	_, err := session.ChannelMessageSendEmbed(notification.ChannelID, embed, discordgo.WithContext(ctx))
 	if err != nil {
 		slog.Error("Failed to send Discord notification",
 			"channel", notification.ChannelID,

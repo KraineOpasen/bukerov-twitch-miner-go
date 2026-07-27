@@ -196,7 +196,7 @@ func newPingTestClient(t *testing.T, url string, reconnectDelayMs int) *WebSocke
 	// while healthy-server tests do not flake when goroutine scheduling is
 	// starved under the full parallel suite.
 	ws.pongTimeout = 300 * time.Millisecond
-	t.Cleanup(ws.Close)
+	t.Cleanup(func() { _ = ws.Close() })
 	return ws
 }
 
@@ -291,7 +291,7 @@ func TestPingWriteFailureConvergesToReconnect(t *testing.T) {
 		}
 		return false
 	})
-	ws.Close() // stop the (correctly) persistent retry once observed
+	_ = ws.Close() // stop the (correctly) persistent retry once observed
 }
 
 // T6 — half-open regression: a deaf socket whose read loop would block forever
@@ -338,8 +338,8 @@ func TestShutdownDuringActivePingLoopIsClean(t *testing.T) {
 	waitUntil(t, "first dial", 2*time.Second, func() bool { return ts.dialCount() == 1 })
 	time.Sleep(50 * time.Millisecond) // the ping loop is now active (in its pong-wait)
 
-	ws.Close()
-	ws.Close() // idempotent: must not panic on a double close
+	_ = ws.Close()
+	_ = ws.Close() // idempotent: must not panic on a double close
 	time.Sleep(300 * time.Millisecond)
 
 	if got := ts.dialCount(); got != 1 {

@@ -245,7 +245,7 @@ func TestDiscordLifecycleRunsWithoutManagerLock(t *testing.T) {
 		fake := &fakeDiscord{connected: true, botToken: "tok", guildID: "guild"}
 		fake.onLifecycle = newProbe(m, &held)
 		m.discord = fake
-		m.Stop()
+		_ = m.Stop()
 		if held {
 			t.Fatalf("Manager.mu was held during Stop Disconnect")
 		}
