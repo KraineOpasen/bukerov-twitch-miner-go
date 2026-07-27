@@ -14,8 +14,10 @@ paths:
 - `.claude/hooks/governance-policy.py` and `.claude/settings.json` are the mechanical enforcement layer; do not
   edit them to work around a permission — if a rule seems wrong, say so and let the user change it outside
   Claude Code.
-- `.claude/skills/**` are vendored third-party content (Matt Pocock's skills) with local patches marked
-  `<!-- bukerov-local-patch: <id> -->`; see `docs/agents/mattpocock-skills-policy.md` before adding, removing,
-  or further patching a skill.
+- `.claude/skills/**` are vendored third-party content from two independent, non-overlapping upstreams —
+  Matt Pocock's `mattpocock/skills` and Anthropic's `anthropics/skills` — with local patches marked either
+  `<!-- bukerov-local-patch: <id> -->` (Markdown/HTML) or `# bukerov-local-patch: <id> — <note>` (Python); see
+  `docs/agents/mattpocock-skills-policy.md` and `docs/agents/anthropic-skills-policy.md` before adding,
+  removing, or further patching a skill from either set.
 - `.github/workflows/**` changes require explicit `ask` confirmation even under an active contract (see
   `.claude/settings.json`) — CI changes are high-blast-radius.

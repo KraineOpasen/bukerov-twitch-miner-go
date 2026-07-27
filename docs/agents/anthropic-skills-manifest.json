@@ -1,0 +1,519 @@
+{
+  "upstream_repo": "https://github.com/anthropics/skills",
+  "upstream_commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "upstream_tree": {
+    "skill-creator": "3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6",
+    "frontend-design": "0d5b74a14bdf3ebcd64f352d06376a2ef05ed296",
+    "webapp-testing": "5ffb7dc66b9fd4c25c3e400a4c00da99a349b714"
+  },
+  "upstream_current_head": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "drift": "none",
+  "reviewed_at": "2026-07-27T04:53:34Z",
+  "reviewed_by": "Claude Code Governance v2 task (Anthropic skills vendoring, single production writer)",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "license": {
+    "spdx": "Apache-2.0",
+    "per_skill_license_file": "LICENSE.txt",
+    "copyright_notice": "Copyright 2026 Anthropic, PBC.",
+    "copyright_notice_source": {
+      "skill-creator-anthropic": "present verbatim in vendored LICENSE.txt (Apache License Appendix)",
+      "webapp-testing": "present verbatim in vendored LICENSE.txt (Apache License Appendix)",
+      "frontend-design": "vendored LICENSE.txt has no Appendix/copyright block (ends at 'END OF TERMS AND CONDITIONS'); attribution recorded here on its behalf per Apache-2.0 practice"
+    }
+  },
+  "notes": "Three of upstream's 17 promoted skills (skill-creator, frontend-design, webapp-testing) are vendored here; the other 14 are excluded (see excluded_skills[]). skill-creator was renamed skill-creator-anthropic to avoid colliding with the Claude Code built-in skill of the same name, and moved from model- to user-invoked (disable-model-invocation: true). Upstream's README notes that skills/docx, skills/pdf, skills/pptx, and skills/xlsx are source-available (not open source) reference copies of Claude's built-in document capabilities -- excluded here regardless of license, since they weren't requested. See docs/agents/anthropic-skills-policy.md for the full review writeup.",
+  "skills": [
+    {
+      "name": "skill-creator-anthropic",
+      "path": ".claude/skills/skill-creator-anthropic",
+      "upstream_path": "skills/skill-creator",
+      "renamed_from": "skill-creator",
+      "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "locally_modified": true,
+      "patch_ids": [
+        "skc-rename-vendored",
+        "skc-user-invoked",
+        "skc-change-mode-gate",
+        "skc-workspace-tmp",
+        "skc-agent-cap",
+        "skc-no-nohup-static-viewer",
+        "skc-no-open-evalreview",
+        "skc-runloop-foreground-sandbox",
+        "skc-package-output-tmp",
+        "skc-html-no-cdn",
+        "skc-py-static-only-viewer",
+        "skc-py-no-claudecode-strip",
+        "skc-py-sandbox-guard",
+        "skc-py-no-autoopen-runloop"
+      ],
+      "scripts_audited": true,
+      "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+      "files": [
+        {
+          "path": ".claude/skills/skill-creator-anthropic/LICENSE.txt",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/LICENSE.txt",
+          "upstream_blob_sha": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/SKILL.md",
+          "upstream_blob_sha": "65b3a402dbd09b8e83f9d637c6b553875189085c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c9e7fe38cf33df7682263390eea10d9ee89ad543",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-rename-vendored",
+            "skc-user-invoked",
+            "skc-change-mode-gate",
+            "skc-workspace-tmp",
+            "skc-agent-cap",
+            "skc-no-nohup-static-viewer",
+            "skc-no-open-evalreview",
+            "skc-runloop-foreground-sandbox",
+            "skc-package-output-tmp"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/agents/analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/agents/analyzer.md",
+          "upstream_blob_sha": "14e41d6068635f4dd3fb878fd1626312395dda63",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "14e41d6068635f4dd3fb878fd1626312395dda63",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/agents/comparator.md",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/agents/comparator.md",
+          "upstream_blob_sha": "80e00eb45db3ee53a132fc2ba97fd59a7339e563",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "80e00eb45db3ee53a132fc2ba97fd59a7339e563",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/agents/grader.md",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/agents/grader.md",
+          "upstream_blob_sha": "558ab05c0a9a8bb062ef4c51823d4d76c3acf7c4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "558ab05c0a9a8bb062ef4c51823d4d76c3acf7c4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/assets/eval_review.html",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/assets/eval_review.html",
+          "upstream_blob_sha": "938ff32aed9bffabf723bd5492d720f4736c8e4d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0b1b459ee1a4d855ae16dbcb4fe789b47b51b3bf",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-html-no-cdn"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/eval-viewer/generate_review.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/eval-viewer/generate_review.py",
+          "upstream_blob_sha": "7fa5978631fed1ed545591dbb2b0eb21ce3f3d08",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c874d1062d63f121b6e16214ff236dc9096fcccf",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-py-static-only-viewer"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/eval-viewer/viewer.html",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/eval-viewer/viewer.html",
+          "upstream_blob_sha": "6d8e96348a02e66c3363d2ff3b3ae58ac11e6382",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7c78fff3e94fde09763913e494ab730c0834217e",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-html-no-cdn"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/references/schemas.md",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/references/schemas.md",
+          "upstream_blob_sha": "b6eeaa2d4a34c1653069585c6c5603da39a5bdbe",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b6eeaa2d4a34c1653069585c6c5603da39a5bdbe",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/__init__.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/__init__.py",
+          "upstream_blob_sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/aggregate_benchmark.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/aggregate_benchmark.py",
+          "upstream_blob_sha": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/generate_report.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/generate_report.py",
+          "upstream_blob_sha": "959e30a0014ec165c41a2bb7420b7dfe1416bbac",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d07e808da71b200fc0908739e1c08c24354adcef",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-html-no-cdn"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/improve_description.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/improve_description.py",
+          "upstream_blob_sha": "06bcec76122446986e3610c20a39c466de36f495",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4889cfde6c9f7cc7ae98960ec747eeb44b5d61eb",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-py-no-claudecode-strip"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/package_skill.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/package_skill.py",
+          "upstream_blob_sha": "f48eac444656ddc41204aac1760a217951ce609e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f48eac444656ddc41204aac1760a217951ce609e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/quick_validate.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/quick_validate.py",
+          "upstream_blob_sha": "ed8e1dddce77b16af13c6f36b3fe86c4ac7c590c",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "557be6266f4c11689d1f0028d62a133c315e78eb",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-user-invoked"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/run_eval.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/run_eval.py",
+          "upstream_blob_sha": "e58c70bea39d5b252a1e819f242bbdcdf20e8b87",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ed1b6c2c125510505369bd279aa7f2c902d21c5a",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-py-no-claudecode-strip",
+            "skc-py-sandbox-guard"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/run_loop.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/run_loop.py",
+          "upstream_blob_sha": "30a263d674ef19de11c756d6f7537f91a421909e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "17db557665790992db27d6c0345830452eb62ff5",
+          "locally_modified": true,
+          "patch_ids": [
+            "skc-py-no-autoopen-runloop"
+          ]
+        },
+        {
+          "path": ".claude/skills/skill-creator-anthropic/scripts/utils.py",
+          "origin": "upstream",
+          "upstream_path": "skills/skill-creator/scripts/utils.py",
+          "upstream_blob_sha": "51b6a07dd57174197a937034b7eecebd5768ff8a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "51b6a07dd57174197a937034b7eecebd5768ff8a",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "frontend-design",
+      "path": ".claude/skills/frontend-design",
+      "upstream_path": "skills/frontend-design",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "locally_modified": true,
+      "patch_ids": [
+        "fd-description-scope",
+        "fd-stack-pin",
+        "fd-artifact-paths"
+      ],
+      "scripts_audited": null,
+      "audit_ref": "not applicable -- this skill ships no scripts (SKILL.md + LICENSE.txt only)",
+      "files": [
+        {
+          "path": ".claude/skills/frontend-design/LICENSE.txt",
+          "origin": "upstream",
+          "upstream_path": "skills/frontend-design/LICENSE.txt",
+          "upstream_blob_sha": "f433b1a53f5b830a205fd2df78e2b34974656c7b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f433b1a53f5b830a205fd2df78e2b34974656c7b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/frontend-design/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/frontend-design/SKILL.md",
+          "upstream_blob_sha": "decdff43d05908b4c1fc2cfd2d80fc5743440934",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4163f8d2063472a2bfd06d7a04986ed5ae966631",
+          "locally_modified": true,
+          "patch_ids": [
+            "fd-description-scope",
+            "fd-stack-pin",
+            "fd-artifact-paths"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "webapp-testing",
+      "path": ".claude/skills/webapp-testing",
+      "upstream_path": "skills/webapp-testing",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
+      "locally_modified": true,
+      "patch_ids": [
+        "webapp-testing-description-scope",
+        "webapp-testing-audit-before-exec",
+        "webapp-testing-no-blackbox",
+        "webapp-testing-localhost-only",
+        "webapp-testing-server-cleanup",
+        "webapp-testing-artifact-paths"
+      ],
+      "scripts_audited": true,
+      "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+      "files": [
+        {
+          "path": ".claude/skills/webapp-testing/LICENSE.txt",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/LICENSE.txt",
+          "upstream_blob_sha": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/webapp-testing/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/SKILL.md",
+          "upstream_blob_sha": "4726215301db64a0cc4d41fc3219c61f37a30f4a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a1efae3c00088f9d7c8801cffa2cd62dc5a53e1",
+          "locally_modified": true,
+          "patch_ids": [
+            "webapp-testing-description-scope",
+            "webapp-testing-audit-before-exec",
+            "webapp-testing-no-blackbox",
+            "webapp-testing-localhost-only",
+            "webapp-testing-server-cleanup"
+          ]
+        },
+        {
+          "path": ".claude/skills/webapp-testing/examples/console_logging.py",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/examples/console_logging.py",
+          "upstream_blob_sha": "9329b5e232ed53d944bfe95e750070117d31b9ab",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a6dfcb59dbbf65f47e418197d6b4febcaee52fb0",
+          "locally_modified": true,
+          "patch_ids": [
+            "webapp-testing-artifact-paths"
+          ]
+        },
+        {
+          "path": ".claude/skills/webapp-testing/examples/element_discovery.py",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/examples/element_discovery.py",
+          "upstream_blob_sha": "917ba72f52421a1b324f93ae8e38af72010a87b9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "917ba72f52421a1b324f93ae8e38af72010a87b9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/webapp-testing/examples/static_html_automation.py",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/examples/static_html_automation.py",
+          "upstream_blob_sha": "90bbedcc08cdb345c74fb938ebad02c0baf56603",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "75fcabab05d901f0b67573ba426ea8f94858561a",
+          "locally_modified": true,
+          "patch_ids": [
+            "webapp-testing-artifact-paths"
+          ]
+        },
+        {
+          "path": ".claude/skills/webapp-testing/scripts/test_with_server.py",
+          "origin": "local",
+          "upstream_path": null,
+          "upstream_blob_sha": null,
+          "upstream_mode": null,
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1a3933156fa71216924ca5a03800c0307bd03b84",
+          "locally_modified": true,
+          "patch_ids": [
+            "webapp-testing-server-cleanup"
+          ],
+          "reason": "New local test harness for the webapp-testing-server-cleanup patch; not present upstream. Stdlib only, runtime < 40s, no network beyond loopback."
+        },
+        {
+          "path": ".claude/skills/webapp-testing/scripts/with_server.py",
+          "origin": "upstream",
+          "upstream_path": "skills/webapp-testing/scripts/with_server.py",
+          "upstream_blob_sha": "431f2eba16b268b7f3e2ae4daae9db41c0289b6d",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d3089b1d733aef875344ab9a592a0743f8ee0bd2",
+          "locally_modified": true,
+          "patch_ids": [
+            "webapp-testing-server-cleanup"
+          ]
+        }
+      ]
+    }
+  ],
+  "excluded_skills": [
+    {
+      "name": "algorithmic-art",
+      "upstream_path": "skills/algorithmic-art",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "brand-guidelines",
+      "upstream_path": "skills/brand-guidelines",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "canvas-design",
+      "upstream_path": "skills/canvas-design",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "claude-api",
+      "upstream_path": "skills/claude-api",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "doc-coauthoring",
+      "upstream_path": "skills/doc-coauthoring",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "docx",
+      "upstream_path": "skills/docx",
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/docx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+    },
+    {
+      "name": "internal-comms",
+      "upstream_path": "skills/internal-comms",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "mcp-builder",
+      "upstream_path": "skills/mcp-builder",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "pdf",
+      "upstream_path": "skills/pdf",
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pdf): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+    },
+    {
+      "name": "pptx",
+      "upstream_path": "skills/pptx",
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pptx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+    },
+    {
+      "name": "slack-gif-creator",
+      "upstream_path": "skills/slack-gif-creator",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "theme-factory",
+      "upstream_path": "skills/theme-factory",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "web-artifacts-builder",
+      "upstream_path": "skills/web-artifacts-builder",
+      "reason": "Not requested by this integration's contract."
+    },
+    {
+      "name": "xlsx",
+      "upstream_path": "skills/xlsx",
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/xlsx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+    }
+  ],
+  "excluded_upstream_paths": [
+    "spec/",
+    "template/",
+    ".claude-plugin/",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    ".gitignore"
+  ]
+}
