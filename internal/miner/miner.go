@@ -297,9 +297,17 @@ type Miner struct {
 	// test drive Run's REAL control flow to a chosen startup stage and fail
 	// it there deterministically, so every early-return path's cleanup is
 	// testable without network access.
+	// startMiningFn additionally covers the startMining stage for the two
+	// SUCCESSFUL-startup control-flow tests (normal cancellation and the
+	// auto-update shutdown): the real startMining's drops tracker fires an
+	// immediate campaign sync whose offline GQL retry/backoff tail
+	// (~7.5-11s) exceeds the S1 drain bounds, so a deterministic offline
+	// test must stub the stage; the loops startMining spawns keep their own
+	// S1 coverage (stop_join_test.go and each component's package tests).
 	authenticateFn    func(ctx context.Context) error
 	loadStreamersFn   func() error
 	subscribeTopicsFn func() error
+	startMiningFn     func(ctx context.Context)
 
 	// stopOnce/stopErr make stop() execute its teardown exactly once and
 	// memoize the aggregate result for any later caller (S2): Run's control
@@ -413,6 +421,9 @@ func (m *Miner) SetWebServer(server *web.Server) {
 
 // Run starts the miner and blocks until the context is cancelled.
 // The caller is responsible for handling OS signals and cancelling the context.
+// A Miner is single-run: stop()'s once guard (S2) means a second Run on the
+// same value would skip teardown entirely — construct a fresh Miner per run
+// (App already does; it is itself single-use).
 func (m *Miner) Run(ctx context.Context) error {
 	// Derive a cancelable context so an applied auto-update can request a
 	// clean shutdown (which returns nil from Run -> process exits 0).
@@ -439,7 +450,7 @@ func (m *Miner) Run(ctx context.Context) error {
 		return m.failStartup(fmt.Errorf("failed to subscribe to topics: %w", err))
 	}
 
-	m.startMining(ctx)
+	m.runStartMining(ctx)
 
 	<-ctx.Done()
 	slog.Info("Shutting down...")
@@ -483,6 +494,17 @@ func (m *Miner) runSubscribeToTopics() error {
 		return m.subscribeTopicsFn()
 	}
 	return m.subscribeToTopics()
+}
+
+// runStartMining dispatches the startMining stage through its tests-only
+// seam (see startMiningFn); production always takes the real startMining
+// path.
+func (m *Miner) runStartMining(ctx context.Context) {
+	if m.startMiningFn != nil {
+		m.startMiningFn(ctx)
+		return
+	}
+	m.startMining(ctx)
 }
 
 // failStartup is the single early-exit cleanup gate for Run (S2): every
@@ -1235,14 +1257,7 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 		CheckInterval:  m.autoUpdate.interval,
 		Notify:         m.notifyUpdateAvailable,
 		NotifyFailure:  m.notifyUpdateFailed,
-		OnUpdate: func() {
-			// Cancel the run context so every component shuts down cleanly and
-			// the process exits 0; the container/service supervisor then
-			// restarts on the freshly written binary.
-			if m.shutdownFn != nil {
-				m.shutdownFn()
-			}
-		},
+		OnUpdate:       m.requestUpdateShutdown,
 	})
 
 	// Tracked like the other startMining loops (S1): the updater's notify
@@ -1250,6 +1265,20 @@ func (m *Miner) startAutoUpdater(ctx context.Context) {
 	// so it must be joined before the handle closes. startAutoUpdater runs on
 	// startMining's goroutine, preserving loopWG's program-order argument.
 	m.startLoop(ctx, upd.Run)
+}
+
+// requestUpdateShutdown is the updater's OnUpdate callback (see
+// startAutoUpdater): after an applied binary update it cancels the run
+// context so every component shuts down cleanly and Run returns nil — the
+// process exits 0 and the container/service supervisor restarts onto the
+// freshly written binary. A method (not an inline closure) so the S2
+// auto-update exit test exercises the exact production callback; the
+// updater's own package tests cover OnUpdate being invoked on an applied
+// update.
+func (m *Miner) requestUpdateShutdown() {
+	if m.shutdownFn != nil {
+		m.shutdownFn()
+	}
 }
 
 // notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
@@ -1791,7 +1820,9 @@ func (m *Miner) stop() error {
 // component teardown below is nil-guarded (S2): on a startup-failure cleanup
 // the miner may be only partially constructed — a component that was never
 // built has nothing to stop, and one that was built but never started is
-// safe by each component's own stop-without-start contract.
+// safe by each component's own stop-without-start contract. Nothing invoked
+// below may call back into stop(): a re-entrant call would deadlock on the
+// once guard.
 func (m *Miner) teardown() error {
 	// Drain in-flight settings applies FIRST, before anything else tears
 	// down: App.Shutdown closes the DB only after Run (and therefore this

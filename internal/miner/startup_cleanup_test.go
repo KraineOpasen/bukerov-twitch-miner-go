@@ -4,16 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/auth"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
 // newStartupCleanupMiner builds a Run-able miner for the S2 startup-failure
@@ -72,6 +78,52 @@ func requireExternalDBAlive(t *testing.T, db *database.DB) {
 	t.Helper()
 	if err := db.WithTx(context.Background(), func(tx *sql.Tx) error { return nil }); err != nil {
 		t.Fatalf("externally owned database handle is unusable after startup cleanup: %v", err)
+	}
+}
+
+// requireNoComponentGoroutines polls — bounded, never a bare sleep-as-
+// synchronization: the condition is "every transport/loop owner has exited",
+// for which no join barrier is exposed once Run has returned — until no
+// goroutine stack contains a frame from the miner-owned runtime packages
+// (pubsub/chat read loops, watcher/drops/discovery/notifications loops).
+// Marker-based stack filtering keeps the check immune to unrelated test or
+// runtime goroutines in this shared binary.
+func requireNoComponentGoroutines(t *testing.T) {
+	t.Helper()
+	markers := []string{
+		"internal/pubsub.",
+		"internal/chat.",
+		"internal/watcher.",
+		"internal/drops.",
+		"internal/discovery.",
+		"internal/notifications.",
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var leftover string
+	for {
+		// runtime.Stack truncates silently at the buffer size; grow until the
+		// dump fits so a large dump cannot hide a leftover marker.
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		for n == len(buf) {
+			buf = make([]byte, len(buf)*2)
+			n = runtime.Stack(buf, true)
+		}
+		stacks := string(buf[:n])
+		leftover = ""
+		for _, marker := range markers {
+			if strings.Contains(stacks, marker) {
+				leftover = marker
+				break
+			}
+		}
+		if leftover == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a goroutine owned by %q survived the startup-failure cleanup:\n%s", leftover, stacks)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -161,6 +213,7 @@ func TestRunSubscribeFailureCleansPartialStartup(t *testing.T) {
 	}
 
 	requireExternalDBAlive(t, db)
+	requireNoComponentGoroutines(t)
 
 	// Exactly-once: a later explicit stop() must not re-run the teardown.
 	if serr := m.stop(); serr != nil {
@@ -169,6 +222,190 @@ func TestRunSubscribeFailureCleansPartialStartup(t *testing.T) {
 	if got := cleanups.Load(); got != 1 {
 		t.Fatalf("teardown re-ran on a second stop(): observer count %d, want 1", got)
 	}
+}
+
+// TestRunNormalCancellationUsesS1DrainOnce (S2, requirement 8): a SUCCESSFUL
+// startup followed by normal context cancellation must still take the S1
+// drain path exactly once and return nil. The startMining stage is stubbed
+// via its seam (the real one fires an immediate drops campaign sync whose
+// offline GQL retry tail breaks the drain bounds — see the seam's doc
+// comment); the stub still registers a REAL background loop in loopWG so the
+// test proves the S1 loop join runs on this path. Requirement-8 coverage of
+// startMining's real loops remains with the S1 suite (stop_join_test.go and
+// the component packages).
+func TestRunNormalCancellationUsesS1DrainOnce(t *testing.T) {
+	m, db := newStartupCleanupMiner(t)
+	stubAuthenticate(m)
+	stubLoadStreamers(m)
+	m.subscribeTopicsFn = func() error { return nil }
+
+	started := make(chan struct{})
+	loopJoined := make(chan struct{})
+	m.startMiningFn = func(ctx context.Context) {
+		m.startLoop(ctx, func(ctx context.Context) {
+			<-ctx.Done()
+			close(loopJoined)
+		})
+		close(started)
+	}
+
+	var cleanups atomic.Int32
+	m.stopObserver = func() { cleanups.Add(1) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(ctx) }()
+
+	// Cancel only after startup completed, so this covers the genuine
+	// running-then-cancelled path rather than an already-cancelled start.
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("startup did not complete")
+	}
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run after a successful startup and normal cancellation = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+
+	select {
+	case <-loopJoined:
+	default:
+		t.Fatal("Run returned before its background loop observed cancellation — the S1 loop join did not run")
+	}
+	if got := cleanups.Load(); got != 1 {
+		t.Fatalf("S1 drain ran %d times on the normal-cancellation path, want exactly 1", got)
+	}
+	requireExternalDBAlive(t, db)
+}
+
+// TestRunAutoUpdateShutdownStaysSuccessful (S2, requirement 9): the applied-
+// auto-update exit path must still return nil from Run so the process exits
+// 0 and the supervisor restarts onto the new binary, and must run the S1
+// drain exactly once. The test runs the REAL startAutoUpdater (registering
+// the real updater loop in loopWG — deterministic offline: a "dev" build's
+// updater is dormant by design) and then invokes requestUpdateShutdown, the
+// exact production method wired as updater.Options.OnUpdate; the updater's
+// own package tests cover OnUpdate firing on an applied update.
+func TestRunAutoUpdateShutdownStaysSuccessful(t *testing.T) {
+	m, _ := newStartupCleanupMiner(t)
+	stubAuthenticate(m)
+	stubLoadStreamers(m)
+	m.subscribeTopicsFn = func() error { return nil }
+	m.ConfigureAutoUpdate(true, time.Hour)
+
+	started := make(chan struct{})
+	m.startMiningFn = func(ctx context.Context) {
+		m.startAutoUpdater(ctx)
+		close(started)
+	}
+
+	var cleanups atomic.Int32
+	m.stopObserver = func() { cleanups.Add(1) }
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(context.Background()) }()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("startup did not complete")
+	}
+	// The production OnUpdate callback, invoked after a binary swap.
+	m.requestUpdateShutdown()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run after an auto-update shutdown request = %v, want nil (exit 0 semantics)", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the auto-update shutdown request")
+	}
+	if got := cleanups.Load(); got != 1 {
+		t.Fatalf("S1 drain ran %d times on the auto-update exit path, want exactly 1", got)
+	}
+}
+
+// TestRunEarlyExitLeavesExternalWebAndAnalyticsAlone (S2, ownership): with
+// App-owned (injected) web server and analytics service — the production
+// composition, where App has already STARTED the web listener before
+// Miner.Run runs — a startup failure's cleanup must not stop either: the web
+// listener keeps accepting connections after Run returns, and the injected
+// database stays open. (analytics.Service.Close is a documented no-op, so
+// the listener probe is the observable half; the same externalAnalytics flag
+// gates both.)
+func TestRunEarlyExitLeavesExternalWebAndAnalyticsAlone(t *testing.T) {
+	m, db := newStartupCleanupMiner(t)
+	stubAuthenticate(m)
+	stubLoadStreamers(m)
+
+	// Reserve a loopback port for the injected server.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	m.config.EnableAnalytics = true
+	m.config.Analytics.Host = "127.0.0.1"
+	m.config.Analytics.Port = port
+
+	svc, err := analytics.NewService(db, m.config.StorageKey(), m.config.Analytics.RetentionDays)
+	if err != nil {
+		t.Fatalf("analytics.NewService: %v", err)
+	}
+	m.SetAnalyticsService(svc)
+
+	ws := web.NewServerEarly(m.config.Analytics, m.config.Username, m.config.StorageKey(), svc)
+	if ws == nil {
+		t.Fatal("web.NewServerEarly returned nil")
+	}
+	if err := ws.Start(); err != nil {
+		t.Fatalf("web server Start: %v", err)
+	}
+	defer ws.Stop()
+	m.SetWebServer(ws)
+
+	// web.Server.Start binds inside its serving goroutine, so the listener
+	// becomes reachable asynchronously: poll (bounded) until the first dial
+	// succeeds.
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	dialDeadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, derr := net.DialTimeout("tcp", addr, time.Second)
+		if derr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(dialDeadline) {
+			t.Fatalf("injected web server not reachable before Run: %v", derr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	sentinel := errors.New("s2 subscribe boom")
+	m.subscribeTopicsFn = func() error { return sentinel }
+
+	if err := m.Run(context.Background()); !errors.Is(err, sentinel) {
+		t.Fatalf("Run = %v, want the subscribe sentinel", err)
+	}
+
+	// The App-owned listener must still accept connections: the miner's
+	// cleanup must not have closed an injected web server.
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("injected web server no longer reachable after startup cleanup — the miner stopped an App-owned server: %v", err)
+	}
+	_ = conn.Close()
+
+	requireExternalDBAlive(t, db)
 }
 
 // TestFailStartupAggregatesCleanupErrors (S2, requirements 3/4/5): a cleanup
