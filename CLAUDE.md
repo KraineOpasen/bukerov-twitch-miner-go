@@ -145,6 +145,13 @@ Vendored third-party skills (Matt Pocock's `mattpocock/skills`, reviewed and aud
 `docs/agents/mattpocock-skills-manifest.json` (installed set, classification), and
 `docs/agents/mattpocock-skills-patches.md` (every local patch, by skill).
 
+A second, independent vendored set covers three skills from `anthropics/skills` (also reviewed and
+audited): `skill-creator-anthropic` (renamed from upstream's `skill-creator`; explicit-invocation-only —
+use `/skill-creator-anthropic`, a plain "create a skill" request routes to the built-in instead),
+`frontend-design`, and `webapp-testing`. See `docs/agents/anthropic-skills-policy.md` (policy,
+update/rollback procedure), `docs/agents/anthropic-skills-manifest.json` (installed set, file-level
+classification), and `docs/agents/anthropic-skills-patches.md` (every local patch, by file).
+
 #### Agent skills
 
 ##### Issue tracker
