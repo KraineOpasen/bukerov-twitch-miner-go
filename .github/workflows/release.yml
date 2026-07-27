@@ -28,7 +28,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
@@ -73,7 +73,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
 
       - name: Install UPX
         run: |
