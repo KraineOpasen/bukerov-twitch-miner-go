@@ -5,23 +5,8 @@
     .log-scroll { max-height: 72vh; overflow: auto; }
     .log-view {
         font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5;
-
-        /* Semantic log palette: bright, saturated hues tuned for the dark
-           card background. Defined once here; every .log-* class below only
-           references these variables. */
-        --log-bright-green: #39FF88;
-        --log-lime: #B6FF3B;
-        --log-red: #FF4D67;
-        --log-yellow: #FFE44D;
-        --log-gold: #FFC83D;
-        --log-orange: #FF8A3D;
-        --log-amber: #FFB020;
-        --log-turquoise: #27E5D8;
-        --log-cyan: #36D7FF;
-        --log-ultramarine: #6E93FF;
-        --log-violet: #A970FF;
-        --log-magenta: #FF4FD8;
-        --log-info-blue: #5EAEFF;
+        /* The --log-* semantic palette (13 hues, both themes) lives in
+           input.css now; every .log-* class below only references it. */
     }
     .log-line {
         display: block; white-space: pre-wrap; word-break: break-word;

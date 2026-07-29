@@ -19,59 +19,479 @@
   src: url("/static/fonts/jetbrains-mono.woff2") format("woff2");
 }
 
-/* Single dark theme. The neutral/purple/amber/green/red scale values are
-   overridden to the project palette so the whole existing app (settings,
-   drops, streamer, notifications) is reskinned without touching every
-   utility, while dedicated semantic tokens drive the new Overview. */
+/* =====================================================================
+   THEME TOKEN SYSTEM (F1 consolidation)
+   ---------------------------------------------------------------------
+   Layer A — Primitives: raw, theme-agnostic hex values. No component or
+     state meaning lives here; every hex anywhere below (fonts/shadows
+     excluded) traces back to one of these.
+   Layer B/C — Semantic tokens: theme-scoped custom properties assigned
+     from primitives. `:root` and `:root[data-theme="dark"]` hold the dark
+     palette (dark is default — also what paints before JS runs);
+     `:root[data-theme="light"]` overrides with the AA-validated light
+     palette. Resolution happens through the normal CSS cascade, so any
+     var() chain (however many hops) re-resolves automatically whenever
+     `data-theme` flips — no page reload needed.
+   Tailwind mapping — `@theme inline` re-points every existing Tailwind
+     color name (neutral/purple/amber/green/red/sidebar/online/offline/
+     streamer/event/success/danger/text/text-dim) plus new surface-,
+     text-, border-, status-, chart- prefixed names at the semantic layer, so
+     `bg-neutral-800`-style classes stay theme-aware with zero template
+     churn. Fonts stay in a plain (non-themed) `@theme` block.
+   ===================================================================== */
+
+/* ---------- Layer A: primitives ---------- */
+:root {
+  /* Night (dark) surfaces / text / borders */
+  --prim-night-page: #1a1b22;
+  --prim-night-sidebar: #15161c;
+  --prim-night-card: #232430;
+  --prim-night-text-100: #e8e6ef;
+  --prim-night-text-300: #b8b6c4;
+  --prim-night-text-400: #9c9aab;
+  --prim-night-border: #3a3b47;
+  --prim-night-border-strong: #7c7a8c;
+  --prim-night-950: #131319;
+  --prim-night-600: #4a4b57;
+  --prim-night-500: #6b6a78;
+  --prim-night-200: #d4d2de;
+
+  /* Night purple / brand */
+  --prim-night-purple: #8b7fd1;
+  --prim-night-purple-700: #6a5eb8;
+  --prim-night-purple-600: #7a6ec4;
+  --prim-night-purple-400: #a79ddd;
+  --prim-night-link: #c3bce9;
+  --prim-night-brand-orange: #FF7A00;
+
+  /* Night amber/event (muted tan family — distinct from the bright warning amber) */
+  --prim-night-amber-700: #c78e4a;
+  --prim-night-event: #d9a25c;
+  --prim-night-amber-500: #e0b074;
+
+  /* Night status */
+  --prim-night-status-success: #7fa88c;
+  --prim-night-status-warning: #FFB020;
+  --prim-night-status-danger: #c97b63;
+  --prim-night-status-info: #36D7FF;
+  --prim-night-emerald-500: #8fb89c;
+  --prim-night-red-700: #b56a52;
+  --prim-night-on-success: #10231a; /* dark on-success text (e.g. btn-bet-go on the success accent) */
+
+  /* Absolute white, theme-agnostic: backs the on-accent/on-success/on-danger
+     text tokens below (solid accent buttons need white text in both themes,
+     unlike hover/active tints over a neutral surface, which use text-primary). */
+  --prim-white: #ffffff;
+
+  /* Night bright accent hues shared by the ui-, log-, rw- families */
+  --prim-night-violet: #A970FF;   /* ui-watching/other, log-violet, rw-net */
+  --prim-night-lime: #B6FF3B;     /* ui-gain/streak, log-lime */
+  --prim-night-mint: #39FF88;     /* ui-roi-pos, log-bright-green */
+  --prim-night-rose: #FF4D67;     /* ui-roi-neg, log-red */
+  --prim-night-turquoise: #27E5D8;/* ui-refund, log-turquoise */
+  --prim-night-yellow: #FFE44D;   /* ui-watch, log-yellow */
+  --prim-night-gold: #FFC83D;     /* ui-claim, log-gold */
+  --prim-night-orange: #FF8A3D;   /* ui-raid, log-orange */
+  --prim-night-sky: #22D3EE;      /* ui-prediction */
+  --prim-night-ultramarine: #6E93FF;
+  --prim-night-magenta: #FF4FD8;
+  --prim-night-info-blue: #5EAEFF;
+  --prim-night-teal: #2CD4C6;     /* rw-cpu */
+  --prim-night-amber-rw: #F0B429; /* rw-mem */
+  --prim-night-blue: #4C8DF6;     /* rw-disk */
+
+  --prim-night-streamer: #e8c48a;
+
+  /* Day (light) surfaces / text / borders */
+  --prim-day-page: #f4f3f8;
+  --prim-day-sidebar: #eae8f1;
+  --prim-day-card: #ffffff;
+  --prim-day-text-100: #211f2e;
+  --prim-day-text-300: #45435a;
+  --prim-day-text-400: #615e74;
+  --prim-day-border: #d9d6e3;
+  --prim-day-border-strong: #8f8ba3;
+  --prim-day-950: #e6e3ee;
+  --prim-day-600: #8f8ba3;
+  --prim-day-500: #77748a;
+  --prim-day-200: #33313f;
+
+  /* Day purple / brand */
+  --prim-day-purple: #5b4fa8;
+  --prim-day-purple-700: #473d8f;
+  --prim-day-purple-400: #6a5eb8;
+  --prim-day-brand-orange: #a03c00;
+
+  /* Day event */
+  --prim-day-event: #8a5f1f;
+
+  /* Day status */
+  --prim-day-status-success: #1e7a45;
+  --prim-day-status-warning: #8a5500;
+  --prim-day-status-danger: #b3323e;
+  --prim-day-status-info: #0b66c3;
+
+  /* Day bright accent hues (own values — not simple inverses of night) */
+  --prim-day-online: #086388;     /* ui-online/queue, log-cyan */
+  --prim-day-watching: #6d33d6;   /* ui-watching/other, log-violet, rw-net */
+  --prim-day-gain: #3d6d00;       /* ui-gain/streak, log-lime */
+  --prim-day-roi-pos: #157a3d;    /* ui-roi-pos, log-bright-green */
+  --prim-day-roi-neg: #c4203f;    /* ui-roi-neg, log-red */
+  --prim-day-refund: #0b6d65;     /* ui-refund, log-turquoise */
+  --prim-day-watch: #755c00;      /* ui-watch, log-yellow */
+  --prim-day-claim: #7d5600;      /* ui-claim, log-gold */
+  --prim-day-raid: #a63e00;       /* ui-raid, log-orange */
+  --prim-day-prediction: #086d85; /* ui-prediction */
+  --prim-day-ultramarine: #3d55cc;
+  --prim-day-magenta: #a81292;
+  --prim-day-info-blue: #1861c9;
+  --prim-day-teal: #0b7568;       /* rw-cpu */
+  --prim-day-amber-rw: #8a5f00;   /* rw-mem */
+  --prim-day-blue: #1e5fd6;       /* rw-disk */
+
+  --prim-day-streamer: #8a5a2a;
+  --prim-day-chart-grid: #e2e0ea;
+  --prim-day-chart-label: #5b5870;
+}
+
+/* ---------- Theme-invariant tokens ----------
+   Chart annotation labels sit on a THEME-INDEPENDENT background: the marker
+   colour is persisted per-event in the database (analytics.RecordAnnotation
+   / miner.go), not derived from the active theme, so a single fixed
+   "readable ink" pair is defined once (not per theme) and the chart script
+   picks whichever gives better WCAG contrast against that specific
+   background at render time — never a fixed ink that can go unreadable
+   against an arbitrary persisted hue in one theme. */
+:root {
+  --chart-annotation-ink-dark: var(--prim-night-sidebar);
+  --chart-annotation-ink-light: var(--prim-white);
+}
+
+/* ---------- Layer B/C: semantic tokens (theme-scoped) ---------- */
+:root, :root[data-theme="dark"] {
+  /* surfaces */
+  --surface-page: var(--prim-night-page);
+  --surface-sidebar: var(--prim-night-sidebar);
+  --surface-card: var(--prim-night-card);
+  --surface-elevated: var(--prim-night-card);
+  --surface-input: var(--prim-night-page);
+
+  /* text */
+  --text-primary: var(--prim-night-text-100);
+  --text-secondary: var(--prim-night-text-300);
+  --text-muted: var(--prim-night-text-400);
+
+  /* borders */
+  --border-default: var(--prim-night-border);
+  --border-strong: var(--prim-night-border-strong);
+
+  /* brand / interactive */
+  --brand-orange: var(--prim-night-brand-orange);
+  --brand-purple: var(--prim-night-purple);
+  --interactive: var(--prim-night-purple);
+  --focus-ring: var(--prim-night-purple);
+  --link-text: var(--prim-night-link);
+
+  /* status */
+  --status-success: var(--prim-night-status-success);
+  --status-warning: var(--prim-night-status-warning);
+  --status-danger: var(--prim-night-status-danger);
+  --status-info: var(--prim-night-status-info);
+  --status-offline: var(--prim-night-text-400);
+
+  /* on-accent text: solid, saturated accent buttons (purple-600/success/
+     danger fills) need a fixed light text color in BOTH themes — unlike
+     hover/active states with a low-opacity tint over a neutral surface,
+     where --text-primary already contrasts correctly per theme. */
+  --text-on-accent: var(--prim-white);
+  --text-on-success: var(--prim-night-on-success);
+  --text-on-danger: var(--prim-night-950);
+
+  /* chart */
+  --chart-grid: var(--prim-night-border);
+  --chart-label: var(--prim-night-text-400);
+  --chart-series-1: var(--interactive);
+  --chart-series-2: var(--prim-night-yellow);
+  --chart-series-3: var(--prim-night-gold);
+  --chart-series-4: var(--prim-night-orange);
+  --chart-series-5: var(--prim-night-lime);
+  --chart-series-6: var(--prim-night-sky);
+
+  /* single-purpose hues consumed as `--color-streamer` / `--color-event` via @theme inline */
+  --streamer-hue: var(--prim-night-streamer);
+  --event-hue: var(--prim-night-event);
+
+  /* --ui-* semantic accents (base.html / overview.html / statistics.html) */
+  --ui-watching: var(--prim-night-violet);
+  --ui-online: var(--status-info);
+  --ui-queue: var(--status-info);
+  --ui-offline: var(--prim-night-500);
+  --ui-gain: var(--prim-night-lime);
+  --ui-warn: var(--status-warning);
+  --ui-roi-pos: var(--prim-night-mint);
+  --ui-roi-neg: var(--prim-night-rose);
+  --ui-refund: var(--prim-night-turquoise);
+  --ui-watch: var(--prim-night-yellow);
+  --ui-claim: var(--prim-night-gold);
+  --ui-raid: var(--prim-night-orange);
+  --ui-streak: var(--prim-night-lime);
+  --ui-prediction: var(--prim-night-sky);
+  --ui-other: var(--ui-watching);
+  --ui-brand-orange: var(--brand-orange);
+
+  /* --log-* palette (logs.html) */
+  --log-bright-green: var(--prim-night-mint);
+  --log-lime: var(--prim-night-lime);
+  --log-red: var(--prim-night-rose);
+  --log-yellow: var(--prim-night-yellow);
+  --log-gold: var(--prim-night-gold);
+  --log-orange: var(--prim-night-orange);
+  --log-amber: var(--status-warning);
+  --log-turquoise: var(--prim-night-turquoise);
+  --log-cyan: var(--status-info);
+  --log-ultramarine: var(--prim-night-ultramarine);
+  --log-violet: var(--prim-night-violet);
+  --log-magenta: var(--prim-night-magenta);
+  --log-info-blue: var(--prim-night-info-blue);
+  /* semantic level aliases */
+  --log-debug: var(--text-muted);
+  --log-info: var(--log-info-blue);
+  --log-warning: var(--log-amber);
+  --log-error: var(--log-red);
+
+  /* --rw-* resource-widget accents (overview.html) */
+  --rw-cpu: var(--prim-night-teal);
+  --rw-mem: var(--prim-night-amber-rw);
+  --rw-net: var(--prim-night-violet);
+  --rw-disk: var(--prim-night-blue);
+
+  /* Tailwind scale indirection (see @theme inline below) */
+  --scale-neutral-950: var(--prim-night-950);
+  --scale-neutral-900: var(--surface-page);
+  --scale-neutral-800: var(--surface-card);
+  --scale-neutral-700: var(--border-default);
+  --scale-neutral-600: var(--prim-night-600);
+  --scale-neutral-500: var(--prim-night-500);
+  --scale-neutral-400: var(--text-muted);
+  --scale-neutral-300: var(--text-secondary);
+  --scale-neutral-200: var(--prim-night-200);
+  --scale-neutral-100: var(--text-primary);
+
+  --scale-purple-700: var(--prim-night-purple-700);
+  --scale-purple-600: var(--prim-night-purple-600);
+  --scale-purple-500: var(--interactive);
+  --scale-purple-400: var(--prim-night-purple-400);
+  --scale-purple-300: var(--link-text);
+
+  --scale-amber-700: var(--prim-night-amber-700);
+  --scale-amber-600: var(--event-hue);
+  --scale-amber-500: var(--prim-night-amber-500);
+
+  --scale-green-600: var(--status-success);
+  --scale-green-500: var(--status-success);
+  --scale-emerald-600: var(--status-success);
+  --scale-emerald-500: var(--prim-night-emerald-500);
+
+  --scale-red-700: var(--prim-night-red-700);
+  --scale-red-600: var(--status-danger);
+  --scale-red-500: var(--status-danger);
+}
+
+:root[data-theme="light"] {
+  /* surfaces */
+  --surface-page: var(--prim-day-page);
+  --surface-sidebar: var(--prim-day-sidebar);
+  --surface-card: var(--prim-day-card);
+  --surface-elevated: var(--prim-day-card);
+  --surface-input: var(--prim-day-page);
+
+  /* text */
+  --text-primary: var(--prim-day-text-100);
+  --text-secondary: var(--prim-day-text-300);
+  --text-muted: var(--prim-day-text-400);
+
+  /* borders */
+  --border-default: var(--prim-day-border);
+  --border-strong: var(--prim-day-border-strong);
+
+  /* brand / interactive */
+  --brand-orange: var(--prim-day-brand-orange);
+  --brand-purple: var(--prim-day-purple);
+  --interactive: var(--prim-day-purple);
+  --focus-ring: var(--prim-day-purple);
+  --link-text: var(--prim-day-purple);
+
+  /* status */
+  --status-success: var(--prim-day-status-success);
+  --status-warning: var(--prim-day-status-warning);
+  --status-danger: var(--prim-day-status-danger);
+  --status-info: var(--prim-day-status-info);
+  --status-offline: var(--prim-day-text-400);
+
+  /* on-accent text: light-theme accent/success/danger fills are all dark
+     enough that a fixed white text stays AA-safe across the board. */
+  --text-on-accent: var(--prim-white);
+  --text-on-success: var(--prim-white);
+  --text-on-danger: var(--prim-white);
+
+  /* chart */
+  --chart-grid: var(--prim-day-chart-grid);
+  --chart-label: var(--prim-day-chart-label);
+  --chart-series-1: var(--interactive);
+  --chart-series-2: var(--prim-day-watch);
+  --chart-series-3: var(--prim-day-claim);
+  --chart-series-4: var(--prim-day-raid);
+  --chart-series-5: var(--prim-day-gain);
+  --chart-series-6: var(--prim-day-prediction);
+
+  --streamer-hue: var(--prim-day-streamer);
+  --event-hue: var(--prim-day-event);
+
+  --ui-watching: var(--prim-day-watching);
+  --ui-online: var(--prim-day-online);
+  --ui-queue: var(--prim-day-online);
+  --ui-offline: var(--prim-day-border-strong);
+  --ui-gain: var(--prim-day-gain);
+  --ui-warn: var(--status-warning);
+  --ui-roi-pos: var(--prim-day-roi-pos);
+  --ui-roi-neg: var(--prim-day-roi-neg);
+  --ui-refund: var(--prim-day-refund);
+  --ui-watch: var(--prim-day-watch);
+  --ui-claim: var(--prim-day-claim);
+  --ui-raid: var(--prim-day-raid);
+  --ui-streak: var(--prim-day-gain);
+  --ui-prediction: var(--prim-day-prediction);
+  --ui-other: var(--ui-watching);
+  --ui-brand-orange: var(--brand-orange);
+
+  --log-bright-green: var(--prim-day-roi-pos);
+  --log-lime: var(--prim-day-gain);
+  --log-red: var(--prim-day-roi-neg);
+  --log-yellow: var(--prim-day-watch);
+  --log-gold: var(--prim-day-claim);
+  --log-orange: var(--prim-day-raid);
+  --log-amber: var(--status-warning);
+  --log-turquoise: var(--prim-day-refund);
+  --log-cyan: var(--prim-day-online);
+  --log-ultramarine: var(--prim-day-ultramarine);
+  --log-violet: var(--prim-day-watching);
+  --log-magenta: var(--prim-day-magenta);
+  --log-info-blue: var(--prim-day-info-blue);
+  --log-debug: var(--text-muted);
+  --log-info: var(--log-info-blue);
+  --log-warning: var(--log-amber);
+  --log-error: var(--log-red);
+
+  --rw-cpu: var(--prim-day-teal);
+  --rw-mem: var(--prim-day-amber-rw);
+  --rw-net: var(--prim-day-watching);
+  --rw-disk: var(--prim-day-blue);
+
+  --scale-neutral-950: var(--prim-day-950);
+  --scale-neutral-900: var(--surface-page);
+  --scale-neutral-800: var(--surface-card);
+  --scale-neutral-700: var(--border-default);
+  --scale-neutral-600: var(--prim-day-600);
+  --scale-neutral-500: var(--prim-day-500);
+  --scale-neutral-400: var(--text-muted);
+  --scale-neutral-300: var(--text-secondary);
+  --scale-neutral-200: var(--prim-day-200);
+  --scale-neutral-100: var(--text-primary);
+
+  --scale-purple-700: var(--prim-day-purple-700);
+  --scale-purple-600: var(--interactive);
+  --scale-purple-500: var(--interactive);
+  --scale-purple-400: var(--prim-day-purple-400);
+  --scale-purple-300: var(--interactive);
+
+  --scale-amber-700: var(--event-hue);
+  --scale-amber-600: var(--event-hue);
+  --scale-amber-500: var(--status-warning);
+
+  --scale-green-600: var(--status-success);
+  --scale-green-500: var(--status-success);
+  --scale-emerald-600: var(--status-success);
+  --scale-emerald-500: var(--status-success);
+
+  --scale-red-700: var(--status-danger);
+  --scale-red-600: var(--status-danger);
+  --scale-red-500: var(--status-danger);
+}
+
+/* Static (non-themed) design tokens. */
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
-  /* Backgrounds / surfaces */
-  --color-neutral-950: #131319;
-  --color-neutral-900: #1a1b22; /* main background */
-  --color-neutral-800: #232430; /* card background */
-  --color-neutral-700: #3a3b47; /* borders / offline outline */
-  --color-neutral-600: #4a4b57;
-  --color-neutral-500: #6b6a78;
-  --color-neutral-400: #9c9aab; /* secondary text */
-  --color-neutral-300: #b8b6c4;
-  --color-neutral-200: #d4d2de;
-  --color-neutral-100: #e8e6ef; /* primary text */
+/* Tailwind color utilities re-pointed at the semantic layer above, so every
+   existing bg-, text-, border- prefixed class (and any new surface-,
+   status- prefixed utilities) resolves through a runtime var() chain that re-evaluates on
+   every `data-theme` change — no Tailwind rebuild needed to re-theme. */
+@theme inline {
+  --color-neutral-950: var(--scale-neutral-950);
+  --color-neutral-900: var(--scale-neutral-900);
+  --color-neutral-800: var(--scale-neutral-800);
+  --color-neutral-700: var(--scale-neutral-700);
+  --color-neutral-600: var(--scale-neutral-600);
+  --color-neutral-500: var(--scale-neutral-500);
+  --color-neutral-400: var(--scale-neutral-400);
+  --color-neutral-300: var(--scale-neutral-300);
+  --color-neutral-200: var(--scale-neutral-200);
+  --color-neutral-100: var(--scale-neutral-100);
 
-  /* Accent (online outline / interactive) */
-  --color-purple-700: #6a5eb8;
-  --color-purple-600: #7a6ec4;
-  --color-purple-500: #8b7fd1; /* online outline */
-  --color-purple-400: #a79ddd;
-  --color-purple-300: #c3bce9;
+  --color-purple-700: var(--scale-purple-700);
+  --color-purple-600: var(--scale-purple-600);
+  --color-purple-500: var(--scale-purple-500);
+  --color-purple-400: var(--scale-purple-400);
+  --color-purple-300: var(--scale-purple-300);
 
-  /* Active event / drop / prediction */
-  --color-amber-700: #c78e4a;
-  --color-amber-600: #d9a25c;
-  --color-amber-500: #e0b074;
+  --color-amber-700: var(--scale-amber-700);
+  --color-amber-600: var(--scale-amber-600);
+  --color-amber-500: var(--scale-amber-500);
 
-  /* Success / gain */
-  --color-green-600: #7fa88c;
-  --color-green-500: #7fa88c;
-  --color-emerald-600: #7fa88c;
-  --color-emerald-500: #8fb89c;
+  --color-green-600: var(--scale-green-600);
+  --color-green-500: var(--scale-green-500);
+  --color-emerald-600: var(--scale-emerald-600);
+  --color-emerald-500: var(--scale-emerald-500);
 
-  /* Error / warning */
-  --color-red-700: #b56a52;
-  --color-red-600: #c97b63;
-  --color-red-500: #c97b63;
+  --color-red-700: var(--scale-red-700);
+  --color-red-600: var(--scale-red-600);
+  --color-red-500: var(--scale-red-500);
 
-  /* Dedicated semantic tokens */
-  --color-sidebar: #15161c;
-  --color-online: #8b7fd1;
-  --color-offline: #3a3b47;
-  --color-streamer: #e8c48a;
-  --color-event: #d9a25c;
-  --color-success: #7fa88c;
-  --color-danger: #c97b63;
-  --color-text: #e8e6ef;
-  --color-text-dim: #9c9aab;
+  --color-sidebar: var(--surface-sidebar);
+  --color-online: var(--focus-ring);
+  --color-offline: var(--border-default);
+  --color-streamer: var(--streamer-hue);
+  --color-event: var(--event-hue);
+  --color-success: var(--status-success);
+  --color-danger: var(--status-danger);
+  --color-text: var(--text-primary);
+  --color-text-dim: var(--text-muted);
+
+  /* new semantic-named utilities */
+  --color-surface-page: var(--surface-page);
+  --color-surface-sidebar: var(--surface-sidebar);
+  --color-surface-card: var(--surface-card);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-input: var(--surface-input);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-brand-orange: var(--brand-orange);
+  --color-brand-purple: var(--brand-purple);
+  --color-interactive: var(--interactive);
+  --color-focus-ring: var(--focus-ring);
+  --color-link-text: var(--link-text);
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-status-danger: var(--status-danger);
+  --color-status-info: var(--status-info);
+  --color-status-offline: var(--status-offline);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-label: var(--chart-label);
 }
 
 @utility btn-primary {
@@ -248,9 +668,8 @@
 }
 
 /* =====================================================================
-   Overview redesign — layout, card states, ticker, predictions board.
-   Plain CSS (selectors / keyframes / media queries) using the @theme
-   custom properties above. Single dark theme.
+   Overview redesign — layout, card states, ticker, predictions board,
+   resource mini-widgets. Plain CSS on the token system above.
    ===================================================================== */
 
 /* Numeric readout: JetBrains Mono + tabular figures for points/timers/%. */
@@ -294,27 +713,6 @@
   .app-main { padding: 1rem; }
 }
 
-.sidebar-link {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  padding: 0.5rem 0.75rem;
-  margin: 0.1rem 0.5rem;
-  border-radius: 0.5rem;
-  color: var(--color-neutral-300);
-  font-size: 0.9rem;
-  font-weight: 500;
-  transition: background 0.15s, color 0.15s;
-}
-.sidebar-link:hover { background: rgba(139, 127, 209, 0.12); color: var(--color-neutral-100); }
-.sidebar-link.is-active {
-  background: rgba(139, 127, 209, 0.16);
-  color: var(--color-neutral-100);
-  box-shadow: inset 3px 0 0 var(--color-online);
-}
-.sidebar-link svg { width: 18px; height: 18px; flex: none; }
-
-/* Pinned "Now Watching" block. */
 .now-watching {
   margin-top: auto;
   border-top: 1px solid var(--color-neutral-700);
@@ -325,25 +723,26 @@
   border-radius: 0.5rem;
   padding: 0.55rem 0.65rem;
   margin-bottom: 0.5rem;
-  background: rgba(35, 36, 48, 0.6);
+  background: color-mix(in srgb, var(--surface-card) 60%, transparent);
 }
-.watch-slot.is-watching { border-color: var(--color-online); box-shadow: 0 0 0 1px rgba(139,127,209,0.35); }
+.watch-slot.is-watching { border-color: var(--color-online); box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive) 35%, transparent); }
 .watch-slot.is-queued { border-style: dashed; opacity: 0.75; }
 .watch-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
-.watch-dot.on { background: var(--color-online); box-shadow: 0 0 6px rgba(139,127,209,0.8); }
-.watch-dot.queue { background: transparent; border: 1.5px solid var(--color-neutral-500); }
+.watch-dot.on { background: var(--color-online); box-shadow: 0 0 6px color-mix(in srgb, var(--interactive) 80%, transparent); }
+/* .watch-dot.queue's border-color is set once, above (in the base-shell
+   block moved from base.html) — that later-cascading rule already won
+   before this consolidation; width/style merge into that single rule so
+   there is exactly one definition instead of a cascade-order-dependent
+   pair. */
+.watch-dot.queue { background: transparent; border-width: 1.5px; border-style: solid; }
 .watch-dot.unknown { background: transparent; border: 1.5px dashed var(--color-event); }
 
-/* Responsive, container-reactive card grid: ~6 cols @2560 down to 1 @390,
-   never overflows horizontally. */
 .card-grid {
   display: grid;
   gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
 }
 
-/* Streamer card + state system. State is conveyed by border, an indicator
-   shape, and a text label — never by colour alone. */
 .s-card {
   position: relative;
   background: var(--color-neutral-800);
@@ -357,20 +756,20 @@
 .s-card:hover { transform: translateY(-2px); border-color: var(--color-purple-400); }
 .s-card:focus-visible { box-shadow: 0 0 0 2px var(--color-online); border-color: var(--color-online); }
 .s-card.state-online, .s-card.state-watching, .s-card.state-queued { border-color: var(--color-online); }
-.s-card.state-watching { box-shadow: 0 0 0 1px rgba(139,127,209,0.45), 0 0 14px rgba(139,127,209,0.25); }
+/* .s-card.state-watching's box-shadow/background are set once, below (the
+   richer rule moved from overview.html's inline <style>) — that later-
+   cascading rule was already the one that rendered before this
+   consolidation (overview.html's <style> loaded after input.css's <link>),
+   so it is intentionally not duplicated here. */
 .s-card.state-queued { border-style: dashed; }
 .s-card.state-offline { border-color: var(--color-offline); }
 .s-card.state-disabled { border-color: var(--color-offline); opacity: 0.6; border-style: dotted; }
-/* Unknown (unconfirmed) status: distinguished by SHAPE (dashed amber border) and
-   icon/text, never by an offline-red colour. `unconfirmed` layers the same dashed
-   cue onto a still-watching card during a transient blip. */
 .s-card.state-unknown { border-color: var(--color-event); border-style: dashed; }
 .s-card.unconfirmed { border-style: dashed; }
 
 .s-name { color: var(--color-streamer); font-weight: 600; }
 .s-points { color: var(--color-neutral-100); }
 
-/* State / preference badges. */
 .badge {
   display: inline-flex;
   align-items: center;
@@ -383,38 +782,38 @@
   border-radius: 0.3rem;
   line-height: 1.4;
 }
-.badge-watching { background: rgba(139,127,209,0.18); color: var(--color-purple-300); }
-.badge-queued { background: rgba(156,154,171,0.15); color: var(--color-neutral-300); }
-.badge-offline { background: rgba(58,59,71,0.5); color: var(--color-neutral-400); }
-.badge-disabled { background: rgba(201,123,99,0.15); color: var(--color-danger); }
-.badge-prefer { background: rgba(127,168,140,0.18); color: var(--color-success); }
-.badge-avoid { background: rgba(201,123,99,0.18); color: var(--color-danger); }
-.badge-event { background: rgba(217,162,92,0.16); color: var(--color-event); }
-.badge-unknown { background: rgba(217,162,92,0.14); color: var(--color-event); }
+.badge-offline { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--color-neutral-400); }
+.badge-disabled { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+.badge-prefer { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
+.badge-avoid { background: color-mix(in srgb, var(--color-danger) 18%, transparent); color: var(--color-danger); }
+/* .badge-event is defined once, above (in the base-shell block moved from
+   base.html) — that later-cascading rule was already the one that rendered
+   before this consolidation (base.html's <style> loaded after input.css's
+   <link>), so the original, distinct input.css-only --color-event-based
+   .badge-event rule is intentionally not duplicated here. */
+.badge-unknown { background: color-mix(in srgb, var(--color-event) 14%, transparent); color: var(--color-event); }
 .status-unavailable { color: var(--color-event); }
-.badge-gain { color: var(--color-success); }
 
-/* Progress bars. */
 .bar { height: 6px; width: 100%; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 999px; }
-.bar-drop > span { background: var(--color-event); }
-.bar-streak > span { background: var(--color-online); }
-.bar-goal > span { background: var(--color-success); }
+/* .bar-drop/.bar-streak/.bar-goal > span backgrounds are set once, above (in
+   the base-shell block moved from base.html, as two-stop gradients) — those
+   later-cascading rules already won before this consolidation, so the flat
+   single-color versions that used to live here are intentionally not
+   duplicated. */
 
-/* Quick actions on cards. */
 .qa-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 0.4rem;
   border: 1px solid var(--color-neutral-700);
-  color: var(--color-neutral-300); background: rgba(26,27,34,0.6);
+  color: var(--color-neutral-300); background: color-mix(in srgb, var(--surface-page) 60%, transparent);
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.qa-btn:hover { color: var(--color-neutral-100); border-color: var(--color-purple-400); background: rgba(139,127,209,0.12); }
+.qa-btn:hover { color: var(--color-neutral-100); border-color: var(--color-purple-400); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
 .qa-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 .qa-btn.is-on { color: var(--color-online); border-color: var(--color-online); }
 .qa-btn.is-danger { color: var(--color-danger); border-color: var(--color-danger); }
 
-/* Events ticker: seamless marquee, pause on hover. */
 .ticker {
   position: relative;
   overflow: hidden;
@@ -439,7 +838,6 @@
   to { transform: translateX(-100%); }
 }
 
-/* Predictions board. */
 .pred-board { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
 .pred-card {
   background: var(--color-neutral-800);
@@ -450,7 +848,7 @@
 }
 .pred-card.is-locked { border-left-color: var(--color-danger); }
 .pred-outcome { display: grid; grid-template-columns: 1fr auto; gap: 0.25rem 0.75rem; align-items: center; margin-top: 0.4rem; }
-.pred-outcome.chosen { background: rgba(139,127,209,0.1); border-radius: 0.35rem; padding: 0.15rem 0.35rem; }
+.pred-outcome.chosen { background: color-mix(in srgb, var(--interactive) 10%, transparent); border-radius: 0.35rem; padding: 0.15rem 0.35rem; }
 .pred-obar { height: 5px; grid-column: 1 / -1; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
 .pred-obar > span { display: block; height: 100%; border-radius: 999px; background: var(--color-online); }
 .pred-empty, .board-empty {
@@ -462,20 +860,18 @@
   font-size: 0.9rem;
 }
 
-/* Stale-data affordance. */
 .is-stale { position: relative; }
 .stale-pill {
   display: inline-flex; align-items: center; gap: 0.3rem;
   font-size: 0.7rem; font-weight: 600;
   color: var(--color-danger);
-  background: rgba(201,123,99,0.12);
-  border: 1px solid rgba(201,123,99,0.4);
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 40%, transparent);
   padding: 0.15rem 0.5rem; border-radius: 999px;
 }
 
-/* Skeleton loading shimmer. */
 .skeleton {
-  background: linear-gradient(90deg, rgba(58,59,71,0.35) 25%, rgba(74,75,87,0.55) 37%, rgba(58,59,71,0.35) 63%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--color-neutral-700) 35%, transparent) 25%, color-mix(in srgb, var(--color-neutral-600) 55%, transparent) 37%, color-mix(in srgb, var(--color-neutral-700) 35%, transparent) 63%);
   background-size: 400% 100%;
   animation: skeleton-shimmer 1.4s ease infinite;
   border-radius: 0.4rem;
@@ -485,7 +881,6 @@
   100% { background-position: 0 50%; }
 }
 
-/* Card drawer (recent events). */
 .drawer-row {
   display: flex; justify-content: space-between; gap: 1rem;
   padding: 0.4rem 0; border-bottom: 1px solid var(--color-neutral-700);
@@ -493,7 +888,6 @@
 }
 .drawer-row:last-child { border-bottom: 0; }
 
-/* Statistics page: segmented range-preset toggle (24ч / 7д / 30д). */
 .stat-range-btn {
   padding: 0.5rem 0.95rem;
   font-size: 0.85rem;
@@ -505,8 +899,8 @@
   transition: background 0.15s ease, color 0.15s ease;
 }
 .stat-range-btn:last-child { border-right: 0; }
-.stat-range-btn:hover { background: rgba(139, 127, 209, 0.12); color: var(--color-neutral-100); }
-.stat-range-btn.is-active { background: var(--color-purple-600); color: #fff; }
+.stat-range-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
+.stat-range-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
 .stat-range-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
 
 /* Respect reduced-motion: no marquee, no transforms, static shimmer. */
@@ -522,32 +916,30 @@
 
 /* =====================================================================
    Manual prediction betting — compact inline controls on the live board.
-   Plain CSS on the existing @theme tokens; single dark theme, keyboard
-   focus-visible, and prefers-reduced-motion aware.
    ===================================================================== */
 .pred-outcome.selectable { cursor: pointer; border-radius: 0.35rem; padding: 0.15rem 0.35rem; transition: background 0.12s, box-shadow 0.12s; }
-.pred-outcome.selectable:hover { background: rgba(139,127,209,0.08); }
+.pred-outcome.selectable:hover { background: color-mix(in srgb, var(--interactive) 8%, transparent); }
 .pred-outcome.selectable:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
-.pred-outcome.picked { background: rgba(139,127,209,0.16); box-shadow: inset 0 0 0 1px var(--color-online); }
+.pred-outcome.picked { background: color-mix(in srgb, var(--interactive) 16%, transparent); box-shadow: inset 0 0 0 1px var(--color-online); }
 
 .pred-manual { margin-top: 0.6rem; border-top: 1px solid var(--color-neutral-700); padding-top: 0.55rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .pred-manual-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .pred-amount { width: 6.5rem; background: var(--color-neutral-900); border: 1px solid var(--color-neutral-700); border-radius: 0.4rem; padding: 0.3rem 0.5rem; color: var(--color-neutral-100); font-size: 0.85rem; }
 .pred-amount:focus { outline: none; border-color: var(--color-online); }
 .pred-fills { display: flex; gap: 0.3rem; }
-.pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--color-neutral-700); color: var(--color-neutral-300); background: rgba(26,27,34,0.6); transition: border-color 0.12s, color 0.12s; }
+.pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--color-neutral-700); color: var(--color-neutral-300); background: color-mix(in srgb, var(--surface-page) 60%, transparent); transition: border-color 0.12s, color 0.12s; }
 .pred-chip:hover { border-color: var(--color-purple-400); color: var(--color-neutral-100); }
 .pred-chip:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
 .pred-manual-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-.btn-bet { font-size: 0.75rem; font-weight: 600; padding: 0.32rem 0.75rem; border-radius: 0.4rem; background: var(--color-purple-600); color: #fff; border: 1px solid transparent; transition: background 0.12s; }
+.btn-bet { font-size: 0.75rem; font-weight: 600; padding: 0.32rem 0.75rem; border-radius: 0.4rem; background: var(--color-purple-600); color: var(--text-on-accent); border: 1px solid transparent; transition: background 0.12s; }
 .btn-bet:hover:not(:disabled) { background: var(--color-purple-700); }
 .btn-bet:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-bet:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
-.pred-confirm { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; background: rgba(139,127,209,0.1); border: 1px solid rgba(139,127,209,0.3); border-radius: 0.4rem; padding: 0.35rem 0.5rem; flex-wrap: wrap; }
+.pred-confirm { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; background: color-mix(in srgb, var(--interactive) 10%, transparent); border: 1px solid color-mix(in srgb, var(--interactive) 30%, transparent); border-radius: 0.4rem; padding: 0.35rem 0.5rem; flex-wrap: wrap; }
 .pred-confirm-actions { display: flex; gap: 0.35rem; }
-.btn-bet-go { font-size: 0.72rem; font-weight: 600; padding: 0.28rem 0.6rem; border-radius: 0.35rem; background: var(--color-success); color: #10231a; border: none; cursor: pointer; }
+.btn-bet-go { font-size: 0.72rem; font-weight: 600; padding: 0.28rem 0.6rem; border-radius: 0.35rem; background: var(--color-success); color: var(--text-on-success); border: none; cursor: pointer; }
 .btn-bet-go:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-bet-cancel { font-size: 0.72rem; padding: 0.28rem 0.55rem; border-radius: 0.35rem; background: transparent; color: var(--color-neutral-300); border: 1px solid var(--color-neutral-700); cursor: pointer; }
 .btn-bet-go:focus-visible, .btn-bet-cancel:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
@@ -560,7 +952,7 @@
 .pred-link:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
 .pred-msg { font-size: 0.75rem; margin-top: 0.4rem; border-radius: 0.35rem; padding: 0.3rem 0.5rem; }
-.pred-msg-error { color: var(--color-danger); background: rgba(201,123,99,0.12); border: 1px solid rgba(201,123,99,0.35); }
+.pred-msg-error { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent); }
 
 .pred-card.is-pending { opacity: 0.85; }
 .pred-manual.is-sending { opacity: 0.7; pointer-events: none; }
@@ -568,3 +960,327 @@
 @media (prefers-reduced-motion: reduce) {
   .pred-outcome.selectable, .pred-chip, .btn-bet { transition: none; }
 }
+
+/* =====================================================================
+   Base shell: sidebar chrome, brand, toggle, badges, section headings,
+   language switch, health banner. Moved here from base.html's inline
+   <style> so template files hold no palette definitions (F1) — the
+   selectors/behavior are unchanged, only the color source moved.
+   ===================================================================== */
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.1rem 0.5rem;
+  border-radius: 0.5rem;
+  color: var(--color-neutral-300);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-link svg { width: 18px; height: 18px; flex: none; color: var(--color-neutral-400); transition: color 0.15s; }
+.sidebar-link:hover { background: linear-gradient(90deg, color-mix(in srgb, var(--ui-watching) 16%, transparent), color-mix(in srgb, var(--ui-online) 8%, transparent)); color: var(--text-primary); }
+.sidebar-link:hover svg { color: var(--ui-online); }
+.sidebar-link.is-active {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--ui-watching) 22%, transparent), color-mix(in srgb, var(--ui-online) 10%, transparent));
+    color: var(--text-primary);
+    box-shadow: inset 3px 0 0 var(--ui-watching);
+}
+.sidebar-link.is-active svg { color: var(--ui-watching); }
+
+/* Sidebar brand wordmark: an orange two-line title beside the (unchanged)
+   alien logo. Its own semantic token — deliberately not the raid/error
+   hues — so the brand meaning never mixes with state colors. */
+.sidebar-brand { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+.sidebar-brand-title { color: var(--ui-brand-orange); font-weight: 600; }
+.sidebar-brand-sub { color: var(--ui-brand-orange); font-size: 0.8em; font-weight: 500; }
+
+/* Mobile drawer toggle. On desktop/tablet (>900px) the sidebar is always
+   present in the grid, so the toggle is hidden and occupies no space. At
+   <=900px the sidebar is an off-canvas drawer, so a fixed hamburger
+   opens/closes it — gated on the same 900px breakpoint as the sidebar. */
+.sidebar-toggle { display: none; }
+@media (max-width: 900px) {
+    .sidebar-toggle {
+        display: inline-flex;
+        position: fixed;
+        top: 0.6rem;
+        left: 0.6rem;
+        z-index: 70;
+        background: var(--color-neutral-800);
+    }
+    .app-main { padding: 3.25rem 1rem 1rem; }
+}
+
+/* Richer state badges shared by cards, sidebar queue, and boards. */
+.badge-watching { background: color-mix(in srgb, var(--ui-watching) 20%, transparent); color: var(--ui-watching); }
+.badge-queued { background: color-mix(in srgb, var(--ui-online) 13%, transparent); color: var(--ui-online); }
+.badge-gain { color: var(--ui-gain); }
+.badge-event { background: color-mix(in srgb, var(--ui-warn) 14%, transparent); color: var(--ui-warn); }
+.watch-dot.queue { border-color: color-mix(in srgb, var(--ui-online) 75%, transparent); }
+.bar-streak > span { background: linear-gradient(90deg, var(--ui-streak), var(--ui-online)); }
+.bar-drop > span { background: linear-gradient(90deg, var(--ui-claim), var(--ui-raid)); }
+.bar-goal > span { background: linear-gradient(90deg, var(--ui-roi-pos), var(--ui-online)); }
+
+/* Section headings on Settings/Notifications get a small violet accent bar. */
+.section-title {
+    padding-left: 0.6rem;
+    border-left: 3px solid var(--ui-watching);
+}
+
+.lang-btn {
+    padding: 0.25rem 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--color-neutral-300);
+    background: var(--color-neutral-800);
+    border-right: 1px solid var(--color-neutral-700);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.lang-btn:last-child { border-right: 0; }
+.lang-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
+.lang-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
+.lang-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { .lang-btn { transition: none; } }
+
+/* Theme toggle: clones the lang-btn segmented-control geometry (F1 — the
+   only new UI control this task adds). Active state is aria-pressed
+   rather than a class, since it is a real accessibility attribute here. */
+.theme-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.25rem 0.5rem;
+    color: var(--color-neutral-300);
+    background: var(--color-neutral-800);
+    border-right: 1px solid var(--color-neutral-700);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.theme-btn:last-child { border-right: 0; }
+.theme-btn svg { width: 14px; height: 14px; display: block; }
+.theme-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
+.theme-btn[aria-pressed="true"] { background: var(--color-purple-600); color: var(--text-on-accent); }
+.theme-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { .theme-btn { transition: none; } }
+
+#health-banner {
+    padding: 0.6rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-align: center;
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+    border: 1px solid transparent;
+}
+#health-banner.health-banner-reauth {
+    background-color: color-mix(in srgb, var(--status-danger) 12%, transparent);
+    border-color: var(--status-danger);
+    color: var(--status-danger);
+}
+#health-banner.health-banner-lost {
+    background-color: color-mix(in srgb, var(--status-warning) 12%, transparent);
+    border-color: var(--status-warning);
+    color: var(--status-warning);
+}
+
+/* =====================================================================
+   BKM-022 resource mini-widgets (CPU / Memory / Network / Disk I/O).
+   The strip lives in the base top-bar row (same line as RU/EN theme
+   toggle), left-aligned via margin-right:auto; overview-only via the
+   topbar_widgets block override.
+   ===================================================================== */
+.rw-strip {
+    margin-right: auto;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, clamp(150px, 13.5vw, 224px)));
+    gap: 0.5rem;
+    align-items: stretch;
+}
+.rw-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "ico label" "ico values" "spark spark";
+    column-gap: 0.5rem;
+    row-gap: 0.1rem;
+    align-items: center;
+    min-width: 0;
+    padding: 0.4rem 0.6rem 0.45rem;
+    border: 1px solid var(--color-neutral-700);
+    border-top: 2px solid var(--rw-accent);
+    border-radius: 0.6rem;
+    background: var(--color-neutral-800);
+    box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--text-primary) 3%, transparent),
+        inset 0 14px 22px -18px var(--rw-accent);
+}
+.rw-ico { grid-area: ico; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--rw-accent); }
+.rw-ico svg { width: 16px; height: 16px; display: block; }
+.rw-label {
+    grid-area: label; min-width: 0;
+    font-size: 0.6rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--color-neutral-400);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rw-values { grid-area: values; display: flex; align-items: baseline; gap: 0.35rem; min-width: 0; }
+.rw-primary { font-size: 1.02rem; font-weight: 700; line-height: 1.15; color: var(--color-neutral-100); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rw-sub { font-size: 0.62rem; color: var(--color-neutral-400); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rw-spark { grid-area: spark; display: flex; align-items: flex-end; gap: 1px; height: 16px; margin-top: 0.15rem; overflow: hidden; }
+.rw-spark > i { flex: 1 1 0; min-width: 0; height: 100%; background: var(--rw-accent); opacity: 0.55; border-radius: 1px; transform: scaleY(0); transform-origin: bottom; transition: transform 0.3s ease; }
+.rw-card.rw-na { opacity: 0.72; }
+.rw-card.rw-na .rw-primary { color: var(--color-neutral-500); }
+.rw-strip.is-stale { opacity: 0.7; filter: saturate(0.75); }
+@media (max-width: 860px) {
+    .rw-strip { margin-right: 0.5rem; flex: 1 1 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .rw-spark { height: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .rw-spark > i { transition: none; }
+}
+
+/* =====================================================================
+   Overview card visual system v2 (state-specific glows) + stream title/
+   tags + in-page section accents. Moved from overview.html's inline
+   <style> (F1) so template files hold no palette definitions.
+   ===================================================================== */
+.s-card { border-radius: 0.8rem; }
+.s-card.state-watching {
+    border-color: var(--ui-watching);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--ui-watching) 12%, transparent), color-mix(in srgb, var(--ui-watching) 2%, transparent) 46%, transparent 72%),
+        var(--color-neutral-800);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-watching) 45%, transparent), 0 0 18px color-mix(in srgb, var(--ui-watching) 22%, transparent);
+}
+.s-card.state-watching:hover { border-color: var(--ui-watching); }
+.s-card.state-queued {
+    border-color: color-mix(in srgb, var(--ui-online) 55%, transparent);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--ui-online) 7%, transparent), transparent 55%),
+        var(--color-neutral-800);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--ui-online) 8%, transparent);
+}
+.s-card.state-offline { background: var(--color-neutral-800); }
+
+.s-title {
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    color: var(--color-neutral-200);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+.s-game { color: var(--ui-online); }
+
+.s-tags {
+    display: flex;
+    gap: 0.3rem;
+    margin-top: 0.45rem;
+    overflow: hidden;
+    flex-wrap: nowrap;
+    max-width: 100%;
+}
+.s-tag {
+    flex: none;
+    max-width: 9.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    color: var(--ui-online);
+    background: color-mix(in srgb, var(--ui-online) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ui-online) 28%, transparent);
+}
+
+#predictions, #grid { scroll-margin-top: 0.75rem; }
+.sec-accent {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.9em;
+    border-radius: 2px;
+    margin-right: 0.45rem;
+    vertical-align: -0.1em;
+}
+.sec-accent-pred { background: linear-gradient(180deg, var(--ui-watching), var(--ui-online)); }
+.sec-accent-grid { background: linear-gradient(180deg, var(--ui-online), var(--ui-gain)); }
+
+/* =====================================================================
+   Logs page: semantic log palette. 13 bright, saturated hues tuned for
+   the card background in each theme. Moved from logs.html's inline
+   <style> (F1); .log-* classes below are unchanged, only the variable
+   definitions moved here.
+   ===================================================================== */
+.log-line {
+    display: block; white-space: pre-wrap; word-break: break-word;
+    padding: 0.02rem 0 0.02rem 0.4rem;
+    border-left: 2px solid currentColor;
+}
+.log-emoji {
+    display: inline-block;
+    width: 1.5em;
+    min-width: 1.5em;
+    text-align: center;
+    margin-right: 0.35rem;
+    font-size: 1em;
+    user-select: none;
+}
+.log-text { white-space: pre-wrap; }
+
+.log-info { color: var(--log-info-blue); }
+.log-warn { color: var(--log-amber); }
+.log-error { color: var(--log-red); }
+
+.log-startup { color: var(--log-ultramarine); }
+.log-service { color: var(--log-cyan); }
+.log-auth { color: var(--log-turquoise); }
+.log-auth-success { color: var(--log-bright-green); }
+
+.log-streamer-online { color: var(--log-bright-green); }
+.log-streamer-offline { color: var(--log-red); }
+.log-connected { color: var(--log-turquoise); }
+.log-chat { color: var(--log-violet); }
+.log-reconnect { color: var(--log-orange); }
+
+.log-points-watch { color: var(--log-yellow); }
+.log-points-streak { color: var(--log-lime); }
+.log-points-claim { color: var(--log-gold); }
+.log-points-raid { color: var(--log-orange); }
+.log-points-gain { color: var(--log-bright-green); }
+.log-bonus { color: var(--log-gold); }
+
+.log-bet-win { color: var(--log-bright-green); }
+.log-bet-lose { color: var(--log-red); }
+.log-bet-refund { color: var(--log-turquoise); }
+.log-bet-filter { color: var(--log-magenta); }
+.log-bet-general { color: var(--log-ultramarine); }
+.log-bet-failed { color: var(--log-red); }
+.log-bet-gated { color: var(--log-orange); }
+
+.log-watch-assigned { color: var(--log-ultramarine); }
+.log-watch-released { color: var(--log-magenta); }
+.log-watch-changed { color: var(--log-violet); }
+.log-rotation { color: var(--log-turquoise); }
+.log-pursuing-streak { color: var(--log-lime); }
+
+.log-drops { color: var(--log-turquoise); }
+.log-drop-skipped { color: var(--log-orange); }
+.log-drop-complete { color: var(--log-bright-green); }
+.log-discovery { color: var(--log-cyan); }
+
+.log-update { color: var(--log-cyan); }
+.log-update-success { color: var(--log-bright-green); }
+
+.log-settings { color: var(--log-violet); }
+.log-health-ok { color: var(--log-bright-green); }
+.log-database { color: var(--log-ultramarine); }
