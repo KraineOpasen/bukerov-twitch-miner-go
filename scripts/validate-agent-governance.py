@@ -42,10 +42,13 @@ means more than "content drifted": it means a script that was read end-to-end du
 review no longer matches what was reviewed, so re-audit (not just re-hash) is required before
 trusting it again.
 """
+import contextlib
 import datetime
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -181,8 +184,19 @@ def project_skill_names():
         manifest = load_manifest(PROJECT_MANIFEST_PATH)
     except Exception:
         return []
+    # A JSON-valid but structurally invalid manifest (top-level array, or a "skills" value that
+    # isn't a list) must fail closed here, not raise: this function is the FIRST caller every other
+    # consumer of the project manifest goes through (check_unique_skill_names, check_frontmatter_keys,
+    # check_manifest_fs_consistency, check_manifest_ownership_partition,
+    # check_builtin_collision_denylist), so an uncaught AttributeError/TypeError here would abort
+    # the entire check run before check_project_manifest ever gets to report the real diagnostic.
+    if not isinstance(manifest, dict):
+        return []
+    skills = manifest.get("skills", [])
+    if not isinstance(skills, list):
+        return []
     return [
-        s["name"] for s in manifest.get("skills", [])
+        s["name"] for s in skills
         if isinstance(s, dict) and isinstance(s.get("name"), str)
     ]
 
@@ -1336,8 +1350,16 @@ def validate_project_manifest(manifest, repo_root, require_tracked=True):
 
         # Directory walk: only ever attempted when `path` passed shape validation AND the
         # resulting directory actually exists -- see the module-level note above on why an
-        # invalid path never reaches here.
-        if skill_dir is not None and os.path.isdir(skill_dir):
+        # invalid path never reaches here. The skill_dir ROOT itself must not be a symlink,
+        # checked and rejected before os.path.isdir() (which follows links) ever runs: the
+        # os.path.islink() guard further down (:1369 in the pre-fix file) only covers CHILD
+        # dirnames inside an already-descended-into skill_dir, so a symlinked TOP would otherwise
+        # be walked in full by this standalone entry point -- a full-repo run is saved only by the
+        # separate no-symlinks-no-exec-under-claude check, which is a weaker contract than what
+        # this function documents for itself.
+        if skill_dir is not None and os.path.islink(skill_dir):
+            details.append("%s: skill directory must not be a symlink: %s" % (label, _safe(path)))
+        elif skill_dir is not None and os.path.isdir(skill_dir):
             skillmd_path = os.path.join(skill_dir, "SKILL.md")
             skillmd_rel = path + "/SKILL.md"
             if not os.path.isfile(skillmd_path):
@@ -1452,20 +1474,41 @@ def validate_project_manifest(manifest, repo_root, require_tracked=True):
 
             if valid_epath:
                 local_epath = os.path.join(repo_root, epath)
-                if not os.path.isfile(local_epath):
+                # No-follow policy: a symlink is rejected on shape alone, BEFORE isfile/ls-files/
+                # hash ever run. os.path.isfile() and git hash-object both silently follow a
+                # symlink and would otherwise validate against the TARGET's bytes -- a committed
+                # symlink is "tracked" too, so without this guard a symlinked eval_evidence.path
+                # whose target happens to match the declared blob_sha would validate through an
+                # external target that was never reviewed.
+                if os.path.islink(local_epath):
+                    details.append(
+                        "%s: eval_evidence.path must not be a symlink: %s" % (label, _safe(epath)))
+                elif not os.path.isfile(local_epath):
                     details.append("%s: eval_evidence.path does not exist on disk: %s" % (label, _safe(epath)))
                 else:
                     if require_tracked:
                         try:
+                            # `-s` (show staged mode) lets this reject a symlink committed to the
+                            # index (mode 120000) even in the rare case the working-tree copy isn't
+                            # an OS-level symlink (e.g. a core.symlinks=false checkout writes the
+                            # target path as plain text) -- the os.path.islink() guard above alone
+                            # would miss that. Requiring exactly 100644 also fail-closes an
+                            # executable-bit evidence blob (100755) as a side effect.
                             out = subprocess.run(
-                                ["git", "-C", repo_root, "ls-files", "--", epath],
+                                ["git", "-C", repo_root, "ls-files", "-s", "--", epath],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
-                            tracked = out.returncode == 0 and out.stdout.strip() != ""
+                            ls_line = out.stdout.strip() if out.returncode == 0 else ""
                         except Exception:
-                            tracked = False
-                        if not tracked:
+                            ls_line = ""
+                        if not ls_line:
                             details.append(
                                 "%s: eval_evidence.path must be tracked by git: %s" % (label, _safe(epath)))
+                        else:
+                            tracked_mode = ls_line.split()[0]
+                            if tracked_mode != "100644":
+                                details.append(
+                                    "%s: eval_evidence.path must be a tracked regular file (mode "
+                                    "100644), got mode %s: %s" % (label, tracked_mode, _safe(epath)))
                     local_sha, err = _git_hash_object(local_epath, repo_root)
                     if err:
                         details.append("%s: eval_evidence: %s" % (label, err))
@@ -1930,6 +1973,231 @@ def _st_n16():
         assert any('review_status must be "approved"' in d for d in details), details
 
 
+# ---- N17-N21: project_skill_names() / validate_project_manifest() against structurally
+# malformed (but JSON-valid) manifests -- the MINOR-1 gap: these must never raise, and the
+# fail-closed diagnostics must actually be reached. N17-N19 swap the module-level
+# PROJECT_MANIFEST_PATH to point at a synthetic malformed file so project_skill_names() itself
+# (the function that was raising) is exercised directly, not just validate_project_manifest()'s
+# own (separately correct) top-level guard -- always restored in a finally so a fixture failure
+# can never leak a bad path into any fixture that runs after it. ----
+
+def _st_n17():
+    global PROJECT_MANIFEST_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        bad_path = os.path.join(tmp, "manifest.json")
+        _write_file(bad_path, json.dumps([{"name": "should-never-appear"}]))
+        saved = PROJECT_MANIFEST_PATH
+        PROJECT_MANIFEST_PATH = bad_path
+        try:
+            names = project_skill_names()
+        finally:
+            PROJECT_MANIFEST_PATH = saved
+        assert names == [], "expected [] for a top-level-array manifest, got %r" % (names,)
+
+    details = validate_project_manifest([{"name": "x"}], REPO_ROOT, require_tracked=False)
+    assert details == ["top-level manifest must be a JSON object"], details
+    details_empty = validate_project_manifest([], REPO_ROOT, require_tracked=False)
+    assert details_empty == ["top-level manifest must be a JSON object"], details_empty
+
+
+def _st_n18():
+    global PROJECT_MANIFEST_PATH
+    manifest = {"schema_version": 1, "ownership_class": PROJECT_OWNERSHIP_CLASS, "skills": 7}
+    with tempfile.TemporaryDirectory() as tmp:
+        bad_path = os.path.join(tmp, "manifest.json")
+        _write_file(bad_path, json.dumps(manifest))
+        saved = PROJECT_MANIFEST_PATH
+        PROJECT_MANIFEST_PATH = bad_path
+        try:
+            names = project_skill_names()
+        finally:
+            PROJECT_MANIFEST_PATH = saved
+        assert names == [], "expected [] when skills is not a list, got %r" % (names,)
+
+    details = validate_project_manifest(manifest, REPO_ROOT, require_tracked=False)
+    assert any("skills must be a list" in d for d in details), details
+
+
+def _st_n19():
+    global PROJECT_MANIFEST_PATH
+    manifest = {"schema_version": 1, "ownership_class": PROJECT_OWNERSHIP_CLASS, "skills": [7]}
+    with tempfile.TemporaryDirectory() as tmp:
+        bad_path = os.path.join(tmp, "manifest.json")
+        _write_file(bad_path, json.dumps(manifest))
+        saved = PROJECT_MANIFEST_PATH
+        PROJECT_MANIFEST_PATH = bad_path
+        try:
+            names = project_skill_names()
+        finally:
+            PROJECT_MANIFEST_PATH = saved
+        assert names == [], "expected [] when a skills[] entry is not an object, got %r" % (names,)
+
+    details = validate_project_manifest(manifest, REPO_ROOT, require_tracked=False)
+    assert any("entry must be an object" in d for d in details), details
+
+
+def _st_n20():
+    # A skills[] entry that IS an object but is missing every required member must produce
+    # per-field missing-key diagnostics, never an exception -- this path was already correct
+    # before MINOR-1 (validate_project_manifest's per-field .get()-based checks), included here as
+    # coverage for the malformed-input failure matrix rather than as a MINOR-1 regression probe.
+    manifest = {"schema_version": 1, "ownership_class": PROJECT_OWNERSHIP_CLASS, "skills": [{}]}
+    details = validate_project_manifest(manifest, REPO_ROOT, require_tracked=False)
+    assert any("name must match" in d for d in details), details
+    assert any("path must be a string" in d for d in details), details
+    assert any("origin must equal" in d for d in details), details
+    assert any("invocation must be" in d for d in details), details
+    assert any("mutation_capability must be" in d for d in details), details
+    assert any("eval_evidence is required" in d for d in details), details
+
+
+def _st_n21():
+    # Full-report continuation: point the real production path constant at a malformed temp
+    # manifest and run the REAL ALL_CHECKS list end to end (not validate_project_manifest() in
+    # isolation) -- this is what actually proves the MINOR-1 gap is closed, since the original
+    # failure mode was project_skill_names() raising inside check_unique_skill_names (check 5 of
+    # 26), which aborted the whole run before check_project_manifest's own diagnostic was ever
+    # reached. RESULTS is saved/restored alongside PROJECT_MANIFEST_PATH so this fixture can never
+    # leave stray report() entries for anything that inspects RESULTS afterward.
+    global PROJECT_MANIFEST_PATH, RESULTS
+    with tempfile.TemporaryDirectory() as tmp:
+        bad_path = os.path.join(tmp, "manifest.json")
+        _write_file(bad_path, json.dumps({"skills": 7}))
+        saved_path = PROJECT_MANIFEST_PATH
+        saved_results = RESULTS
+        PROJECT_MANIFEST_PATH = bad_path
+        RESULTS = []
+        try:
+            # Every other self-test fixture is silent (none of them route through report()); this
+            # one uniquely does, since proving MINOR-1 fixed means driving the REAL ALL_CHECKS
+            # list end to end. Redirect stdout for the duration so --self-test's output stays
+            # fixture-results-only, matching every other fixture's shape.
+            with contextlib.redirect_stdout(io.StringIO()):
+                for check in ALL_CHECKS:
+                    check()
+            results = RESULTS
+        except Exception as e:
+            raise AssertionError("full check run raised with a malformed project manifest: %r" % (e,))
+        finally:
+            PROJECT_MANIFEST_PATH = saved_path
+            RESULTS = saved_results
+    assert len(results) == 26, "expected exactly 26 labeled results, got %d: %r" % (
+        len(results), [r[0] for r in results])
+    failing = [name for name, ok, _ in results if not ok]
+    assert failing, "expected at least one failing check, got none"
+    assert "project-manifest-valid" in failing, failing
+
+
+# ---- N22-N23: eval_evidence.path symlink handling -- the MINOR-2 gap. N22 exercises the
+# working-tree os.path.islink() guard (filesystem only, require_tracked=False); N23 exercises the
+# independent git-index tracked-mode guard (require_tracked=True) in a real, disposable temp git
+# repo, specifically for the case a working-tree os.path.islink() check alone would miss (a
+# checked-out plain file whose git INDEX entry is still mode 120000 -- e.g. a core.symlinks=false
+# checkout). ----
+
+def _st_n22():
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest, repo_root, _skill_dir, _files = _build_valid_entry_fixture(tmp, "n22-skill")
+        eval_rel = manifest["skills"][0]["eval_evidence"]["path"]
+        eval_path = os.path.join(repo_root, eval_rel)
+        # Move (not copy) the real evidence file OUTSIDE the fixture's skill tree entirely, then
+        # symlink the declared eval_evidence.path at it -- the target's bytes still match the
+        # declared blob_sha exactly (same bytes, just relocated), which is precisely the bypass
+        # MINOR-2 closes: without the no-follow guard, hashing the target would validate clean.
+        external_target = os.path.join(tmp, "outside-eval-target-n22.md")
+        os.replace(eval_path, external_target)
+        try:
+            os.symlink(external_target, eval_path)
+        except (OSError, NotImplementedError) as e:
+            raise AssertionError("platform refused symlink creation: %s" % e)
+        details = validate_project_manifest(manifest, repo_root, require_tracked=False)
+        assert any("eval_evidence.path must not be a symlink" in d for d in details), details
+        # No-follow proof: the hash-mismatch diagnostic must never fire, because the target is
+        # never read at all once islink() has already failed the entry closed.
+        assert not any("eval_evidence on-disk blob" in d for d in details), details
+
+    # Positive control: an ordinary (non-symlinked) evidence file still passes clean.
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest2, repo_root2, _skill_dir2, _files2 = _build_valid_entry_fixture(tmp, "n22b-skill")
+        details2 = validate_project_manifest(manifest2, repo_root2, require_tracked=False)
+        assert not any("eval_evidence" in d for d in details2), details2
+
+
+def _st_n23():
+    git = shutil.which("git")
+    assert git, "git not found on PATH; required for the N23 fixture"
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest, repo_root, _skill_dir, _files = _build_valid_entry_fixture(tmp, "n23-skill")
+        eval_rel = manifest["skills"][0]["eval_evidence"]["path"]
+        eval_path = os.path.join(repo_root, eval_rel)
+
+        def _git(*args):
+            out = subprocess.run(["git"] + list(args), cwd=repo_root, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, timeout=5, text=True)
+            assert out.returncode == 0, "git %s failed: %s" % (" ".join(args), out.stderr)
+
+        # -c user.name/user.email flags (never os.environ mutation) scope the commit identity to
+        # this one git invocation, so this disposable /tmp fixture repo never touches the calling
+        # process's or the primary repo's git config.
+        author_flags = ("-c", "user.name=governance-self-test",
+                         "-c", "user.email=governance-self-test@example.invalid")
+        _git("init", "-q")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "n23: initial regular file")))
+
+        # Positive control: a committed 100644 regular file passes the tracked-mode check
+        # unchanged.
+        details_regular = validate_project_manifest(manifest, repo_root, require_tracked=True)
+        assert not any("eval_evidence" in d for d in details_regular), details_regular
+
+        # Replace the tracked file with a real OS symlink and commit it (mode 120000 in the
+        # index), then simulate a core.symlinks=false checkout by re-writing the working-tree path
+        # as a PLAIN FILE containing the link target text -- this isolates the git-index
+        # tracked-mode guard from the working-tree os.path.islink() guard above it: with a real OS
+        # symlink still on disk, islink() alone would already catch this case, so it wouldn't
+        # prove the second, independent guard exists.
+        external_target = os.path.join(tmp, "outside-eval-target-n23.md")
+        _write_file(external_target, "external, must never be read\n")
+        os.remove(eval_path)
+        os.symlink(external_target, eval_path)
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "n23: replace with a committed symlink")))
+
+        os.remove(eval_path)
+        _write_file(eval_path, os.path.relpath(external_target, os.path.dirname(eval_path)))
+        assert not os.path.islink(eval_path), "fixture setup: expected a plain file, not a symlink"
+
+        details_symlink = validate_project_manifest(manifest, repo_root, require_tracked=True)
+        assert any("mode 120000" in d for d in details_symlink), details_symlink
+
+
+# ---- N24: symlinked skill root (standalone validate_project_manifest, the MINOR-3 gap) ----
+
+def _st_n24():
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest, repo_root, skill_dir, _files = _build_valid_entry_fixture(tmp, "n24-skill")
+        # The external target directory carries a marker file that would never legitimately be
+        # produced by this fixture -- its presence in any diagnostic would mean the walk descended
+        # into the symlinked root, which the fix must prevent entirely.
+        external_dir = os.path.join(tmp, "external-skill-root-n24")
+        os.makedirs(external_dir, exist_ok=True)
+        _write_file(os.path.join(external_dir, "marker.md"), "external marker, must never be walked\n")
+        shutil.rmtree(skill_dir)
+        try:
+            os.symlink(external_dir, skill_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            raise AssertionError("platform refused symlink creation: %s" % e)
+        details = validate_project_manifest(manifest, repo_root, require_tracked=False)
+        assert any("skill directory must not be a symlink" in d for d in details), details
+        assert not any("marker.md" in d for d in details), details
+
+    # Positive control: an ordinary (non-symlinked) skill directory is unaffected.
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest2, repo_root2, _skill_dir2, _files2 = _build_valid_entry_fixture(tmp, "n24b-skill")
+        details2 = validate_project_manifest(manifest2, repo_root2, require_tracked=False)
+        assert not any("skill directory must not be a symlink" in d for d in details2), details2
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -1960,6 +2228,14 @@ def _self_test_fixtures():
         ("N14", "duplicate skill name/path within one manifest", _st_n14),
         ("N15", "symlinked subdirectory inside the skill dir", _st_n15),
         ("N16", "on-disk skill dir with review_status draft", _st_n16),
+        ("N17", "top-level manifest is a JSON array", _st_n17),
+        ("N18", "skills is not a list", _st_n18),
+        ("N19", "a skills[] entry is not an object", _st_n19),
+        ("N20", "skills[] entry missing required structural members", _st_n20),
+        ("N21", "full ALL_CHECKS run against a malformed project manifest", _st_n21),
+        ("N22", "eval_evidence.path is a working-tree symlink", _st_n22),
+        ("N23", "eval_evidence.path is a git-index symlink (tracked-mode check)", _st_n23),
+        ("N24", "symlinked skill root, standalone validate_project_manifest", _st_n24),
     ]
 
 

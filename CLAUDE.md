@@ -152,6 +152,16 @@ use `/skill-creator-anthropic`, a plain "create a skill" request routes to the b
 update/rollback procedure), `docs/agents/anthropic-skills-manifest.json` (installed set, file-level
 classification), and `docs/agents/anthropic-skills-patches.md` (every local patch, by file).
 
+A third ownership class covers project-owned first-party skills: content authored directly in this
+repo rather than vendored from an upstream source. It is governed by
+`docs/agents/project-skills-policy.md`, tracked in `docs/agents/project-skills-manifest.json`, and
+validated by `scripts/validate-agent-governance.py` alongside the two vendored sets above. The
+manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
+Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
+authority: mechanical authority to change tracked files always comes from an active task contract,
+`.claude/settings.json`, and hooks, never from manifest metadata alone. This does not change
+Governance v2 precedence.
+
 #### Agent skills
 
 ##### Issue tracker
