@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
 
@@ -92,12 +93,32 @@ type Options struct {
 	// the supervisor restarts it on the new binary.
 	OnUpdate func()
 
+	// Gate, if set, is consulted on every cycle immediately before
+	// applyUpdate, in addition to Enabled: the effective permission to apply
+	// an available update is `Enabled && (Gate == nil || Gate())`. A nil Gate
+	// preserves the pre-existing behavior (Enabled alone decides). This lets a
+	// process-level owner (e.g. the lifecycle controller) allow/withhold
+	// applying an update based on process state — running/paused vs stopped —
+	// without the updater knowing anything about that state machine. Gate is
+	// re-evaluated every cycle; it is never cached.
+	Gate func() bool
+
 	// httpClient/apiBaseURL/execPath/retryDelay are overridable for tests;
 	// zero values fall back to sane production defaults in New.
 	httpClient *http.Client
 	apiBaseURL string
 	execPath   string
 	retryDelay time.Duration
+
+	// onGateBlocked, if set, overrides the production ring-event recording
+	// triggered when Enabled is true but Gate refuses to allow applying an
+	// available update. This is a test seam only: it lets tests observe the
+	// (per-version deduped) gate-blocked signal deterministically via a plain
+	// callback instead of asserting against the process-global events ring
+	// from parallel-unsafe test positions. Production code always leaves this
+	// nil so New installs the default, which records
+	// events.TypeLifecycleUpdaterGateBlocked.
+	onGateBlocked func(current, latest string)
 }
 
 // Updater checks for and applies binary updates.
@@ -111,6 +132,11 @@ type Updater struct {
 	// already surfaced via NotifyFailure, so a persistently broken release
 	// isn't re-announced on every interval.
 	failedVersion string
+	// gateBlockedVersion is the latest version whose Gate-refused apply was
+	// already surfaced via onGateBlocked, so a persistently withheld release
+	// isn't re-announced on every interval. A distinct new version clears the
+	// dedup and fires exactly one more time.
+	gateBlockedVersion string
 }
 
 // release/asset mirror the subset of the GitHub Releases API the updater uses.
@@ -144,7 +170,18 @@ func New(opts Options) *Updater {
 	if opts.httpClient == nil {
 		opts.httpClient = &http.Client{Timeout: downloadTimeout}
 	}
+	if opts.onGateBlocked == nil {
+		opts.onGateBlocked = defaultGateBlocked
+	}
 	return &Updater{opts: opts}
+}
+
+// defaultGateBlocked is the production onGateBlocked: it records the
+// canonical lifecycle_updater_gate_blocked ring event so operators/dashboards
+// can see that an available update is being intentionally withheld (e.g.
+// because the process is in a stopped state) rather than silently ignored.
+func defaultGateBlocked(current, latest string) {
+	events.Record(events.TypeLifecycleUpdaterGateBlocked, "", fmt.Sprintf("%s -> %s", current, latest))
 }
 
 // Run performs an initial check and then re-checks every CheckInterval until
@@ -214,6 +251,19 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	if !u.opts.Enabled {
 		slog.Info("Auto-update is disabled; not replacing the binary. Enable it with -auto-update or AUTO_UPDATE=true.",
 			"latest", rel.TagName)
+		return
+	}
+
+	// Effective permission to apply is Enabled (checked above) AND the Gate,
+	// re-evaluated fresh on every cycle - never cached across cycles. A nil
+	// Gate is treated as "no opinion", preserving pre-Gate behavior.
+	if u.opts.Gate != nil && !u.opts.Gate() {
+		slog.Info("Auto-update: available update withheld by lifecycle gate",
+			"current", u.opts.CurrentVersion, "latest", rel.TagName)
+		if u.gateBlockedVersion != rel.TagName {
+			u.gateBlockedVersion = rel.TagName
+			u.opts.onGateBlocked(u.opts.CurrentVersion, rel.TagName)
+		}
 		return
 	}
 

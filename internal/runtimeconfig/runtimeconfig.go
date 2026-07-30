@@ -77,6 +77,7 @@ const (
 	envDashboardInsecure     = "DASHBOARD_INSECURE_NO_AUTH"
 	envDashboardTrustedOrigs = "DASHBOARD_TRUSTED_ORIGINS"
 	envDevPredictions        = "MINER_DEV_PREDICTIONS"
+	envLifecycleForceRunning = "LIFECYCLE_FORCE_RUNNING"
 )
 
 // Lookup abstracts reading a single environment variable. It mirrors
@@ -288,6 +289,13 @@ type RuntimeConfig struct {
 	AutoUpdateInterval time.Duration
 	// Dashboard is the resolved web dashboard exposure/auth configuration.
 	Dashboard Dashboard
+	// LifecycleForceRunning is the resolved LIFECYCLE_FORCE_RUNNING escape
+	// hatch (design v6 §5.4): true only for a truthy value, matching
+	// InsecureNoAuth's parseBool semantics. Honored ONLY at the lifecycle
+	// controller's startup reconciliation (internal/lifecycle), forcing
+	// in-memory desired to running without rewriting the durable row — see
+	// lifecycle.Config.ForceRunning.
+	LifecycleForceRunning bool
 }
 
 // LogValue redacts nested secrets (the dashboard password) so a RuntimeConfig
@@ -298,6 +306,7 @@ func (rc RuntimeConfig) LogValue() slog.Value {
 		slog.Bool("debug", rc.Debug),
 		slog.Bool("autoUpdateEnabled", rc.AutoUpdateEnabled),
 		slog.Duration("autoUpdateInterval", rc.AutoUpdateInterval),
+		slog.Bool("lifecycleForceRunning", rc.LifecycleForceRunning),
 		// Embed the already-redacted dashboard group directly (rather than
 		// slog.Any of the struct) so the secret is redacted even when the value
 		// is rendered without a LogValuer-resolving handler.
@@ -310,16 +319,16 @@ func (rc RuntimeConfig) LogValue() slog.Value {
 // redacted Dashboard.String).
 func (rc RuntimeConfig) String() string {
 	return fmt.Sprintf(
-		"runtimeconfig.RuntimeConfig{configPath:%q debug:%t autoUpdate:%t interval:%s dashboard:%s}",
-		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.Dashboard.String())
+		"runtimeconfig.RuntimeConfig{configPath:%q debug:%t autoUpdate:%t interval:%s lifecycleForceRunning:%t dashboard:%s}",
+		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.LifecycleForceRunning, rc.Dashboard.String())
 }
 
 // GoString redacts secrets under %#v: without a GoStringer, %#v would fall back
 // to Go-syntax reflection that prints the nested Dashboard.Password verbatim.
 func (rc RuntimeConfig) GoString() string {
 	return fmt.Sprintf(
-		"runtimeconfig.RuntimeConfig{ConfigPath:%q, Debug:%#v, AutoUpdateEnabled:%#v, AutoUpdateInterval:%#v, Dashboard:%s}",
-		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.Dashboard.GoString())
+		"runtimeconfig.RuntimeConfig{ConfigPath:%q, Debug:%#v, AutoUpdateEnabled:%#v, AutoUpdateInterval:%#v, LifecycleForceRunning:%#v, Dashboard:%s}",
+		rc.ConfigPath, rc.Debug, rc.AutoUpdateEnabled, rc.AutoUpdateInterval, rc.LifecycleForceRunning, rc.Dashboard.GoString())
 }
 
 // Format makes RuntimeConfig a fmt.Formatter so every verb (including a wrong
@@ -348,12 +357,14 @@ func (rc RuntimeConfig) Format(f fmt.State, verb rune) {
 //   - Dashboard.InsecureNoAuth: DASHBOARD_INSECURE_NO_AUTH (strconv.ParseBool).
 //   - Dashboard.TrustedOrigins: DASHBOARD_TRUSTED_ORIGINS (parsed here).
 //   - Dashboard.DevPredictions: MINER_DEV_PREDICTIONS truthy set.
+//   - LifecycleForceRunning: LIFECYCLE_FORCE_RUNNING (strconv.ParseBool, truthy only).
 func Resolve(flags Flags, env Lookup) RuntimeConfig {
 	return RuntimeConfig{
-		ConfigPath:         flags.ConfigPath,
-		Debug:              flags.Debug,
-		AutoUpdateEnabled:  resolveAutoUpdateEnabled(flags.AutoUpdate, env.get(envAutoUpdate)),
-		AutoUpdateInterval: updater.ParseCheckInterval(env.get(envAutoUpdateInterval)),
+		ConfigPath:            flags.ConfigPath,
+		Debug:                 flags.Debug,
+		AutoUpdateEnabled:     resolveAutoUpdateEnabled(flags.AutoUpdate, env.get(envAutoUpdate)),
+		AutoUpdateInterval:    updater.ParseCheckInterval(env.get(envAutoUpdateInterval)),
+		LifecycleForceRunning: parseBool(env.get(envLifecycleForceRunning)),
 		Dashboard: Dashboard{
 			HostOverride:   strings.TrimSpace(env.get(envDashboardHost)),
 			Username:       env.get(envDashboardUsername),

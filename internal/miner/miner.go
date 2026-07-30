@@ -35,9 +35,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
@@ -47,6 +45,12 @@ import (
 // see that package's doc comment). Kept as a miner-local alias so production
 // and test code in this package can refer to it as miner.ErrShuttingDown.
 var ErrShuttingDown = settings.ErrShuttingDown
+
+// ErrAlreadyRun is returned by Run when it is called a second time on the
+// same Miner value (design v6 §14's Run-once guard): a Miner is single-use,
+// since stop()'s own once-guard (S2) would otherwise make a second Run skip
+// teardown entirely rather than actually re-running anything.
+var ErrAlreadyRun = errors.New("miner: Run already called; a Miner is single-use")
 
 // SRAP (Streamer Removal Admission Protocol, M1) budget vars — package-level
 // so a test can shrink them to exercise a deterministic timeout without a
@@ -156,16 +160,29 @@ type Miner struct {
 	// ownership of its Close.
 	ownsDB bool
 
-	// autoUpdate holds the auto-update watcher configuration set via
-	// ConfigureAutoUpdate before Run. When nil the watcher is not started.
-	autoUpdate *autoUpdateConfig
-	// shutdownFn cancels the run context so an applied binary update can ask
-	// the miner to exit cleanly (exit 0) and let the supervisor restart it.
+	// shutdownFn cancels the run context. failStartup calls it FIRST, before
+	// running the S1 teardown drain, so every ctx-bound helper (auth recovery
+	// flights, notification dispatch, the reconcile sweeps) observes shutdown
+	// before teardown joins it — mirroring the normal exit path, where ctx is
+	// already done by the time stop() runs. (Historically this also let an
+	// applied auto-update request its own clean exit; that responsibility
+	// moved to the process-level lifecycle controller in design v6 §7 —
+	// Controller.Run's update-exit path now cancels the CURRENT generation's
+	// own ctx directly, never through this field.)
 	shutdownFn context.CancelFunc
 	// runCtx is the run-scoped context, captured in Run before any component
 	// starts. Auth recovery triggered from long-lived consumers (PubSub
 	// ERR_BADAUTH) is bound to it so shutdown releases recovery waiters.
 	runCtx context.Context
+	// ranOnce guards the explicit Run-once invariant (design v6 §14's
+	// optional Run-once guard, taken): a Miner is single-use because stop()'s
+	// own once-guard (S2) means a second Run would skip teardown entirely,
+	// silently reusing already-torn-down state. CompareAndSwap at the very
+	// top of Run makes that invariant an immediate, loud error instead of a
+	// latent bug — every process-level owner (internal/app's per-generation
+	// Miner factory) already constructs a fresh Miner per Run, so this never
+	// fires in production; it exists to fail fast if that ever regresses.
+	ranOnce atomic.Bool
 
 	nextStreamCheck    time.Time
 	streamCheckTrigger chan struct{}
@@ -297,10 +314,10 @@ type Miner struct {
 	// test drive Run's REAL control flow to a chosen startup stage and fail
 	// it there deterministically, so every early-return path's cleanup is
 	// testable without network access.
-	// startMiningFn additionally covers the startMining stage for the two
-	// SUCCESSFUL-startup control-flow tests (normal cancellation and the
-	// auto-update shutdown): the real startMining's drops tracker fires an
-	// immediate campaign sync whose offline GQL retry/backoff tail
+	// startMiningFn additionally covers the startMining stage for the
+	// SUCCESSFUL-startup control-flow tests (e.g. normal cancellation, the
+	// F12 provider-safety table): the real startMining's drops tracker fires
+	// an immediate campaign sync whose offline GQL retry/backoff tail
 	// (~7.5-11s) exceeds the S1 drain bounds, so a deterministic offline
 	// test must stub the stage; the loops startMining spawns keep their own
 	// S1 coverage (stop_join_test.go and each component's package tests).
@@ -374,20 +391,6 @@ func New(cfg *config.Config, configPath string) *Miner {
 	}
 }
 
-// autoUpdateConfig captures the auto-update settings resolved from CLI
-// flags/env at startup.
-type autoUpdateConfig struct {
-	enabled  bool
-	interval time.Duration
-}
-
-// ConfigureAutoUpdate enables the background release-update watcher. Called
-// before Run; with enabled=false the watcher still checks periodically and
-// logs/notifies when a newer release exists, but never replaces the binary.
-func (m *Miner) ConfigureAutoUpdate(enabled bool, interval time.Duration) {
-	m.autoUpdate = &autoUpdateConfig{enabled: enabled, interval: interval}
-}
-
 // SetDashboardConfig injects the resolved, immutable dashboard exposure/auth
 // snapshot. App calls it during composition; it is consumed only by the
 // fallback web-server build in start() (the library path where App did not
@@ -421,12 +424,19 @@ func (m *Miner) SetWebServer(server *web.Server) {
 
 // Run starts the miner and blocks until the context is cancelled.
 // The caller is responsible for handling OS signals and cancelling the context.
-// A Miner is single-run: stop()'s once guard (S2) means a second Run on the
-// same value would skip teardown entirely — construct a fresh Miner per run
-// (App already does; it is itself single-use).
+// A Miner is single-run: stop()'s own once guard (S2) means a second Run on
+// the same value would skip teardown entirely, so Run now enforces that
+// explicitly and immediately (ErrAlreadyRun) rather than leaving it as a
+// latent bug — construct a fresh Miner per run (internal/app's per-generation
+// Miner factory already does; App itself is separately single-use).
 func (m *Miner) Run(ctx context.Context) error {
-	// Derive a cancelable context so an applied auto-update can request a
-	// clean shutdown (which returns nil from Run -> process exits 0).
+	if !m.ranOnce.CompareAndSwap(false, true) {
+		return ErrAlreadyRun
+	}
+
+	// Derive a cancelable context so failStartup can proactively cancel it
+	// before running the S1 teardown drain on a startup failure (see
+	// shutdownFn's doc comment).
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	m.shutdownFn = cancel
@@ -1020,6 +1030,17 @@ func (m *Miner) notificationManager() *notifications.Manager {
 	return m.notifications
 }
 
+// NotificationManager is the public counterpart to notificationManager: a
+// thin, exported wrapper so an EXTERNAL owner (internal/app's process-level
+// updater-notify adapter, design v6 §7) can resolve "this generation's live
+// notifications manager, or nil" without internal/miner exposing the field
+// itself. Safe to call at any point in the Miner's lifecycle, including
+// before Run and after Run has returned (both observe nil or a stopped-but-
+// safe-to-call Manager — see notifications.Manager.Stop's doc comment).
+func (m *Miner) NotificationManager() *notifications.Manager {
+	return m.notificationManager()
+}
+
 // initNotificationManager builds and publishes the miner's notifications
 // Manager (M4). It is the ONLY assignment to m.notifications anywhere in
 // production code — every other reader goes through the notificationManager()
@@ -1112,6 +1133,54 @@ func (m *Miner) subscribeToTopics() error {
 	return nil
 }
 
+// debugServerHadBindConflict tracks, across generations within THIS PROCESS,
+// whether the most recent debug-server bind attempt failed (design v6 §6,
+// contract §11 item 6): a LATER generation's successful bind, after a prior
+// conflict, logs debug_server_rebound — so an operator watching logs across
+// a pause/resume or restart cycle sees the port free up again, not just that
+// it failed once. Package-level (not a Miner field) because a bind conflict
+// is a process-wide port-contention fact, and a fresh generation's Miner
+// (design v6 §14: one Miner per generation) has no memory of a PREVIOUS
+// generation's own failed attempt otherwise. Deliberately trivial: a single
+// flag, not a counter or history — exactly the "keep it trivial" the
+// contract asks for.
+var debugServerHadBindConflict atomic.Bool
+
+// startDebugServer binds the localhost-only diagnostic HTTP server when
+// Debug.Enabled, and wires the same in-process snapshot builder onto the
+// main dashboard so the Logs-page button works from remote browsers.
+// Extracted out of startMining as its own method so the bind-conflict/
+// rebound observability below is directly unit-testable without spinning up
+// startMining's full component graph (watcher/dropsTracker/discovery/...).
+func (m *Miner) startDebugServer() {
+	if !m.config.Debug.Enabled {
+		return
+	}
+
+	logPath := ""
+	if m.config.Logger.Save {
+		logPath = logger.LogFilePath(m.config.StorageKey())
+	}
+	m.debugServer = debug.NewServer(m.config.Debug.Port, m.BuildDebugSnapshot, logPath)
+	if err := m.debugServer.Start(); err != nil {
+		slog.Error("debug_server_bind_conflict", "port", m.config.Debug.Port, "error", err)
+		debugServerHadBindConflict.Store(true)
+		m.debugServer = nil
+	} else if debugServerHadBindConflict.Swap(false) {
+		slog.Info("debug_server_rebound", "port", m.config.Debug.Port)
+	}
+
+	// Publish the same in-process snapshot builder on the main dashboard
+	// (relative URL, full auth/middleware chain) so the Logs-page button
+	// works from remote browsers — "localhost" there is the viewer's
+	// machine, not this container. Wired here, alongside the debug server,
+	// so the dashboard route also never observes half-initialized fields.
+	if m.webServer != nil {
+		m.webServer.SetDebugSnapshotProvider(m.BuildDebugSnapshot)
+		m.webServer.SetDebugURL(web.DebugSnapshotPath)
+	}
+}
+
 func (m *Miner) startMining(ctx context.Context) {
 	slog.Info("Starting mining operations")
 
@@ -1121,27 +1190,7 @@ func (m *Miner) startMining(ctx context.Context) {
 
 	// The debug server starts here - after every component is wired up - so
 	// its snapshot handler never observes half-initialized miner fields.
-	if m.config.Debug.Enabled {
-		logPath := ""
-		if m.config.Logger.Save {
-			logPath = logger.LogFilePath(m.config.StorageKey())
-		}
-		m.debugServer = debug.NewServer(m.config.Debug.Port, m.BuildDebugSnapshot, logPath)
-		if err := m.debugServer.Start(); err != nil {
-			slog.Error("Failed to start debug server", "error", err)
-			m.debugServer = nil
-		}
-
-		// Publish the same in-process snapshot builder on the main dashboard
-		// (relative URL, full auth/middleware chain) so the Logs-page button
-		// works from remote browsers — "localhost" there is the viewer's
-		// machine, not this container. Wired here, alongside the debug server,
-		// so the dashboard route also never observes half-initialized fields.
-		if m.webServer != nil {
-			m.webServer.SetDebugSnapshotProvider(m.BuildDebugSnapshot)
-			m.webServer.SetDebugURL(web.DebugSnapshotPath)
-		}
-	}
+	m.startDebugServer()
 
 	events.Record(events.TypeMinerStarted, "", "mining operations started")
 
@@ -1194,14 +1243,15 @@ func (m *Miner) startMining(ctx context.Context) {
 	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
 		m.startLoop(ctx, m.dailySummaryLoop)
 	}
-	m.startAutoUpdater(ctx)
 }
 
 // startLoop spawns one of startMining's background loops registered in
 // loopWG, so stop() can join it (bounded) before the shared database handle
 // is closed. Must only be called on the startMining call path (startMining
-// itself and startAutoUpdater, which startMining invokes on the same
-// goroutine) — see loopWG's ordering contract.
+// itself, on its own goroutine) — see loopWG's ordering contract. The
+// auto-updater is no longer one of these loops: it moved to the process-level
+// lifecycle controller (design v6 §7, internal/lifecycle), not a
+// generation-owned goroutine.
 func (m *Miner) startLoop(ctx context.Context, fn func(context.Context)) {
 	m.loopWG.Add(1)
 	go func() {
@@ -1242,66 +1292,33 @@ func (m *Miner) joinLoops() error {
 	}
 }
 
-// startAutoUpdater launches the background release-update watcher when it has
-// been configured via ConfigureAutoUpdate. It runs non-blocking: a failed
-// check or a failed binary swap is logged and the miner keeps running.
-func (m *Miner) startAutoUpdater(ctx context.Context) {
-	if m.autoUpdate == nil {
-		return
-	}
-
-	upd := updater.New(updater.Options{
-		Repo:           version.Repo,
-		CurrentVersion: version.Version,
-		Enabled:        m.autoUpdate.enabled,
-		CheckInterval:  m.autoUpdate.interval,
-		Notify:         m.notifyUpdateAvailable,
-		NotifyFailure:  m.notifyUpdateFailed,
-		OnUpdate:       m.requestUpdateShutdown,
-	})
-
-	// Tracked like the other startMining loops (S1): the updater's notify
-	// callbacks read the notifications config from SQLite on this goroutine,
-	// so it must be joined before the handle closes. startAutoUpdater runs on
-	// startMining's goroutine, preserving loopWG's program-order argument.
-	m.startLoop(ctx, upd.Run)
-}
-
-// requestUpdateShutdown is the updater's OnUpdate callback (see
-// startAutoUpdater): after an applied binary update it cancels the run
-// context so every component shuts down cleanly and Run returns nil — the
-// process exits 0 and the container/service supervisor restarts onto the
-// freshly written binary. A method (not an inline closure) so the S2
-// auto-update exit test exercises the exact production callback; the
-// updater's own package tests cover OnUpdate being invoked on an applied
-// update.
-func (m *Miner) requestUpdateShutdown() {
-	if m.shutdownFn != nil {
-		m.shutdownFn()
-	}
-}
-
-// notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
-// update-available notification. Reads the write-once notifications manager
-// via the shared accessor so it works even if Discord was toggled on after
-// startup.
-func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
-	events.Record(events.TypeUpdateAvailable, "", fmt.Sprintf("%s -> %s", current, latest))
-
-	if notifMgr := m.notificationManager(); notifMgr != nil {
-		notifMgr.NotifyUpdateAvailable(current, latest, releaseURL)
-	}
-}
-
-// notifyUpdateFailed logs and, when Discord is enabled, dispatches an
-// update-failed notification (fail-closed checksum refusal, download error,
-// or a failed binary swap). Mirrors notifyUpdateAvailable.
-func (m *Miner) notifyUpdateFailed(current, latest, reason string) {
-	events.Record(events.TypeUpdateFailed, "", fmt.Sprintf("%s -> %s: %s", current, latest, reason))
-
-	if notifMgr := m.notificationManager(); notifMgr != nil {
-		notifMgr.NotifyUpdateFailed(current, latest, reason)
-	}
+// IsJoinTimeoutError reports whether err is (or wraps) a drain/join-timeout
+// class failure that Miner.Run's returned error can genuinely carry on a
+// shutdown-drain overrun (design v6 §5.3's "dirty teardown" classifier,
+// contract §11 item 5): internal/lifecycle wires this, alongside its own
+// lifecycle.ErrDirtyTeardown (test sentinel), into
+// lifecycle.IsDirtyTeardownError so a generation dying with an overrun
+// drain is classified the same way a genuinely dirty teardown is (desired=
+// running -> Controller.Run exits; desired paused/stopped -> degraded).
+//
+// Scope, disclosed honestly rather than faked: this recognizes ONLY
+// errLoopJoinTimeout, the miner package's OWN sentinel (returned by
+// joinLoops, from stop()'s "shutdown drain incomplete" wrapping in Run). The
+// chat/pubsub/notifications sub-teardowns (ChatManager.Close,
+// WebSocketPool.Close, notifications.Manager.Stop) each have an ANALOGOUS
+// join/drain-timeout sentinel of their own, and each one's error DOES reach
+// Run's aggregated return via teardown()'s errors.Join — but every one of
+// those sentinels is unexported to its own package (chat.errLoopJoinTimeout,
+// pubsub.errLoopJoinTimeout, notifications.errDispatchDrainTimeout), so
+// there is no errors.Is-able value internal/miner can reference for them
+// without either exporting a new sentinel from a package b3's allowed paths
+// do not include, or matching on the error STRING (rejected: fragile,
+// exactly the kind of raw-sentinel-adjacent over-export this function is
+// meant to avoid). watcher.MinuteWatcher.Stop is not reachable at all here:
+// it returns no error whatsoever, so its own join-timeout log line can never
+// appear in Run's returned error in the first place.
+func IsJoinTimeoutError(err error) bool {
+	return errors.Is(err, errLoopJoinTimeout)
 }
 
 // bonusPollInterval is how often the GQL polling fallback re-checks each online
@@ -1902,11 +1919,14 @@ func (m *Miner) teardown() error {
 
 	// Close the DB only when the miner opened it itself (library use). In
 	// the cmd/miner path main owns the handle and closes it after Run
-	// returns. With the S1 drains above (settings applies, miner loops incl.
-	// the auto-updater, chat/pubsub read loops and reconnect drivers,
-	// watcher, drops, notification dispatch) every asynchronous SQLite
-	// WRITER this runtime spawns has been joined or refused by the time this
-	// line runs. Known read-only residual: the bounded (2-min) auth-recovery
+	// returns. With the S1 drains above (settings applies, this generation's
+	// own loops, chat/pubsub read loops and reconnect drivers, watcher,
+	// drops, notification dispatch) every asynchronous SQLite WRITER this
+	// runtime spawns has been joined or refused by the time this line runs.
+	// The process-level auto-updater (design v6 §7) is no longer one of
+	// these generation-owned loops — it is joined by the lifecycle
+	// controller itself, independently of any one generation's teardown.
+	// Known read-only residual: the bounded (2-min) auth-recovery
 	// observer can, in a rare recovery race, still perform a notifications
 	// config READ after Run returns — logged, no data loss (see
 	// recoverFromRejectedGeneration).

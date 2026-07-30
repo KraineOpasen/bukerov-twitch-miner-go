@@ -52,6 +52,33 @@ const (
 	TypeDropStalled      Type = "drop_stalled"
 	TypeDropRecovered    Type = "drop_recovered"
 	TypeDropRecoveryStep Type = "drop_recovery_step"
+
+	// The Type* constants below are the internal/lifecycle package's
+	// ring-level events (design v6 §11's "canonical list", ring-level
+	// half): one entry per lifecycle STATE CHANGE (command/self-
+	// classification reaching a terminal, or a one-shot boot fact) — never
+	// per-attempt/high-frequency detail, which stays slog-only so a
+	// crash-looping retry chain can never evict mining events from this
+	// shared, fixed-capacity ring (tested: N retry cycles produce a
+	// bounded, constant number of ring records). Recorded with an empty
+	// Streamer (these are process-level facts, not per-streamer).
+	TypeLifecycleFailedEntered                 Type = "lifecycle_failed_entered"
+	TypeLifecycleFailedRecovered               Type = "lifecycle_failed_recovered"
+	TypeLifecycleTransitionDegraded            Type = "lifecycle_transition_degraded"
+	TypeLifecyclePaused                        Type = "lifecycle_paused"
+	TypeLifecycleResumed                       Type = "lifecycle_resumed"
+	TypeLifecycleStopped                       Type = "lifecycle_stopped"
+	TypeLifecycleRestarted                     Type = "lifecycle_restarted"
+	TypeLifecycleCommandDeferredToRestart      Type = "lifecycle_command_deferred_to_restart"
+	TypeLifecycleEnvOverride                   Type = "lifecycle_env_override"
+	TypeLifecycleIntentHonoredNoControlSurface Type = "lifecycle_intent_honored_no_control_surface"
+	TypeLifecycleUpdaterGateBlocked            Type = "lifecycle_updater_gate_blocked"
+	TypeLifecycleUpdaterTookPriority           Type = "lifecycle_updater_took_priority"
+	TypeLifecycleShutdownTookPriority          Type = "lifecycle_shutdown_took_priority"
+	TypeLifecycleRestartProcessRequested       Type = "lifecycle_restart_process_requested"
+	TypeLifecycleStateCorrupt                  Type = "lifecycle_state_corrupt"
+	TypeLifecycleStateReadFailed               Type = "lifecycle_state_read_failed"
+	TypeLifecyclePersistenceFailed             Type = "lifecycle_persistence_failed"
 )
 
 type Event struct {

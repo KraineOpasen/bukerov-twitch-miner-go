@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -548,5 +550,247 @@ func TestCheckAndMaybeUpdateNotifiesFailureOnce(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(exec); string(got) != "old" {
 		t.Errorf("binary replaced despite refusal: %q", got)
+	}
+}
+
+// --- Options.Gate (process-lifecycle interlock, contract §10/§15 items 35-39) ---
+
+// A nil Gate must preserve pre-Gate behavior: Enabled alone decides, and the
+// update is applied exactly as before Gate existed.
+func TestGateNilPreservesEnabledOnlyBehavior(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	restarted := false
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		// Gate intentionally left nil.
+		OnUpdate: func() { restarted = true },
+	})
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	if !restarted {
+		t.Error("OnUpdate not called: nil Gate should not block an Enabled apply")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != string(binary) {
+		t.Errorf("binary not replaced with nil Gate: %q", got)
+	}
+}
+
+// Gate is consulted fresh on every cycle, not cached: flipping it between
+// cycles must change the outcome (mutation-probe target: a static/cached
+// Gate read would make this test fail).
+func TestGateReevaluatedEveryCycle(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	var gateOpen atomic.Bool
+	restarts := 0
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Gate:     func() bool { return gateOpen.Load() },
+		OnUpdate: func() { restarts++ },
+	})
+
+	// Cycle 1: gate closed -> must not apply.
+	u.checkAndMaybeUpdate(context.Background())
+	if restarts != 0 {
+		t.Fatalf("OnUpdate called with gate closed on cycle 1")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Fatalf("binary replaced with gate closed on cycle 1: %q", got)
+	}
+
+	// Flip the gate open, then re-check: the SAME Updater must now apply,
+	// proving Gate is re-read every cycle rather than cached from cycle 1.
+	gateOpen.Store(true)
+	u.checkAndMaybeUpdate(context.Background())
+	if restarts != 1 {
+		t.Fatalf("OnUpdate called %d times after gate opened on cycle 2, want 1", restarts)
+	}
+	if got, _ := os.ReadFile(exec); string(got) != string(binary) {
+		t.Errorf("binary not replaced after gate opened: %q", got)
+	}
+}
+
+// Gate() == true (the running/paused matrix cells) allows the apply to proceed.
+func TestGateTrueAllowsApply(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	restarted := false
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Gate:     func() bool { return true },
+		OnUpdate: func() { restarted = true },
+	})
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	if !restarted {
+		t.Error("OnUpdate not called with Gate()==true")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != string(binary) {
+		t.Errorf("binary not replaced with Gate()==true: %q", got)
+	}
+}
+
+// Gate() == false (the stopped matrix cell) blocks the apply, but the
+// existing per-version Notify dedup still fires exactly once - "check +
+// notify only" per §7's matrix.
+func TestGateFalseBlocksApplyButNotifiesOnce(t *testing.T) {
+	srv := newReleaseServer(t, "v9.9.9", []byte("new binary"), true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	notifyCount := 0
+	restarted := false
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Gate:     func() bool { return false },
+		Notify:   func(_, _, _ string) { notifyCount++ },
+		OnUpdate: func() { restarted = true },
+	})
+
+	u.checkAndMaybeUpdate(context.Background())
+	// Second cycle: same version, Notify must stay deduped.
+	u.checkAndMaybeUpdate(context.Background())
+
+	if notifyCount != 1 {
+		t.Errorf("Notify called %d times with Gate()==false, want exactly 1 (deduped per version)", notifyCount)
+	}
+	if restarted {
+		t.Error("OnUpdate called despite Gate()==false")
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary replaced despite Gate()==false: %q", got)
+	}
+}
+
+// The gate-blocked signal is deduped by version exactly like Notify/
+// NotifyFailure: repeated cycles on the same withheld version fire the
+// callback once, and a genuinely new version fires exactly one more time.
+func TestGateBlockedDedupedByVersionNewVersionRetriggers(t *testing.T) {
+	var tag atomic.Value
+	tag.Store("v9.9.9")
+	binary := []byte("bin")
+	sum := sha256.Sum256(binary)
+	checksums := hex.EncodeToString(sum[:]) + "  " + assetName() + "\n"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		tn := tag.Load().(string)
+		rel := release{
+			TagName: tn,
+			HTMLURL: "https://example.test/releases/" + tn,
+			Assets: []asset{
+				{Name: assetName(), URL: srvURL(r) + "/download/binary"},
+				{Name: "checksums.txt", URL: srvURL(r) + "/download/checksums"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(rel)
+	})
+	mux.HandleFunc("/download/binary", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(binary) })
+	mux.HandleFunc("/download/checksums", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(checksums))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	blockedCalls := 0
+	var lastCurrent, lastLatest string
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, httpClient: srv.Client(),
+		Gate: func() bool { return false },
+	})
+	// Test seam: override the production ring-event recorder with a plain,
+	// deterministic callback so this test does not need to assert against
+	// the process-global events ring from a parallel-unsafe position.
+	u.opts.onGateBlocked = func(current, latest string) {
+		blockedCalls++
+		lastCurrent, lastLatest = current, latest
+	}
+
+	u.checkAndMaybeUpdate(context.Background())
+	u.checkAndMaybeUpdate(context.Background())
+	if blockedCalls != 1 {
+		t.Fatalf("onGateBlocked called %d times for the same version, want exactly 1", blockedCalls)
+	}
+	if lastCurrent != "v1.0.0" || lastLatest != "v9.9.9" {
+		t.Errorf("onGateBlocked args = (%q, %q), want (v1.0.0, v9.9.9)", lastCurrent, lastLatest)
+	}
+
+	// A genuinely new latest version must retrigger exactly one more call.
+	tag.Store("v9.9.10")
+	u.checkAndMaybeUpdate(context.Background())
+	if blockedCalls != 2 {
+		t.Fatalf("onGateBlocked called %d times after a new version appeared, want exactly 2", blockedCalls)
+	}
+	if lastCurrent != "v1.0.0" || lastLatest != "v9.9.10" {
+		t.Errorf("onGateBlocked args after new version = (%q, %q), want (v1.0.0, v9.9.10)", lastCurrent, lastLatest)
+	}
+}
+
+// gateBlockedRingMarkerSeq gives each TestGateBlockedDefaultRecordsRingEvent
+// invocation (including repeats under `go test -count=N`, which reruns test
+// functions within the same process) a distinct "latest version" so the
+// assertion below can find the exact event this call produced in the
+// process-wide events ring, rather than a stale one from an earlier run.
+var gateBlockedRingMarkerSeq atomic.Int64
+
+// The default (production) onGateBlocked records the canonical
+// lifecycle_updater_gate_blocked ring event, deduped by version, without a
+// test override - proving the wiring in New() actually installs it.
+func TestGateBlockedDefaultRecordsRingEvent(t *testing.T) {
+	n := gateBlockedRingMarkerSeq.Add(1)
+	latest := fmt.Sprintf("v1.0.%d", 900000+n) // unique, valid semver, > v1.0.0
+
+	srv := newReleaseServer(t, latest, []byte("new binary"), true, 0)
+	defer srv.Close()
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, httpClient: srv.Client(),
+		Gate: func() bool { return false },
+	})
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	found := false
+	for _, e := range events.Recent(200) {
+		if e.Type == events.TypeLifecycleUpdaterGateBlocked && strings.Contains(e.Detail, latest) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("default onGateBlocked did not record a lifecycle_updater_gate_blocked ring event for %s", latest)
 	}
 }
