@@ -153,3 +153,187 @@ func TestAcceptRejectsWhenSlotOccupiedDespiteTransitionCleared(t *testing.T) {
 		t.Fatal("Run did not return")
 	}
 }
+
+// Spec re-review BLOCKER (post-F4b Q3 consolidated corrective): MAJOR 6's
+// override-resume branch (accept()'s cellIdempotent case, active only when
+// s.override && cmd==Resume && observed==running) is ITSELF an
+// accept-class outcome — it occupies the slot — but was added without the
+// same s.pending!=nil guard BLOCKER 1 added to the default accept-class
+// branch (now: occupySlotLocked, the single centralized helper every
+// occupying branch routes through, precisely so a FUTURE occupying cell
+// cannot repeat this class of bug by forgetting to duplicate the check).
+// Omitting the guard reproduced BLOCKER 1's exact scenario verbatim with
+// ForceRunning:true and Resume in place of Stop: a resume racing a
+// still-in-flight, undispatched pcA would overwrite s.pending, its own
+// cmdCh send would be silently dropped behind pcA's still-buffered one,
+// and the worker would later discard pcA via isCurrentPending while the
+// resume's own pc never dispatches — Transition stuck at pending forever,
+// every later Submit 409s, controller permanently wedged.
+//
+// This pins the WHOLE CLASS, not a single instance: the exact BLOCKER-1
+// race window (pcA's slot occupied, undispatched, while Transition has
+// been reset to none by a phantom start's own completion — see
+// TestAcceptRejectsWhenSlotOccupiedDespiteTransitionCleared's own doc
+// comment for the full mechanics) is replayed for EVERY combination of a
+// second command (Stop, which always goes through the default
+// accept-class branch regardless of override; Resume, which is idempotent
+// UNLESS override is active, in which case it goes through the
+// override-resume occupying branch this BLOCKER is about) crossed with
+// override on/off. This proves both that the guard now covers every
+// occupying branch, AND — the resume-no-override row — that override
+// cannot accidentally turn a genuinely idempotent cell into a 409: design
+// v6 §5.1's idempotent cells must keep returning idempotent while the
+// slot is held.
+func TestSlotBusyGuardCoversEveryOccupyingBranch(t *testing.T) {
+	cases := []struct {
+		name         string
+		forceRunning bool
+		submit       func(c *Controller) SubmitResult
+		wantOutcome  Outcome
+	}{
+		{
+			name:         "stop-no-override",
+			forceRunning: false,
+			submit:       func(c *Controller) SubmitResult { return c.Stop(context.Background()) },
+			wantOutcome:  OutcomeRejected,
+		},
+		{
+			name:         "stop-with-override",
+			forceRunning: true,
+			submit:       func(c *Controller) SubmitResult { return c.Stop(context.Background()) },
+			wantOutcome:  OutcomeRejected,
+		},
+		{
+			name:         "resume-no-override-stays-idempotent",
+			forceRunning: false,
+			submit:       func(c *Controller) SubmitResult { return c.Resume(context.Background()) },
+			wantOutcome:  OutcomeIdempotent,
+		},
+		{
+			name:         "resume-with-override-is-the-blocker",
+			forceRunning: true,
+			submit:       func(c *Controller) SubmitResult { return c.Resume(context.Background()) },
+			wantOutcome:  OutcomeRejected,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rf := newRunnerFactory()
+			rf.readySignaling = true
+			var pers *fakePersistence
+			if tc.forceRunning {
+				// Persisted paused, overridden to running in-memory by
+				// ForceRunning — this is what makes s.override true for
+				// the whole process lifetime.
+				pers = newFakePersistence(LoadResult{Found: true, Desired: DesiredPaused})
+			} else {
+				pers = newFakePersistence(LoadResult{Found: false}) // missing row -> running
+			}
+			cfg := Config{Factory: rf.Factory, Persistence: pers, Clock: newFakeClock(), ForceRunning: tc.forceRunning}
+			c := New(cfg)
+
+			// Manually-stepped testBeforeSelect: pauses the worker at the
+			// TOP of every loop iteration until passthrough is set —
+			// identical technique to
+			// TestAcceptRejectsWhenSlotOccupiedDespiteTransitionCleared,
+			// see that test's doc comment for why both barriers
+			// (armSaveBarrier + this) are needed.
+			var passthrough atomic.Bool
+			ackCh := make(chan struct{})
+			stepCh := make(chan struct{})
+			c.testBeforeSelect = func() {
+				if passthrough.Load() {
+					return
+				}
+				ackCh <- struct{}{}
+				<-stepCh
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := runInBackground(c, ctx)
+			defer cancel()
+
+			<-ackCh
+			rf.waitCount(t, 1)
+			rf.at(0).waitStarted(t)
+			if got := c.Snapshot().Observed; got != ObservedStarting {
+				t.Fatalf("observed before releasing iteration 1 = %v, want starting", got)
+			}
+			if tc.forceRunning && !c.Snapshot().Override {
+				t.Fatal("test setup: Override should be true (ForceRunning honored)")
+			}
+			stepCh <- struct{}{} // let iteration 1 enter its select; nothing is ready yet, so it blocks there.
+
+			// Hold Pause's own persist open: accept() (occupying the slot
+			// as pcA, via the "starting" row's slot-free cancel-start
+			// cell — unaffected by override, which only special-cases
+			// Resume) completes in-memory immediately, but Submit's send
+			// into cmdCh is delayed for as long as we hold this barrier.
+			release := pers.armSaveBarrier()
+
+			pauseResCh := make(chan SubmitResult, 1)
+			go func() { pauseResCh <- c.Pause(context.Background()) }()
+			waitFor(t, 2*time.Second, func() bool { return c.Snapshot().Transition == TransitionPending })
+
+			// The phantom start reaches ready while Pause's cmdCh send is
+			// still pending: iteration 1's blocked select wakes on
+			// readyChSafe alone and runs completeStart ->
+			// publishTerminalNoSlot, resetting Transition to none and
+			// Observed to running WITHOUT touching pcA's slot.
+			rf.at(0).markReady()
+			<-ackCh
+			waitObserved(t, c, ObservedRunning)
+
+			if got := c.Snapshot().Transition; got != TransitionNone {
+				t.Fatalf("transition = %v, want none (phantom completion must reset it even though pcA's slot is still occupied)", got)
+			}
+
+			// Release Pause's Save: Submit proceeds to actually send pcA
+			// into cmdCh and returns. The worker is STILL frozen before
+			// iteration 2's select, so pcA is provably sitting there,
+			// undispatched, while we submit the second command below.
+			release()
+			pauseRes := <-pauseResCh
+			if pauseRes.Outcome != OutcomeAccepted {
+				t.Fatalf("pause: %v (%v)", pauseRes.Outcome, pauseRes.Err)
+			}
+
+			before := len(c.cmdCh)
+			res := tc.submit(c)
+			if res.Outcome != tc.wantOutcome {
+				t.Fatalf("second command: got %v, want %v (%v)", res.Outcome, tc.wantOutcome, res.Err)
+			}
+			if tc.wantOutcome == OutcomeRejected {
+				if after := len(c.cmdCh); after != before {
+					t.Fatalf("cmdCh length changed from %d to %d — a rejected command must never touch cmdCh (no send, no drain)", before, after)
+				}
+			}
+
+			// Let the worker run freely from here on.
+			passthrough.Store(true)
+			stepCh <- struct{}{}
+
+			// The controller must remain fully live regardless of the
+			// second command's outcome: pcA's own pause still reaches its
+			// terminal (paused), and a subsequent command is still
+			// accepted normally afterwards — distinguishing a correct
+			// 409/idempotent result from the bug's permanent wedge.
+			waitObserved(t, c, ObservedPaused)
+			resumeRes := c.Resume(context.Background())
+			if resumeRes.Outcome != OutcomeAccepted {
+				t.Fatalf("resume after the race: %v (%v)", resumeRes.Outcome, resumeRes.Err)
+			}
+			rf.waitCount(t, 2)
+			rf.at(1).markReady() // this factory is readySignaling=true throughout
+			waitObserved(t, c, ObservedRunning)
+
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run did not return")
+			}
+		})
+	}
+}

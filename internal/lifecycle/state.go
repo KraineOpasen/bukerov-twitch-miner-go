@@ -353,13 +353,19 @@ func (s *statusState) snapshot() Snapshot {
 }
 
 // capabilitiesLocked derives Capabilities from the current observed/desired
-// via the same table Submit uses, so the two can never disagree. Every
-// capability is false for as long as the slot is occupied (MINOR 7, F4b Q3
-// consolidated corrective) — design v6 §5.2 step 1's "all canX=false"
-// covers the WHOLE accepted-through-terminal span (pausing/stopping/
-// starting-slot-held/restarting too), not just the narrow pre-dispatch
-// Transition==pending window before the worker has even dequeued the
-// command.
+// via the same table Submit uses — the two agree for every REJECT-class
+// cell, and Capabilities reports false whenever the slot is occupied
+// exactly like Submit's own slot-busy guard does (see below), but they can
+// legitimately differ for an IDEMPOTENT cell with a slot-free special case
+// (MAJOR 6, F4b Q3 consolidated corrective's override-resume branch):
+// Submit may occupy the slot and persist there instead of returning
+// idempotent, something this derivation — which only ever consults the
+// bare table, never s.override — has no way to reflect. Every capability
+// is false for as long as the slot IS occupied (MINOR 7) — design v6 §5.2
+// step 1's "all canX=false" covers the WHOLE accepted-through-terminal
+// span (pausing/stopping/starting-slot-held/restarting too), not just the
+// narrow pre-dispatch Transition==pending window before the worker has
+// even dequeued the command.
 func (s *statusState) capabilitiesLocked() Capabilities {
 	if s.pending != nil {
 		return Capabilities{}
@@ -410,6 +416,31 @@ func (s *statusState) pendingAndDesired() (*pendingCommand, DesiredState) {
 	return s.pending, s.desired
 }
 
+// occupySlotLocked is the SOLE place any accept-class outcome — including
+// MAJOR 6's override-resume special case inside cellIdempotent, not just
+// the table's ordinary "accept" cells — actually occupies the pending
+// slot (concurrency re-review, post-F4b Q3 corrective: centralizes the
+// slot-busy guard so a FUTURE occupying cell cannot repeat BLOCKER 1's /
+// this same review's own class of bug by forgetting to duplicate the
+// check). Must be called with mu held. Rejects with errSlotBusy if the
+// slot is already occupied; otherwise cancels any armed retry timer,
+// marks the slot pending, and returns the new pendingCommand.
+func (s *statusState) occupySlotLocked(cmd Command, commandID string, reason Reason, target DesiredState, action workerAction) acceptDecision {
+	if s.pending != nil {
+		return acceptDecision{kind: acceptRejected, err: errSlotBusy(s.pending)}
+	}
+	stop := s.cancelRetryLocked()
+	s.transition = TransitionPending
+	s.pending = &pendingCommand{
+		id:     commandID,
+		cmd:    cmd,
+		reason: reason,
+		target: target,
+		action: action,
+	}
+	return acceptDecision{kind: acceptOccupied, pending: s.pending, stopRetry: stop}
+}
+
 // accept is Submit's atomic accept step (design v6 §5.2 step 1): one
 // critical section that checks the pending slot, looks up the transition
 // table, and — for an "accept"-class outcome — occupies the slot and
@@ -447,16 +478,21 @@ func (s *statusState) accept(cmd Command, commandID string) acceptDecision {
 		// "starting" would be a lie, and the natural ready-completion
 		// path already covers that narrower window on its own).
 		if s.override && cmd == CommandResume && s.observed == ObservedRunning {
-			stop := s.cancelRetryLocked()
-			s.transition = TransitionPending
-			s.pending = &pendingCommand{
-				id:     commandID,
-				cmd:    cmd,
-				reason: ReasonUser,
-				target: DesiredRunning,
-				action: actionPersistOnlyRunning,
-			}
-			return acceptDecision{kind: acceptOccupied, pending: s.pending, stopRetry: stop}
+			// Spec re-review BLOCKER (post-F4b Q3 corrective): this branch
+			// is itself an accept-class outcome (it occupies the slot), so
+			// it MUST go through the same centralized occupySlotLocked
+			// guard every other occupying outcome uses (see that method's
+			// doc comment) — omitting it here reproduced BLOCKER 1's exact
+			// scenario verbatim with ForceRunning:true and Resume in place
+			// of Stop: without this check, a resume racing a
+			// still-in-flight pcA (slot occupied, not yet dispatched to
+			// cmdCh) would have overwritten s.pending, its own cmdCh send
+			// silently dropped behind pcA's still-buffered one, and the
+			// worker would later discard pcA via isCurrentPending while
+			// the resume's own pc never dispatches — Transition stuck at
+			// pending forever, every later Submit 409s, controller
+			// permanently wedged.
+			return s.occupySlotLocked(cmd, commandID, ReasonUser, DesiredRunning, actionPersistOnlyRunning)
 		}
 		id := s.commandID
 		if s.pending != nil {
@@ -483,19 +519,11 @@ func (s *statusState) accept(cmd Command, commandID string) acceptDecision {
 		// Transition — is the actual "second submit -> 409" invariant).
 		// Idempotent same-command cells of transitional rows are unaffected
 		// (cellIdempotent returns above, before ever reaching here).
-		if s.pending != nil {
-			return acceptDecision{kind: acceptRejected, err: errSlotBusy(s.pending)}
-		}
-		stop := s.cancelRetryLocked()
-		s.transition = TransitionPending
-		s.pending = &pendingCommand{
-			id:     commandID,
-			cmd:    cmd,
-			reason: ReasonUser,
-			target: targetFor(cmd),
-			action: actionFor(outcome),
-		}
-		return acceptDecision{kind: acceptOccupied, pending: s.pending, stopRetry: stop}
+		// occupySlotLocked (below) is what actually enforces the guard —
+		// centralized so a future occupying cell cannot repeat this class
+		// of bug by forgetting to duplicate the check (concurrency
+		// re-review, post-F4b Q3 corrective).
+		return s.occupySlotLocked(cmd, commandID, ReasonUser, targetFor(cmd), actionFor(outcome))
 	}
 }
 

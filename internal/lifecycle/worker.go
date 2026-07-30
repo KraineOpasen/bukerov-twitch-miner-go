@@ -418,9 +418,34 @@ func (c *Controller) dispatch(pc *pendingCommand) (error, bool) {
 			// exactly like runCancelStart does for the analogous
 			// slot-free-start-cancellation case, since this generation may
 			// still be awaiting its own readiness.
+			//
+			// MINOR (concurrency re-review, post-F4b Q3 corrective): the
+			// live generation being torn down here IS, by construction,
+			// the retry-driven continuation of a failed lineage (this
+			// action is only ever produced from the "failed"/paused/
+			// stopped persist-only cells — reaching it while
+			// generationLive is true means a retry/reconcile-driven start
+			// raced in and is now live). Capture that fact via
+			// c.recoveryPending — a worker-owned field, race-free — BEFORE
+			// escalating: re-reading s.observed AFTER the race (as the
+			// non-escalated branch below does) would be unreliable here,
+			// since by dispatch time observed has typically already moved
+			// to "starting" (the racing generation's own launch), no
+			// longer "failed". Apply the SAME reset runCancelStart uses
+			// unconditionally for its own, analogous slot-free-cancel
+			// case, mirrored here: a user command that ends this
+			// generation's story — whether via an ordinary teardown or
+			// this escalated one — ends the failed-lineage streak just as
+			// surely as reaching ready would have.
+			wasFailedLineage := c.recoveryPending
 			c.awaitingStart = nil
 			c.readyCh = nil
-			return c.runTeardown(pc)
+			exitErr, shouldExit := c.runTeardown(pc)
+			if wasFailedLineage {
+				c.retryAttempt = 0
+				c.recoveryPending = false
+			}
+			return exitErr, shouldExit
 		}
 		wasFailed := c.state.snapshot().Observed == ObservedFailed
 		c.state.publishTerminal(steadyObservedFor(pc.target), pc.reason, "", true)
@@ -474,6 +499,34 @@ func (c *Controller) dispatch(pc *pendingCommand) (error, bool) {
 				// which already classifies by the slot's own target/reason).
 				c.awaitingStart.pc = pc
 				c.awaitingStart.reason = pc.reason
+				// MINOR (concurrency re-review, post-F4b Q3 corrective):
+				// publish a proper transition for the adopted command —
+				// without this, Transition stays stuck at TransitionPending
+				// (accept()'s own value from occupying the slot) forever,
+				// since startGeneration/beginStartTransition — which would
+				// normally move it to TransitionStart — never runs for an
+				// adoption. This also restores drainUndispatchedCommand's
+				// own invariant: its "Unreachable... nothing else ever
+				// reads cmdCh" comment assumes Transition==pending means a
+				// command is STILL sitting, undispatched, in cmdCh — true
+				// again once Transition correctly reads TransitionStart
+				// here instead of Pending. A priority shutdown/update-exit
+				// racing an adopted, still-awaiting-ready command now
+				// correctly takes the "already dispatched" path (ordinary
+				// teardown via tearDownForExit, then ObservedExiting) —
+				// see TestShutdownDuringAdoptedStartTearsDownNormally —
+				// instead of wrongly trying (and silently failing to,
+				// since cmdCh is empty by adoption time) supersede it as
+				// if it were still undispatched.
+				//
+				// Observed is read fresh rather than hardcoded to
+				// ObservedStarting: a slot-free phantom
+				// awaitingStart.pc==nil is only ever reachable while
+				// observed is "starting" (a slot-free start is never
+				// "restarting" — that always already holds its own
+				// command's pc from launch), but reading it keeps this
+				// honest if that invariant ever changes.
+				c.state.beginTransition(c.state.snapshot().Observed, TransitionStart, c.cfg.Clock.Now())
 				return nil, false
 			}
 			// The live generation already satisfies target=running (it is
@@ -917,6 +970,15 @@ func (c *Controller) classifyUnhealthyCompletion(err error) (error, bool) {
 		// returns the error, main exits 1, and the supervisor
 		// (docker/systemd/etc) restarts it. A control surface being
 		// present keeps the ordinary failed+retry path below, unchanged.
+		//
+		// err can genuinely be nil here (a Runner that returned cleanly
+		// but desired=running expected it to keep going — see
+		// describeFailure's own doc comment); %w on a nil error renders
+		// the unreadable "%!w(<nil>)" in the resulting message (spec
+		// re-review NOTE), so only wrap when there is something to wrap.
+		if err == nil {
+			return errors.New("lifecycle: startup failure with no control surface (OD3): " + describeFailure(err)), true
+		}
 		return fmt.Errorf("lifecycle: startup failure with no control surface (OD3): %w", err), true
 	}
 	c.retryAttempt++

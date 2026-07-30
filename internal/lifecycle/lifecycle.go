@@ -171,10 +171,20 @@ type SubmitResult struct {
 	Err error
 }
 
-// Capabilities mirrors the transition table's "A"/"A-idempotent" cells for
-// the CURRENT observed state: which of the four commands would currently be
-// accepted or are a no-op. It is derived, never stored independently of
-// observed/slot occupancy.
+// Capabilities reports, for the CURRENT observed state, which of the four
+// commands would currently be accepted (MINOR, concurrency re-review,
+// post-F4b Q3 corrective: stating the REAL rule, not the table's raw
+// "A"/"A-idempotent" cells) — a capability is true only when BOTH the
+// table accepts the command AND the slot is free (capabilitiesLocked
+// reports every capability false for as long as the slot is occupied,
+// design v6 §5.2 step 1). A duplicate command can therefore still return
+// OutcomeIdempotent from Submit while its OWN capability here reads false
+// (e.g. MAJOR 6's override-resume special case: a resume against the
+// running row's otherwise-idempotent cell, evaluated while a DIFFERENT
+// command's slot is held, correctly rejects — see
+// TestSlotBusyGuardCoversEveryOccupyingBranch — even though that exact
+// cell is idempotent whenever the slot is actually free). It is derived,
+// never stored independently of observed/slot occupancy.
 type Capabilities struct {
 	CanPause   bool
 	CanResume  bool
