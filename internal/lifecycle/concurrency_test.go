@@ -105,49 +105,103 @@ func TestConcurrentCommandsResolveDeterministically(t *testing.T) {
 	<-done
 }
 
-// (9) Persistence.Save is called, and completes, BEFORE the worker
-// publishes the command's transitional observed state — observed here
-// mode is the SAME test used to also prove ordering isn't accidentally
-// reversed under race detection.
+// (9) Persistence.Save is called, and completes, BEFORE the worker is ever
+// signaled — not just before it publishes the transitional observed state.
+//
+// Two independent barriers make the one assertion that matters airtight
+// rather than a timing guess:
+//   - Save itself is held open (armSaveBarrier) so the caller goroutine is
+//     provably still inside Submit's persist call when we look.
+//   - The worker is ALSO independently pinned before it ever reaches its
+//     first select (armOnce, the same seam dispatch_race_test.go uses to
+//     construct its races) so it cannot race ahead and drain c.cmdCh on its
+//     own — without this, the worker (idle in its select, ready to receive
+//     the instant anything is sent) drains a wrongly-early send before the
+//     test ever gets to look, and the very reordering this test exists to
+//     catch would go unnoticed almost every run.
+//
+// With both held, c.cmdCh MUST still be empty: the send into it (Submit,
+// lifecycle.go) happens strictly after Save returns, and nothing else can
+// have consumed it either.
 func TestPersistHappensBeforeWorkerTransition(t *testing.T) {
 	rf := newRunnerFactory()
 	pers := newFakePersistence(LoadResult{Found: false})
 
-	saveObservedRunning := make(chan bool, 1)
+	saveEntered := make(chan struct{}, 1)
 	pers.onSave = func(d DesiredState, reason, cmdID string) {
 		// At the instant Save is invoked, the worker must not yet have
 		// published the transitional "pausing" state (design v6 §5.2: the
 		// caller persists BEFORE signaling the worker).
-		saveObservedRunning <- true
+		saveEntered <- struct{}{}
 	}
+	releaseSave := pers.armSaveBarrier()
 
 	cfg := Config{Factory: rf.Factory, Persistence: pers, Clock: newFakeClock()}
 	c := New(cfg)
+
+	// Hold the worker at the TOP of its very first loop iteration (same
+	// rendezvous point TestPauseAcceptedRacesSpontaneousDeath uses):
+	// reconcile has already launched generation 1, but the worker has not
+	// yet reached the select that would let it dequeue c.cmdCh.
+	enter, releaseWorker := armOnce(c, 1)
+
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := runInBackground(c, ctx)
+
+	<-enter
 	rf.waitCount(t, 1)
 	rf.at(0).waitStarted(t)
-	waitObserved(t, c, ObservedRunning)
-
-	res := c.Pause(context.Background())
-	if res.Outcome != OutcomeAccepted {
-		t.Fatalf("pause: %v (%v)", res.Outcome, res.Err)
+	if got := c.Snapshot().Observed; got != ObservedRunning {
+		t.Fatalf("observed before pausing the worker = %v, want running", got)
 	}
 
+	resCh := make(chan SubmitResult, 1)
+	go func() { resCh <- c.Pause(context.Background()) }()
+
 	select {
-	case <-saveObservedRunning:
+	case <-saveEntered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Save was never called")
 	}
 
+	// Save is blocked in flight on the barrier, AND the worker is
+	// independently held before its select: with correct ordering (persist,
+	// then signal) the send into cmdCh cannot have happened yet, and even
+	// if it wrongly had, the worker could not yet have drained it — this is
+	// deterministic, not a timing guess.
+	if n := len(c.cmdCh); n != 0 {
+		t.Fatalf("cmdCh has %d pending signal(s) while Save is still in flight; want 0 (worker must not be signaled before persist completes)", n)
+	}
+
+	releaseWorker()
+	releaseSave()
+
+	res := <-resCh
+	if res.Outcome != OutcomeAccepted {
+		t.Fatalf("pause: %v (%v)", res.Outcome, res.Err)
+	}
+
 	waitObserved(t, c, ObservedPaused)
 	cancel()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
 }
 
 // (10) A persistence failure leaves in-memory desired/observed completely
 // unchanged, releases the slot exactly once, and surfaces the error to the
-// caller — no generation action is ever taken.
+// caller — no generation action is ever taken, and no signal ever reaches
+// c.cmdCh (a send guarded behind the same "did Save fail" branch a
+// reordering bug would bypass).
+//
+// The worker is pinned before its first select (armOnce — see
+// TestPersistHappensBeforeWorkerTransition's doc comment for why this is
+// what makes the cmdCh assertion below airtight rather than a race the
+// worker usually wins by draining first): Submit's Save call fails
+// synchronously here, so there is no need for a separate Save barrier too.
 func TestPersistFailureLeavesStateUnchanged(t *testing.T) {
 	rf := newRunnerFactory()
 	pers := newFakePersistence(LoadResult{Found: false})
@@ -156,11 +210,19 @@ func TestPersistFailureLeavesStateUnchanged(t *testing.T) {
 
 	cfg := Config{Factory: rf.Factory, Persistence: pers, Clock: newFakeClock()}
 	c := New(cfg)
+
+	enter, releaseWorker := armOnce(c, 1)
+
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := runInBackground(c, ctx)
+
+	<-enter
 	rf.waitCount(t, 1)
 	rf.at(0).waitStarted(t)
-	waitObserved(t, c, ObservedRunning)
+	if got := c.Snapshot().Observed; got != ObservedRunning {
+		t.Fatalf("observed before pausing the worker = %v, want running", got)
+	}
 
 	before := c.Snapshot()
 
@@ -171,6 +233,11 @@ func TestPersistFailureLeavesStateUnchanged(t *testing.T) {
 	if res.Err == nil || !errors.Is(res.Err, wantErr) {
 		t.Fatalf("pause error = %v, want wrapping %v", res.Err, wantErr)
 	}
+	if n := len(c.cmdCh); n != 0 {
+		t.Fatalf("cmdCh has %d pending signal(s) after a failed persist; want 0 (no signal may leak to the worker on a failed persist)", n)
+	}
+
+	releaseWorker()
 
 	after := c.Snapshot()
 	if after.Desired != before.Desired || after.Observed != before.Observed {
@@ -198,5 +265,9 @@ func TestPersistFailureLeavesStateUnchanged(t *testing.T) {
 	waitObserved(t, c, ObservedPaused)
 
 	cancel()
-	<-done
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
 }

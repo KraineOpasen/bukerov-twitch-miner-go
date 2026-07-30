@@ -333,6 +333,13 @@ type fakePersistence struct {
 	saveErr error
 	saves   []savedCall
 	onSave  func(d DesiredState, reason, cmdID string)
+
+	// saveBarrier, when armed (see armSaveBarrier), makes Save block — after
+	// being recorded and after onSave has run, but before returning — until
+	// the test releases it. Used to hold Save deterministically "in flight"
+	// so a test can assert what has (or, importantly, has NOT) happened yet
+	// while persistence is still pending, without any sleep-based timing.
+	saveBarrier chan struct{}
 }
 
 type savedCall struct {
@@ -358,11 +365,30 @@ func (p *fakePersistence) Save(_ context.Context, d DesiredState, reason, cmdID 
 		p.saves = append(p.saves, savedCall{d, reason, cmdID})
 	}
 	hook := p.onSave
+	barrier := p.saveBarrier
 	p.mu.Unlock()
 	if hook != nil {
 		hook(d, reason, cmdID)
 	}
+	if barrier != nil {
+		<-barrier
+	}
 	return err
+}
+
+// armSaveBarrier makes every subsequent Save call block — after being
+// recorded and after onSave runs — until the returned release func is
+// called. release is idempotent (safe to call once; further calls are a
+// no-op). Lets a test hold Save deterministically "in flight" for a
+// controlled window, e.g. to assert the caller has not yet signaled the
+// worker (design v6 §5.2: persist happens BEFORE the worker is signaled).
+func (p *fakePersistence) armSaveBarrier() (release func()) {
+	ch := make(chan struct{})
+	p.mu.Lock()
+	p.saveBarrier = ch
+	p.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
 }
 
 func (p *fakePersistence) setSaveErr(err error) {
