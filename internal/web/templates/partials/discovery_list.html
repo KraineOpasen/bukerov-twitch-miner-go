@@ -33,9 +33,9 @@
                 <td class="px-4 py-3"><span class="status-pill status-pill-progress">{{ t "drops.discovery.drops_enabled" }}</span></td>
                 <td class="px-4 py-3 text-right">
                     {{if .Watching}}
-                    <span class="status-pill status-pill-progress">{{ t "drops.discovery.watching" }}</span>
+                    <span class="status-pill status-pill-progress"><span aria-hidden="true">▶ </span>{{ t "drops.discovery.watching" }}</span>
                     {{else if .Offline}}
-                    <span class="status-pill status-pill-claimed">{{ t "drops.discovery.offline" }}</span>
+                    <span class="status-pill status-pill-claimed"><span aria-hidden="true">⏹ </span>{{ t "drops.discovery.offline" }}</span>
                     {{else}}
                     <span class="text-xs text-neutral-400">{{ t "drops.discovery.available" }}</span>
                     {{end}}

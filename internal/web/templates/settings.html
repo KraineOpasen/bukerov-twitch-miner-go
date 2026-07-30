@@ -264,6 +264,37 @@
         </div>
     </details>
 
+    <details id="prediction-risk" class="details-panel">
+        <summary class="text-lg">{{ t "set.predrisk.title" }}</summary>
+        <div class="details-content space-y-0">
+            <p class="text-neutral-400 text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">{{ t "set.predrisk.max_stake_label" }}</div>
+                    <div class="setting-description">{{ t "set.predrisk.max_stake_desc" }}</div>
+                </div>
+                <input type="number" class="input-field w-28" id="predictionRiskMaxStakePercent" min="0" max="100">
+            </div>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">{{ t "set.predrisk.reserve_label" }}</div>
+                    <div class="setting-description">{{ t "set.predrisk.reserve_desc" }}</div>
+                </div>
+                <input type="number" class="input-field w-28" id="predictionRiskReservePoints" min="0">
+            </div>
+
+            <div class="setting-row">
+                <div>
+                    <div class="setting-label">{{ t "set.predrisk.healthgate_label" }}</div>
+                    <div class="setting-description">{{ t "set.predrisk.healthgate_desc" }}</div>
+                </div>
+                <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-purple-600">
+            </div>
+        </div>
+    </details>
+
     <details id="logger" class="details-panel">
         <summary class="text-lg">{{ t "set.logger.title" }}</summary>
         <div class="details-content space-y-0">
@@ -388,7 +419,7 @@
     </div>
 </form>
 
-<div id="toast-container"></div>
+<div id="toast-container" role="status" aria-live="polite"></div>
 {{end}}
 
 {{define "scripts"}}
@@ -631,6 +662,15 @@
         document.getElementById('discoveryMode').value = settings.discoveryMode || 'all';
         document.getElementById('discoveryPreferTracked').checked = !!settings.discoveryPreferTracked;
         document.getElementById('discoveryPreferSubscribed').checked = !!settings.discoveryPreferSubscribed;
+
+        // Guard: a settings payload without predictionRisk (an older snapshot,
+        // or a test fixture) leaves the fields at their current values rather
+        // than clobbering them with undefined.
+        if (settings.predictionRisk) {
+            document.getElementById('predictionRiskMaxStakePercent').value = settings.predictionRisk.maxStakePercent;
+            document.getElementById('predictionRiskReservePoints').value = settings.predictionRisk.reservePoints;
+            document.getElementById('predictionRiskHealthGate').checked = !!settings.predictionRisk.healthGateEnabled;
+        }
     }
 
     function populateDirectoryGameList(games) {
@@ -1118,7 +1158,12 @@
             directoryGames: gatherDirectoryGames(),
             discoveryMode: document.getElementById('discoveryMode').value,
             discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked,
-            discoveryPreferSubscribed: document.getElementById('discoveryPreferSubscribed').checked
+            discoveryPreferSubscribed: document.getElementById('discoveryPreferSubscribed').checked,
+            predictionRisk: {
+                maxStakePercent: parseInt(document.getElementById('predictionRiskMaxStakePercent').value) || 0,
+                reservePoints: parseInt(document.getElementById('predictionRiskReservePoints').value) || 0,
+                healthGateEnabled: document.getElementById('predictionRiskHealthGate').checked
+            }
         };
     }
 

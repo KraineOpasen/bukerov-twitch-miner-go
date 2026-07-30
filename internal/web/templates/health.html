@@ -8,3 +8,42 @@
     <div class="animate-pulse text-neutral-400">{{ t "health.loading" }}</div>
 </section>
 {{end}}
+
+{{define "scripts"}}
+<script>
+    // __healthGuard defers the timed poll (#health-center's own "every 15s"
+    // hx-trigger) whenever the operator is mid-edit inside the canary/watchdog
+    // forms, so a background refresh can never yank focus or discard an
+    // unsaved keystroke. It never blocks the forms' own POSTs or the "Run
+    // now" button — those requests originate from a different element
+    // (the form, or the button itself), not #health-center.
+    (function () {
+        if (window.__healthGuard) return;
+        window.__healthGuard = true;
+
+        document.addEventListener('htmx:beforeRequest', function (evt) {
+            const cfg = evt.detail && evt.detail.requestConfig;
+            const elt = cfg && cfg.elt;
+            const center = document.getElementById('health-center');
+            if (!elt || !center || elt !== center) return; // only the timed poll targets #health-center itself
+
+            // BUTTON is deliberately excluded: a button keeps focus after a
+            // click (e.g. "Run now"), so including it here would defer the
+            // 15s poll indefinitely afterward with no cue that it's stuck.
+            const active = document.activeElement;
+            const activeInside = !!(active && center.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+
+            let dirty = false;
+            center.querySelectorAll('input, select, textarea').forEach(function (el) {
+                if (el.type === 'checkbox' || el.type === 'radio') {
+                    if (el.checked !== el.defaultChecked) dirty = true;
+                } else if ('defaultValue' in el && el.value !== el.defaultValue) {
+                    dirty = true;
+                }
+            });
+
+            if (activeInside || dirty) evt.preventDefault();
+        });
+    })();
+</script>
+{{end}}

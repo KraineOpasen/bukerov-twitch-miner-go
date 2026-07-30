@@ -75,7 +75,7 @@ func TestThemeBootstrapPlacement(t *testing.T) {
 	bootstrap := base[firstScript : firstScript+end]
 
 	for _, want := range []string{
-		"miner-theme", // localStorage key
+		"miner-theme",                   // localStorage key
 		"'dark'", "'light'", "'system'", // the three-value whitelist
 		"data-theme", "data-theme-mode",
 		"localStorage.getItem",
@@ -428,15 +428,18 @@ func TestOnAccentTokensFixSolidAccentButtons(t *testing.T) {
 		t.Error("component rules must not reference a Layer-A primitive directly — use the semantic on-accent/on-success token")
 	}
 
-	stats := readEmbeddedTemplate(t, "templates/statistics.html")
-	if strings.Contains(stats, "color:#fff") || strings.Contains(stats, "color: #fff") {
-		t.Error("statistics.html must not hardcode color:#fff on .roi-period-btn.is-active — use var(--text-on-accent)")
+	// .roi-period-btn moved from statistics.html's inline <style> into
+	// input.css (F3 dedup — the page-local style block is now defined
+	// alongside every other page's styles); the same AA-safe-token and
+	// no-hardcoded-tint invariants apply at its new location.
+	if strings.Contains(css, "color:#fff") || strings.Contains(css, "color: #fff") {
+		t.Error("input.css must not hardcode color:#fff on .roi-period-btn.is-active — use var(--text-on-accent)")
 	}
-	if !strings.Contains(stats, "color:var(--text-on-accent)") {
-		t.Error("statistics.html .roi-period-btn.is-active must use var(--text-on-accent)")
+	if !strings.Contains(css, ".roi-period-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }") {
+		t.Error("input.css .roi-period-btn.is-active must use var(--text-on-accent)")
 	}
-	if strings.Contains(stats, "#8b7fd11f") {
-		t.Error("statistics.html .roi-period-btn:hover must not hardcode the #8b7fd11f tint — use color-mix over var(--interactive)")
+	if strings.Contains(css, "#8b7fd11f") {
+		t.Error("input.css .roi-period-btn:hover must not hardcode the #8b7fd11f tint — use color-mix over var(--interactive)")
 	}
 
 	overviewLive := readEmbeddedTemplate(t, "templates/partials/overview_live.html")

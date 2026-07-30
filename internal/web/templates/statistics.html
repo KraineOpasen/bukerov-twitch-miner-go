@@ -1,56 +1,9 @@
 {{define "title"}}{{ t "stat.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<style>
-/* Scoped ROI styles — reuse the existing design tokens. Kept inline because the
-   Tailwind build is not re-run for template-only changes. */
-.roi-period-btn{color:var(--color-neutral-300);background:var(--color-neutral-800);border-right:1px solid var(--color-neutral-700);cursor:pointer;padding:.5rem .95rem;font-size:.85rem;font-weight:500;transition:background .15s,color .15s}
-.roi-period-btn:last-child{border-right:0}
-.roi-period-btn:hover{color:var(--color-neutral-100);background:color-mix(in srgb, var(--interactive) 12%, transparent)}
-.roi-period-btn.is-active{background:var(--color-purple-600);color:var(--text-on-accent)}
-.roi-period-btn:focus-visible{outline:2px solid var(--color-online);outline-offset:-2px}
-.stat-tile{display:flex;flex-direction:column;gap:.25rem;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-700);background:var(--color-neutral-800);padding:.85rem 1rem}
-.stat-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:var(--color-neutral-400)}
-.stat-value{font-size:1.35rem;font-weight:600;color:var(--color-neutral-100)}
-.stat-value.pos{color:var(--color-success)}
-.stat-value.neg{color:var(--color-danger)}
-.roi-table{width:100%;font-size:.85rem;border-collapse:collapse}
-.roi-table th,.roi-table td{text-align:right;padding:.35rem .5rem;border-bottom:1px solid var(--color-neutral-700)}
-.roi-table th:first-child,.roi-table td:first-child{text-align:left}
-.roi-table th{color:var(--color-neutral-400);font-weight:500;font-size:.72rem;text-transform:uppercase;letter-spacing:.03em}
-.roi-table td.pos{color:var(--color-success)}
-.roi-table td.neg{color:var(--color-danger)}
-.stat-value.pos{color:var(--ui-roi-pos)}
-.stat-value.neg{color:var(--ui-roi-neg)}
-.roi-table td.pos{color:var(--ui-roi-pos)}
-.roi-table td.neg{color:var(--ui-roi-neg)}
-/* KPI tiles get a soft top accent so the summary row reads as widgets, not
-   a gray strip; hue matches the shared --ui-* palette from base.html. */
-.stat-tile{position:relative;overflow:hidden}
-.stat-tile::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:linear-gradient(90deg,var(--ui-watching),var(--ui-online),transparent)}
-.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));gap:1rem;margin-bottom:1.25rem}
-.breakdown-grid{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:1.5rem;align-items:center;margin-top:1.5rem}
-@media (max-width:760px){.breakdown-grid{grid-template-columns:1fr}}
-.breakdown-legend{display:flex;flex-direction:column;gap:.45rem;font-size:.85rem}
-.breakdown-row{display:flex;align-items:center;gap:.55rem}
-.breakdown-dot{width:.65rem;height:.65rem;border-radius:999px;flex:none}
-.breakdown-name{color:var(--color-neutral-300);min-width:6.5rem}
-.breakdown-val{margin-left:auto;color:var(--color-neutral-100)}
-.breakdown-count{color:var(--color-neutral-500);font-size:.75rem}
-.bet-summary{margin-top:1.25rem;border-top:1px solid var(--color-neutral-700);padding-top:1rem}
-.bet-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(8rem,1fr));gap:.75rem}
-.bet-stat{display:flex;flex-direction:column;gap:.15rem;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-700);background:var(--color-neutral-800);padding:.6rem .75rem}
-.bet-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;color:var(--color-neutral-400)}
-.bet-val{font-size:1.1rem;font-weight:600;color:var(--color-neutral-100)}
-.bet-val.pos{color:var(--ui-roi-pos)}
-.bet-val.neg{color:var(--ui-roi-neg)}
-.roi-donut-wrap{display:flex;align-items:center;justify-content:center}
-.roi-outcomes-grid{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:1.5rem;align-items:center;margin-bottom:1.5rem}
-@media (max-width:760px){.roi-outcomes-grid{grid-template-columns:1fr}}
-</style>
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "stat.title" }}</h1>
-    <div id="stat-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
+    <div id="stat-updated" class="text-xs text-neutral-400 num"></div>
 </div>
 <p class="text-neutral-400 text-sm mb-6">{{ t "stat.subtitle" }}</p>
 
@@ -136,7 +89,7 @@
 <!-- ===================== Prediction ROI ===================== -->
 <div class="flex items-center justify-between flex-wrap gap-3 mt-10 mb-2">
     <h2 class="text-2xl font-bold">{{ t "stat.roi.title" }}</h2>
-    <div id="roi-updated" class="text-xs text-neutral-400 num" aria-live="polite"></div>
+    <div id="roi-updated" class="text-xs text-neutral-400 num"></div>
 </div>
 <p class="text-neutral-400 text-sm mb-6">{{ t "stat.roi.subtitle" }}</p>
 
@@ -737,7 +690,7 @@
             table.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
             return;
         }
-        let html = '<thead><tr><th>' + t('js.stat.col.key') + '</th><th>N</th><th>' + t('js.stat.col.profit') + '</th><th>ROI</th></tr></thead><tbody>';
+        let html = '<thead><tr><th scope="col">' + t('js.stat.col.key') + '</th><th scope="col">N</th><th scope="col">' + t('js.stat.col.profit') + '</th><th scope="col">ROI</th></tr></thead><tbody>';
         for (const r of rows) {
             html += '<tr>' +
                 '<td>' + escapeHTML(r.key) + '</td>' +

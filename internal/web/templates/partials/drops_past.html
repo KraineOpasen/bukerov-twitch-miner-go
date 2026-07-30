@@ -25,7 +25,7 @@
                 </div>
                 <div class="flex items-center gap-1.5 flex-shrink-0">
                     {{if gt $g.Count 1}}<span class="status-pill status-pill-progress" title="{{ t "drops.past.ran_title" }}">{{ t "drops.past.ran_prefix" }} {{$g.Count}}×</span>{{end}}
-                    <span class="status-pill status-pill-claimed" title="{{ t "drops.past.claimed_title" }}">{{$g.ClaimedCount}}/{{$g.Count}} {{ t "drops.past.claimed_suffix" }}</span>
+                    <span class="status-pill status-pill-claimed" title="{{ t "drops.past.claimed_title" }}"><span aria-hidden="true">✓ </span>{{$g.ClaimedCount}}/{{$g.Count}} {{ t "drops.past.claimed_suffix" }}</span>
                 </div>
             </div>
 
@@ -49,9 +49,9 @@
                                 <td class="py-1 pr-3 num text-neutral-300">{{if $inst.EndLabel}}{{$inst.EndLabel}}{{else}}—{{end}}</td>
                                 <td class="py-1">
                                     {{if $inst.Claimed}}
-                                    <span style="color: var(--color-success)">✓ {{$inst.StatusLabel}}</span>
+                                    <span style="color: var(--color-success)"><span aria-hidden="true">✓ </span>{{$inst.StatusLabel}}</span>
                                     {{else}}
-                                    <span class="text-neutral-500">{{$inst.StatusLabel}}</span>
+                                    <span class="text-neutral-500"><span aria-hidden="true">— </span>{{$inst.StatusLabel}}</span>
                                     {{end}}
                                 </td>
                             </tr>
