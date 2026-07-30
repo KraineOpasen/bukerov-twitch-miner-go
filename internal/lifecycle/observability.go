@@ -146,3 +146,13 @@ func recordSlotReleased(released *pendingCommand, reason string) {
 	}
 	slog.Info("lifecycle: slot_released", "command", released.cmd, "command_id", released.id, "reason", reason)
 }
+
+// recordUpdaterJoinTimeout logs design v6 §7/§11's "updater_join_timeout":
+// the process-level updater loop (Config.UpdaterRun) did not return within
+// updaterJoinTimeout of its context being cancelled. Run continues its own
+// shutdown regardless — this never blocks the process exit, it only records
+// that the bound was hit so operators can investigate a stuck updater cycle
+// (e.g. a slow download that outlived process shutdown).
+func recordUpdaterJoinTimeout(timeout time.Duration) {
+	slog.Warn("lifecycle: updater_join_timeout", "timeout", timeout)
+}

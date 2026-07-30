@@ -284,53 +284,17 @@ func TestRunNormalCancellationUsesS1DrainOnce(t *testing.T) {
 	requireExternalDBAlive(t, db)
 }
 
-// TestRunAutoUpdateShutdownStaysSuccessful (S2, requirement 9): the applied-
-// auto-update exit path must still return nil from Run so the process exits
-// 0 and the supervisor restarts onto the new binary, and must run the S1
-// drain exactly once. The test runs the REAL startAutoUpdater (registering
-// the real updater loop in loopWG — deterministic offline: a "dev" build's
-// updater is dormant by design) and then invokes requestUpdateShutdown, the
-// exact production method wired as updater.Options.OnUpdate; the updater's
-// own package tests cover OnUpdate firing on an applied update.
-func TestRunAutoUpdateShutdownStaysSuccessful(t *testing.T) {
-	m, _ := newStartupCleanupMiner(t)
-	stubAuthenticate(m)
-	stubLoadStreamers(m)
-	m.subscribeTopicsFn = func() error { return nil }
-	m.ConfigureAutoUpdate(true, time.Hour)
-
-	started := make(chan struct{})
-	m.startMiningFn = func(ctx context.Context) {
-		m.startAutoUpdater(ctx)
-		close(started)
-	}
-
-	var cleanups atomic.Int32
-	m.stopObserver = func() { cleanups.Add(1) }
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- m.Run(context.Background()) }()
-
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("startup did not complete")
-	}
-	// The production OnUpdate callback, invoked after a binary swap.
-	m.requestUpdateShutdown()
-
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("Run after an auto-update shutdown request = %v, want nil (exit 0 semantics)", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run did not return after the auto-update shutdown request")
-	}
-	if got := cleanups.Load(); got != 1 {
-		t.Fatalf("S1 drain ran %d times on the auto-update exit path, want exactly 1", got)
-	}
-}
+// NOTE: the former TestRunAutoUpdateShutdownStaysSuccessful (S2, requirement
+// 9) lived here, pinning that an applied auto-update's shutdown request
+// still returns nil from Run (exit 0 semantics) and runs the S1 drain
+// exactly once. Design v6 §7 moved the auto-updater out of any
+// generation-owned goroutine and onto the process-level lifecycle
+// controller, so that invariant no longer has a Miner-level call path to
+// exercise (startAutoUpdater/requestUpdateShutdown were deleted). The
+// equivalent invariant is now
+// TestUpdaterLoopUpdateAppliedTeardownAndJoinBeforeRunReturns in
+// internal/lifecycle/updater_loop_test.go, which drives the same
+// UpdateApplied-triggered exit path against Controller.Run directly.
 
 // TestRunEarlyExitLeavesExternalWebAndAnalyticsAlone (S2, ownership): with
 // App-owned (injected) web server and analytics service — the production

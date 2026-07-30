@@ -30,6 +30,17 @@ var RetryBackoffSchedule = []time.Duration{
 // wall clock, so no test needs a real sleep to exercise it.
 var teardownSlowThreshold = 5 * time.Second
 
+// updaterJoinTimeout bounds how long Run waits, on every exit path, for the
+// process-level updater loop (Config.UpdaterRun) to actually return after
+// its derived context is cancelled (design v6 §7). This is a real-time
+// safety net around a goroutine the worker does not otherwise control (it
+// is not itself a generation), mirroring internal/miner's loopJoinTimeout
+// precedent — measured against the wall clock (time.After), not the
+// injectable Clock seam, since it exists purely to guarantee Run never
+// hangs, not to drive any deterministic state-machine behavior. Package
+// variable so tests can shrink it to exercise the timeout path fast.
+var updaterJoinTimeout = 3 * time.Second
+
 // retryBackoff returns the jittered delay before retry number attempt
 // (1-based): the schedule's entry for that attempt, capped at its last
 // value, with ±20% jitter so many deployments retrying at once don't hit
@@ -58,6 +69,43 @@ func retryBackoff(attempt int) time.Duration {
 // classifies the completion of a generation (package doc).
 func (c *Controller) Run(ctx context.Context) error {
 	c.runCtx = ctx
+
+	// Process-level updater loop ownership (design v6 §7): started exactly
+	// once here, as its own goroutine, on a context DERIVED from ctx (never
+	// ctx itself) — because on the update-exit path (handleUpdateApplied)
+	// Run returns nil while the PARENT ctx is still very much alive (nothing
+	// about an update-exit cancels the process context; that only happens
+	// later, when App/main reacts to Run's return by shutting down), so the
+	// updater loop must be independently cancelled right here, not left
+	// running past Run's own return.
+	//
+	// The defer below runs on EVERY exit path out of this function — process
+	// shutdown, update-exit, and the dirty-teardown-at-desired-running exit
+	// — because Go defers fire on any return, not just one call site; this is
+	// what makes "joined before Controller.Run returns" a property of every
+	// exit, not just the ones a maintainer remembered to add the join to.
+	// That ordering is exactly what design v6 §7 needs to guarantee "updater
+	// joined before the App-owned DB close": App.Shutdown only closes the
+	// shared database handle after App.Run — which just wraps this Run call
+	// — returns, so by construction the updater has already stopped touching
+	// anything by the time that close happens.
+	if c.cfg.UpdaterRun != nil {
+		uctx, ucancel := context.WithCancel(ctx)
+		updaterDone := make(chan struct{})
+		go func() {
+			defer close(updaterDone)
+			c.cfg.UpdaterRun(uctx)
+		}()
+		defer func() {
+			ucancel()
+			select {
+			case <-updaterDone:
+			case <-time.After(updaterJoinTimeout):
+				recordUpdaterJoinTimeout(updaterJoinTimeout)
+			}
+		}()
+	}
+
 	c.reconcileAndMaybeStart(ctx)
 
 	for {

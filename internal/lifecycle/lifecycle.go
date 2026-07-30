@@ -326,6 +326,16 @@ type Config struct {
 
 	// Clock is the time/timer seam. Defaults to the real wall clock.
 	Clock Clock
+
+	// UpdaterRun, if set, is the process-level updater loop (design v6 §7:
+	// updater ownership moves OUT of any per-generation runtime and onto the
+	// process/controller). Controller.Run starts it exactly once, as its own
+	// goroutine, on a context DERIVED from the ctx passed to Run — see Run's
+	// doc comment for why a derived (not shared) context is required. nil (the
+	// default) means this controller does not own an updater loop at all
+	// (every existing test, and any caller that manages the updater
+	// independently).
+	UpdaterRun func(ctx context.Context)
 }
 
 // Controller is the durable lifecycle core. Construct with New, drive with
@@ -539,4 +549,17 @@ func (c *Controller) Submit(ctx context.Context, cmd Command) SubmitResult {
 // "OnUpdate идемпотентен").
 func (c *Controller) UpdateApplied() {
 	c.updateOnce.Do(func() { close(c.updateCh) })
+}
+
+// UpdaterGate implements design v6 §7's updater-interlock matrix: the
+// effective permission to actually APPLY an available update is desired !=
+// stopped (both running and paused allow an apply; stopped means
+// check-and-notify only, never replacing the binary while the operator has
+// asked for the process to be stopped). Intended to be wired as an
+// updater.Options.Gate. Reads the current desired state under statusMu via
+// the existing currentDesired accessor — no new locks — so it is safe to
+// call from any goroutine, in particular the updater loop's own goroutine,
+// concurrently with the worker.
+func (c *Controller) UpdaterGate() bool {
+	return c.state.currentDesired() != DesiredStopped
 }

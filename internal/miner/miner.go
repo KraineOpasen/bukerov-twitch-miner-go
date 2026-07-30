@@ -35,9 +35,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
@@ -1194,14 +1192,15 @@ func (m *Miner) startMining(ctx context.Context) {
 	if m.config.DailySummary.Enabled && m.analyticsSvc != nil {
 		m.startLoop(ctx, m.dailySummaryLoop)
 	}
-	m.startAutoUpdater(ctx)
 }
 
 // startLoop spawns one of startMining's background loops registered in
 // loopWG, so stop() can join it (bounded) before the shared database handle
 // is closed. Must only be called on the startMining call path (startMining
-// itself and startAutoUpdater, which startMining invokes on the same
-// goroutine) — see loopWG's ordering contract.
+// itself, on its own goroutine) — see loopWG's ordering contract. The
+// auto-updater is no longer one of these loops: it moved to the process-level
+// lifecycle controller (design v6 §7, internal/lifecycle), not a
+// generation-owned goroutine.
 func (m *Miner) startLoop(ctx context.Context, fn func(context.Context)) {
 	m.loopWG.Add(1)
 	go func() {
@@ -1239,68 +1238,6 @@ func (m *Miner) joinLoops() error {
 		slog.Warn("Miner background loops did not finish within the stop timeout; proceeding with shutdown",
 			"timeout", loopJoinTimeout)
 		return fmt.Errorf("%w after %s", errLoopJoinTimeout, loopJoinTimeout)
-	}
-}
-
-// startAutoUpdater launches the background release-update watcher when it has
-// been configured via ConfigureAutoUpdate. It runs non-blocking: a failed
-// check or a failed binary swap is logged and the miner keeps running.
-func (m *Miner) startAutoUpdater(ctx context.Context) {
-	if m.autoUpdate == nil {
-		return
-	}
-
-	upd := updater.New(updater.Options{
-		Repo:           version.Repo,
-		CurrentVersion: version.Version,
-		Enabled:        m.autoUpdate.enabled,
-		CheckInterval:  m.autoUpdate.interval,
-		Notify:         m.notifyUpdateAvailable,
-		NotifyFailure:  m.notifyUpdateFailed,
-		OnUpdate:       m.requestUpdateShutdown,
-	})
-
-	// Tracked like the other startMining loops (S1): the updater's notify
-	// callbacks read the notifications config from SQLite on this goroutine,
-	// so it must be joined before the handle closes. startAutoUpdater runs on
-	// startMining's goroutine, preserving loopWG's program-order argument.
-	m.startLoop(ctx, upd.Run)
-}
-
-// requestUpdateShutdown is the updater's OnUpdate callback (see
-// startAutoUpdater): after an applied binary update it cancels the run
-// context so every component shuts down cleanly and Run returns nil — the
-// process exits 0 and the container/service supervisor restarts onto the
-// freshly written binary. A method (not an inline closure) so the S2
-// auto-update exit test exercises the exact production callback; the
-// updater's own package tests cover OnUpdate being invoked on an applied
-// update.
-func (m *Miner) requestUpdateShutdown() {
-	if m.shutdownFn != nil {
-		m.shutdownFn()
-	}
-}
-
-// notifyUpdateAvailable logs and, when Discord is enabled, dispatches an
-// update-available notification. Reads the write-once notifications manager
-// via the shared accessor so it works even if Discord was toggled on after
-// startup.
-func (m *Miner) notifyUpdateAvailable(current, latest, releaseURL string) {
-	events.Record(events.TypeUpdateAvailable, "", fmt.Sprintf("%s -> %s", current, latest))
-
-	if notifMgr := m.notificationManager(); notifMgr != nil {
-		notifMgr.NotifyUpdateAvailable(current, latest, releaseURL)
-	}
-}
-
-// notifyUpdateFailed logs and, when Discord is enabled, dispatches an
-// update-failed notification (fail-closed checksum refusal, download error,
-// or a failed binary swap). Mirrors notifyUpdateAvailable.
-func (m *Miner) notifyUpdateFailed(current, latest, reason string) {
-	events.Record(events.TypeUpdateFailed, "", fmt.Sprintf("%s -> %s: %s", current, latest, reason))
-
-	if notifMgr := m.notificationManager(); notifMgr != nil {
-		notifMgr.NotifyUpdateFailed(current, latest, reason)
 	}
 }
 
