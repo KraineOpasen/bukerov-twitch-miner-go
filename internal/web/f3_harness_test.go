@@ -215,7 +215,7 @@ func f3WriteLogFixture(t *testing.T, dir, username string, n int) {
 	var b strings.Builder
 	for i := 0; i < n; i++ {
 		b.WriteString(lines[i%len(lines)])
-		b.WriteString(fmt.Sprintf(" seq=%d\n", i))
+		fmt.Fprintf(&b, " seq=%d\n", i)
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		t.Fatal(err)
