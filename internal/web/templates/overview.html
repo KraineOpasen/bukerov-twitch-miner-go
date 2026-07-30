@@ -1,9 +1,54 @@
 {{define "title"}}Overview - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<div id="overview-live" hx-get="/api/overview" hx-trigger="every 30s, refresh" hx-swap="innerHTML">
+{{/* W19: the static page title lives here, ABOVE the toolbar — order is
+     title -> toolbar -> live region. It moved out of the partial's <header>
+     (which keeps every DYNAMIC chip — bot status, net state, health — so
+     those keep updating on every 30s swap; only the static heading text
+     moved, nothing that needs to stay live). */}}
+<h1 class="text-2xl font-bold text-neutral-100 mb-3">{{ t "nav.overview" }}</h1>
+
+{{/* F2.1/F2.2/F2.5 toolbar — deliberately OUTSIDE #overview-live so the 30s
+     htmx innerHTML swap never touches it: the filter input never loses focus
+     or its typed value, and the sort selection survives every refresh. The
+     __ovDelta script below owns all of it. */}}
+<div class="ov-toolbar" data-ov-toolbar role="group" aria-label="{{ t "ov.toolbar.label" }}">
+    <div class="ov-toolbar-group">
+        <label for="ov-filter-input" class="ov-toolbar-label">{{ t "ov.filter.label" }}</label>
+        <div class="ov-filter-wrap">
+            <input type="search" id="ov-filter-input" class="ov-filter-input" placeholder="{{ t "ov.filter.placeholder" }}" autocomplete="off" spellcheck="false">
+            <button type="button" id="ov-filter-clear" class="ov-filter-clear" aria-label="{{ t "ov.filter.clear" }}" hidden>&times;</button>
+        </div>
+    </div>
+    <div class="ov-toolbar-group">
+        <label for="ov-sort-select" class="ov-toolbar-label">{{ t "ov.sort.label" }}</label>
+        <select id="ov-sort-select" class="ov-sort-select">
+            <option value="default">{{ t "ov.sort.default" }}</option>
+            <option value="points">{{ t "ov.sort.points" }}</option>
+            <option value="today">{{ t "ov.sort.today" }}</option>
+            <option value="name">{{ t "ov.sort.name" }}</option>
+        </select>
+    </div>
+    <span id="ov-filter-count" class="ov-filter-count" aria-live="polite"></span>
+    {{/* F2.5 stale badge — text + icon (never color alone), role="status".
+         The __ovDelta clock re-evaluates every second (monotonic via
+         performance.now(), anchored to #ov-meta's data-generated inside the
+         swapped partial), but only WRITES to this badge — and only re-fires
+         the role="status" announcement — when the fresh/delayed/stale/lost
+         state actually changes, never on every tick. */}}
+    <span id="ov-stale-badge" class="ov-stale-badge ov-fresh" role="status">
+        <svg class="ov-stale-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span id="ov-stale-text">{{ t "js.ov.fresh_fresh" }}</span>
+    </span>
+</div>
+
+<div id="overview-live" hx-get="/api/overview" hx-trigger="every {{.PollSeconds}}s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
 </div>
+
+{{/* F2.8: hidden, inert placeholder reserved for a future updater widget.
+     Zero JS references, zero fetches — purely a layout reservation. */}}
+<div id="updater-widget-slot" hidden aria-hidden="true" data-updater-slot></div>
 
 <dialog id="events-drawer" class="modal-dialog">
     <div id="events-drawer-body" class="p-0"></div>
@@ -455,6 +500,296 @@
             if (document.hidden) { stop(); } else { start(); poll(); }   // immediate refresh on return
         });
         start();
+    })();
+</script>
+
+<script>
+    // =====================================================================
+    // F2 Overview delta: client-side name filter (F2.1), client-side sort
+    // (F2.2), and the freshness/stale clock (F2.5). Single instance guarded
+    // by window.__ovDelta (I9/I10): one interval, one htmx:afterSwap
+    // listener. Filter/sort controls live OUTSIDE #overview-live (in the
+    // toolbar above) so the 30s innerHTML swap never touches them; only the
+    // card grid inside #overview-live is re-applied to after every swap.
+    // localStorage access is always try/catch so the page still works with
+    // storage disabled (private mode) — see design.md's failure matrix.
+    // =====================================================================
+    (function () {
+        if (window.__ovDelta) return;               // single-instance guard
+        window.__ovDelta = true;
+
+        var FILTER_KEY = 'miner-ov-filter';
+        var SORT_KEY = 'miner-ov-sort';
+        var SORT_VALUES = ['default', 'points', 'today', 'name'];
+        var POLL_MS = {{.PollSeconds}} * 1000;
+        var MAX_STALE_BASELINE_AGE_MS = 24 * 60 * 60 * 1000; // guard against a nonsense wall-clock read
+
+        function storageGet(key) {
+            try { return localStorage.getItem(key); } catch (e) { return null; }
+        }
+        function storageSet(key, val) {
+            try { localStorage.setItem(key, val); } catch (e) { /* private mode etc. — controls still work */ }
+        }
+
+        var toolbar = document.querySelector('[data-ov-toolbar]');
+        var liveRoot = document.getElementById('overview-live');
+        var filterInput = document.getElementById('ov-filter-input');
+        var filterClear = document.getElementById('ov-filter-clear');
+        var sortSelect = document.getElementById('ov-sort-select');
+        var countEl = document.getElementById('ov-filter-count');
+        var staleBadge = document.getElementById('ov-stale-badge');
+        var staleText = document.getElementById('ov-stale-text');
+
+        // Invalid/unknown stored sort value silently falls back to 'default'
+        // rather than erroring — an F2.2 requirement.
+        var storedSort = storageGet(SORT_KEY);
+        var sortValue = SORT_VALUES.indexOf(storedSort) !== -1 ? storedSort : 'default';
+        var filterValue = storageGet(FILTER_KEY) || '';
+
+        if (sortSelect) sortSelect.value = sortValue;
+        if (filterInput) filterInput.value = filterValue;
+        if (filterClear) filterClear.hidden = !filterValue;
+
+        // ---- F2.2 sort ----------------------------------------------------
+        // 'default' restores server order via data-ov-idx, stamped fresh
+        // right after every swap (before any sort runs) so it always reflects
+        // the current server-rendered order, never a stale one.
+        function stampIndices() {
+            if (!liveRoot) return;
+            var grids = liveRoot.querySelectorAll('.card-grid');
+            for (var i = 0; i < grids.length; i++) {
+                var cards = grids[i].querySelectorAll('[data-ov-name]');
+                for (var j = 0; j < cards.length; j++) cards[j].setAttribute('data-ov-idx', j);
+            }
+        }
+
+        // Normalize (toLocaleLowerCase) before comparing — a locale-aware,
+        // case-insensitive order, matching the "normalized name" the design
+        // specifies (and the same normalization applyFilter() already uses).
+        function nameCmp(a, b) {
+            var an = (a.getAttribute('data-ov-name') || '').toLocaleLowerCase();
+            var bn = (b.getAttribute('data-ov-name') || '').toLocaleLowerCase();
+            return an.localeCompare(bn);
+        }
+
+        function numCmp(attr) {
+            return function (a, b) {
+                var d = (Number(b.getAttribute(attr)) || 0) - (Number(a.getAttribute(attr)) || 0);
+                return d !== 0 ? d : nameCmp(a, b);
+            };
+        }
+
+        // Sorting is applied WITHIN each group's .card-grid independently —
+        // live cards never mix with offline cards, etc. (F2.2 requirement).
+        // The computed order is compared against the CURRENT DOM order first
+        // and the grid is only touched (appendChild reorder) when it actually
+        // differs — every swap (including the common "already in 'default'
+        // order" case) would otherwise force a needless reflow/reorder.
+        function applySort() {
+            if (!liveRoot) return;
+            var grids = liveRoot.querySelectorAll('.card-grid');
+            var cmp = sortValue === 'points' ? numCmp('data-ov-points')
+                : sortValue === 'today' ? numCmp('data-ov-today')
+                : sortValue === 'name' ? nameCmp
+                : function (a, b) { return (Number(a.getAttribute('data-ov-idx')) || 0) - (Number(b.getAttribute('data-ov-idx')) || 0); };
+            for (var i = 0; i < grids.length; i++) {
+                var grid = grids[i];
+                var current = Array.prototype.slice.call(grid.querySelectorAll('[data-ov-name]'));
+                if (current.length < 2) continue;
+                var sorted = current.slice().sort(cmp);
+                var changed = false;
+                for (var j = 0; j < sorted.length; j++) {
+                    if (sorted[j] !== current[j]) { changed = true; break; }
+                }
+                if (!changed) continue;
+                for (var k = 0; k < sorted.length; k++) grid.appendChild(sorted[k]);
+            }
+        }
+
+        // ---- F2.1 filter ----------------------------------------------------
+        // Normalize + substring match (trim + toLocaleLowerCase). A card that
+        // doesn't match is hidden via the `hidden` attribute (display:none —
+        // unfocusable, I19). A group with zero visible cards is hidden too;
+        // when every group is empty the global no-results element shows.
+        function applyFilter() {
+            var q = (filterValue || '').trim().toLocaleLowerCase();
+            var shown = 0, total = 0;
+            if (liveRoot) {
+                var groups = liveRoot.querySelectorAll('[data-ov-group]');
+                for (var g = 0; g < groups.length; g++) {
+                    var section = groups[g];
+                    var visible = 0;
+                    var cards = section.querySelectorAll('[data-ov-name]');
+                    for (var i = 0; i < cards.length; i++) {
+                        var card = cards[i];
+                        total++;
+                        var name = (card.getAttribute('data-ov-name') || '').toLocaleLowerCase();
+                        var match = q === '' || name.indexOf(q) !== -1;
+                        card.hidden = !match;
+                        if (match) { visible++; shown++; }
+                    }
+                    section.hidden = cards.length > 0 && visible === 0;
+                    // W13(b): the group heading count reflects the currently
+                    // VISIBLE count while filtering; restored to the
+                    // server-rendered total (data-ov-total) once the filter
+                    // is cleared.
+                    var groupCount = section.querySelector('[data-ov-group-count]');
+                    if (groupCount) {
+                        var wantCount = q === '' ? (groupCount.getAttribute('data-ov-total') || String(cards.length)) : String(visible);
+                        if (groupCount.textContent !== wantCount) groupCount.textContent = wantCount;
+                    }
+                }
+                var noResults = liveRoot.querySelector('[data-ov-noresults]');
+                if (noResults) noResults.hidden = !(total > 0 && shown === 0);
+            }
+            // W13(a): an untracked/empty miner (no streamer cards at all)
+            // shows no orphan filter/sort controls.
+            if (toolbar) toolbar.hidden = total === 0;
+            // W2: only write the aria-live region when the announced text
+            // actually changes — writing it unconditionally on every 30s
+            // swap (even when shown/total didn't move) re-announces the same
+            // count to screen readers every poll, which is just noise.
+            var newCount = t('js.ov.shown_count', { shown: shown, total: total });
+            if (countEl && countEl.textContent !== newCount) countEl.textContent = newCount;
+        }
+
+        // Re-apply pipeline run on every #overview-live swap: stamp indices
+        // (fresh server order) -> sort -> filter (I11).
+        function reapply() {
+            stampIndices();
+            applySort();
+            applyFilter();
+        }
+
+        if (filterInput) {
+            filterInput.addEventListener('input', function () {
+                filterValue = filterInput.value;
+                storageSet(FILTER_KEY, filterValue);
+                if (filterClear) filterClear.hidden = !filterValue;
+                applyFilter();
+            });
+        }
+        if (filterClear) {
+            filterClear.addEventListener('click', function () {
+                filterValue = '';
+                if (filterInput) filterInput.value = '';
+                storageSet(FILTER_KEY, '');
+                filterClear.hidden = true;
+                applyFilter();
+                if (filterInput) filterInput.focus();
+            });
+        }
+        if (sortSelect) {
+            sortSelect.addEventListener('change', function () {
+                var v = sortSelect.value;
+                sortValue = SORT_VALUES.indexOf(v) !== -1 ? v : 'default';
+                storageSet(SORT_KEY, sortValue);
+                applySort();
+                applyFilter();
+                // Mirror the (natively-announced) <select> choice into the
+                // aria-live region too, so a screen reader user who isn't
+                // focused on the select still hears the new order (F2.2).
+                if (countEl) {
+                    var opt = sortSelect.options[sortSelect.selectedIndex];
+                    var label = opt ? opt.textContent : sortValue;
+                    countEl.textContent = t('js.ov.sort_applied', { sort: label }) + ' — ' + countEl.textContent;
+                }
+            });
+        }
+
+        // Only the swap of #overview-live itself is relevant here — other
+        // htmx swaps on the page (Now Watching, etc.) must not re-run this.
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (!e.detail || !e.detail.target || e.detail.target.id !== 'overview-live') return;
+            reapply();
+            resetStaleBaseline();
+        });
+
+        // A failed poll (htmx:responseError/htmx:sendError) never fires
+        // afterSwap, so the DOM and the stale clock's baseline are left
+        // untouched by construction — the age simply keeps growing. No
+        // listener is needed for that: the contract holds by construction
+        // (afterSwap above is the only place the baseline ever resets), so
+        // there's nothing for a responseError/sendError handler to do.
+
+        // ---- F2.5 stale clock ----------------------------------------------
+        // Monotonic clock via performance.now(), immune to wall-clock jumps.
+        // window.__OV_CLOCK is a browser-test seam only (never set in prod).
+        function nowMs() { return window.__OV_CLOCK ? window.__OV_CLOCK() : performance.now(); }
+
+        var baselinePerf = nowMs(); // provisional; refined below once #ov-meta is read
+        var lastStaleState = null; // W1: last state actually WRITTEN to the DOM
+
+        // resetStaleBaseline anchors the stale clock to the server's actual
+        // generation time (#ov-meta's data-generated, wall-clock unix
+        // seconds) instead of just assuming "received right now" — a
+        // cached/stale initial page load (or a slow response) must not paint
+        // as falsely fresh. Wall-clock is consumed ONLY here, as a one-shot
+        // clamp: ageMs = Date.now() - generatedMs is computed once and folded
+        // into an offset from the monotonic nowMs(), so every subsequent tick
+        // stays immune to wall-clock jumps. A malformed/absent timestamp, a
+        // negative age (clock skew), or an implausible age (> 24h) all fall
+        // back to "receipt time" (age zero) rather than risking NaN or a
+        // nonsense reading — system-clock-backward safe. Called once after
+        // every real #overview-live swap AND once at controller init, so a
+        // stale/cached initial render is corrected immediately too.
+        function resetStaleBaseline() {
+            var meta = document.getElementById('ov-meta');
+            var genSec = meta ? Number(meta.getAttribute('data-generated')) : NaN;
+            var ageMs = Date.now() - (genSec * 1000);
+            if (Number.isFinite(ageMs) && ageMs > 0 && ageMs <= MAX_STALE_BASELINE_AGE_MS) {
+                baselinePerf = nowMs() - ageMs;
+            } else {
+                baselinePerf = nowMs();
+            }
+            tickStale();
+        }
+
+        // W1: tickStale() runs every second (the interval below), but only
+        // WRITES to the DOM (badge classes/text, aria-label, the #overview-
+        // live is-stale toggle) when the computed state actually changed
+        // since the last write — otherwise a role="status" badge stuck on
+        // "Live" would re-announce "Live" to assistive tech every single
+        // second, which is exactly the kind of announcement spam role=status
+        // exists to avoid.
+        function tickStale() {
+            if (!staleBadge) return;
+            var meta = document.getElementById('ov-meta');
+            var lost = !!meta && meta.getAttribute('data-connection-lost') === '1';
+            var ageMs = nowMs() - baselinePerf;
+            var state;
+            if (lost) state = 'lost';
+            else if (ageMs <= POLL_MS * 2) state = 'fresh';
+            else if (ageMs <= POLL_MS * 4) state = 'delayed';
+            else state = 'stale';
+            if (state === lastStaleState) return;
+            lastStaleState = state;
+            staleBadge.classList.remove('ov-fresh', 'ov-delayed', 'ov-stale', 'ov-lost');
+            staleBadge.classList.add('ov-' + state);
+            // Visual degradation only — never hides data or the manual
+            // refresh button (I19-adjacent requirement in design.md §2).
+            if (liveRoot) liveRoot.classList.toggle('is-stale', state === 'stale' || state === 'lost');
+            if (staleText) staleText.textContent = t('js.ov.fresh_' + state);
+            staleBadge.setAttribute('aria-label', t('js.ov.fresh_aria') + ': ' + t('js.ov.fresh_' + state));
+        }
+
+        setInterval(tickStale, 1000);
+
+        // Fast recovery: coming back to a hidden tab re-polls immediately,
+        // but only when the data is actually old enough that a fresh poll
+        // would matter (more than one full interval since the baseline) —
+        // and never while a manual bet confirm/send is in flight (never
+        // yanks that away — mirrors the existing rw-poller/predBusy
+        // conventions).
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden && !window.__predBusy && window.htmx && (nowMs() - baselinePerf > POLL_MS)) {
+                htmx.trigger('#overview-live', 'refresh');
+            }
+        });
+
+        // Apply once to the content already present at initial page load.
+        reapply();
+        resetStaleBaseline();
     })();
 </script>
 {{end}}

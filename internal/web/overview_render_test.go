@@ -10,10 +10,37 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
-// sampleOverview builds an OverviewData exercising every card state and board
-// branch, for template-render coverage.
-func sampleOverview() OverviewData {
-	return OverviewData{
+// sampleOverview builds an OverviewPageData exercising every card state and
+// board branch, for template-render coverage. LiveCards/OfflineCards are the
+// only card source the Overview templates read (buildOverviewData no longer
+// populates OverviewData's own TrackedLive/TrackedOffline on this path — see
+// the OverviewPageData doc comment in handlers_overview.go), so this fixture
+// mirrors that: the live/offline fixtures feed LiveCards/OfflineCards only.
+func sampleOverview() OverviewPageData {
+	live := []StreamerInfo{
+		{
+			Name: "shroud", State: "watching", Watching: true, IsLive: true,
+			PointsFormatted: "100,000", PointsPerHour: "1,200", PointsToday: "5,000",
+			GameName: "VALORANT", ViewersCount: 40000, ViewersCountFormatted: "40,000",
+			Title:         "☀️ 2X UPDATE + FAR CRY !DROPS ☀️ | Chilling w/ coffee",
+			Tags:          []string{"English", "DropsEnabled", "FPS"},
+			StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25,
+			HasCampaign: true, CampaignName: "Drop", CampaignPercent: 40, CampaignMinutesInfo: "8/20 min",
+			HasGoal: true, GoalTitle: "New Emote", GoalPercent: 72,
+			Preference: "prefer", HasActivePrediction: true,
+			LastEventText: "Bonus claimed", LastEventAgo: "2m ago",
+		},
+		{
+			Name: "pokimane", State: "queued", Queued: true, IsLive: true,
+			PointsFormatted: "80,000", Preference: "avoid",
+		},
+	}
+	offline := []StreamerInfo{
+		{Name: "summit", State: "offline", PointsFormatted: "5,000", OfflineDuration: "3h"},
+		{Name: "benched", State: "disabled", DisableWatch: true, PointsFormatted: "1,000", WatchReason: "watching disabled"},
+	}
+
+	data := OverviewData{
 		Username:       "tester",
 		RefreshMinutes: 5,
 		Version:        "test",
@@ -39,28 +66,17 @@ func sampleOverview() OverviewData {
 			},
 			{Streamer: "ninja", Title: "Locked one", Status: "LOCKED", Locked: true},
 		},
-		TrackedLive: []StreamerInfo{
-			{
-				Name: "shroud", State: "watching", Watching: true, IsLive: true,
-				PointsFormatted: "100,000", PointsPerHour: "1,200", PointsToday: "5,000",
-				GameName: "VALORANT", ViewersCount: 40000, ViewersCountFormatted: "40,000",
-				Title:         "☀️ 2X UPDATE + FAR CRY !DROPS ☀️ | Chilling w/ coffee",
-				Tags:          []string{"English", "DropsEnabled", "FPS"},
-				StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25,
-				HasCampaign: true, CampaignName: "Drop", CampaignPercent: 40, CampaignMinutesInfo: "8/20 min",
-				HasGoal: true, GoalTitle: "New Emote", GoalPercent: 72,
-				Preference: "prefer", HasActivePrediction: true,
-				LastEventText: "Bonus claimed", LastEventAgo: "2m ago",
-			},
-			{
-				Name: "pokimane", State: "queued", Queued: true, IsLive: true,
-				PointsFormatted: "80,000", Preference: "avoid",
-			},
-		},
-		TrackedOffline: []StreamerInfo{
-			{Name: "summit", State: "offline", PointsFormatted: "5,000", OfflineDuration: "3h"},
-			{Name: "benched", State: "disabled", DisableWatch: true, PointsFormatted: "1,000", WatchReason: "watching disabled"},
-		},
+		GeneratedUnix: 1700000000,
+	}
+
+	return OverviewPageData{
+		OverviewData:          data,
+		LiveCards:             toCardViews(live, map[string]streamerStats{"shroud": {pointsToday: 5000}}),
+		OfflineCards:          toCardViews(offline, nil),
+		Health:                OverviewHealthView{State: "healthy", Label: "Healthy", Detail: ""},
+		PredictionsState:      "active",
+		PredictionsStateLabel: "Active",
+		PollSeconds:           overviewPollSeconds,
 	}
 }
 
@@ -100,8 +116,8 @@ func TestRenderOverviewTemplates(t *testing.T) {
 func TestOverviewCardEscapesTitleAndTags(t *testing.T) {
 	partials := testPartials(t)
 	data := sampleOverview()
-	data.TrackedLive[0].Title = `<script>alert(1)</script> stream`
-	data.TrackedLive[0].Tags = []string{`<img src=x onerror=alert(2)>`}
+	data.LiveCards[0].Title = `<script>alert(1)</script> stream`
+	data.LiveCards[0].Tags = []string{`<img src=x onerror=alert(2)>`}
 
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
@@ -123,7 +139,7 @@ func TestOverviewCardEscapesTitleAndTags(t *testing.T) {
 func TestOverviewCardOmitsEmptyTitleAndTags(t *testing.T) {
 	partials := testPartials(t)
 	data := sampleOverview()
-	data.TrackedLive = data.TrackedLive[1:] // pokimane: live, no title/tags
+	data.LiveCards = data.LiveCards[1:] // pokimane: live, no title/tags
 
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {

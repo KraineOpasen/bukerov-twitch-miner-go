@@ -1284,3 +1284,174 @@
 .log-settings { color: var(--log-violet); }
 .log-health-ok { color: var(--log-bright-green); }
 .log-database { color: var(--log-ultramarine); }
+
+/* =====================================================================
+   F2 «Overview delta»: toolbar (filter/sort/stale badge), avatar-initial
+   fallback, aggregated-health + predictions status chips, and compact
+   card-hierarchy tweaks. Tokens only — --surface-*, --text-*, --border-*,
+   --status-*, --chart-series-*, --ui-*, color-mix() — no new hex colors
+   (I25), no CDN/fonts (I26), no geometry change to the sidebar/breakpoint
+   (I29).
+   ===================================================================== */
+
+.ov-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: 0.6rem;
+}
+.ov-toolbar-group { display: flex; align-items: center; gap: 0.4rem; }
+.ov-toolbar-label { font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
+.ov-filter-wrap { position: relative; display: inline-flex; align-items: center; }
+.ov-filter-input {
+  width: 12rem;
+  background: var(--surface-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.4rem;
+  padding: 0.32rem 1.6rem 0.32rem 0.55rem;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+.ov-filter-input:focus { outline: none; border-color: var(--status-info); }
+.ov-filter-clear {
+  position: absolute;
+  right: 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.ov-filter-clear:hover { color: var(--text-primary); }
+.ov-filter-clear:focus-visible { outline: 2px solid var(--status-info); outline-offset: 1px; }
+.ov-sort-select {
+  background: var(--surface-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+.ov-sort-select:focus-visible { outline: 2px solid var(--status-info); outline-offset: 1px; }
+.ov-filter-count { font-size: 0.78rem; color: var(--text-muted); }
+
+.ov-stale-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-page) 60%, transparent);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.ov-stale-badge.ov-fresh { color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 45%, transparent); background: color-mix(in srgb, var(--status-success) 10%, transparent); }
+.ov-stale-badge.ov-delayed { color: var(--status-warning); border-color: color-mix(in srgb, var(--status-warning) 45%, transparent); background: color-mix(in srgb, var(--status-warning) 10%, transparent); }
+.ov-stale-badge.ov-stale { color: var(--status-danger); border-color: color-mix(in srgb, var(--status-danger) 45%, transparent); background: color-mix(in srgb, var(--status-danger) 10%, transparent); }
+.ov-stale-badge.ov-lost { color: var(--status-danger); border-color: color-mix(in srgb, var(--status-danger) 60%, transparent); background: color-mix(in srgb, var(--status-danger) 16%, transparent); }
+
+/* Visual-only degradation while stale/lost: opacity dims the existing cards,
+   it never hides data and never disables the manual refresh button. */
+/* :not(.state-disabled) — disabled cards are already dimmed to 0.6 opacity
+   (state-disabled, below); without this exclusion the stale rule's 0.82
+   out-specifies that lower opacity via cascade order and makes a disabled
+   card MORE visible while stale, inverting the intended hierarchy. */
+#overview-live.is-stale .s-card:not(.state-disabled) { opacity: 0.82; }
+
+/* F2.4 avatar-initial fallback. Fixed dimensions so it never causes layout
+   shift; the six buckets map onto the chart-series tokens via color-mix so
+   the same streamer name always renders the same color. */
+.s-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.s-avatar-b0 { background: color-mix(in srgb, var(--chart-series-1) 30%, var(--surface-card)); }
+.s-avatar-b1 { background: color-mix(in srgb, var(--chart-series-2) 30%, var(--surface-card)); }
+.s-avatar-b2 { background: color-mix(in srgb, var(--chart-series-3) 30%, var(--surface-card)); }
+.s-avatar-b3 { background: color-mix(in srgb, var(--chart-series-4) 30%, var(--surface-card)); }
+.s-avatar-b4 { background: color-mix(in srgb, var(--chart-series-5) 30%, var(--surface-card)); }
+.s-avatar-b5 { background: color-mix(in srgb, var(--chart-series-6) 30%, var(--surface-card)); }
+.s-card.state-offline .s-avatar, .s-card.state-unknown .s-avatar, .s-card.state-disabled .s-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 0.7rem;
+}
+
+/* F2.6 aggregated health chip — icon + text, never color alone. */
+.ov-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--text-secondary);
+  border-bottom: 1px dashed transparent;
+}
+.ov-health:hover, .ov-health:focus-visible { border-bottom-color: currentColor; }
+.ov-health:focus-visible { outline: 2px solid var(--status-info); outline-offset: 2px; }
+.ov-health-healthy { color: var(--status-success); }
+.ov-health-degraded { color: var(--status-warning); }
+.ov-health-unhealthy { color: var(--status-danger); }
+.ov-health-unknown { color: var(--text-muted); }
+
+/* F2.7 predictions technical-status chip (never the betting outcome). */
+.ov-pred-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.08rem 0.4rem;
+  border-radius: 0.3rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
+}
+.ov-pred-chip-active { color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 45%, transparent); }
+.ov-pred-chip-idle { color: var(--text-muted); border-color: var(--border-default); }
+/* Unavailable is a benign absence (no provider wired / miner still starting),
+   not an error — muted like the health chip's "unknown", not danger red. */
+.ov-pred-chip-unavailable { color: var(--text-muted); border-color: var(--border-default); }
+
+/* Compact hierarchy for offline/unknown/disabled cards (state-* classes
+   already existed — this only adjusts density, no field removal). Unknown
+   keeps its own dashed border (set above) so it never reads as a plain
+   offline card. */
+.s-card.state-offline, .s-card.state-unknown, .s-card.state-disabled {
+  padding: 0.75rem;
+}
+.s-card.state-offline .s-points, .s-card.state-unknown .s-points, .s-card.state-disabled .s-points {
+  font-size: 1.25rem;
+}
+
+/* Live cards get a slightly stronger presence — an accent bar alongside the
+   existing state-watching glow (defined above); NOT heavier data. */
+.s-card.state-watching { border-left: 3px solid var(--ui-watching); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ov-stale-badge { transition: none; }
+}
