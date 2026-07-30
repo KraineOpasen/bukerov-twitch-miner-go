@@ -16,7 +16,7 @@
 {{else}}
 {{/* populated, or stale with cached cards preserved */}}
 {{if .HasError}}
-<div class="card mb-4 text-sm" style="border-color:#b45309;color:#fbbf24;">
+<div class="card mb-4 text-sm" style="border-color:var(--color-status-warning);color:var(--color-status-warning);">
     {{ t "drops.upcoming.state.error_cached" }}
     {{if .LastSuccessText}}<span class="text-neutral-400">{{ t "drops.upcoming.last_success" }} {{ .LastSuccessText }}</span>{{end}}
 </div>

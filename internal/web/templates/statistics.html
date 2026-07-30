@@ -6,8 +6,8 @@
    Tailwind build is not re-run for template-only changes. */
 .roi-period-btn{color:var(--color-neutral-300);background:var(--color-neutral-800);border-right:1px solid var(--color-neutral-700);cursor:pointer;padding:.5rem .95rem;font-size:.85rem;font-weight:500;transition:background .15s,color .15s}
 .roi-period-btn:last-child{border-right:0}
-.roi-period-btn:hover{color:var(--color-neutral-100);background:#8b7fd11f}
-.roi-period-btn.is-active{background:var(--color-purple-600);color:#fff}
+.roi-period-btn:hover{color:var(--color-neutral-100);background:color-mix(in srgb, var(--interactive) 12%, transparent)}
+.roi-period-btn.is-active{background:var(--color-purple-600);color:var(--text-on-accent)}
 .roi-period-btn:focus-visible{outline:2px solid var(--color-online);outline-offset:-2px}
 .stat-tile{display:flex;flex-direction:column;gap:.25rem;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-700);background:var(--color-neutral-800);padding:.85rem 1rem}
 .stat-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:var(--color-neutral-400)}
@@ -235,37 +235,110 @@
     const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    // Palette tokens read from CSS custom properties so the chart stays in sync
-    // with the single dark theme (no hardcoded colours).
-    const css = getComputedStyle(document.documentElement);
-    const tok = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
-    const C = {
-        accent:  tok('--color-purple-500', '#8b7fd1'),
-        grid:    tok('--color-neutral-700', '#3a3b47'),
-        text:    tok('--color-neutral-400', '#9c9aab'),
-        pos:     tok('--ui-roi-pos', '#39FF88'),
-        neg:     tok('--ui-roi-neg', '#FF4D67'),
-    };
+    // Palette tokens re-read from CSS custom properties on every call (not
+    // captured once at IIFE-init) so the chart follows a live theme switch —
+    // dark/light both drive the same var() names, no hardcoded colours.
+    function palette() {
+        const css = getComputedStyle(document.documentElement);
+        const tok = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
+        return {
+            accent:       tok('--color-interactive', '#8b7fd1'),
+            grid:         tok('--color-chart-grid', '#3a3b47'),
+            text:         tok('--color-chart-label', '#9c9aab'),
+            textPrimary:  tok('--color-text-primary', ''),
+            surface:      tok('--color-surface-card', ''),
+            inkDark:      tok('--chart-annotation-ink-dark', ''),
+            inkLight:     tok('--chart-annotation-ink-light', ''),
+            pos:          tok('--ui-roi-pos', '#39FF88'),
+            neg:          tok('--ui-roi-neg', '#FF4D67'),
+            refund:       tok('--ui-refund', '#27E5D8'),
+            watch:        tok('--ui-watch', '#FFE44D'),
+            claim:        tok('--ui-claim', '#FFC83D'),
+            raid:         tok('--ui-raid', '#FF8A3D'),
+            streak:       tok('--ui-streak', '#B6FF3B'),
+            prediction:   tok('--ui-prediction', '#22D3EE'),
+            other:        tok('--ui-other', '#A970FF'),
+        };
+    }
 
-    // Reason → colour/label for the earnings-breakdown donut. Colours come
-    // from the shared --ui-* palette (base.html) so WATCH/CLAIM/RAID/STREAK
-    // keep one hue everywhere; unknown reasons pool into OTHER.
-    const REASONS = {
-        WATCH:        { color: tok('--ui-watch', '#FFE44D'),      label: () => t('js.stat.br.watch') },
-        CLAIM:        { color: tok('--ui-claim', '#FFC83D'),      label: () => t('js.stat.br.claim') },
-        RAID:         { color: tok('--ui-raid', '#FF8A3D'),       label: () => t('js.stat.br.raid') },
-        WATCH_STREAK: { color: tok('--ui-streak', '#B6FF3B'),     label: () => t('js.stat.br.streak') },
-        PREDICTION:   { color: tok('--ui-prediction', '#22D3EE'), label: () => t('js.stat.br.prediction') },
-        OTHER:        { color: tok('--ui-other', '#A970FF'),      label: () => t('js.stat.br.other') },
-    };
+    function resolvedTheme() {
+        return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    }
+
+    // WCAG relative-luminance contrast, used to pick a readable label ink
+    // against an arbitrary, theme-INDEPENDENT background: annotation marker
+    // colours are persisted per-event in the database (analytics.
+    // RecordAnnotation), not derived from the active theme, so a fixed ink
+    // token would go unreadable against some hues in one theme or the other.
+    // Picking by actual contrast against the two ink candidates keeps every
+    // marker readable in both themes regardless of its background hue.
+    function srgbToLinear(c) {
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function relativeLuminance(hex) {
+        const h = hex.replace('#', '');
+        const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+        const r = srgbToLinear(parseInt(full.substr(0, 2), 16) / 255);
+        const g = srgbToLinear(parseInt(full.substr(2, 2), 16) / 255);
+        const b = srgbToLinear(parseInt(full.substr(4, 2), 16) / 255);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+    function contrastRatio(hexA, hexB) {
+        const la = relativeLuminance(hexA);
+        const lb = relativeLuminance(hexB);
+        const lighter = Math.max(la, lb);
+        const darker = Math.min(la, lb);
+        return (lighter + 0.05) / (darker + 0.05);
+    }
+    // Picks whichever of the two invariant ink tokens contrasts better
+    // against the given background; ties (and any parse failure) fall back
+    // to the dark ink, which is the AA-safe default across this palette.
+    function readableInkFor(bgHex, P) {
+        try {
+            return contrastRatio(bgHex, P.inkLight) > contrastRatio(bgHex, P.inkDark) ? P.inkLight : P.inkDark;
+        } catch (e) {
+            return P.inkDark;
+        }
+    }
+
+    // Annotation-TYPE → colour (the machine-readable event code, e.g.
+    // WATCH_STREAK/RAID/PREDICTION_MADE/WIN/LOSE — see analytics.
+    // RecordAnnotation / miner.go). Deliberately NOT keyed by a.reason: that
+    // field is the always-non-empty human-readable text ("+450 - Watch
+    // Streak"), so preferring it ahead of a.type (as an earlier version of
+    // this lookup did) never actually reached a.type at all — a dead mapping
+    // that silently always fell through to the persisted per-event colour.
+    function annotationTypePalette(P) {
+        return {
+            WATCH_STREAK:    P.streak,
+            RAID:            P.raid,
+            PREDICTION_MADE: P.prediction,
+            WIN:             P.pos,
+            LOSE:            P.neg,
+        };
+    }
+
+    // Reason → colour/label for the earnings-breakdown donut, rebuilt from a
+    // fresh palette on every render so WATCH/CLAIM/RAID/STREAK keep one hue
+    // everywhere and follow the active theme; unknown reasons pool into OTHER.
+    function reasonPalette(P) {
+        return {
+            WATCH:        { color: P.watch,      label: () => t('js.stat.br.watch') },
+            CLAIM:        { color: P.claim,      label: () => t('js.stat.br.claim') },
+            RAID:         { color: P.raid,       label: () => t('js.stat.br.raid') },
+            WATCH_STREAK: { color: P.streak,     label: () => t('js.stat.br.streak') },
+            PREDICTION:   { color: P.prediction, label: () => t('js.stat.br.prediction') },
+            OTHER:        { color: P.other,      label: () => t('js.stat.br.other') },
+        };
+    }
 
     // Collapse the server's per-reason shares into the four first-class
     // reasons plus one OTHER bucket, keeping the server's order.
-    function breakdownSlices(breakdown) {
+    function breakdownSlices(breakdown, R) {
         const slices = [];
         let other = null;
         for (const share of breakdown || []) {
-            const known = REASONS[share.reason];
+            const known = R[share.reason];
             if (known && share.reason !== 'OTHER') {
                 slices.push({ key: share.reason, gained: share.gained, count: share.count });
             } else {
@@ -277,13 +350,13 @@
         return slices.filter(s => s.gained > 0);
     }
 
-    // Annotation colour comes from the persisted record (the per-type palette in
-    // analytics.RecordAnnotation), so every event type — WATCH_STREAK included —
-    // renders in its own hue instead of colliding with the accent-coloured
-    // balance line, and a new event type needs no template change. Falls back to
-    // the accent only if a row somehow carries no colour.
-    function annColor(a) {
-        return (a && a.color) ? a.color : C.accent;
+    // Annotation marker background: keyed by the machine-readable a.type
+    // (see annotationTypePalette above) so it follows the active theme;
+    // falls back to the persisted per-annotation colour (analytics.
+    // RecordAnnotation), then to the accent if a row somehow carries neither.
+    function annBg(a, P, ANN) {
+        if (a && a.type && ANN[a.type]) return ANN[a.type];
+        return (a && a.color) ? a.color : P.accent;
     }
 
     const els = {
@@ -328,18 +401,22 @@
     }
 
     function buildOptions(data) {
+        const P = palette();
+        const R = reasonPalette(P);
+        const ANN = annotationTypePalette(P);
         const series = (data.points || []).map(p => ({ x: p.t, y: p.balance }));
         const reasons = (data.points || []).map(p => p.reason || '');
         const annotations = (data.annotations || []).map(a => {
-            const color = annColor(a);
+            const bg = annBg(a, P, ANN);
+            const ink = readableInkFor(bg, P);
             return {
                 x: a.t,
-                borderColor: color,
+                borderColor: bg,
                 strokeDashArray: 0,
                 label: {
-                    borderColor: color,
-                    style: { color: '#15161c', background: color, fontSize: '10px' },
-                    text: a.reason || a.type,
+                    borderColor: bg,
+                    style: { color: ink, background: bg, fontSize: '10px' },
+                    text: a.reason ? a.reason : a.type,
                     orientation: 'horizontal',
                 },
             };
@@ -351,20 +428,20 @@
                 type: 'area',
                 height: 400,
                 background: 'transparent',
-                foreColor: C.text,
+                foreColor: P.text,
                 fontFamily: 'Inter, sans-serif',
                 toolbar: { show: true, tools: { download: false, selection: true, zoom: true, zoomin: true, zoomout: true, pan: true, reset: true } },
                 animations: { enabled: !reducedMotion, speed: 300 },
             },
-            colors: [C.accent],
+            colors: [P.accent],
             fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.05, stops: [0, 100] } },
             stroke: { curve: 'smooth', width: 2 },
             dataLabels: { enabled: false },
             xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
             yaxis: { labels: { formatter: v => new Intl.NumberFormat().format(Math.round(v)) } },
-            grid: { borderColor: C.grid, strokeDashArray: 4 },
+            grid: { borderColor: P.grid, strokeDashArray: 4 },
             tooltip: {
-                theme: 'dark',
+                theme: resolvedTheme(),
                 x: { format: 'dd MMM yyyy HH:mm' },
                 y: {
                     formatter: function (val, opts) {
@@ -380,7 +457,10 @@
         };
     }
 
+    let lastData = null;
+
     function render(data) {
+        lastData = data;
         const options = buildOptions(data);
         if (chart) {
             chart.updateOptions(options, false, !reducedMotion);
@@ -462,7 +542,9 @@
     // the raw series was truncated (partial data); mere chart downsampling
     // never hides it — the breakdown is built from the full raw series.
     function renderBreakdown(data) {
-        const slices = data.rawTruncated ? [] : breakdownSlices(data.breakdown);
+        const P = palette();
+        const R = reasonPalette(P);
+        const slices = data.rawTruncated ? [] : breakdownSlices(data.breakdown, R);
         if (!slices.length) {
             if (donut) { donut.destroy(); donut = null; }
             els.breakdown.classList.add('hidden');
@@ -472,14 +554,14 @@
 
         const options = {
             series: slices.map(s => s.gained),
-            labels: slices.map(s => REASONS[s.key].label()),
-            colors: slices.map(s => REASONS[s.key].color),
-            chart: { type: 'donut', height: 240, background: 'transparent', foreColor: C.text, fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotion, speed: 300 } },
+            labels: slices.map(s => R[s.key].label()),
+            colors: slices.map(s => R[s.key].color),
+            chart: { type: 'donut', height: 240, background: 'transparent', foreColor: P.text, fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotion, speed: 300 } },
             legend: { show: false },
             dataLabels: { enabled: false },
-            stroke: { colors: ['#232430'], width: 2 },
-            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: '#e8e6ef', fontSize: '1.05rem', formatter: v => '+' + nfStat.format(v) }, total: { show: true, showAlways: true, label: '', color: '#e8e6ef', formatter: w => '+' + nfStat.format(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
-            tooltip: { theme: 'dark', y: { formatter: v => '+' + nfStat.format(v) + ' ' + t('js.stat.points_suffix') } },
+            stroke: { colors: [P.surface], width: 2 },
+            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: P.textPrimary, fontSize: '1.05rem', formatter: v => '+' + nfStat.format(v) }, total: { show: true, showAlways: true, label: '', color: P.textPrimary, formatter: w => '+' + nfStat.format(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+            tooltip: { theme: resolvedTheme(), y: { formatter: v => '+' + nfStat.format(v) + ' ' + t('js.stat.points_suffix') } },
         };
         if (donut) {
             donut.updateOptions(options, false, !reducedMotion);
@@ -489,7 +571,7 @@
         }
 
         els.legend.innerHTML = slices.map(s => {
-            const r = REASONS[s.key];
+            const r = R[s.key];
             return '<div class="breakdown-row">' +
                 '<span class="breakdown-dot" style="background:' + r.color + '"></span>' +
                 '<span class="breakdown-name">' + r.label() + '</span>' +
@@ -577,6 +659,14 @@
             else { els.errorMsg.textContent = t('js.stat.chart_lib_failed'); show('error'); }
         })();
     }
+
+    // Follow live theme switches: re-derive the chart/donut options from a
+    // fresh palette and update the EXISTING instances in place — no
+    // destroy/recreate, one listener bound once at init (T11).
+    document.addEventListener('miner:themechange', function () {
+        if (chart && lastData) chart.updateOptions(buildOptions(lastData), false, false);
+        if (lastData) renderBreakdown(lastData);
+    });
 
     updateExportLink();
     waitForApexCharts(function () {
@@ -666,7 +756,10 @@
         ));
     }
 
+    let lastROI = null;
+
     function render(d) {
+        lastROI = d;
         setTile('roi-count', fmtInt(d.count));
         setTile('roi-winrate', d.winRate.toFixed(1) + '%');
         setTile('roi-net', fmtSigned(d.netProfit), signClass(d.netProfit));
@@ -685,11 +778,25 @@
     }
 
     // Win/lose/refund split as a colour-coded ring, on the shared semantic
-    // ROI palette (green/red/turquoise) from base.html.
+    // ROI palette (green/red/turquoise) — tokens re-read on every render so
+    // the ring follows the active theme.
     let outcomesDonut = null;
-    const roiCSS = getComputedStyle(document.documentElement);
-    const roiTok = (name, fallback) => (roiCSS.getPropertyValue(name).trim() || fallback);
     const reducedMotionROI = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function roiPalette() {
+        const css = getComputedStyle(document.documentElement);
+        const tok = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
+        return {
+            pos:     tok('--ui-roi-pos', '#39FF88'),
+            neg:     tok('--ui-roi-neg', '#FF4D67'),
+            refund:  tok('--ui-refund', '#27E5D8'),
+            text:    tok('--color-chart-label', '#9c9aab'),
+            surface: tok('--color-surface-card', ''),
+        };
+    }
+    function roiResolvedTheme() {
+        return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    }
 
     function renderOutcomesDonut(d) {
         const host = document.getElementById('roi-donut');
@@ -705,16 +812,17 @@
             }
             return;
         }
+        const P = roiPalette();
         const options = {
             series: [d.wins || 0, d.losses || 0, d.refunds || 0],
             labels: [t('js.stat.roi.wins'), t('js.stat.roi.losses'), t('js.stat.roi.refunds')],
-            colors: [roiTok('--ui-roi-pos', '#39FF88'), roiTok('--ui-roi-neg', '#FF4D67'), roiTok('--ui-refund', '#27E5D8')],
-            chart: { type: 'donut', height: 200, background: 'transparent', foreColor: roiTok('--color-neutral-400', '#9c9aab'), fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotionROI, speed: 300 } },
+            colors: [P.pos, P.neg, P.refund],
+            chart: { type: 'donut', height: 200, background: 'transparent', foreColor: P.text, fontFamily: 'Inter, sans-serif', animations: { enabled: !reducedMotionROI, speed: 300 } },
             legend: { position: 'bottom', fontSize: '12px' },
             dataLabels: { enabled: false },
-            stroke: { colors: ['#232430'], width: 2 },
+            stroke: { colors: [P.surface], width: 2 },
             plotOptions: { pie: { donut: { size: '70%' } } },
-            tooltip: { theme: 'dark' },
+            tooltip: { theme: roiResolvedTheme() },
         };
         if (outcomesDonut) {
             outcomesDonut.updateOptions(options, false, !reducedMotionROI);
@@ -769,6 +877,12 @@
     els.streamer.addEventListener('change', () => load(false));
     els.strategy.addEventListener('change', () => load(false));
     els.retry.addEventListener('click', () => load(false));
+
+    // One listener bound once at init — re-render the existing donut instance
+    // in place on a live theme switch (no destroy/recreate).
+    document.addEventListener('miner:themechange', function () {
+        if (outcomesDonut && lastROI) renderOutcomesDonut(lastROI);
+    });
 
     updateExportLink();
     load(false);

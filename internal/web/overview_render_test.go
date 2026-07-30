@@ -173,21 +173,36 @@ func TestSidebarOmitsDuplicateOverviewTabs(t *testing.T) {
 		}
 	}
 
+	// F1 theme-token consolidation moved overview.html's inline <style> block
+	// (card-state visuals, stream title/tag rules, section accents) into
+	// input.css, so those selectors are checked there now instead of in the
+	// template; overview.html itself must no longer carry the old block.
+	css, err := staticFS.ReadFile("static/css/input.css")
+	if err != nil {
+		t.Fatalf("read input.css: %v", err)
+	}
+	for _, want := range []string{".s-title", ".s-tag", "scroll-margin-top", ".sec-accent"} {
+		if !strings.Contains(string(css), want) {
+			t.Errorf("input.css missing %q", want)
+		}
+	}
+
 	overview, err := templatesFS.ReadFile("templates/overview.html")
 	if err != nil {
 		t.Fatalf("read overview.html: %v", err)
 	}
-	for _, want := range []string{".s-title", ".s-tag", "scroll-margin-top", ".sec-accent"} {
-		if !strings.Contains(string(overview), want) {
-			t.Errorf("overview.html style block missing %q", want)
-		}
+	if strings.Contains(string(overview), "<style>") {
+		t.Error("overview.html must no longer carry an inline <style> block — those rules now live in input.css")
 	}
 
 	// The shared semantic palette every page (and the statistics charts)
-	// reads must be declared once in base.html.
+	// reads is now declared once in input.css (F1), not inline in base.html.
 	for _, wantVar := range []string{"--ui-watching", "--ui-online", "--ui-gain", "--ui-roi-pos", "--ui-roi-neg", "--ui-watch", "--ui-claim", "--ui-raid", "--ui-streak"} {
-		if !strings.Contains(string(base), wantVar) {
-			t.Errorf("base.html missing semantic palette variable %q", wantVar)
+		if !strings.Contains(string(css), wantVar) {
+			t.Errorf("input.css missing semantic palette variable %q", wantVar)
+		}
+		if strings.Contains(string(base), wantVar+":") {
+			t.Errorf("base.html must not define %q inline anymore — it now lives only in input.css", wantVar)
 		}
 	}
 }

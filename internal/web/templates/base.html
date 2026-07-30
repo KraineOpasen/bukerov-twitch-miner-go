@@ -1,15 +1,49 @@
 <!DOCTYPE html>
-<html lang="{{ lang }}" class="dark">
+<html lang="{{ lang }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        // Theme FOUC bootstrap — must run before app.css paints and before any
+        // other script. Resolves the persisted mode (dark/light/system) to a
+        // concrete theme and stamps both attributes on <html> pre-paint; the
+        // theme controller script (near the bottom of <body>) takes over for
+        // clicks and OS-preference changes afterward.
+        (function () {
+            var KEY = 'miner-theme';
+            // Shared with the theme controller script (near the bottom of
+            // <body>) so the resolved-theme -> meta theme-color mapping is
+            // defined exactly once. Safe to read there unconditionally:
+            // this bootstrap script always runs first (it's the first
+            // <script> in <head>, before every other script on the page).
+            var THEME_META = { dark: '#1a1b22', light: '#f4f3f8' };
+            window.__MINER_THEME_META = THEME_META;
+            var mode = 'system';
+            try {
+                var v = localStorage.getItem(KEY);
+                if (v === 'dark' || v === 'light' || v === 'system') mode = v;
+            } catch (e) {}
+            var mql = window.matchMedia('(prefers-color-scheme: light)');
+            var resolved = mode === 'system' ? (mql.matches ? 'light' : 'dark') : mode;
+            var de = document.documentElement;
+            de.setAttribute('data-theme', resolved);
+            de.setAttribute('data-theme-mode', mode);
+            // This element doesn't exist yet at this point in parsing (this
+            // script runs before its own <meta id="meta-theme-color"> tag,
+            // further down in <head>), so this is a best-effort no-op today —
+            // the theme controller script syncs it for real once the DOM
+            // element exists, using the same THEME_META map.
+            var metaTC = document.getElementById('meta-theme-color');
+            if (metaTC) metaTC.setAttribute('content', THEME_META[resolved]);
+        })();
+    </script>
     <title>{{block "title" .}}Twitch Points Miner{{end}}</title>
     <link rel="icon" href="/static/images/favicon.ico" sizes="any">
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16x16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180x180.png">
     <link rel="manifest" href="/static/site.webmanifest">
-    <meta name="theme-color" content="#15161c">
+    <meta name="theme-color" content="#1a1b22" id="meta-theme-color">
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/js/htmx.min.js" defer></script>
     <script src="/static/js/apexcharts.min.js" defer></script>
@@ -29,128 +63,6 @@
             return s;
         };
     </script>
-    <style>
-        /* Shared semantic UI palette for the dark theme. Lives here (after
-           app.css) rather than in input.css because the Tailwind build is not
-           re-run for template-only changes; every page and the statistics
-           charts read these tokens so states keep one consistent hue across
-           Overview, Statistics, Notifications, and Settings. */
-        :root {
-            --ui-watching: #A970FF;  /* actively farmed */
-            --ui-online: #36D7FF;    /* live / queued for a slot */
-            --ui-queue: #36D7FF;
-            --ui-offline: #6b6a78;   /* deliberately muted */
-            --ui-gain: #B6FF3B;      /* positive point gain */
-            --ui-warn: #FFB020;
-            --ui-roi-pos: #39FF88;
-            --ui-roi-neg: #FF4D67;
-            --ui-refund: #27E5D8;
-            --ui-watch: #FFE44D;     /* points reason: WATCH */
-            --ui-claim: #FFC83D;     /* points reason: CLAIM */
-            --ui-raid: #FF8A3D;      /* points reason: RAID */
-            --ui-streak: #B6FF3B;    /* points reason: WATCH_STREAK */
-            --ui-prediction: #22D3EE;/* points reason: PREDICTION (bet wins) */
-            --ui-other: #A970FF;
-            --ui-brand-orange: #FF7A00; /* sidebar brand wordmark; ~7.6:1 on --color-sidebar #15161c */
-        }
-
-        /* Sidebar: icon + label accents on hover/active instead of the flat
-           single-hue wash; the active item carries a violet bar and icon. */
-        .sidebar-link svg { color: var(--color-neutral-400); transition: color 0.15s; }
-        .sidebar-link:hover { background: linear-gradient(90deg, rgba(169, 112, 255, 0.16), rgba(54, 215, 255, 0.08)); color: #fff; }
-        .sidebar-link:hover svg { color: var(--ui-online); }
-        .sidebar-link.is-active {
-            background: linear-gradient(90deg, rgba(169, 112, 255, 0.22), rgba(54, 215, 255, 0.10));
-            color: #fff;
-            box-shadow: inset 3px 0 0 var(--ui-watching);
-        }
-        .sidebar-link.is-active svg { color: var(--ui-watching); }
-
-        /* Sidebar brand wordmark: an orange two-line title beside the (unchanged)
-           alien logo. Its own semantic token — deliberately not the raid/error
-           hues — so the brand meaning never mixes with state colors. leading-tight
-           keeps the two lines beside the 52px logo; the sub line is a touch
-           smaller for hierarchy while staying the same orange. */
-        .sidebar-brand { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
-        .sidebar-brand-title { color: var(--ui-brand-orange); font-weight: 600; }
-        .sidebar-brand-sub { color: var(--ui-brand-orange); font-size: 0.8em; font-weight: 500; }
-
-        /* Mobile drawer toggle. On desktop/tablet (>900px) the sidebar is always
-           present in the grid, so the toggle is hidden and occupies no space —
-           the main content starts directly at the page content with no top gap.
-           At <=900px the sidebar is an off-canvas drawer (translateX(-100%)), so a
-           fixed hamburger opens/closes it. It is gated on the SAME 900px
-           breakpoint as the sidebar (not Tailwind's md:768) so there is no
-           range where the drawer is hidden yet the toggle is gone. */
-        .sidebar-toggle { display: none; }
-        @media (max-width: 900px) {
-            .sidebar-toggle {
-                display: inline-flex;
-                position: fixed;
-                top: 0.6rem;
-                left: 0.6rem;
-                z-index: 70; /* above the drawer (z-index 60) so it also closes it */
-                background: var(--color-neutral-800);
-            }
-            /* Reserve room so the fixed hamburger never overlaps page content. */
-            .app-main { padding: 3.25rem 1rem 1rem; }
-        }
-
-        /* Richer state badges shared by cards, sidebar queue, and boards:
-           queue reads cyan (waiting, not dead), watching reads violet, gains
-           read lime. Offline/disabled stay deliberately muted. */
-        .badge-watching { background: rgba(169, 112, 255, 0.20); color: #cdb4ff; }
-        .badge-queued { background: rgba(54, 215, 255, 0.13); color: #7fe3ff; }
-        .badge-gain { color: var(--ui-gain); }
-        .badge-event { background: rgba(255, 176, 32, 0.14); color: var(--ui-warn); }
-        .watch-dot.queue { border-color: rgba(54, 215, 255, 0.75); }
-        .bar-streak > span { background: linear-gradient(90deg, var(--ui-streak), var(--ui-online)); }
-        .bar-drop > span { background: linear-gradient(90deg, var(--ui-claim), var(--ui-raid)); }
-        .bar-goal > span { background: linear-gradient(90deg, var(--ui-roi-pos), var(--ui-online)); }
-
-        /* Section headings on Settings/Notifications get a small violet
-           accent bar so those pages stop reading as a gray wall. */
-        .section-title {
-            padding-left: 0.6rem;
-            border-left: 3px solid var(--ui-watching);
-        }
-
-        .lang-btn {
-            padding: 0.25rem 0.6rem;
-            font-size: 0.75rem;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            color: var(--color-neutral-300);
-            background: var(--color-neutral-800);
-            border-right: 1px solid var(--color-neutral-700);
-            cursor: pointer;
-            transition: background 0.15s ease, color 0.15s ease;
-        }
-        .lang-btn:last-child { border-right: 0; }
-        .lang-btn:hover { background: rgba(139, 127, 209, 0.12); color: var(--color-neutral-100); }
-        .lang-btn.is-active { background: var(--color-purple-600); color: #fff; }
-        .lang-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
-        @media (prefers-reduced-motion: reduce) { .lang-btn { transition: none; } }
-        #health-banner {
-            padding: 0.6rem 1rem;
-            font-size: 0.875rem;
-            font-weight: 500;
-            text-align: center;
-            border-radius: 0.5rem;
-            margin-bottom: 1rem;
-            border: 1px solid transparent;
-        }
-        #health-banner.health-banner-reauth {
-            background-color: rgba(201, 123, 99, 0.12);
-            border-color: #c97b63;
-            color: #d99680;
-        }
-        #health-banner.health-banner-lost {
-            background-color: rgba(217, 162, 92, 0.12);
-            border-color: #d9a25c;
-            color: #e0b074;
-        }
-    </style>
 </head>
 <body class="min-h-screen bg-neutral-900 text-neutral-100">
     <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-neutral-900/95 flex items-center justify-center z-[1000]">
@@ -232,6 +144,18 @@
 
         <main class="app-main">
             <div class="flex items-center justify-end mb-3">{{block "topbar_widgets" .}}{{end}}
+                <div class="inline-flex rounded-md overflow-hidden border border-neutral-700 mr-2"
+                     role="group" aria-label="{{ t "a11y.theme" }}" id="theme-toggle">
+                    <button type="button" class="theme-btn" data-theme-value="light" aria-pressed="false" aria-label="{{ t "theme.light" }}" title="{{ t "theme.light" }}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                    </button>
+                    <button type="button" class="theme-btn" data-theme-value="system" aria-pressed="false" aria-label="{{ t "theme.system" }}" title="{{ t "theme.system" }}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                    </button>
+                    <button type="button" class="theme-btn" data-theme-value="dark" aria-pressed="false" aria-label="{{ t "theme.dark" }}" title="{{ t "theme.dark" }}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                    </button>
+                </div>
                 <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "a11y.language" }}">
                     <button type="button" class="lang-btn{{if eq lang "ru"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"ru"}' hx-swap="none" aria-pressed="{{if eq lang "ru"}}true{{else}}false{{end}}">RU</button>
                     <button type="button" class="lang-btn{{if eq lang "en"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"en"}' hx-swap="none" aria-pressed="{{if eq lang "en"}}true{{else}}false{{end}}">EN</button>
@@ -304,6 +228,76 @@
                     if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setOpen(false);
                 });
             }
+        })();
+    </script>
+
+    <script>
+        // Theme controller: click handling for the toggle, OS-preference
+        // follow-along while mode is "system", and persistence. The bootstrap
+        // script (top of <head>) already applied the resolved theme pre-paint;
+        // this wires interactivity for the rest of the page's lifetime.
+        (function () {
+            var KEY = 'miner-theme';
+            var root = document.documentElement;
+            var mql = window.matchMedia('(prefers-color-scheme: light)');
+            var metaTC = document.getElementById('meta-theme-color');
+            // Set by the bootstrap script (top of <head>), which always runs
+            // first — no literal fallback needed here.
+            var THEME_META = window.__MINER_THEME_META;
+            var toggle = document.getElementById('theme-toggle');
+            var buttons = toggle ? Array.prototype.slice.call(toggle.querySelectorAll('.theme-btn')) : [];
+
+            function resolve(mode) {
+                return mode === 'system' ? (mql.matches ? 'light' : 'dark') : mode;
+            }
+
+            function syncButtons(mode) {
+                buttons.forEach(function (btn) {
+                    var on = btn.getAttribute('data-theme-value') === mode;
+                    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                });
+            }
+
+            function apply(mode, resolved) {
+                root.setAttribute('data-theme', resolved);
+                root.setAttribute('data-theme-mode', mode);
+                if (metaTC) metaTC.setAttribute('content', THEME_META[resolved]);
+                syncButtons(mode);
+            }
+
+            function setMode(mode) {
+                if (mode !== 'dark' && mode !== 'light' && mode !== 'system') mode = 'system';
+                try { localStorage.setItem(KEY, mode); } catch (e) {}
+                var resolved = resolve(mode);
+                apply(mode, resolved);
+                document.dispatchEvent(new CustomEvent('miner:themechange', { detail: { mode: mode, theme: resolved } }));
+            }
+
+            buttons.forEach(function (btn) {
+                btn.addEventListener('click', function () { setMode(btn.getAttribute('data-theme-value')); });
+            });
+
+            // Only re-resolve on an OS-preference change when the stored mode is
+            // "system" — an explicit dark/light choice must never be overridden
+            // by the OS switching preference underneath it.
+            mql.addEventListener('change', function () {
+                if (root.getAttribute('data-theme-mode') === 'system') {
+                    var resolved = resolve('system');
+                    apply('system', resolved);
+                    document.dispatchEvent(new CustomEvent('miner:themechange', { detail: { mode: 'system', theme: resolved } }));
+                }
+            });
+
+            // Sync everything (aria-pressed AND meta theme-color) from
+            // whatever the bootstrap script already resolved pre-paint. The
+            // bootstrap script ran before <meta id="meta-theme-color"> existed
+            // in the DOM, so its own meta update was a no-op — this call is
+            // what actually syncs the meta tag on first load. data-theme/
+            // data-theme-mode are re-applied too, but that's a no-op (already
+            // correct); it does NOT dispatch miner:themechange, since nothing
+            // actually changed.
+            var initialMode = root.getAttribute('data-theme-mode') || 'system';
+            apply(initialMode, resolve(initialMode));
         })();
     </script>
 

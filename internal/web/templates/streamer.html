@@ -99,38 +99,76 @@
 <script>
     const streamerName = "{{.Streamer.Name}}";
     let chart = null;
-    
-    async function loadChart(startDate, endDate) {
-        let url = '/json/' + streamerName;
-        const params = new URLSearchParams();
-        if (startDate) params.set('startDate', startDate);
-        if (endDate) params.set('endDate', endDate);
-        if (params.toString()) url += '?' + params.toString();
-        
-        const response = await fetch(url);
-        const data = await response.json();
-        
-        const series = data.series || [];
-        const annotations = data.annotations || [];
-        
+    let lastChart = null; // { series, annotations } from the last successful load, for theme re-renders
+
+    // Palette tokens re-read from CSS custom properties on every call so this
+    // legacy chart follows a live theme switch like every other chart.
+    function chartPalette() {
+        const css = getComputedStyle(document.documentElement);
+        const tok = (name, fallback) => (css.getPropertyValue(name).trim() || fallback);
+        return {
+            label:    tok('--color-chart-label', ''),
+            grid:     tok('--color-chart-grid', ''),
+            accent:   tok('--color-interactive', ''),
+            inkDark:  tok('--chart-annotation-ink-dark', ''),
+            inkLight: tok('--chart-annotation-ink-light', ''),
+        };
+    }
+    function chartResolvedTheme() {
+        return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    }
+
+    // WCAG relative-luminance contrast, used to pick a readable label ink
+    // against the annotation's actual background: the marker colour here
+    // (a.borderColor) is persisted per-event in the database, not derived
+    // from the active theme, so a fixed ink token would go unreadable
+    // against some hues in one theme or the other — pick by contrast instead.
+    function srgbToLinear(c) {
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function relativeLuminance(hex) {
+        const h = hex.replace('#', '');
+        const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+        const r = srgbToLinear(parseInt(full.substr(0, 2), 16) / 255);
+        const g = srgbToLinear(parseInt(full.substr(2, 2), 16) / 255);
+        const b = srgbToLinear(parseInt(full.substr(4, 2), 16) / 255);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+    function contrastRatio(hexA, hexB) {
+        const la = relativeLuminance(hexA);
+        const lb = relativeLuminance(hexB);
+        const lighter = Math.max(la, lb);
+        const darker = Math.min(la, lb);
+        return (lighter + 0.05) / (darker + 0.05);
+    }
+    function readableInkFor(bgHex, P) {
+        try {
+            return contrastRatio(bgHex, P.inkLight) > contrastRatio(bgHex, P.inkDark) ? P.inkLight : P.inkDark;
+        } catch (e) {
+            return P.inkDark;
+        }
+    }
+
+    function buildChartOptions(series, annotations) {
+        const P = chartPalette();
         const chartData = series.map(p => ({
             x: p.x,
             y: p.y
         }));
-        
+
         const xAxisAnnotations = annotations.map(a => ({
             x: a.x,
             borderColor: a.borderColor,
             label: {
                 style: {
-                    color: '#000',
+                    color: readableInkFor(a.borderColor, P),
                     background: a.borderColor
                 },
                 text: a.label.text
             }
         }));
-        
-        const options = {
+
+        return {
             series: [{
                 name: t('js.streamer.points'),
                 data: chartData
@@ -139,7 +177,7 @@
                 type: 'area',
                 height: 400,
                 background: 'transparent',
-                foreColor: '#adadb8',
+                foreColor: P.label,
                 toolbar: {
                     show: true,
                     tools: {
@@ -158,7 +196,7 @@
                     speed: 300
                 }
             },
-            colors: ['#9146ff'],
+            colors: [P.accent],
             fill: {
                 type: 'gradient',
                 gradient: {
@@ -189,7 +227,7 @@
                 }
             },
             tooltip: {
-                theme: 'dark',
+                theme: chartResolvedTheme(),
                 x: {
                     format: 'MMM dd, yyyy HH:mm'
                 },
@@ -208,11 +246,28 @@
                 xaxis: xAxisAnnotations
             },
             grid: {
-                borderColor: '#303033',
+                borderColor: P.grid,
                 strokeDashArray: 4
             }
         };
-        
+    }
+
+    async function loadChart(startDate, endDate) {
+        let url = '/json/' + streamerName;
+        const params = new URLSearchParams();
+        if (startDate) params.set('startDate', startDate);
+        if (endDate) params.set('endDate', endDate);
+        if (params.toString()) url += '?' + params.toString();
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        const series = data.series || [];
+        const annotations = data.annotations || [];
+        lastChart = { series, annotations };
+
+        const options = buildChartOptions(series, annotations);
+
         if (chart) {
             chart.updateOptions(options);
         } else {
@@ -220,7 +275,13 @@
             chart.render();
         }
     }
-    
+
+    // Follow live theme switches: re-derive options from the last-loaded
+    // series/annotations and update the EXISTING chart instance in place.
+    document.addEventListener('miner:themechange', function () {
+        if (chart && lastChart) chart.updateOptions(buildChartOptions(lastChart.series, lastChart.annotations), false, false);
+    });
+
     function formatLocalDate(date) {
         return date.toLocaleDateString('en-CA');
     }
@@ -350,7 +411,7 @@
     }
     
     function renderChatMessage(msg, searchQuery = '') {
-        const color = msg.color || '#9146ff';
+        const color = msg.color || 'var(--color-interactive)';
         const displayName = msg.display_name || msg.username;
         let messageHtml = parseEmotes(msg.message, msg.emotes);
         
@@ -497,10 +558,12 @@
 
         function showStatus(msg, ok) {
             statusEl.textContent = msg;
-            // Inline colors so the status reads correctly even if the CSS
-            // wasn't rebuilt to include these Tailwind color utilities.
-            statusEl.style.background = ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
-            statusEl.style.color = ok ? '#86efac' : '#fca5a5';
+            // Token-driven inline colors so the status stays theme-correct
+            // (var() resolves live against the active data-theme).
+            statusEl.style.background = ok
+                ? 'color-mix(in srgb, var(--color-status-success) 15%, transparent)'
+                : 'color-mix(in srgb, var(--color-status-danger) 15%, transparent)';
+            statusEl.style.color = ok ? 'var(--color-status-success)' : 'var(--color-status-danger)';
             statusEl.classList.remove('hidden');
         }
         function clearStatus() { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
