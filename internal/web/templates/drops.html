@@ -12,13 +12,13 @@
 <p class="text-neutral-400 text-sm mb-4">{{ t "drops.subtitle" }}</p>
 
 <div class="flex gap-1 border-b border-neutral-700 mb-5" role="tablist" aria-label="{{ t "drops.tablist_aria" }}">
-    <button type="button" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true">{{ t "drops.tab.current" }}</button>
-    <button type="button" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false">{{ t "drops.tab.upcoming" }}</button>
-    <button type="button" class="drops-tab" data-tab="past" role="tab" aria-selected="false">{{ t "drops.tab.past" }}</button>
+    <button type="button" id="drops-tab-current" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true" aria-controls="tab-current" tabindex="0">{{ t "drops.tab.current" }}</button>
+    <button type="button" id="drops-tab-upcoming" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false" aria-controls="tab-upcoming" tabindex="-1">{{ t "drops.tab.upcoming" }}</button>
+    <button type="button" id="drops-tab-past" class="drops-tab" data-tab="past" role="tab" aria-selected="false" aria-controls="tab-past" tabindex="-1">{{ t "drops.tab.past" }}</button>
 </div>
 
 <!-- Current -->
-<div id="tab-current" class="drops-panel">
+<div id="tab-current" class="drops-panel" role="tabpanel" aria-labelledby="drops-tab-current" tabindex="-1">
     <form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
           class="flex items-center gap-2 text-sm mb-6">
         <label class="text-neutral-400">{{ t "drops.policy.label" }}</label>
@@ -67,7 +67,7 @@
 </div>
 
 <!-- Upcoming -->
-<div id="tab-upcoming" class="drops-panel hidden">
+<div id="tab-upcoming" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-upcoming" tabindex="-1">
     <p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
     <!--
         Re-reads the backend snapshot every minute so a new campaign surfaced by a
@@ -82,7 +82,7 @@
 </div>
 
 <!-- Past -->
-<div id="tab-past" class="drops-panel hidden">
+<div id="tab-past" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-past" tabindex="-1">
     <p class="text-neutral-400 text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
     <section id="drops-past" hx-get="/api/drops/past" hx-trigger="load" hx-swap="innerHTML">
         <div class="animate-pulse text-neutral-400">{{ t "drops.loading.past" }}</div>
@@ -92,65 +92,153 @@
 
 {{define "scripts"}}
 <script>
-    // Tab switching for Current / Upcoming / Past. Each panel's content is
-    // htmx-loaded once on first reveal (hx-trigger="load" fires when the section
-    // enters the DOM, which it already is; the panels just toggle visibility).
+    // __dropsTabs owns tab switching (roving tabindex + arrow-key navigation)
+    // and the drop-card modal dialogs (open/close + focus restore to the
+    // opening card). Single IIFE, re-init guarded: htmx only ever swaps the
+    // panel CONTENTS (#drops-queue, #drops-upcoming, #drops-past), never the
+    // tab buttons or panel wrappers themselves, so these listeners are
+    // attached exactly once for the page's lifetime.
     (function () {
+        if (window.__dropsTabs) return;
+        window.__dropsTabs = true;
+
         const tabs = Array.from(document.querySelectorAll('.drops-tab'));
         const panels = {
             current: document.getElementById('tab-current'),
             upcoming: document.getElementById('tab-upcoming'),
             past: document.getElementById('tab-past'),
         };
-        tabs.forEach(function (tab) {
-            tab.addEventListener('click', function () {
-                const name = tab.dataset.tab;
-                tabs.forEach(function (t) {
-                    const active = t === tab;
-                    t.classList.toggle('is-active', active);
-                    t.setAttribute('aria-selected', active ? 'true' : 'false');
-                });
-                Object.keys(panels).forEach(function (key) {
-                    if (panels[key]) panels[key].classList.toggle('hidden', key !== name);
-                });
+        const tablistEl = tabs.length ? tabs[0].closest('[role="tablist"]') : null;
+
+        function activate(tab, opts) {
+            const name = tab.dataset.tab;
+            tabs.forEach(function (t) {
+                const active = t === tab;
+                t.classList.toggle('is-active', active);
+                t.setAttribute('aria-selected', active ? 'true' : 'false');
+                t.tabIndex = active ? 0 : -1;
             });
+            Object.keys(panels).forEach(function (key) {
+                if (panels[key]) panels[key].classList.toggle('hidden', key !== name);
+            });
+            if (opts && opts.focus) tab.focus();
+        }
+
+        tabs.forEach(function (tab) {
+            tab.addEventListener('click', function () { activate(tab); });
         });
+
+        if (tablistEl) {
+            tablistEl.addEventListener('keydown', function (e) {
+                const idx = tabs.indexOf(document.activeElement);
+                if (idx === -1) return;
+                let next = null;
+                switch (e.key) {
+                    case 'ArrowRight': next = tabs[(idx + 1) % tabs.length]; break;
+                    case 'ArrowLeft': next = tabs[(idx - 1 + tabs.length) % tabs.length]; break;
+                    case 'Home': next = tabs[0]; break;
+                    case 'End': next = tabs[tabs.length - 1]; break;
+                    default: return;
+                }
+                e.preventDefault();
+                activate(next, { focus: true });
+            });
+        }
+
+        // Delegated so it keeps working after htmx swaps the campaign list on
+        // auto-refresh (the campaign cards and their <dialog> modals are
+        // re-created, but these listeners live on document and never get
+        // replaced). The opener's data-drop-modal KEY is stored (not just the
+        // node reference): the 30s auto-refresh can replace the opening card
+        // with a fresh DOM node while the dialog is still open, detaching the
+        // stored reference, so close-time focus restore re-looks-up the live
+        // card by that key first and only falls back to the stored node.
+        let dialogOpenerKey = null;
+        let dialogOpenerNode = null;
+
+        function openDropModal(id, opener) {
+            const dialog = document.getElementById(id);
+            if (dialog && typeof dialog.showModal === 'function') {
+                dialogOpenerNode = opener || null;
+                dialogOpenerKey = opener ? opener.getAttribute('data-drop-modal') : null;
+                dialog.showModal();
+            }
+        }
+
+        document.addEventListener('click', (e) => {
+            const closeBtn = e.target.closest('[data-drop-modal-close]');
+            if (closeBtn) {
+                const dialog = closeBtn.closest('dialog');
+                if (dialog) dialog.close();
+                return;
+            }
+
+            // Click on the dialog element itself (its backdrop area) closes it.
+            if (e.target.tagName === 'DIALOG') {
+                e.target.close();
+                return;
+            }
+
+            const trigger = e.target.closest('[data-drop-modal]');
+            if (trigger) openDropModal(trigger.dataset.dropModal, trigger);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const trigger = e.target.closest('[data-drop-modal]');
+            if (trigger) {
+                e.preventDefault();
+                openDropModal(trigger.dataset.dropModal, trigger);
+            }
+        });
+
+        // The native <dialog> "close" event fires for Esc, backdrop click, and
+        // the explicit close button alike; it does not bubble, so this listener
+        // is registered in the capture phase on document.
+        document.addEventListener('close', function (e) {
+            if (e.target && e.target.tagName === 'DIALOG' && e.target.id && e.target.id.indexOf('drop-modal-') === 0) {
+                let target = null;
+                if (dialogOpenerKey) {
+                    target = document.querySelector('[data-drop-modal="' + dialogOpenerKey + '"]');
+                }
+                if (!target && dialogOpenerNode && document.body.contains(dialogOpenerNode)) {
+                    target = dialogOpenerNode;
+                }
+                if (target && typeof target.focus === 'function') target.focus();
+                dialogOpenerKey = null;
+                dialogOpenerNode = null;
+            }
+        }, true);
+
+        // "Ends in …" humanization (FIX-6): the server renders the honest raw
+        // Go-duration fallback text (e.g. "ends in 30h0m0s") directly in
+        // data-ends-in's owning span, so a parse failure just leaves that
+        // text untouched. Re-applied after every #drops-queue swap since the
+        // 30s auto-refresh replaces those spans with fresh ones.
+        function parseEndsIn(raw) {
+            const m = /^(?:(\d+)h)?(\d+)m/.exec(raw || '');
+            if (!m) return null;
+            return { h: m[1] ? parseInt(m[1], 10) : 0, m: parseInt(m[2], 10) };
+        }
+
+        function humanizeEndsIn(el) {
+            const parsed = parseEndsIn(el.getAttribute('data-ends-in'));
+            if (!parsed) return;
+            el.textContent = parsed.h > 0
+                ? window.t('js.drops.ends_in_hm', { h: parsed.h, m: parsed.m })
+                : window.t('js.drops.ends_in_m', { m: parsed.m });
+        }
+
+        function humanizeAllEndsIn() {
+            document.querySelectorAll('.js-ends-in').forEach(humanizeEndsIn);
+        }
+
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (e.target && e.target.id === 'drops-queue') humanizeAllEndsIn();
+        });
+
+        humanizeAllEndsIn();
     })();
-
-    // Delegated so it keeps working after htmx swaps the campaign list on
-    // auto-refresh (the campaign cards and their <dialog> modals are re-created,
-    // but these listeners live on document and never get replaced).
-    function openDropModal(id) {
-        const dialog = document.getElementById(id);
-        if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
-    }
-
-    document.addEventListener('click', (e) => {
-        const closeBtn = e.target.closest('[data-drop-modal-close]');
-        if (closeBtn) {
-            const dialog = closeBtn.closest('dialog');
-            if (dialog) dialog.close();
-            return;
-        }
-
-        // Click on the dialog element itself (its backdrop area) closes it.
-        if (e.target.tagName === 'DIALOG') {
-            e.target.close();
-            return;
-        }
-
-        const trigger = e.target.closest('[data-drop-modal]');
-        if (trigger) openDropModal(trigger.dataset.dropModal);
-    });
-
-    document.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        const trigger = e.target.closest('[data-drop-modal]');
-        if (trigger) {
-            e.preventDefault();
-            openDropModal(trigger.dataset.dropModal);
-        }
-    });
 
     // Manual "Sync Drops now": POSTs to the cooldown-gated endpoint and reports
     // the outcome. The button briefly disables itself; the campaign list's own

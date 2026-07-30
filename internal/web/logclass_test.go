@@ -222,52 +222,68 @@ func TestEmojiCoverage(t *testing.T) {
 	}
 }
 
-// TestLogCSSCoverage reads the embedded logs.html and asserts every semantic
-// class the classifier can return is styled there, that the palette avoids
-// gray for event colors, and that the emoji span has a stable width and no
-// animation.
+// TestLogCSSCoverage reads the embedded input.css (F3 moved the .log-*
+// palette out of logs.html's inline <style> into input.css, alongside every
+// other page's styles — see input.css's "Logs page" section) and asserts
+// every semantic class the classifier can return is styled there, that the
+// palette avoids gray for event colors, and that the emoji span has a stable
+// width and no animation. logs.html itself is checked separately for having
+// shed its old inline <style> block (TestLogsPageHasNoInlineLogStyle).
 func TestLogCSSCoverage(t *testing.T) {
-	raw, err := templatesFS.ReadFile("templates/logs.html")
-	if err != nil {
-		t.Fatalf("read logs.html: %v", err)
-	}
-	css := string(raw)
+	css := readEmbeddedStatic(t, "static/css/input.css")
 
 	for _, class := range allLogLineClasses() {
 		if !strings.Contains(css, "."+class+" ") && !strings.Contains(css, "."+class+" {") {
-			t.Errorf("class %q returned by the classifier is not styled in logs.html", class)
+			t.Errorf("class %q returned by the classifier is not styled in input.css", class)
 		}
 	}
 
-	for _, needle := range []string{".log-emoji", "width: 1.5em", "min-width: 1.5em", "aria-hidden"} {
-		switch needle {
-		case "aria-hidden":
-			// aria-hidden lives in the partial, checked in the render test.
-		default:
-			if !strings.Contains(css, needle) {
-				t.Errorf("logs.html missing %q", needle)
-			}
+	for _, needle := range []string{".log-emoji", "width: 1.5em", "min-width: 1.5em"} {
+		if !strings.Contains(css, needle) {
+			t.Errorf("input.css missing %q", needle)
 		}
 	}
+
+	// Scoped to the "Logs page" CSS so these checks don't flag unrelated
+	// rules elsewhere in input.css (e.g. the skeleton/ticker animations, or
+	// the neutral scale used by non-log components). There are two ranges:
+	// the F1 palette (.log-* colors) and the F3 addition (.log-scroll,
+	// .log-view, the filter toolbar, the jump-to-new-lines button) — F3
+	// appended its logs CSS near the end of the file, well past the F1
+	// section, so both must be located and scanned or a regression in the
+	// F3-only rules (e.g. a stray transition or a neutral-scale color)
+	// would go undetected.
+	f1Start := strings.Index(css, "Logs page: semantic log palette")
+	f1End := strings.Index(css, "F2 «Overview delta»")
+	if f1Start < 0 || f1End < 0 || f1End <= f1Start {
+		t.Fatal("could not locate the F1 Logs page CSS section in input.css")
+	}
+	f3Start := strings.Index(css, "Logs page: scroll container + monospace log view")
+	f3End := strings.Index(css, "Health Center: responsive signal-card grid")
+	if f3Start < 0 || f3End < 0 || f3End <= f3Start {
+		t.Fatal("could not locate the F3 Logs page CSS section in input.css")
+	}
+	section := css[f1Start:f1End] + "\n" + css[f3Start:f3End]
 
 	for _, banned := range []string{"animation", "blink", "@keyframes"} {
-		if strings.Contains(css, banned) {
-			t.Errorf("logs.html must not animate log lines, found %q", banned)
+		if strings.Contains(section, banned) {
+			t.Errorf("input.css Logs page section must not animate log lines, found %q", banned)
 		}
 	}
-
-	// Event colors must come from the bright palette variables, not the gray
-	// neutral scale.
-	styleStart := strings.Index(css, "<style>")
-	styleEnd := strings.Index(css, "</style>")
-	if styleStart < 0 || styleEnd < 0 {
-		t.Fatal("logs.html lost its <style> block")
-	}
-	style := css[styleStart:styleEnd]
 	for _, banned := range []string{"--color-neutral-", "gray", "grey"} {
-		if strings.Contains(style, banned) {
-			t.Errorf("logs.html style block uses gray/neutral color %q for log lines", banned)
+		if strings.Contains(section, banned) {
+			t.Errorf("input.css Logs page section uses gray/neutral color %q for log lines", banned)
 		}
+	}
+}
+
+// TestLogsPageHasNoInlineLogStyle guards the F3 dedup: logs.html must not
+// re-duplicate the .log-* palette (or the .log-scroll/.log-view layout rules)
+// that now live solely in input.css.
+func TestLogsPageHasNoInlineLogStyle(t *testing.T) {
+	logs := readEmbeddedTemplate(t, "templates/logs.html")
+	if strings.Contains(logs, "<style>") {
+		t.Error("logs.html must not carry its own inline <style> block anymore (F3 moved it to input.css)")
 	}
 }
 

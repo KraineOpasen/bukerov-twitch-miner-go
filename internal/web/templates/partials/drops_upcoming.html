@@ -42,7 +42,7 @@
                     <h3 class="text-neutral-100 font-semibold truncate">{{.Name}}</h3>
                     {{if .GameName}}<div class="text-xs text-neutral-400 truncate">{{.GameName}}</div>{{end}}
                 </div>
-                <span class="status-pill status-pill-progress flex-shrink-0" title="{{ t "drops.badge.upcoming_title" }}">{{ t "drops.badge.upcoming" }}</span>
+                <span class="status-pill status-pill-progress flex-shrink-0" title="{{ t "drops.badge.upcoming_title" }}"><span aria-hidden="true">⏳ </span>{{ t "drops.badge.upcoming" }}</span>
             </div>
 
             <div class="mt-2 text-sm text-neutral-300 space-y-1">

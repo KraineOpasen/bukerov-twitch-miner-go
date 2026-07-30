@@ -1,90 +1,6 @@
 {{define "title"}}{{ t "logs.heading" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<style>
-    .log-scroll { max-height: 72vh; overflow: auto; }
-    .log-view {
-        font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5;
-        /* The --log-* semantic palette (13 hues, both themes) lives in
-           input.css now; every .log-* class below only references it. */
-    }
-    .log-line {
-        display: block; white-space: pre-wrap; word-break: break-word;
-        padding: 0.02rem 0 0.02rem 0.4rem;
-        border-left: 2px solid currentColor;
-    }
-    /* The emoji is decorative (aria-hidden) and excluded from selection so
-       copied text stays the untouched log line. Fixed width keeps timestamps
-       vertically aligned whether or not a line carries an icon. */
-    .log-emoji {
-        display: inline-block;
-        width: 1.5em;
-        min-width: 1.5em;
-        text-align: center;
-        margin-right: 0.35rem;
-        font-size: 1em;
-        user-select: none;
-    }
-    .log-text { white-space: pre-wrap; }
-
-    /* Levels + fallback. */
-    .log-info { color: var(--log-info-blue); }
-    .log-warn { color: var(--log-amber); }
-    .log-error { color: var(--log-red); }
-
-    /* Startup / service / auth. */
-    .log-startup { color: var(--log-ultramarine); }
-    .log-service { color: var(--log-cyan); }
-    .log-auth { color: var(--log-turquoise); }
-    .log-auth-success { color: var(--log-bright-green); }
-
-    /* Streamer / connections. */
-    .log-streamer-online { color: var(--log-bright-green); }
-    .log-streamer-offline { color: var(--log-red); }
-    .log-connected { color: var(--log-turquoise); }
-    .log-chat { color: var(--log-violet); }
-    .log-reconnect { color: var(--log-orange); }
-
-    /* Points / gains. */
-    .log-points-watch { color: var(--log-yellow); }
-    .log-points-streak { color: var(--log-lime); }
-    .log-points-claim { color: var(--log-gold); }
-    .log-points-raid { color: var(--log-orange); }
-    .log-points-gain { color: var(--log-bright-green); }
-    .log-bonus { color: var(--log-gold); }
-
-    /* Predictions / bets. */
-    .log-bet-win { color: var(--log-bright-green); }
-    .log-bet-lose { color: var(--log-red); }
-    .log-bet-refund { color: var(--log-turquoise); }
-    .log-bet-filter { color: var(--log-magenta); }
-    .log-bet-general { color: var(--log-ultramarine); }
-    .log-bet-failed { color: var(--log-red); }
-    .log-bet-gated { color: var(--log-orange); }
-
-    /* Watch lifecycle. */
-    .log-watch-assigned { color: var(--log-ultramarine); }
-    .log-watch-released { color: var(--log-magenta); }
-    .log-watch-changed { color: var(--log-violet); }
-    .log-rotation { color: var(--log-turquoise); }
-    .log-pursuing-streak { color: var(--log-lime); }
-
-    /* Drops / discovery. */
-    .log-drops { color: var(--log-turquoise); }
-    .log-drop-skipped { color: var(--log-orange); }
-    .log-drop-complete { color: var(--log-bright-green); }
-    .log-discovery { color: var(--log-cyan); }
-
-    /* Auto-update. */
-    .log-update { color: var(--log-cyan); }
-    .log-update-success { color: var(--log-bright-green); }
-
-    /* Settings / health / database. */
-    .log-settings { color: var(--log-violet); }
-    .log-health-ok { color: var(--log-bright-green); }
-    .log-database { color: var(--log-ultramarine); }
-</style>
-
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "logs.heading" }}</h1>
     <div class="flex items-center gap-2">
@@ -94,27 +10,295 @@
 </div>
 <p class="text-neutral-400 text-sm mb-6">{{ t "logs.description" }}</p>
 
-<div class="card">
-    <div id="logs-scroll" class="log-scroll log-view">
+<div class="logs-toolbar" role="toolbar" aria-label="{{ t "logs.filter.toolbar_aria" }}">
+    <div class="logs-toolbar-group">
+        <label class="logs-toolbar-label" for="logs-filter-level">{{ t "logs.filter.level" }}</label>
+        <select id="logs-filter-level" class="input-field">
+            <option value="all">{{ t "logs.filter.all_levels" }}</option>
+            <option value="info">{{ t "logs.filter.info" }}</option>
+            <option value="warning">{{ t "logs.filter.warning" }}</option>
+            <option value="error">{{ t "logs.filter.error" }}</option>
+        </select>
+    </div>
+
+    <div class="logs-toolbar-group">
+        <label class="logs-toolbar-label" for="logs-filter-subsystem">{{ t "logs.filter.subsystem" }}</label>
+        <select id="logs-filter-subsystem" class="input-field">
+            <option value="all">{{ t "logs.filter.all_subsystems" }}</option>
+            <option value="service">{{ t "logs.filter.sub.service" }}</option>
+            <option value="auth">{{ t "logs.filter.sub.auth" }}</option>
+            <option value="stream">{{ t "logs.filter.sub.stream" }}</option>
+            <option value="points">{{ t "logs.filter.sub.points" }}</option>
+            <option value="predictions">{{ t "logs.filter.sub.predictions" }}</option>
+            <option value="watch">{{ t "logs.filter.sub.watch" }}</option>
+            <option value="drops">{{ t "logs.filter.sub.drops" }}</option>
+            <option value="updater">{{ t "logs.filter.sub.updater" }}</option>
+            <option value="system">{{ t "logs.filter.sub.system" }}</option>
+            <option value="other">{{ t "logs.filter.sub.other" }}</option>
+        </select>
+    </div>
+
+    <div class="logs-toolbar-group">
+        <input type="search" id="logs-filter-search" class="input-field logs-search-input" placeholder="{{ t "logs.filter.search_ph" }}" aria-label="{{ t "logs.filter.search_ph" }}">
+    </div>
+
+    <label class="logs-toolbar-group text-sm text-neutral-300">
+        <input type="checkbox" id="logs-filter-reconnect" class="w-4 h-4 accent-purple-600" checked>
+        {{ t "logs.filter.reconnect" }}
+    </label>
+
+    <div class="logs-toolbar-group">
+        <button type="button" id="logs-copy-btn" class="btn-secondary text-sm">{{ t "logs.copy_visible" }}</button>
+        <span id="logs-copy-status" class="text-xs text-neutral-500" role="status"></span>
+    </div>
+
+    <!-- Purely visual: rewrites on every keystroke and every 10s poll, so it
+         is NOT a live region (that would be announcement spam). The
+         no-match TRANSITION is announced separately by #logs-no-match. -->
+    <span id="logs-count" class="logs-count"></span>
+    <span id="logs-no-match" class="visually-hidden" role="status"></span>
+</div>
+
+<div class="card relative">
+    <div id="logs-scroll" class="log-scroll log-view" tabindex="0" role="region" aria-label="{{ t "logs.region_aria" }}">
         <div id="logs-lines" hx-get="/api/logs" hx-trigger="every 10s" hx-swap="innerHTML">
             {{template "logs_lines" .}}
         </div>
     </div>
+    <button type="button" id="logs-new-indicator" class="logs-jump-btn hidden">{{ t "logs.jump_new" }}</button>
 </div>
 {{end}}
 
 {{define "scripts"}}
 <script>
-    // Keep the log view pinned to the newest line on load and after each refresh.
+    // __logsCtl owns sticky autoscroll + the filter toolbar (level/subsystem/
+    // search/reconnect), the "jump to new lines" indicator, and copy-visible.
+    // Single IIFE, re-init guarded, so an accidental double-include (or a future
+    // htmx swap of the whole page shell) can never attach a second set of
+    // listeners/timers.
     (function () {
-        function toBottom() {
-            const el = document.getElementById('logs-scroll');
-            if (el) el.scrollTop = el.scrollHeight;
+        if (window.__logsCtl) return;
+        window.__logsCtl = true;
+
+        const scrollEl = document.getElementById('logs-scroll');
+        const linesEl = document.getElementById('logs-lines');
+        const indicator = document.getElementById('logs-new-indicator');
+        const levelSel = document.getElementById('logs-filter-level');
+        const subSel = document.getElementById('logs-filter-subsystem');
+        const searchInput = document.getElementById('logs-filter-search');
+        const reconnectToggle = document.getElementById('logs-filter-reconnect');
+        const copyBtn = document.getElementById('logs-copy-btn');
+        const copyStatus = document.getElementById('logs-copy-status');
+        const countEl = document.getElementById('logs-count');
+        const noMatchEl = document.getElementById('logs-no-match');
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        if (!scrollEl || !linesEl) return;
+
+        // class -> subsystem. Deterministic, test-covered table (see
+        // f3_pages_test.go): every class allLogLineClasses() can emit must
+        // appear here exactly once, so no log line silently escapes every
+        // subsystem filter bucket.
+        const SUBSYS = {
+            'log-error': 'other', 'log-warn': 'other', 'log-info': 'other',
+            'log-startup': 'service', 'log-service': 'service',
+            'log-auth': 'auth', 'log-auth-success': 'auth',
+            'log-streamer-online': 'stream', 'log-streamer-offline': 'stream',
+            'log-connected': 'stream', 'log-chat': 'stream', 'log-reconnect': 'stream',
+            'log-points-watch': 'points', 'log-points-streak': 'points', 'log-points-claim': 'points',
+            'log-points-raid': 'points', 'log-points-gain': 'points', 'log-bonus': 'points',
+            'log-bet-win': 'predictions', 'log-bet-lose': 'predictions', 'log-bet-refund': 'predictions',
+            'log-bet-filter': 'predictions', 'log-bet-general': 'predictions', 'log-bet-failed': 'predictions',
+            'log-bet-gated': 'predictions',
+            'log-watch-assigned': 'watch', 'log-watch-released': 'watch', 'log-watch-changed': 'watch',
+            'log-rotation': 'watch', 'log-pursuing-streak': 'watch',
+            'log-drops': 'drops', 'log-drop-skipped': 'drops', 'log-drop-complete': 'drops', 'log-discovery': 'drops',
+            'log-update': 'updater', 'log-update-success': 'updater',
+            'log-settings': 'system', 'log-health-ok': 'system', 'log-database': 'system',
+        };
+
+        function levelOf(cls) {
+            if (cls === 'log-error') return 'error';
+            if (cls === 'log-warn') return 'warning';
+            return 'info';
         }
-        toBottom();
-        document.body.addEventListener('htmx:afterSwap', function (e) {
-            if (e.target && e.target.id === 'logs-lines') toBottom();
+        function subsystemOf(cls) {
+            return SUBSYS[cls] || 'other';
+        }
+        // One line = one authoritative class: the template renders
+        // class="log-line <semantic-class>", so the first class after
+        // "log-line" is the line's classification.
+        function semanticClass(el) {
+            const parts = (el.className || '').trim().split(/\s+/);
+            return parts.length > 1 ? parts[1] : parts[0];
+        }
+
+        // Geometry-derived pin threshold, computed once at init: 2 line-heights
+        // (min 32px) so a swap that adds one or two trailing lines while the
+        // user sits at the bottom doesn't spuriously unpin them.
+        let threshold = 32;
+        (function computeThreshold() {
+            const lh = parseFloat(getComputedStyle(scrollEl).lineHeight);
+            if (!isNaN(lh)) threshold = Math.max(32, 2 * lh);
+        })();
+
+        let pinned = true;
+
+        function isPinned() {
+            return (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight) <= threshold;
+        }
+
+        function toBottom(smooth) {
+            scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: smooth && !reducedMotion ? 'smooth' : 'auto' });
+        }
+
+        function showIndicator() { if (indicator) indicator.classList.remove('hidden'); }
+        function hideIndicator() { if (indicator) indicator.classList.add('hidden'); }
+
+        let lastCountText = null;
+        function setCount(text) {
+            if (!countEl || lastCountText === text) return;
+            lastCountText = text;
+            countEl.textContent = text;
+        }
+
+        // #logs-no-match is the ONLY announced region for the filter counts:
+        // it writes just once on the transition into "no lines match" and
+        // once more on the transition back out, so retyping within the same
+        // no-match state (or every 10s poll while still no-match) never
+        // re-announces. #logs-count itself is purely visual (no aria-live).
+        let noMatchActive = false;
+        function setNoMatchAnnouncement(active) {
+            if (!noMatchEl || noMatchActive === active) return;
+            noMatchActive = active;
+            noMatchEl.textContent = active ? window.t('js.logs.no_match') : '';
+        }
+
+        // Content signature (line count + last line's text) so an unpinned
+        // afterSwap only raises the "jump to new lines" indicator when the
+        // tail actually changed, not on every identical 10s poll response.
+        let lastSignature = null;
+        function computeSignature() {
+            const lineEls = linesEl.querySelectorAll('.log-line');
+            const total = lineEls.length;
+            let lastText = '';
+            if (total > 0) {
+                const lastTextEl = lineEls[total - 1].querySelector('.log-text');
+                lastText = lastTextEl ? lastTextEl.textContent : '';
+            }
+            return total + '|' + lastText;
+        }
+
+        function applyFilters() {
+            const level = levelSel ? levelSel.value : 'all';
+            const sub = subSel ? subSel.value : 'all';
+            const q = (searchInput ? searchInput.value : '').trim().toLowerCase();
+            const showReconnect = reconnectToggle ? reconnectToggle.checked : true;
+
+            const lineEls = linesEl.querySelectorAll('.log-line');
+            let shown = 0;
+            lineEls.forEach(function (el) {
+                const cls = semanticClass(el);
+                let visible = true;
+                if (level !== 'all' && levelOf(cls) !== level) visible = false;
+                if (visible && sub !== 'all' && subsystemOf(cls) !== sub) visible = false;
+                if (visible && !showReconnect && cls === 'log-reconnect') visible = false;
+                if (visible && q) {
+                    const textEl = el.querySelector('.log-text');
+                    const text = textEl ? textEl.textContent.toLowerCase() : '';
+                    if (text.indexOf(q) === -1) visible = false;
+                }
+                if (visible) {
+                    el.removeAttribute('hidden');
+                    shown++;
+                } else {
+                    el.setAttribute('hidden', '');
+                }
+            });
+
+            const total = lineEls.length;
+            if (total > 0 && shown === 0) {
+                setCount(window.t('js.logs.no_match'));
+                setNoMatchAnnouncement(true);
+            } else {
+                setCount(window.t('js.logs.count', { shown: shown, total: total }));
+                setNoMatchAnnouncement(false);
+            }
+        }
+
+        function onFilterChange() {
+            applyFilters();
+            if (pinned) toBottom(false);
+        }
+
+        if (levelSel) levelSel.addEventListener('change', onFilterChange);
+        if (subSel) subSel.addEventListener('change', onFilterChange);
+        if (searchInput) searchInput.addEventListener('input', onFilterChange);
+        if (reconnectToggle) reconnectToggle.addEventListener('change', onFilterChange);
+
+        if (indicator) {
+            indicator.addEventListener('click', function () {
+                pinned = true;
+                toBottom(true);
+                hideIndicator();
+            });
+        }
+
+        scrollEl.addEventListener('scroll', function () {
+            pinned = isPinned();
+            if (pinned) hideIndicator();
         });
+
+        // One htmx:afterSwap listener, filtered to the log-lines swap target.
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (!e.target || e.target.id !== 'logs-lines') return;
+            applyFilters();
+            const sig = computeSignature();
+            const changed = sig !== lastSignature;
+            lastSignature = sig;
+            if (pinned) {
+                toBottom(false);
+                hideIndicator();
+            } else if (changed) {
+                showIndicator();
+            }
+        });
+
+        // Single owned timer: clearTimeout before every re-arm so a rapid
+        // double-click (or a retry after a failure) never stacks a second
+        // auto-clear.
+        let copyStatusTimer = null;
+        function setCopyStatus(text) {
+            if (!copyStatus) return;
+            copyStatus.textContent = text;
+            if (copyStatusTimer) clearTimeout(copyStatusTimer);
+            copyStatusTimer = setTimeout(function () {
+                copyStatus.textContent = '';
+                copyStatusTimer = null;
+            }, 4000);
+        }
+
+        if (copyBtn) {
+            copyBtn.addEventListener('click', async function () {
+                // Clear first (not through setCopyStatus, so an empty
+                // interim value never starts the auto-clear timer) so a
+                // repeated, IDENTICAL result still re-announces in the
+                // role=status region instead of being a same-text no-op.
+                if (copyStatus) copyStatus.textContent = '';
+                const textEls = linesEl.querySelectorAll('.log-line:not([hidden]) .log-text');
+                const text = Array.prototype.map.call(textEls, function (el) { return el.textContent; }).join('\n');
+                try {
+                    await navigator.clipboard.writeText(text);
+                    setCopyStatus(window.t('js.logs.copy_ok'));
+                } catch (err) {
+                    setCopyStatus(window.t('js.logs.copy_failed'));
+                }
+            });
+        }
+
+        lastSignature = computeSignature();
+        applyFilters();
+        toBottom(false);
     })();
 </script>
 {{end}}

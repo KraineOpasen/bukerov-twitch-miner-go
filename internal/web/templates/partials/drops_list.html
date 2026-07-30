@@ -31,11 +31,11 @@
                     <span class="drop-exclusive-badge" title="{{ t "drops.badge.channel_only_title" }}">{{ t "drops.badge.channel_only" }}</span>
                     {{end}}
                     {{if $c.Upcoming}}
-                    <span class="status-pill status-pill-progress" title="{{ t "drops.badge.upcoming_title" }}">{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}{{ t "drops.tab.upcoming" }}{{end}}</span>
+                    <span class="status-pill status-pill-progress" title="{{ t "drops.badge.upcoming_title" }}"><span aria-hidden="true">⏳ </span>{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}{{ t "drops.tab.upcoming" }}{{end}}</span>
                     {{else if $c.Claimed}}
-                    <span class="status-pill status-pill-claimed">{{$c.StatusLabel}}</span>
+                    <span class="status-pill status-pill-claimed"><span aria-hidden="true">✓ </span>{{$c.StatusLabel}}</span>
                     {{else}}
-                    <span class="status-pill status-pill-progress">{{$c.StatusLabel}}</span>
+                    <span class="status-pill status-pill-progress"><span aria-hidden="true">● </span>{{$c.StatusLabel}}</span>
                     {{end}}
                 </div>
             </div>
@@ -47,9 +47,9 @@
             {{end}}
 
             <div class="mt-3">
-                <div class="flex justify-between text-xs text-neutral-400 mb-1">
-                    <span>{{ t "drops.progress.campaign" }}</span>
-                    <span>{{$c.OverallPercent}}%</span>
+                <div class="flex items-end justify-between mb-1">
+                    <span class="text-xs text-neutral-400">{{ t "drops.progress.campaign" }}</span>
+                    <span class="num text-xl font-bold leading-none {{if $c.Claimed}}text-neutral-300{{else}}text-purple-400{{end}}">{{$c.OverallPercent}}%</span>
                 </div>
                 <div class="progress-track">
                     <div class="{{if $c.Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{$c.OverallPercent}}%"></div>
@@ -83,10 +83,11 @@
             <!-- Campaign-policy badge: feasibility status (an estimate, not a
                  guarantee), the score total, and the explainable breakdown. -->
             <div class="mt-3 text-xs" style="border-top: 1px solid var(--color-border-default); padding-top: 0.5rem;">
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-wrap">
                     <span class="status-pill" style="color: {{.StatusColor}}; border: 1px solid currentColor; background: transparent;">{{.StatusLabel}}</span>
                     {{if .Excluded}}<span class="text-neutral-500">{{.ExcludeReason}}</span>
                     {{else}}<span class="text-neutral-400">{{ t "drops.policy.score" }} {{.Total}}</span>{{end}}
+                    {{if and .TimeUntilEnd (ne .TimeUntilEnd "0s")}}<span class="text-neutral-500 js-ends-in" data-ends-in="{{.TimeUntilEnd}}">{{ t "drops.policy.ends_in" }} {{.TimeUntilEnd}}</span>{{end}}
                 </div>
                 {{if .Factors}}
                 <details class="mt-1">
@@ -138,9 +139,9 @@
                             {{if .Benefit}}<div class="text-xs text-neutral-400 truncate" title="{{.Benefit}}">{{.Benefit}}</div>{{end}}
                         </div>
                         {{if .Claimed}}
-                        <span class="status-pill status-pill-claimed flex-shrink-0">{{.StatusLabel}}</span>
+                        <span class="status-pill status-pill-claimed flex-shrink-0"><span aria-hidden="true">✓ </span>{{.StatusLabel}}</span>
                         {{else}}
-                        <span class="status-pill status-pill-progress flex-shrink-0">{{.StatusLabel}}</span>
+                        <span class="status-pill status-pill-progress flex-shrink-0"><span aria-hidden="true">● </span>{{.StatusLabel}}</span>
                         {{end}}
                     </div>
 

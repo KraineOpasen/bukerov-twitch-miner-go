@@ -1455,3 +1455,217 @@
 @media (prefers-reduced-motion: reduce) {
   .ov-stale-badge { transition: none; }
 }
+
+/* =====================================================================
+   F3 «Pages Evolution»: Statistics page-local styles moved verbatim from
+   statistics.html's inline <style> (selectors/DOM/JS hooks unchanged, only
+   the color source stays the same — this is a straight relocation, not a
+   redesign). Reformatted to the file's expanded, commented style; two
+   pairs of dead duplicate declarations from the original inline block
+   (.stat-value.pos/.neg and .roi-table td.pos/.neg had been declared
+   twice, the plain --color-success/--color-danger pair immediately
+   overridden by the later --ui-roi-pos/--ui-roi-neg pair — only the
+   winning values are kept here) and the split .stat-tile rule (base +
+   position/overflow addendum) are each merged into one declaration.
+   ===================================================================== */
+.roi-period-btn {
+  color: var(--color-neutral-300);
+  background: var(--color-neutral-800);
+  border-right: 1px solid var(--color-neutral-700);
+  cursor: pointer;
+  padding: 0.5rem 0.95rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+}
+.roi-period-btn:last-child { border-right: 0; }
+.roi-period-btn:hover { color: var(--color-neutral-100); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
+.roi-period-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
+.roi-period-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
+
+/* KPI tiles get a soft top accent (::before) so the summary row reads as
+   widgets, not a gray strip; hue matches the shared --ui-* palette from
+   base.html. */
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-neutral-700);
+  background: var(--color-neutral-800);
+  padding: 0.85rem 1rem;
+  position: relative;
+  overflow: hidden;
+}
+.stat-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--ui-watching), var(--ui-online), transparent);
+}
+.stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-neutral-400); }
+.stat-value { font-size: 1.35rem; font-weight: 600; color: var(--color-neutral-100); }
+.stat-value.pos { color: var(--ui-roi-pos); }
+.stat-value.neg { color: var(--ui-roi-neg); }
+
+.roi-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+.roi-table th, .roi-table td { text-align: right; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--color-neutral-700); }
+.roi-table th:first-child, .roi-table td:first-child { text-align: left; }
+.roi-table th { color: var(--color-neutral-400); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.roi-table td.pos { color: var(--ui-roi-pos); }
+.roi-table td.neg { color: var(--ui-roi-neg); }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
+.breakdown-grid { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 1.5rem; align-items: center; margin-top: 1.5rem; }
+@media (max-width: 760px) { .breakdown-grid { grid-template-columns: 1fr; } }
+.breakdown-legend { display: flex; flex-direction: column; gap: 0.45rem; font-size: 0.85rem; }
+.breakdown-row { display: flex; align-items: center; gap: 0.55rem; }
+.breakdown-dot { width: 0.65rem; height: 0.65rem; border-radius: 999px; flex: none; }
+.breakdown-name { color: var(--color-neutral-300); min-width: 6.5rem; }
+.breakdown-val { margin-left: auto; color: var(--color-neutral-100); }
+.breakdown-count { color: var(--color-neutral-500); font-size: 0.75rem; }
+
+.bet-summary { margin-top: 1.25rem; border-top: 1px solid var(--color-neutral-700); padding-top: 1rem; }
+.bet-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.75rem; }
+.bet-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-neutral-700);
+  background: var(--color-neutral-800);
+  padding: 0.6rem 0.75rem;
+}
+.bet-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-neutral-400); }
+.bet-val { font-size: 1.1rem; font-weight: 600; color: var(--color-neutral-100); }
+.bet-val.pos { color: var(--ui-roi-pos); }
+.bet-val.neg { color: var(--ui-roi-neg); }
+
+.roi-donut-wrap { display: flex; align-items: center; justify-content: center; }
+.roi-outcomes-grid { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 1.5rem; align-items: center; margin-bottom: 1.5rem; }
+@media (max-width: 760px) { .roi-outcomes-grid { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------------------
+   Logs page: scroll container + monospace log view, moved verbatim from
+   logs.html's inline <style> (the .log-* color classes already lived here
+   from F1 — only these two layout rules were still duplicated in the
+   template).
+   --------------------------------------------------------------------- */
+.log-scroll { max-height: 72vh; overflow: auto; }
+.log-view {
+  font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.5;
+}
+/* #logs-scroll carries tabindex="0" role="region" so keyboard users can
+   actually scroll it (it has no other focusable descendant); this gives it
+   a visible keyboard-focus ring like every other interactive control. */
+.log-scroll:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
+
+/* Visually hidden but still reachable by assistive tech — used for the
+   change-gated #logs-no-match announcement region (the visible #logs-count
+   next to it is NOT a live region; see logs.html). Standard clip-based
+   technique, not display:none, so screen readers still read it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Logs filter toolbar + "jump to new lines" indicator. Tokens only. */
+.logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.85rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: 0.6rem;
+}
+.logs-toolbar-group { display: flex; align-items: center; gap: 0.4rem; }
+.logs-toolbar-label { font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
+.logs-search-input { width: 14rem; max-width: 100%; }
+.logs-count { font-size: 0.78rem; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+.logs-jump-btn {
+  position: absolute;
+  bottom: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.logs-jump-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: 2px; }
+
+/* Health Center: responsive signal-card grid replacing the old table.
+   Severity is derived server-side (in-template) from the existing
+   StatusColor hex constants into these classes — no new hex here, tokens
+   only. */
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.85rem;
+}
+.health-card {
+  border: 1px solid var(--border-default);
+  border-radius: 0.6rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface-card);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.health-card-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.health-card-status { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.health-sev-icon { display: inline-flex; width: 1.1em; justify-content: center; }
+.health-card-row { font-size: 0.75rem; color: var(--text-muted); }
+.health-card-row-label { color: var(--text-secondary); margin-right: 0.3rem; }
+.health-card-detail { word-break: break-word; }
+
+.health-sev-ok .health-card-status-text, .health-sev-ok .health-sev-icon { color: var(--color-success); }
+.health-sev-bad .health-card-status-text, .health-sev-bad .health-sev-icon { color: var(--color-danger); }
+.health-sev-warn .health-card-status-text, .health-sev-warn .health-sev-icon { color: var(--status-warning); }
+.health-sev-neutral .health-card-status-text, .health-sev-neutral .health-sev-icon { color: var(--text-muted); }
+
+/* Settings/Health/Notifications: setting-row mobile stacking + visible
+   focus-visible outlines for inputs and details summaries. */
+@media (max-width: 640px) {
+  .setting-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+  .setting-row input.input-field,
+  .setting-row select.input-field,
+  .setting-row textarea.input-field {
+    width: 100%;
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+  .setting-row input[type="checkbox"] {
+    width: 1.4rem;
+    height: 1.4rem;
+  }
+}
+.input-field:focus-visible {
+  outline: 2px solid var(--color-online);
+  outline-offset: 1px;
+}
+.details-panel summary:focus-visible {
+  outline: 2px solid var(--color-online);
+  outline-offset: -2px;
+}
