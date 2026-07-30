@@ -239,3 +239,75 @@ func TestCommandDuringOverridePersistsDurably(t *testing.T) {
 	cancel2()
 	<-done2
 }
+
+// MAJOR 6 (F4b Q3 consolidated corrective), design v6 §5.4(б): a resume
+// submitted while LIFECYCLE_FORCE_RUNNING's override is active used to hit
+// the running row's plain idempotent cell and return WITHOUT ever calling
+// Persistence.Save — leaving the durable row exactly as it was before the
+// override (e.g. still "paused"), even though the operator just explicitly
+// asked to run. That silently defeats the override's own stated purpose
+// ("resume при override... пишет durable=running (снимает расхождение
+// память/диск)"): with no runtime command surface to publish the divergence
+// resolution, removing the env var later would still reconcile back to the
+// stale durable value. A resume evaluated against this idempotent cell must
+// now persist durable=running like any other accepted command.
+func TestResumeUnderOverridePersistsDurableRunning(t *testing.T) {
+	rf := newRunnerFactory()
+	pers := newFakePersistence(LoadResult{Found: true, Desired: DesiredPaused})
+
+	c, cancel, done := buildAndRun(Config{
+		Factory:      rf.Factory,
+		Persistence:  pers,
+		Clock:        newFakeClock(),
+		ForceRunning: true,
+	})
+	defer cancel()
+
+	rf.waitCount(t, 1)
+	waitObserved(t, c, ObservedRunning)
+	if pers.saveCount() != 0 {
+		t.Fatalf("ForceRunning itself must not persist anything yet, got %d saves", pers.saveCount())
+	}
+
+	res := c.Resume(context.Background())
+	if res.Outcome != OutcomeAccepted {
+		t.Fatalf("resume under override: got %v, want accepted (%v)", res.Outcome, res.Err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool { return pers.saveCount() == 1 })
+	if got := pers.lastSave().desired; got != DesiredRunning {
+		t.Fatalf("persisted desired = %v, want running", got)
+	}
+
+	// Observed must stay running throughout — this is a same-value
+	// republish, not a visible transition, and no new generation is built.
+	if got := c.Snapshot().Observed; got != ObservedRunning {
+		t.Fatalf("observed = %v, want still running", got)
+	}
+	if rf.count() != 1 {
+		t.Fatalf("resume under an already-running override must not build a new generation, got %d", rf.count())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+
+	// A fresh controller (override cleared) over the SAME persistence now
+	// honors the durable running value the override-resume just wrote —
+	// the memory/disk divergence is genuinely resolved.
+	rf2 := newRunnerFactory()
+	c2, cancel2, done2 := buildAndRun(Config{Factory: rf2.Factory, Persistence: pers, Clock: newFakeClock()})
+	defer cancel2()
+
+	rf2.waitCount(t, 1)
+	waitObserved(t, c2, ObservedRunning)
+	if c2.Snapshot().Override {
+		t.Fatal("override must not be reported once ForceRunning is no longer set")
+	}
+
+	cancel2()
+	<-done2
+}

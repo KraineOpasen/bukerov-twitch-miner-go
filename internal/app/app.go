@@ -365,10 +365,18 @@ func wireDirtyTeardownClassifier() {
 //
 // Mapping table (every lifecycle status NOT listed here is dropped, logged
 // at debug):
-//   - "paused" / "stopped" -> web.StatusError, with the exact design v6 §5.4
-//     message: a boot-honored persisted lifecycle intent — otherwise an
-//     operator staring at a dashboard stuck on the loading overlay would
-//     have no idea the miner never started on purpose.
+//   - "paused" / "stopped" WITH message == lifecycle.BootHonoredIntentMessage
+//     -> web.StatusError, with the exact design v6 §5.4 message: a
+//     boot-honored persisted lifecycle intent — otherwise an operator
+//     staring at a dashboard stuck on the loading overlay would have no idea
+//     the miner never started on purpose. Any OTHER paused/stopped call
+//     (MINOR 13, F4b Q3 consolidated corrective) — e.g. an ordinary runtime
+//     pause/stop an operator just issued, which publishTerminal routes
+//     through this exact same SetStatus method — is dropped like any other
+//     unmapped status: only the boot-reconciliation call is "the miner never
+//     started and nothing else will ever explain why"; an ordinary runtime
+//     transition is communicated through the lifecycle command surface
+//     instead, not this fixed overlay message.
 //   - "failed" -> web.StatusError, with the lifecycle LastError message (a
 //     startup failure sitting in the retry-backoff window between attempts).
 //   - "degraded" -> web.StatusError, with the lifecycle LastError message (a
@@ -393,6 +401,13 @@ const lifecycleHonoredIntentMessage = "miner paused/stopped by persisted lifecyc
 func (a lifecycleStatusAdapter) SetStatus(status, message string) {
 	switch status {
 	case "paused", "stopped":
+		if message != lifecycle.BootHonoredIntentMessage {
+			// MINOR 13: an ordinary runtime paused/stopped — not the
+			// boot-reconciliation call — must never surface as the fixed
+			// honored-intent overlay.
+			slog.Debug("app: ordinary runtime paused/stopped status dropped (not the boot-honored marker)", "status", status)
+			return
+		}
 		a.broadcaster.SetStatus(web.StatusError, lifecycleHonoredIntentMessage)
 	case "failed", "degraded":
 		a.broadcaster.SetStatus(web.StatusError, message)

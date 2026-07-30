@@ -78,6 +78,15 @@ func retryBackoff(attempt int) time.Duration {
 // process's life; it is the ONLY goroutine that ever starts, tears down, or
 // classifies the completion of a generation (package doc).
 func (c *Controller) Run(ctx context.Context) error {
+	// MINOR 16 (F4b Q3 consolidated corrective): a second call — concurrent
+	// or sequential — must fail fast rather than spawn a second worker
+	// racing the first over every worker-owned field below with no
+	// synchronization at all. The CAS itself is what makes the guard
+	// race-free; c.runCtx is only ever written by whichever goroutine wins
+	// it, so the write below is never raced either.
+	if !c.runStarted.CompareAndSwap(false, true) {
+		return ErrAlreadyRunning
+	}
 	c.runCtx = ctx
 
 	// Process-level updater loop ownership (design v6 §7): started exactly
@@ -219,6 +228,21 @@ func (c *Controller) Run(ctx context.Context) error {
 			// so the reminder recurs for as long as the process runs.
 			recordNoControlSurfaceTick()
 			c.armNoControlSurfaceTick()
+
+		case <-c.rearmRetryCh:
+			// MAJOR 5 (F4b Q3 consolidated corrective): re-validate
+			// reality before ever actually re-arming — a signal queued by
+			// one Submit call can be stale by the time the worker gets to
+			// it (e.g. a LATER command already resolved the failed
+			// lineage in the meantime), and blindly re-arming then would
+			// dangle a spurious retry timer that could fire while a real
+			// generation is already live (reintroducing the same class of
+			// hazard BLOCKER 2's dispatch guard exists to close). Only
+			// re-arm when the system is STILL failed with genuinely no
+			// retry currently scheduled.
+			if snap := c.state.snapshot(); snap.Observed == ObservedFailed && snap.NextRetryAt.IsZero() {
+				c.armRetryTimer()
+			}
 		}
 	}
 }
@@ -294,8 +318,20 @@ func (c *Controller) reconcileAndMaybeStart(ctx context.Context) {
 	// already folded into desired above) keeps today's behavior: no sink
 	// call here, since the miner drives its own startup statuses once its
 	// generation actually starts.
+	//
+	// MINOR 13 (F4b Q3 consolidated corrective): the message passed is
+	// BootHonoredIntentMessage, a dedicated marker distinguishing THIS
+	// specific boot-reconciliation call from any ORDINARY runtime
+	// paused/stopped SetStatus call publishTerminal also makes (e.g. an
+	// operator explicitly pausing right now) — an adapter must be able to
+	// tell these apart, since only the boot-honored case has "the miner
+	// never started and nothing else will ever explain why" as its whole
+	// reason for existing. lastErr (the corrupt/read-error detail, when
+	// applicable) is intentionally not threaded through here: the b3
+	// adapter's own §5.4 overlay message is a fixed, operator-facing
+	// remediation string, not a raw internal error detail.
 	if desired != DesiredRunning {
-		c.cfg.StatusSink.SetStatus(string(observed), lastErr)
+		c.cfg.StatusSink.SetStatus(string(observed), BootHonoredIntentMessage)
 	}
 
 	// design v6 §14/OD3, contract §11 item 8: when a control surface (the
@@ -366,6 +402,26 @@ func observedForDesiredAtBoot(d DesiredState) ObservedState {
 func (c *Controller) dispatch(pc *pendingCommand) (error, bool) {
 	switch pc.action {
 	case actionPersistOnlySetObserved:
+		if c.generationLive {
+			// BLOCKER 2 sibling hazard (F4b Q3 consolidated corrective):
+			// this action is only ever correct when NO generation exists
+			// to touch (design v6 §5.1 "failed" row: persist-only). A
+			// command accepted against a stale, already-superseded
+			// ObservedFailed+slot-free snapshot (the same race
+			// actionStart's own guard below closes) could still reach
+			// here while a generation is ACTUALLY live — blindly
+			// publishing paused/stopped would both lie about reality (the
+			// generation keeps mining, orphaned, while the snapshot
+			// claims paused/stopped) and never tear it down. Escalate to
+			// the exact same teardown any ordinary running-row pause/stop
+			// uses instead — clearing awaitingStart/readyCh first,
+			// exactly like runCancelStart does for the analogous
+			// slot-free-start-cancellation case, since this generation may
+			// still be awaiting its own readiness.
+			c.awaitingStart = nil
+			c.readyCh = nil
+			return c.runTeardown(pc)
+		}
 		wasFailed := c.state.snapshot().Observed == ObservedFailed
 		c.state.publishTerminal(steadyObservedFor(pc.target), pc.reason, "", true)
 		recordTerminalForTarget(pc.target, pc.reason, pc.id)
@@ -383,7 +439,51 @@ func (c *Controller) dispatch(pc *pendingCommand) (error, bool) {
 		recordCommandAcceptedDegradedSwitch(pc)
 		return nil, false
 
+	case actionPersistOnlyRunning:
+		// MAJOR 6 (F4b Q3 consolidated corrective): unlike
+		// actionPersistOnlySetObserved above, a live generation here is
+		// the entirely expected, correct state (this action is only ever
+		// produced while observed is ALREADY running) — never tear
+		// anything down. completeStart's own publish is a same-value
+		// republish of "running" (observed unchanged) that simply
+		// releases pc's slot; reused directly since this is exactly what
+		// an ordinary instant-ready start's own completion does.
+		c.completeStart(c.currentGen, pc, pc.reason)
+		return nil, false
+
 	case actionStart:
+		if c.generationLive {
+			// BLOCKER 2 (F4b Q3 consolidated corrective): a command
+			// accepted against a stale, already-superseded
+			// ObservedFailed+slot-free snapshot (a race startGeneration's
+			// own beginStartTransition narrows but a mutex-acquisition
+			// gap can never fully close, see that method's doc comment)
+			// can still reach dispatch() with action=actionStart while a
+			// DIFFERENT generation the worker itself already knows about
+			// is live. Launching a second one here would orphan the
+			// first — clobbering currentGenCancel, the actual
+			// generation-leak this guard exists to close — so reality, as
+			// the worker itself observes it, always wins over a
+			// potentially-stale accept()-computed action.
+			if c.awaitingStart != nil && c.awaitingStart.pc == nil {
+				// The live generation is a phantom (slot-free) start
+				// still awaiting readiness: adopt this command into it
+				// instead of starting a second one — its own terminal
+				// publishes once that SAME generation actually becomes
+				// ready (completeStart) or dies (handleSpontaneousCompletion,
+				// which already classifies by the slot's own target/reason).
+				c.awaitingStart.pc = pc
+				c.awaitingStart.reason = pc.reason
+				return nil, false
+			}
+			// The live generation already satisfies target=running (it is
+			// steady-running, or its own readiness already resolved) —
+			// publish THIS command's own terminal immediately against it,
+			// exactly as completeStart does for an ordinary instant-ready
+			// start, rather than disturbing anything.
+			c.completeStart(c.currentGen, pc, pc.reason)
+			return nil, false
+		}
 		c.startGeneration(pc.reason, pc.id, pc.cmd)
 		return nil, false
 
@@ -416,10 +516,13 @@ func (c *Controller) startGeneration(reason Reason, cmdID string, cmd Command) {
 	// non-failure terminal is reached) — see maybeDeclareRecovery's doc
 	// comment for why merely launching is not enough (design v6 item 12:
 	// backoff must keep growing across a whole crash-loop).
-	c.recoveryPending = c.state.snapshot().Observed == ObservedFailed
-
+	//
+	// This read and the beginTransition write below are ONE atomic
+	// critical section (beginStartTransition, BLOCKER 2's layer-a
+	// hardening) rather than two separate lock/unlock pairs — see that
+	// method's doc comment.
 	now := c.cfg.Clock.Now()
-	c.state.beginTransition(ObservedStarting, TransitionStart, now)
+	c.recoveryPending = c.state.beginStartTransition(ObservedStarting, TransitionStart, now)
 	recordTransitionStarted(cmd, reason)
 
 	var pc *pendingCommand
@@ -743,19 +846,30 @@ func (c *Controller) handleSpontaneousCompletion(res generationResult) (error, b
 		reason = pending.reason
 		cmdID = pending.id
 		// pending occupies the slot AND this classification is about to
-		// resolve/release it — but the ONLY way pending can be non-nil
-		// here (transition never reached dispatch()'s beginTransition,
-		// since that's mutually exclusive with THIS iteration having
-		// picked doneCh instead of cmdCh) is if its pc is STILL physically
-		// sitting, undequeued, in the capacity-1 cmdCh. Drain it now,
-		// synchronously with releasing the slot: cmdCh's buffer must never
-		// be left holding a stale entry across iterations — a concurrent
-		// Submit's later, non-blocking send to a still-full channel would
-		// otherwise silently no-op, accepting a command whose signal to
-		// the worker is simply dropped (orchestrator concurrency review,
-		// defect 1 — the failure mode dispatch's isCurrentPending check
-		// alone cannot close, since that check only guards a pc already IN
-		// HAND, not one still queued behind an undrained stale entry).
+		// resolve/release it. Drain cmdCh defensively (MINOR 11, F4b Q3
+		// consolidated corrective — this comment previously overclaimed
+		// pending non-nil here means its pc must STILL be sitting,
+		// undequeued, in cmdCh; that is true of only ONE of the reasons
+		// pending can be non-nil at this point):
+		//   - the race this guards against: a command was accepted
+		//     (occupying the slot, sent to cmdCh) in the SAME instant its
+		//     own generation died, so the worker's loop picked doneCh over
+		//     cmdCh this iteration — pc IS still undequeued there, and
+		//     cmdCh's capacity-1 buffer must never be left holding it
+		//     across iterations, or a concurrent Submit's later,
+		//     non-blocking send to a still-full channel would silently
+		//     no-op, dropping that command's own signal to the worker
+		//     (orchestrator concurrency review, defect 1).
+		//   - a slot-HELD actionStart (a real resume/restart command
+		//     driving a start) whose generation was already dispatched,
+		//     spent time awaiting readiness, and then died before ever
+		//     reaching it: pc was drained from cmdCh long ago, in the
+		//     iteration that originally dispatched it — pending is
+		//     STILL non-nil here (the slot has not been released yet),
+		//     but there is nothing left in cmdCh to drain.
+		// Calling this unconditionally is what makes it correct for
+		// either case: drainStaleQueuedCommand's own default branch makes
+		// the second case's call a harmless no-op.
 		c.drainStaleQueuedCommand()
 	}
 
@@ -792,6 +906,18 @@ func (c *Controller) handleSpontaneousCompletion(res generationResult) (error, b
 func (c *Controller) classifyUnhealthyCompletion(err error) (error, bool) {
 	if IsDirtyTeardownError(err) {
 		return fmt.Errorf("lifecycle: dirty teardown (desired=running): %w", err), true
+	}
+	if c.cfg.NoControlSurface {
+		// design v6 §5.4/OD3 (MAJOR 4, F4b Q3 consolidated corrective):
+		// with NO control surface built for this process at all, entering
+		// failed+retry would be both invisible (nothing can ever show
+		// "retrying") and unactionable (nothing can ever accept a command
+		// to intervene) — exit the process instead, exactly like every
+		// startup failure did before this package existed: App.Run
+		// returns the error, main exits 1, and the supervisor
+		// (docker/systemd/etc) restarts it. A control surface being
+		// present keeps the ordinary failed+retry path below, unchanged.
+		return fmt.Errorf("lifecycle: startup failure with no control surface (OD3): %w", err), true
 	}
 	c.retryAttempt++
 	msg := describeFailure(err)
@@ -849,8 +975,17 @@ func (c *Controller) handleUpdateApplied() error {
 	c.drainUndispatchedCommand(ReasonUpdater)
 	c.awaitingStart = nil
 	c.readyCh = nil
-	_ = c.tearDownForExit()
-	c.state.publishTerminal(ObservedExiting, ReasonUpdater, "", true)
+	err := c.tearDownForExit()
+	if err != nil {
+		// MINOR 8 (F4b Q3 consolidated corrective): update-exit always
+		// returns nil regardless (I31 — no os.Exit, no surfaced Run error
+		// on this path), so a non-nil teardown error would otherwise be
+		// completely invisible. Log it and surface it as the exiting
+		// publish's own LastError, exactly like handleProcessShutdown
+		// already does for its own (process-shutdown) exit path.
+		slog.Warn("lifecycle: teardown before update-exit did not complete cleanly", "error", err)
+	}
+	c.state.publishTerminal(ObservedExiting, ReasonUpdater, classifyWindDownLastError(err), true)
 	recordRing(events.TypeLifecycleUpdaterTookPriority, "")
 	return nil
 }

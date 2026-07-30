@@ -16,6 +16,19 @@ type StatusSink interface {
 	SetGeneration(uint64)
 }
 
+// BootHonoredIntentMessage is the message SetStatus carries EXACTLY once
+// per boot, only for a boot-honored persisted paused/stopped intent (design
+// v6 §5.4, contract §11 item 9) — MINOR 13, F4b Q3 consolidated corrective.
+// It is a marker, not free text: an integration adapter (e.g. b3's web
+// status adapter) matches on it EXACTLY to distinguish "the miner never
+// started at all, and nothing else will ever explain why" from an ordinary
+// runtime paused/stopped SetStatus call (an operator explicitly pausing or
+// stopping right now, which publishTerminal also routes through the same
+// SetStatus method) — only the former needs a special, standing overlay
+// message; the latter is communicated through the ordinary lifecycle
+// command surface instead.
+const BootHonoredIntentMessage = "persisted lifecycle intent honored"
+
 // nopSink is Config's default StatusSink: every call is a no-op, so a
 // Controller built without one behaves identically to having no status side
 // channel at all.

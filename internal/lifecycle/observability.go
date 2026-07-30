@@ -157,10 +157,17 @@ func recordUpdaterJoinTimeout(timeout time.Duration) {
 	slog.Warn("lifecycle: updater_join_timeout", "timeout", timeout)
 }
 
+// noControlSurfaceRemediationMessage is design v6 §5.4's prescribed
+// remediation text (MINOR 14, F4b Q3 consolidated corrective) for an
+// operator who is tailing logs with no dashboard open at all: this
+// recurring reminder must actually say how to regain control, not just
+// that something is being honored.
+const noControlSurfaceRemediationMessage = "lifecycle intent honored, no control surface: resume via config EnableAnalytics=true / env LIFECYCLE_FORCE_RUNNING=true / docker stop"
+
 // recordNoControlSurfaceTick logs design v6 §14/OD3's rare periodic
 // reminder (contract §11 item 8): a persisted paused/stopped intent is
 // STILL honored with no dashboard control surface for this process.
 // slog-only by design (see the call site's comment) — never the ring.
 func recordNoControlSurfaceTick() {
-	slog.Info("lifecycle: no_control_surface_tick")
+	slog.Info("lifecycle: no_control_surface_tick", "message", noControlSurfaceRemediationMessage)
 }

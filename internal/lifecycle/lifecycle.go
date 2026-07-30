@@ -55,6 +55,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -356,6 +357,18 @@ type Controller struct {
 
 	state statusState
 
+	// runStarted guards Run against a second call (MINOR 16, F4b Q3
+	// consolidated corrective): Run spawns exactly one worker (itself,
+	// synchronously — there is no separate goroutine to "start twice" in
+	// the usual sense, but a second CONCURRENT or sequential call to Run
+	// would otherwise race the first over every worker-owned field below
+	// — currentGen, awaitingStart, generationLive, ... — with absolutely
+	// no synchronization at all, since those fields are documented and
+	// designed as single-worker-goroutine-only). The CAS below, checked
+	// before runCtx is ever written, makes a second call fail fast
+	// instead.
+	runStarted atomic.Bool
+
 	// cmdCh carries an accepted command from Submit's caller goroutine to
 	// the worker. Buffered cap=1 with a non-blocking send: the pending-slot
 	// invariant guarantees at most one command is ever in flight, so the
@@ -372,6 +385,22 @@ type Controller struct {
 	// generation token so the worker can recognize (and discard) a stale
 	// completion from an already-superseded generation.
 	doneCh chan generationResult
+
+	// rearmRetryCh is Submit's signal to the worker that a persist failure
+	// may have left the automatic retry chain permanently disarmed (MAJOR
+	// 5, F4b Q3 consolidated corrective): accept() cancels any armed retry
+	// timer the instant it occupies the slot (design v6 §5.2 step 1,
+	// cancelRetryLocked) — correct when the command goes on to actually
+	// resolve the failed lineage, but if the SUBSEQUENT persist then
+	// fails, that cancellation must not survive as a permanent, silent
+	// parking in failed/desired=running with NOTHING left to ever retry
+	// again (design v6 §5.3's automatic retry is supposed to be
+	// unconditional/"бесконечно"). Buffered cap=1 with a non-blocking
+	// send/receive — the worker re-validates reality before ever actually
+	// re-arming (see Run's own case), so a stale or redundant signal is
+	// harmless; timer ownership stays entirely with the worker
+	// (armRetryTimer is never called from any other goroutine).
+	rearmRetryCh chan struct{}
 
 	// The fields below are touched ONLY by the worker goroutine (inside
 	// Run) — never concurrently, so they need no lock of their own. They
@@ -498,10 +527,11 @@ func New(cfg Config) *Controller {
 	}
 
 	c := &Controller{
-		cfg:      cfg,
-		cmdCh:    make(chan *pendingCommand, 1),
-		updateCh: make(chan struct{}),
-		doneCh:   make(chan generationResult, 1),
+		cfg:          cfg,
+		cmdCh:        make(chan *pendingCommand, 1),
+		updateCh:     make(chan struct{}),
+		doneCh:       make(chan generationResult, 1),
+		rearmRetryCh: make(chan struct{}, 1),
 	}
 	c.state.init(cfg.StatusSink)
 	return c
@@ -529,6 +559,14 @@ func (c *Controller) Submit(ctx context.Context, cmd Command) SubmitResult {
 	commandID := newCommandID()
 
 	decision := c.state.accept(cmd, commandID)
+	if decision.stopRetry != nil {
+		// MINOR 9 (F4b Q3 consolidated corrective): accept() captured this
+		// closure while holding statusMu but deliberately did NOT invoke
+		// it there (design v6 §6's leaf-lock rule — the injected Timer's
+		// Stop is an outward call). Invoke it now that accept() has
+		// already returned (and thus already released the lock).
+		decision.stopRetry()
+	}
 	switch decision.kind {
 	case acceptRejected:
 		recordCommandRejected(cmd, decision.err)
@@ -546,11 +584,25 @@ func (c *Controller) Submit(ctx context.Context, cmd Command) SubmitResult {
 	// observed states.
 	pc := decision.pending
 	if err := c.cfg.Persistence.Save(ctx, pc.target, string(pc.reason), commandID); err != nil {
-		c.state.revertPendingOnPersistFailure()
+		c.state.revertPendingOnPersistFailure(pc)
 		recordCommandRejectedPersist(cmd, err)
+		// MAJOR 5 (F4b Q3 consolidated corrective): accept() already
+		// cancelled any armed retry timer as part of occupying the slot
+		// (design v6 §5.2 step 1) — if the system is STILL failed and now
+		// has no retry armed at all, that cancellation must not be allowed
+		// to permanently disarm design v6 §5.3's automatic retry chain.
+		// Signal the worker (sole timer owner) to re-arm; see
+		// rearmRetryCh's own doc comment for why a stale/redundant signal
+		// here is harmless.
+		if snap := c.state.snapshot(); snap.Observed == ObservedFailed && snap.NextRetryAt.IsZero() {
+			select {
+			case c.rearmRetryCh <- struct{}{}:
+			default:
+			}
+		}
 		return SubmitResult{Outcome: OutcomeRejected, Err: fmt.Errorf("lifecycle: persist desired state: %w", err)}
 	}
-	c.state.commitDesiredAndReason(pc.target, pc.reason)
+	c.state.commitDesiredAndReason(pc, pc.target, pc.reason)
 
 	select {
 	case c.cmdCh <- pc:

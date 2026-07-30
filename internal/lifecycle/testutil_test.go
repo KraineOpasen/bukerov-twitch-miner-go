@@ -363,9 +363,14 @@ func (p *fakePersistence) Save(_ context.Context, d DesiredState, reason, cmdID 
 	err := p.saveErr
 	if err == nil {
 		p.saves = append(p.saves, savedCall{d, reason, cmdID})
+		// Round-trip like a real store: a later Load (e.g. a fresh
+		// controller built over this same fake) must see what was just
+		// durably saved, not the value it was constructed with.
+		p.loadResult = LoadResult{Desired: d, Found: true}
 	}
 	hook := p.onSave
 	barrier := p.saveBarrier
+	p.saveBarrier = nil // one-shot: disarm immediately so a LATER, unrelated Save call never also blocks.
 	p.mu.Unlock()
 	if hook != nil {
 		hook(d, reason, cmdID)
@@ -376,11 +381,13 @@ func (p *fakePersistence) Save(_ context.Context, d DesiredState, reason, cmdID 
 	return err
 }
 
-// armSaveBarrier makes every subsequent Save call block — after being
-// recorded and after onSave runs — until the returned release func is
-// called. release is idempotent (safe to call once; further calls are a
-// no-op). Lets a test hold Save deterministically "in flight" for a
-// controlled window, e.g. to assert the caller has not yet signaled the
+// armSaveBarrier arms a ONE-SHOT barrier: only the very NEXT Save call
+// blocks — after being recorded and after onSave runs — until the returned
+// release func is called; any Save call after that one proceeds normally
+// (the barrier disarms itself the instant it is consumed). release is
+// idempotent (safe to call once; further calls are a no-op). Lets a test
+// hold ONE specific Save call deterministically "in flight" for a
+// controlled window — e.g. to assert the caller has not yet signaled the
 // worker (design v6 §5.2: persist happens BEFORE the worker is signaled).
 func (p *fakePersistence) armSaveBarrier() (release func()) {
 	ch := make(chan struct{})

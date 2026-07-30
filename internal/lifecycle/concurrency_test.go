@@ -271,3 +271,176 @@ func TestPersistFailureLeavesStateUnchanged(t *testing.T) {
 		t.Fatal("Run did not return")
 	}
 }
+
+// MAJOR 3 (F4b Q3 consolidated corrective): Submit's persist-failure
+// rollback (revertPendingOnPersistFailure) and persist-success commit
+// (commitDesiredAndReason) both used to touch statusState unconditionally,
+// with no idea whether the command they belong to (pc) was even STILL the
+// slot's occupant by the time Save finally returned. A slow Save racing pc's
+// OWN generation dying spontaneously (independently classified and
+// released by the worker while Save is still in flight — exactly the
+// mechanism slot_discipline_test.go's BLOCKER-1 regression also exploits)
+// leaves the slot free for a SECOND, completely unrelated command (pcB) to
+// be accepted and start its own generation — all while pcA's Submit
+// goroutine is still blocked in Save. When pcA's Save finally returns
+// (here: with a failure), its stale rollback must be a no-op — NOT clear
+// pcB's still-legitimately-occupied slot/transition out from under it
+// (which would corrupt capabilities — a concurrent command would then be
+// wrongly evaluated as if the slot were free — and, once pcB's own
+// generation reaches ready, leave CommandID stuck on pcA's stale value
+// since publishTerminal's "released := s.pending" would read the
+// wrongly-nulled slot instead of pcB).
+func TestPersistFailureRollbackScopedToOwnCommand(t *testing.T) {
+	rf := newRunnerFactory()
+	rf.readySignaling = true
+	pers := newFakePersistence(LoadResult{Found: false}) // missing row -> running
+	wantErr := errors.New("db is busy")
+
+	cfg := Config{Factory: rf.Factory, Persistence: pers, Clock: newFakeClock()}
+	c, cancel, done := buildAndRun(cfg)
+	defer cancel()
+
+	rf.waitCount(t, 1)
+	rf.at(0).waitStarted(t)
+	waitObserved(t, c, ObservedStarting)
+	rf.at(0).markReady()
+	waitObserved(t, c, ObservedRunning)
+
+	// pcA = Pause, whose own Save is about to be slow and eventually fail.
+	pers.setSaveErr(wantErr)
+	releaseA := pers.armSaveBarrier() // one-shot: applies to pcA's Save call only.
+
+	pcAResCh := make(chan SubmitResult, 1)
+	go func() { pcAResCh <- c.Pause(context.Background()) }()
+	waitFor(t, 2*time.Second, func() bool { return c.Snapshot().Transition == TransitionPending })
+
+	// pcA's own generation dies spontaneously WHILE its Save is still in
+	// flight: handleSpontaneousCompletion classifies by the SLOT's own
+	// target (paused, since pcA occupies it) and releases pcA's slot —
+	// entirely independently of pcA's own still-blocked Submit call.
+	rf.at(0).finish(errors.New("boom"))
+	waitObserved(t, c, ObservedPaused)
+
+	// pcB = Resume, submitted (accepted, persisted, and dispatched —
+	// launching a SECOND generation) entirely AFTER pcA's slot was
+	// released above. pcA's Submit goroutine is still blocked in Save the
+	// whole time.
+	pers.setSaveErr(nil)
+	pcBRes := c.Resume(context.Background())
+	if pcBRes.Outcome != OutcomeAccepted {
+		t.Fatalf("resume (pcB): %v (%v)", pcBRes.Outcome, pcBRes.Err)
+	}
+	rf.waitCount(t, 2)
+	rf.at(1).waitStarted(t)
+	// Deliberately not marked ready yet: pcB's own generation must still be
+	// legitimately "in flight" (slot occupied) when pcA's stale Save
+	// returns below.
+	waitObserved(t, c, ObservedStarting)
+
+	// Now release pcA's failing Save: its Submit's persist-failure
+	// rollback must be a no-op (pcA is no longer the slot's occupant — pcB
+	// is) — not clear pcB's still-legitimately-in-flight slot/transition
+	// out from under it.
+	releaseA()
+	pcARes := <-pcAResCh
+	if pcARes.Outcome != OutcomeRejected {
+		t.Fatalf("pause (pcA) with failing persist: got %v, want rejected", pcARes.Outcome)
+	}
+
+	if snap := c.Snapshot(); snap.Transition == TransitionNone {
+		t.Fatal("pcA's stale persist-failure rollback cleared pcB's slot/transition out from under it")
+	}
+
+	// pcB is genuinely unaffected: it still reaches its OWN terminal
+	// correctly, with its OWN CommandID, once ITS generation actually
+	// becomes ready.
+	rf.at(1).markReady()
+	waitObserved(t, c, ObservedRunning)
+	if got := c.Snapshot().CommandID; got != pcBRes.CommandID {
+		t.Fatalf("CommandID = %q after pcB's generation became ready, want pcB's own id %q (pcA's stale rollback corrupted the slot before release, so publishTerminal never saw pcB as the occupant)", got, pcBRes.CommandID)
+	}
+	if rf.count() != 2 {
+		t.Fatalf("expected exactly 2 generations (1 initial + 1 from pcB's resume), got %d", rf.count())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+// The symmetric case: a slow SUCCEEDING Save for pcA must not overwrite
+// in-memory desired/reason with pcA's now-stale target after a DIFFERENT
+// command (pcB) has since committed its own, newer desired state — the
+// commit side of MAJOR 3's same scoping fix.
+func TestPersistSuccessCommitScopedToOwnCommand(t *testing.T) {
+	rf := newRunnerFactory()
+	rf.readySignaling = true
+	pers := newFakePersistence(LoadResult{Found: false}) // missing row -> running
+	cfg := Config{Factory: rf.Factory, Persistence: pers, Clock: newFakeClock()}
+	c, cancel, done := buildAndRun(cfg)
+	defer cancel()
+
+	rf.waitCount(t, 1)
+	rf.at(0).waitStarted(t)
+	waitObserved(t, c, ObservedStarting)
+	rf.at(0).markReady()
+	waitObserved(t, c, ObservedRunning)
+
+	// pcA = Pause, whose own (succeeding) Save is about to be slow.
+	releaseA := pers.armSaveBarrier() // one-shot: applies to pcA's Save call only.
+
+	pcAResCh := make(chan SubmitResult, 1)
+	go func() { pcAResCh <- c.Pause(context.Background()) }()
+	waitFor(t, 2*time.Second, func() bool { return c.Snapshot().Transition == TransitionPending })
+
+	// pcA's own generation dies spontaneously WHILE its Save is still in
+	// flight, releasing its slot independently of its own still-blocked
+	// Submit call.
+	rf.at(0).finish(errors.New("boom"))
+	waitObserved(t, c, ObservedPaused)
+
+	// pcB = Resume, fully accepted/persisted/dispatched — committing
+	// desired=running — entirely AFTER pcA's slot was released above.
+	pcBRes := c.Resume(context.Background())
+	if pcBRes.Outcome != OutcomeAccepted {
+		t.Fatalf("resume (pcB): %v (%v)", pcBRes.Outcome, pcBRes.Err)
+	}
+	if got := c.Snapshot().Desired; got != DesiredRunning {
+		t.Fatalf("desired after pcB committed = %v, want running", got)
+	}
+	rf.waitCount(t, 2)
+	rf.at(1).waitStarted(t)
+	waitObserved(t, c, ObservedStarting)
+
+	// Now release pcA's SUCCEEDING Save: its stale commit must be a no-op
+	// (pcA is no longer the slot's occupant) — not overwrite desired=running
+	// (pcB's own commit) back to paused (pcA's own, now-stale target).
+	releaseA()
+	pcARes := <-pcAResCh
+	if pcARes.Outcome != OutcomeAccepted {
+		t.Fatalf("pause (pcA), stale but nominally succeeding: %v (%v)", pcARes.Outcome, pcARes.Err)
+	}
+
+	if got := c.Snapshot().Desired; got != DesiredRunning {
+		t.Fatalf("desired = %v after pcA's stale commit, want still running (pcB's commit must not be overwritten)", got)
+	}
+
+	rf.at(1).markReady()
+	waitObserved(t, c, ObservedRunning)
+	if got := c.Snapshot().CommandID; got != pcBRes.CommandID {
+		t.Fatalf("CommandID = %q, want pcB's own id %q", got, pcBRes.CommandID)
+	}
+	if rf.count() != 2 {
+		t.Fatalf("expected exactly 2 generations, got %d", rf.count())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}

@@ -84,6 +84,21 @@ const (
 	// start (design v6 §5.1 "starting" row: pause/stop cancels a
 	// reconcile/retry-driven start that hasn't reached ready yet).
 	actionCancelStart
+	// actionPersistOnlyRunning: MAJOR 6 (F4b Q3 consolidated corrective),
+	// design v6 §5.4(б) — a resume evaluated against the running row's
+	// otherwise-idempotent cell WHILE LIFECYCLE_FORCE_RUNNING's override
+	// is active. Deliberately a DISTINCT action from
+	// actionPersistOnlySetObserved: that action's dispatch-time
+	// generationLive guard exists for a completely different hazard (a
+	// stale, race-produced action from the "failed" row, where a live
+	// generation would be a corruption to defend against) — here, a live,
+	// steady-running generation is the ENTIRELY EXPECTED, correct state
+	// (that's exactly why this cell was idempotent in the first place),
+	// so dispatch must never tear anything down for it. Only Submit's own
+	// persist call is the point of this action; the worker's own
+	// handling is a same-value republish of "running", never a
+	// generation-touching operation.
+	actionPersistOnlyRunning
 )
 
 // cellOutcome is one transition-table cell's disposition (design v6 §5.1).
@@ -280,6 +295,13 @@ type acceptDecision struct {
 	err        error
 	existingID string
 	pending    *pendingCommand
+	// stopRetry, set only for an acceptOccupied decision that cancelled an
+	// armed retry timer, is the timer's own stop closure captured while
+	// still holding mu (MINOR 9, F4b Q3 consolidated corrective) — the
+	// caller (Submit) must invoke it only AFTER accept() has already
+	// returned (and thus already released statusMu). nil when no retry
+	// needed cancelling.
+	stopRetry func()
 }
 
 // errProcessRestartRequired is the degraded row's resume/restart rejection
@@ -331,16 +353,19 @@ func (s *statusState) snapshot() Snapshot {
 }
 
 // capabilitiesLocked derives Capabilities from the current observed/desired
-// via the same table Submit uses, so the two can never disagree. During the
-// pending window (accepted, not yet dequeued) every capability is false
-// (design v6 §5.2 step 1).
+// via the same table Submit uses, so the two can never disagree. Every
+// capability is false for as long as the slot is occupied (MINOR 7, F4b Q3
+// consolidated corrective) — design v6 §5.2 step 1's "all canX=false"
+// covers the WHOLE accepted-through-terminal span (pausing/stopping/
+// starting-slot-held/restarting too), not just the narrow pre-dispatch
+// Transition==pending window before the worker has even dequeued the
+// command.
 func (s *statusState) capabilitiesLocked() Capabilities {
-	if s.transition == TransitionPending {
+	if s.pending != nil {
 		return Capabilities{}
 	}
-	slotHeld := s.pending != nil
 	can := func(cmd Command) bool {
-		switch tableLookup(s.observed, s.desired, cmd, slotHeld) {
+		switch tableLookup(s.observed, s.desired, cmd, false) {
 		case cellReject, cellRejectDegraded:
 			return false
 		default:
@@ -410,6 +435,29 @@ func (s *statusState) accept(cmd Command, commandID string) acceptDecision {
 		return acceptDecision{kind: acceptRejected, err: errProcessRestartRequired}
 
 	case cellIdempotent:
+		// MAJOR 6 (F4b Q3 consolidated corrective), design v6 §5.4(б): a
+		// resume evaluated against the running row's idempotent cell
+		// WHILE LIFECYCLE_FORCE_RUNNING's override is active must still
+		// persist durable=running — otherwise the durable row is left
+		// exactly as it was before the override forever, even though the
+		// operator explicitly asked to run, defeating the override's own
+		// documented purpose of letting a later env-var removal converge
+		// cleanly. Restricted to observed==running specifically (matching
+		// "observed unchanged" — publishing running while still merely
+		// "starting" would be a lie, and the natural ready-completion
+		// path already covers that narrower window on its own).
+		if s.override && cmd == CommandResume && s.observed == ObservedRunning {
+			stop := s.cancelRetryLocked()
+			s.transition = TransitionPending
+			s.pending = &pendingCommand{
+				id:     commandID,
+				cmd:    cmd,
+				reason: ReasonUser,
+				target: DesiredRunning,
+				action: actionPersistOnlyRunning,
+			}
+			return acceptDecision{kind: acceptOccupied, pending: s.pending, stopRetry: stop}
+		}
 		id := s.commandID
 		if s.pending != nil {
 			id = s.pending.id
@@ -417,7 +465,28 @@ func (s *statusState) accept(cmd Command, commandID string) acceptDecision {
 		return acceptDecision{kind: acceptIdempotent, existingID: id}
 
 	default: // every remaining outcome is some flavor of "accept"
-		s.cancelRetryLocked()
+		// Defense-in-depth beyond the Transition==pending check above
+		// (BLOCKER 1, F4b Q3 consolidated corrective): that check alone
+		// only catches the window where the SLOT'S OWN owner has not yet
+		// reached a terminal. A slot-FREE phantom start's own completion
+		// (publishTerminalNoSlot — worker.go's completeStart when pc==nil)
+		// forcibly resets Transition to none WITHOUT touching a DIFFERENT,
+		// already-accepted-but-not-yet-dispatched command's slot occupancy
+		// (a phantom start never held that slot in the first place). If
+		// s.pending is still non-nil here despite Transition reading none,
+		// the table above was evaluated against a stale post-completion
+		// observed/desired that has no idea a slot is still occupied — most
+		// rows (unlike "starting") never consult slotHeld, so an unrelated
+		// second command could otherwise be admitted, overwrite s.pending,
+		// and silently drop its own cmdCh send behind the still-buffered
+		// first command (design v6 §5.2 step 1: slot occupancy — not just
+		// Transition — is the actual "second submit -> 409" invariant).
+		// Idempotent same-command cells of transitional rows are unaffected
+		// (cellIdempotent returns above, before ever reaching here).
+		if s.pending != nil {
+			return acceptDecision{kind: acceptRejected, err: errSlotBusy(s.pending)}
+		}
+		stop := s.cancelRetryLocked()
 		s.transition = TransitionPending
 		s.pending = &pendingCommand{
 			id:     commandID,
@@ -426,44 +495,75 @@ func (s *statusState) accept(cmd Command, commandID string) acceptDecision {
 			target: targetFor(cmd),
 			action: actionFor(outcome),
 		}
-		return acceptDecision{kind: acceptOccupied, pending: s.pending}
+		return acceptDecision{kind: acceptOccupied, pending: s.pending, stopRetry: stop}
 	}
 }
 
-// revertPendingOnPersistFailure undoes accept()'s slot occupancy when
+// revertPendingOnPersistFailure undoes accept()'s slot occupancy for pc when
 // Submit's subsequent persistence call fails (design v6 I17): in-memory
 // desired/observed were never touched by accept() in the first place, so
-// there is nothing else to roll back.
-func (s *statusState) revertPendingOnPersistFailure() {
+// there is nothing else to roll back. A no-op if pc is no longer the slot's
+// occupant (MAJOR 3, F4b Q3 consolidated corrective): a slow, failing Save
+// can race pc's OWN generation dying spontaneously — independently
+// classified and released by the worker while Save is still in flight — and
+// by the time Save finally returns, a completely different, unrelated
+// command may have since been accepted into the (by-then-free) slot. Blindly
+// clearing s.pending/s.transition here would rip that DIFFERENT command's
+// still-legitimate slot occupancy out from under it (corrupting
+// capabilities, and — via publishTerminal's own "released := s.pending"
+// read — its eventual terminal's CommandID) purely because pc's own,
+// long-stale Submit call finally got around to failing. Mirrors the
+// isCurrentPending pattern dispatch() already uses for the analogous
+// cmdCh-dequeue race.
+func (s *statusState) revertPendingOnPersistFailure(pc *pendingCommand) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.pending != pc {
+		return
+	}
 	s.pending = nil
 	s.transition = TransitionNone
 }
 
 // commitDesiredAndReason publishes a newly-and-durably-persisted desired
-// state (plus the reason that drove it) into memory. Called by Submit right
-// after a successful Persistence.Save, before the worker is signaled, so
-// the worker (and any concurrent Snapshot/accept caller) always sees a
-// desired value that already matches what was just committed to disk.
-func (s *statusState) commitDesiredAndReason(d DesiredState, r Reason) {
+// state (plus the reason that drove it) into memory for pc. Called by
+// Submit right after a successful Persistence.Save, before the worker is
+// signaled, so the worker (and any concurrent Snapshot/accept caller)
+// always sees a desired value that already matches what was just committed
+// to disk. A no-op if pc is no longer the slot's occupant (MAJOR 3): the
+// symmetric case of revertPendingOnPersistFailure's own race — a slow but
+// SUCCEEDING Save for pc, returning only after pc's own generation already
+// died spontaneously and a DIFFERENT command has since committed its own,
+// newer desired state, must never overwrite that newer value with pc's
+// now-stale one.
+func (s *statusState) commitDesiredAndReason(pc *pendingCommand, d DesiredState, r Reason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.pending != pc {
+		return
+	}
 	s.desired = d
 	s.reason = r
 }
 
-// cancelRetryLocked stops any armed retry timer. Must be called with mu
-// held. Bumps retrySeq so a fire already buffered in the worker's private
-// timer channel (Stop() cannot un-send it) is recognized as stale when the
-// worker eventually reads it (see retrySeq's doc comment).
-func (s *statusState) cancelRetryLocked() {
-	if s.retryCancel != nil {
-		s.retryCancel()
-		s.retryCancel = nil
-	}
+// cancelRetryLocked drops any armed retry timer's bookkeeping. Must be
+// called with mu held. Bumps retrySeq so a fire already buffered in the
+// worker's private timer channel (Stop() cannot un-send it) is recognized
+// as stale when the worker eventually reads it (see retrySeq's doc
+// comment). Returns the timer's own stop closure (a no-op func if none was
+// armed) WITHOUT invoking it (MINOR 9, F4b Q3 consolidated corrective):
+// the injected Timer.Stop is an outward call — design v6 §6's leaf-lock
+// rule ("под statusMu не делается НИ ОДИН вызов наружу") requires every
+// caller to invoke the returned closure only AFTER releasing mu.
+func (s *statusState) cancelRetryLocked() (stop func()) {
+	cancel := s.retryCancel
+	s.retryCancel = nil
 	s.nextRetryAt = time.Time{}
 	s.retrySeq++
+	if cancel == nil {
+		return func() {}
+	}
+	return cancel
 }
 
 // armRetry records a scheduled retry (worker-only caller) and returns the
@@ -521,6 +621,33 @@ func (s *statusState) beginTransition(observed ObservedState, transition Transit
 	s.transitionStartedAt = now
 }
 
+// beginStartTransition is startGeneration's atomic combination of "was the
+// PREVIOUS observed state failed" (for failed-lineage/recovery tracking)
+// with beginTransition's own publish of the new "starting" transition
+// (BLOCKER 2, F4b Q3 consolidated corrective): startGeneration used to do
+// these as two SEPARATE statusMu critical sections (a snapshot() read, then
+// a later beginTransition() write) with no outward call in between — but
+// still a real gap. A concurrent Submit's accept() evaluated inside that
+// gap would see the STALE pre-transition observed/slot state (e.g.
+// ObservedFailed with the slot free) and could legitimately compute an
+// "accept"-class action, occupying the slot and queuing itself on cmdCh —
+// racing a worker that is, at that very moment, ALREADY committed to
+// launching this new generation. Merging the read and the write into one
+// critical section (still not a full fix on its own — see dispatch()'s own
+// defensive re-derivation for actionStart/actionPersistOnlySetObserved,
+// which is what actually closes the hazard regardless of how narrow this
+// makes the window) at least removes the now-pointless extra lock/unlock
+// round trip that existed for no reason other than historical accident.
+func (s *statusState) beginStartTransition(observed ObservedState, transition Transition, now time.Time) (wasFailed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wasFailed = s.observed == ObservedFailed
+	s.observed = observed
+	s.transition = transition
+	s.transitionStartedAt = now
+	return wasFailed
+}
+
 // beginGeneration records a freshly-launched generation's token and publishes
 // it to the StatusSink BEFORE the caller spawns the Runner's goroutine
 // (design v6 §10 ordering requirement). Worker-only caller.
@@ -551,12 +678,20 @@ func (s *statusState) publishTerminal(observed ObservedState, reason Reason, las
 		s.commandID = released.id
 	}
 	s.pending = nil
+	var stopRetry func()
 	if clearRetry {
-		s.cancelRetryLocked()
+		stopRetry = s.cancelRetryLocked()
 	}
 	sink := s.sink
 	s.mu.Unlock()
 
+	// MINOR 9 (F4b Q3 consolidated corrective): the retry timer's own stop
+	// closure is invoked only now, after releasing statusMu (design v6
+	// §6's leaf-lock rule) — exactly like the sink notification below,
+	// which has always followed this same "unlock first" shape.
+	if stopRetry != nil {
+		stopRetry()
+	}
 	recordSlotReleased(released, string(observed))
 	// statusMu is a leaf lock (package doc, design v6 §6: "под statusMu не
 	// делается НИ ОДИН вызов наружу") — the sink is notified only after
@@ -578,12 +713,18 @@ func (s *statusState) publishTerminalNoSlot(observed ObservedState, reason Reaso
 	s.transition = TransitionNone
 	s.reason = reason
 	s.lastError = lastError
+	var stopRetry func()
 	if clearRetry {
-		s.cancelRetryLocked()
+		stopRetry = s.cancelRetryLocked()
 	}
 	sink := s.sink
 	s.mu.Unlock()
 
+	// MINOR 9: invoked only after releasing statusMu — see publishTerminal's
+	// own doc comment.
+	if stopRetry != nil {
+		stopRetry()
+	}
 	sink.SetStatus(string(observed), lastError)
 }
 
@@ -612,11 +753,22 @@ func (s *statusState) enterDegraded(lastError string) {
 	s.transition = TransitionNone
 	s.lastError = lastError
 	released := s.pending
+	if released != nil {
+		// MINOR 15 (F4b Q3 consolidated corrective): parity with
+		// publishTerminal — a degraded terminal reached via a
+		// command-in-flight (its own pause/stop hitting a dirty teardown)
+		// must report THAT command's id, not leave CommandID stuck on
+		// whatever it was before.
+		s.commandID = released.id
+	}
 	s.pending = nil
-	s.cancelRetryLocked()
+	stopRetry := s.cancelRetryLocked()
 	sink := s.sink
 	s.mu.Unlock()
 
+	// MINOR 9: invoked only after releasing statusMu — see publishTerminal's
+	// own doc comment.
+	stopRetry()
 	recordSlotReleased(released, "degraded")
 	sink.SetStatus(string(ObservedDegraded), lastError)
 }

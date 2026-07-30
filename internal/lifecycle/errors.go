@@ -47,3 +47,10 @@ var ErrDirtyTeardown = errors.New("lifecycle: dirty teardown (join-timeout class
 var IsDirtyTeardownError = func(err error) bool {
 	return errors.Is(err, ErrDirtyTeardown)
 }
+
+// ErrAlreadyRunning is returned by Controller.Run when called a second
+// time on the same Controller (MINOR 16, F4b Q3 consolidated corrective):
+// Run is single-use — a second call, concurrent or sequential, must never
+// spawn a second worker goroutine racing the first over every
+// worker-owned field with no synchronization at all.
+var ErrAlreadyRunning = errors.New("lifecycle: Run already called")

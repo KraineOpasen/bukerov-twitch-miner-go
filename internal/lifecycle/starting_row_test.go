@@ -190,9 +190,12 @@ func TestStartingRowSlotHeldRejectsOtherCommands(t *testing.T) {
 
 // A generation that dies BEFORE becoming ready while a resume/restart
 // command holds the slot classifies exactly like any other startup
-// failure — target=running, so failed+retry, unchanged from the
-// slot-free case (design v6: "slot-held -> classify by slot target
-// [unchanged]").
+// failure — target=running, so failed+retry, unchanged from the slot-free
+// case (MINOR 12, F4b Q3 consolidated corrective: citation corrected — no
+// literal design v6 quote exists for this; the applicable rule is design
+// v6 §5.2 step 5's slot-target classification, which is target-driven
+// regardless of whether the slot got there via a slot-free
+// reconcile/retry start or a slot-held resume/restart command).
 func TestStartingRowSlotHeldDeathBeforeReadyIsStartupFailure(t *testing.T) {
 	rf := newRunnerFactory()
 	rf.readySignaling = true
