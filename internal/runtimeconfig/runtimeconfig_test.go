@@ -150,6 +150,9 @@ func TestResolveDefaults(t *testing.T) {
 	if rc.AutoUpdateInterval != updater.DefaultCheckInterval {
 		t.Errorf("AutoUpdateInterval = %s, want default %s", rc.AutoUpdateInterval, updater.DefaultCheckInterval)
 	}
+	if rc.LifecycleForceRunning {
+		t.Error("LifecycleForceRunning should default false")
+	}
 	if rc.Dashboard.AuthEnabled() {
 		t.Error("no credentials -> AuthEnabled should be false")
 	}
@@ -259,6 +262,38 @@ func TestResolveInsecureNoAuthOnlyTruthy(t *testing.T) {
 		if rc.Dashboard.InsecureNoAuth != tc.want {
 			t.Errorf("InsecureNoAuth(%q) = %v, want %v", tc.raw, rc.Dashboard.InsecureNoAuth, tc.want)
 		}
+	}
+}
+
+// TestResolveLifecycleForceRunning locks LIFECYCLE_FORCE_RUNNING's resolution:
+// truthy only (parseBool semantics, matching InsecureNoAuth), unset/garbage
+// values default to false.
+func TestResolveLifecycleForceRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  bool
+		raw  string
+		want bool
+	}{
+		{"unset", false, "", false},
+		{"true", true, "true", true},
+		{"1", true, "1", true},
+		{"TRUE", true, "TRUE", true},
+		{"false", true, "false", false},
+		{"0", true, "0", false},
+		{"empty string set", true, "", false},
+		{"garbage", true, "sometimes", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{}
+			if tc.set {
+				env["LIFECYCLE_FORCE_RUNNING"] = tc.raw
+			}
+			rc := Resolve(Flags{}, envMap(env))
+			if rc.LifecycleForceRunning != tc.want {
+				t.Errorf("LifecycleForceRunning(%q, set=%v) = %v, want %v", tc.raw, tc.set, rc.LifecycleForceRunning, tc.want)
+			}
+		})
 	}
 }
 

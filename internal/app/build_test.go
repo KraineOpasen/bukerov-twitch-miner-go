@@ -92,11 +92,48 @@ func TestBuildConstructsDependencies(t *testing.T) {
 	if app.web == nil {
 		t.Error("web not built")
 	}
-	if app.runner == nil {
-		t.Error("miner not built")
+	if app.minerFactory == nil {
+		t.Error("miner factory not built")
+	}
+	if app.controller == nil {
+		t.Error("lifecycle controller not built")
 	}
 	if got, want := stepNames(app), []string{"database", "analytics", "web"}; !equalStrings(got, want) {
 		t.Errorf("steps = %v, want %v", got, want)
+	}
+}
+
+// (contract §11 item 10) Build's miner factory produces a FRESH *miner.Miner
+// on every call — never the same instance twice — and each one is tracked as
+// the "current generation" miner under currentMinerMu before it's returned.
+func TestBuildMinerFactoryProducesFreshMinerEveryCall(t *testing.T) {
+	ctx := context.Background()
+	app, err := buildWith(ctx, testConfig(), runtimeconfig.RuntimeConfig{}, testFactories(t, nil))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+	m1 := app.minerFactory()
+	if m1 == nil {
+		t.Fatal("minerFactory returned nil")
+	}
+	app.currentMinerMu.Lock()
+	tracked1 := app.currentMiner
+	app.currentMinerMu.Unlock()
+	if tracked1 != m1 {
+		t.Fatal("currentMiner was not published to the miner the factory just built")
+	}
+
+	m2 := app.minerFactory()
+	if m2 == m1 {
+		t.Fatal("minerFactory returned the SAME miner twice; each generation must get a fresh one")
+	}
+	app.currentMinerMu.Lock()
+	tracked2 := app.currentMiner
+	app.currentMinerMu.Unlock()
+	if tracked2 != m2 {
+		t.Fatal("currentMiner was not updated to the SECOND generation's miner")
 	}
 }
 
@@ -157,8 +194,11 @@ func TestBuildAnalyticsDisabled(t *testing.T) {
 	if app.web != nil {
 		t.Error("web built despite EnableAnalytics=false")
 	}
-	if app.runner == nil {
-		t.Error("miner not built")
+	if app.minerFactory == nil {
+		t.Error("miner factory not built")
+	}
+	if app.controller == nil {
+		t.Error("lifecycle controller not built")
 	}
 	if got, want := stepNames(app), []string{"database"}; !equalStrings(got, want) {
 		t.Errorf("steps = %v, want %v", got, want)

@@ -327,6 +327,16 @@ type Config struct {
 	// Clock is the time/timer seam. Defaults to the real wall clock.
 	Clock Clock
 
+	// NoControlSurface reports whether this process has NO way at all for an
+	// operator to change desired at runtime (design v6 §14/OD3: no web
+	// dashboard was built, e.g. EnableAnalytics=false). When true AND
+	// startup reconciliation honors a persisted paused/stopped intent, the
+	// controller records a one-per-boot ring event plus a rare periodic slog
+	// reminder (noControlSurfaceTickInterval) explaining why the miner never
+	// started and how to regain control — since with no control surface
+	// there would otherwise be NOTHING in the logs to explain the silence.
+	NoControlSurface bool
+
 	// UpdaterRun, if set, is the process-level updater loop (design v6 §7:
 	// updater ownership moves OUT of any per-generation runtime and onto the
 	// process/controller). Controller.Run starts it exactly once, as its own
@@ -398,6 +408,17 @@ type Controller struct {
 	// than launching a second, spurious generation (orchestrator
 	// concurrency review, defect 1's retry-timer race).
 	retryTimerSeq uint64
+
+	// noControlSurfaceTimer is the single, worker-owned periodic reminder
+	// timer for design v6 §14/OD3's no-control-surface tick (contract §11
+	// item 8): armed once at startup reconciliation when a persisted
+	// paused/stopped intent is honored with cfg.NoControlSurface set, then
+	// RE-armed every time it fires — unlike retryTimer, which fires at most
+	// once per generation attempt, this one recurs for the entire life of
+	// the process, since with no control surface desired can never change.
+	// nil whenever no reminder is armed (the common case: either desired
+	// ended up running, or NoControlSurface is false).
+	noControlSurfaceTimer Timer
 
 	// awaitingStart is non-nil while the CURRENT generation is a
 	// ReadySignaler that has not yet become ready — i.e. observed is

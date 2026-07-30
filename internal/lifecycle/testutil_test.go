@@ -281,6 +281,44 @@ func (t *fakeTimer) Stop() bool {
 	return !already
 }
 
+// --- fakeStatusSink ------------------------------------------------------
+
+// statusCall records one SetStatus invocation for assertions.
+type statusCall struct {
+	status  string
+	message string
+}
+
+// fakeStatusSink is the StatusSink seam's test double: records every
+// SetStatus/SetGeneration call (ordered) so a test can assert exactly what a
+// b3 web adapter would have received, without internal/lifecycle ever
+// importing internal/web.
+type fakeStatusSink struct {
+	mu          sync.Mutex
+	statuses    []statusCall
+	generations []uint64
+}
+
+func (s *fakeStatusSink) SetStatus(status, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses = append(s.statuses, statusCall{status: status, message: message})
+}
+
+func (s *fakeStatusSink) SetGeneration(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generations = append(s.generations, gen)
+}
+
+func (s *fakeStatusSink) snapshotStatuses() []statusCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]statusCall, len(s.statuses))
+	copy(out, s.statuses)
+	return out
+}
+
 // --- fakePersistence ---------------------------------------------------
 
 // fakePersistence is the Persistence seam's test double: Load returns a

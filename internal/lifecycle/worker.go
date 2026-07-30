@@ -30,6 +30,16 @@ var RetryBackoffSchedule = []time.Duration{
 // wall clock, so no test needs a real sleep to exercise it.
 var teardownSlowThreshold = 5 * time.Second
 
+// noControlSurfaceTickInterval is how often the no-control-surface periodic
+// slog reminder fires (design v6 §14/OD3, contract §11 item 8) while a
+// persisted paused/stopped intent stays honored with no dashboard control
+// surface built for this process. Long enough not to spam logs across a
+// long-running idle container, short enough that an operator tailing logs
+// without a dashboard open eventually sees it. Package variable so tests can
+// shrink it to observe multiple ticks fast, against the injectable Clock
+// seam (never a real sleep).
+var noControlSurfaceTickInterval = 15 * time.Minute
+
 // updaterJoinTimeout bounds how long Run waits, on every exit path, for the
 // process-level updater loop (Config.UpdaterRun) to actually return after
 // its derived context is cancelled (design v6 §7). This is a real-time
@@ -197,6 +207,18 @@ func (c *Controller) Run(ctx context.Context) error {
 				c.state.clearRetry()
 				c.startGeneration(ReasonRetry, "", "")
 			}
+
+		case <-c.noControlSurfaceTimerChan():
+			// design v6 §14/OD3, contract §11 item 8: a rare periodic
+			// reminder, slog-only (never the ring — a one-per-boot ring
+			// entry already recorded WHY at reconciliation; a recurring ring
+			// entry every interval would just be noise competing for the
+			// same fixed-capacity budget mining events use). Re-armed
+			// unconditionally: this state never changes for the rest of the
+			// process's life (no control surface exists to change desired),
+			// so the reminder recurs for as long as the process runs.
+			recordNoControlSurfaceTick()
+			c.armNoControlSurfaceTick()
 		}
 	}
 }
@@ -208,6 +230,23 @@ func (c *Controller) retryTimerChan() <-chan time.Time {
 		return nil
 	}
 	return c.retryTimer.C()
+}
+
+// noControlSurfaceTimerChan returns the current no-control-surface reminder
+// timer's fire channel, or nil (a select case on a nil channel never fires)
+// when no reminder is armed.
+func (c *Controller) noControlSurfaceTimerChan() <-chan time.Time {
+	if c.noControlSurfaceTimer == nil {
+		return nil
+	}
+	return c.noControlSurfaceTimer.C()
+}
+
+// armNoControlSurfaceTick (re-)arms the no-control-surface periodic
+// reminder timer via the injectable Clock seam — no goroutine, no sleep,
+// exactly like armRetryTimer.
+func (c *Controller) armNoControlSurfaceTick() {
+	c.noControlSurfaceTimer = c.cfg.Clock.NewTimer(noControlSurfaceTickInterval)
 }
 
 // readyChSafe returns the current generation's Ready() channel while the
@@ -245,6 +284,31 @@ func (c *Controller) reconcileAndMaybeStart(ctx context.Context) {
 	}
 
 	c.state.reconcile(desired, observed, reason, lastErr, override)
+
+	// design v6 §5.4/contract §11 item 9: a boot-honored paused/stopped
+	// intent must reach the StatusSink — outside statusMu, exactly like
+	// every other sink notification (package doc: "под statusMu не делается
+	// НИ ОДИН вызов наружу") — so a b3 web adapter can publish the §5.4
+	// overlay message explaining WHY the miner never started. Boot
+	// desired=running (persisted running, OR ForceRunning's override, both
+	// already folded into desired above) keeps today's behavior: no sink
+	// call here, since the miner drives its own startup statuses once its
+	// generation actually starts.
+	if desired != DesiredRunning {
+		c.cfg.StatusSink.SetStatus(string(observed), lastErr)
+	}
+
+	// design v6 §14/OD3, contract §11 item 8: when a control surface (the
+	// dashboard) does not exist AT ALL for this process, a persisted
+	// paused/stopped intent is otherwise silent — nothing ever logs or
+	// surfaces WHY the miner sits idle. Recorded once per boot (ring) plus a
+	// rare periodic slog reminder for an operator tailing logs without a
+	// dashboard open at all.
+	if desired != DesiredRunning && c.cfg.NoControlSurface {
+		recordRing(events.TypeLifecycleIntentHonoredNoControlSurface,
+			fmt.Sprintf("desired=%s honored with no control surface; resume via config EnableAnalytics=true / env LIFECYCLE_FORCE_RUNNING=true / docker stop", desired))
+		c.armNoControlSurfaceTick()
+	}
 
 	if desired == DesiredRunning {
 		c.startGeneration(reason, "", "")

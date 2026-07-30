@@ -15,19 +15,27 @@
 // order, Runs them, and Shuts them down in the reverse order with a single,
 // idempotent, error-aggregating path. The miner remains the runtime engine that
 // owns its own internal graph (pubsub, chat, watcher, drops, discovery, health,
-// notifications, debug server, auto-update); App owns only the process-level
-// resources main used to own, plus the miner's construction and lifecycle.
+// notifications, debug server); App owns the process-level resources main used
+// to own, the miner's construction, AND — since design v6/contract §11 — the
+// durable lifecycle controller that decides WHEN a miner generation runs at
+// all: App.Run drives a *lifecycle.Controller instead of a single pre-built
+// runner, and the controller drives zero-or-more Miner "generations" (built
+// fresh, one per generation, via App's own miner factory) over the process's
+// lifetime — pause/resume/restart tear down and rebuild the generation without
+// App's own owned resources (db/analytics/web) ever being touched.
 //
 // Build performs no network I/O, starts no runtime loops, and launches no
 // goroutines: authentication (a network/device-code step) and every watch /
-// pubsub / IRC / HTTP-serving loop happen only under Run. This split makes
-// construction, startup order, and shutdown order independently testable.
+// pubsub / IRC / HTTP-serving loop happen only under Run (inside a generation
+// the controller starts). This split makes construction, startup order, and
+// shutdown order independently testable.
 package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -36,8 +44,12 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/web"
 )
 
@@ -60,13 +72,6 @@ var (
 	ErrShutDown = errors.New("app: Run called after Shutdown")
 )
 
-// runner is the runtime engine App drives. *miner.Miner satisfies it. It is an
-// interface so lifecycle tests can inject a fake runtime without the miner's
-// network/auth dependencies.
-type runner interface {
-	Run(ctx context.Context) error
-}
-
 // lifecycleStep is one process-level owned resource. start is nil for resources
 // that are fully live once constructed (the database and analytics service);
 // stop is the resource's Close/Stop. Steps are started in slice order under Run
@@ -85,7 +90,37 @@ type App struct {
 	db        *database.DB
 	analytics *analytics.Service
 	web       *web.Server
-	runner    runner
+
+	// minerFactory builds AND wires a fresh *miner.Miner exactly as Build's
+	// old single pre-built runner used to (SetDashboardConfig/SetDatabase/
+	// SetAnalyticsService/SetWebServer) — but is now called once PER
+	// GENERATION (design v6 §14/contract §11 item 10) by the lifecycle
+	// controller's Factory, instead of once per process. Set in Build; nil
+	// only for an App built directly as a struct literal in a test that
+	// wires its own controller (see lifecycle_test.go).
+	minerFactory func() *miner.Miner
+
+	// currentMinerMu/currentMiner track the miner instance the CURRENTLY (or
+	// most recently) built generation owns, so the process-level updater's
+	// notify adapter (contract §11 item 13) can resolve "the live
+	// generation's notifications manager, else nil" without the updater
+	// loop — which outlives any single generation — having any generation
+	// concept of its own. Set by minerFactory itself, BEFORE it returns the
+	// miner, under currentMinerMu; read the same way by the updater's
+	// accessor closure. Never cleared on teardown: a stale-but-stopped
+	// miner's NotificationManager() is still safe to call (Stop closes
+	// dispatch admission), and the NEXT generation's factory call overwrites
+	// it before that generation's Run ever starts.
+	currentMinerMu sync.Mutex
+	currentMiner   *miner.Miner
+
+	// controller is the durable lifecycle core App.Run drives instead of a
+	// single pre-built runner (contract §11 items 10-12): it owns deciding
+	// WHEN a miner generation runs (persisted desired state, pause/resume/
+	// restart, the process-level auto-updater's exit request) and tears
+	// down/rebuilds generations via minerFactory. nil only in a test App
+	// that never calls Build.
+	controller *lifecycle.Controller
 
 	// steps are the process-level owned resources in construction order:
 	// database, then (optionally) analytics service, then (optionally) web
@@ -171,6 +206,15 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		stop: closer(db.Close),
 	})
 
+	// The lifecycle store's migration registers against db right after it
+	// opens (contract §11 item 11): a failure here unwinds through the SAME
+	// partial-build cleanup as every other step above, since "database" is
+	// already tracked in app.steps by this point.
+	store, serr := lifecycle.NewStore(db)
+	if serr != nil {
+		return nil, fmt.Errorf("app: build lifecycle store: %w", serr)
+	}
+
 	if cfg.EnableAnalytics {
 		svc, aerr := f.newAnalytics(db, basePath, cfg.Analytics.RetentionDays)
 		if aerr != nil {
@@ -198,37 +242,186 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		})
 	}
 
-	// The miner is the runtime engine. It is constructed and wired here but not
-	// run; Run(ctx) performs authentication and starts every runtime loop. The
-	// miner receives the App-owned database/analytics/web as external
-	// dependencies (it neither opens nor closes them — App does), so ownership
-	// is single and unambiguous.
-	m := f.newMiner(cfg, rc.ConfigPath)
-	m.ConfigureAutoUpdate(rc.AutoUpdateEnabled, rc.AutoUpdateInterval)
-	// The miner's fallback web build (used only when App does not inject a web
-	// server) reads the same immutable dashboard snapshot rather than the env.
-	m.SetDashboardConfig(rc.Dashboard)
-	m.SetDatabase(db)
-	if app.analytics != nil {
-		m.SetAnalyticsService(app.analytics)
+	// The miner is the runtime engine — but, since design v6/contract §11,
+	// App no longer builds a single one: it builds a FACTORY that the
+	// lifecycle controller calls once per generation. Each fresh miner is
+	// constructed and wired here but not run; the generation's own Run(ctx)
+	// (invoked by the controller) performs authentication and starts every
+	// runtime loop. The miner receives the SAME App-owned database/analytics/
+	// web as external dependencies on every generation (it neither opens nor
+	// closes them — App does), so ownership is single and unambiguous no
+	// matter how many generations come and go.
+	app.minerFactory = func() *miner.Miner {
+		m := f.newMiner(cfg, rc.ConfigPath)
+		// The miner's fallback web build (used only when App does not inject
+		// a web server) reads the same immutable dashboard snapshot rather
+		// than the env.
+		m.SetDashboardConfig(rc.Dashboard)
+		m.SetDatabase(db)
+		if app.analytics != nil {
+			m.SetAnalyticsService(app.analytics)
+		}
+		if app.web != nil {
+			m.SetWebServer(app.web)
+		}
+		// Published BEFORE returning (contract §11 item 10): the process-
+		// level updater's notify accessor (item 13) reads this under
+		// currentMinerMu to resolve "the live generation's notifications
+		// manager, else nil", and must never observe a half-wired miner.
+		app.currentMinerMu.Lock()
+		app.currentMiner = m
+		app.currentMinerMu.Unlock()
+		return m
 	}
+
+	// Wire the dirty-teardown classifier ONCE per process (contract §11 item
+	// 5): internal/lifecycle stays Twitch/Miner-agnostic, so this is the one
+	// integration point where both packages are visible together.
+	wireDirtyTeardownClassifier()
+
+	// The web status adapter (contract §11 item 14) is nil when there is no
+	// web server at all — lifecycle.New defaults a nil StatusSink to its own
+	// no-op sink, so this stays a plain, honest nil rather than a manually
+	// constructed no-op wrapper.
+	var sink lifecycle.StatusSink
 	if app.web != nil {
-		m.SetWebServer(app.web)
+		sink = lifecycleStatusAdapter{broadcaster: app.web.GetStatusBroadcaster()}
 	}
-	app.runner = m
+
+	// The process-level updater loop (contract §11 item 13, design v6 §7):
+	// built as a closure captured over the (not-yet-assigned) controller
+	// variable below — it only ever RUNS inside controller.Run, by which
+	// point controller is already assigned, so this is safe despite the
+	// apparent forward reference (a Go closure captures the variable, not
+	// its value at closure-creation time).
+	var controller *lifecycle.Controller
+	updaterRun := func(uctx context.Context) {
+		currentManager := func() *notifications.Manager {
+			app.currentMinerMu.Lock()
+			m := app.currentMiner
+			app.currentMinerMu.Unlock()
+			if m == nil {
+				return nil
+			}
+			return m.NotificationManager()
+		}
+		notifyAvailable, notifyFailed := miner.UpdateNotifyFuncs(currentManager)
+		upd := updater.New(updater.Options{
+			Repo:           version.Repo,
+			CurrentVersion: version.Version,
+			Enabled:        rc.AutoUpdateEnabled,
+			CheckInterval:  rc.AutoUpdateInterval,
+			Gate:           controller.UpdaterGate,
+			OnUpdate:       controller.UpdateApplied,
+			Notify:         notifyAvailable,
+			NotifyFailure:  notifyFailed,
+		})
+		upd.Run(uctx)
+	}
+
+	controller = lifecycle.New(lifecycle.Config{
+		Factory: func() lifecycle.Runner {
+			return app.minerFactory()
+		},
+		Persistence:      store,
+		StatusSink:       sink,
+		ForceRunning:     rc.LifecycleForceRunning,
+		NoControlSurface: app.web == nil,
+		UpdaterRun:       updaterRun,
+	})
+	app.controller = controller
 
 	return app, nil
 }
 
+// wireDirtyTeardownClassifierOnce guards wireDirtyTeardownClassifier so
+// repeated Builds within one process (every test binary; a real process only
+// ever Builds once) install the classifier exactly once.
+var wireDirtyTeardownClassifierOnce sync.Once
+
+// wireDirtyTeardownClassifier installs the real "dirty teardown" (join-
+// timeout class) recognizer into internal/lifecycle's package-level seam
+// (contract §11 item 5): internal/lifecycle must never import internal/miner
+// directly (it stays Twitch/Miner-agnostic by design — see its package doc),
+// so this integration layer is the one place both packages are visible at
+// once. Recognizes BOTH lifecycle.ErrDirtyTeardown (internal/lifecycle's own
+// test sentinel — keeping that package's tests working unmodified) and
+// miner.IsJoinTimeoutError (the real production class this wiring exists
+// for: a shutdown-drain overrun surfacing through Miner.Run's returned
+// error). Assigned exactly once per process, not per Build call.
+func wireDirtyTeardownClassifier() {
+	wireDirtyTeardownClassifierOnce.Do(func() {
+		lifecycle.IsDirtyTeardownError = func(err error) bool {
+			return errors.Is(err, lifecycle.ErrDirtyTeardown) || miner.IsJoinTimeoutError(err)
+		}
+	})
+}
+
+// lifecycleStatusAdapter implements lifecycle.StatusSink over web.Server's
+// existing status broadcaster (contract §11 item 14, design v6 §14
+// hardening — THE WHITELIST RULE): it publishes ONLY existing
+// web.MinerStatus values, and ONLY for the lifecycle statuses the miner
+// itself could never explain on its own.
+//
+// Mapping table (every lifecycle status NOT listed here is dropped, logged
+// at debug):
+//   - "paused" / "stopped" -> web.StatusError, with the exact design v6 §5.4
+//     message: a boot-honored persisted lifecycle intent — otherwise an
+//     operator staring at a dashboard stuck on the loading overlay would
+//     have no idea the miner never started on purpose.
+//   - "failed" -> web.StatusError, with the lifecycle LastError message (a
+//     startup failure sitting in the retry-backoff window between attempts).
+//   - "degraded" -> web.StatusError, with the lifecycle LastError message (a
+//     dirty teardown while desired stayed paused/stopped).
+//
+// Every OTHER lifecycle status (starting/running/pausing/stopping/
+// restarting/exiting) is intentionally NOT published: the miner ITSELF
+// already drives this SAME broadcaster through its own startup progression
+// (initializing -> auth_required/auth_waiting -> loading_streamers ->
+// running) once its generation actually starts running — publishing
+// "running" from here at launch would prematurely clear that in-progress
+// overlay before the miner has actually finished starting. This adapter
+// only ever fills the gaps the miner itself can never report.
+type lifecycleStatusAdapter struct {
+	broadcaster *web.StatusBroadcaster
+}
+
+// lifecycleHonoredIntentMessage is design v6 §5.4's exact operator-facing
+// message for a boot-honored paused/stopped persisted intent.
+const lifecycleHonoredIntentMessage = "miner paused/stopped by persisted lifecycle intent; resume: LIFECYCLE_FORCE_RUNNING=true (или дождитесь релиза с dashboard-контролами)"
+
+func (a lifecycleStatusAdapter) SetStatus(status, message string) {
+	switch status {
+	case "paused", "stopped":
+		a.broadcaster.SetStatus(web.StatusError, lifecycleHonoredIntentMessage)
+	case "failed", "degraded":
+		a.broadcaster.SetStatus(web.StatusError, message)
+	default:
+		slog.Debug("app: lifecycle status has no web.MinerStatus mapping, dropped", "status", status)
+	}
+}
+
+// SetGeneration is a no-op in Ф4b: status.go has no generation field until
+// Ф4c. Logged at debug so the call is at least visible while wiring this up.
+func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
+	slog.Debug("app: lifecycle SetGeneration is a no-op in Ф4b (no generation field in status.go yet)", "generation", gen)
+}
+
 // Run starts the process-level owned resources in construction order (only the
-// web server has a start step) and then runs the miner, which authenticates and
-// drives every runtime loop until ctx is cancelled. Run blocks until the miner
-// returns (on ctx cancellation or a fatal runtime error).
+// web server has a start step) and then runs the lifecycle controller instead
+// of a single pre-built runner (contract §11 item 12): the controller performs
+// startup reconciliation (persisted desired state), then drives zero or more
+// Miner generations — built by App's own factory — over the rest of the
+// process's life, reacting to pause/resume/restart commands and the
+// process-level auto-updater's exit request. Run blocks until the controller
+// returns (process-shutdown via ctx cancellation, an applied update, or a
+// dirty teardown while desired stayed running).
 //
 // A start-step failure (e.g. the web server refusing an insecure bind) unwinds
 // every resource opened so far, in reverse order, before returning the wrapped
-// error — so a failed startup leaves nothing open. Run is single-use: a second
-// call returns ErrAlreadyRun, and a call after Shutdown returns ErrShutDown.
+// error — so a failed startup leaves nothing open, and the controller never
+// even starts. Run is single-use: a second call returns ErrAlreadyRun, and a
+// call after Shutdown returns ErrShutDown.
 func (a *App) Run(ctx context.Context) error {
 	if a.shutdownStarted.Load() {
 		return ErrShutDown
@@ -251,10 +444,10 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 
-	if a.runner == nil {
+	if a.controller == nil {
 		return nil
 	}
-	return a.runner.Run(ctx)
+	return a.controller.Run(ctx)
 }
 
 // Shutdown stops the process-level owned resources in reverse construction order
@@ -265,8 +458,11 @@ func (a *App) Run(ctx context.Context) error {
 // Run is safe — it simply closes whatever Build opened.
 //
 // By the time Shutdown runs on the normal path, Run has returned, which means
-// the miner has already torn down its own runtime graph (its Run cancels on ctx
-// and calls stop()); Shutdown then closes the resources the miner does not own.
+// the lifecycle controller has already returned — and, on every one of its own
+// exit paths, already joined the process-level updater loop and torn down
+// whatever miner generation was current (each generation's own Run cancels on
+// its ctx and calls stop()) — before Run itself returned; Shutdown then closes
+// the resources neither the controller nor any generation owns.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.shutdownStarted.Store(true)
 	a.shutdownOnce.Do(func() {

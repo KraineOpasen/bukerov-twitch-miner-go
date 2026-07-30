@@ -156,3 +156,11 @@ func recordSlotReleased(released *pendingCommand, reason string) {
 func recordUpdaterJoinTimeout(timeout time.Duration) {
 	slog.Warn("lifecycle: updater_join_timeout", "timeout", timeout)
 }
+
+// recordNoControlSurfaceTick logs design v6 §14/OD3's rare periodic
+// reminder (contract §11 item 8): a persisted paused/stopped intent is
+// STILL honored with no dashboard control surface for this process.
+// slog-only by design (see the call site's comment) — never the ring.
+func recordNoControlSurfaceTick() {
+	slog.Info("lifecycle: no_control_surface_tick")
+}
