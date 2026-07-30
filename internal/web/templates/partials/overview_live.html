@@ -1,7 +1,18 @@
 {{define "overview_live"}}
+{{/* F2.5: freshness marker consumed by overview.html's __ovDelta stale
+     clock. Hidden — it carries only data attributes, never visible content.
+     data-generated is the server's wall-clock unix seconds at render time
+     (GeneratedUnix, already existed on OverviewData); the client reads it
+     ONCE per swap (and once at initial page load) to anchor the monotonic
+     stale-clock baseline via resetStaleBaseline() — this is what stops a
+     cached/stale initial HTML render from painting as falsely "fresh". All
+     ticking after that anchor uses performance.now(), never wall-clock
+     again. data-connection-lost lets the client escalate straight to "lost"
+     without waiting out the fresh/delayed/stale age thresholds. */}}
+<span id="ov-meta" hidden data-generated="{{.GeneratedUnix}}" data-connection-lost="{{if .ConnectionLost}}1{{else}}0{{end}}"></span>
+
 <header class="flex flex-wrap items-center justify-between gap-3 mb-4">
     <div class="flex items-center gap-4 flex-wrap">
-        <h1 class="text-2xl font-bold text-neutral-100">{{ t "nav.overview" }}</h1>
         <span class="inline-flex items-center gap-2 text-sm">
             <span class="w-2.5 h-2.5 rounded-full {{if .Connected}}{{else if .ConnectionLost}}bg-event{{else}}bg-danger{{end}}" style="{{if .Connected}}background:var(--color-success);box-shadow:0 0 6px color-mix(in srgb, var(--color-success) 80%, transparent){{end}}"></span>
             <span class="text-neutral-300">{{.BotStatusLabel}}</span>
@@ -10,6 +21,16 @@
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5a7 7 0 0 1 14 0"/><path d="M8.5 15.5a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
             {{if eq .NetState "ok"}}{{ t "ov.connected" }}{{else if eq .NetState "degraded"}}{{ t "ov.degraded" }}{{else}}<span class="stale-pill">{{ t "ov.stale_data" }}</span>{{end}}
         </span>
+        {{/* F2.6: aggregated health chip — icon + localized text (never color
+             alone), links to the full Health Center page. aria-label carries
+             both the label AND the detail (a title tooltip alone is
+             mouse-only and unreachable via keyboard/screen reader); the
+             title attribute is rendered only when there IS a detail, never
+             as an empty title="". */}}
+        <a href="/health" class="ov-health ov-health-{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
+            <svg class="ov-health-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span>{{.Health.Label}}</span>
+        </a>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
         <div class="text-right">
@@ -37,6 +58,18 @@
     <div class="flex items-center gap-2 mb-2">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400"><span class="sec-accent sec-accent-pred" aria-hidden="true"></span>{{ t "pred.heading" }}</h2>
         {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}
+        {{/* F2.7: predictions board's technical status (never the betting
+             outcome) — icon + visible localized text (readable in the
+             accessibility tree via normal document order; no role=status
+             here — this chip lives inside #overview-live, so it's a brand
+             new DOM node on every 30s innerHTML swap and would never
+             actually fire a live-region announcement, only false-promise
+             one). No "degraded" state exists (documented omission); this
+             never touches manualUI/__predBusy. */}}
+        <span class="ov-pred-chip ov-pred-chip-{{.PredictionsState}}">
+            <svg class="ov-pred-chip-ico" aria-hidden="true" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            <span>{{.PredictionsStateLabel}}</span>
+        </span>
     </div>
     {{if .Predictions}}
     <div class="pred-board">
@@ -48,37 +81,57 @@
 </section>
 
 <section id="grid">
-    {{if .TrackedLive}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2"><span class="sec-accent sec-accent-grid" aria-hidden="true"></span>{{ t "grid.live" }} · {{len .TrackedLive}}</h3>
-    <div class="card-grid mb-6">
-        {{range .TrackedLive}}{{template "overview_card" .}}{{end}}
-    </div>
+    {{/* F2.1/W13(b): each group heading's count is wrapped in
+         data-ov-group-count, carrying the server-rendered total in
+         data-ov-total. applyFilter() swaps its textContent to the group's
+         currently-VISIBLE count while a filter is active, and restores
+         data-ov-total when the filter is cleared — so the count always
+         reflects what's actually shown. */}}
+    {{if .LiveCards}}
+    <section class="ov-group" data-ov-group="live">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2"><span class="sec-accent sec-accent-grid" aria-hidden="true"></span>{{ t "grid.live" }} · <span data-ov-group-count data-ov-total="{{len .LiveCards}}">{{len .LiveCards}}</span></h3>
+        <div class="card-grid mb-6">
+            {{range .LiveCards}}{{template "overview_card" .}}{{end}}
+        </div>
+    </section>
     {{end}}
 
-    {{if .TrackedUnknown}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.unknown" }} · {{len .TrackedUnknown}}</h3>
-    <div class="card-grid mb-6">
-        {{range .TrackedUnknown}}{{template "overview_card" .}}{{end}}
-    </div>
+    {{if .UnknownCards}}
+    <section class="ov-group" data-ov-group="unknown">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.unknown" }} · <span data-ov-group-count data-ov-total="{{len .UnknownCards}}">{{len .UnknownCards}}</span></h3>
+        <div class="card-grid mb-6">
+            {{range .UnknownCards}}{{template "overview_card" .}}{{end}}
+        </div>
+    </section>
     {{end}}
 
-    {{if .TrackedOffline}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.offline" }} · {{len .TrackedOffline}}</h3>
-    <div class="card-grid mb-6">
-        {{range .TrackedOffline}}{{template "overview_card" .}}{{end}}
-    </div>
+    {{if .OfflineCards}}
+    <section class="ov-group" data-ov-group="offline">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.offline" }} · <span data-ov-group-count data-ov-total="{{len .OfflineCards}}">{{len .OfflineCards}}</span></h3>
+        <div class="card-grid mb-6">
+            {{range .OfflineCards}}{{template "overview_card" .}}{{end}}
+        </div>
+    </section>
     {{end}}
 
-    {{if .Untracked}}
-    <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.untracked" }} · {{len .Untracked}}</h3>
-    <div class="card-grid mb-6">
-        {{range .Untracked}}{{template "overview_card" .}}{{end}}
-    </div>
+    {{if .UntrackedCards}}
+    <section class="ov-group" data-ov-group="untracked">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.untracked" }} · <span data-ov-group-count data-ov-total="{{len .UntrackedCards}}">{{len .UntrackedCards}}</span></h3>
+        <div class="card-grid mb-6">
+            {{range .UntrackedCards}}{{template "overview_card" .}}{{end}}
+        </div>
+    </section>
     {{end}}
 
-    {{if not (or .TrackedLive .TrackedUnknown .TrackedOffline .Untracked)}}
+    {{if not (or .LiveCards .UnknownCards .OfflineCards .UntrackedCards)}}
     <p class="text-neutral-400">{{ t "grid.empty" }}</p>
     {{end}}
+
+    {{/* F2.1: global "no results" state for the client-side name filter.
+         Hidden by default; shown by JS only when the filter matched zero
+         cards out of a non-empty grid (an empty grid already renders the
+         message above instead). */}}
+    <p data-ov-noresults hidden class="board-empty">{{ t "ov.noresults" }}</p>
 </section>
 {{end}}
 
@@ -205,9 +258,14 @@
 {{define "overview_card"}}
 <article class="s-card state-{{.State}}{{if .Unconfirmed}} unconfirmed{{end}}" tabindex="0" role="button"
          data-card-streamer="{{.Name}}"
+         data-ov-name="{{.Name}}" data-ov-points="{{.Points}}" data-ov-today="{{if .HasTodayRaw}}{{.PointsTodayRaw}}{{else}}0{{end}}"
          aria-label="{{.Name}}. {{ t "card.open_events" }}">
     <div class="flex items-start justify-between gap-2 mb-1.5">
         <div class="min-w-0 flex items-center gap-2">
+            {{/* F2.4: deterministic initial-letter avatar — decorative only,
+                 the adjacent visible name is what carries the identity, so
+                 this stays aria-hidden. No network call, no image. */}}
+            <span class="s-avatar s-avatar-b{{.AvatarBucket}}" aria-hidden="true">{{.AvatarInitial}}</span>
             <span class="s-name text-base truncate">{{.Name}}</span>
             {{if .HasActivePrediction}}<span class="text-event" title="{{ t "card.live_prediction_title" }}">◆</span>{{end}}
         </div>

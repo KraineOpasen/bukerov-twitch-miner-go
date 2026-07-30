@@ -2,12 +2,16 @@ package web
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
@@ -18,6 +22,67 @@ import (
 // analytics-derived figures (points-today / points-per-hour) from SQLite, so
 // the 30s live poll doesn't add DB load beyond what the old dashboard did.
 const statsTTL = 60 * time.Second
+
+// overviewPollSeconds is the single source of truth for how often the
+// Overview live partial polls (#overview-live's hx-trigger "every Ns") AND
+// for the F2.5 staleness thresholds derived from it (fresh <= 2x, delayed
+// <= 4x, stale > 4x). Keeping one constant means the client-side clock and
+// the server-rendered trigger interval can never drift apart (I1).
+const overviewPollSeconds = 30
+
+// OverviewCardView wraps a streamer card with the raw (unformatted)
+// points-today figure the F2.2 numeric sort needs. It embeds StreamerInfo so
+// every existing `.Field` reference in overview_card keeps working unchanged
+// — this is purely additive. PointsTodayRaw/HasTodayRaw come straight from
+// the memoised streamerStats cache (never parsed back out of a formatted
+// string — I13).
+type OverviewCardView struct {
+	StreamerInfo
+	PointsTodayRaw int
+	HasTodayRaw    bool
+}
+
+// OverviewHealthView is the aggregated health chip shown on the Overview
+// header. State drives the chip's icon/class (never color alone — I18); Label
+// and Detail are both localized, human strings (Detail carries the deciding
+// signal(s) or the reason a verdict couldn't be reached, e.g. "no provider").
+type OverviewHealthView struct {
+	State  string // "healthy" | "degraded" | "unhealthy" | "unknown"
+	Label  string
+	Detail string
+}
+
+// OverviewPageData is the Overview page/partial view model. It embeds the
+// existing OverviewData so every current `.Field` reference (including in
+// handleDashboard, which is not touched by this change) keeps compiling, and
+// adds the F2 card-hierarchy/health/predictions/polling additions alongside
+// it. NOTE: as of the F2 card-hierarchy work, OverviewData's own
+// TrackedLive/TrackedUnknown/TrackedOffline/Untracked fields (declared in
+// viewmodels.go) are no longer populated by buildOverviewData below — every
+// Overview template consumer now reads the *Cards slices instead. The fields
+// stay declared (viewmodels.go is out of scope here, and StreamerGridData —
+// a distinct type — still uses same-named fields for the Streamers page) but
+// are write-only dead weight on this path; left as an intentional zero value
+// rather than duplicating card-building work nobody reads.
+type OverviewPageData struct {
+	OverviewData
+	LiveCards      []OverviewCardView
+	UnknownCards   []OverviewCardView
+	OfflineCards   []OverviewCardView
+	UntrackedCards []OverviewCardView
+	Health         OverviewHealthView
+	// PredictionsState is the technical (not betting-outcome) status of the
+	// live-predictions board: "active" (>=1 round), "idle" (board reachable,
+	// nothing on it right now), or "unavailable" (no provider, or the miner
+	// isn't running). There is no "degraded" state — nothing in the system
+	// honestly distinguishes it (documented omission, design.md §1).
+	PredictionsState      string
+	PredictionsStateLabel string
+	// PollSeconds is overviewPollSeconds, rendered into the partial's
+	// hx-trigger so the client-side stale-clock thresholds and the actual
+	// poll interval are always derived from the same number.
+	PollSeconds int
+}
 
 // handleAPIOverview renders the live Overview content partial (header stats,
 // events ticker, live-predictions board and the streamer grid) plus an
@@ -130,7 +195,7 @@ func (s *Server) ensureStats(streamers []*models.Streamer) (map[string]streamerS
 // buildOverviewData assembles the full Overview view model from in-memory
 // state (streamers, watcher slots, pool predictions, the events ring) plus the
 // memoised analytics figures.
-func (s *Server) buildOverviewData(lang string) OverviewData {
+func (s *Server) buildOverviewData(lang string) OverviewPageData {
 	tr := func(key string) string { return s.i18n.T(lang, key) }
 	streamers := s.snapshotStreamers()
 	stats, total, today := s.ensureStats(streamers)
@@ -140,6 +205,9 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 	discordEnabled := s.discordEnabled
 	debugURL := s.debugURL
 	provider := s.overviewProvider
+	// healthProvider is read under the same RLock as the other providers
+	// above (server.go's SetHealthProvider writes it under s.mu.Lock()).
+	healthProvider := s.healthProvider
 	s.mu.RUnlock()
 
 	status := s.status.GetStatus()
@@ -172,6 +240,16 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		}
 	}
 
+	// Health Center snapshot read is a lock-free atomic load (health.Center),
+	// not SQLite and not a fresh Twitch call — safe to do on every request.
+	var healthSnap health.Snapshot
+	if healthProvider != nil {
+		healthSnap = healthProvider.HealthSnapshot()
+	}
+	healthView := buildOverviewHealth(tr, healthProvider != nil, healthSnap, status.ConnectionLost)
+
+	predState := predictionsState(provider != nil, status.Status == StatusRunning, len(predictions))
+
 	data := OverviewData{
 		Username:       s.username,
 		RefreshMinutes: refresh,
@@ -192,13 +270,171 @@ func (s *Server) buildOverviewData(lang string) OverviewData {
 		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
 		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost),
-		TrackedLive:    live,
-		TrackedUnknown: unknown,
-		TrackedOffline: offline,
-		Untracked:      untracked,
-		GeneratedUnix:  time.Now().Unix(),
+		// TrackedLive/TrackedUnknown/TrackedOffline/Untracked are deliberately
+		// left unset: no Overview template consumer reads them anymore (see
+		// the OverviewPageData doc comment above) — every render goes through
+		// the *Cards slices below, built from the same live/unknown/offline/
+		// untracked slices without a second pass over the streamers.
+		GeneratedUnix: time.Now().Unix(),
 	}
-	return data
+
+	return OverviewPageData{
+		OverviewData:          data,
+		LiveCards:             toCardViews(live, stats),
+		UnknownCards:          toCardViews(unknown, stats),
+		OfflineCards:          toCardViews(offline, stats),
+		UntrackedCards:        toCardViews(untracked, stats),
+		Health:                healthView,
+		PredictionsState:      predState,
+		PredictionsStateLabel: tr("ov.pred_state." + predState),
+		PollSeconds:           overviewPollSeconds,
+	}
+}
+
+// toCardViews wraps each StreamerInfo with its raw points-today figure looked
+// up from the memoised streamerStats cache (nil-safe: a nil/empty stats map
+// simply leaves HasTodayRaw false for every card). Returns nil for an empty
+// input so an empty group renders identically to before (no group heading).
+func toCardViews(infos []StreamerInfo, stats map[string]streamerStats) []OverviewCardView {
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]OverviewCardView, len(infos))
+	for i, info := range infos {
+		cv := OverviewCardView{StreamerInfo: info}
+		if cs, ok := stats[info.Name]; ok {
+			cv.PointsTodayRaw = cs.pointsToday
+			cv.HasTodayRaw = true
+		}
+		out[i] = cv
+	}
+	return out
+}
+
+// AvatarInitial returns the uppercased first rune of the trimmed streamer
+// name for the F2.4 avatar-initial fallback, or "?" for an empty/whitespace
+// name. Twitch exposes no profile-image URL anywhere in this in-memory model
+// (design.md §1), so this deterministic initial is the only honest fallback —
+// no network call is ever made for it.
+func (si StreamerInfo) AvatarInitial() string {
+	name := strings.TrimSpace(si.Name)
+	if name == "" {
+		return "?"
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	if size == 0 || r == utf8.RuneError {
+		return "?"
+	}
+	return string(unicode.ToUpper(r))
+}
+
+// avatarBucketCount is the number of avatar color buckets, matching the
+// input.css --chart-series-1..6 tokens (s-avatar-b0..b5).
+const avatarBucketCount = 6
+
+// AvatarBucket deterministically maps the streamer's lowercased, trimmed name
+// to one of avatarBucketCount color buckets (FNV-1a 32 % 6) so the same name
+// always renders the same avatar color and an empty name lands on bucket 0.
+// Pure, no network, no dependency beyond the standard library.
+func (si StreamerInfo) AvatarBucket() int {
+	name := strings.ToLower(strings.TrimSpace(si.Name))
+	if name == "" {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return int(h.Sum32() % avatarBucketCount)
+}
+
+// aggregateHealth reduces the Health Center snapshot to the single aggregate
+// state shown by the F2.6 Overview health chip, following the precedence
+// documented in design.md §1: failed|stalled signals win first (unhealthy),
+// then degraded, then unknown-status signals or an empty snapshot (unknown),
+// and only "all ok|idle with >=1 signal" reads healthy. connectionLost is
+// checked first and always wins — a fully lost connection is never masked by
+// a green chip (I14) — and a nil provider reads "unknown" (never a false
+// "healthy"), distinguished from an empty snapshot only by reason.
+//
+// reason is the single source of truth for WHY that state was reached —
+// exactly one of "connlost"/"noprovider"/"nosignals"/"signal"/"" (healthy) —
+// so the only caller, buildOverviewHealth, can map it straight to an i18n key
+// without re-deriving or re-testing any of the conditions above. offending
+// lists the human-readable signal name(s) behind a "signal" reason (nil for
+// every other reason).
+func aggregateHealth(providerPresent bool, snap health.Snapshot, connectionLost bool) (state, reason string, offending []string) {
+	if connectionLost {
+		return "unhealthy", "connlost", nil
+	}
+	if !providerPresent {
+		return "unknown", "noprovider", nil
+	}
+	if len(snap.Signals) == 0 {
+		return "unknown", "nosignals", nil
+	}
+
+	var failed, degraded, unknown []string
+	for _, sig := range snap.Signals {
+		label := healthSignalLabels[sig.Name]
+		if label == "" {
+			label = sig.Name
+		}
+		switch sig.Status {
+		case health.StatusFailed, health.StatusStalled:
+			failed = append(failed, label)
+		case health.StatusDegraded:
+			degraded = append(degraded, label)
+		case health.StatusUnknown:
+			unknown = append(unknown, label)
+		}
+	}
+	switch {
+	case len(failed) > 0:
+		return "unhealthy", "signal", failed
+	case len(degraded) > 0:
+		return "degraded", "signal", degraded
+	case len(unknown) > 0:
+		return "unknown", "signal", unknown
+	default:
+		return "healthy", "", nil
+	}
+}
+
+// buildOverviewHealth turns aggregateHealth's verdict into the localized
+// OverviewHealthView rendered by the F2.6 health chip (icon + text, title
+// tooltip carrying the basis — never color alone, I18). It is a PURE
+// reason -> i18n-key mapping: every branching decision already happened
+// inside aggregateHealth, so this never re-tests connectionLost/
+// providerPresent/snapshot contents itself.
+func buildOverviewHealth(tr func(string) string, providerPresent bool, snap health.Snapshot, connectionLost bool) OverviewHealthView {
+	state, reason, offending := aggregateHealth(providerPresent, snap, connectionLost)
+	view := OverviewHealthView{State: state, Label: tr("ov.health." + state)}
+	switch reason {
+	case "connlost":
+		view.Detail = tr("ov.health.detail.connlost")
+	case "noprovider":
+		view.Detail = tr("ov.health.detail.noprovider")
+	case "nosignals":
+		view.Detail = tr("ov.health.detail.nosignals")
+	case "signal":
+		view.Detail = tr("ov.health.detail.signal") + ": " + strings.Join(offending, ", ")
+	}
+	return view
+}
+
+// predictionsState is the F2.7 pure classifier for the predictions board's
+// technical status (never the betting outcome): "unavailable" when there's no
+// provider or the miner isn't currently running, "active" when >=1 round is
+// on the board, otherwise "idle" (board reachable, nothing live right now —
+// not an error). There's no "degraded" state; nothing in the system honestly
+// distinguishes one (documented omission, design.md §1).
+func predictionsState(providerPresent, minerRunning bool, predictionCount int) string {
+	if !providerPresent || !minerRunning {
+		return "unavailable"
+	}
+	if predictionCount > 0 {
+		return "active"
+	}
+	return "idle"
 }
 
 // netState maps the miner status to the Overview network indicator's tri-state.
