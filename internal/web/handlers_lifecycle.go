@@ -198,6 +198,7 @@ func (s *Server) handleAPILifecycleAction(w http.ResponseWriter, r *http.Request
 	}
 
 	if action != "pause" && action != "resume" && action != "restart" && action != "stop" {
+		slog.Warn("lifecycle_command_rejected", "action", action, "outcome", "unknown_action", "remote", r.RemoteAddr)
 		s.respondLifecycle(w, r, http.StatusBadRequest, lifecycleActionOutcome{kind: "unknown_action"})
 		return
 	}
@@ -218,6 +219,7 @@ func (s *Server) handleAPILifecycleAction(w http.ResponseWriter, r *http.Request
 
 	ctrl, _, _ := s.lifecycleProviders()
 	if ctrl == nil {
+		slog.Warn("lifecycle_command_rejected", "action", action, "outcome", "unavailable", "remote", r.RemoteAddr)
 		s.respondLifecycle(w, r, http.StatusServiceUnavailable, lifecycleActionOutcome{kind: "unavailable"})
 		return
 	}
@@ -281,6 +283,7 @@ func (s *Server) handleLifecycleRestartProcess(w http.ResponseWriter, r *http.Re
 
 	ctrl, _, requester := s.lifecycleProviders()
 	if ctrl == nil || requester == nil {
+		slog.Warn("lifecycle_restart_process_rejected", "reason", "unavailable", "remote", r.RemoteAddr)
 		s.respondLifecycle(w, r, http.StatusServiceUnavailable, lifecycleActionOutcome{kind: "unavailable"})
 		return
 	}

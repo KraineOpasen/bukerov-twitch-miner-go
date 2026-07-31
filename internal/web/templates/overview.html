@@ -834,18 +834,35 @@
 
         var lastAnnounced = null;
         var lastSwapAt = nowMs();
-        // Focus restoration across the innerHTML swap: htmx's default
-        // responseHandling does not preserve focus when a container's whole
-        // content is replaced (the clicked button node is destroyed), so a
-        // command button click would otherwise silently drop keyboard focus
-        // back to <body>. Remember which command was just posted and, after
-        // the swap, refocus the equivalent (freshly-rendered) button if it
-        // exists and isn't disabled.
+        // Transient-state preservation across the innerHTML swap: htmx's
+        // default responseHandling replaces the ENTIRE panel content on
+        // every swap — including the plain 2s poll tick, not just a
+        // command click — so anything the swap doesn't know about is lost:
+        // an opened "Advanced actions" <details> silently re-collapses, and
+        // keyboard focus resting on a panel button (or the summary) is
+        // dropped to <body>. Both are captured on 'htmx:beforeRequest'
+        // (fires for the poll's own GET AND a command's POST alike, since
+        // both are requests against/within #lifecycle-panel) rather than
+        // 'htmx:beforeSwap': hx-disabled-elt="this" disables — and per the
+        // HTML spec therefore synchronously BLURS — the clicked button
+        // during request setup, so by the time beforeSwap fires (after the
+        // response arrives) a POST's activeElement would already be
+        // <body>; beforeRequest is the last point both cases still see the
+        // real activeElement.
         var pendingFocusSelector = null;
-        panel.addEventListener('htmx:beforeRequest', function (e) {
-            var el = e.detail && e.detail.elt;
-            var post = el && el.getAttribute && el.getAttribute('hx-post');
-            pendingFocusSelector = post ? '[hx-post="' + post + '"]' : null;
+        var focusWasInPanel = false;
+        var pendingAdvancedOpen = false;
+        panel.addEventListener('htmx:beforeRequest', function () {
+            var advanced = document.getElementById('lc-advanced');
+            pendingAdvancedOpen = !!(advanced && advanced.open);
+
+            var active = document.activeElement;
+            focusWasInPanel = !!(active && panel.contains(active));
+            pendingFocusSelector = null;
+            if (focusWasInPanel && active.getAttribute) {
+                var post = active.getAttribute('hx-post');
+                if (post) pendingFocusSelector = '[hx-post="' + post + '"]';
+            }
         });
 
         function applyAnnounce() {
@@ -862,18 +879,37 @@
             lastSwapAt = nowMs();
             if (connLost) connLost.hidden = true;
             applyAnnounce();
-            if (pendingFocusSelector) {
-                // Prefer the SAME command's button if the new state still
-                // offers it (e.g. a rejected/idempotent re-render); a
-                // transition that removes that exact button (resume ->
-                // running drops the Resume button in favor of Pause) falls
-                // back to the first enabled action button in the panel, so
-                // focus lands somewhere sensible rather than silently
-                // resetting to <body>.
-                var next = panel.querySelector(pendingFocusSelector + ':not([disabled])') || panel.querySelector('button:not([disabled])');
-                if (next) next.focus();
-                pendingFocusSelector = null;
+
+            // Re-open "Advanced actions" BEFORE any focus attempt below: a
+            // button inside a still-closed <details> is excluded from the
+            // tab order/a11y tree, so focusing it would silently no-op.
+            if (pendingAdvancedOpen) {
+                var advanced = document.getElementById('lc-advanced');
+                if (advanced) advanced.open = true;
             }
+            pendingAdvancedOpen = false;
+
+            if (focusWasInPanel) {
+                // Same selector strategy for a command click AND a plain
+                // poll swap: prefer the SAME command's button if the new
+                // state still offers it (e.g. a rejected/idempotent
+                // re-render, or a poll tick that changed nothing); a
+                // transition that removes that exact button (resume ->
+                // running drops Resume in favor of Pause) falls back to the
+                // first enabled action button. If EVERY button is disabled
+                // (e.g. the render immediately after an accepted command,
+                // before capabilities catch up on the next poll), fall back
+                // to the Advanced-actions summary, and finally the panel
+                // container itself (tabindex="-1") — focus must never
+                // silently reset to <body>.
+                var next = (pendingFocusSelector && panel.querySelector(pendingFocusSelector + ':not([disabled])'))
+                    || panel.querySelector('button:not([disabled])')
+                    || panel.querySelector('#lc-advanced summary')
+                    || panel.querySelector('.lc-panel'); // partial's root div, tabindex="-1"
+                if (next) next.focus();
+            }
+            pendingFocusSelector = null;
+            focusWasInPanel = false;
         });
 
         // A failed poll never fires afterSwap (htmx default responseHandling),

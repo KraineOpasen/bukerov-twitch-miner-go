@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
@@ -31,19 +32,43 @@ func settingsLifecycleTestServer(t *testing.T, observed lifecycle.ObservedState,
 	return s, ctrl, applied
 }
 
+// postSettingsLang is postSettings plus a "lang" cookie, so the 409 body's
+// exact localized text can be pinned per language.
+func postSettingsLang(t *testing.T, srv *Server, body, lang string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: langCookieName, Value: lang})
+	srv.handleAPISettings(rec, req)
+	return rec
+}
+
+// TestSettingsPostBlockedWhilePaused also pins the EXACT localized 409 body
+// (both languages) — the wording is neutral across paused/stopped/
+// mid-transition (it must not claim specifically "paused" when the same
+// body is reused for those other states too, see TestSettingsPostBlocked*
+// below), and the "no changes were made" honesty tail is preserved.
 func TestSettingsPostBlockedWhilePaused(t *testing.T) {
 	s, _, applied := settingsLifecycleTestServer(t, lifecycle.ObservedPaused, lifecycle.TransitionNone)
-
-	rec := postSettings(t, s, `{"streamers":[{"username":"alpha"}]}`)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
 	}
+
+	for _, lang := range []string{"en", "ru"} {
+		rec := postSettingsLang(t, s, `{"streamers":[{"username":"alpha"}]}`, lang)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("[%s] status = %d, want 409 (body=%s)", lang, rec.Code, rec.Body.String())
+		}
+		// writeConflict -> writeError -> http.Error, which appends "\n".
+		wantBody := loc.T(lang, "lc.settings_conflict") + "\n"
+		if rec.Body.String() != wantBody {
+			t.Errorf("[%s] 409 body = %q, want %q", lang, rec.Body.String(), wantBody)
+		}
+	}
+
 	if len(*applied) != 0 {
 		t.Errorf("settings callback must not be invoked while paused, got %d calls", len(*applied))
-	}
-	if rec.Body.Len() == 0 {
-		t.Error("409 body must carry a localized explanation")
 	}
 }
 

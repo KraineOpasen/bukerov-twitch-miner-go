@@ -1,6 +1,6 @@
 {{define "lifecycle_panel"}}
 {{if .Available}}
-<div class="lc-panel card" data-lc-announce="{{.Announce}}">
+<div class="lc-panel card" data-lc-announce="{{.Announce}}" tabindex="-1">
     <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
         <div class="flex items-center gap-2">
             <span class="text-sm font-semibold text-neutral-100">{{ t "lc.title" }}</span>
@@ -38,7 +38,7 @@
     </div>
     {{end}}
 
-    <div class="flex items-center gap-2 flex-wrap mt-2" aria-label="{{ t "lc.aria.panel" }}">
+    <div class="flex items-center gap-2 flex-wrap mt-2" role="group" aria-label="{{ t "lc.aria.panel" }}">
         {{if .ShowPause}}
         <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/pause" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" {{if or (not .CanPause) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.pause" }}</button>
         {{end}}

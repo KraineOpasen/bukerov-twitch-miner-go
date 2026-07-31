@@ -317,10 +317,16 @@ func TestHandleAPILifecycleHTMXUnknownActionShowsMessage(t *testing.T) {
 	ctrl := &fakeLifecycleController{}
 	s.SetLifecycleController(ctrl)
 
+	req := htmxRequest(http.MethodPost, "/api/lifecycle/bogus")
+	req.AddCookie(&http.Cookie{Name: langCookieName, Value: "en"})
 	rec := httptest.NewRecorder()
-	s.handleAPILifecycleAction(rec, htmxRequest(http.MethodPost, "/api/lifecycle/bogus"))
+	s.handleAPILifecycleAction(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("htmx unknown action status = %d, want 200", rec.Code)
+	}
+	wantMsg := enTR(t)("lc.result.unknown_action")
+	if !strings.Contains(rec.Body.String(), wantMsg) {
+		t.Errorf("htmx partial must show the unknown-action message %q; body=%s", wantMsg, rec.Body.String())
 	}
 }
 
