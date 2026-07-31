@@ -8,6 +8,22 @@
      moved, nothing that needs to stay live). */}}
 <h1 class="text-2xl font-bold text-neutral-100 mb-3">{{ t "nav.overview" }}</h1>
 
+{{/* Ф4c lifecycle panel — deliberately OUTSIDE #overview-live (same
+     rationale as the toolbar below: the 30s live-region swap must never
+     touch it) so its own, independent 2s poll never races the Overview
+     poll. #lc-live is a STATIC sibling of the swapped #lifecycle-panel: a
+     role=status INSIDE a swapped node never announces to assistive tech
+     (every swap creates a brand-new DOM node — see overview_live.html's
+     documented pitfall), so the announcement text lives here and is
+     written by the script below, write-only-on-change. #lc-conn-lost is
+     the panel's own staleness marker (ov-stale-badge precedent), shown only
+     when polling has been failing for a while — htmx's default
+     responseHandling leaves the DOM untouched on a failed poll, so age is
+     the only signal available. */}}
+<div id="lc-live" class="visually-hidden" aria-live="polite" role="status"></div>
+<div id="lifecycle-panel" hx-get="/api/lifecycle" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+<div id="lc-conn-lost" hidden role="status"></div>
+
 {{/* F2.1/F2.2/F2.5 toolbar — deliberately OUTSIDE #overview-live so the 30s
      htmx innerHTML swap never touches it: the filter input never loses focus
      or its typed value, and the sort selection survives every refresh. The
@@ -790,6 +806,123 @@
         // Apply once to the content already present at initial page load.
         reapply();
         resetStaleBaseline();
+    })();
+</script>
+
+<script>
+    // =====================================================================
+    // Ф4c lifecycle panel: the aria-live announcement (write-only-on-change,
+    // read from the swapped partial's data-lc-announce attribute since a
+    // role=status INSIDE the swapped node never announces — see the
+    // lc-live comment above #lifecycle-panel) and the "connection lost"
+    // staleness marker (htmx's default responseHandling leaves the DOM
+    // untouched on a failed poll, so a stale last-successful-swap timestamp
+    // is the only signal — same pattern as the F2.5 stale clock above, but
+    // a simple binary threshold rather than a 4-state gradient).
+    // =====================================================================
+    (function () {
+        if (window.__lcPanel) return; // single-instance guard
+        window.__lcPanel = true;
+
+        var STALE_AFTER_MS = 6000;
+        var panel = document.getElementById('lifecycle-panel');
+        var live = document.getElementById('lc-live');
+        var connLost = document.getElementById('lc-conn-lost');
+        if (!panel) return;
+
+        function nowMs() { return window.__OV_CLOCK ? window.__OV_CLOCK() : performance.now(); }
+
+        var lastAnnounced = null;
+        var lastSwapAt = nowMs();
+        // Transient-state preservation across the innerHTML swap: htmx's
+        // default responseHandling replaces the ENTIRE panel content on
+        // every swap — including the plain 2s poll tick, not just a
+        // command click — so anything the swap doesn't know about is lost:
+        // an opened "Advanced actions" <details> silently re-collapses, and
+        // keyboard focus resting on a panel button (or the summary) is
+        // dropped to <body>. Both are captured on 'htmx:beforeRequest'
+        // (fires for the poll's own GET AND a command's POST alike, since
+        // both are requests against/within #lifecycle-panel) rather than
+        // 'htmx:beforeSwap': hx-disabled-elt="this" disables — and per the
+        // HTML spec therefore synchronously BLURS — the clicked button
+        // during request setup, so by the time beforeSwap fires (after the
+        // response arrives) a POST's activeElement would already be
+        // <body>; beforeRequest is the last point both cases still see the
+        // real activeElement.
+        var pendingFocusSelector = null;
+        var focusWasInPanel = false;
+        var pendingAdvancedOpen = false;
+        panel.addEventListener('htmx:beforeRequest', function () {
+            var advanced = document.getElementById('lc-advanced');
+            pendingAdvancedOpen = !!(advanced && advanced.open);
+
+            var active = document.activeElement;
+            focusWasInPanel = !!(active && panel.contains(active));
+            pendingFocusSelector = null;
+            if (focusWasInPanel && active.getAttribute) {
+                var post = active.getAttribute('hx-post');
+                if (post) pendingFocusSelector = '[hx-post="' + post + '"]';
+            }
+        });
+
+        function applyAnnounce() {
+            var root = panel.querySelector('[data-lc-announce]');
+            var text = root ? root.getAttribute('data-lc-announce') : '';
+            if (text && text !== lastAnnounced && live) {
+                live.textContent = text;
+                lastAnnounced = text;
+            }
+        }
+
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (!e.detail || !e.detail.target || e.detail.target.id !== 'lifecycle-panel') return;
+            lastSwapAt = nowMs();
+            if (connLost) connLost.hidden = true;
+            applyAnnounce();
+
+            // Re-open "Advanced actions" BEFORE any focus attempt below: a
+            // button inside a still-closed <details> is excluded from the
+            // tab order/a11y tree, so focusing it would silently no-op.
+            if (pendingAdvancedOpen) {
+                var advanced = document.getElementById('lc-advanced');
+                if (advanced) advanced.open = true;
+            }
+            pendingAdvancedOpen = false;
+
+            if (focusWasInPanel) {
+                // Same selector strategy for a command click AND a plain
+                // poll swap: prefer the SAME command's button if the new
+                // state still offers it (e.g. a rejected/idempotent
+                // re-render, or a poll tick that changed nothing); a
+                // transition that removes that exact button (resume ->
+                // running drops Resume in favor of Pause) falls back to the
+                // first enabled action button. If EVERY button is disabled
+                // (e.g. the render immediately after an accepted command,
+                // before capabilities catch up on the next poll), fall back
+                // to the Advanced-actions summary, and finally the panel
+                // container itself (tabindex="-1") — focus must never
+                // silently reset to <body>.
+                var next = (pendingFocusSelector && panel.querySelector(pendingFocusSelector + ':not([disabled])'))
+                    || panel.querySelector('button:not([disabled])')
+                    || panel.querySelector('#lc-advanced summary')
+                    || panel.querySelector('.lc-panel'); // partial's root div, tabindex="-1"
+                if (next) next.focus();
+            }
+            pendingFocusSelector = null;
+            focusWasInPanel = false;
+        });
+
+        // A failed poll never fires afterSwap (htmx default responseHandling),
+        // so lastSwapAt simply stops advancing — checked here instead.
+        setInterval(function () {
+            if (!connLost) return;
+            var lost = (nowMs() - lastSwapAt) > STALE_AFTER_MS;
+            if (lost === !connLost.hidden) return; // no visible change
+            connLost.hidden = !lost;
+            if (lost) connLost.textContent = t('js.lc.conn_lost');
+        }, 1000);
+
+        applyAnnounce();
     })();
 </script>
 {{end}}

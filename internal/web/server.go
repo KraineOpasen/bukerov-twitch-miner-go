@@ -200,6 +200,24 @@ type Server struct {
 	status                  *StatusBroadcaster
 	ready                   bool
 
+	// lifecycleController is the narrow lifecycle-command seam (Ф4c): nil
+	// (the default, e.g. every pre-Ф4c test/build) means no lifecycle
+	// controller is wired at all — GET/POST /api/lifecycle then answer 503
+	// and the dashboard panel renders nothing, exactly like every other
+	// nil-provider path in this file. See handlers_lifecycle.go.
+	lifecycleController LifecycleController
+	// lifecycleUpdateState reports the best-effort auto-updater state (Ф4c
+	// design D5) for the panel's "update available/failed/applied" line and
+	// the GET JSON's updateState field. nil means "no updater information
+	// wired" (updateState omitted).
+	lifecycleUpdateState func() LifecycleUpdateState
+	// processRestartRequester is wired by internal/app (Ф4c design D6) to
+	// cancel the app's own run scope — the documented process-shutdown exit
+	// path — when the degraded "Restart process" action is accepted. nil
+	// means the action is unavailable (503 for API, hidden/disabled in the
+	// panel).
+	processRestartRequester func()
+
 	// displayLoc is the time zone the dashboard renders absolute times in (set
 	// from config LoggerSettings.TimeZone via SetDisplayLocation). nil falls back
 	// to the server's local time. Guarded by mu.
@@ -665,6 +683,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/miner-status", s.handleAPIMinerStatus)
 	mux.HandleFunc("/api/miner-status/stream", s.handleAPIMinerStatusStream)
 	mux.HandleFunc("/api/next-check", s.handleAPINextCheck)
+
+	// Lifecycle routes (Ф4c): "/api/lifecycle" (exact) is GET-only (current
+	// snapshot); "/api/lifecycle/" (subtree) is POST-only, action taken from
+	// the trailing path segment (pause|resume|restart|stop|restart-process) —
+	// same exact-vs-subtree split as "/api/streamers" vs "/api/streamer/"
+	// above. See handlers_lifecycle.go for the response contract.
+	mux.HandleFunc("/api/lifecycle", s.handleAPILifecycle)
+	mux.HandleFunc("/api/lifecycle/", s.handleAPILifecycleAction)
 
 	// Settings routes
 	mux.HandleFunc("/settings", s.handleSettingsPage)

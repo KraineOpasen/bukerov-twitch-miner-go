@@ -794,6 +794,15 @@
 .badge-unknown { background: color-mix(in srgb, var(--color-event) 14%, transparent); color: var(--color-event); }
 .status-unavailable { color: var(--color-event); }
 
+/* Lifecycle panel (Ф4c) state badge — paused/stopped are neutral (never
+   alarming), failed/degraded use the shared warning/danger status tokens,
+   running uses success; every state also carries a glyph (see the panel
+   partial), never color alone. */
+.badge-lc-running { background: color-mix(in srgb, var(--status-success) 18%, transparent); color: var(--status-success); }
+.badge-lc-neutral { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--color-neutral-300); }
+.badge-lc-warning { background: color-mix(in srgb, var(--status-warning) 18%, transparent); color: var(--status-warning); }
+.badge-lc-danger { background: color-mix(in srgb, var(--status-danger) 18%, transparent); color: var(--status-danger); }
+
 .bar { height: 6px; width: 100%; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 999px; }
 /* .bar-drop/.bar-streak/.bar-goal > span backgrounds are set once, above (in
@@ -1087,6 +1096,29 @@
     border-color: var(--status-warning);
     color: var(--status-warning);
 }
+
+/* Lifecycle panel (Ф4c): non-blocking auth banner (generation>1 sibling of
+   #health-banner, see base.html) reuses the same visual language. */
+#lifecycle-auth-banner {
+    padding: 0.6rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-align: center;
+    border-radius: 0.5rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--status-warning);
+    background-color: color-mix(in srgb, var(--status-warning) 12%, transparent);
+    color: var(--status-warning);
+}
+
+.lc-panel { margin-bottom: 1rem; }
+@media (prefers-reduced-motion: reduce) {
+  .lc-spinner { animation: none; }
+}
+.lc-result { border-radius: 0.4rem; padding: 0.5rem 0.75rem; font-size: 0.8rem; margin-top: 0.6rem; border: 1px solid transparent; }
+.lc-result-info { background: color-mix(in srgb, var(--status-info) 12%, transparent); border-color: var(--status-info); color: var(--status-info); }
+.lc-result-error { background: color-mix(in srgb, var(--status-danger) 12%, transparent); border-color: var(--status-danger); color: var(--status-danger); }
+#lc-conn-lost { color: var(--status-warning); font-size: 0.75rem; margin-top: 0.4rem; }
 
 /* =====================================================================
    BKM-022 resource mini-widgets (CPU / Memory / Network / Disk I/O).

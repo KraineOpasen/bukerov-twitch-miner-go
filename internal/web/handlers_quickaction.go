@@ -27,6 +27,11 @@ func (s *Server) handleAPIStreamerQuickAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if s.lifecycleMutationBlocked() {
+		s.writeSettingsConflict(w, r)
+		return
+	}
+
 	name := strings.TrimPrefix(r.URL.Path, "/api/streamer-action/")
 	if name == "" {
 		writeBadRequest(w, "Streamer not specified")

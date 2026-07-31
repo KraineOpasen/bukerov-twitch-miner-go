@@ -166,6 +166,17 @@
                 <span id="health-banner-text"></span>
             </div>
 
+            {{/* Ф4c: non-blocking re-auth banner for generation>1 (design v6
+                 §10 rule 2) — a SIBLING of #health-banner, own id, own
+                 markup (link + select-all code, reusing the overlay's proven
+                 structure at the auth_required case below and the same
+                 js.overlay.* keys), since #health-banner is text-only
+                 (className switch + textContent) and cannot host that
+                 markup. Hidden whenever status leaves an auth state, or is
+                 in one but at generation<=1 (the blocking overlay already
+                 covers that case). */}}
+            <div id="lifecycle-auth-banner" class="hidden" role="alert"></div>
+
             {{block "content" .}}{{end}}
         </main>
     </div>
@@ -344,6 +355,7 @@
             const spinner = document.getElementById('status-spinner');
             const healthBanner = document.getElementById('health-banner');
             const healthBannerText = document.getElementById('health-banner-text');
+            const authBanner = document.getElementById('lifecycle-auth-banner');
 
             function updateHealthBanner(status) {
                 if (status.reauthRequired) {
@@ -358,16 +370,78 @@
                 }
             }
 
+            // Ф4c (design v6 §10 rule 2): auth_required/auth_waiting are
+            // ALWAYS actionable, but only get the blocking full-screen
+            // overlay at generation<=1 (the very first boot). At
+            // generation>1 (e.g. a lifecycle resume that needs a fresh
+            // device-code auth) they show this non-blocking banner instead —
+            // same link + select-all code markup as the overlay's
+            // auth_required case, same js.overlay.* keys, but never
+            // fixed/inset — so the lifecycle panel and the rest of the page
+            // stay reachable while auth is pending.
+            function updateAuthBanner(status, firstBoot) {
+                if (!authBanner) return;
+                const isAuthState = status.status === 'auth_required' || status.status === 'auth_waiting';
+                if (!isAuthState || firstBoot) {
+                    authBanner.classList.add('hidden');
+                    authBanner.innerHTML = '';
+                    return;
+                }
+                authBanner.classList.remove('hidden');
+                if (status.auth) {
+                    authBanner.innerHTML = `
+                        <p>${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-purple-500 font-medium">${status.auth.verificationUri}</a></p>
+                        <p>${t('js.overlay.enter_code')}</p>
+                        <div class="num text-xl font-bold text-purple-500 bg-neutral-900 px-4 py-2 rounded-lg my-2 tracking-widest select-all">${status.auth.userCode}</div>
+                        <p class="text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>
+                    `;
+                } else {
+                    authBanner.innerHTML = `<p>${t('js.overlay.waiting_auth')}</p>`;
+                }
+            }
+
+            // Statuses the Ф4c lifecycle panel (not this overlay) is the
+            // honest surface for — they must NEVER show the full-screen
+            // overlay, at any generation (design v6 §10 rule 3).
+            const LIFECYCLE_STATUSES = ['paused', 'stopped', 'restarting', 'failed', 'degraded'];
+
             function updateStatus(status) {
                 updateHealthBanner(status);
 
+                // The client-visible generation discriminator (design v6
+                // §10): status.generation is omitempty, so its absence means
+                // "still the first boot" — (status.generation || 1) <= 1.
+                const firstBoot = (status.generation || 1) <= 1;
+                updateAuthBanner(status, firstBoot);
+
                 if (status.status === 'running') {
                     overlay.classList.add('hidden');
-                    const reloadKey = 'miner_loaded_' + window.location.pathname;
-                    if (!sessionStorage.getItem(reloadKey)) {
-                        sessionStorage.setItem(reloadKey, 'true');
-                        window.location.reload();
+                    // One-shot reload-on-running, gated on firstBoot on BOTH
+                    // the reload itself and the sessionStorage bookkeeping
+                    // (design v6 §10 rule 4): a lifecycle transition into
+                    // running (generation>1) must never reload the page.
+                    if (firstBoot) {
+                        const reloadKey = 'miner_loaded_' + window.location.pathname;
+                        if (!sessionStorage.getItem(reloadKey)) {
+                            sessionStorage.setItem(reloadKey, 'true');
+                            window.location.reload();
+                        }
                     }
+                    return;
+                }
+
+                if (LIFECYCLE_STATUSES.indexOf(status.status) !== -1) {
+                    overlay.classList.add('hidden');
+                    return;
+                }
+
+                if (!firstBoot) {
+                    // A startup-phase status (initializing/auth_required/
+                    // auth_waiting/loading_streamers/error) at generation>1:
+                    // auth states already got their banner above; the rest
+                    // are covered by the lifecycle panel's own poll. Never
+                    // the blocking overlay past the first boot.
+                    overlay.classList.add('hidden');
                     return;
                 }
 

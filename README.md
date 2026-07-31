@@ -388,6 +388,82 @@ notifications are configured) instead of updating.
 
 ---
 
+## Lifecycle Controls (Pause / Resume / Restart / Stop)
+
+The dashboard has a **Miner control** panel (top of Overview) that lets you
+pause, resume, restart, or stop mining without touching the container. It
+polls `GET /api/lifecycle` every 2 seconds and posts commands to
+`POST /api/lifecycle/{pause|resume|restart|stop}`. Both endpoints answer
+plain JSON when the request sends `Accept: application/json` (useful for
+scripts/tooling — the response includes `desiredState`, `observedState`,
+`transition`, `generation`, the `canPause`/`canResume`/`canRestart`/`canStop`
+capability flags, and more); a request coming from the dashboard itself
+(`HX-Request: true`) always gets back `200` plus the re-rendered panel, with
+the result (accepted, no-op, conflict, error) rendered visibly inside it —
+this is intentional so the panel never shows a false "success" and a
+conflict is always explained in plain text, not just a raw status code.
+
+**Stop is not `docker stop`.** The Stop button only tells the miner to stop
+mining — the container, dashboard, and healthcheck keep running. Under the
+shipped `docker-compose.yml`'s `restart: unless-stopped` policy, only a
+manual `docker stop`/`docker compose stop` keeps the container down; any
+other exit (including a self-update) brings it back up. The Stop
+confirmation deliberately spells this out before you click it.
+
+**The stop/pause intent is durable.** The desired state (running/paused/
+stopped) is persisted in the SQLite database under the `database/` directory
+(see [Data Storage](#data-storage)), which lives on the `/database` volume in
+Docker — it survives crashes, restarts, and updates. Running
+`docker compose down -v` (or otherwise removing/unmounting that volume)
+resets the intent back to `running`, since there is nothing left to read.
+
+**Updater interaction:**
+
+| Desired state | Behavior when a new release is found |
+|----------------|----------------------------------------|
+| `running` / `paused` | Update is applied normally: binary swap, then a clean exit so the supervisor restarts the process on the new version. |
+| `stopped` | The updater only checks and notifies (Discord, if configured) — it never applies while you've asked the process to stay stopped. |
+
+Honest edge case: if the binary swap already started just as you switch to
+`stopped`, that in-flight update still finishes (exit 0, supervisor
+restart) — the process comes back up on the **new** version, still
+`stopped`. This is the one window in which a stopped miner can end up on a
+newer version; the durable intent itself is never lost.
+
+The dashboard's `HEALTHCHECK` (`/api/status`) is **not** lifecycle-aware on
+purpose: a paused or stopped miner is not "unhealthy" and must not trigger
+an orchestrator to recreate the container. Paused/stopped states are visible
+in the lifecycle panel and the `GET /api/lifecycle` response, not the
+healthcheck.
+
+**Emergency override — `LIFECYCLE_FORCE_RUNNING`:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIFECYCLE_FORCE_RUNNING` | unset | `true`/`1` forces the miner to start running on THIS boot only, even if a persisted `paused`/`stopped` intent exists. The durable row on disk is **not** rewritten — remove the variable on the next boot and the miner goes back to honoring whatever was actually persisted. A `WARN` is logged and an event is recorded on every boot the override is active, and the override is shown in the lifecycle panel / `GET /api/lifecycle` (`override: true`) so it's never silently in effect. |
+
+This is a rollback/emergency switch — e.g. if you downgrade to a build
+without dashboard lifecycle controls while a `paused`/`stopped` intent is
+persisted (that older build has no other way to change it). **Remove the
+variable once you no longer need it.**
+
+**Deployment recommendation:** add `stop_grace_period: 45s` to your own
+`docker-compose.yml` override (the shipped one is intentionally left
+unchanged) — the miner's own graceful-shutdown budget is up to ~30 seconds,
+so the default Docker grace period (10 seconds before `SIGKILL`) can cut a
+slow shutdown short.
+
+**Security:** lifecycle mutations (pause/resume/restart/stop) follow the
+same rules as every other dashboard write — see
+[Security defaults](#security-defaults). One addition specific to
+lifecycle: when `DASHBOARD_INSECURE_NO_AUTH=true`, lifecycle *mutations* are
+always refused with `403`, even though every other route is unauthenticated
+in that mode — the panel renders its controls disabled with an explanation
+rather than silently failing. Reading state (`GET /api/lifecycle`) is never
+gated.
+
+---
+
 ## Token Encryption at Rest
 
 The Twitch OAuth token is stored under `cookies/{username}.json`. By default it is
