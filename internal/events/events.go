@@ -26,6 +26,22 @@ const (
 	TypeUpdateAvailable Type = "update_available"
 	TypeUpdateFailed    Type = "update_failed"
 
+	// TypeUpdateSucceeded is recorded by internal/app at boot (design Ф5a1)
+	// when the restarted binary's version equals a consumed durable
+	// handoff's to_version (internal/updater.BootSucceeded) - i.e. an
+	// in-flight self-update from the PREVIOUS process generation is
+	// confirmed to have actually taken effect.
+	TypeUpdateSucceeded Type = "update_succeeded"
+
+	// TypeUpdaterHandoffWriteFailed records a durable updater-handoff
+	// write/clear failure (internal/updater.Options.Handoff, store.go):
+	// the update itself always proceeds regardless (observability must
+	// never block an update) - this event exists so a persistently failing
+	// handoff write (e.g. a read-only database) is visible somewhere, even
+	// though its only practical effect is a degraded next-boot
+	// classification (internal/updater.ClassifyBoot).
+	TypeUpdaterHandoffWriteFailed Type = "updater_handoff_write_failed"
+
 	// TypeModuleInitFailed records a DB-backed module (notifications,
 	// watch-time store, drops catalog) failing to initialize/migrate at
 	// startup: the miner degrades gracefully but the module stays down until

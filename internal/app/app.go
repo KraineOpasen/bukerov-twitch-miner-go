@@ -229,6 +229,67 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		return nil, fmt.Errorf("app: build lifecycle store: %w", serr)
 	}
 
+	// The durable updater-handoff store (design Ф5a1) registers its own
+	// migration against the SAME db, right alongside the lifecycle store -
+	// same partial-build cleanup, same "database" step already tracked.
+	updStore, uerr := updater.NewStore(db)
+	if uerr != nil {
+		return nil, fmt.Errorf("app: build updater store: %w", uerr)
+	}
+
+	// Boot-time handoff consumption (design Ф5a1): reads-and-deletes any
+	// durable apply-handoff row left by the PREVIOUS process generation,
+	// strictly BEFORE the lifecycle controller (and therefore any new
+	// updater cycle that could write a fresh row) is constructed below - see
+	// Store.ConsumeHandoff's own doc comment for why that ordering makes
+	// this race-free. A read/consume failure is best-effort: it is logged
+	// and Build proceeds exactly as if no row had been found, since a
+	// degraded boot-time classification must never be the reason the whole
+	// process fails to start.
+	//
+	// seedUpdaterApplied is nil unless classification is BootSucceeded, in
+	// which case it captures the (from, to) pair to seed into the updater's
+	// Snapshot once that updater is constructed further down this function -
+	// upd does not exist yet at this point.
+	var seedUpdaterApplied func(upd *updater.Updater)
+	if rec, found, cerr := updStore.ConsumeHandoff(ctx); cerr != nil {
+		slog.Warn("app: failed to consume updater handoff at boot (best-effort)", "error", cerr)
+	} else if found {
+		switch updater.ClassifyBoot(rec, version.Version) {
+		case updater.BootSucceeded:
+			events.Record(events.TypeUpdateSucceeded, "", rec.FromVersion+" -> "+rec.ToVersion)
+			slog.Info("app: self-update applied successfully across restart",
+				"from", rec.FromVersion, "to", rec.ToVersion, "url", rec.ReleaseURL)
+			seedUpdaterApplied = func(upd *updater.Updater) {
+				// rec.UpdatedAt (the durable row's own timestamp) IS the apply
+				// time — using time.Now() here instead would misreport it by
+				// the restart gap (however long the process took to come back
+				// up), which can be seconds under a supervisor or much longer
+				// under a manual restart.
+				upd.SeedApplied(rec.FromVersion, rec.ToVersion, rec.UpdatedAt)
+			}
+		case updater.BootInterrupted:
+			events.Record(events.TypeUpdateFailed, "",
+				fmt.Sprintf("%s -> %s: update interrupted mid-apply (process restarted before the swap completed)",
+					rec.FromVersion, rec.ToVersion))
+			slog.Warn("app: durable updater handoff shows an interrupted apply",
+				"from", rec.FromVersion, "to", rec.ToVersion, "phase", rec.Phase)
+		case updater.BootNotEffective:
+			events.Record(events.TypeUpdateFailed, "",
+				fmt.Sprintf("%s -> %s: update reported success but the swap did not take effect",
+					rec.FromVersion, rec.ToVersion))
+			slog.Warn("app: durable updater handoff shows a swap that did not take effect",
+				"from", rec.FromVersion, "to", rec.ToVersion, "phase", rec.Phase)
+		case updater.BootAnomalous:
+			// Neither FromVersion nor ToVersion matches the running binary -
+			// this package's own boot classification cannot explain it, so no
+			// ring event is recorded (it would mislead more than help);
+			// manual investigation is the only sound next step.
+			slog.Warn("app: anomalous durable updater handoff at boot; manual investigation may be required",
+				"from", rec.FromVersion, "to", rec.ToVersion, "phase", rec.Phase, "running", version.Version)
+		}
+	}
+
 	if cfg.EnableAnalytics {
 		svc, aerr := f.newAnalytics(db, basePath, cfg.Analytics.RetentionDays)
 		if aerr != nil {
@@ -303,52 +364,66 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	}
 
 	// The process-level updater loop (contract §11 item 13, design v6 §7):
-	// built as a closure captured over the (not-yet-assigned) controller
-	// variable below — it only ever RUNS inside controller.Run, by which
-	// point controller is already assigned, so this is safe despite the
-	// apparent forward reference (a Go closure captures the variable, not
-	// its value at closure-creation time).
-	//
 	// updateState is Ф4c's best-effort lifecycle.updateState source (task
 	// contract D5): internal/updater keeps no exported state of its own, so
 	// this additively wraps the SAME Notify/NotifyFailure/OnUpdate closures
-	// updaterRun already builds to record into an app-owned cell, exposed to
-	// web read-only via SetLifecycleUpdateState below. Deliberately tiny:
-	// "" (nothing observed yet) | "available" | "failed" | "applied".
+	// below to record into an app-owned cell, exposed to web read-only via
+	// SetLifecycleUpdateState below. Deliberately tiny: "" (nothing observed
+	// yet) | "available" | "failed" | "applied".
 	var controller *lifecycle.Controller
 	updateState := &lifecycleUpdateStateCell{}
-	updaterRun := func(uctx context.Context) {
-		currentManager := func() *notifications.Manager {
-			app.currentMinerMu.Lock()
-			m := app.currentMiner
-			app.currentMinerMu.Unlock()
-			if m == nil {
-				return nil
-			}
-			return m.NotificationManager()
+
+	currentManager := func() *notifications.Manager {
+		app.currentMinerMu.Lock()
+		m := app.currentMiner
+		app.currentMinerMu.Unlock()
+		if m == nil {
+			return nil
 		}
-		notifyAvailable, notifyFailed := miner.UpdateNotifyFuncs(currentManager)
-		upd := updater.New(updater.Options{
-			Repo:           version.Repo,
-			CurrentVersion: version.Version,
-			Enabled:        rc.AutoUpdateEnabled,
-			CheckInterval:  rc.AutoUpdateInterval,
-			Gate:           controller.UpdaterGate,
-			OnUpdate: func() {
-				updateState.set("applied", version.Version)
-				controller.UpdateApplied()
-			},
-			Notify: func(cur, latest, releaseURL string) {
-				updateState.set("available", latest)
-				notifyAvailable(cur, latest, releaseURL)
-			},
-			NotifyFailure: func(cur, latest, reason string) {
-				updateState.set("failed", latest)
-				notifyFailed(cur, latest, reason)
-			},
-		})
-		upd.Run(uctx)
+		return m.NotificationManager()
 	}
+	notifyAvailable, notifyFailed := miner.UpdateNotifyFuncs(currentManager)
+
+	// upd is now constructed HERE, at buildWith level (design Ф5a1) rather
+	// than lazily inside updaterRun as before: seedUpdaterApplied (set above,
+	// during boot-handoff consumption) needs a live *updater.Updater to seed
+	// BEFORE the lifecycle controller ever starts the updater goroutine, and
+	// controller.Run — the only place that goroutine gets started — happens
+	// later, under App.Run, long after Build (and this whole function) has
+	// returned. Gate MUST be a call-time closure, `func() bool { return
+	// controller.UpdaterGate() }`, NOT the hoisted method value
+	// `controller.UpdaterGate`: a method value binds its receiver at the
+	// moment the expression is evaluated, and at this point in the function
+	// `controller` is still nil (declared above, assigned only below) — a
+	// bound-to-nil method value would panic the first time Gate() is ever
+	// called. The closure instead captures the `controller` VARIABLE, which
+	// Go closures always do by reference, so by the time Gate() is actually
+	// invoked (inside a running updater cycle, always after controller has
+	// been assigned) the read observes the real controller.
+	upd := updater.New(updater.Options{
+		Repo:           version.Repo,
+		CurrentVersion: version.Version,
+		Enabled:        rc.AutoUpdateEnabled,
+		CheckInterval:  rc.AutoUpdateInterval,
+		Handoff:        updStore,
+		Gate:           func() bool { return controller.UpdaterGate() },
+		OnUpdate: func() {
+			updateState.set("applied", version.Version)
+			controller.UpdateApplied()
+		},
+		Notify: func(cur, latest, releaseURL string) {
+			updateState.set("available", latest)
+			notifyAvailable(cur, latest, releaseURL)
+		},
+		NotifyFailure: func(cur, latest, reason string) {
+			updateState.set("failed", latest)
+			notifyFailed(cur, latest, reason)
+		},
+	})
+	if seedUpdaterApplied != nil {
+		seedUpdaterApplied(upd)
+	}
+	updaterRun := func(uctx context.Context) { upd.Run(uctx) }
 
 	controller = lifecycle.New(lifecycle.Config{
 		Factory: func() lifecycle.Runner {
@@ -406,9 +481,10 @@ func (d lifecyclePersistenceDecorator) Save(ctx context.Context, desired lifecyc
 }
 
 // lifecycleUpdateStateCell is the app-owned, mutex-guarded cell behind
-// web.SetLifecycleUpdateState (task contract D5) — see updaterRun above for
-// where it's written; read through get, wired directly as the closure web
-// calls on every GET /api/lifecycle and panel poll.
+// web.SetLifecycleUpdateState (task contract D5) — see the Options.OnUpdate/
+// Notify/NotifyFailure closures in buildWith above for where it's written;
+// read through get, wired directly as the closure web calls on every GET
+// /api/lifecycle and panel poll.
 type lifecycleUpdateStateCell struct {
 	mu    sync.Mutex
 	state web.LifecycleUpdateState

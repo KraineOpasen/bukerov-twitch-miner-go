@@ -144,3 +144,18 @@ func cmpInt(a, b int) int {
 		return 0
 	}
 }
+
+// VersionsEqual reports whether a and b denote the same semantic version,
+// ignoring the optional leading "v"/"V" and any build-metadata suffix (see
+// parseVersion). The durable updater handoff (internal/updater/store.go)
+// always compares the ldflags-injected running version (e.g. "1.2.3")
+// against a GitHub release tag (e.g. "v1.2.3") - two strings that denote the
+// same release but are almost never byte-identical - so raw string equality
+// must never be used for that comparison; VersionsEqual is the one blessed
+// way to ask "is this the same version as that". Two unparseable/empty
+// inputs are never considered equal (ok=false from compareVersions), mirroring
+// compareVersions' own refusal to guess.
+func VersionsEqual(a, b string) bool {
+	c, ok := compareVersions(a, b)
+	return ok && c == 0
+}

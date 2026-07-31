@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,8 +32,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/util"
 )
@@ -119,6 +122,41 @@ type Options struct {
 	// nil so New installs the default, which records
 	// events.TypeLifecycleUpdaterGateBlocked.
 	onGateBlocked func(current, latest string)
+
+	// Handoff, if set, durably records apply-intent/apply-success/clear
+	// around every apply attempt (design Ф5a1) so a restart mid-swap - or a
+	// supervisor that never restarts the process at all - can be classified
+	// at the NEXT boot by internal/app (Store.ConsumeHandoff + ClassifyBoot
+	// in store.go). nil disables durable handoff entirely: the updater still
+	// works exactly as before, just without that boot-time classification.
+	// *Store satisfies this interface; every method is best-effort from the
+	// Updater's point of view - a Handoff error is reported via
+	// onHandoffError and never blocks or aborts the update itself.
+	Handoff Handoff
+
+	// now is a test seam for LastCheckAt/NextCheckAt determinism; production
+	// leaves it nil so New installs time.Now.
+	now func() time.Time
+
+	// onHandoffError, if set, overrides the production ring-event/slog
+	// recording triggered whenever a Handoff write or clear fails. Mirrors
+	// onGateBlocked: a test seam only, so tests can observe a Handoff
+	// failure deterministically via a plain callback. Production code always
+	// leaves this nil so New installs defaultHandoffError.
+	onHandoffError func(stage string, err error)
+}
+
+// Handoff is the durable apply-intent/apply-success/clear sink an Updater
+// calls around applyUpdate (design Ф5a1): RecordApplying is called
+// immediately before the first download byte, RecordApplied immediately
+// after a successful swap (strictly before OnUpdate fires), and Clear on
+// every failure class so no stale 'applying' row ever survives a cycle.
+// *Store (store.go) is the production implementation; all three methods are
+// best-effort from the Updater's point of view.
+type Handoff interface {
+	RecordApplying(ctx context.Context, from, to, releaseURL string) error
+	RecordApplied(ctx context.Context, from, to string) error
+	Clear(ctx context.Context) error
 }
 
 // Updater checks for and applies binary updates.
@@ -137,6 +175,14 @@ type Updater struct {
 	// isn't re-announced on every interval. A distinct new version clears the
 	// dedup and fires exactly one more time.
 	gateBlockedVersion string
+
+	// snapMu guards snap, this Updater's live status cell (Ф5a1; see
+	// Snapshot/snapshot.go). LEAF LOCK (internal/lifecycle's statusState
+	// doc-comment leaf-lock convention, state.go): no I/O, no callback, and
+	// no other lock is ever held while snapMu is held - every setter in
+	// snapshot.go does nothing but copy plain values in and out under it.
+	snapMu sync.Mutex
+	snap   Snapshot
 }
 
 // release/asset mirror the subset of the GitHub Releases API the updater uses.
@@ -173,7 +219,22 @@ func New(opts Options) *Updater {
 	if opts.onGateBlocked == nil {
 		opts.onGateBlocked = defaultGateBlocked
 	}
-	return &Updater{opts: opts}
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	if opts.onHandoffError == nil {
+		opts.onHandoffError = defaultHandoffError
+	}
+
+	u := &Updater{opts: opts}
+	u.snap = Snapshot{
+		CurrentVersion: opts.CurrentVersion,
+		Enabled:        opts.Enabled,
+		CheckInterval:  opts.CheckInterval,
+		Phase:          PhaseIdle,
+		LastOutcome:    OutcomeNone,
+	}
+	return u
 }
 
 // defaultGateBlocked is the production onGateBlocked: it records the
@@ -182,6 +243,22 @@ func New(opts Options) *Updater {
 // because the process is in a stopped state) rather than silently ignored.
 func defaultGateBlocked(current, latest string) {
 	events.Record(events.TypeLifecycleUpdaterGateBlocked, "", fmt.Sprintf("%s -> %s", current, latest))
+}
+
+// defaultHandoffError is the production onHandoffError: it records the
+// updater_handoff_write_failed ring event and logs. A database.ErrClosed is
+// logged at Debug rather than Error: the updater's own ctx is already
+// cancelled on every concurrent-exit path by the time the post-swap tail
+// (RecordApplied/Clear) runs, so a too-late write hitting an already-closed
+// database is an expected shutdown race, not a bug worth an Error-level log
+// line on every process exit.
+func defaultHandoffError(stage string, err error) {
+	events.Record(events.TypeUpdaterHandoffWriteFailed, "", stage+": "+err.Error())
+	if errors.Is(err, database.ErrClosed) {
+		slog.Debug("Auto-update: durable handoff write failed (shutdown race)", "stage", stage, "error", err)
+		return
+	}
+	slog.Error("Auto-update: durable handoff write failed", "stage", stage, "error", err)
 }
 
 // Run performs an initial check and then re-checks every CheckInterval until
@@ -194,6 +271,7 @@ func (u *Updater) Run(ctx context.Context) {
 		// the latest published release, so the updater stays dormant.
 		slog.Info("Auto-update disabled: running a non-release build",
 			"version", u.opts.CurrentVersion)
+		u.setPhase(PhaseDormant)
 		return
 	}
 
@@ -221,9 +299,16 @@ func (u *Updater) Run(ctx context.Context) {
 // newer than the running version either apply it (when enabled) or just
 // log/notify. Errors are logged and swallowed so the loop keeps running.
 func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
+	// stampCheckTimes runs LAST (defer), after every phase/outcome stamp this
+	// cycle's body makes below, so LastCheckAt/NextCheckAt always reflect
+	// "this cycle just finished" regardless of which branch it took.
+	defer u.stampCheckTimes()
+	u.setPhase(PhaseChecking)
+
 	rel, err := u.latestRelease(ctx)
 	if err != nil {
 		slog.Warn("Auto-update check failed", "error", err)
+		u.setIdleOutcome(OutcomeCheckFailed, err.Error())
 		return
 	}
 
@@ -231,16 +316,20 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	if !ok {
 		slog.Debug("Auto-update: could not compare versions",
 			"current", u.opts.CurrentVersion, "latest", rel.TagName)
+		u.setIdleOutcome(OutcomeCheckFailed, fmt.Sprintf(
+			"could not compare versions: current=%q latest=%q", u.opts.CurrentVersion, rel.TagName))
 		return
 	}
 	if cmp >= 0 {
 		slog.Debug("Auto-update: already up to date",
 			"current", u.opts.CurrentVersion, "latest", rel.TagName)
+		u.setIdleOutcome(OutcomeUpToDate, "")
 		return
 	}
 
 	slog.Info("Auto-update: newer release available",
 		"current", u.opts.CurrentVersion, "latest", rel.TagName, "url", rel.HTMLURL)
+	u.setLatest(rel.TagName, rel.HTMLURL)
 
 	// Notify once per distinct latest version, whether or not self-update is on.
 	if u.opts.Notify != nil && u.notifiedVersion != rel.TagName {
@@ -251,6 +340,7 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	if !u.opts.Enabled {
 		slog.Info("Auto-update is disabled; not replacing the binary. Enable it with -auto-update or AUTO_UPDATE=true.",
 			"latest", rel.TagName)
+		u.setIdleOutcome(OutcomeUpdateAvailable, "")
 		return
 	}
 
@@ -264,7 +354,19 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 			u.gateBlockedVersion = rel.TagName
 			u.opts.onGateBlocked(u.opts.CurrentVersion, rel.TagName)
 		}
+		u.setIdleOutcome(OutcomeGateBlocked, "")
 		return
+	}
+
+	// INTENT: record the durable handoff BEFORE the first download byte
+	// (design Ф5a1), so a crash anywhere in applyUpdate is classifiable at
+	// the next boot. Observability must never block the update itself: a
+	// failed write is reported via onHandoffError and the apply proceeds
+	// regardless.
+	if u.opts.Handoff != nil {
+		if herr := u.opts.Handoff.RecordApplying(ctx, u.opts.CurrentVersion, rel.TagName, rel.HTMLURL); herr != nil {
+			u.opts.onHandoffError("record_applying", herr)
+		}
 	}
 
 	if err := u.applyUpdate(ctx, rel); err != nil {
@@ -277,11 +379,31 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 			u.failedVersion = rel.TagName
 			u.opts.NotifyFailure(u.opts.CurrentVersion, rel.TagName, err.Error())
 		}
+		// Mandatory terminalization: no stale 'applying' row may survive a
+		// failed cycle, on ANY failure class.
+		if u.opts.Handoff != nil {
+			if cerr := u.opts.Handoff.Clear(ctx); cerr != nil {
+				u.opts.onHandoffError("clear", cerr)
+			}
+		}
+		u.setIdleOutcome(OutcomeApplyFailed, err.Error())
 		return
 	}
 
+	if u.opts.Handoff != nil {
+		if rerr := u.opts.Handoff.RecordApplied(ctx, u.opts.CurrentVersion, rel.TagName); rerr != nil {
+			u.opts.onHandoffError("record_applied", rerr)
+		}
+	}
+
+	u.setAppliedOutcome(rel.TagName)
 	slog.Info("Auto-update: binary replaced successfully, restarting to load the new version",
 		"from", u.opts.CurrentVersion, "to", rel.TagName)
+	// RecordApplied -> setAppliedOutcome -> this slog line -> OnUpdate, in
+	// that exact program order: RecordApplied strictly precedes OnUpdate, and
+	// therefore precedes controller.UpdateApplied, which internal/app's
+	// OnUpdate wrapper calls (task contract D5's async NotifyUpdate* chain is
+	// untouched: OnUpdate itself is still just a func()).
 	if u.opts.OnUpdate != nil {
 		u.opts.OnUpdate()
 	}
@@ -375,16 +497,19 @@ func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
+	u.setPhase(PhaseDownloading)
 	slog.Info("Auto-update: downloading new binary", "asset", name, "version", rel.TagName)
 	data, err := u.get(ctx, a.URL, downloadTimeout)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
 
+	u.setPhase(PhaseVerifying)
 	if err := u.verifyChecksum(ctx, rel, name, data); err != nil {
 		return err
 	}
 
+	u.setPhase(PhaseSwapping)
 	return replaceExecutable(execPath, data)
 }
 
