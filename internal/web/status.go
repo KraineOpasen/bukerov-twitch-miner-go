@@ -13,6 +13,19 @@ const (
 	StatusLoadingStreamers MinerStatus = "loading_streamers"
 	StatusRunning          MinerStatus = "running"
 	StatusError            MinerStatus = "error"
+
+	// Lifecycle-driven statuses (Ф4c): published exclusively by the
+	// internal/app lifecycle status adapter over internal/lifecycle's
+	// Observed states, never by the miner's own startup progression. See
+	// SetGeneration and StatusInfo.Generation for the discriminator that
+	// tells the client whether a startup-phase status belongs to the very
+	// first boot (show the blocking overlay) or a later lifecycle
+	// transition (never show it — the lifecycle panel is the surface).
+	StatusPaused     MinerStatus = "paused"
+	StatusStopped    MinerStatus = "stopped"
+	StatusRestarting MinerStatus = "restarting"
+	StatusFailed     MinerStatus = "failed"
+	StatusDegraded   MinerStatus = "degraded"
 )
 
 type AuthInfo struct {
@@ -43,6 +56,16 @@ type StatusInfo struct {
 	// network indicator (yellow).
 	ConnectionDegraded        bool   `json:"connectionDegraded,omitempty"`
 	ConnectionDegradedMessage string `json:"connectionDegradedMessage,omitempty"`
+
+	// Generation is the lifecycle controller's monotonically increasing
+	// generation token (design v6 §10), set by SetGeneration BEFORE that
+	// generation's Run is launched — so it never lags the status it labels.
+	// Like the fields above it is preserved across SetStatus/SetAuthRequired/
+	// SetStreamerProgress. omitempty means a process with no lifecycle
+	// controller wired (or one that has not yet started a generation) simply
+	// omits the field; the client treats an absent value as 1
+	// ((status.generation || 1) <= 1), i.e. "still the first boot".
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 type StatusBroadcaster struct {
@@ -137,6 +160,19 @@ func (b *StatusBroadcaster) SetConnectionDegraded(degraded bool, message string)
 	b.mu.Lock()
 	b.status.ConnectionDegraded = degraded
 	b.status.ConnectionDegradedMessage = message
+	current := b.status
+	b.mu.Unlock()
+
+	b.broadcast(current)
+}
+
+// SetGeneration publishes the current lifecycle generation token, preserving
+// every other field (mirrors SetConnectionDegraded's set-field/copy/broadcast
+// shape) — it must never clear Status/Message/Auth/StreamerInfo, since it can
+// be called independently of any startup-overlay transition.
+func (b *StatusBroadcaster) SetGeneration(gen uint64) {
+	b.mu.Lock()
+	b.status.Generation = gen
 	current := b.status
 	b.mu.Unlock()
 

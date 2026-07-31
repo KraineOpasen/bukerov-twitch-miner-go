@@ -44,6 +44,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/miner"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
@@ -121,6 +122,19 @@ type App struct {
 	// down/rebuilds generations via minerFactory. nil only in a test App
 	// that never calls Build.
 	controller *lifecycle.Controller
+
+	// runCancel cancels the ctx App.Run hands to controller.Run (task
+	// contract D6/design v6 I31: cancelling the controller's parent ctx is
+	// the documented process-shutdown exit path). Set once, right before
+	// controller.Run is invoked; read by the degraded "Restart process"
+	// requester wired to web in buildWith. nil until Run actually reaches
+	// that point (there is no controller, or Run hasn't been called yet).
+	runCancelMu sync.Mutex
+	runCancel   context.CancelFunc
+	// restartProcessOnce makes repeated "Restart process" presses (or a slow
+	// double click before the panel disables itself) a safe no-op — only
+	// the first call ever cancels runCancel.
+	restartProcessOnce sync.Once
 
 	// steps are the process-level owned resources in construction order:
 	// database, then (optionally) analytics service, then (optionally) web
@@ -294,7 +308,15 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	// point controller is already assigned, so this is safe despite the
 	// apparent forward reference (a Go closure captures the variable, not
 	// its value at closure-creation time).
+	//
+	// updateState is Ф4c's best-effort lifecycle.updateState source (task
+	// contract D5): internal/updater keeps no exported state of its own, so
+	// this additively wraps the SAME Notify/NotifyFailure/OnUpdate closures
+	// updaterRun already builds to record into an app-owned cell, exposed to
+	// web read-only via SetLifecycleUpdateState below. Deliberately tiny:
+	// "" (nothing observed yet) | "available" | "failed" | "applied".
 	var controller *lifecycle.Controller
+	updateState := &lifecycleUpdateStateCell{}
 	updaterRun := func(uctx context.Context) {
 		currentManager := func() *notifications.Manager {
 			app.currentMinerMu.Lock()
@@ -312,9 +334,18 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 			Enabled:        rc.AutoUpdateEnabled,
 			CheckInterval:  rc.AutoUpdateInterval,
 			Gate:           controller.UpdaterGate,
-			OnUpdate:       controller.UpdateApplied,
-			Notify:         notifyAvailable,
-			NotifyFailure:  notifyFailed,
+			OnUpdate: func() {
+				updateState.set("applied", version.Version)
+				controller.UpdateApplied()
+			},
+			Notify: func(cur, latest, releaseURL string) {
+				updateState.set("available", latest)
+				notifyAvailable(cur, latest, releaseURL)
+			},
+			NotifyFailure: func(cur, latest, reason string) {
+				updateState.set("failed", latest)
+				notifyFailed(cur, latest, reason)
+			},
 		})
 		upd.Run(uctx)
 	}
@@ -323,7 +354,12 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		Factory: func() lifecycle.Runner {
 			return app.minerFactory()
 		},
-		Persistence:      store,
+		// Ф4c (task contract D4): the persistence decorator additively
+		// tags a Save failure with web.ErrLifecyclePersist so the web
+		// handler can discriminate 500-class persist failures from
+		// 409-class table/slot rejections via errors.Is, without
+		// string-matching lifecycle's rejection prose.
+		Persistence:      lifecyclePersistenceDecorator{inner: store},
 		StatusSink:       sink,
 		ForceRunning:     rc.LifecycleForceRunning,
 		NoControlSurface: app.web == nil,
@@ -331,7 +367,63 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	})
 	app.controller = controller
 
+	// Wire the lifecycle command/snapshot seam, the best-effort updater
+	// state, and the degraded "Restart process" action into web (task
+	// contract D1/D5/D6) — additive, right after the controller exists;
+	// nil app.web (EnableAnalytics=false) simply means none of this is
+	// wired, exactly like every other web-only provider above.
+	if app.web != nil {
+		app.web.SetLifecycleController(controller)
+		app.web.SetLifecycleUpdateState(updateState.get)
+		app.web.SetProcessRestartRequester(app.requestProcessRestart)
+	}
+
 	return app, nil
+}
+
+// lifecyclePersistenceDecorator wraps the lifecycle.Store this package
+// already builds for lifecycle.Config.Persistence (task contract D4): its
+// Save additively tags any error with web.ErrLifecyclePersist via
+// errors.Join (preserving the original chain), so internal/web can tell a
+// 500-class persistence failure apart from a 409-class table/slot rejection
+// with errors.Is(res.Err, web.ErrLifecyclePersist) — lifecycle.Submit wraps
+// Store errors with %w, so the sentinel survives that wrap unchanged. Load
+// passes straight through; only Save (the write path §5.2 discriminates on)
+// is decorated.
+type lifecyclePersistenceDecorator struct {
+	inner lifecycle.Persistence
+}
+
+func (d lifecyclePersistenceDecorator) Load(ctx context.Context) (lifecycle.LoadResult, error) {
+	return d.inner.Load(ctx)
+}
+
+func (d lifecyclePersistenceDecorator) Save(ctx context.Context, desired lifecycle.DesiredState, reason, commandID string) error {
+	if err := d.inner.Save(ctx, desired, reason, commandID); err != nil {
+		return errors.Join(web.ErrLifecyclePersist, err)
+	}
+	return nil
+}
+
+// lifecycleUpdateStateCell is the app-owned, mutex-guarded cell behind
+// web.SetLifecycleUpdateState (task contract D5) — see updaterRun above for
+// where it's written; read through get, wired directly as the closure web
+// calls on every GET /api/lifecycle and panel poll.
+type lifecycleUpdateStateCell struct {
+	mu    sync.Mutex
+	state web.LifecycleUpdateState
+}
+
+func (c *lifecycleUpdateStateCell) set(state, ver string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = web.LifecycleUpdateState{State: state, Version: ver}
+}
+
+func (c *lifecycleUpdateStateCell) get() web.LifecycleUpdateState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state
 }
 
 // wireDirtyTeardownClassifierOnce guards wireDirtyTeardownClassifier so
@@ -359,67 +451,64 @@ func wireDirtyTeardownClassifier() {
 
 // lifecycleStatusAdapter implements lifecycle.StatusSink over web.Server's
 // existing status broadcaster (contract §11 item 14, design v6 §14
-// hardening — THE WHITELIST RULE): it publishes ONLY existing
-// web.MinerStatus values, and ONLY for the lifecycle statuses the miner
-// itself could never explain on its own.
+// hardening — THE WHITELIST RULE, extended in Ф4c per §14's "Ф4c расширяет
+// ТОЛЬКО адаптер и web-слой"): it publishes ONLY existing web.MinerStatus
+// values, and ONLY for the lifecycle statuses the miner itself could never
+// explain on its own.
 //
 // Mapping table (every lifecycle status NOT listed here is dropped, logged
 // at debug):
-//   - "paused" / "stopped" WITH message == lifecycle.BootHonoredIntentMessage
-//     -> web.StatusError, with the exact design v6 §5.4 message: a
-//     boot-honored persisted lifecycle intent — otherwise an operator
-//     staring at a dashboard stuck on the loading overlay would have no idea
-//     the miner never started on purpose. Any OTHER paused/stopped call
-//     (MINOR 13, F4b Q3 consolidated corrective) — e.g. an ordinary runtime
-//     pause/stop an operator just issued, which publishTerminal routes
-//     through this exact same SetStatus method — is dropped like any other
-//     unmapped status: only the boot-reconciliation call is "the miner never
-//     started and nothing else will ever explain why"; an ordinary runtime
-//     transition is communicated through the lifecycle command surface
-//     instead, not this fixed overlay message.
-//   - "failed" -> web.StatusError, with the lifecycle LastError message (a
-//     startup failure sitting in the retry-backoff window between attempts).
-//   - "degraded" -> web.StatusError, with the lifecycle LastError message (a
-//     dirty teardown while desired stayed paused/stopped).
+//   - "paused" -> web.StatusPaused, "stopped" -> web.StatusStopped,
+//     "restarting" -> web.StatusRestarting: message is passed through
+//     verbatim, WHETHER this is the once-per-boot boot-honored-intent call
+//     (lifecycle.BootHonoredIntentMessage) or an ordinary runtime
+//     pause/stop/restart an operator just issued — Ф4b's special-cased
+//     overlay text for the boot-honored case is gone: the lifecycle panel
+//     (Ф4c, driven off GET /api/lifecycle) is now the single honest surface
+//     for every paused/stopped/restarting state, boot-honored or not, so
+//     there is no longer a reason to distinguish them here.
+//   - "failed" -> web.StatusFailed, "degraded" -> web.StatusDegraded: message
+//     is the lifecycle LastError (a startup failure sitting in the
+//     retry-backoff window, or a dirty teardown while desired stayed
+//     paused/stopped).
 //
-// Every OTHER lifecycle status (starting/running/pausing/stopping/
-// restarting/exiting) is intentionally NOT published: the miner ITSELF
-// already drives this SAME broadcaster through its own startup progression
-// (initializing -> auth_required/auth_waiting -> loading_streamers ->
-// running) once its generation actually starts running — publishing
-// "running" from here at launch would prematurely clear that in-progress
-// overlay before the miner has actually finished starting. This adapter
-// only ever fills the gaps the miner itself can never report.
+// Every OTHER lifecycle status (starting/running/pausing/stopping/exiting)
+// is intentionally NOT published: the miner ITSELF already drives this SAME
+// broadcaster through its own startup progression (initializing ->
+// auth_required/auth_waiting -> loading_streamers -> running) once its
+// generation actually starts running — publishing "running" from here at
+// launch would prematurely clear that in-progress overlay before the miner
+// has actually finished starting, and publishing the other transitional
+// states would only flicker the (Ф4c-forbidden, design v6 §10 rule 3)
+// full-screen overlay for a lifecycle transition; the lifecycle panel covers
+// those via its own 2s poll instead. This adapter only ever fills the gaps
+// the miner itself can never report.
 type lifecycleStatusAdapter struct {
 	broadcaster *web.StatusBroadcaster
 }
 
-// lifecycleHonoredIntentMessage is design v6 §5.4's exact operator-facing
-// message for a boot-honored paused/stopped persisted intent.
-const lifecycleHonoredIntentMessage = "miner paused/stopped by persisted lifecycle intent; resume: LIFECYCLE_FORCE_RUNNING=true (или дождитесь релиза с dashboard-контролами)"
-
 func (a lifecycleStatusAdapter) SetStatus(status, message string) {
 	switch status {
-	case "paused", "stopped":
-		if message != lifecycle.BootHonoredIntentMessage {
-			// MINOR 13: an ordinary runtime paused/stopped — not the
-			// boot-reconciliation call — must never surface as the fixed
-			// honored-intent overlay.
-			slog.Debug("app: ordinary runtime paused/stopped status dropped (not the boot-honored marker)", "status", status)
-			return
-		}
-		a.broadcaster.SetStatus(web.StatusError, lifecycleHonoredIntentMessage)
-	case "failed", "degraded":
-		a.broadcaster.SetStatus(web.StatusError, message)
+	case "paused":
+		a.broadcaster.SetStatus(web.StatusPaused, message)
+	case "stopped":
+		a.broadcaster.SetStatus(web.StatusStopped, message)
+	case "restarting":
+		a.broadcaster.SetStatus(web.StatusRestarting, message)
+	case "failed":
+		a.broadcaster.SetStatus(web.StatusFailed, message)
+	case "degraded":
+		a.broadcaster.SetStatus(web.StatusDegraded, message)
 	default:
 		slog.Debug("app: lifecycle status has no web.MinerStatus mapping, dropped", "status", status)
 	}
 }
 
-// SetGeneration is a no-op in Ф4b: status.go has no generation field until
-// Ф4c. Logged at debug so the call is at least visible while wiring this up.
+// SetGeneration forwards the lifecycle generation token to the broadcaster
+// (design v6 §10: the client-visible discriminator that tells the overlay/
+// reload logic whether a startup-phase status belongs to the first boot).
 func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
-	slog.Debug("app: lifecycle SetGeneration is a no-op in Ф4b (no generation field in status.go yet)", "generation", gen)
+	a.broadcaster.SetGeneration(gen)
 }
 
 // Run starts the process-level owned resources in construction order (only the
@@ -462,7 +551,43 @@ func (a *App) Run(ctx context.Context) error {
 	if a.controller == nil {
 		return nil
 	}
-	return a.controller.Run(ctx)
+
+	// Ф4c (task contract D6): derive a cancelable ctx for the controller's
+	// own run scope so the degraded "Restart process" action (web,
+	// SetProcessRestartRequester) has a documented, I31-compliant exit path
+	// — cancelling THIS ctx, not os.Exit — available to it. An ordinary
+	// SIGINT/SIGTERM still works identically: cancelling the ctx passed to
+	// Run cancels runCtx too (context.WithCancel derives from it), so no
+	// existing shutdown behavior changes.
+	runCtx, cancel := context.WithCancel(ctx)
+	a.runCancelMu.Lock()
+	a.runCancel = cancel
+	a.runCancelMu.Unlock()
+	defer cancel()
+
+	return a.controller.Run(runCtx)
+}
+
+// requestProcessRestart is wired to web.Server.SetProcessRestartRequester
+// (task contract D6): cancelling a.runCancel is the documented
+// process-shutdown path (design v6 I31) — teardown -> App.Run returns ->
+// main performs the full Shutdown -> process exits, and (under a restart
+// policy) the supervisor brings the container back. One-shot: only the
+// first call has any effect. A nil runCancel (Run hasn't reached that point
+// yet, or there is no controller at all) is a safe no-op — web only wires
+// this action visibly once a real degraded snapshot exists, which cannot
+// happen before Run has started the controller.
+func (a *App) requestProcessRestart() {
+	a.restartProcessOnce.Do(func() {
+		events.Record(events.TypeLifecycleRestartProcessRequested, "", "operator requested a process restart while degraded")
+		slog.Warn("app: process restart requested (degraded) — cancelling the lifecycle run scope for a clean exit")
+		a.runCancelMu.Lock()
+		cancel := a.runCancel
+		a.runCancelMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
 }
 
 // Shutdown stops the process-level owned resources in reverse construction order

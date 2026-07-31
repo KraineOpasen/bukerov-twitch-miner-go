@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
@@ -31,6 +32,40 @@ func writeApplyError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeInternalError(w, applyErrorMessage)
+}
+
+// lifecycleMutationBlocked consults the SAME injected lifecycle controller
+// GET /api/lifecycle reads (design v6 §4/OD2, task contract D11): a nil
+// controller (no lifecycle wired at all — every pre-Ф4c test, and any build
+// without it) means "no guard", exactly today's behavior, so the dozens of
+// bare-&Server{} settings tests keep passing unmodified. Blocked whenever
+// the miner is paused/stopped (settings mutations there are pointless: the
+// generation reading them is torn down) or a lifecycle transition is
+// currently in flight (pausing/stopping/restarting/starting-pending) — but
+// NOT while running or degraded (the underlying generation is still live,
+// or fail-closed apply already refuses safely) and NOT while failed (apply
+// already fails closed via the existing 503 backstop). This is UX sugar
+// only: writeApplyError's fail-closed ErrShuttingDown->503 path remains the
+// authoritative backstop for the unavoidable race between this check and
+// the actual apply.
+func (s *Server) lifecycleMutationBlocked() bool {
+	s.mu.RLock()
+	ctrl := s.lifecycleController
+	s.mu.RUnlock()
+	if ctrl == nil {
+		return false
+	}
+	snap := ctrl.Snapshot()
+	if snap.Observed == lifecycle.ObservedPaused || snap.Observed == lifecycle.ObservedStopped {
+		return true
+	}
+	return snap.Transition != lifecycle.TransitionNone
+}
+
+// writeSettingsConflict writes the friendly, server-localized 409 body for a
+// settings mutation refused because the miner is paused/stopped/mid-transition.
+func (s *Server) writeSettingsConflict(w http.ResponseWriter, r *http.Request) {
+	writeConflict(w, s.i18n.T(s.langFromRequest(r), "lc.settings_conflict"))
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +102,10 @@ func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost {
+		if s.lifecycleMutationBlocked() {
+			s.writeSettingsConflict(w, r)
+			return
+		}
 		if provider == nil {
 			writeServiceUnavailable(w, "Settings not available")
 			return
@@ -139,6 +178,11 @@ func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPISettingsReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeNotAllowed(w)
+		return
+	}
+
+	if s.lifecycleMutationBlocked() {
+		s.writeSettingsConflict(w, r)
 		return
 	}
 
