@@ -781,7 +781,9 @@
   "lc.btn.advanced": "Advanced actions",
   "lc.confirm.restart": "Restart the miner? If shutdown does not complete cleanly, this may fall back to a full process restart (the container comes back under a restart policy; a manual run without a supervisor will not).",
   "lc.confirm.stop": "Stop mining? This only stops the miner — the container keeps running. The stop intent is stored in the database on the /database volume; \"docker compose down -v\" (or an unmounted volume) resets it back to running. For a full stop, use \"docker stop\".",
-  "lc.insecure_disabled": "Lifecycle controls are disabled: DASHBOARD_INSECURE_NO_AUTH=true. Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD to enable them.",
+  "lc.insecure_disabled": "Lifecycle controls are disabled: DASHBOARD_INSECURE_NO_AUTH=true. Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD, or allow your home network with DASHBOARD_TRUSTED_LAN_CIDRS, to enable them.",
+  "lc.lan.allowed": "Lifecycle commands are allowed from your address (DASHBOARD_TRUSTED_LAN_CIDRS) — checked against the direct connection address only; proxy headers (Forwarded, X-Forwarded-For, X-Real-IP) are ignored.",
+  "lc.lan.denied": "Lifecycle controls are disabled for your address: it is not in DASHBOARD_TRUSTED_LAN_CIDRS. The check uses the direct connection address only; proxy headers (Forwarded, X-Forwarded-For, X-Real-IP) are ignored.",
   "lc.env_override": "Intent overridden by the LIFECYCLE_FORCE_RUNNING environment variable for this boot only.",
   "lc.next_retry": "Next retry",
   "lc.degraded_hint": "The last shutdown did not finish cleanly, so a new generation cannot be started safely. Restarting the process is the only way to recover.",
@@ -800,6 +802,7 @@
   "lc.result.unavailable": "Lifecycle controller is not available.",
   "lc.result.persist_error": "Could not save the new state; nothing changed. Please try again.",
   "lc.result.restart_process_conflict": "Restart process is only available while the miner is degraded.",
+  "lc.result.lan_denied": "Lifecycle command blocked: your address is not in DASHBOARD_TRUSTED_LAN_CIDRS (direct connection address only; proxy headers are ignored).",
   "lc.aria.panel": "Miner lifecycle controls",
   "js.lc.conn_lost": "Connection to the miner lost — retrying…"
 }

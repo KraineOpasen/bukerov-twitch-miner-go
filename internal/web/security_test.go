@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -67,6 +68,143 @@ func TestValidateBindSecurity(t *testing.T) {
 	insecure := runtimeconfig.Dashboard{InsecureNoAuth: true}
 	if err := validateBindSecurity(insecure, "0.0.0.0"); err != nil {
 		t.Fatalf("explicit insecure opt-out should be allowed: %v", err)
+	}
+}
+
+// TestValidateBindSecurityInvalidTrustedLANCIDRs is the Ф4d startup gate: an
+// invalid DASHBOARD_TRUSTED_LAN_CIDRS value fails Start/validate regardless
+// of bind host or auth mode (checked BEFORE the loopback short-circuit), and
+// a valid allowlist alongside a loopback bind is unaffected.
+func TestValidateBindSecurityInvalidTrustedLANCIDRs(t *testing.T) {
+	_, parseErr := runtimeconfig.ParseTrustedLANCIDRs("not-a-cidr")
+	if parseErr == nil {
+		t.Fatal("test fixture: expected ParseTrustedLANCIDRs to fail for \"not-a-cidr\"")
+	}
+
+	invalid := runtimeconfig.Dashboard{TrustedLANCIDRsErr: parseErr.Error()}
+
+	// Even a loopback bind (which every other check exempts) must be
+	// rejected: the invalid-CIDR check runs BEFORE the loopback
+	// short-circuit.
+	err := validateBindSecurity(invalid, "127.0.0.1")
+	if err == nil {
+		t.Fatal("invalid DASHBOARD_TRUSTED_LAN_CIDRS must fail startup even for a loopback bind")
+	}
+	if !strings.Contains(err.Error(), "DASHBOARD_TRUSTED_LAN_CIDRS") {
+		t.Errorf("startup error should name DASHBOARD_TRUSTED_LAN_CIDRS, got: %v", err)
+	}
+
+	// Also rejected for a non-loopback bind, auth configured or not.
+	withAuth := runtimeconfig.Dashboard{
+		TrustedLANCIDRsErr: parseErr.Error(),
+		Username:           "admin",
+		Password:           runtimeconfig.NewSecret("secret"),
+	}
+	if err := validateBindSecurity(withAuth, "0.0.0.0"); err == nil {
+		t.Fatal("invalid DASHBOARD_TRUSTED_LAN_CIDRS must fail startup even with Basic Auth configured")
+	}
+
+	// A VALID allowlist alongside a loopback bind must not be affected.
+	valid, err := runtimeconfig.ParseTrustedLANCIDRs("10.0.0.0/8")
+	if err != nil {
+		t.Fatalf("test fixture: %v", err)
+	}
+	ok := runtimeconfig.Dashboard{TrustedLANCIDRs: valid}
+	if err := validateBindSecurity(ok, "127.0.0.1"); err != nil {
+		t.Fatalf("a valid trusted-LAN allowlist must not block a loopback bind: %v", err)
+	}
+}
+
+// TestLifecycleLANTrust is the seam-2 classifier matrix for
+// lifecycleLANTrust: not-configured, allowed/denied across IPv4 and IPv6,
+// multiple CIDRs, an unparseable/empty RemoteAddr (fail closed), and a
+// zoned IPv6 address (never matches, per Prefix.Contains).
+func TestLifecycleLANTrust(t *testing.T) {
+	mustCIDRs := func(t *testing.T, raw string) []netip.Prefix {
+		t.Helper()
+		p, err := runtimeconfig.ParseTrustedLANCIDRs(raw)
+		if err != nil {
+			t.Fatalf("ParseTrustedLANCIDRs(%q): %v", raw, err)
+		}
+		return p
+	}
+
+	cases := []struct {
+		name       string
+		cidrs      string
+		remoteAddr string
+		want       lanTrust
+	}{
+		{"not configured, no CIDRs at all", "", "10.1.2.3:5555", lanTrustNotConfigured},
+		{"IPv4 allowed", "10.0.0.0/8", "10.1.2.3:5555", lanTrustAllowed},
+		{"IPv4 denied outside range", "10.0.0.0/8", "192.168.1.5:5555", lanTrustDenied},
+		{"IPv6 allowed", "fd00::/8", "[fd12::1]:4242", lanTrustAllowed},
+		{"IPv6 denied outside range", "fd00::/8", "[2001:db8::1]:4242", lanTrustDenied},
+		{"multiple CIDRs, match in the second", "10.0.0.0/8,192.168.0.0/16", "192.168.5.5:1111", lanTrustAllowed},
+		{"multiple CIDRs, match in neither", "10.0.0.0/8,192.168.0.0/16", "203.0.113.5:1111", lanTrustDenied},
+		{"unparseable RemoteAddr denied (fail closed)", "10.0.0.0/8", "not-an-address", lanTrustDenied},
+		{"empty RemoteAddr denied (fail closed)", "10.0.0.0/8", "", lanTrustDenied},
+		{"zoned IPv6 never matches", "fe80::/10", "[fe80::1%eth0]:1234", lanTrustDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg runtimeconfig.Dashboard
+			if tc.cidrs != "" {
+				cfg.TrustedLANCIDRs = mustCIDRs(t, tc.cidrs)
+			}
+			if got := lifecycleLANTrust(cfg, tc.remoteAddr); got != tc.want {
+				t.Errorf("lifecycleLANTrust(%v, %q) = %v, want %v", cfg.TrustedLANCIDRs, tc.remoteAddr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNonPrivateTrustedLANPrefixes is the A3 corrective-pass classifier
+// test: entries fully inside a private/loopback/link-local/ULA range are
+// never flagged; anything broader (including the degenerate 0.0.0.0/0) is.
+func TestNonPrivateTrustedLANPrefixes(t *testing.T) {
+	mustCIDRs := func(t *testing.T, raw string) []netip.Prefix {
+		t.Helper()
+		p, err := runtimeconfig.ParseTrustedLANCIDRs(raw)
+		if err != nil {
+			t.Fatalf("ParseTrustedLANCIDRs(%q): %v", raw, err)
+		}
+		return p
+	}
+
+	cases := []struct {
+		name        string
+		cidrs       string
+		wantFlagged []string
+	}{
+		{"private RFC1918 /24 not flagged", "192.168.1.0/24", nil},
+		{"ULA /8 not flagged", "fd00::/8", nil},
+		{"loopback /8 not flagged", "127.0.0.0/8", nil},
+		{"default route flagged", "0.0.0.0/0", []string{"0.0.0.0/0"}},
+		{"public /24 flagged", "8.8.8.0/24", []string{"8.8.8.0/24"}},
+		{
+			"mixed list flags only the public entry",
+			"192.168.1.0/24,8.8.8.0/24,fd00::/8",
+			[]string{"8.8.8.0/24"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := runtimeconfig.Dashboard{TrustedLANCIDRs: mustCIDRs(t, tc.cidrs)}
+			got := nonPrivateTrustedLANPrefixes(cfg)
+			gotStrs := make([]string, len(got))
+			for i, p := range got {
+				gotStrs[i] = p.String()
+			}
+			if len(gotStrs) != len(tc.wantFlagged) {
+				t.Fatalf("nonPrivateTrustedLANPrefixes(%q) = %v, want %v", tc.cidrs, gotStrs, tc.wantFlagged)
+			}
+			for i, want := range tc.wantFlagged {
+				if gotStrs[i] != want {
+					t.Errorf("entry %d = %q, want %q", i, gotStrs[i], want)
+				}
+			}
+		})
 	}
 }
 

@@ -264,6 +264,64 @@ func TestHandleAPILifecycleActionUnknownAction(t *testing.T) {
 	}
 }
 
+// TestHandleAPILifecycleActionUnknownActionGatedByTrustFirst is the A1
+// corrective-pass regression: the auth/trust gate runs BEFORE action-name
+// validation, so an unrecognized action from a denied trusted-LAN address
+// is refused with lan_denied (403), never reaching the unknown_action logic
+// at all — and the SAME unrecognized action from an ALLOWED address still
+// gets today's unknown_action 400 (the gate lets it through, then the
+// action-name check rejects it, exactly as before this pass).
+func TestHandleAPILifecycleActionUnknownActionGatedByTrustFirst(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	// Denied address: the gate blocks before the unknown action name is
+	// ever inspected.
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/zzz")
+	req.RemoteAddr = "192.168.1.5:5555"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unknown action from a denied address: status = %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp lifecycleResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Outcome != "lan_denied" {
+		t.Errorf("outcome = %q, want lan_denied", resp.Outcome)
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called, calls=%v", ctrl.calls)
+	}
+
+	// Control: the SAME unknown action from an ALLOWED address still gets
+	// today's unknown_action 400 — the gate lets it through, and the
+	// existing action-name validation takes over from there.
+	req2 := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/zzz")
+	req2.RemoteAddr = "10.1.2.3:5555"
+	req2.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action from an allowed address: status = %d, want 400 (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	var resp2 lifecycleResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp2.Outcome != "unknown_action" {
+		t.Errorf("outcome = %q, want unknown_action", resp2.Outcome)
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called for an unknown action either way, calls=%v", ctrl.calls)
+	}
+}
+
 func TestHandleAPILifecycleActionNilControllerUnavailable(t *testing.T) {
 	s := newRenderServer(t)
 	rec := httptest.NewRecorder()
@@ -486,6 +544,318 @@ func TestLifecycleSecurityLoopbackNoAuthAllowsMutations(t *testing.T) {
 	}
 	if ctrl.callCount() != 1 {
 		t.Errorf("controller should have been called once, calls=%v", ctrl.calls)
+	}
+}
+
+// ---- trusted-LAN allowlist gate (Ф4d) -------------------------------------
+
+// TestLifecycleSecurityTrustedLANAllowsIPv4 covers row 4 of the Ф4d behavior
+// matrix: InsecureNoAuth + a CIDR containing RemoteAddr allows the mutation
+// over both the JSON and htmx contracts.
+func TestLifecycleSecurityTrustedLANAllowsIPv4(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "10.1.2.3:5555"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("JSON POST from trusted LAN: status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ctrl.callCount() != 1 {
+		t.Errorf("controller should have been called once, calls=%v", ctrl.calls)
+	}
+
+	hreq := htmxRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	hreq.RemoteAddr = "10.1.2.3:5555"
+	hreq.Header.Set("Sec-Fetch-Site", "same-origin")
+	hreq.AddCookie(&http.Cookie{Name: langCookieName, Value: "en"})
+	hrec := httptest.NewRecorder()
+	handler.ServeHTTP(hrec, hreq)
+	if hrec.Code != http.StatusOK {
+		t.Fatalf("htmx POST from trusted LAN: status = %d, want 200 (body=%s)", hrec.Code, hrec.Body.String())
+	}
+	if !strings.Contains(hrec.Body.String(), enTR(t)("lc.result.accepted")) {
+		t.Errorf("htmx partial should show the accepted message, body=%s", hrec.Body.String())
+	}
+	if ctrl.callCount() != 2 {
+		t.Errorf("controller should have been called twice total, calls=%v", ctrl.calls)
+	}
+}
+
+// TestLifecycleSecurityTrustedLANDeniesIPv4Outside covers row 5: RemoteAddr
+// outside the configured CIDR is refused with the new lan_denied outcome,
+// the controller is never called, and the htmx body shows the denial text.
+func TestLifecycleSecurityTrustedLANDeniesIPv4Outside(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "192.168.1.5:5555"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("JSON POST outside trusted LAN: status = %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp lifecycleResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Outcome != "lan_denied" {
+		t.Errorf("outcome = %q, want lan_denied", resp.Outcome)
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called, calls=%v", ctrl.calls)
+	}
+
+	hreq := htmxRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	hreq.RemoteAddr = "192.168.1.5:5555"
+	hreq.Header.Set("Sec-Fetch-Site", "same-origin")
+	hreq.AddCookie(&http.Cookie{Name: langCookieName, Value: "en"})
+	hrec := httptest.NewRecorder()
+	handler.ServeHTTP(hrec, hreq)
+	if hrec.Code != http.StatusOK {
+		t.Fatalf("htmx POST outside trusted LAN: status = %d, want 200 (body=%s)", hrec.Code, hrec.Body.String())
+	}
+	if !strings.Contains(hrec.Body.String(), enTR(t)("lc.result.lan_denied")) {
+		t.Errorf("htmx partial should show the lan_denied message, body=%s", hrec.Body.String())
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called (htmx path), calls=%v", ctrl.calls)
+	}
+}
+
+// TestLifecycleSecurityTrustedLANIPv6 covers IPv6 allow/deny.
+func TestLifecycleSecurityTrustedLANIPv6(t *testing.T) {
+	cases := []struct {
+		name       string
+		cidrs      string
+		remoteAddr string
+		wantStatus int
+		wantCalls  int
+	}{
+		{"allowed inside fd00::/8", "fd00::/8", "[fd12::1]:4242", http.StatusAccepted, 1},
+		{"denied outside fd00::/8", "fd00::/8", "[2001:db8::1]:4242", http.StatusForbidden, 0},
+		// A4: an IPv4-mapped-IPv6 RemoteAddr (as net/http reports for a
+		// dual-stack listener accepting an IPv4 peer) must still match a
+		// plain IPv4 CIDR end to end - proves the lifecycleLANTrust
+		// Unmap() step, not just the classifier's own unit test.
+		{"IPv4-mapped-IPv6 RemoteAddr unmapped against an IPv4 CIDR", "10.0.0.0/8", "[::ffff:10.1.2.3]:5555", http.StatusAccepted, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRenderServer(t)
+			ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+			s.SetLifecycleController(ctrl)
+			s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, tc.cidrs)})
+			handler := s.handler()
+
+			req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if ctrl.callCount() != tc.wantCalls {
+				t.Errorf("controller called %d times, want %d, calls=%v", ctrl.callCount(), tc.wantCalls, ctrl.calls)
+			}
+		})
+	}
+}
+
+// TestLifecycleSecurityTrustedLANMultipleCIDRsMatchSecond covers matching
+// against the SECOND of several configured CIDRs.
+func TestLifecycleSecurityTrustedLANMultipleCIDRsMatchSecond(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8,192.168.0.0/16")})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "192.168.5.5:1111"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ctrl.callCount() != 1 {
+		t.Errorf("controller should have been called once, calls=%v", ctrl.calls)
+	}
+}
+
+// TestLifecycleSecurityTrustedLANIgnoresSpoofedHeaders proves the allowlist
+// is checked against r.RemoteAddr ONLY: a denied RemoteAddr stays denied
+// even when Forwarded/X-Forwarded-For/X-Real-IP all claim an allowed IP.
+func TestLifecycleSecurityTrustedLANIgnoresSpoofedHeaders(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "203.0.113.5:5555" // outside 10.0.0.0/8
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("X-Forwarded-For", "10.1.2.3")
+	req.Header.Set("X-Real-IP", "10.1.2.3")
+	req.Header.Set("Forwarded", `for="10.1.2.3"`)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("spoofed proxy headers must not bypass the gate: status = %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called, calls=%v", ctrl.calls)
+	}
+}
+
+// TestLifecycleSecurityBasicAuthNeverBypassedByTrustedLAN covers row 1 of
+// the behavior matrix: even with a trusted-LAN allowlist configured that
+// matches the RemoteAddr, Basic Auth (when credentials are configured) is
+// still enforced by the outer middleware — the allowlist never substitutes
+// for it.
+func TestLifecycleSecurityBasicAuthNeverBypassedByTrustedLAN(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{
+		Username:        "admin",
+		Password:        runtimeconfig.NewSecret("hunter2"),
+		InsecureNoAuth:  true, // an operator could set both; auth must still win
+		TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8"),
+	})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "10.1.2.3:5555" // inside the allowlist
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no credentials, even from a trusted LAN address: status = %d, want 401", rec.Code)
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called without credentials, calls=%v", ctrl.calls)
+	}
+
+	req2 := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req2.RemoteAddr = "10.1.2.3:5555"
+	req2.Header.Set("Sec-Fetch-Site", "same-origin")
+	req2.SetBasicAuth("admin", "hunter2")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusAccepted {
+		t.Fatalf("with credentials from a trusted LAN address: status = %d, want 202 (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if ctrl.callCount() != 1 {
+		t.Errorf("controller should have been called once, calls=%v", ctrl.calls)
+	}
+}
+
+// TestLifecycleSecurityTrustedLANCSRFStillApplies proves the trust gate does
+// not weaken CSRF protection: a cross-origin POST from an ALLOWED RemoteAddr
+// is still blocked by the CSRF layer, before the trust gate is ever reached.
+func TestLifecycleSecurityTrustedLANCSRFStillApplies(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{result: lifecycle.SubmitResult{Outcome: lifecycle.OutcomeAccepted}}
+	s.SetLifecycleController(ctrl)
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/pause")
+	req.RemoteAddr = "10.1.2.3:5555" // inside the allowlist
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST (even from a trusted address): status = %d, want 403", rec.Code)
+	}
+	if ctrl.callCount() != 0 {
+		t.Errorf("controller must not be called for a CSRF-blocked request, calls=%v", ctrl.calls)
+	}
+	if strings.Contains(rec.Body.String(), "lan_denied") {
+		t.Error("this 403 must come from the CSRF layer, not the lifecycle trust gate")
+	}
+}
+
+// TestLifecycleGETNeverGatedAcrossTrustStates: GET /api/lifecycle stays
+// read-only and ungated in all three trust states (I21).
+func TestLifecycleGETNeverGatedAcrossTrustStates(t *testing.T) {
+	cases := []struct {
+		name string
+		dash runtimeconfig.Dashboard
+	}{
+		{"not configured", runtimeconfig.Dashboard{InsecureNoAuth: true}},
+		{"allowed", runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")}},
+		{"denied", runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "192.168.0.0/16")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRenderServer(t)
+			s.SetLifecycleController(&fakeLifecycleController{snap: lifecycle.Snapshot{Observed: lifecycle.ObservedRunning}})
+			s.SetDashboardConfig(tc.dash)
+			handler := s.handler()
+
+			req := jsonRequest(http.MethodGet, "http://10.0.0.5:5000/api/lifecycle")
+			req.RemoteAddr = "10.1.2.3:5555"
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleLifecycleRestartProcessTrustedLANGate proves restart-process
+// honors the same gate as the other mutations: denied outside the CIDR
+// (403, requester not called), accepted inside it while degraded.
+func TestHandleLifecycleRestartProcessTrustedLANGate(t *testing.T) {
+	s := newRenderServer(t)
+	ctrl := &fakeLifecycleController{snap: lifecycle.Snapshot{Observed: lifecycle.ObservedDegraded}}
+	s.SetLifecycleController(ctrl)
+	var calls int
+	s.SetProcessRestartRequester(func() { calls++ })
+	s.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true, TrustedLANCIDRs: mustLANCIDRs(t, "10.0.0.0/8")})
+	handler := s.handler()
+
+	// Outside the CIDR: denied, requester not called.
+	req := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/restart-process")
+	req.RemoteAddr = "192.168.1.5:5555"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("outside CIDR: status = %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if calls != 0 {
+		t.Errorf("requester must not be called when denied, calls=%d", calls)
+	}
+
+	// Inside the CIDR, still degraded: accepted.
+	req2 := jsonRequest(http.MethodPost, "http://10.0.0.5:5000/api/lifecycle/restart-process")
+	req2.RemoteAddr = "10.1.2.3:5555"
+	req2.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusAccepted {
+		t.Fatalf("inside CIDR: status = %d, want 202 (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if calls != 1 {
+		t.Errorf("requester should have been called once, calls=%d", calls)
 	}
 }
 

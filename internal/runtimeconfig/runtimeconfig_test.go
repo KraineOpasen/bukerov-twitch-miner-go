@@ -160,6 +160,9 @@ func TestResolveDefaults(t *testing.T) {
 		rc.Dashboard.DevPredictions || len(rc.Dashboard.TrustedOrigins) != 0 {
 		t.Errorf("empty env should yield a zero Dashboard, got %+v", rc.Dashboard)
 	}
+	if rc.Dashboard.TrustedLANCIDRs != nil || rc.Dashboard.TrustedLANCIDRsErr != "" {
+		t.Errorf("empty env should yield no trusted-LAN CIDRs and no error, got %+v", rc.Dashboard)
+	}
 }
 
 // TestResolveAutoUpdatePrecedence locks the exact flag/env precedence carried
@@ -376,6 +379,282 @@ func TestRedaction(t *testing.T) {
 	empty := Resolve(Flags{}, envMap(nil))
 	if strings.Contains(empty.String(), "***") {
 		t.Errorf("unset password should not render as ***: %s", empty.String())
+	}
+}
+
+// TestParseTrustedLANCIDRs is the seam-1 parser matrix for
+// DASHBOARD_TRUSTED_LAN_CIDRS: valid IPv4/IPv6, multiple entries with
+// whitespace and a trailing comma, Masked() normalization of host bits,
+// not-configured cases, and malformed entries (each error naming the
+// offending entry and the variable).
+func TestParseTrustedLANCIDRs(t *testing.T) {
+	t.Run("valid IPv4", func(t *testing.T) {
+		got, err := ParseTrustedLANCIDRs("192.168.1.0/24")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0].String() != "192.168.1.0/24" {
+			t.Fatalf("got %v, want [192.168.1.0/24]", got)
+		}
+	})
+
+	t.Run("valid IPv6", func(t *testing.T) {
+		got, err := ParseTrustedLANCIDRs("fd00::/64")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0].String() != "fd00::/64" {
+			t.Fatalf("got %v, want [fd00::/64]", got)
+		}
+	})
+
+	t.Run("multiple mixed with spaces and trailing comma", func(t *testing.T) {
+		got, err := ParseTrustedLANCIDRs(" 192.168.1.0/24 , fd00::/64 ,")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"192.168.1.0/24", "fd00::/64"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i, p := range got {
+			if p.String() != want[i] {
+				t.Errorf("entry %d = %s, want %s", i, p.String(), want[i])
+			}
+		}
+	})
+
+	t.Run("canonical network forms still parse", func(t *testing.T) {
+		// Corrective-pass regression: these already have zero host bits, so
+		// they must NOT be rejected by the host-bits-set check below.
+		for _, raw := range []string{"10.0.0.0/8", "0.0.0.0/0", "::/0", "fd00::/8"} {
+			got, err := ParseTrustedLANCIDRs(raw)
+			if err != nil {
+				t.Errorf("raw %q: unexpected error: %v", raw, err)
+				continue
+			}
+			if len(got) != 1 || got[0].String() != raw {
+				t.Errorf("raw %q: got %v, want [%s]", raw, got, raw)
+			}
+		}
+	})
+
+	t.Run("host bits set are rejected, not silently normalized", func(t *testing.T) {
+		// Corrective-pass hardening: a set host bit used to be silently
+		// masked off (ParsePrefix + .Masked()), which let a typo'd prefix
+		// length like "/2" instead of "/24" silently normalize to a vastly
+		// wider network ("192.168.1.0/2" -> "192.0.0.0/2") rather than
+		// failing loudly. Now every entry must already be its own canonical
+		// (Masked) form.
+		cases := []struct {
+			raw         string
+			wantCanonIn string // the suggested canonical form the error must name
+		}{
+			{"192.168.1.5/24", "192.168.1.0/24"},
+			{"192.168.1.0/2", "192.0.0.0/2"}, // the exact typo example from the corrective pass
+			{"fd12::1/64", "fd12::/64"},
+		}
+		for _, tc := range cases {
+			got, err := ParseTrustedLANCIDRs(tc.raw)
+			if err == nil {
+				t.Errorf("raw %q: expected an error (host bits set), got prefixes %v", tc.raw, got)
+				continue
+			}
+			if got != nil {
+				t.Errorf("raw %q: fail-closed should return nil prefixes on error, got %v", tc.raw, got)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.raw) {
+				t.Errorf("raw %q: error %q must name the offending entry", tc.raw, msg)
+			}
+			if !strings.Contains(msg, tc.wantCanonIn) {
+				t.Errorf("raw %q: error %q must suggest the canonical form %q", tc.raw, msg, tc.wantCanonIn)
+			}
+			if !strings.Contains(msg, "host bits set") {
+				t.Errorf("raw %q: error %q must say what's wrong (host bits set)", tc.raw, msg)
+			}
+			if !strings.Contains(msg, "DASHBOARD_TRUSTED_LAN_CIDRS") {
+				t.Errorf("raw %q: error %q must name DASHBOARD_TRUSTED_LAN_CIDRS", tc.raw, msg)
+			}
+		}
+	})
+
+	t.Run("IPv4-mapped IPv6 (4-in-6) prefixes are rejected", func(t *testing.T) {
+		// Corrective-pass hardening: lifecycleLANTrust always Unmap()s the
+		// connection address before matching, so a 4-in-6 prefix could
+		// never match anything - accepting it would be silent dead
+		// configuration rather than a fail-closed error. This entry is
+		// already in canonical (host-bits-zero) form, so it must be caught
+		// by the 4-in-6 check specifically, not the host-bits check above.
+		got, err := ParseTrustedLANCIDRs("::ffff:192.168.0.0/112")
+		if err == nil {
+			t.Fatalf("expected an error for a 4-in-6 prefix, got prefixes %v", got)
+		}
+		if got != nil {
+			t.Errorf("fail-closed should return nil prefixes on error, got %v", got)
+		}
+		msg := err.Error()
+		for _, want := range []string{"::ffff:192.168.0.0/112", "DASHBOARD_TRUSTED_LAN_CIDRS", "IPv4"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error %q must contain %q", msg, want)
+			}
+		}
+	})
+
+	t.Run("empty and whitespace-only are not configured", func(t *testing.T) {
+		for _, raw := range []string{"", "   ", ",", " , ", " , , "} {
+			got, err := ParseTrustedLANCIDRs(raw)
+			if err != nil {
+				t.Errorf("raw %q: unexpected error: %v", raw, err)
+			}
+			if got != nil {
+				t.Errorf("raw %q: got %v, want nil", raw, got)
+			}
+		}
+	})
+
+	t.Run("malformed entries error and name the offending entry", func(t *testing.T) {
+		cases := []struct {
+			raw    string
+			wantIn string // substring the offending entry text must contain
+		}{
+			{"foo", "foo"},
+			{"192.168.1.0/33", "192.168.1.0/33"},
+			{"10.0.0.1", "10.0.0.1"},                               // bare IP, no prefix length
+			{"10.0.0.0/24 10.0.0.1/32", "10.0.0.0/24 10.0.0.1/32"}, // space inside one entry
+			{"192.168.1.0/24,foo", "foo"},                          // one bad entry among good ones
+		}
+		for _, tc := range cases {
+			got, err := ParseTrustedLANCIDRs(tc.raw)
+			if err == nil {
+				t.Errorf("raw %q: expected an error, got prefixes %v", tc.raw, got)
+				continue
+			}
+			if got != nil {
+				t.Errorf("raw %q: fail-closed should return nil prefixes on error, got %v", tc.raw, got)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantIn) {
+				t.Errorf("raw %q: error %q must name the offending entry %q", tc.raw, msg, tc.wantIn)
+			}
+			if !strings.Contains(msg, "DASHBOARD_TRUSTED_LAN_CIDRS") {
+				t.Errorf("raw %q: error %q must name DASHBOARD_TRUSTED_LAN_CIDRS", tc.raw, msg)
+			}
+		}
+	})
+}
+
+// TestResolveTrustedLANCIDRs covers Resolve's fail-closed pairing: unset ->
+// nil prefixes + empty error; valid -> populated prefixes + empty error;
+// invalid -> nil prefixes + non-empty error, with the rest of Dashboard still
+// resolved normally alongside it.
+func TestResolveTrustedLANCIDRs(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		rc := Resolve(Flags{}, envMap(nil))
+		if rc.Dashboard.TrustedLANCIDRs != nil {
+			t.Errorf("TrustedLANCIDRs = %v, want nil", rc.Dashboard.TrustedLANCIDRs)
+		}
+		if rc.Dashboard.TrustedLANCIDRsErr != "" {
+			t.Errorf("TrustedLANCIDRsErr = %q, want empty", rc.Dashboard.TrustedLANCIDRsErr)
+		}
+	})
+
+	t.Run("valid", func(t *testing.T) {
+		rc := Resolve(Flags{}, envMap(map[string]string{
+			"DASHBOARD_TRUSTED_LAN_CIDRS": "10.0.0.0/8,fd00::/64",
+			"DASHBOARD_USERNAME":          "admin",
+		}))
+		if len(rc.Dashboard.TrustedLANCIDRs) != 2 {
+			t.Fatalf("TrustedLANCIDRs = %v, want 2 entries", rc.Dashboard.TrustedLANCIDRs)
+		}
+		if rc.Dashboard.TrustedLANCIDRsErr != "" {
+			t.Errorf("TrustedLANCIDRsErr = %q, want empty", rc.Dashboard.TrustedLANCIDRsErr)
+		}
+		// Sibling Dashboard field still resolved alongside the new one.
+		if rc.Dashboard.Username != "admin" {
+			t.Errorf("Username = %q, want admin", rc.Dashboard.Username)
+		}
+	})
+
+	t.Run("invalid fails closed", func(t *testing.T) {
+		rc := Resolve(Flags{}, envMap(map[string]string{
+			"DASHBOARD_TRUSTED_LAN_CIDRS": "not-a-cidr",
+			"DASHBOARD_HOST":              "0.0.0.0",
+		}))
+		if rc.Dashboard.TrustedLANCIDRs != nil {
+			t.Errorf("TrustedLANCIDRs = %v, want nil on parse error", rc.Dashboard.TrustedLANCIDRs)
+		}
+		if rc.Dashboard.TrustedLANCIDRsErr == "" {
+			t.Error("TrustedLANCIDRsErr should be set on parse error")
+		}
+		if !strings.Contains(rc.Dashboard.TrustedLANCIDRsErr, "DASHBOARD_TRUSTED_LAN_CIDRS") {
+			t.Errorf("TrustedLANCIDRsErr = %q must name DASHBOARD_TRUSTED_LAN_CIDRS", rc.Dashboard.TrustedLANCIDRsErr)
+		}
+		// Sibling Dashboard field still resolved despite the parse error.
+		if rc.Dashboard.HostOverride != "0.0.0.0" {
+			t.Errorf("HostOverride = %q, want 0.0.0.0", rc.Dashboard.HostOverride)
+		}
+	})
+}
+
+// TestTrustedLANCIDRPrefixesDefensiveCopy mirrors
+// TestTrustedOriginHostsDefensiveCopy (:340-351): mutating the returned slice
+// must not corrupt the snapshot.
+func TestTrustedLANCIDRPrefixesDefensiveCopy(t *testing.T) {
+	rc := Resolve(Flags{}, envMap(map[string]string{
+		"DASHBOARD_TRUSTED_LAN_CIDRS": "10.0.0.0/8,192.168.0.0/16",
+	}))
+	got := rc.Dashboard.TrustedLANCIDRPrefixes()
+	got[0] = got[1]
+
+	fresh := rc.Dashboard.TrustedLANCIDRPrefixes()
+	if fresh[0].String() != "10.0.0.0/8" {
+		t.Fatalf("mutating the returned slice corrupted the snapshot: %v", fresh)
+	}
+}
+
+// TestDashboardFormattingCoversTrustedLANFields extends the formatting
+// matrix (TestRedaction/TestSecretNeverLeaksInFormatting neighbors) to the
+// new fields: String/LogValue render a count (never the raw CIDR list as a
+// count substitute for secrecy - CIDRs are not secrets, this is just the
+// established TrustedOrigins style) and GoString carries the full list.
+func TestDashboardFormattingCoversTrustedLANFields(t *testing.T) {
+	valid := Resolve(Flags{}, envMap(map[string]string{
+		"DASHBOARD_TRUSTED_LAN_CIDRS": "10.0.0.0/8,192.168.0.0/16",
+	})).Dashboard
+
+	if !strings.Contains(valid.String(), "trustedLANCIDRs:2") {
+		t.Errorf("String() should show the CIDR count: %s", valid.String())
+	}
+	if !strings.Contains(valid.String(), `trustedLANCIDRsErr:""`) {
+		t.Errorf("String() should show an empty trustedLANCIDRsErr when unset: %s", valid.String())
+	}
+
+	// GoString() carries the full field (not merely a count) - assert only
+	// on the exported field name, never on netip.Prefix's unexported
+	// internal layout (e.g. its bitsPlusOne field), which is a stdlib
+	// implementation detail, not this package's exported behavior.
+	goStr := fmt.Sprintf("%#v", valid)
+	if !strings.Contains(goStr, "TrustedLANCIDRs:") {
+		t.Errorf("GoString() should carry the TrustedLANCIDRs field: %s", goStr)
+	}
+
+	lv := valid.LogValue().String()
+	if !strings.Contains(lv, "trustedLANCIDRs=2") {
+		t.Errorf("LogValue() should show the CIDR count: %s", lv)
+	}
+	if !strings.Contains(lv, "trustedLANCIDRsErr=") {
+		t.Errorf("LogValue() should carry the trustedLANCIDRsErr attribute: %s", lv)
+	}
+
+	invalid := Resolve(Flags{}, envMap(map[string]string{
+		"DASHBOARD_TRUSTED_LAN_CIDRS": "garbage",
+	})).Dashboard
+	if !strings.Contains(invalid.String(), "trustedLANCIDRsErr:") || strings.Contains(invalid.String(), `trustedLANCIDRsErr:""`) {
+		t.Errorf("String() should surface a non-empty parse error: %s", invalid.String())
+	}
+	if lv := invalid.LogValue().String(); strings.Contains(lv, `trustedLANCIDRsErr=""`) {
+		t.Errorf("LogValue() should surface a non-empty parse error, not an empty one: %s", lv)
 	}
 }
 

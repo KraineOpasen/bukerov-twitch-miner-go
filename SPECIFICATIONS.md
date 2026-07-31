@@ -1778,6 +1778,8 @@ The report never places, modifies, or auto-disables a bet or strategy.
 | `/api/settings/reset` | POST | Reset settings to defaults |
 | `/api/followed` | GET | List the authenticated user's followed channels for the import picker (each flagged `alreadyTracked`; `truncated`/`cap` report the pagination limit) |
 | `/api/followed/import` | POST | Add selected followed channels (`{"logins":[...]}`) to the tracked streamer list with default settings; returns `added` count |
+| `/api/lifecycle` | GET | Current lifecycle snapshot (desired/observed/transition, capabilities, override, update state) as JSON, or the `lifecycle_panel` HTMX partial; never gated (read-only) |
+| `/api/lifecycle/{action}` | POST | Lifecycle mutation: `pause`/`resume`/`restart`/`stop`/`restart-process` (action taken from the URL suffix); gated per [Dashboard Security Model](#dashboard-security-model-internalwebsecuritygo) — refused under `DASHBOARD_INSECURE_NO_AUTH=true` unless the caller's own remote address is in `DASHBOARD_TRUSTED_LAN_CIDRS` |
 
 #### Query Parameters for `/json/{streamer}`
 - `startDate`: Filter start (YYYY-MM-DD)
@@ -2244,6 +2246,43 @@ when the resolved bind is non-loopback and `DASHBOARD_USERNAME`/
 `DASHBOARD_PASSWORD` are unset, unless `DASHBOARD_INSECURE_NO_AUTH=true`
 explicitly (and loudly, via a startup warning) opts out. Loopback binds never
 require auth.
+
+**Trusted-LAN lifecycle allowlist.** Under `DASHBOARD_INSECURE_NO_AUTH=true`
+— and *only* then; this has no effect at all when Basic Auth is configured,
+nor on a loopback-default run with no auth mode set — every lifecycle
+mutation POST (`pause`/`resume`/`restart`/`stop`/`restart-process`)
+additionally passes through `lifecycleLANTrust`, a tri-state classifier over
+the `DASHBOARD_TRUSTED_LAN_CIDRS` allowlist
+(`internal/runtimeconfig.ParseTrustedLANCIDRs` → `[]netip.Prefix`):
+`notConfigured` (no allowlist set → today's unconditional 403, outcome kind
+`insecure`, unchanged), `allowed` (the request's `r.RemoteAddr` falls inside
+a configured CIDR → the mutation proceeds normally), or `denied` (an
+allowlist is configured but the remote address is outside every prefix, or
+the address itself failed to parse → 403, **new** outcome kind
+`lan_denied`, the lifecycle controller is never invoked). The classifier
+trusts ONLY the TCP connection's own peer address — never `Forwarded`/
+`X-Forwarded-For`/`X-Real-IP`, all of which an untrusted client can set to
+any value — so it does **not** work behind a reverse proxy unless the
+proxy's own address is what is allowlisted. Each entry must already be its
+own canonical network address (`netip.Prefix` equal to its own `.Masked()`
+— a set host bit, e.g. `192.168.1.5/24`, is rejected rather than silently
+normalized) and must not be an IPv4-mapped-IPv6 form (`Is4In6`, e.g.
+`::ffff:192.168.0.0/112`, which could never match since the connection
+address is always `Unmap()`ed first). Parsing fails closed: an invalid
+`DASHBOARD_TRUSTED_LAN_CIDRS` entry is captured as
+`Dashboard.TrustedLANCIDRsErr` at bootstrap and re-checked FIRST in
+`validateBindSecurity` — before the loopback short-circuit — so the process
+refuses to start with an actionable message naming the variable, regardless
+of bind host or auth mode (whenever the dashboard is enabled at all — with
+`EnableAnalytics=false` no web server is built, and no lifecycle surface
+exists). Basic Auth, when configured, is never bypassed by
+this allowlist (its own check happens earlier in the middleware chain via
+`basicAuthMiddleware`, and this classifier is only ever consulted once
+`DASHBOARD_INSECURE_NO_AUTH=true` is already established), and
+`csrfProtectMiddleware`'s same-origin check still runs before this gate is
+ever reached — the allowlist widens who may skip *authentication*, never who
+may skip CSRF. `GET /api/lifecycle` is never gated by any of this, in any
+trust state.
 
 **Middleware chain** (outermost first), built in `Server.handler()`:
 

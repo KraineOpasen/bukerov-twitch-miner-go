@@ -2,9 +2,11 @@ package web
 
 import (
 	"html/template"
+	"net/netip"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 // testLoadTemplates builds the per-language template sets for tests using the
@@ -57,4 +59,18 @@ func newRenderServer(t *testing.T) *Server {
 	}
 	pages, partials := loadTemplates(loc)
 	return &Server{i18n: loc, templates: pages, partials: partials}
+}
+
+// mustLANCIDRs parses a DASHBOARD_TRUSTED_LAN_CIDRS fixture value, failing
+// the test immediately on a bad fixture (never the behavior under test).
+// Shared by every package-web test file that needs a trusted-LAN CIDR
+// fixture (corrective-pass B5: previously duplicated as mustLANCIDRs in
+// handlers_lifecycle_test.go and f4cMustLANCIDRs in f4c_pages_test.go).
+func mustLANCIDRs(t *testing.T, raw string) []netip.Prefix {
+	t.Helper()
+	p, err := runtimeconfig.ParseTrustedLANCIDRs(raw)
+	if err != nil {
+		t.Fatalf("ParseTrustedLANCIDRs(%q): %v", raw, err)
+	}
+	return p
 }

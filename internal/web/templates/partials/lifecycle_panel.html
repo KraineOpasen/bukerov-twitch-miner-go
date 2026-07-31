@@ -66,8 +66,13 @@
         </div>
     </details>
 
-    {{if .InsecureDisabled}}
+    {{if eq .LANState "denied"}}
+    <div class="lc-result lc-result-error" role="alert">{{ t "lc.lan.denied" }}</div>
+    {{else if eq .LANState "not_configured"}}
     <div class="lc-result lc-result-error" role="alert">{{ t "lc.insecure_disabled" }}</div>
+    {{end}}
+    {{if eq .LANState "allowed"}}
+    <div class="lc-result lc-result-info" role="status">{{ t "lc.lan.allowed" }}</div>
     {{end}}
 
     {{if .UpdateState}}
