@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -70,6 +72,25 @@ func TestIsReleaseVersion(t *testing.T) {
 	for _, tt := range tests {
 		if got := isReleaseVersion(tt.v); got != tt.want {
 			t.Errorf("isReleaseVersion(%q) = %v, want %v", tt.v, got, tt.want)
+		}
+	}
+}
+
+func TestVersionsEqual(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"v1.2.3", "1.2.3", true}, // ldflags value vs release tag
+		{"1.2.3", "1.2.3", true},
+		{"v1.2.3", "v1.2.4", false},
+		{"dev", "1.2.3", false}, // unparseable -> never equal
+		{"", "1.0.0", false},
+		{"v1.2.3+build.9", "1.2.3+build.1", true}, // build metadata ignored
+	}
+	for _, tt := range tests {
+		if got := VersionsEqual(tt.a, tt.b); got != tt.want {
+			t.Errorf("VersionsEqual(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
 	}
 }
@@ -792,5 +813,551 @@ func TestGateBlockedDefaultRecordsRingEvent(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("default onGateBlocked did not record a lifecycle_updater_gate_blocked ring event for %s", latest)
+	}
+}
+
+// --- Options.Handoff (durable updater core, design Ф5a1) -------------------
+
+// orderedRecorder is a shared, ordered, concurrency-safe event log the
+// Handoff tests below use to assert RELATIVE ordering between spyHandoff
+// calls and other events (an HTTP hit, OnUpdate firing) recorded into the
+// SAME log.
+type orderedRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *orderedRecorder) record(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, s)
+}
+
+func (r *orderedRecorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// spyHandoff is a test Handoff: it counts calls, can be made to fail on
+// command, and appends into a shared orderedRecorder so ordering can be
+// asserted against other recorded events.
+type spyHandoff struct {
+	rec *orderedRecorder
+
+	mu                  sync.Mutex
+	recordApplyingCalls int
+	recordAppliedCalls  int
+	clearCalls          int
+	recordApplyingErr   error
+	recordAppliedErr    error
+	clearErr            error
+}
+
+func newSpyHandoff(rec *orderedRecorder) *spyHandoff {
+	return &spyHandoff{rec: rec}
+}
+
+func (s *spyHandoff) RecordApplying(_ context.Context, _, _, _ string) error {
+	s.mu.Lock()
+	s.recordApplyingCalls++
+	err := s.recordApplyingErr
+	s.mu.Unlock()
+	s.rec.record("record_applying")
+	return err
+}
+
+func (s *spyHandoff) RecordApplied(_ context.Context, _, _ string) error {
+	s.mu.Lock()
+	s.recordAppliedCalls++
+	err := s.recordAppliedErr
+	s.mu.Unlock()
+	s.rec.record("record_applied")
+	return err
+}
+
+func (s *spyHandoff) Clear(_ context.Context) error {
+	s.mu.Lock()
+	s.clearCalls++
+	err := s.clearErr
+	s.mu.Unlock()
+	s.rec.record("clear")
+	return err
+}
+
+func (s *spyHandoff) counts() (applying, applied, clear int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recordApplyingCalls, s.recordAppliedCalls, s.clearCalls
+}
+
+// RecordApplying is called before applyUpdate ever downloads the asset - the
+// INTENT write must land before the first download byte, so a crash during
+// download is still classifiable at the next boot.
+func TestHandoffRecordApplyingCalledBeforeDownload(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	rec := &orderedRecorder{}
+
+	sum := sha256.Sum256(binary)
+	checksums := hex.EncodeToString(sum[:]) + "  " + assetName() + "\n"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		rel := release{
+			TagName: "v9.9.9",
+			HTMLURL: "https://example.test/releases/v9.9.9",
+			Assets: []asset{
+				{Name: assetName(), URL: srvURL(r) + "/download/binary"},
+				{Name: "checksums.txt", URL: srvURL(r) + "/download/checksums"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(rel)
+	})
+	mux.HandleFunc("/download/binary", func(w http.ResponseWriter, r *http.Request) {
+		rec.record("asset_download")
+		_, _ = w.Write(binary)
+	})
+	mux.HandleFunc("/download/checksums", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(checksums))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	h := newSpyHandoff(rec)
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff: h,
+	})
+	u.checkAndMaybeUpdate(context.Background())
+
+	evs := rec.all()
+	if len(evs) < 2 || evs[0] != "record_applying" || evs[1] != "asset_download" {
+		t.Fatalf("event order = %v, want [record_applying, asset_download, ...]", evs)
+	}
+	if applying, applied, clear := h.counts(); applying != 1 || applied != 1 || clear != 0 {
+		t.Errorf("counts = applying=%d applied=%d clear=%d, want 1/1/0 (success path)", applying, applied, clear)
+	}
+}
+
+// A Handoff is never consulted on a cycle that never attempts to apply
+// anything: up-to-date, disabled, and gate-blocked cycles must all leave
+// every Handoff method uncalled.
+func TestHandoffNotCalledWhenNoApplyAttempted(t *testing.T) {
+	t.Run("up_to_date", func(t *testing.T) {
+		srv := newReleaseServer(t, "v1.0.0", []byte("bin"), false, 0)
+		defer srv.Close()
+		h := newSpyHandoff(&orderedRecorder{})
+		u := New(Options{
+			Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+			apiBaseURL: srv.URL, httpClient: srv.Client(), Handoff: h,
+		})
+		u.checkAndMaybeUpdate(context.Background())
+		if a, ap, c := h.counts(); a != 0 || ap != 0 || c != 0 {
+			t.Errorf("counts = %d/%d/%d, want all zero", a, ap, c)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		srv := newReleaseServer(t, "v9.9.9", []byte("bin"), true, 0)
+		defer srv.Close()
+		h := newSpyHandoff(&orderedRecorder{})
+		u := New(Options{
+			Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: false,
+			apiBaseURL: srv.URL, httpClient: srv.Client(), Handoff: h,
+		})
+		u.checkAndMaybeUpdate(context.Background())
+		if a, ap, c := h.counts(); a != 0 || ap != 0 || c != 0 {
+			t.Errorf("counts = %d/%d/%d, want all zero", a, ap, c)
+		}
+	})
+	t.Run("gate_blocked", func(t *testing.T) {
+		srv := newReleaseServer(t, "v9.9.9", []byte("bin"), true, 0)
+		defer srv.Close()
+		h := newSpyHandoff(&orderedRecorder{})
+		u := New(Options{
+			Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+			apiBaseURL: srv.URL, httpClient: srv.Client(), Handoff: h,
+			Gate: func() bool { return false },
+		})
+		u.checkAndMaybeUpdate(context.Background())
+		if a, ap, c := h.counts(); a != 0 || ap != 0 || c != 0 {
+			t.Errorf("counts = %d/%d/%d, want all zero", a, ap, c)
+		}
+	})
+}
+
+// Clear is called on EVERY applyUpdate failure class: missing asset,
+// download error, all three fail-closed checksum refusals, checksum
+// mismatch, and a failed binary swap.
+func TestHandoffClearCalledOnEveryFailureClass(t *testing.T) {
+	newBinaryOK := []byte("new binary")
+
+	cases := []struct {
+		name     string
+		buildSrv func(t *testing.T) *httptest.Server
+		execOK   bool // false -> exec path's parent dir is missing (swap failure)
+	}{
+		{
+			name: "missing_asset",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+					rel := release{TagName: "v9.9.9", Assets: []asset{{Name: "some-other-binary", URL: srvURL(r) + "/bin"}}}
+					_ = json.NewEncoder(w).Encode(rel)
+				})
+				return httptest.NewServer(mux)
+			},
+			execOK: true,
+		},
+		{
+			name: "download_error",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+					rel := release{TagName: "v9.9.9", Assets: []asset{{Name: assetName(), URL: srvURL(r) + "/bin"}}}
+					_ = json.NewEncoder(w).Encode(rel)
+				})
+				mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "boom", http.StatusInternalServerError)
+				})
+				return httptest.NewServer(mux)
+			},
+			execOK: true,
+		},
+		{
+			name: "checksums_missing",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				return newReleaseServer(t, "v9.9.9", newBinaryOK, false, 0)
+			},
+			execOK: true,
+		},
+		{
+			name: "checksums_fetch_fails",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+					rel := release{TagName: "v9.9.9", Assets: []asset{
+						{Name: assetName(), URL: srvURL(r) + "/bin"},
+						{Name: "checksums.txt", URL: srvURL(r) + "/sums"},
+					}}
+					_ = json.NewEncoder(w).Encode(rel)
+				})
+				mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(newBinaryOK) })
+				mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "boom", http.StatusInternalServerError)
+				})
+				return httptest.NewServer(mux)
+			},
+			execOK: true,
+		},
+		{
+			name: "checksum_entry_missing",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+					rel := release{TagName: "v9.9.9", Assets: []asset{
+						{Name: assetName(), URL: srvURL(r) + "/bin"},
+						{Name: "checksums.txt", URL: srvURL(r) + "/sums"},
+					}}
+					_ = json.NewEncoder(w).Encode(rel)
+				})
+				mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(newBinaryOK) })
+				mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte("deadbeef  some-other-asset\n"))
+				})
+				return httptest.NewServer(mux)
+			},
+			execOK: true,
+		},
+		{
+			name: "checksum_mismatch",
+			buildSrv: func(t *testing.T) *httptest.Server {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/repos/owner/repo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+					rel := release{TagName: "v9.9.9", Assets: []asset{
+						{Name: assetName(), URL: srvURL(r) + "/bin"},
+						{Name: "checksums.txt", URL: srvURL(r) + "/sums"},
+					}}
+					_ = json.NewEncoder(w).Encode(rel)
+				})
+				mux.HandleFunc("/bin", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(newBinaryOK) })
+				mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte("deadbeef  " + assetName() + "\n"))
+				})
+				return httptest.NewServer(mux)
+			},
+			execOK: true,
+		},
+		{
+			name:     "swap_write_failure",
+			buildSrv: func(t *testing.T) *httptest.Server { return newReleaseServer(t, "v9.9.9", newBinaryOK, true, 0) },
+			execOK:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.buildSrv(t)
+			defer srv.Close()
+
+			var exec string
+			if tc.execOK {
+				dir := t.TempDir()
+				exec = filepath.Join(dir, "twitch-miner-go")
+				_ = os.WriteFile(exec, []byte("old"), 0755)
+			} else {
+				exec = filepath.Join(t.TempDir(), "missing-dir", "twitch-miner-go")
+			}
+
+			h := newSpyHandoff(&orderedRecorder{})
+			u := New(Options{
+				Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+				apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+				Handoff: h,
+			})
+			u.checkAndMaybeUpdate(context.Background())
+
+			applying, applied, clear := h.counts()
+			if applying != 1 {
+				t.Errorf("RecordApplying calls = %d, want 1", applying)
+			}
+			if applied != 0 {
+				t.Errorf("RecordApplied calls = %d, want 0 (failure path)", applied)
+			}
+			if clear != 1 {
+				t.Errorf("Clear calls = %d, want 1 (mandatory terminalization on failure)", clear)
+			}
+		})
+	}
+}
+
+// RecordApplied strictly precedes OnUpdate in program order.
+func TestHandoffRecordAppliedBeforeOnUpdate(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	rec := &orderedRecorder{}
+	h := newSpyHandoff(rec)
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff:  h,
+		OnUpdate: func() { rec.record("on_update") },
+	})
+	u.checkAndMaybeUpdate(context.Background())
+
+	evs := rec.all()
+	idxApplied, idxOnUpdate := -1, -1
+	for i, e := range evs {
+		if e == "record_applied" {
+			idxApplied = i
+		}
+		if e == "on_update" {
+			idxOnUpdate = i
+		}
+	}
+	if idxApplied == -1 || idxOnUpdate == -1 || idxApplied >= idxOnUpdate {
+		t.Fatalf("event order = %v, want record_applied strictly before on_update", evs)
+	}
+}
+
+// A failing RecordApplying must not prevent the apply (observability must
+// never block an update) - the error is routed through onHandoffError
+// instead.
+func TestHandoffRecordApplyingErrorDoesNotBlockApply(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	h := newSpyHandoff(&orderedRecorder{})
+	h.recordApplyingErr = errors.New("boom")
+
+	var handoffStage string
+	var handoffErr error
+	restarted := false
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff:  h,
+		OnUpdate: func() { restarted = true },
+	})
+	u.opts.onHandoffError = func(stage string, err error) {
+		handoffStage, handoffErr = stage, err
+	}
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	if !restarted {
+		t.Error("apply must proceed despite a failing RecordApplying (observability must never block an update)")
+	}
+	if handoffStage != "record_applying" || handoffErr == nil {
+		t.Errorf("onHandoffError not routed correctly: stage=%q err=%v", handoffStage, handoffErr)
+	}
+	if got, _ := os.ReadFile(exec); string(got) != string(binary) {
+		t.Errorf("binary not replaced: %q", got)
+	}
+}
+
+// handoffErrorRingMarkerSeq gives each TestHandoffDefaultErrorRecordsRingEvent
+// invocation (including reruns under `go test -count=N`) a distinct marker,
+// so the assertion below can find the exact event this call produced in the
+// process-wide events ring, rather than a stale one from another run -
+// mirrors gateBlockedRingMarkerSeq's precedent for onGateBlocked.
+var handoffErrorRingMarkerSeq atomic.Int64
+
+// The default (production) onHandoffError records the canonical
+// updater_handoff_write_failed ring event with the stage prefix, without a
+// test override - proving the wiring in New() actually installs
+// defaultHandoffError (mirrors TestGateBlockedDefaultRecordsRingEvent's
+// precedent for onGateBlocked).
+func TestHandoffDefaultErrorRecordsRingEvent(t *testing.T) {
+	n := handoffErrorRingMarkerSeq.Add(1)
+	marker := fmt.Sprintf("handoff-write-failed-marker-%d", n)
+
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	h := newSpyHandoff(&orderedRecorder{})
+	h.recordApplyingErr = errors.New(marker)
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff: h,
+		// onHandoffError intentionally left nil so New() installs the
+		// production default (defaultHandoffError) - no test override here.
+	})
+	u.checkAndMaybeUpdate(context.Background())
+
+	found := false
+	for _, e := range events.Recent(200) {
+		if e.Type == events.TypeUpdaterHandoffWriteFailed &&
+			strings.Contains(e.Detail, "record_applying") && strings.Contains(e.Detail, marker) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("default onHandoffError did not record an updater_handoff_write_failed ring event for %q", marker)
+	}
+}
+
+// A failing RecordApplied must not prevent OnUpdate from firing (the binary
+// swap already succeeded by the time RecordApplied runs) - the error is
+// routed through onHandoffError instead, exactly like a failing
+// RecordApplying.
+func TestHandoffRecordAppliedErrorDoesNotBlockOnUpdate(t *testing.T) {
+	binary := []byte("BRAND NEW BINARY CONTENTS")
+	srv := newReleaseServer(t, "v9.9.9", binary, true, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	h := newSpyHandoff(&orderedRecorder{})
+	h.recordAppliedErr = errors.New("boom-applied")
+
+	var handoffStage string
+	var handoffErr error
+	restarted := false
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff:  h,
+		OnUpdate: func() { restarted = true },
+	})
+	u.opts.onHandoffError = func(stage string, err error) {
+		handoffStage, handoffErr = stage, err
+	}
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	if !restarted {
+		t.Error("OnUpdate must still fire despite a failing RecordApplied")
+	}
+	if handoffStage != "record_applied" || handoffErr == nil {
+		t.Errorf("onHandoffError not routed correctly: stage=%q err=%v", handoffStage, handoffErr)
+	}
+	if got, _ := os.ReadFile(exec); string(got) != string(binary) {
+		t.Errorf("binary not replaced: %q", got)
+	}
+}
+
+// A failing Clear must not change the existing failure handling at all
+// (NotifyFailure still fires with the original refusal reason, the binary
+// stays untouched, LastOutcome still records apply_failed) - only the
+// Clear error itself is additionally routed through onHandoffError.
+func TestHandoffClearErrorDoesNotChangeFailureHandling(t *testing.T) {
+	srv := newReleaseServer(t, "v9.9.9", []byte("new binary"), false /* no checksums -> refuse */, 0)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "twitch-miner-go")
+	_ = os.WriteFile(exec, []byte("old"), 0755)
+
+	h := newSpyHandoff(&orderedRecorder{})
+	h.clearErr = errors.New("boom-clear")
+
+	var handoffStage string
+	var handoffErr error
+	failureCalls := 0
+	var failureReason string
+
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "v1.0.0", Enabled: true,
+		apiBaseURL: srv.URL, execPath: exec, httpClient: srv.Client(),
+		Handoff: h,
+		NotifyFailure: func(_, _, reason string) {
+			failureCalls++
+			failureReason = reason
+		},
+	})
+	u.opts.onHandoffError = func(stage string, err error) {
+		handoffStage, handoffErr = stage, err
+	}
+
+	u.checkAndMaybeUpdate(context.Background())
+
+	if handoffStage != "clear" || handoffErr == nil {
+		t.Errorf("onHandoffError not routed correctly: stage=%q err=%v", handoffStage, handoffErr)
+	}
+	if failureCalls != 1 {
+		t.Errorf("NotifyFailure calls = %d, want 1 (a failing Clear must not change failure handling)", failureCalls)
+	}
+	if !strings.Contains(failureReason, "refusing to install unverified binary") {
+		t.Errorf("failure reason = %q, want the refusal reason unchanged", failureReason)
+	}
+	if got, _ := os.ReadFile(exec); string(got) != "old" {
+		t.Errorf("binary replaced despite refusal: %q", got)
+	}
+	if applying, applied, clear := h.counts(); applying != 1 || applied != 0 || clear != 1 {
+		t.Errorf("counts = applying=%d applied=%d clear=%d, want 1/0/1", applying, applied, clear)
+	}
+	if got := u.Snapshot().LastOutcome; got != OutcomeApplyFailed {
+		t.Errorf("LastOutcome = %q, want %q even though Clear itself failed", got, OutcomeApplyFailed)
 	}
 }
