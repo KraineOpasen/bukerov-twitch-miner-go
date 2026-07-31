@@ -453,13 +453,23 @@ unchanged) — the miner's own graceful-shutdown budget is up to ~30 seconds,
 so the default Docker grace period (10 seconds before `SIGKILL`) can cut a
 slow shutdown short.
 
+**Trusted-LAN lifecycle allowlist — `DASHBOARD_TRUSTED_LAN_CIDRS`:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DASHBOARD_TRUSTED_LAN_CIDRS` | unset | Comma-separated CIDR allowlist (e.g. `192.168.1.0/24,fd00::/64` — use RFC1918/ULA ranges, never a real public address) permitting lifecycle mutation commands (pause/resume/restart/stop/restart-process) **without** Basic Auth — but ONLY when `DASHBOARD_INSECURE_NO_AUTH=true` is also set; it has no effect otherwise. Checked strictly against the TCP connection's own remote address — `Forwarded`/`X-Forwarded-For`/`X-Real-IP` are **never** trusted (any client can set them to anything), so behind a reverse proxy it's the **proxy's own** address that must match, not the original client's. Each entry must be a **network address** (no host bits set — `192.168.1.5/24` is rejected in favor of `192.168.1.0/24`) and not an IPv4-mapped-IPv6 form (`::ffff:192.168.0.0/112`, which could never match); a bare IP is also rejected — spell out `/32` (IPv4) or `/128` (IPv6) for a single address. An invalid value fails startup outright (when the dashboard is enabled — with analytics/dashboard disabled there is no web server, and no lifecycle endpoints either). |
+
 **Security:** lifecycle mutations (pause/resume/restart/stop) follow the
 same rules as every other dashboard write — see
 [Security defaults](#security-defaults). One addition specific to
 lifecycle: when `DASHBOARD_INSECURE_NO_AUTH=true`, lifecycle *mutations* are
-always refused with `403`, even though every other route is unauthenticated
-in that mode — the panel renders its controls disabled with an explanation
-rather than silently failing. Reading state (`GET /api/lifecycle`) is never
+refused by default (`403`), even though every other route is unauthenticated
+in that mode. `DASHBOARD_TRUSTED_LAN_CIDRS` above is the one narrow, opt-in
+exception — allowed only for a connection whose *own* remote address matches
+the allowlist, everyone else (on that same insecure dashboard) stays
+refused. The panel renders its controls disabled with an explanation when
+refused, or enabled with a note when your address is trusted, rather than
+silently failing either way. Reading state (`GET /api/lifecycle`) is never
 gated.
 
 ---
@@ -1223,6 +1233,22 @@ panel.
   exactly what to set. `DASHBOARD_INSECURE_NO_AUTH=true` is the explicit,
   logged opt-out for trusted networks. On a loopback bind auth stays
   optional.
+- **Trusted-LAN lifecycle allowlist:** `DASHBOARD_TRUSTED_LAN_CIDRS` is a
+  narrow, opt-in exception that applies ONLY when
+  `DASHBOARD_INSECURE_NO_AUTH=true` — see the "Trusted-LAN lifecycle
+  allowlist" table in [Lifecycle Controls](#lifecycle-controls-pause--resume--restart--stop)
+  above for the full variable description. Unlike `DASHBOARD_TRUSTED_ORIGINS` in the CSRF
+  bullet below (which matches a browser-supplied `Origin`/`Referer`
+  **header**), this check is **RemoteAddr-only**: it is matched against the
+  TCP connection's own peer address and never looks at `Forwarded`/
+  `X-Forwarded-For`/`X-Real-IP`, which an untrusted client can set to
+  anything. That means it does **not** work behind a reverse proxy unless
+  the proxy's own address is what you allowlist. Each entry must be a
+  canonical network address (host bits set, and IPv4-mapped-IPv6 forms, are
+  rejected — see the table above). An invalid value fails startup outright —
+  fail closed, on any bind host and in any auth mode (whenever the dashboard
+  is enabled at all — with analytics/dashboard disabled there is no web
+  server, and no lifecycle surface exists).
 - **CSRF protection:** all state-changing endpoints (bets, redemptions,
   settings, quick actions, canary runs, notification config) reject
   cross-origin browser requests based on `Sec-Fetch-Site`/`Origin`/`Referer`.

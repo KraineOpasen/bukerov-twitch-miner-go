@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -69,15 +70,16 @@ import (
 // Environment variable names read by Resolve. They are collected here so the
 // full set of process-level inputs this boundary owns is visible in one place.
 const (
-	envAutoUpdate            = "AUTO_UPDATE"
-	envAutoUpdateInterval    = "AUTO_UPDATE_CHECK_INTERVAL"
-	envDashboardHost         = "DASHBOARD_HOST"
-	envDashboardUsername     = "DASHBOARD_USERNAME"
-	envDashboardPassword     = "DASHBOARD_PASSWORD"
-	envDashboardInsecure     = "DASHBOARD_INSECURE_NO_AUTH"
-	envDashboardTrustedOrigs = "DASHBOARD_TRUSTED_ORIGINS"
-	envDevPredictions        = "MINER_DEV_PREDICTIONS"
-	envLifecycleForceRunning = "LIFECYCLE_FORCE_RUNNING"
+	envAutoUpdate               = "AUTO_UPDATE"
+	envAutoUpdateInterval       = "AUTO_UPDATE_CHECK_INTERVAL"
+	envDashboardHost            = "DASHBOARD_HOST"
+	envDashboardUsername        = "DASHBOARD_USERNAME"
+	envDashboardPassword        = "DASHBOARD_PASSWORD"
+	envDashboardInsecure        = "DASHBOARD_INSECURE_NO_AUTH"
+	envDashboardTrustedOrigs    = "DASHBOARD_TRUSTED_ORIGINS"
+	envDashboardTrustedLANCIDRs = "DASHBOARD_TRUSTED_LAN_CIDRS"
+	envDevPredictions           = "MINER_DEV_PREDICTIONS"
+	envLifecycleForceRunning    = "LIFECYCLE_FORCE_RUNNING"
 )
 
 // Lookup abstracts reading a single environment variable. It mirrors
@@ -207,6 +209,24 @@ type Dashboard struct {
 	// DevPredictions is the resolved MINER_DEV_PREDICTIONS switch enabling the
 	// local prediction simulator. Off unless explicitly set truthy.
 	DevPredictions bool
+	// TrustedLANCIDRs is the parsed DASHBOARD_TRUSTED_LAN_CIDRS allowlist:
+	// CIDR ranges permitted to issue lifecycle mutation commands WITHOUT
+	// Basic Auth when InsecureNoAuth is true (see
+	// internal/web/security.go's lifecycleLANTrust, the only consumer). nil
+	// when unset, OR when TrustedLANCIDRsErr is non-empty — a parse error
+	// fails closed to no allowlist rather than a partially-parsed one. The
+	// field is exported for construction; because a slice shares its backing
+	// array across value copies, treat it as read-only and use
+	// TrustedLANCIDRPrefixes for a defensive copy rather than mutating it in
+	// place.
+	TrustedLANCIDRs []netip.Prefix
+	// TrustedLANCIDRsErr is "" when DASHBOARD_TRUSTED_LAN_CIDRS is unset or
+	// parsed successfully; otherwise it holds the parse error's text.
+	// Deliberately a string, not an error: this snapshot is a plain,
+	// printable value (see Dashboard.String/LogValue), and the sole
+	// consumer — validateBindSecurity's fail-closed startup gate — only
+	// ever needs the text, never to unwrap it.
+	TrustedLANCIDRsErr string
 }
 
 // AuthEnabled reports whether Basic Auth is configured (both credentials set).
@@ -225,7 +245,22 @@ func (d Dashboard) TrustedOriginHosts() []string {
 	return out
 }
 
+// TrustedLANCIDRPrefixes returns a defensive copy of the parsed trusted-LAN
+// CIDR allowlist, so a caller can never mutate the snapshot's internal slice
+// (mirrors TrustedOriginHosts).
+func (d Dashboard) TrustedLANCIDRPrefixes() []netip.Prefix {
+	if len(d.TrustedLANCIDRs) == 0 {
+		return nil
+	}
+	out := make([]netip.Prefix, len(d.TrustedLANCIDRs))
+	copy(out, d.TrustedLANCIDRs)
+	return out
+}
+
 // LogValue redacts the Basic Auth password so a Dashboard is safe to log.
+// TrustedLANCIDRs (not a secret) renders as a count, like TrustedOrigins;
+// TrustedLANCIDRsErr is safe to log verbatim - it never contains user
+// credentials, only the offending config entry and remedy text.
 func (d Dashboard) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("hostOverride", d.HostOverride),
@@ -234,6 +269,8 @@ func (d Dashboard) LogValue() slog.Value {
 		slog.Bool("insecureNoAuth", d.InsecureNoAuth),
 		slog.Int("trustedOrigins", len(d.TrustedOrigins)),
 		slog.Bool("devPredictions", d.DevPredictions),
+		slog.Int("trustedLANCIDRs", len(d.TrustedLANCIDRs)),
+		slog.String("trustedLANCIDRsErr", d.TrustedLANCIDRsErr),
 	)
 }
 
@@ -245,15 +282,17 @@ func (d Dashboard) LogValue() slog.Value {
 // when a Dashboard IS reached interfaceably, this method renders a clean "***".
 func (d Dashboard) String() string {
 	return fmt.Sprintf(
-		"runtimeconfig.Dashboard{hostOverride:%q username:%q password:%q insecureNoAuth:%t trustedOrigins:%d devPredictions:%t}",
-		d.HostOverride, d.Username, d.Password.redacted(), d.InsecureNoAuth, len(d.TrustedOrigins), d.DevPredictions)
+		"runtimeconfig.Dashboard{hostOverride:%q username:%q password:%q insecureNoAuth:%t trustedOrigins:%d devPredictions:%t trustedLANCIDRs:%d trustedLANCIDRsErr:%q}",
+		d.HostOverride, d.Username, d.Password.redacted(), d.InsecureNoAuth, len(d.TrustedOrigins), d.DevPredictions,
+		len(d.TrustedLANCIDRs), d.TrustedLANCIDRsErr)
 }
 
 // GoString makes Dashboard a fmt.GoStringer with the password redacted under %#v.
 func (d Dashboard) GoString() string {
 	return fmt.Sprintf(
-		"runtimeconfig.Dashboard{HostOverride:%q, Username:%q, Password:%#v, InsecureNoAuth:%#v, TrustedOrigins:%#v, DevPredictions:%#v}",
-		d.HostOverride, d.Username, d.Password, d.InsecureNoAuth, d.TrustedOrigins, d.DevPredictions)
+		"runtimeconfig.Dashboard{HostOverride:%q, Username:%q, Password:%#v, InsecureNoAuth:%#v, TrustedOrigins:%#v, DevPredictions:%#v, TrustedLANCIDRs:%#v, TrustedLANCIDRsErr:%#v}",
+		d.HostOverride, d.Username, d.Password, d.InsecureNoAuth, d.TrustedOrigins, d.DevPredictions,
+		d.TrustedLANCIDRs, d.TrustedLANCIDRsErr)
 }
 
 // Format makes Dashboard a fmt.Formatter — the highest-precedence fmt hook,
@@ -347,6 +386,14 @@ func (rc RuntimeConfig) Format(f fmt.State, verb rune) {
 // valid by construction. The environment is read ONLY here, and only through
 // the injected Lookup.
 //
+// One deliberate exception to "nothing left to fail": Dashboard.TrustedLANCIDRs
+// can fail to parse (an operator typo). Resolve stays total by CAPTURING that
+// failure as text in Dashboard.TrustedLANCIDRsErr rather than returning an
+// error itself — cmd/miner's call site is frozen and cannot gain an error
+// return. Enforcement is deferred to internal/web/security.go's
+// validateBindSecurity, the fail-closed startup gate, which refuses to start
+// whenever TrustedLANCIDRsErr is non-empty.
+//
 // Precedence is preserved exactly as it was before BKM-021:
 //
 //   - AutoUpdateEnabled: -auto-update flag OR a truthy AUTO_UPDATE env value.
@@ -356,9 +403,16 @@ func (rc RuntimeConfig) Format(f fmt.State, verb rune) {
 //   - Dashboard.Username/Password: DASHBOARD_USERNAME/DASHBOARD_PASSWORD (verbatim).
 //   - Dashboard.InsecureNoAuth: DASHBOARD_INSECURE_NO_AUTH (strconv.ParseBool).
 //   - Dashboard.TrustedOrigins: DASHBOARD_TRUSTED_ORIGINS (parsed here).
+//   - Dashboard.TrustedLANCIDRs/TrustedLANCIDRsErr: DASHBOARD_TRUSTED_LAN_CIDRS
+//     (parsed here; see the exception note above).
 //   - Dashboard.DevPredictions: MINER_DEV_PREDICTIONS truthy set.
 //   - LifecycleForceRunning: LIFECYCLE_FORCE_RUNNING (strconv.ParseBool, truthy only).
 func Resolve(flags Flags, env Lookup) RuntimeConfig {
+	lanCIDRs, lanCIDRsErr := ParseTrustedLANCIDRs(env.get(envDashboardTrustedLANCIDRs))
+	lanCIDRsErrText := ""
+	if lanCIDRsErr != nil {
+		lanCIDRsErrText = lanCIDRsErr.Error()
+	}
 	return RuntimeConfig{
 		ConfigPath:            flags.ConfigPath,
 		Debug:                 flags.Debug,
@@ -366,12 +420,14 @@ func Resolve(flags Flags, env Lookup) RuntimeConfig {
 		AutoUpdateInterval:    updater.ParseCheckInterval(env.get(envAutoUpdateInterval)),
 		LifecycleForceRunning: parseBool(env.get(envLifecycleForceRunning)),
 		Dashboard: Dashboard{
-			HostOverride:   strings.TrimSpace(env.get(envDashboardHost)),
-			Username:       env.get(envDashboardUsername),
-			Password:       NewSecret(env.get(envDashboardPassword)),
-			InsecureNoAuth: parseBool(env.get(envDashboardInsecure)),
-			TrustedOrigins: ParseTrustedOrigins(env.get(envDashboardTrustedOrigs)),
-			DevPredictions: parseDevPredictions(env.get(envDevPredictions)),
+			HostOverride:       strings.TrimSpace(env.get(envDashboardHost)),
+			Username:           env.get(envDashboardUsername),
+			Password:           NewSecret(env.get(envDashboardPassword)),
+			InsecureNoAuth:     parseBool(env.get(envDashboardInsecure)),
+			TrustedOrigins:     ParseTrustedOrigins(env.get(envDashboardTrustedOrigs)),
+			DevPredictions:     parseDevPredictions(env.get(envDevPredictions)),
+			TrustedLANCIDRs:    lanCIDRs,
+			TrustedLANCIDRsErr: lanCIDRsErrText,
 		},
 	}
 }
@@ -431,4 +487,69 @@ func ParseTrustedOrigins(raw string) []string {
 		hosts = append(hosts, entry)
 	}
 	return hosts
+}
+
+// ParseTrustedLANCIDRs parses a DASHBOARD_TRUSTED_LAN_CIDRS value: a
+// comma-separated CIDR allowlist that permits lifecycle mutation commands
+// without Basic Auth when DASHBOARD_INSECURE_NO_AUTH=true, checked against
+// the connection's remote address only (see
+// internal/web/security.go's lifecycleLANTrust). This is the single parser
+// for that variable, mirroring ParseTrustedOrigins.
+//
+// Each entry MUST be a CIDR (netip.ParsePrefix) — a bare IP address is
+// rejected, so an operator must spell out /32 (IPv4) or /128 (IPv6) for a
+// single address, keeping the value unambiguous about its own semantics.
+// "" or a whitespace-only value (including a value made only of
+// empty/whitespace entries, e.g. a trailing comma) means "not configured":
+// (nil, nil).
+//
+// Every entry MUST already be in its canonical network form — i.e. equal to
+// its own .Masked() value — with no host bits set (corrective-pass
+// hardening: this used to silently accept and normalize a set host bit,
+// e.g. "192.168.1.5/24" -> "192.168.1.0/24", which let a typo'd prefix
+// length like "192.168.1.0/2" silently normalize to the vastly wider
+// "192.0.0.0/2" instead of failing loudly). A host-bits-set entry is now a
+// parse error naming the canonical form the operator most likely meant.
+//
+// An entry whose address is an IPv4-mapped IPv6 form (net/netip's Is4In6,
+// e.g. "::ffff:192.168.0.0/112") is also rejected: lifecycleLANTrust always
+// Unmap()s the connection's address before matching, so such a prefix could
+// never match anything — accepting it would be silent, dishonest dead
+// configuration rather than a fail-closed error.
+//
+// A malformed entry fails the WHOLE value (nil prefixes, non-nil error) —
+// fail-closed rather than silently dropping the bad entry and trusting a
+// partial allowlist the operator never intended.
+func ParseTrustedLANCIDRs(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid DASHBOARD_TRUSTED_LAN_CIDRS entry %q: %v (expected comma-separated CIDRs like \"192.168.1.0/24,fd00::/64\"; use /32 or /128 for a single address)",
+				entry, err)
+		}
+		if masked := p.Masked(); p != masked {
+			return nil, fmt.Errorf(
+				"invalid DASHBOARD_TRUSTED_LAN_CIDRS entry %q: host bits set; use %q (the network) or /32 (IPv4) / /128 (IPv6) for a single address",
+				entry, masked.String())
+		}
+		if p.Addr().Is4In6() {
+			return nil, fmt.Errorf(
+				"invalid DASHBOARD_TRUSTED_LAN_CIDRS entry %q: IPv4-mapped IPv6 form is not accepted (the connection address is always unmapped before matching, so it could never match); write the plain IPv4 CIDR instead",
+				entry)
+		}
+		prefixes = append(prefixes, p)
+	}
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	return prefixes, nil
 }

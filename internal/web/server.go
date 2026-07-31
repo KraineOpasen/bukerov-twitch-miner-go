@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -493,7 +494,12 @@ func (s *Server) SetDebugURL(url string) {
 // SetDashboardConfig injects the resolved, immutable dashboard exposure/auth
 // snapshot. It is called once during composition (by internal/app, or by the
 // miner's fallback web build) before Start; the web layer reads no process
-// environment of its own.
+// environment of its own. It MUST be called before Start: Start's call to
+// s.handler() captures this snapshot into the middleware chain
+// (basicAuthMiddleware/csrfProtectMiddleware are built once, closing over
+// the dashboard value passed to them at that moment), so reconfiguring the
+// dashboard after Start has already built and started serving that handler
+// is not supported and will not take effect on the running listener.
 func (s *Server) SetDashboardConfig(d runtimeconfig.Dashboard) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -538,6 +544,34 @@ func basicAuthMiddleware(cfg runtimeconfig.Dashboard, next http.Handler) http.Ha
 	})
 }
 
+// logTrustedLANCIDRsAudit is Ф4d's corrective-pass startup audit trail: when
+// the trusted-LAN allowlist is actually active (InsecureNoAuth AND at least
+// one configured prefix), it is logged once at Info so an operator can see
+// exactly what was accepted from the process's own logs — these are config
+// values, not secrets, so there's nothing to redact. Any configured prefix
+// broader than a private/loopback/link-local/ULA range (see
+// nonPrivateTrustedLANPrefixes in security.go) additionally gets its own
+// Warn, naming that prefix, since an accidentally-public allowlist entry is
+// exactly the kind of mistake worth surfacing loudly rather than leaving to
+// be discovered later. Called from Start after validateBindSecurity has
+// already accepted the configuration (never for a value that fails
+// startup); a no-op when the allowlist isn't active at all.
+func logTrustedLANCIDRsAudit(dash runtimeconfig.Dashboard) {
+	if !dash.InsecureNoAuth || len(dash.TrustedLANCIDRs) == 0 {
+		return
+	}
+	prefixStrs := make([]string, len(dash.TrustedLANCIDRs))
+	for i, p := range dash.TrustedLANCIDRs {
+		prefixStrs[i] = p.String()
+	}
+	slog.Info("dashboard_trusted_lan_cidrs", "prefixes", strings.Join(prefixStrs, ","))
+	for _, p := range nonPrivateTrustedLANPrefixes(dash) {
+		slog.Warn("dashboard_trusted_lan_cidrs_broad",
+			"prefix", p.String(),
+			"hint", "this entry is broader than a private/loopback/link-local/ULA range")
+	}
+}
+
 // Start resolves the effective bind address, enforces the fail-closed
 // exposure rules (see security.go), and begins serving in the background.
 // A non-loopback bind without credentials is a startup error, not a warning.
@@ -548,6 +582,7 @@ func (s *Server) Start() error {
 	if err := validateBindSecurity(dash, host); err != nil {
 		return err
 	}
+	logTrustedLANCIDRsAudit(dash)
 
 	handler := s.handler()
 

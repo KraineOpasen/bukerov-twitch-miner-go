@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -39,6 +40,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
 )
 
 // f4cDevController is the harness's fake LifecycleController: state is set
@@ -210,6 +212,50 @@ func registerF4cDevLifecycleRoutes(mux *http.ServeMux, srv *Server, dev *f4cDevC
 		srv.GetStatusBroadcaster().SetStatus(StatusRunning, "")
 		w.WriteHeader(http.StatusOK)
 	})
+	// Ф4d evidence fixture: POST /api/dev/lifecycle/lan?mode=allowed|denied|unset
+	// reconfigures the dashboard so Playwright can exercise all three
+	// trusted-LAN panel states end to end. Every mode always sets
+	// InsecureNoAuth true (the trust gate only ever fires under it);
+	// "allowed"/"denied" additionally set a DASHBOARD_TRUSTED_LAN_CIDRS
+	// allowlist that does/doesn't contain 127.0.0.1 (loopback — what a
+	// browser driving this harness connects from). RFC1918/loopback
+	// placeholders only, per governance — never a real owner address.
+	mux.HandleFunc("/api/dev/lifecycle/lan", func(w http.ResponseWriter, r *http.Request) {
+		switch mode := r.URL.Query().Get("mode"); mode {
+		case "allowed":
+			srv.SetDashboardConfig(runtimeconfig.Dashboard{
+				InsecureNoAuth:  true,
+				TrustedLANCIDRs: mustParseHarnessLANCIDRs("127.0.0.0/8,::1/128"),
+			})
+		case "denied":
+			srv.SetDashboardConfig(runtimeconfig.Dashboard{
+				InsecureNoAuth:  true,
+				TrustedLANCIDRs: mustParseHarnessLANCIDRs("192.168.0.0/16"),
+			})
+		case "unset":
+			srv.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true})
+		default:
+			http.Error(w, "bad mode", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// mustParseHarnessLANCIDRs parses a fixed, known-good CIDR literal for the
+// dev harness routes above. It cannot be the shared mustLANCIDRs test
+// helper (render_helpers_test.go): these calls happen inside an
+// http.HandlerFunc closure serving live requests, not inside a *testing.T
+// test body, so there is no *testing.T to call t.Fatalf on — it panics
+// instead (never reachable in practice, since the two literals above are
+// fixed and known-good; a typo here would be a harness bug, not behavior
+// under test).
+func mustParseHarnessLANCIDRs(raw string) []netip.Prefix {
+	p, err := runtimeconfig.ParseTrustedLANCIDRs(raw)
+	if err != nil {
+		panic(fmt.Sprintf("f4c harness: bad fixture CIDR %q: %v", raw, err))
+	}
+	return p
 }
 
 // TestF4cEvidenceHarness serves the dashboard, with the full F3 fixture set

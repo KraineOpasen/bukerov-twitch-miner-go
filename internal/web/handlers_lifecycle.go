@@ -162,7 +162,7 @@ func buildLifecycleResponse(snap lifecycle.Snapshot, upd LifecycleUpdateState) l
 // render it: "" (the zero value, used for plain GETs) means no result to
 // show at all.
 type lifecycleActionOutcome struct {
-	kind   string // "accepted" | "idempotent" | "rejected" | "insecure" | "unknown_action" | "unavailable"
+	kind   string // "accepted" | "idempotent" | "rejected" | "insecure" | "lan_denied" | "unknown_action" | "unavailable"
 	detail string // sanitized human-readable detail; "" when kind carries its own fixed text
 }
 
@@ -190,6 +190,24 @@ func (s *Server) handleAPILifecycleAction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Security gate (design v6 §9(а); Ф4d, hoisted in the corrective pass):
+	// the trigger is EXACTLY InsecureNoAuth, never !AuthEnabled() — a
+	// loopback default run with no credentials configured at all must still
+	// be able to mutate (§9(в)). This check is per-handler because
+	// basicAuthMiddleware is skipped entirely whenever AuthEnabled() is
+	// false, so nothing upstream in the middleware chain would otherwise
+	// stop an unauthenticated remote command under
+	// DASHBOARD_INSECURE_NO_AUTH=true. lifecycleAuthGateBlocked additionally
+	// consults the DASHBOARD_TRUSTED_LAN_CIDRS allowlist. It runs FIRST —
+	// above action-name validation and the restart-process dispatch below —
+	// so EVERY POST under /api/lifecycle/, including an unrecognized action
+	// name, passes it before anything else: the unknown_action 400 (which
+	// echoes a snapshot body) is reachable only by a caller this gate has
+	// already allowed.
+	if s.lifecycleAuthGateBlocked(w, r) {
+		return
+	}
+
 	action := strings.TrimPrefix(r.URL.Path, "/api/lifecycle/")
 
 	if action == "restart-process" {
@@ -200,20 +218,6 @@ func (s *Server) handleAPILifecycleAction(w http.ResponseWriter, r *http.Request
 	if action != "pause" && action != "resume" && action != "restart" && action != "stop" {
 		slog.Warn("lifecycle_command_rejected", "action", action, "outcome", "unknown_action", "remote", r.RemoteAddr)
 		s.respondLifecycle(w, r, http.StatusBadRequest, lifecycleActionOutcome{kind: "unknown_action"})
-		return
-	}
-
-	// Security gate (design v6 §9(а)): the trigger is EXACTLY InsecureNoAuth,
-	// never !AuthEnabled() — a loopback default run with no credentials
-	// configured at all must still be able to mutate (§9(в)). This check is
-	// per-handler because basicAuthMiddleware is skipped entirely whenever
-	// AuthEnabled() is false, so nothing upstream in the middleware chain
-	// would otherwise stop an unauthenticated remote command under
-	// DASHBOARD_INSECURE_NO_AUTH=true.
-	dash := s.dashboardConfig()
-	if dash.InsecureNoAuth {
-		slog.Warn("lifecycle_mutation_blocked_insecure", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
-		s.respondLifecycle(w, r, http.StatusForbidden, lifecycleActionOutcome{kind: "insecure"})
 		return
 	}
 
@@ -268,16 +272,47 @@ func (s *Server) handleAPILifecycleAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// lifecycleAuthGateBlocked is the ONE shared unauthenticated-mutation gate
+// for both lifecycle POST handlers (handleAPILifecycleAction and
+// handleLifecycleRestartProcess), extracted so the two call sites can never
+// drift. Under DASHBOARD_INSECURE_NO_AUTH=true a mutation is refused unless
+// lifecycleLANTrust explicitly trusts the connection's remote address
+// against the DASHBOARD_TRUSTED_LAN_CIDRS allowlist (Ф4d). Auth-enabled and
+// loopback-default runs are unaffected: this only ever fires when
+// InsecureNoAuth is true. Returns true — having already written the 403
+// response via respondLifecycle — when the caller must not proceed.
+func (s *Server) lifecycleAuthGateBlocked(w http.ResponseWriter, r *http.Request) bool {
+	dash := s.dashboardConfig()
+	if !dash.InsecureNoAuth {
+		return false
+	}
+	switch lifecycleLANTrust(dash, r.RemoteAddr) {
+	case lanTrustAllowed:
+		return false
+	case lanTrustDenied:
+		slog.Warn("lifecycle_mutation_blocked_lan_denied", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		s.respondLifecycle(w, r, http.StatusForbidden, lifecycleActionOutcome{kind: "lan_denied"})
+		return true
+	default: // lanTrustNotConfigured: exactly today's unconditional refusal.
+		slog.Warn("lifecycle_mutation_blocked_insecure", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		s.respondLifecycle(w, r, http.StatusForbidden, lifecycleActionOutcome{kind: "insecure"})
+		return true
+	}
+}
+
 // handleLifecycleRestartProcess serves POST /api/lifecycle/restart-process
 // (task contract D6): accepted ONLY when Observed==degraded, calling the
 // injected requester exactly once (its own sync.Once makes repeats a no-op).
 // This is the I31 process-exit path — cancelling the app's own run scope —
 // never anything this package does directly.
 func (s *Server) handleLifecycleRestartProcess(w http.ResponseWriter, r *http.Request) {
-	dash := s.dashboardConfig()
-	if dash.InsecureNoAuth {
-		slog.Warn("lifecycle_mutation_blocked_insecure", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
-		s.respondLifecycle(w, r, http.StatusForbidden, lifecycleActionOutcome{kind: "insecure"})
+	// Reached today only via handleAPILifecycleAction's "restart-process"
+	// dispatch, which already ran this same gate first (hoisted in the
+	// corrective pass) — this second call is a cheap, idempotent no-op on
+	// that path (dash.InsecureNoAuth/the CIDR classification haven't
+	// changed between the two calls). It stays here as defense-in-depth in
+	// case this handler is ever reached some other way.
+	if s.lifecycleAuthGateBlocked(w, r) {
 		return
 	}
 
@@ -392,7 +427,16 @@ type LifecyclePanelView struct {
 	// the button is hidden even for a degraded observed state.
 	CanRestartProcess bool
 
+	// InsecureDisabled means "unauthenticated mode AND this client may not
+	// mutate": dash.InsecureNoAuth && trust != lanTrustAllowed. Buttons keep
+	// using it (unchanged) for the disabled attribute — a trusted-LAN client
+	// under InsecureNoAuth is NOT disabled.
 	InsecureDisabled bool
+	// LANState is "" whenever !dash.InsecureNoAuth (Basic Auth / loopback
+	// modes carry no LAN messaging at all); otherwise one of "allowed" |
+	// "not_configured" | "denied", driving which explanation block the
+	// partial renders (Ф4d).
+	LANState string
 
 	UpdateState   string
 	UpdateVersion string
@@ -418,23 +462,43 @@ type LifecyclePanelView struct {
 
 func (s *Server) buildLifecyclePanelView(available bool, snap lifecycle.Snapshot, dash runtimeconfig.Dashboard, upd LifecycleUpdateState, restartProcessWired bool, ao lifecycleActionOutcome, r *http.Request) LifecyclePanelView {
 	vm := LifecyclePanelView{
-		Available:        available,
-		DesiredState:     string(snap.Desired),
-		ObservedState:    string(snap.Observed),
-		Transition:       string(snap.Transition),
-		Generation:       snap.Generation,
-		CommandID:        snap.CommandID,
-		Reason:           string(snap.Reason),
-		LastError:        snap.LastError,
-		Override:         snap.Override,
-		CanPause:         snap.Capabilities.CanPause,
-		CanResume:        snap.Capabilities.CanResume,
-		CanRestart:       snap.Capabilities.CanRestart,
-		CanStop:          snap.Capabilities.CanStop,
-		InsecureDisabled: dash.InsecureNoAuth,
-		UpdateState:      upd.State,
-		UpdateVersion:    upd.Version,
-		Version:          version.Version,
+		Available:     available,
+		DesiredState:  string(snap.Desired),
+		ObservedState: string(snap.Observed),
+		Transition:    string(snap.Transition),
+		Generation:    snap.Generation,
+		CommandID:     snap.CommandID,
+		Reason:        string(snap.Reason),
+		LastError:     snap.LastError,
+		Override:      snap.Override,
+		CanPause:      snap.Capabilities.CanPause,
+		CanResume:     snap.Capabilities.CanResume,
+		CanRestart:    snap.Capabilities.CanRestart,
+		CanStop:       snap.Capabilities.CanStop,
+		UpdateState:   upd.State,
+		UpdateVersion: upd.Version,
+		Version:       version.Version,
+	}
+
+	// Ф4d: compute the trust classification once for THIS render, then
+	// derive both InsecureDisabled (unchanged semantics for the six button
+	// lines) and the new LANState (drives which explanation block renders)
+	// from the single result. This is not the only lifecycleLANTrust call
+	// for a gated POST: lifecycleAuthGateBlocked already ran its own,
+	// separate check earlier in the request (before ever reaching here) to
+	// decide whether to let the mutation through at all; this call exists
+	// purely to render the panel that follows.
+	trust := lifecycleLANTrust(dash, r.RemoteAddr)
+	vm.InsecureDisabled = dash.InsecureNoAuth && trust != lanTrustAllowed
+	if dash.InsecureNoAuth {
+		switch trust {
+		case lanTrustAllowed:
+			vm.LANState = "allowed"
+		case lanTrustDenied:
+			vm.LANState = "denied"
+		default:
+			vm.LANState = "not_configured"
+		}
 	}
 
 	if !snap.NextRetryAt.IsZero() {
@@ -453,7 +517,7 @@ func (s *Server) buildLifecyclePanelView(available bool, snap lifecycle.Snapshot
 	vm.CanRestartProcess = restartProcessWired
 
 	vm.ResultKind = ao.kind
-	vm.ResultIsError = ao.kind == "rejected" || ao.kind == "insecure" || ao.kind == "unknown_action" || ao.kind == "unavailable"
+	vm.ResultIsError = ao.kind == "rejected" || ao.kind == "insecure" || ao.kind == "lan_denied" || ao.kind == "unknown_action" || ao.kind == "unavailable"
 	vm.ResultMessage = s.lifecycleResultMessage(r, ao)
 
 	if available {
@@ -482,6 +546,8 @@ func (s *Server) lifecycleResultMessage(r *http.Request, ao lifecycleActionOutco
 		return tr("lc.result.rejected")
 	case "insecure":
 		return tr("lc.insecure_disabled")
+	case "lan_denied":
+		return tr("lc.result.lan_denied")
 	case "unknown_action":
 		return tr("lc.result.unknown_action")
 	case "unavailable":
