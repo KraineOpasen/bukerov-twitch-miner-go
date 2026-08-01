@@ -3,6 +3,7 @@ package notifications
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +78,25 @@ func TestNotificationTombstoneBlocksAddPointRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new repo: %v", err)
 	}
+
+	// The point rule this test creates after Reinstate is durable in the
+	// package-wide shared testDBHandle, so without removing it here a later
+	// -count=N iteration would misread it as a rule created while tombstoned.
+	t.Cleanup(func() {
+		r.Reinstate("ntomb")
+		rules, err := r.GetPointRules()
+		if err != nil {
+			t.Errorf("cleanup: get point rules: %v", err)
+			return
+		}
+		for _, rule := range rules {
+			if strings.EqualFold(rule.Streamer, "ntomb") {
+				if err := r.DeletePointRule(rule.ID); err != nil {
+					t.Errorf("cleanup: delete point rule %d: %v", rule.ID, err)
+				}
+			}
+		}
+	})
 
 	r.Tombstone("Ntomb")
 	if err := r.AddPointRule(&PointRule{Streamer: "ntomb", Threshold: 10}); !errors.Is(err, ErrStreamerDeleted) {
