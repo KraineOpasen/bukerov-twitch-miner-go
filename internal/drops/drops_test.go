@@ -1,6 +1,7 @@
 package drops
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -289,5 +290,46 @@ func TestBuildTrackedCampaignBackfillsFromSummary(t *testing.T) {
 	}
 	if campaign.Game == nil || campaign.Game.ID != "game-wot" {
 		t.Errorf("expected game backfilled from summary, got %+v", campaign.Game)
+	}
+}
+
+// TestObserveClaimedFromInventoryExtractsFullIdentity is a direct, low-level
+// check of the E3 (S4) identity extraction: given a raw inventory
+// dropCampaignsInProgress entry with self.isClaimed=true, the skip ledger row
+// it produces carries the complete identity bundle (game/benefit/instance/
+// drop/campaign IDs) read straight from the decoded maps, and an unclaimed
+// sibling drop in the SAME entry is ignored entirely.
+func TestObserveClaimedFromInventoryExtractsFullIdentity(t *testing.T) {
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	d := &DropsTracker{skipLedger: ledger}
+
+	prog := []interface{}{
+		map[string]interface{}{
+			"id":   "camp-e3c",
+			"name": "Camp E3c",
+			"game": map[string]interface{}{"id": "game-e3c", "name": "Game"},
+			"timeBasedDrops": []interface{}{
+				claimedInProgressDrop("drop-e3c", "Reward", 60, 60, "inst-e3c", "ben-e3c"),
+				// An unclaimed sibling drop in the same entry must be ignored.
+				inProgressDrop("drop-e3c-2", "Other Reward", 60, 30, false),
+			},
+		},
+	}
+
+	d.observeClaimedFromInventory(prog)
+
+	snap, err := ledger.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	row, ok := snap.byInstance["inst-e3c"]
+	if !ok {
+		t.Fatal("expected a ledger row for the claimed drop's instance")
+	}
+	if row.gameID != "game-e3c" || row.benefitID != "ben-e3c" || row.campaignID != "camp-e3c" || row.dropID != "drop-e3c" {
+		t.Fatalf("incomplete identity extracted from raw inventory: %+v", row)
+	}
+	if _, ok := snap.byComposite[compositeKey{"camp-e3c", "drop-e3c-2"}]; ok {
+		t.Error("an unclaimed drop in the same entry must not create a ledger row")
 	}
 }
