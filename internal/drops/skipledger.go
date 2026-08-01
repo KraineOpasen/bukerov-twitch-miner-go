@@ -638,16 +638,49 @@ func (s *skipSnapshot) decide(c models.RewardIdentity, canClaim bool) (skip bool
 // by hand. This runs once per campaign per broker pass (not once per
 // streamer -- see updateStreamerCampaigns' views loop), so it is cheap
 // regardless of streamer count.
+//
+// DEFENSIVE BOUNDARY HARDENING: models.Campaign.Clone (models/campaign.go)
+// does `dc := *d` for every element of c.Drops, so a nil element would panic
+// INSIDE Clone before the filtering loop below ever ran. This is not a claim
+// that a nil *models.Drop is reachable from production today
+// (models.NewDropFromGQL, the only production constructor, never returns
+// one) -- it is that brokerView sits on the broker-assignment path and
+// should not be the thing that panics if a nil ever does appear, and should
+// agree with suppressedDrops/Reconcile (below in this file), which already
+// skip nil drops via their own guards. See hasNilDrop below.
 func brokerView(campaign *models.Campaign, snap *skipSnapshot) *models.Campaign {
 	if snap == nil {
 		return campaign
 	}
-	view := campaign.Clone()
+
+	// Shallow-copy the Campaign struct -- this does NOT dereference any
+	// drop, so it is safe even when campaign.Drops holds a nil element. Only
+	// when a nil element is actually present do we build a NEW Drops slice
+	// (a new slice header over the SAME, still non-nil, element pointers)
+	// and assign it to the copy; the source campaign and its source Drops
+	// slice are never touched either way. Clone() then runs on the
+	// sanitized copy exactly as before, preserving its existing deep-copy
+	// behaviour for Drops, Channels, ClaimedDropNames and ACL.
+	sanitized := *campaign
+	if hasNilDrop(campaign.Drops) {
+		clean := make([]*models.Drop, 0, len(campaign.Drops))
+		for _, d := range campaign.Drops {
+			if d != nil {
+				clean = append(clean, d)
+			}
+		}
+		sanitized.Drops = clean
+	}
+
+	view := sanitized.Clone()
 	gameID := campaignGameID(campaign)
 	fallback := campaignFallbackWindow(campaign)
 
 	kept := make([]*models.Drop, 0, len(view.Drops))
 	for _, drop := range view.Drops {
+		if drop == nil { // defense-in-depth; the sanitization above already excludes nils
+			continue
+		}
 		id := drop.Identity(gameID, campaign.ID, fallback)
 		if skip, reason := snap.decide(id, drop.CanClaim()); skip {
 			slog.Debug("Drop suppressed by ghost-skip ledger",
@@ -659,6 +692,20 @@ func brokerView(campaign *models.Campaign, snap *skipSnapshot) *models.Campaign 
 	}
 	view.Drops = kept
 	return view
+}
+
+// hasNilDrop reports whether drops contains any nil element, WITHOUT
+// dereferencing any element. brokerView uses it to decide whether the
+// pre-Clone sanitization pass (which allocates a new slice) is needed at
+// all, so the common case -- no nil drops -- allocates nothing extra beyond
+// the existing Clone() behaviour.
+func hasNilDrop(drops []*models.Drop) bool {
+	for _, d := range drops {
+		if d == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // SuppressedDrop is one drop currently excluded from broker-facing

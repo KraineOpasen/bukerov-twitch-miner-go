@@ -666,6 +666,60 @@ func TestBrokerFilterGatesHasEligibleAssignedDropCampaign(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Defensive boundary hardening: a nil element in campaign.Drops must never
+// panic brokerView. This is NOT a claim that a nil *models.Drop is currently
+// reachable from production (models.NewDropFromGQL, the only production
+// constructor, never returns one) -- it is that brokerView sits on the
+// broker-assignment path and should not be the thing that panics if a nil
+// ever appears there, and that it should agree with suppressedDrops/
+// Reconcile (both in this file), which already guard against nil drops via
+// their own `if drop == nil { continue }` checks.
+//
+// Without the guard, campaign.Clone() (models/campaign.go) does `dc := *d`
+// for every element of c.Drops, so a nil element panics INSIDE Clone before
+// brokerView's own filtering loop ever runs.
+// ---------------------------------------------------------------------------
+
+func TestBrokerViewNilDropInSourceDoesNotPanic(t *testing.T) {
+	validDrop := claimableDrop("drop-nilguard", "inst-nilguard")
+	campaign := &models.Campaign{
+		ID: "camp-nilguard", Name: "C-nilguard", Game: &models.Game{ID: "game-nilguard"},
+		StartAt: time.Now().Add(-time.Hour), EndAt: time.Now().Add(10 * time.Hour),
+		Drops: []*models.Drop{nil, validDrop},
+	}
+	// A non-nil, empty snapshot -- no rule should suppress the valid drop --
+	// so brokerView takes the real filtering path instead of the nil-snapshot
+	// fail-open early return.
+	snap := &skipSnapshot{
+		byInstance:  make(map[string]skipRow),
+		byComposite: make(map[compositeKey][]skipRow),
+		byBenefit:   make(map[string][]skipRow),
+	}
+
+	view := brokerView(campaign, snap) // must NOT panic on the nil element
+
+	if len(view.Drops) != 1 || view.Drops[0] == nil || view.Drops[0].ID != validDrop.ID {
+		t.Fatalf("expected the returned view to keep only the valid drop, got %+v", view.Drops)
+	}
+	if view.Drops[0] == validDrop {
+		t.Fatal("expected the returned view's drop to be a CLONE, not the source pointer (existing immutability guarantee)")
+	}
+
+	// The SOURCE campaign must be completely unaffected: same length, the
+	// same nil element still in place, and the same *models.Drop pointer for
+	// the valid entry (pointer identity, not just an equal value).
+	if len(campaign.Drops) != 2 {
+		t.Fatalf("source campaign.Drops length must be unchanged, got %d", len(campaign.Drops))
+	}
+	if campaign.Drops[0] != nil {
+		t.Fatalf("source campaign.Drops[0] must remain nil, got %+v", campaign.Drops[0])
+	}
+	if campaign.Drops[1] != validDrop {
+		t.Fatal("source campaign.Drops[1] must remain the SAME *models.Drop pointer, unmutated")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Retention: Prune only ever deletes RELEASED rows past the given horizon.
 // ---------------------------------------------------------------------------
 
