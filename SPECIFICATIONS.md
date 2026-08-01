@@ -874,6 +874,9 @@ Drop
 
 2. Sync Inventory
    ├── GET Inventory
+   ├── Observe raw self.isClaimed sightings into the drop skip ledger (E3 —
+   │   read straight from the decoded response maps, BEFORE anything below
+   │   can strip a drop from a Campaign; see "Drop Skip Ledger" below)
    ├── Match drops to campaigns
    ├── Update progress
    └── Recover any dropCampaignsInProgress campaign missing from the
@@ -882,14 +885,23 @@ Drop
        appears on the Drops page even when its DropCampaignDetails fetch
        returned nothing
 
-2b. Apply Claim History
+2b. Apply Claim History (see "Claim History Check" below — against the proven
+    Twitch response shape this pass alone can never actually remove a drop;
+    the drop skip ledger is what closes that gap)
    ├── GET Inventory (gameEventDrops: account-wide granted rewards)
-   ├── Normalize each granted reward to a game+name key
-   ├── Strip any campaign drop whose normalized key was already granted
-   │   (covers recurring/regional variants of the same campaign under a
-   │   different campaign or drop ID)
-   ├── Campaign.claimStatus = already_claimed once all its drops are stripped
-   └── Log "already claimed" (campaign) and skipped-drop cases
+   ├── Build an evidence-ranked RewardIdentity per record (an instance,
+   │   benefit, or campaign+drop composite ID when Twitch supplies one, else
+   │   a name-only fallback)
+   └── Strip a drop only on a positive, provable identity match (MatchIdentity
+       == Confirmed, or the strict unique-name+overlapping-window upgrade);
+       everything else — which is every record the proven `gameEventDrops`
+       shape actually produces — fails open and the drop is retained
+
+2c. Reconcile Drop Skip Ledger (self-heal, once per full sync — see "Drop
+    Skip Ledger" below)
+   ├── Runs on the raw, still-unfiltered candidate set, immediately after the
+   │   catalog is recorded
+   └── Writes to the ledger only; never mutates a campaign
 
 3. Check Claimable
    ├── dropInstanceId != null
@@ -898,7 +910,16 @@ Drop
 
 4. Claim Drop
    ├── POST DropsPage_ClaimDropRewards
-   └── Mark as claimed
+   ├── Mark as claimed
+   └── Observe the authoritative outcome into the drop skip ledger (E1 fresh
+       accept / E2 already-claimed — see "Drop Skip Ledger" below)
+
+5. Broker-Facing Assignment (updateStreamerCampaigns — every full AND
+   lightweight sync)
+   └── Filter each campaign's drops against the skip ledger (Decide) before a
+       streamer may be assigned it, on a CLONE only — the tracked pool itself
+       (Campaigns(), the catalog, every published Campaign) always stays the
+       unfiltered set
 ```
 
 ### Lightweight progress sync
@@ -975,28 +996,167 @@ the claim gate.
 
 ### Claim History Check
 
-Before a campaign can make a streamer eligible for the `PriorityDrops`
-channel-selection boost, `DropsTracker.applyClaimHistory`
-(`internal/drops/drops.go`) cross-references each of its drops against the
-account's Twitch-wide claim history (`gameEventDrops` in the `Inventory`
-response) via `Drop.RewardKey` / `Campaign.ApplyClaimHistory`
-(`internal/models/drop.go`, `internal/models/campaign.go`).
+`DropsTracker.applyClaimHistory` (`internal/drops/drops.go`) cross-references
+each tracked campaign's drops against the account's Twitch-wide claim history
+(`gameEventDrops` in the `Inventory` response) via
+`extractClaimedRewards` → `Campaign.ApplyClaimHistoryRecords`
+(`internal/models/reward_identity.go`, `internal/models/campaign.go`). This is
+the **evidence-aware** replacement for the old lossy game+name key: each
+`gameEventDrops` entry is decoded into a `models.ClaimedReward` carrying a full
+`RewardIdentity` (game, benefit ID when present, drop/campaign ID, name, and
+entitlement window), and `MatchIdentity` only strips a drop on a positive,
+provable match — never on a fuzzy name guess.
 
-Reward identity is normalized as `lower(gameID) + "::" + lower(dropName)`
-rather than trusting Twitch's raw campaign/drop IDs, since a recurring or
-regional variant of the same campaign reuses the same reward name and game
-under a different (and occasionally colliding) campaign/drop ID. A drop
-whose normalized key already appears in the claim history is stripped from
-`Campaign.Drops` before campaigns are matched to streamers; if that empties
-a campaign, its `ClaimStatus` becomes `already_claimed`. Since
-`updateStreamerCampaigns` only assigns campaigns with `len(Drops) > 0`, an
-already-claimed campaign is never used to prioritize channel selection or
-consume watch time. Each skip is logged (`slog.Info`, "already claimed" /
-"already-claimed reward") naming the campaign and which rewards were already
-granted. `ClaimStatus`/`ClaimedDropNames` are kept on the (still in-memory)
-campaign list rather than discarded, so a future dashboard view can list
-already-claimed campaigns separately from in-progress ones without further
-backend changes.
+**This pass is a structural no-op against the currently proven Twitch
+response shape, and that is expected, not a bug to "fix" here.**
+`extractClaimedRewards` builds every record with `InstanceID=""`, `DropID=""`,
+and `EntitlementWindow{}` (`Known=false`) — the proven `gameEventDrops`
+contract carries no drop ID (its own `id` field is a per-user *event* ID, not
+a campaign's `timeBasedDrop` ID) and no window at all, only occasionally a
+benefit ID. Every `Confirmed` path in `MatchIdentity` requires an instance ID,
+a benefit ID **plus** two decidable overlapping windows, or a composite ID —
+none of which this shape ever supplies. So the strongest outcome an
+already-claimed drop can reach is `Ambiguous` (fail open, retained) — see
+`claim_history_test.go`'s `TestClaimHistoryFailOpenNoWindow`, which pins this
+exact behavior. `ClaimStatus`/`ClaimedDropNames` are still kept on the
+(in-memory) campaign list for a future "already claimed" dashboard view, but
+in production this pass essentially never actually removes anything, so an
+already-awarded reward Twitch re-offers with progress reset to 0 /
+`isClaimed=false` (a "ghost") would otherwise be re-farmed forever with
+nothing surviving a restart. The **Drop Skip Ledger** below is the durable fix
+for that gap, built from evidence this miner itself witnesses rather than from
+`gameEventDrops`.
+
+### Drop Skip Ledger
+
+`internal/drops/skipledger.go` is a durable, evidence-ranked ledger fed
+**exclusively by evidence this miner itself witnesses** — never by claim
+history — that gates only **future broker-facing drop assignment**
+(`updateStreamerCampaigns`), never `Drop.CanClaim` or `TwitchClient.ClaimDrop`
+themselves. It is what actually stops an already-granted reward Twitch
+re-offers ("ghost") from being re-farmed forever, and is scoped per account
+(`config.StorageKey()`) via `SkipLedger` / `NewSkipLedger`. See "Drop Skip
+Ledger Module Schema" below for the table/index definitions.
+
+**Evidence classes**, ranked strongest to weakest (a row's evidence only ever
+strengthens, never weakens):
+
+| class | rank | source |
+|---|---|---|
+| `claim_accepted`    | 3 | our own `ClaimDrop` returned a fresh, authoritative acceptance (E1) |
+| `claim_already`     | 2 | our own `ClaimDrop` returned an authoritative already-claimed reconciliation (E2) |
+| `inventory_claimed` | 1 | the raw inventory reports `self.isClaimed == true` (E3) — read straight from the decoded response maps, before anything else can strip the drop from a `Campaign` |
+
+A row is created **only** when the evidence carries an instance ID, or a full
+campaign+drop composite; benefit-only or name-only evidence can enrich an
+existing row but can never create one (this is what keeps both of the
+schema's unique indexes total).
+
+**Write path — `Observe`**: one transaction per observation, called only
+*after* the network call (claim mutation or inventory read) that produced it
+has already returned, so no network call ever happens inside a DB
+transaction. It looks up an existing row first by exact instance ID, then —
+only on a miss — by the exact campaign+drop+occurrence-window composite,
+restricted to rows that are either instance-less or already carry the *same*
+instance (a row bearing a *different* non-empty instance is invisible to this
+lookup, so a second minted instance can never merge into, enrich, or
+overwrite the first instance's row — this is what makes two distinct grants
+of the same reward two distinct rows). On a miss it inserts a fresh row
+(`state = active`); on a hit it *enriches only* — every column upgrades via a
+`CASE` guard that fills an empty/unknown value but never overwrites a
+populated one, and `evidence_rank` only ever increases. An authoritative
+observation for the row's *exact* instance, or the adoption of an
+instance-less composite row by a real instance, re-arms the row to `active`
+even from `released`/`conflicting` — but this predicate is evaluated against
+the row's state *before* the same update, so it can never be triggered by a
+*different* instance.
+
+**Self-heal — `Reconcile`**: runs once per full sync (immediately after the
+catalog is recorded, on the raw unfiltered candidate set — read-only over
+campaigns, writes only to the ledger), applying the first applicable rule per
+matched `active` row. The whole candidate set is applied in ONE transaction
+(so a timeout/cancellation rolls back the entire pass atomically rather than
+half-applying it — simply retried in full on the next sync), and `ctx` is
+honored throughout: every skip-ledger DB call (`Observe`/`Reconcile`/
+`Snapshot`) is bounded by `DropsTracker.skipLedgerCtx`, derived from the
+tracker's own lifecycle context with a capped timeout
+(`skipLedgerOpTimeout`), so a cancelled/shutting-down miner — or a slow DB —
+can never block behind the process's single SQLite connection indefinitely.
+
+| Rule | Condition | Transition |
+|---|---|---|
+| SH1 | candidate has an instance ID; the row's instance ID is different (non-empty) | `active → released` (`new_minted_instance`) |
+| SH2 | both windows are decidable and disjoint | `active → released` (`disjoint_occurrence`) |
+| SH3 | candidate's instance ID equals the row's, and Twitch currently authorizes claiming it | `active → conflicting` (`claimable_same_instance`) |
+| SH4 | the row is instance-less, the candidate carries a fresh minted instance with no row of its own yet, and Twitch currently authorizes claiming it | `active → conflicting` (`minted_instance_over_composite_row`) |
+
+A `conflicting`, instance-less composite row separately moves to `released`
+(`superseded_by_instance_row`) once *any* instance-bearing row exists for the
+same campaign+drop. Time alone never transitions a row — every transition is
+driven by a fresh `Observe` or a `Reconcile` pass.
+
+**Read path — `Decide`**: a pure, I/O-free function evaluated once per
+candidate drop over a `Snapshot` loaded exactly once per broker pass
+(`updateStreamerCampaigns`). A known, *different* game ID on either side
+excludes a row from **every** tier below, checked before any of them. In
+order: (1) an exact instance match — `active` → **SKIP**, `conflicting` →
+FARM, `released` → FARM; a *miss* on the instance still checks whether some
+*other* recorded instance (FARM, new occurrence) or an instance-less
+claimable composite/benefit row (FARM, stale row) exists before falling
+through; (2) a composite (campaign+drop) match with a not-provably-disjoint
+window → **SKIP**; (3) a benefit match with a decidable, overlapping window →
+**SKIP**; (4) otherwise → FARM. `reward_name` is never consulted anywhere in
+this decision.
+
+**Broker-facing filter (S6)**: `updateStreamerCampaigns` loads one `Snapshot`
+per pass, off-lock, then builds each campaign's broker-facing view once
+(`brokerView`): `Campaign.Clone()` with every `Decide()==SKIP` drop removed. A
+nil ledger (never wired) or a failed `Snapshot` load both fail **open** —
+`brokerView` returns the original campaign object unchanged, no clone, no
+filtering. The tracked pool itself (`Campaigns()`, the drop catalog, every
+published `*models.Campaign`) always stays the full, unfiltered set — only
+the clone handed to a streamer's `Stream.SetCampaigns` is ever filtered. This
+gates `Streamer.HasEligibleAssignedDropCampaign` (the real watch-slot gate);
+it does **not** gate `Streamer.DropsCondition`, which reads a separate
+channel-side `Stream.CampaignIDs` list.
+
+**Diagnostics**: every suppressed drop is logged individually at DEBUG
+(`"Drop suppressed by ghost-skip ledger"`, with the campaign/drop identity and
+the `decide()` reason — `same_instance`, `same_composite`, etc.), computed
+once per campaign per broker pass, matching the pipeline's existing
+per-decision logging convention (`logDropIneligible`, `internal/drops/drops.go`
+— nothing here rises above DEBUG). The full-sync pipeline's existing
+`"Drops sync: campaign counts through the pipeline"` DEBUG summary additionally
+carries a `suppressedByGhostSkipLedger` count. And
+`DropsTracker.SuppressedDrops()` is a read-only accessor returning the current
+list of suppressed drops (campaign/drop identity + reason) for programmatic
+diagnostics (e.g. a future dashboard/`/debug/snapshot` view) — like every
+other read here, a nil/unwired ledger or a failed snapshot returns nothing
+rather than erroring. None of this ever filters `Campaigns()` or any
+published campaign; an operator is no longer limited to opening `miner.db` by
+hand to see why a campaign stopped being farmed.
+
+**Fail-open guarantee**: a nil ledger, a failed `Observe`/`Reconcile` write,
+or a failed `Snapshot` read are all logged and otherwise silently ignored —
+none of them can prevent a drop from being claimed or the miner from
+starting. `internal/miner/miner.go`'s `setupComponents` wires
+`drops.NewSkipLedger` exactly like the pre-existing drop-campaign catalog: a
+registration/migration failure is logged and `events.TypeModuleInitFailed` is
+recorded, and the miner starts with ghost-skip simply disabled (every
+candidate keeps farming, exactly as before this feature existed). Because
+`drops.NewSkipLedger` registering its module successfully is not by itself
+proof the ledger reached the tracker, `DropsTracker.SkipLedgerEnabled()`
+exposes whether `SetSkipLedger` actually ran, so a startup-wiring regression
+is provable independently of the module's own schema state.
+
+**Retention**: storage-only, mirroring the drop catalog's own policy, and
+**account-scoped exactly like every other statement against this table** —
+`Prune(before)` permanently deletes only THIS account's `released` rows past
+an operator-supplied horizon; it can never touch another account's ledger
+even though every account's rows share the same process-wide `drop_reward_skips`
+table. `active`/`conflicting` rows are never pruned, there is no TTL, and no
+automatic sweep is wired anywhere — this is an explicit, operator-driven
+maintenance action only.
 
 ### Channel-Restricted Campaigns
 
@@ -1683,6 +1843,63 @@ already fetched each sync (no new Twitch calls) and are **never** entered into t
 active farm set — a campaign cannot be farmed before its official start.
 
 **Note**: All timestamps are Unix timestamps in milliseconds, except `watch_time_events.timestamp` which is Unix seconds.
+
+#### Drop Skip Ledger Module Schema
+
+```sql
+-- Durable, evidence-ranked record of drop rewards this account has been
+-- authoritatively granted (or Twitch's inventory reports as already claimed),
+-- scoped per account_key (config.StorageKey()). See "Drop Skip Ledger" above
+-- for the evidence classes, write/self-heal/read paths, and the fail-open
+-- contract; this table is consulted ONLY to gate future broker-facing drop
+-- assignment, never Drop.CanClaim or the claim mutation itself.
+CREATE TABLE drop_reward_skips (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_key    TEXT    NOT NULL,
+    game_id        TEXT    NOT NULL DEFAULT '',
+    instance_id    TEXT    NOT NULL DEFAULT '',
+    benefit_id     TEXT    NOT NULL DEFAULT '',
+    campaign_id    TEXT    NOT NULL DEFAULT '',
+    drop_id        TEXT    NOT NULL DEFAULT '',
+    reward_name    TEXT    NOT NULL DEFAULT '',   -- diagnostics only, never matched
+    occ_start_ms   INTEGER NOT NULL DEFAULT 0,    -- entitlement-window bounds (Unix millis, 0 = unknown)
+    occ_end_ms     INTEGER NOT NULL DEFAULT 0,
+    occ_source     INTEGER NOT NULL DEFAULT 0,    -- models.WindowSource
+    occ_known      INTEGER NOT NULL DEFAULT 0,    -- 1 iff the window is authoritative (models.EntitlementWindow.Known)
+    evidence_class TEXT    NOT NULL,              -- claim_accepted | claim_already | inventory_claimed
+    evidence_rank  INTEGER NOT NULL,               -- 3 | 2 | 1, monotone non-decreasing on a row
+    state          TEXT    NOT NULL DEFAULT 'active',  -- active | released | conflicting
+    state_reason   TEXT    NOT NULL DEFAULT '',
+    created_at_ms  INTEGER NOT NULL,               -- never updated after insert
+    updated_at_ms  INTEGER NOT NULL,
+    resolved_at_ms INTEGER NOT NULL DEFAULT 0      -- stamped only on a transition INTO 'released'
+);
+
+-- instance_id is part of the composite tuple below (not just its own index):
+-- two server-minted instances of the same campaign+drop+occurrence are two
+-- distinct grants and must never collapse onto one row.
+CREATE UNIQUE INDEX ux_drop_skips_instance
+    ON drop_reward_skips(account_key, instance_id) WHERE instance_id <> '';
+
+CREATE UNIQUE INDEX ux_drop_skips_composite
+    ON drop_reward_skips(account_key, campaign_id, drop_id, occ_start_ms, occ_end_ms, instance_id)
+    WHERE campaign_id <> '' AND drop_id <> '';
+
+CREATE INDEX idx_drop_skips_benefit ON drop_reward_skips(account_key, benefit_id) WHERE benefit_id <> '';
+CREATE INDEX idx_drop_skips_composite_lookup ON drop_reward_skips(account_key, campaign_id, drop_id);
+CREATE INDEX idx_drop_skips_state ON drop_reward_skips(account_key, state);
+```
+
+A row is created only when the evidence carries an instance ID, or a full
+campaign+drop composite (benefit-only/name-only evidence can enrich an
+existing row but never creates one — see "Drop Skip Ledger" above), which is
+what keeps both unique indexes total over every row this package ever writes.
+Like the drop catalog, this table is excluded from any automatic retention
+sweep; `SkipLedger.Prune` (never called automatically) deletes only that
+ledger's own `account_key`'s `released` rows past an operator-supplied
+horizon — every account's ledger shares this one process-wide table, so the
+`account_key` predicate on the `DELETE` is what keeps one account's `Prune`
+call from ever touching another's rows.
 
 ---
 

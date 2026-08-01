@@ -326,6 +326,18 @@ type Miner struct {
 	subscribeTopicsFn func() error
 	startMiningFn     func(ctx context.Context)
 
+	// newSkipLedgerFn is a tests-only seam over the drop-skip ledger
+	// constructor (nil in production; a per-instance field, following this
+	// package's authenticateFn/loadStreamersFn/subscribeTopicsFn/
+	// startMiningFn convention). Not needed to reach a real migration
+	// failure -- see TestSetupComponentsSkipLedgerMigrationFailureFailsOpen,
+	// which drives that through a real Run() instead. This seam exists
+	// solely to fabricate the one shape the real constructor can never
+	// produce (a non-nil ledger alongside a non-nil error) as a
+	// defensive-guard regression test -- see
+	// TestSetupComponentsSkipLedgerConstructorFailureNoPartialLedgerEscapes.
+	newSkipLedgerFn func(db *database.DB, accountKey string) (*drops.SkipLedger, error)
+
 	// stopOnce/stopErr make stop() execute its teardown exactly once and
 	// memoize the aggregate result for any later caller (S2): Run's control
 	// flow reaches stop() on exactly one path per run — either the normal
@@ -515,6 +527,16 @@ func (m *Miner) runStartMining(ctx context.Context) {
 		return
 	}
 	m.startMining(ctx)
+}
+
+// runNewSkipLedger dispatches drop-skip-ledger construction through its
+// tests-only seam (see newSkipLedgerFn); production always takes the real
+// drops.NewSkipLedger path.
+func (m *Miner) runNewSkipLedger(db *database.DB, accountKey string) (*drops.SkipLedger, error) {
+	if m.newSkipLedgerFn != nil {
+		return m.newSkipLedgerFn(db, accountKey)
+	}
+	return drops.NewSkipLedger(db, accountKey)
 }
 
 // failStartup is the single early-exit cleanup gate for Run (S2): every
@@ -924,6 +946,32 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		} else {
 			m.dropsTracker.SetCatalog(catalog)
 			m.dropCatalog = catalog
+		}
+	}
+
+	// Wire the durable drop-skip ledger (the ghost-skip filter fixing claim
+	// history's structural no-op -- see internal/drops/skipledger.go's
+	// file-level doc comment): our own authoritative claim outcomes and
+	// inventory isClaimed sightings gate only FUTURE broker-facing assignment,
+	// never the claim mutation itself. A failed init must never stop the miner
+	// from starting -- ghost-skip simply stays disabled (every candidate keeps
+	// farming, exactly as before this feature). A REAL migration/registration
+	// failure here is reached through m.runNewSkipLedger's real
+	// drops.NewSkipLedger path (no seam needed -- see newSkipLedgerFn's own
+	// doc comment and TestSetupComponentsSkipLedgerMigrationFailureFailsOpen).
+	// err gates EVERYTHING below it: ledger is never attached (SetSkipLedger
+	// is never called) unless err is nil, even if ledger itself is non-nil, so
+	// a hypothetical constructor that returns a partially-built ledger
+	// alongside an error can never leak into production use (the
+	// newSkipLedgerFn seam fabricates exactly that unreachable shape as a
+	// defensive-guard regression test -- see
+	// TestSetupComponentsSkipLedgerConstructorFailureNoPartialLedgerEscapes).
+	if m.db != nil {
+		if ledger, err := m.runNewSkipLedger(m.db, m.config.StorageKey()); err != nil {
+			slog.Error("Failed to initialize drop skip ledger; ghost-skip stays DISABLED", "error", err)
+			events.Record(events.TypeModuleInitFailed, "", "drop_skip_ledger: "+err.Error())
+		} else {
+			m.dropsTracker.SetSkipLedger(ledger)
 		}
 	}
 

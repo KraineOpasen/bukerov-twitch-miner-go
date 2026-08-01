@@ -1,6 +1,7 @@
 package drops
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -100,5 +101,43 @@ func TestClaimHistoryFailOpenNoWindow(t *testing.T) {
 	}
 	if len(out.AmbiguousNames) != 1 || len(out.ConfirmedNames) != 0 {
 		t.Fatalf("expected ambiguous, got confirmed=%v ambiguous=%v", out.ConfirmedNames, out.AmbiguousNames)
+	}
+}
+
+// TestInventoryClaimedSurvivesClaimHistoryFailOpen closes the loop the rest of
+// this file documents: claim history's benefit-id-without-window signal can
+// never CONFIRM a claim (TestClaimHistoryFailOpenNoWindow above, proven and
+// left exactly as-is -- that data shape genuinely cannot support it, see
+// skipledger.go's file-level doc comment). But a raw self.isClaimed=true
+// sighting for the SAME reward independently reaches the skip ledger (E3,
+// S4) and gates future broker assignment on its own -- this is the actual
+// fix for the structural gap the rest of this file proves exists.
+func TestInventoryClaimedSurvivesClaimHistoryFailOpen(t *testing.T) {
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	d := &DropsTracker{skipLedger: ledger}
+
+	// The exact reward TestClaimHistoryFailOpenNoWindow proves claim history
+	// can never confirm: a benefit id is present, but no entitlement window.
+	prog := []interface{}{
+		map[string]interface{}{
+			"id":   "c2",
+			"name": "Camp",
+			"game": map[string]interface{}{"id": "g1", "name": "Game"},
+			"timeBasedDrops": []interface{}{
+				claimedInProgressDrop("d1", "Coin", 60, 60, "inst-ch1", "ben-1"),
+			},
+		},
+	}
+	d.observeClaimedFromInventory(prog)
+
+	snap, err := ledger.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	skip, reason := snap.decide(models.RewardIdentity{
+		GameID: "g1", BenefitID: "ben-1", InstanceID: "inst-ch1", DropID: "d1", CampaignID: "c2",
+	}, false)
+	if !skip {
+		t.Fatalf("expected the ghost-skip ledger to SKIP a re-offer of the same reward (reason=%q) even though claim history itself stays fail-open", reason)
 	}
 }

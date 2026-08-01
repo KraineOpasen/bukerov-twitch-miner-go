@@ -112,6 +112,15 @@ type DropsTracker struct {
 	// Set once at wiring time before the loops start; nil disables cataloging.
 	catalog *CampaignCatalog
 
+	// skipLedger, when set, records our own authoritative claim outcomes and
+	// raw-inventory isClaimed sightings and gates broker-facing drop
+	// assignment on them -- the ghost-skip fix for claim history's structural
+	// no-op (see skipledger.go's file-level doc comment). Set once at wiring
+	// time before the loops start, exactly like catalog; nil (or any read/
+	// write failure against it) is a permanent no-op that fails OPEN -- every
+	// candidate stays farmable, exactly as before this feature existed.
+	skipLedger *SkipLedger
+
 	// Sync bookkeeping for SyncStatus (and LastSync); all guarded by mu.
 	syncRuns              int
 	lastSyncAt            time.Time
@@ -460,6 +469,108 @@ func (d *DropsTracker) SetCatalog(catalog *CampaignCatalog) {
 	d.catalog = catalog
 }
 
+// SetSkipLedger wires the durable drop skip ledger (the ghost-skip filter).
+// Set once before the sync loops start; when nil, the filter is a permanent
+// no-op -- every candidate fails open to FARM (skipledger.go INVARIANT 9).
+func (d *DropsTracker) SetSkipLedger(ledger *SkipLedger) {
+	d.skipLedger = ledger
+}
+
+// SkipLedgerEnabled reports whether the ghost-skip drop ledger is currently
+// wired (SetSkipLedger was called with a non-nil ledger). It exists so a
+// startup-wiring regression is provable from OUTSIDE this package: a
+// successful drops.NewSkipLedger call alone (e.g. its module-registration
+// side effect landing in schema_versions) is NOT proof SetSkipLedger was
+// ever actually called on the tracker -- see the S1 wiring in
+// internal/miner/miner.go and TestSetupComponentsWiresDropSkipLedger, which
+// asserts this directly.
+func (d *DropsTracker) SkipLedgerEnabled() bool {
+	return d.skipLedger != nil
+}
+
+// skipLedgerOpTimeout bounds how long a skip-ledger DB operation (Observe /
+// Reconcile / Snapshot) may hold the process's single SQLite connection when
+// derived from the tracker's own lifecycle context via skipLedgerCtx, so a
+// cancelled/shutting-down miner (or a hung DB) can never block behind it
+// indefinitely (concurrency.md: no blocking work that ignores ctx). Package
+// variable so tests can shrink it.
+var skipLedgerOpTimeout = 15 * time.Second
+
+// skipLedgerCtx builds a bounded context for one skip-ledger DB operation,
+// derived from the tracker's lifecycle ctx exactly like notifyUpcoming's base
+// context (upcomingNotifyTimeout, above) -- falls back to context.Background()
+// before Start (or in tests that never set d.ctx). The caller must call the
+// returned cancel.
+func (d *DropsTracker) skipLedgerCtx() (context.Context, context.CancelFunc) {
+	base := context.Background()
+	d.mu.RLock()
+	if d.ctx != nil {
+		base = d.ctx
+	}
+	d.mu.RUnlock()
+	return context.WithTimeout(base, skipLedgerOpTimeout)
+}
+
+// observeSkip feeds one claim/inventory evidence sighting into the skip
+// ledger, best-effort: a nil ledger (never wired) is a silent no-op, and a
+// write failure is logged and otherwise ignored. It must never affect the
+// claim outcome already recorded by the caller above it (INVARIANT 9/12: the
+// ledger only ever narrows FUTURE broker assignment, never gates a claim
+// mutation Twitch has already accepted).
+func (d *DropsTracker) observeSkip(ev skipEvidence) {
+	if d.skipLedger == nil {
+		return
+	}
+	ctx, cancel := d.skipLedgerCtx()
+	defer cancel()
+	if err := d.skipLedger.Observe(ctx, ev); err != nil {
+		slog.Error("Drop skip ledger observe failed; ghost-skip evidence not recorded this time",
+			"error", err, "class", string(ev.class))
+	}
+}
+
+// reconcileSkipLedger runs the ledger's self-heal pass (S5) over this sync's
+// full candidate set. A nil ledger is a no-op; a reconcile failure is logged
+// and never disrupts the sync (storage-only bookkeeping, same fail-open
+// contract as observeSkip).
+func (d *DropsTracker) reconcileSkipLedger(campaigns []*models.Campaign) {
+	if d.skipLedger == nil {
+		return
+	}
+	ctx, cancel := d.skipLedgerCtx()
+	defer cancel()
+	if err := d.skipLedger.Reconcile(ctx, campaigns); err != nil {
+		slog.Error("Drop skip ledger reconcile failed; ledger self-heal partially skipped this cycle", "error", err)
+	}
+}
+
+// SuppressedDrops returns the drops the skip ledger currently excludes from
+// broker-facing assignment, computed fresh over the current tracked pool and
+// a fresh ledger snapshot -- the read-only diagnostics accessor so an
+// operator (or a future dashboard/debug-snapshot view) can see WHY a
+// campaign stopped being farmed without opening miner.db by hand. It never
+// filters Campaigns() or any published campaign. A nil/unwired ledger, or a
+// failed snapshot load, returns nil (fail open: nothing to report as
+// suppressed, matching brokerView's own fail-open contract).
+func (d *DropsTracker) SuppressedDrops() []SuppressedDrop {
+	if d.skipLedger == nil {
+		return nil
+	}
+	ctx, cancel := d.skipLedgerCtx()
+	defer cancel()
+	snap, err := d.skipLedger.Snapshot(ctx)
+	if err != nil {
+		slog.Error("Drop skip ledger snapshot failed while building suppressed-drop diagnostics", "error", err)
+		return nil
+	}
+
+	d.mu.RLock()
+	campaigns := d.campaigns
+	d.mu.RUnlock()
+
+	return suppressedDrops(campaigns, snap)
+}
+
 // LastSync reports when the campaign-sync pipeline last completed (zero if it
 // has not run yet). Exposed for the debug snapshot.
 func (d *DropsTracker) LastSync() time.Time {
@@ -745,6 +856,12 @@ func (d *DropsTracker) syncProgress() {
 		return
 	}
 
+	// E3 (S4): read the RAW decoded inventory maps directly for
+	// self.isClaimed sightings, BEFORE anything below can strip a drop from a
+	// *models.Campaign (ClearClaimedDrops runs on the clone a few lines down).
+	// See skipledger.go's file-level doc comment and INVARIANT 10.
+	d.observeClaimedFromInventory(inProgress)
+
 	progressByID := make(map[string][]interface{}, len(inProgress))
 	for _, prog := range inProgress {
 		progData, ok := prog.(map[string]interface{})
@@ -881,6 +998,11 @@ func (d *DropsTracker) syncCampaigns() {
 	// blacklisted-but-real campaigns are still catalogued as having existed.
 	d.recordCatalog(campaigns, upcoming)
 
+	// Self-heal the skip ledger against this sync's full (still unfiltered)
+	// candidate set. Runs on raw campaigns/drops, same as recordCatalog above:
+	// writes to the ledger only, never mutates a campaign (S5).
+	d.reconcileSkipLedger(campaigns)
+
 	campaigns = d.applyBlacklist(campaigns)
 	afterBlacklist := len(campaigns)
 	filteredByBlacklist := afterClaimHistory - afterBlacklist
@@ -906,6 +1028,27 @@ func (d *DropsTracker) syncCampaigns() {
 	campaigns, filteredRewardsByAccountLink := d.applyAccountLinkFilter(campaigns)
 	afterAccountLink := len(campaigns)
 
+	// Suppressed-drop diagnostic (ghost-skip ledger): how many of the
+	// about-to-be-published drops the ledger currently excludes from
+	// broker-facing assignment (see SuppressedDrops/brokerView). This is a
+	// second, cheap, local-SQLite snapshot read beyond the one
+	// updateStreamerCampaigns takes below for S6 itself -- accepted for a
+	// DEBUG-only diagnostic rather than threading a pre-loaded snapshot
+	// through two independently-triggerable call paths, since syncProgress
+	// also calls updateStreamerCampaigns on its own cadence without ever
+	// reaching this log line.
+	suppressedCount := 0
+	if d.skipLedger != nil {
+		ctx, cancel := d.skipLedgerCtx()
+		snap, err := d.skipLedger.Snapshot(ctx)
+		cancel()
+		if err != nil {
+			slog.Error("Drop skip ledger snapshot failed while computing the pipeline suppressed-drop counter", "error", err)
+		} else {
+			suppressedCount = len(suppressedDrops(campaigns, snap))
+		}
+	}
+
 	slog.Debug("Drops sync: campaign counts through the pipeline",
 		"dashboardCount", dashboardCount,
 		"fromDashboard", fromDashboard,
@@ -917,7 +1060,8 @@ func (d *DropsTracker) syncCampaigns() {
 		"afterGameFilter", afterGameFilter,
 		"filteredByGame", filteredByGame,
 		"afterAccountLink", afterAccountLink,
-		"filteredRewardsByAccountLink", filteredRewardsByAccountLink)
+		"filteredRewardsByAccountLink", filteredRewardsByAccountLink,
+		"suppressedByGhostSkipLedger", suppressedCount)
 
 	// Reconcile each fresh campaign's ACL against the previously-published ACL
 	// for the same campaign instance BEFORE publishing, so a transient
@@ -1292,6 +1436,12 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 		return campaigns
 	}
 
+	// E3 (S4): read the RAW decoded inventory maps directly for
+	// self.isClaimed sightings, BEFORE the campaign-merge loop below can strip
+	// a drop via ClearClaimedDrops. See skipledger.go's file-level doc comment
+	// and INVARIANT 10.
+	d.observeClaimedFromInventory(inProgress)
+
 	tracked := make(map[string]bool, len(campaigns))
 	for _, campaign := range campaigns {
 		if campaign.ID != "" {
@@ -1314,7 +1464,7 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 			campaign.InInventory = true
 
 			if drops, ok := progData["timeBasedDrops"].([]interface{}); ok {
-				campaign.SyncDrops(drops, d.claimDropFn())
+				campaign.SyncDrops(drops, d.claimDropFnFor(campaign))
 			}
 
 			campaign.ClearClaimedDrops()
@@ -1354,10 +1504,28 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 	return campaigns
 }
 
-// claimDropFn returns the callback SyncDrops uses to claim a drop once its
-// watch requirement is met, recording a claim event on success.
-func (d *DropsTracker) claimDropFn() func(*models.Drop) bool {
+// claimDropFnFor returns the SyncDrops claim callback for drops belonging to
+// campaign, additionally recording the claim outcome in the skip ledger (S2):
+// the drop's full identity bundle (game/benefit/instance/drop/campaign IDs +
+// the campaign's fallback window) is captured BEFORE the claim mutation --
+// reflecting the drop's pre-claim state -- then observed into the ledger
+// AFTER ClaimDrop returns (INVARIANT 13: Observe never runs until the network
+// round trip is already complete, so no network call ever happens inside a DB
+// transaction). campaign is REQUIRED and must never be nil: both production
+// call sites (syncWithInventory, buildInProgressCampaign) always construct a
+// real *models.Campaign before calling this, and every test in this package
+// passes one too. A nil campaign is a caller bug, not a supported "no
+// identity" mode -- the returned closure fails loudly (a nil-pointer panic
+// dereferencing campaign.ID) the first time it actually runs, rather than
+// silently skipping the ledger observation and leaving no trace. See
+// TestSyncWithInventoryPassesCampaignIdentityToClaimDropFnFor and
+// TestBuildInProgressCampaignPassesCampaignIdentityToClaimDropFnFor
+// (claim_boundary_test.go), which pin campaign identity reaching the ledger
+// through these exact two call sites.
+func (d *DropsTracker) claimDropFnFor(campaign *models.Campaign) func(*models.Drop) bool {
 	return func(drop *models.Drop) bool {
+		id := drop.Identity(campaignGameID(campaign), campaign.ID, campaignFallbackWindow(campaign))
+
 		status, err := d.client.ClaimDrop(drop)
 		if err != nil {
 			slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
@@ -1371,16 +1539,89 @@ func (d *DropsTracker) claimDropFn() func(*models.Drop) bool {
 			return false
 		}
 		if status.Fresh() {
-			// Fresh authoritative claim: emit the user-facing success event once.
+			// Fresh authoritative claim: emit the user-facing success event once,
+			// and record E1 (strongest) evidence in the skip ledger.
 			events.Record(events.TypeDropClaimed, "", drop.Name)
 			d.noteDropClaimed(drop.Name)
+			d.observeSkip(skipEvidenceFromIdentity(evidenceClaimAccepted, id))
 		} else {
 			// Authoritative already-claimed: reconcile local state to claimed
-			// WITHOUT emitting a duplicate user-facing success event.
+			// WITHOUT emitting a duplicate user-facing success event, and record
+			// E2 evidence -- this is exactly the case claim history itself can
+			// never confirm (see skipledger.go's file-level doc comment).
 			slog.Debug("Drop already claimed on Twitch; reconciling state without duplicate event",
 				"drop", drop.Name)
+			d.observeSkip(skipEvidenceFromIdentity(evidenceClaimAlready, id))
 		}
 		return true
+	}
+}
+
+// observeClaimedFromInventory feeds E3 (inventory_claimed) evidence into the
+// skip ledger by reading the RAW decoded inventory maps directly -- never
+// campaign.Drops -- so the observation happens before ClearClaimedDrops (or
+// any tier/date filtering) can ever strip the drop from a *models.Campaign
+// (INVARIANT 10). Nothing here mutates the decoded maps (NewCampaignFromGQL/
+// NewDropFromGQL only read them), so it is safe to call regardless of what
+// else this sync's campaign-merge loop does to a *models.Campaign built from
+// the same maps, and is naturally idempotent: an unchanged
+// self.isClaimed==true sighting just re-enriches (never re-creates) the same
+// row on every sync.
+func (d *DropsTracker) observeClaimedFromInventory(inProgress []interface{}) {
+	if d.skipLedger == nil {
+		return
+	}
+	for _, prog := range inProgress {
+		progData, ok := prog.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		campaignID, _ := progData["id"].(string)
+		if campaignID == "" {
+			continue
+		}
+		drops, ok := progData["timeBasedDrops"].([]interface{})
+		if !ok {
+			continue
+		}
+
+		// Built purely to derive the game/campaign identity and fallback window
+		// for this observation -- reads ONLY the raw progData map (never
+		// campaign.Drops), so it is unaffected by anything a campaign-merge loop
+		// elsewhere in this sync does to a *models.Campaign's Drops slice.
+		campaignIdentity := models.NewCampaignFromGQL(progData)
+		campaignIdentity.InInventory = true
+		gameID := campaignGameID(campaignIdentity)
+		occ := campaignFallbackWindow(campaignIdentity)
+
+		for _, dd := range drops {
+			dropData, ok := dd.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			self, ok := dropData["self"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			claimed, _ := self["isClaimed"].(bool)
+			if !claimed {
+				continue
+			}
+
+			drop := models.NewDropFromGQL(dropData)
+			instanceID, _ := self["dropInstanceID"].(string)
+
+			d.observeSkip(skipEvidence{
+				class:      evidenceInventoryClaimed,
+				gameID:     gameID,
+				benefitID:  drop.BenefitID,
+				instanceID: instanceID,
+				campaignID: campaignID,
+				dropID:     drop.ID,
+				name:       drop.Name,
+				window:     occ,
+			})
+		}
 	}
 }
 
@@ -1413,7 +1654,7 @@ func (d *DropsTracker) buildInProgressCampaign(progData map[string]interface{}) 
 	campaign.InInventory = true
 
 	if drops, ok := progData["timeBasedDrops"].([]interface{}); ok {
-		campaign.SyncDrops(drops, d.claimDropFn())
+		campaign.SyncDrops(drops, d.claimDropFnFor(campaign))
 	}
 
 	kept := make([]*models.Drop, 0, len(campaign.Drops))
@@ -1908,6 +2149,16 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 			continue
 		}
 
+		// Built once per campaign entry purely to carry the game/campaign
+		// identity and the campaign-level fallback window into the skip-ledger
+		// observation below (S3) -- it is never tracked, filtered, or
+		// published. InInventory mirrors syncWithInventory/
+		// buildInProgressCampaign so a date-less inventory campaign still gets
+		// the correct WindowSourceInventory fallback rather than
+		// WindowSourceNone.
+		campaignIdentity := models.NewCampaignFromGQL(campaignData)
+		campaignIdentity.InInventory = true
+
 		for _, dropData := range drops {
 			dropMap, ok := dropData.(map[string]interface{})
 			if !ok {
@@ -1922,19 +2173,24 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 			// Claim only on the authoritative server signal (CanClaim), never on
 			// locally-counted watch minutes.
 			if drop.CanClaim() {
+				id := drop.Identity(campaignGameID(campaignIdentity), campaignIdentity.ID, campaignFallbackWindow(campaignIdentity))
 				status, err := d.client.ClaimDrop(drop)
 				switch {
 				case err != nil:
 					slog.Error("Failed to claim drop", "drop", drop.Name, "error", err)
 				case status.Fresh():
-					// Fresh authoritative claim: one success log + one event.
+					// Fresh authoritative claim: one success log + one event, plus
+					// E1 (strongest) skip-ledger evidence.
 					slog.Info("Claimed drop", "drop", drop.Name)
 					events.Record(events.TypeDropClaimed, "", drop.Name)
 					d.noteDropClaimed(drop.Name)
+					d.observeSkip(skipEvidenceFromIdentity(evidenceClaimAccepted, id))
 				case status.Accepted():
-					// Already-claimed reconciliation — no duplicate success event.
+					// Already-claimed reconciliation — no duplicate success event,
+					// plus E2 skip-ledger evidence.
 					slog.Debug("Drop already claimed on Twitch; no duplicate success event",
 						"drop", drop.Name)
+					d.observeSkip(skipEvidenceFromIdentity(evidenceClaimAlready, id))
 				default:
 					slog.Warn("Drop claim not accepted by Twitch",
 						"drop", drop.Name, "outcome", string(status), "retryable", status.Retryable())
@@ -2003,6 +2259,37 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	streamers := d.streamers
 	d.mu.RUnlock()
 
+	// Load the skip-ledger snapshot ONCE per pass (S6), off-lock: a nil ledger
+	// or a failed load both fail OPEN via brokerView below (snap stays nil ->
+	// every campaign is returned unchanged, unfiltered).
+	var snap *skipSnapshot
+	if d.skipLedger != nil {
+		ctx, cancel := d.skipLedgerCtx()
+		s, err := d.skipLedger.Snapshot(ctx)
+		cancel()
+		if err != nil {
+			slog.Error("Drop skip ledger snapshot failed; ghost-skip filter fails open this cycle", "error", err)
+		} else {
+			snap = s
+		}
+	}
+
+	// Build each campaign's broker-facing view ONCE per sync (not once per
+	// streamer below): brokerView depends only on the campaign + snapshot,
+	// never on which streamer is being evaluated, so computing it here avoids
+	// len(streamers) * len(campaigns) redundant clones. d.campaigns, the
+	// catalog, and every published *models.Campaign stay untouched -- only
+	// these views (Campaign.Clone() when a ledger is wired) are filtered
+	// (INVARIANT 11).
+	views := make([]*models.Campaign, 0, len(campaigns))
+	for _, campaign := range campaigns {
+		view := brokerView(campaign, snap)
+		if len(view.Drops) == 0 {
+			continue
+		}
+		views = append(views, view)
+	}
+
 	// All assignment/progress logging shares the de-dup maps below, so serialize
 	// it against a concurrent updateStreamerCampaigns from the other sync
 	// goroutine. The work here is cheap and runs at most every couple of minutes.
@@ -2058,10 +2345,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		availSnap, unknownGraceExpired := streamer.Stream.CampaignAvailabilitySnapshotAt(ev.Clock.Now())
 
 		var streamerCampaigns []*models.Campaign
-		for _, campaign := range campaigns {
-			if len(campaign.Drops) == 0 {
-				continue
-			}
+		for _, campaign := range views {
 			// The production-evaluated eligibility runs against the campaign's
 			// actual next watchable drop (CurrentDrop), never an arbitrary later
 			// tier: window/claim/feasibility are judged on the drop that would be
