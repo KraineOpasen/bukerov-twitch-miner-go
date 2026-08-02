@@ -997,8 +997,14 @@ write path for a drop's `currentMinutesWatched`/claimability is
 depends on fails, returns no response, or does not decode to a usable
 inventory object, those freshly-built objects never receive that update; the
 sync aborts before publishing and keeps the previously published campaign
-pool, `Revision`, `BackendUpdatedAt`, and `UpdateSource` unchanged. The sync
-*attempt* itself is still recorded — `SyncStatus.LastSyncAt`/`Runs`/
+pool, `Revision`, `BackendUpdatedAt`, and `UpdateSource` unchanged. This
+exemption does not cover `upcomingCampaigns`: the upcoming set
+`getActiveCampaigns` returns is written unconditionally as soon as the
+dashboard/details listing succeeds, before `syncWithInventory` is even
+attempted, so a subsequent Inventory-merge failure can still leave a fresher
+`upcomingCampaigns` in place from that successful listing — only
+`notifyUpcoming` is skipped, not the field update. The sync *attempt* itself
+is still recorded — `SyncStatus.LastSyncAt`/`Runs`/
 `DashboardCampaigns`/`LastError` update exactly like a dashboard/details-
 listing failure (`LastSuccessAt` does not advance) — so the failure is
 visible without the stale pool ever being replaced. This applies only to the

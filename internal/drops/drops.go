@@ -691,9 +691,10 @@ func (d *DropsTracker) recordProgressSync(err error) {
 func (d *DropsTracker) publishProgressObservation(capturedRevision uint64, newCampaigns []*models.Campaign) bool {
 	d.mu.Lock()
 	if d.revision != capturedRevision {
+		current := d.revision
 		d.mu.Unlock()
 		slog.Debug("Drops progress sync: discarding stale result; campaign pool changed while inventory was in flight",
-			"capturedRevision", capturedRevision, "currentRevision", d.revision)
+			"capturedRevision", capturedRevision, "currentRevision", current)
 		return false
 	}
 	if newCampaigns != nil {

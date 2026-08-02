@@ -34,8 +34,10 @@ type fakeDropsClient struct {
 
 	// fullSyncSignal, when non-nil, receives one non-blocking signal per full
 	// sync (each ViewerDropsDashboard call), letting a test observe the
-	// background loop's cadence. Set before Start; the maps are read-only after
-	// construction, so the loop goroutine touches no mutable shared state.
+	// background loop's cadence. Set before Start. dashboard/details/inventory
+	// may be swapped after construction (e.g. publishCampaignB), but only
+	// while every concurrent caller is parked in the inventoryGate and cannot
+	// re-enter PostGQL -- swapping them at any other time is a data race.
 	fullSyncSignal chan struct{}
 
 	// gateMu guards inventoryGate: armInventoryGate (the test goroutine) and
