@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
@@ -131,7 +133,11 @@ func (rt *beaconRedirectRT) RoundTrip(req *http.Request) (*http.Response, error)
 
 	var reqBody []byte
 	if req.Body != nil {
-		reqBody, _ = io.ReadAll(req.Body)
+		var err error
+		reqBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read request body: %w", err)
+		}
 	}
 
 	rt.mu.Lock()
@@ -164,6 +170,41 @@ func (rt *beaconRedirectRT) RoundTrip(req *http.Request) (*http.Response, error)
 		Body:       io.NopCloser(strings.NewReader(resp.body)),
 		Request:    req,
 	}, nil
+}
+
+// TestBeaconRedirectRTRoundTripReturnsBodyReadError proves the test harness
+// itself is deterministic about a request-body read failure: RoundTrip must
+// surface the error instead of silently treating an unreadable body as an
+// empty one, and must not record the failed request in rt.hits or rt.body.
+func TestBeaconRedirectRTRoundTripReturnsBodyReadError(t *testing.T) {
+	sentinelErr := errors.New("sentinel body read error")
+
+	rt := newBeaconRedirectRT()
+	rt.okChain()
+
+	req, err := http.NewRequest(http.MethodPost, "http://spade.test/beacon", iotest.ErrReader(sentinelErr))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	resp, roundTripErr := rt.RoundTrip(req)
+
+	if roundTripErr == nil {
+		t.Fatal("expected RoundTrip to return a non-nil error on a body read failure")
+	}
+	if !errors.Is(roundTripErr, sentinelErr) {
+		t.Fatalf("expected the returned error to wrap the sentinel error, got %v", roundTripErr)
+	}
+	if resp != nil {
+		t.Fatalf("expected a nil response on a body read failure, got %+v", resp)
+	}
+	u := req.URL.String()
+	if got := rt.hitCount(u); got != 0 {
+		t.Fatalf("a failed body read must not be recorded in rt.hits, got %d hit(s)", got)
+	}
+	if body := rt.bodyFor(u); body != nil {
+		t.Fatalf("a failed body read must not record a body, got %q", body)
+	}
 }
 
 // beaconRedirectSender builds a MinuteSender wired to rt and a brought-online
