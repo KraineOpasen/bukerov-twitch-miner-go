@@ -295,6 +295,25 @@
   --scale-red-700: var(--prim-night-red-700);
   --scale-red-600: var(--status-danger);
   --scale-red-500: var(--status-danger);
+
+  /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
+  --surface-overlay: rgb(0 0 0 / .55);
+  --surface-inset: var(--prim-night-950);
+  --shadow-1: 0 2px 8px rgb(0 0 0 / .35);
+  --shadow-2: 0 8px 28px rgb(0 0 0 / .50);
+
+  /* State-tier aliases — zero new hues, resolve through existing status/text tokens. */
+  --state-ok: var(--status-success);
+  --state-info: var(--status-info);
+  --state-caution: var(--status-warning);
+  --state-danger: var(--status-danger);
+  --state-neutral: var(--text-muted);
+  --state-ok-bg: color-mix(in oklab, var(--state-ok) 12%, transparent);
+  --state-info-bg: color-mix(in oklab, var(--state-info) 12%, transparent);
+  --state-caution-bg: color-mix(in oklab, var(--state-caution) 12%, transparent);
+  --state-danger-bg: color-mix(in oklab, var(--state-danger) 12%, transparent);
+  --state-neutral-bg: color-mix(in oklab, var(--state-neutral) 12%, transparent);
+  /* S-NOBACK intentionally has no token — it is the absence of rendering. */
 }
 
 :root[data-theme="light"] {
@@ -416,6 +435,64 @@
   --scale-red-700: var(--status-danger);
   --scale-red-600: var(--status-danger);
   --scale-red-500: var(--status-danger);
+
+  /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
+  --surface-overlay: rgb(0 0 0 / .35);
+  --surface-inset: var(--prim-day-950);
+  --shadow-1: 0 2px 8px rgb(0 0 0 / .10);
+  --shadow-2: 0 8px 28px rgb(0 0 0 / .18);
+
+  /* State-tier aliases — zero new hues, resolve through existing status/text tokens. */
+  --state-ok: var(--status-success);
+  --state-info: var(--status-info);
+  --state-caution: var(--status-warning);
+  --state-danger: var(--status-danger);
+  --state-neutral: var(--text-muted);
+  --state-ok-bg: color-mix(in oklab, var(--state-ok) 12%, transparent);
+  --state-info-bg: color-mix(in oklab, var(--state-info) 12%, transparent);
+  --state-caution-bg: color-mix(in oklab, var(--state-caution) 12%, transparent);
+  --state-danger-bg: color-mix(in oklab, var(--state-danger) 12%, transparent);
+  --state-neutral-bg: color-mix(in oklab, var(--state-neutral) 12%, transparent);
+  /* S-NOBACK intentionally has no token — it is the absence of rendering. */
+}
+
+/* ---------- Layer D: additive system scales (Stage 5 S5-1) ----------
+   Theme-invariant: z-index stacking order and motion timing. */
+:root {
+  /* z-index */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-popover: 20;
+  --z-rail: 30;
+  --z-drawer: 40;
+  --z-dialog: 50;
+  --z-toast: 60;
+
+  /* motion */
+  --motion-fast: 80ms;
+  --motion-base: 160ms;
+  --motion-slow: 240ms;
+  --motion-easing: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Stage 5 design-system radii — compatibility note (S5-1):
+   Stage 4 §4 approves --radius-xs/sm/md/lg at 4/6/10/14px, but Tailwind v4's
+   OWN built-in theme already defines --radius-xs/sm/md/lg (and --radius-full)
+   at different pixel values (its defaults: xs 2px, sm 4px, md 6px, lg 8px),
+   and 38 existing rounded-sm/md/lg consumers across templates and this file
+   (e.g. .btn-primary, .card, .input-field, .modal-dialog) resolve through
+   those exact Tailwind keys today. Overriding --radius-xs/sm/md/lg in @theme
+   would therefore silently reflow every one of those already-rendered
+   components — the opposite of the "near-zero visual delta" S5-1 requires.
+   The approved Stage 5 sizes are implemented additively instead, under a
+   --ds-radius-* / ds-rounded-* namespace that cannot collide with Tailwind's
+   own --radius-* keys, for later S5 slices to adopt explicitly. */
+:root {
+  --ds-radius-xs: 4px;
+  --ds-radius-sm: 6px;
+  --ds-radius-md: 10px;
+  --ds-radius-lg: 14px;
+  --ds-radius-full: 9999px;
 }
 
 /* Static (non-themed) design tokens. */
@@ -492,7 +569,118 @@
   --color-status-offline: var(--status-offline);
   --color-chart-grid: var(--chart-grid);
   --color-chart-label: var(--chart-label);
+
+  /* Layer E additions (Stage 5 S5-1) — additive, existing assignments above unchanged. */
+  --color-surface-overlay: var(--surface-overlay);
+  --color-surface-inset: var(--surface-inset);
+  --color-state-ok: var(--state-ok);
+  --color-state-info: var(--state-info);
+  --color-state-caution: var(--state-caution);
+  --color-state-danger: var(--state-danger);
+  --color-state-neutral: var(--state-neutral);
+  --color-state-ok-bg: var(--state-ok-bg);
+  --color-state-info-bg: var(--state-info-bg);
+  --color-state-caution-bg: var(--state-caution-bg);
+  --color-state-danger-bg: var(--state-danger-bg);
+  --color-state-neutral-bg: var(--state-neutral-bg);
 }
+
+/* =====================================================================
+   Stage 5 S5-1 — additive design-system utilities.
+   type-*: typography roles (Inter/JetBrains Mono per Stage 4 §4).
+   motion-*: transition duration + easing only — no property/animation is
+     set, so applying these alone introduces no ambient movement.
+   ds-rounded-*: the namespaced Stage 5 radii (see the compatibility note
+     above the --ds-radius-* tokens for why these don't use Tailwind's
+     built-in rounded-* names).
+   shadow-1/2: defined via @utility (not @theme inline) because the
+     semantic token names --shadow-1/--shadow-2 are identical to the
+     Tailwind theme keys that would generate them — @theme inline would
+     make each resolve to var(itself), a CSS custom-property cycle.
+   None of these classes are referenced by any template in this slice.
+   ===================================================================== */
+
+@utility type-h1 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 1.375rem;
+  line-height: 1.75rem;
+}
+
+@utility type-h2 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 1.0625rem;
+  line-height: 1.5rem;
+}
+
+@utility type-h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+@utility type-body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+@utility type-small {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
+}
+
+@utility type-micro {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  letter-spacing: 0.02em;
+}
+
+@utility type-data {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+@utility type-code {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 0.78125rem;
+  line-height: 1.125rem;
+}
+
+@utility motion-fast {
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--motion-easing);
+}
+
+@utility motion-base {
+  transition-duration: var(--motion-base);
+  transition-timing-function: var(--motion-easing);
+}
+
+@utility motion-slow {
+  transition-duration: var(--motion-slow);
+  transition-timing-function: var(--motion-easing);
+}
+
+@utility ds-rounded-xs { border-radius: var(--ds-radius-xs); }
+@utility ds-rounded-sm { border-radius: var(--ds-radius-sm); }
+@utility ds-rounded-md { border-radius: var(--ds-radius-md); }
+@utility ds-rounded-lg { border-radius: var(--ds-radius-lg); }
+@utility ds-rounded-full { border-radius: var(--ds-radius-full); }
+
+@utility shadow-1 { box-shadow: var(--shadow-1); }
+@utility shadow-2 { box-shadow: var(--shadow-2); }
 
 @utility btn-primary {
   @apply bg-purple-600 text-white hover:bg-purple-700 px-4 py-2 rounded-md font-medium transition-colors;
@@ -921,6 +1109,18 @@
   .app-sidebar { transition: none; }
   .stat-range-btn { transition: none; }
   * { scroll-behavior: auto !important; }
+
+  /* Stage 5 S5-1: global collapse of every remaining CSS transition and
+     animation (present and future — including type- and motion- utility
+     consumers and ::before/::after decoration) to a near-zero duration.
+     Content, layout and state changes stay fully functional; only the
+     motion is removed, per the §9 reduced-motion contract. */
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* =====================================================================
@@ -935,6 +1135,7 @@
 .pred-manual-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .pred-amount { width: 6.5rem; background: var(--color-neutral-900); border: 1px solid var(--color-neutral-700); border-radius: 0.4rem; padding: 0.3rem 0.5rem; color: var(--color-neutral-100); font-size: 0.85rem; }
 .pred-amount:focus { outline: none; border-color: var(--color-online); }
+.pred-amount:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 .pred-fills { display: flex; gap: 0.3rem; }
 .pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--color-neutral-700); color: var(--color-neutral-300); background: color-mix(in srgb, var(--surface-page) 60%, transparent); transition: border-color 0.12s, color 0.12s; }
 .pred-chip:hover { border-color: var(--color-purple-400); color: var(--color-neutral-100); }
@@ -1350,6 +1551,7 @@
   font-size: 0.85rem;
 }
 .ov-filter-input:focus { outline: none; border-color: var(--status-info); }
+.ov-filter-input:focus-visible { outline: 2px solid var(--status-info); outline-offset: 1px; }
 .ov-filter-clear {
   position: absolute;
   right: 0.35rem;
