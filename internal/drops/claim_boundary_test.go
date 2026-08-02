@@ -475,7 +475,9 @@ func TestSyncWithInventoryPassesCampaignIdentityToClaimDropFnFor(t *testing.T) {
 	tr.SetSkipLedger(ledger)
 
 	campaigns := []*models.Campaign{campaignWithDrop("d1", 60)} // ID "camp-1", Game "game-1"
-	tr.syncWithInventory(campaigns)
+	if _, err := tr.syncWithInventory(campaigns); err != nil {
+		t.Fatalf("syncWithInventory: %v", err)
+	}
 
 	if client.callCount() != 1 {
 		t.Fatalf("expected exactly one claim call through syncWithInventory, got %d", client.callCount())

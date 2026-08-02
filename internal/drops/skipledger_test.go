@@ -244,7 +244,10 @@ func TestE3ObservedFromRawInventoryNotCampaignDropsInSyncWithInventory(t *testin
 	tracked := []*models.Campaign{{ID: "camp-e3a", Game: &models.Game{ID: "game-e3a"}, Drops: nil}}
 	tr.campaigns = tracked
 
-	got := tr.syncWithInventory(tracked)
+	got, err := tr.syncWithInventory(tracked)
+	if err != nil {
+		t.Fatalf("syncWithInventory: %v", err)
+	}
 	if len(got) != 1 || len(got[0].Drops) != 0 {
 		t.Fatalf("expected the campaign to remain trackable with no drops of its own, got %+v", got)
 	}
@@ -258,7 +261,9 @@ func TestE3ObservedFromRawInventoryNotCampaignDropsInSyncWithInventory(t *testin
 	}
 
 	// Idempotent: a repeat sync must not create a second row.
-	tr.syncWithInventory(tracked)
+	if _, err := tr.syncWithInventory(tracked); err != nil {
+		t.Fatalf("syncWithInventory: %v", err)
+	}
 	if n := countRows(t, ledger, "account_key = ? AND instance_id = ?", ledger.accountKey, "inst-e3a"); n != 1 {
 		t.Fatalf("expected exactly one row after repeated syncs, got %d", n)
 	}

@@ -665,6 +665,48 @@ func (d *DropsTracker) recordProgressSync(err error) {
 	}
 }
 
+// publishProgressObservation is the optimistic-concurrency guard that protects
+// every successful light-sync outcome (changed publish, unchanged observation,
+// valid-empty observation) from racing a full sync. syncProgress necessarily
+// performs its Inventory read WITHOUT holding d.mu (no network call may run
+// while a lock is held), so a full sync can replace d.campaigns and bump the
+// revision while that read is in flight. capturedRevision is the revision
+// syncProgress captured atomically alongside its campaign snapshot, BEFORE the
+// network call; if the published revision has since moved on, that snapshot —
+// and anything computed from it — is stale and MUST be discarded rather than
+// merged over (or reported as having observed) the newer pool: a stale
+// republish can resurrect a removed campaign, drop a newly discovered one, or
+// revert streamer assignments, and would otherwise only recover on the next
+// full sync.
+//
+// When newCampaigns is non-nil it is swapped in as d.campaigns and the
+// revision is bumped (source light_sync) atomically with the staleness check,
+// so a concurrent full sync can never land between the check and the publish.
+// The progress-sync bookkeeping (ProgressLastSyncAt/ProgressLastError) is
+// recorded in the same critical section for every accepted outcome, so a
+// reader can never observe the new timestamp without the campaigns it
+// describes. Returns false when the result was discarded as stale (nothing
+// published or recorded); the caller must not treat that as an observation
+// (no streamer re-point, no further logging beyond this DEBUG line).
+func (d *DropsTracker) publishProgressObservation(capturedRevision uint64, newCampaigns []*models.Campaign) bool {
+	d.mu.Lock()
+	if d.revision != capturedRevision {
+		d.mu.Unlock()
+		slog.Debug("Drops progress sync: discarding stale result; campaign pool changed while inventory was in flight",
+			"capturedRevision", capturedRevision, "currentRevision", d.revision)
+		return false
+	}
+	if newCampaigns != nil {
+		d.campaigns = newCampaigns
+		d.bumpRevisionLocked(updateSourceLightSync)
+	}
+	d.progressRuns++
+	d.progressLastSyncAt = time.Now()
+	d.progressLastErr = ""
+	d.mu.Unlock()
+	return true
+}
+
 func (d *DropsTracker) loop() {
 	d.mu.RLock()
 	ctx := d.ctx
@@ -826,6 +868,7 @@ func (d *DropsTracker) syncProgress() {
 	d.mu.RLock()
 	existing := make([]*models.Campaign, len(d.campaigns))
 	copy(existing, d.campaigns)
+	capturedRevision := d.revision
 	d.mu.RUnlock()
 
 	// Nothing tracked yet: the full sync hasn't populated the campaign pool, so
@@ -851,8 +894,10 @@ func (d *DropsTracker) syncProgress() {
 	if !ok || inProgress == nil {
 		// A fetched inventory without an in-progress list is a legitimate state
 		// (tracked campaigns whose watching hasn't credited any minutes yet), so
-		// this counts as a completed observation reporting zero progress.
-		d.recordProgressSync(nil)
+		// this counts as a completed observation reporting zero progress — unless
+		// the pool this snapshot was captured against has since been superseded by
+		// a full sync (see publishProgressObservation).
+		d.publishProgressObservation(capturedRevision, nil)
 		return
 	}
 
@@ -906,25 +951,23 @@ func (d *DropsTracker) syncProgress() {
 	if !changed {
 		// The inventory read completed and nothing moved — "checked and
 		// unchanged" is exactly the observation the progress watchdog counts
-		// stalls with.
-		d.recordProgressSync(nil)
+		// stalls with (again subject to the same staleness guard).
+		d.publishProgressObservation(capturedRevision, nil)
 		return
 	}
 
-	d.mu.Lock()
-	d.campaigns = updated
-	d.bumpRevisionLocked(updateSourceLightSync)
-	d.mu.Unlock()
+	// Publish the refreshed campaigns and stamp the observation atomically,
+	// guarded against the captured snapshot having gone stale while the
+	// Inventory read was in flight (see publishProgressObservation). A
+	// discarded stale result must not re-point streamers either, so that only
+	// happens below once publication is confirmed.
+	if !d.publishProgressObservation(capturedRevision, updated) {
+		return
+	}
 
 	// Re-point the streamers at the refreshed campaigns so watch-priority
 	// decisions see the new progress too, exactly as the full sync does.
 	d.updateStreamerCampaigns()
-
-	// Stamp the observation only AFTER the refreshed campaigns are published:
-	// a reader (the progress watchdog) that sees the new observation timestamp
-	// must also see the new minutes, or a progress-carrying read could be
-	// miscounted as a no-progress observation.
-	d.recordProgressSync(nil)
 
 	slog.Debug("Drops progress sync: refreshed tracked campaign progress from inventory",
 		"campaigns", len(updated))
@@ -981,7 +1024,19 @@ func (d *DropsTracker) syncCampaigns() {
 	// syncWithInventory folds in any in-progress campaign that path missed.
 	fromDashboard := len(campaigns)
 
-	campaigns = d.syncWithInventory(campaigns)
+	campaigns, err = d.syncWithInventory(campaigns)
+	if err != nil {
+		// The authoritative inventory merge failed or was unusable (request
+		// error, nil response, malformed shape): campaigns here are freshly built
+		// from GetDropCampaignDetails and have never received live progress (see
+		// syncWithInventory's doc comment), so publishing them now would replace
+		// previously known Twitch progress with zero/unknown data without a new
+		// authoritative observation. Abort exactly like a dashboard/details
+		// failure above and keep the previously tracked campaigns.
+		slog.Error("Drops sync failed: could not merge live inventory progress into campaigns; keeping previously tracked campaigns", "error", err)
+		d.recordSync(dashboardCount, 0, 0, 0, 0, time.Since(start), err)
+		return
+	}
 	afterInventory := len(campaigns)
 	// Anything syncWithInventory added beyond the dashboard set was recovered
 	// straight from the inventory's in-progress list.
@@ -1425,15 +1480,31 @@ func (d *DropsTracker) getInventory() (map[string]interface{}, error) {
 	return inventory, nil
 }
 
-func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models.Campaign {
+// syncWithInventory merges live per-drop progress from the Inventory query
+// into campaigns (the dashboard/details-built set) and recovers any campaign
+// Twitch is actively crediting that the dashboard/details path missed. It
+// returns an error when the Inventory acquisition itself failed or was
+// unusable (request error, nil response, or a response that did not decode to
+// a usable inventory object): campaigns at that point are freshly built from
+// GetDropCampaignDetails and have never received Drop.Update(selfData) (the
+// sole write path for CurrentMinutesWatched/Claimability — see
+// claimAllDropsFromInventory/Campaign.SyncDrops), so the caller must abort the
+// sync rather than publish them and silently replace previously known Twitch
+// progress with zero/unknown data. A successfully decoded inventory that
+// simply reports no in-progress campaigns is a legitimate observation, not a
+// failure, and returns campaigns unchanged with a nil error.
+func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) ([]*models.Campaign, error) {
 	inventory, err := d.getInventory()
 	if err != nil || inventory == nil {
-		return campaigns
+		if err == nil {
+			err = fmt.Errorf("empty inventory response")
+		}
+		return campaigns, err
 	}
 
 	inProgress, ok := inventory["dropCampaignsInProgress"].([]interface{})
 	if !ok || inProgress == nil {
-		return campaigns
+		return campaigns, nil
 	}
 
 	// E3 (S4): read the RAW decoded inventory maps directly for
@@ -1501,7 +1572,7 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) []*models
 		tracked[progID] = true
 	}
 
-	return campaigns
+	return campaigns, nil
 }
 
 // claimDropFnFor returns the SyncDrops claim callback for drops belonging to
