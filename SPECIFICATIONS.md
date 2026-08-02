@@ -702,6 +702,53 @@ transport has not been confirmed for a configurable max-staleness window. It
 never holds a broker slot and is not a candidate source; at most one extra beacon
 can briefly coincide with two busy slots, and only on the max-staleness schedule.
 
+#### Crash Recovery Policy
+
+`MinuteWatcher.Start` spawns exactly one goroutine (`loop`) per instance, and
+neither it nor anything in its call chain installs a local `recover()` —
+verified: no `recover()` exists anywhere in `internal/watcher`, nor in
+`internal/miner`'s production code that constructs or drives it
+(`startMining`'s `m.watcher.Start(ctx)` is the sole call site). This is a
+deliberate **crash-only** policy, not an oversight: an unhandled panic in
+`loop` is caught nowhere, so Go's runtime default applies — it terminates the
+whole process, not just the watch loop. Recovering locally was rejected
+because a panic there may mean loop-owned state (`rotation`, `lastSlots`,
+`sessionConverge`, and similar fields documented as touched only by this
+goroutine) is no longer trustworthy; letting the loop continue past that
+risks mining against corrupted state. **Do not add a `recover()` around the
+watch loop** — that would undermine this policy, not harden it.
+
+The policy is workable because the loop holds no long-lived worker resources
+a crash would leak: each tick's slot allocation (`arbitrate`) builds `slots`
+fresh from `w.streamers`/`w.rotation`, never a persistent per-channel worker
+pool. A restart simply constructs a new `*MinuteWatcher` and starts selection
+over; nothing needs reconciling.
+
+Bringing the process back up after a crash is an **external deployment**
+concern — `cmd/miner` and `internal/app` contain no self-restart or re-exec
+logic; an unrecovered panic simply ends the process. This repository's own
+`docker-compose.yml` sets `restart: unless-stopped` (also required for the
+auto-update self-exit-then-relaunch flow), which does cover this case *for
+that specific file*. That is not a general property of "Docker" or any other
+platform — any other deployment (bare binary, systemd unit, a different
+container/App definition) must supply its own equivalent restart policy for
+the process to come back after a crash.
+
+Two related hardening ideas are intentionally deferred, not bugs:
+
+- **R9-F1 (`Start` idempotence guard):** `Start` has no guard against being
+  called twice on the same instance — a second call would silently overwrite
+  `w.ctx`/`w.cancel`/`w.loopDone` and leak the first `loop()` goroutine.
+  Unreachable in production today: the durable lifecycle controller
+  (`internal/lifecycle.Controller`) never restarts an existing generation —
+  its `Config.Factory` (wired in `internal/app.Build` as `minerFactory`)
+  constructs a brand-new `*miner.Miner`, and therefore a brand-new
+  `*MinuteWatcher`, for every generation, so `Start` runs at most once per
+  instance. `DEFERRED_HARDENING`.
+- **R9-F3 (broker snapshot staleness signal):** `BrokerSnapshot` carries an
+  `EvaluatedAt` timestamp but nothing actively signals a consumer when a
+  snapshot has gone stale. `DEFERRED_HARDENING`.
+
 ### Priority System
 
 Maximum 2 streams watched simultaneously (`constants.MaxSimultaneousStreams`),
