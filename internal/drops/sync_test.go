@@ -3,6 +3,7 @@ package drops
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,9 +34,45 @@ type fakeDropsClient struct {
 
 	// fullSyncSignal, when non-nil, receives one non-blocking signal per full
 	// sync (each ViewerDropsDashboard call), letting a test observe the
-	// background loop's cadence. Set before Start; the maps are read-only after
-	// construction, so the loop goroutine touches no mutable shared state.
+	// background loop's cadence. Set before Start. dashboard/details/inventory
+	// may be swapped after construction (e.g. publishCampaignB), but only
+	// while every concurrent caller is parked in the inventoryGate and cannot
+	// re-enter PostGQL -- swapping them at any other time is a data race.
 	fullSyncSignal chan struct{}
+
+	// gateMu guards inventoryGate: armInventoryGate (the test goroutine) and
+	// PostGQL's "Inventory" case (whichever goroutine reaches it) touch it
+	// concurrently once a light sync and a full sync race, so a plain field
+	// would be a data race under -race.
+	gateMu        sync.Mutex
+	inventoryGate *inventoryGate
+}
+
+// inventoryGate lets a test deterministically hold ONE in-flight Inventory
+// PostGQL call open while a second, concurrent caller (a full sync) runs to
+// completion unblocked -- the exact interleaving the F1 staleness tests need
+// to prove a stale light-sync response is discarded rather than published
+// over a newer campaign pool.
+type inventoryGate struct {
+	entered chan struct{} // closed once the gated call is reached
+	release chan struct{} // the test closes this to let the gated call return
+	resp    map[string]interface{}
+	err     error
+}
+
+// armInventoryGate arms the fake to intercept exactly the NEXT "Inventory"
+// PostGQL call: that call closes the returned gate's entered channel, blocks
+// until the test closes release, then returns resp/err instead of the normal
+// f.inventory/f.inventoryErr. It is single-shot -- every Inventory call after
+// the gated one (including further calls within the same sync that triggered
+// it) proceeds normally. Must be called before starting the goroutine whose
+// Inventory call is to be gated.
+func (f *fakeDropsClient) armInventoryGate(resp map[string]interface{}, err error) *inventoryGate {
+	g := &inventoryGate{entered: make(chan struct{}), release: make(chan struct{}), resp: resp, err: err}
+	f.gateMu.Lock()
+	f.inventoryGate = g
+	f.gateMu.Unlock()
+	return g
 }
 
 func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
@@ -52,6 +89,15 @@ func (f *fakeDropsClient) PostGQL(op constants.GQLOperation) (map[string]interfa
 		}
 		return f.dashboard, nil
 	case "Inventory":
+		f.gateMu.Lock()
+		g := f.inventoryGate
+		f.inventoryGate = nil // single-shot: only the first call after arming is gated
+		f.gateMu.Unlock()
+		if g != nil {
+			close(g.entered)
+			<-g.release
+			return g.resp, g.err
+		}
 		if f.inventoryErr != nil {
 			return nil, f.inventoryErr
 		}
@@ -850,5 +896,439 @@ func TestSyncCampaignsDistinguishesEmptyFromFiltered(t *testing.T) {
 	tracker2.syncCampaigns()
 	if status := tracker2.SyncStatus(); status.DashboardCampaigns != 0 {
 		t.Errorf("expected dashboardCampaigns=0 for an account with no campaigns, got %d", status.DashboardCampaigns)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F1: a lightweight progress sync captured against campaign revision R must
+// never publish (or record a successful observation) over a pool a full sync
+// has already replaced with revision R+n. syncProgress performs its Inventory
+// read without holding d.mu, so the interleaving below is a real race the
+// production code must resolve, not just a sequencing convenience.
+// ---------------------------------------------------------------------------
+
+// campaignAAndB returns matching dashboard summary + campaign detail for two
+// distinct, equally-eligible campaigns sharing one game, used to prove a
+// stale light-sync response for campaign A is discarded rather than merged
+// over a newer pool that has moved on to campaign B.
+func campaignAAndB() (summaryA, detailA, summaryB, detailB map[string]interface{}) {
+	game := map[string]interface{}{"id": "game-wot", "name": "World of Tanks"}
+	summaryA = map[string]interface{}{"id": "campaign-a", "name": "Campaign A", "status": "ACTIVE", "game": game}
+	detailA = map[string]interface{}{
+		"id": "campaign-a", "name": "Campaign A", "status": "ACTIVE",
+		"startAt": rfc3339(nowMinusHours(2)), "endAt": rfc3339(nowPlusHours(48)), "game": game,
+		"timeBasedDrops": []interface{}{activeDrop("drop-a", "Reward A", 120)},
+	}
+	summaryB = map[string]interface{}{"id": "campaign-b", "name": "Campaign B", "status": "ACTIVE", "game": game}
+	detailB = map[string]interface{}{
+		"id": "campaign-b", "name": "Campaign B", "status": "ACTIVE",
+		"startAt": rfc3339(nowMinusHours(2)), "endAt": rfc3339(nowPlusHours(48)), "game": game,
+		"timeBasedDrops": []interface{}{activeDrop("drop-b", "Reward B", 120)},
+	}
+	return
+}
+
+// staleProgressFixture is a tracker with one online, drops-enabled streamer
+// and campaign A already published (via a real syncCampaigns) and assigned to
+// the streamer, ready for a test to interleave a light sync's in-flight
+// Inventory read with a concurrent full sync that publishes campaign B.
+type staleProgressFixture struct {
+	tracker  *DropsTracker
+	client   *fakeDropsClient
+	streamer *models.Streamer
+}
+
+func newStaleProgressFixture(t *testing.T) *staleProgressFixture {
+	t.Helper()
+	summaryA, detailA, _, _ := campaignAAndB()
+
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summaryA),
+		inventory: inventoryWithInProgress(map[string]interface{}{
+			"id":             "campaign-a",
+			"name":           "Campaign A",
+			"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{inProgressDrop("drop-a", "Reward A", 120, 45, false)},
+		}),
+		details: map[string]map[string]interface{}{"campaign-a": detailA},
+	}
+
+	s := models.NewStreamer("streamer1", models.StreamerSettings{ClaimDrops: true})
+	s.SetConfirmedOnline()
+	s.Stream.SetCampaignIDs([]string{"campaign-a"}) // resolved Known availability -> AvailabilityYes
+
+	tracker := NewDropsTracker(client, []*models.Streamer{s}, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+
+	got := tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-a" || got[0].Drops[0].CurrentMinutesWatched != 45 {
+		t.Fatalf("fixture setup: expected campaign-a tracked at 45 min, got %+v", got)
+	}
+	assertAssigned(t, s, "campaign-a")
+
+	return &staleProgressFixture{tracker: tracker, client: client, streamer: s}
+}
+
+// publishCampaignB runs a full sync that replaces the tracked pool with
+// campaign B and re-points the streamer's advertised availability at it --
+// the "newer full sync" a concurrent stale light sync must never be
+// published over.
+func (f *staleProgressFixture) publishCampaignB(t *testing.T) {
+	t.Helper()
+	_, _, summaryB, detailB := campaignAAndB()
+	f.client.dashboard = dashboardResponse(summaryB)
+	f.client.details = map[string]map[string]interface{}{"campaign-b": detailB}
+	f.client.inventory = emptyInventoryResponse()
+	f.streamer.Stream.SetCampaignIDs([]string{"campaign-b"})
+
+	f.tracker.syncCampaigns()
+
+	got := f.tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-b" {
+		t.Fatalf("fixture setup: expected campaign-b published, got %+v", got)
+	}
+}
+
+// TestSyncProgressStaleChangedResultDiscarded is F1-T1: a light sync captures
+// campaign-a at revision R, blocks in flight on its Inventory read, and a full
+// sync publishes campaign-b at R+1 while it waits. Releasing the light sync's
+// response -- reporting CHANGED progress for the now-superseded campaign-a --
+// must be discarded entirely: campaign-b must remain the published pool,
+// untouched by the stale result, and the streamer must stay assigned to it.
+func TestSyncProgressStaleChangedResultDiscarded(t *testing.T) {
+	f := newStaleProgressFixture(t)
+
+	gate := f.client.armInventoryGate(inventoryWithInProgress(map[string]interface{}{
+		"id":             "campaign-a",
+		"name":           "Campaign A",
+		"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{inProgressDrop("drop-a", "Reward A", 120, 90, false)}, // changed: 45 -> 90
+	}), nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.tracker.syncProgress()
+	}()
+
+	select {
+	case <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("syncProgress did not reach the gated Inventory call")
+	}
+
+	// The newer full sync lands while the light sync's Inventory read is in
+	// flight: publishes campaign-b at a bumped revision and re-points the
+	// streamer, exactly as a real interleaved full sync would.
+	f.publishCampaignB(t)
+	revAfterFull := f.tracker.Revision()
+	statusAfterFull := f.tracker.SyncStatus()
+
+	close(gate.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("syncProgress did not return after the gated Inventory call was released")
+	}
+
+	got := f.tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-b" {
+		t.Fatalf("stale light-sync result must not resurrect campaign-a or lose campaign-b, got %v", keptIDs(got))
+	}
+	if r := f.tracker.Revision(); r != revAfterFull {
+		t.Errorf("stale light-sync result must not bump the revision, got %d, want %d (unchanged since the full sync)", r, revAfterFull)
+	}
+	status := f.tracker.SyncStatus()
+	if status.UpdateSource != "full_sync" {
+		t.Errorf("stale light-sync result must not overwrite UpdateSource, got %q, want %q", status.UpdateSource, "full_sync")
+	}
+	if !status.BackendUpdatedAt.Equal(statusAfterFull.BackendUpdatedAt) {
+		t.Errorf("stale light-sync result must not stamp BackendUpdatedAt, got %v, want %v", status.BackendUpdatedAt, statusAfterFull.BackendUpdatedAt)
+	}
+	if status.ProgressRuns != 0 || !status.ProgressLastSyncAt.IsZero() {
+		t.Errorf("stale light-sync result must not record a progress observation, got runs=%d lastSyncAt=%v", status.ProgressRuns, status.ProgressLastSyncAt)
+	}
+	assertAssigned(t, f.streamer, "campaign-b")
+}
+
+// TestSyncProgressStaleUnchangedOrEmptyResultDiscarded is F1-T2: the same
+// stale interleaving as F1-T1, but the light sync's released response reports
+// either unchanged progress or a valid empty/no-in-progress observation for
+// the superseded pool. Both must be discarded exactly like a changed result:
+// the progress-observation bookkeeping (ProgressLastSyncAt/ProgressLastError)
+// must not be stamped against the newer pool, and the streamer assignment
+// must not be touched.
+func TestSyncProgressStaleUnchangedOrEmptyResultDiscarded(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() map[string]interface{}
+	}{
+		{
+			name: "unchanged",
+			build: func() map[string]interface{} {
+				return inventoryWithInProgress(map[string]interface{}{
+					"id":             "campaign-a",
+					"name":           "Campaign A",
+					"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+					"timeBasedDrops": []interface{}{inProgressDrop("drop-a", "Reward A", 120, 45, false)}, // unchanged: still 45
+				})
+			},
+		},
+		{
+			name:  "empty",
+			build: func() map[string]interface{} { return emptyInventoryResponse() },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStaleProgressFixture(t)
+
+			gate := f.client.armInventoryGate(tc.build(), nil)
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				f.tracker.syncProgress()
+			}()
+
+			select {
+			case <-gate.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("syncProgress did not reach the gated Inventory call")
+			}
+
+			f.publishCampaignB(t)
+			revAfterFull := f.tracker.Revision()
+
+			close(gate.release)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("syncProgress did not return after the gated Inventory call was released")
+			}
+
+			status := f.tracker.SyncStatus()
+			if status.ProgressRuns != 0 || !status.ProgressLastSyncAt.IsZero() {
+				t.Errorf("a stale %s observation must not advance ProgressLastSyncAt/ProgressRuns for the newer pool, got runs=%d lastSyncAt=%v",
+					tc.name, status.ProgressRuns, status.ProgressLastSyncAt)
+			}
+			if status.ProgressLastError != "" {
+				t.Errorf("a stale %s observation must not set/clear ProgressLastError, got %q", tc.name, status.ProgressLastError)
+			}
+			if r := f.tracker.Revision(); r != revAfterFull {
+				t.Errorf("stale %s observation must not bump the revision, got %d, want %d", tc.name, r, revAfterFull)
+			}
+			assertAssigned(t, f.streamer, "campaign-b")
+		})
+	}
+}
+
+// TestSyncProgressChangedObservationPublishesOnceAfterFreshRevision is F1-T3:
+// with no concurrent revision movement, a changed light-sync observation
+// still publishes normally -- the revision increments exactly once,
+// UpdateSource is light_sync, and the observation timestamp is recorded no
+// earlier than the refreshed campaign data it describes (both are set
+// together under the same lock in publishProgressObservation, so a reader can
+// never observe one without the other).
+func TestSyncProgressChangedObservationPublishesOnceAfterFreshRevision(t *testing.T) {
+	invAt := func(minutes float64) map[string]interface{} {
+		return inventoryWithInProgress(map[string]interface{}{
+			"id":             "campaign-a",
+			"name":           "Campaign A",
+			"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{inProgressDrop("drop-a", "Reward A", 120, minutes, false)},
+		})
+	}
+	summaryA, detailA, _, _ := campaignAAndB()
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summaryA),
+		inventory: invAt(45),
+		details:   map[string]map[string]interface{}{"campaign-a": detailA},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+	revBefore := tracker.Revision()
+
+	before := time.Now()
+	client.inventory = invAt(90)
+	tracker.syncProgress()
+
+	status := tracker.SyncStatus()
+	if status.Revision != revBefore+1 {
+		t.Fatalf("revision should increment exactly once, got %d, want %d", status.Revision, revBefore+1)
+	}
+	if status.UpdateSource != "light_sync" {
+		t.Fatalf("UpdateSource should be light_sync, got %q", status.UpdateSource)
+	}
+	if status.ProgressLastSyncAt.Before(before) {
+		t.Errorf("ProgressLastSyncAt should be recorded at/after the sync started, got %v, want >= %v", status.ProgressLastSyncAt, before)
+	}
+	got := tracker.Campaigns()
+	if len(got) != 1 || got[0].Drops[0].CurrentMinutesWatched != 90 {
+		t.Fatalf("expected refreshed progress 90, got %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F2: when the Inventory acquisition syncWithInventory depends on fails,
+// returns nil, or is structurally unusable, the full sync must abort and keep
+// the last-known-good published pool rather than publish freshly-built
+// campaign/drop objects that never received live progress. A successfully
+// decoded Inventory response that simply reports no in-progress campaigns
+// remains a legitimate observation, not a failure.
+// ---------------------------------------------------------------------------
+
+// f2Fixture builds a dashboard summary/detail pair and an Inventory response
+// generator for one campaign, shared by the F2 acquisition-failure tests.
+func f2Fixture() (summary, detail map[string]interface{}, progAt func(watched float64) map[string]interface{}) {
+	summary = map[string]interface{}{
+		"id": "campaign-amd", "name": "AMD Summer Arena Drops#2", "status": "ACTIVE",
+		"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail = map[string]interface{}{
+		"id": "campaign-amd", "name": "AMD Summer Arena Drops#2", "status": "ACTIVE",
+		"startAt": rfc3339(nowMinusHours(2)), "endAt": rfc3339(nowPlusHours(48)),
+		"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{activeDrop("drop-1", "Alienware Mystery Drop", 240)},
+	}
+	progAt = func(watched float64) map[string]interface{} {
+		return inventoryWithInProgress(map[string]interface{}{
+			"id":             "campaign-amd",
+			"name":           "AMD Summer Arena Drops#2",
+			"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{inProgressDrop("drop-1", "Alienware Mystery Drop", 240, watched, false)},
+		})
+	}
+	return
+}
+
+// TestSyncCampaignsInventoryAcquisitionFailurePreservesLastKnownGood covers
+// F2-T1 (a request-error Inventory acquisition aborts the full sync and keeps
+// the previous pool) and F2-T4 (a later successful sync recovers normally).
+// syncWithInventory's own Inventory acquisition is the sole source of live
+// per-drop progress (Drop.Update(selfData)); when it fails, the campaigns
+// built from GetDropCampaignDetails have never received it, so publishing
+// them would silently replace known progress with zero/unknown data.
+func TestSyncCampaignsInventoryAcquisitionFailurePreservesLastKnownGood(t *testing.T) {
+	summary, detail, progAt := f2Fixture()
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		inventory: progAt(140),
+		details:   map[string]map[string]interface{}{"campaign-amd": detail},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+
+	got := tracker.Campaigns()
+	if len(got) != 1 || got[0].Drops[0].CurrentMinutesWatched != 140 {
+		t.Fatalf("expected the last-known-good pool at 140 min, got %+v", got)
+	}
+	revBefore := tracker.Revision()
+
+	// The Inventory acquisition syncWithInventory depends on now fails.
+	client.inventoryErr = fmt.Errorf("inventory 502")
+	tracker.syncCampaigns()
+
+	got = tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-amd" || got[0].Drops[0].CurrentMinutesWatched != 140 {
+		t.Fatalf("an inventory acquisition failure must preserve the last-known-good pool/progress, got %+v", got)
+	}
+	if r := tracker.Revision(); r != revBefore {
+		t.Errorf("a failed inventory merge must not publish a new revision, got %d, want %d", r, revBefore)
+	}
+	status := tracker.SyncStatus()
+	if status.LastError == "" {
+		t.Error("expected the inventory acquisition failure to be visible via SyncStatus.LastError")
+	}
+	if status.DashboardCampaigns != 1 {
+		t.Errorf("expected dashboardCampaigns=1 recorded for the failed run (the listing succeeded), got %d", status.DashboardCampaigns)
+	}
+
+	// F2-T4: recovery -- a later successful sync updates progress normally.
+	client.inventoryErr = nil
+	client.inventory = progAt(200)
+	tracker.syncCampaigns()
+
+	got = tracker.Campaigns()
+	if len(got) != 1 || got[0].Drops[0].CurrentMinutesWatched != 200 {
+		t.Fatalf("recovery sync should update progress normally, got %+v", got)
+	}
+	if status := tracker.SyncStatus(); status.LastError != "" {
+		t.Errorf("expected the sync error to clear on recovery, got %q", status.LastError)
+	}
+}
+
+// TestSyncCampaignsUnusableInventoryResponsePreservesLastKnownGood is F2-T2:
+// the same last-known-good preservation as F2-T1, but for a nil-error
+// response that simply does not decode to a usable inventory object -- the
+// other half of syncWithInventory's `err != nil || inventory == nil` guard,
+// distinct from a request error.
+func TestSyncCampaignsUnusableInventoryResponsePreservesLastKnownGood(t *testing.T) {
+	cases := []struct {
+		name      string
+		inventory map[string]interface{}
+	}{
+		{name: "nil response", inventory: nil},
+		{name: "malformed shape (no currentUser)", inventory: map[string]interface{}{"data": map[string]interface{}{}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			summary, detail, progAt := f2Fixture()
+			client := &fakeDropsClient{
+				dashboard: dashboardResponse(summary),
+				inventory: progAt(140),
+				details:   map[string]map[string]interface{}{"campaign-amd": detail},
+			}
+			tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+			tracker.syncCampaigns()
+			if got := tracker.Campaigns(); len(got) != 1 || got[0].Drops[0].CurrentMinutesWatched != 140 {
+				t.Fatalf("expected the last-known-good pool at 140 min, got %+v", got)
+			}
+			revBefore := tracker.Revision()
+
+			client.inventory = tc.inventory // no error, but getInventory() cannot produce a usable map
+			tracker.syncCampaigns()
+
+			got := tracker.Campaigns()
+			if len(got) != 1 || got[0].Drops[0].CurrentMinutesWatched != 140 {
+				t.Fatalf("an unusable inventory response (%s) must preserve the last-known-good pool/progress, got %+v", tc.name, got)
+			}
+			if r := tracker.Revision(); r != revBefore {
+				t.Errorf("an unusable inventory response (%s) must not publish a new revision, got %d, want %d", tc.name, r, revBefore)
+			}
+			if status := tracker.SyncStatus(); status.LastError == "" {
+				t.Errorf("expected the unusable inventory response (%s) to surface via SyncStatus.LastError", tc.name)
+			}
+		})
+	}
+}
+
+// TestSyncCampaignsValidEmptyInventoryIsNotAcquisitionFailure is F2-T3: a
+// successfully decoded Inventory response that simply reports no
+// dropCampaignsInProgress (I6) must remain distinguishable from a request
+// error or a malformed response -- it is a legitimate observation, and the
+// sync must publish normally rather than aborting.
+func TestSyncCampaignsValidEmptyInventoryIsNotAcquisitionFailure(t *testing.T) {
+	summary, detail, _ := f2Fixture()
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		inventory: emptyInventoryResponse(), // valid, decoded, but no dropCampaignsInProgress
+		details:   map[string]map[string]interface{}{"campaign-amd": detail},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.syncCampaigns()
+
+	got := tracker.Campaigns()
+	if len(got) != 1 {
+		t.Fatalf("a valid empty inventory must not be treated as an acquisition failure, got %d tracked", len(got))
+	}
+	status := tracker.SyncStatus()
+	if status.LastError != "" {
+		t.Errorf("a valid empty inventory must not surface as a sync error, got %q", status.LastError)
+	}
+	if status.Revision == 0 || status.UpdateSource != "full_sync" {
+		t.Errorf("expected a normal full-sync publication, got revision=%d source=%q", status.Revision, status.UpdateSource)
 	}
 }

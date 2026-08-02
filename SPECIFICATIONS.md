@@ -955,6 +955,69 @@ The watcher calls `DropsTracker.TriggerProgressSync` after every successfully
 reported watched minute, so a watched minute is reflected on the Drops page
 within seconds rather than waiting out the interval.
 
+### Progress-sync freshness (stale light-sync results are discarded)
+
+`syncProgress` snapshots the published campaign pool and its `Revision` under
+the tracker's read lock, then performs its `Inventory` request without
+holding the lock (no network call ever runs under `d.mu`). Because the full
+sync can run concurrently and replace the pool in between, the response that
+comes back may describe a campaign set a newer full sync has already
+superseded — an unguarded republish would resurrect a removed campaign, drop
+one the full sync just added, or revert streamer assignments, silently
+undoing the full sync's own result.
+
+Every outcome a light sync can report — changed progress, an unchanged
+observation, or a valid empty/no-in-progress inventory — is therefore
+conditional on the revision it observed: immediately before publishing
+(or, for an unchanged/empty result, before recording the observation at
+all), the tracker re-checks that its published `Revision` still equals the
+one captured at the start of the sync, atomically with the check itself. If
+the revision has moved on, the result is discarded in full:
+
+- the campaign pool, `Revision`, `BackendUpdatedAt`, and `UpdateSource` are
+  left exactly as the newer (superseding) sync set them;
+- streamers are not re-pointed;
+- `ProgressLastSyncAt`/`ProgressLastError` are not touched — a discarded
+  result must never look like a fresh observation of the newer pool;
+- at most a DEBUG diagnostic is logged; the sync returns without retrying.
+
+The next scheduled (or on-demand) light sync simply observes whatever pool is
+current by then. Progress can legitimately decrease after a valid Twitch
+observation (no local monotonic-max rule), and this guard does not change
+that — it only ensures a response is judged against the pool it was actually
+taken from.
+
+### Full-sync inventory-merge failure preserves the last-known-good pool
+
+The full sync's dashboard/details path (`getActiveCampaigns`) builds fresh
+campaign and drop objects that carry no live per-drop progress — the only
+write path for a drop's `currentMinutesWatched`/claimability is
+`Drop.Update`, called from the `Inventory` merge (`syncWithInventory`) or from
+`claimAllDropsFromInventory`. If the `Inventory` request `syncWithInventory`
+depends on fails, returns no response, or does not decode to a usable
+inventory object, those freshly-built objects never receive that update; the
+sync aborts before publishing and keeps the previously published campaign
+pool, `Revision`, `BackendUpdatedAt`, and `UpdateSource` unchanged. This
+exemption does not cover `upcomingCampaigns`: the upcoming set
+`getActiveCampaigns` returns is written unconditionally as soon as the
+dashboard/details listing succeeds, before `syncWithInventory` is even
+attempted, so a subsequent Inventory-merge failure can still leave a fresher
+`upcomingCampaigns` in place from that successful listing — only
+`notifyUpcoming` is skipped, not the field update. The sync *attempt* itself
+is still recorded — `SyncStatus.LastSyncAt`/`Runs`/
+`DashboardCampaigns`/`LastError` update exactly like a dashboard/details-
+listing failure (`LastSuccessAt` does not advance) — so the failure is
+visible without the stale pool ever being replaced. This applies only to the
+acquisition
+`syncWithInventory` itself performs — `claimAllDropsFromInventory` and
+`applyClaimHistory` make their own independent `Inventory` requests and keep
+their pre-existing failure handling (best-effort, non-fatal to the sync).
+
+A successfully decoded `Inventory` response that simply reports no
+`dropCampaignsInProgress` (a fresh account, or every tracked campaign
+genuinely not yet started) is a legitimate observation, not a failure — the
+sync continues normally with the dashboard/details-built campaigns.
+
 ### Drops Eligibility
 
 A streamer is eligible for drops when:
