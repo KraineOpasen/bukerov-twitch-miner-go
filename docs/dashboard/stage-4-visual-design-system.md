@@ -32,7 +32,7 @@ Provenance legend used throughout — every item is tagged with one of:
 
 - Repo: `KraineOpasen/bukerov-twitch-miner-go`, default branch `main`.
 - **Design base SHA: `1cf198aa4257a5f9ba250aec29bf027870f8dad7`** (`origin/main` at Stage 4 close; includes merged PR #147 — R17 backend "abort-and-preserve" + revision-guarded light sync — and PR #148).
-- The Stage 3 wireframe report was based at `a87334f6e01f1bf2d7996384304562c2696545d0`'s predecessor state (`a87334f...`); the delta between that base and `1cf198aa...` is exactly the R17 backend work, which §12 renders.
+- The Stage 3 wireframe report was based at exactly `a87334f6e01f1bf2d7996384304562c2696545d0`. The delta from that base to `1cf198aa...` comprises **PR #147** — the R17 backend progress-provenance and last-known-good sync changes, which §12 renders — and **PR #148**, watcher crash-only recovery documentation, which is not part of the R17 backend implementation.
 - Stage 4 produced **no commits**; the design exists only as the report this handoff extracts. Stage 5 work runs under its own task contract on a fresh branch from `main`.
 - Fixed stack [CP]: Go `html/template` (embedded via `go:embed` in `internal/web/server.go`) + Tailwind **v4** standalone CLI (`internal/web/static/css/input.css` → `app.css`, `make tailwind`; `@import "tailwindcss"` + `@source "../../../templates"`) + HTMX (`static/js/htmx.min.js`) + ApexCharts (vendored) + i18n RU/EN (`t` template func) + SSE status stream (`/api/miner-status/stream`).
 - Fonts [CP]: **vendored variable Inter (100–900) and JetBrains Mono (100–800)** at `internal/web/static/fonts/{inter,jetbrains-mono}.woff2`, declared with `@font-face` + `font-display: swap` in `input.css`. No CDN, no external fonts, ever.
@@ -44,7 +44,7 @@ Provenance legend used throughout — every item is tagged with one of:
 - **IA is frozen**: exactly **7 sections, 30 routes** (full list in §11). No route added, removed, renamed, re-owned.
 - **13 UI states** (full treatments §7): S-LOAD, S-READY, S-EMPTY, S-PART, S-STALE, S-UNK, S-DEGR, S-FAIL, S-BLOCK, S-DENY, S-NOBACK, S-SESS, S-DEFER. Invariant: **unknown never converts to healthy/completed/claimed/delivered**.
 - **Stage 2 canon** [AD]: (a) exactly **two** watch slots everywhere; an empty slot is a definite rendered state («Слот свободен» + machine reason), never hidden; (b) **full roster mandatory** on the queue page; (c) **/drops/claims is the sole owner** of claim lifecycle — every other page links, never restates; (d) **Save/Cancel/Discard per settings category** — category = dirty boundary, sticky bar, discard dialog on leave, **autosave forbidden**; (e) **account-level sound preferences** (persistence gated [BE:B4]) with **browser fail-open** playback stated in the UI; (f) manual queue/slot controls **deferred** [DEF] (§13).
-- Classification vocabulary [CP from Stage 3]: `CP`, `AND`, `DPE`, `DPBA`, `BD`, `DP-C` (=DESIGN_PROPOSAL_PENDING_FILLED_GROUP_C_EVIDENCE).
+- Classification vocabulary — **the Stage 4 tags above are the canonical labels used throughout this handoff**; Stage 3's vocabulary [CP from Stage 3] maps onto them one-to-one: `CP` = `CP` (CONFIRMED_PARITY) · `AD` = `AND` (APPROVED_NEW_DESIGN) · `INT` = `DPE` (DESIGN_PROPOSAL_PENDING_EVIDENCE) · `DEF` = `DPBA` (DEFERRED_PENDING_BROKER_AUDIT) · `BE:Bn` = `BD-Bn` (BACKEND_DEPENDENCY n) · `DP-C` = `DP-C` (=DESIGN_PROPOSAL_PENDING_FILLED_GROUP_C_EVIDENCE).
 - Stage 4 boundary (§14 of the Stage 3 handoff) — **forbidden in Stage 5 too**: backend/API/schema assumptions (incl. rendering any B1–B11 field as available); React/Next/SPA; CDN; external fonts; autosave; activating DPBA controls; presenting DP-C cards as parity; merging sound-status/sound-config ownership; changing the 7×30 IA; converting unknown to positive states; rendering a missing version field as «у вас последняя версия»; `outline: none` without an accessible replacement.
 - Open items carried forward, **not resolved by Stage 4**: owner decision №1 (claims history depth: 90-day window vs unlimited — UI supports both via period filter); gaps Г1 (stage docs not persisted in repo), Г2 (`events_drawer.html` has non-localized EN strings — fix in slice S5-7), Г3 (current Health page mixes config+status — split in S5-5, both parities preserved), Г4 (ROI "three tables" composition = стример/стратегия/исход is [INT]), Г5 (transport for new zones unknown → transport-independent contract, §10).
 
@@ -118,7 +118,7 @@ All numeric table/KPI cells: `font-variant-numeric: tabular-nums`.
 
 **Z-index** [AD]: `--z-base` 0 · `--z-sticky` 10 (table headers, save bar, toolbar) · `--z-popover` 20 · `--z-rail` 30 (rail flyouts) · `--z-drawer` 40 (+scrim) · `--z-dialog` 50 (+scrim) · `--z-toast` 60. Nothing stacks above toasts.
 
-**Motion** [AD]: `--motion-fast` 80ms (hover/press) · `--motion-base` 160ms (swap fades, accordion, badges) · `--motion-slow` 240ms (drawer/dialog enter; exits 0.7×) · easing `cubic-bezier(0.2, 0, 0, 1)`. Only permitted loop = skeleton shimmer; under `prefers-reduced-motion` shimmer becomes static and all durations → 0ms. Logs and SSE swaps animate nothing.
+**Motion** [AD]: `--motion-fast` 80ms (hover/press) · `--motion-base` 160ms (swap fades, accordion, badges) · `--motion-slow` 240ms (drawer/dialog enter; exits 0.7×) · easing `cubic-bezier(0.2, 0, 0, 1)`. Only permitted loop = skeleton shimmer; under `prefers-reduced-motion` shimmer becomes static and all durations → 0ms. **Logs, SSE updates and timed-poll refreshes animate nothing**; the swap fade (§10) applies only to user-initiated, non-log HTMX swaps.
 
 ## 5. Tailwind mapping and legacy compatibility
 
@@ -314,7 +314,7 @@ Transport is fixed [CP] and **inventing transport is prohibited**: server-first 
 - **Stable `hx-target` boundaries** [CP pattern]: HTMX swaps only fragments with stable target containers — lifecycle panel, slots, queue/roster, logs, drops lists, journal, status widgets. Page shells render server-side; fragments swap inside fixed-geometry containers (P5).
 - **Initial load vs refresh**: server-rendered S-LOAD skeletons only for genuinely late fragments (no skeleton theater for static content). A refresh of an already-populated region is **not** S-LOAD: `hx-indicator` shows a 60%-opacity skeleton overlay **over the retained old content**, which stays visible until the swap.
 - **Mutations**: button spinner + `hx-disabled-elt` (`aria-busy`, 60% opacity, default cursor) + `hx-sync` to prevent double-fire [CP]. Light confirmations via `hx-confirm`; heavy ones via C8 modals.
-- **Swap settle**: incoming fragment fades opacity 0.6→1 over `--motion-base` (`.htmx-settling`); no translate/slide; instant under reduced motion.
+- **Swap settle**: on **user-initiated, non-log** swaps the incoming fragment fades opacity 0.6→1 over `--motion-base` (`.htmx-settling`); no translate/slide. **Logs, SSE updates and timed-poll refreshes animate nothing** (§4). Under `prefers-reduced-motion` every swap is instant.
 - **Success**: mutation success = C17 toast + fragment swap; the swapped region's C0 chip is the **only** freshness messaging (ties into §12: no swap → no visual event).
 - **Inline errors, never toast**: HTMX response/network errors render the error partial **into the failing region** as C1 S-FAIL — `role="alert"`, cause, time, **Retry** re-firing the same request. Repeated failures update the strip's timestamp; strips never stack. Toasts carry success/neutral only.
 - **Focus after swap**: container `tabindex="-1"` focus + `data-*-announce` [CP] for **user-initiated** swaps only; timed polls and SSE updates never steal focus and never announce.
@@ -396,7 +396,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.1 `/overview`
 
-```
+```text
 ┌ app ───────────────────────────────────────────────────────────────────────┐
 │ ⟦C2 sidebar 260px, surface-sidebar⟧      ⟦topbar: theme ◐ | RU EN | ●stale⟧ │
 │ ▍Обзор            │  Обзор                                    ⟦type-h1⟧    │
@@ -423,7 +423,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.2 `/overview/queue`
 
-```
+```text
 │ Очередь и назначения                                  ⟦type-h1⟧
 │ ┌ Слот 1 ◉ streamer_a · DROP_PRIORITY ┐┌ Слот 2 — свободен · NO_CANDIDATE ┐ ⟦C12⟧
 │ ⟦C5⟧ [Поиск… ] (Статус ▾)(Причина ▾)(Сортировка ▾)  [таблица|карточки]  Сбросить
@@ -443,7 +443,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.3 `/drops/current` — R17 state shown
 
-```
+```text
 │ Дропсы · Текущие                                     ⟦type-h1⟧
 │ Политика: (Все ▾)  [Синхронизировать ⟳]              ⟦C5 + manual sync⟧
 │ ┌ ⟦C1 strip · S-DEGR, caution rail 3px⟧ ────────────────────────────────┐
@@ -465,7 +465,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.4 `/drops/claims`
 
-```
+```text
 │ Дропсы · Клеймы                                      ⟦type-h1⟧
 │ ┌ ⟦C9 info⟧ История в объёме этой сессии ⚑ — постоянное хранилище не
 │ │ подтверждено (до свидетельств B2)                                     ┘
@@ -485,7 +485,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.5 `/settings/events-notifications`
 
-```
+```text
 │ Настройки · События и уведомления       ⟦категория = граница dirty⟧
 │ ┌ Звук ⟦C6⟧ ────────────────────────────────────────────────────────────┐
 │ │ Громкость      [────●────] 70%        [▶ Предпросмотр] ⟦по жесту⟧     │
@@ -508,7 +508,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.6 `/system/status`
 
-```
+```text
 │ Система · Статус                                      ⟦type-h1⟧
 │ ┌ Подсистемы ⟦C4, свежесть НА КАЖДОЙ строке⟧ ───────────────────────────┐
 │ │ Подсистема        Состояние⟦икона+текст+цвет⟧      Свежесть ⟦C0/строку⟧│
@@ -525,7 +525,7 @@ Desktop `xl`, dark theme, RU copy. `⟦…⟧` = component/token annotation. Chr
 
 ### 14.7 `/system/logs`
 
-```
+```text
 │ Система · Логи        ⓘ Логи — технический журнал; события → /events
 │ ⟦C5⟧ [Поиск… ] (Уровень ▾)(Модуль ▾)  [Перенос строк] [Копировать]
 │ ┌ ⟦C15 well: surface-inset, type-code 12.5px⟧ ── ⏱ 10 с · опрос ⟦C0⟧ ──┐
