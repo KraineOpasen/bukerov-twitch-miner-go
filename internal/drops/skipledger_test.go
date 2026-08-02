@@ -1159,3 +1159,226 @@ func TestNewSkipLedgerMigrationFailureNoPartialState(t *testing.T) {
 		t.Errorf("clean db drop_skip_ledger version = %d, want 1", cleanVersion)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Benefit-tier decide() branches: a Benefit ID identifies a reward FAMILY, not
+// a specific occurrence, so tier 3 (BENEFIT) only ever returns SKIP when both
+// windows are decidable AND overlapping (same_benefit_overlapping_window).
+// Every other outcome in this tier -- either window unknown, provably
+// disjoint windows, or a game conflict that excludes the row from
+// activeBenefit before the window is ever consulted -- shares the same
+// "benefit_window_undecidable" fallthrough (fail open by default). Tier 1
+// (INSTANCE) separately consults activeBenefit, but only to prove a
+// DIFFERENT already-recorded instance makes the candidate a new occurrence
+// ("new_minted_instance") -- that guard must terminate BEFORE tier 3 ever
+// runs, or two distinct grants of the same reward family would collapse onto
+// one SKIP.
+// ---------------------------------------------------------------------------
+
+func TestSkipSnapshotDecideBenefitTierMatrix(t *testing.T) {
+	windowEarly := models.EntitlementWindow{
+		Start: time.Date(2031, 3, 1, 0, 0, 0, 0, time.UTC), End: time.Date(2031, 3, 1, 6, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
+	windowOverlapsEarly := models.EntitlementWindow{
+		Start: time.Date(2031, 3, 1, 3, 0, 0, 0, time.UTC), End: time.Date(2031, 3, 1, 9, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
+	windowLaterDisjoint := models.EntitlementWindow{
+		Start: time.Date(2031, 3, 2, 0, 0, 0, 0, time.UTC), End: time.Date(2031, 3, 2, 6, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
+	var windowUnknown models.EntitlementWindow // zero value: Known=false
+
+	tests := []struct {
+		name           string
+		ledgerEvidence skipEvidence
+		candidate      models.RewardIdentity
+		wantSkip       bool
+		wantReason     string
+	}{
+		{
+			// B1: known, overlapping windows on both sides. The candidate
+			// carries no CampaignID/DropID/InstanceID at all, so tiers 1 and 2
+			// are structurally never entered (their guards require non-empty
+			// fields the candidate doesn't have here) -- only tier 3 can
+			// produce this result. The candidate's name is never set either,
+			// confirming the match needs no name comparison.
+			name: "B1_same_benefit_overlapping_window_is_skip",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b1", benefitID: "ben-b1",
+				campaignID: "camp-b1", dropID: "drop-b1", window: windowEarly,
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b1", BenefitID: "ben-b1", Window: windowOverlapsEarly},
+			wantSkip:   true,
+			wantReason: "same_benefit_overlapping_window",
+		},
+		{
+			// B2: both windows decidable but the candidate is a LATER,
+			// disjoint occurrence -- provably a different grant of the same
+			// reward family, so this later occurrence must remain farmable.
+			name: "B2_same_benefit_disjoint_window_is_farm",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b2", benefitID: "ben-b2",
+				campaignID: "camp-b2", dropID: "drop-b2", window: windowEarly,
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b2", BenefitID: "ben-b2", Window: windowLaterDisjoint},
+			wantSkip:   false,
+			wantReason: "benefit_window_undecidable",
+		},
+		{
+			// B3: the candidate's own window is unknown -- sameness cannot be
+			// proven, so this fails open to FARM exactly like B2.
+			name: "B3_candidate_window_unknown_fails_open_to_farm",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b3", benefitID: "ben-b3",
+				campaignID: "camp-b3", dropID: "drop-b3", window: windowEarly,
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b3", BenefitID: "ben-b3", Window: windowUnknown},
+			wantSkip:   false,
+			wantReason: "benefit_window_undecidable",
+		},
+		{
+			// B4: the same fail-open rule from the OTHER side -- the recorded
+			// ledger row itself never had a known window (e.g. an E3
+			// inventory sighting, which carries no dates of its own).
+			name: "B4_ledger_row_window_unknown_fails_open_to_farm",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b4", benefitID: "ben-b4",
+				campaignID: "camp-b4", dropID: "drop-b4", // window left zero-value (unknown)
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b4", BenefitID: "ben-b4", Window: windowEarly},
+			wantSkip:   false,
+			wantReason: "benefit_window_undecidable",
+		},
+		{
+			// B5: without the game conflict this candidate would SKIP (same
+			// benefit, overlapping windows) -- the different KNOWN game must
+			// exclude the row from activeBenefit before the window is ever
+			// consulted, so the decision terminates as FARM.
+			name: "B5_different_known_game_ids_is_farm_before_benefit_match",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b5-a", benefitID: "ben-b5",
+				campaignID: "camp-b5", dropID: "drop-b5", window: windowEarly,
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b5-b", BenefitID: "ben-b5", Window: windowOverlapsEarly},
+			wantSkip:   false,
+			wantReason: "benefit_window_undecidable",
+		},
+		{
+			// B6: the ledger row already carries a DIFFERENT, older minted
+			// instance under the same benefit ID. The candidate's brand-new
+			// instance is unrecorded, so decide() enters tier 1's "no record
+			// of this exact instance" branch; the benefit-backed guard there
+			// must return FARM ("new_minted_instance") and terminate BEFORE
+			// tier 3 ever runs, even though the windows overlap and tier 3
+			// would otherwise SKIP. The candidate has no CampaignID/DropID, so
+			// the sibling composite-backed guard in the same tier is
+			// structurally unreachable here -- only the benefit-backed guard
+			// can produce this result.
+			name: "B6_different_minted_instance_same_benefit_is_farm_terminal",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b6", benefitID: "ben-b6",
+				campaignID: "camp-b6-old", dropID: "drop-b6-old", instanceID: "inst-b6-old", window: windowEarly,
+			},
+			candidate: models.RewardIdentity{
+				GameID: "game-b6", BenefitID: "ben-b6", InstanceID: "inst-b6-new", Window: windowOverlapsEarly,
+			},
+			wantSkip:   false,
+			wantReason: "new_minted_instance",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+			ctx := context.Background()
+			must(t, ledger.Observe(ctx, tt.ledgerEvidence))
+
+			snap, err := ledger.Snapshot(ctx)
+			if err != nil {
+				t.Fatalf("snapshot: %v", err)
+			}
+			skip, reason := snap.decide(tt.candidate, false)
+			if skip != tt.wantSkip {
+				t.Fatalf("decide() = skip=%v reason=%q, want skip=%v", skip, reason, tt.wantSkip)
+			}
+			if reason != tt.wantReason {
+				t.Fatalf("decide() reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B7: Reconcile's SH2 rule releases an ACTIVE row once a freshly-observed
+// candidate's entitlement window is provably disjoint from it -- a genuinely
+// new occurrence of the same campaign+drop composite, regardless of instance
+// IDs (both sides are instance-less here, so SH1 can never fire first).
+// ---------------------------------------------------------------------------
+
+func TestReconcileSH2DisjointOccurrenceReleasesRow(t *testing.T) {
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	ctx := context.Background()
+
+	earlyWindow := models.EntitlementWindow{
+		Start: time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC), End: time.Date(2031, 4, 1, 6, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
+	laterDisjointWindow := models.EntitlementWindow{
+		Start: time.Date(2031, 4, 2, 0, 0, 0, 0, time.UTC), End: time.Date(2031, 4, 2, 6, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
+
+	must(t, ledger.Observe(ctx, skipEvidence{
+		class: evidenceInventoryClaimed, gameID: "game-b7", campaignID: "camp-b7", dropID: "drop-b7",
+		window: earlyWindow,
+	}))
+
+	// Precondition: before Reconcile runs, the SAME occurrence still SKIPs --
+	// establishes the "before" state this test's transition is measured
+	// against.
+	preSnap, err := ledger.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	sameOccurrence := models.RewardIdentity{GameID: "game-b7", CampaignID: "camp-b7", DropID: "drop-b7", Window: earlyWindow}
+	if skip, reason := preSnap.decide(sameOccurrence, false); !skip {
+		t.Fatalf("precondition failed: expected the row to still SKIP the same occurrence before Reconcile, got FARM (%s)", reason)
+	}
+
+	campaign := &models.Campaign{
+		ID: "camp-b7", Game: &models.Game{ID: "game-b7"},
+		StartAt: laterDisjointWindow.Start, EndAt: laterDisjointWindow.End,
+		Drops: []*models.Drop{{ID: "drop-b7", Name: "Reward", MinutesRequired: 60}},
+	}
+	must(t, ledger.Reconcile(ctx, []*models.Campaign{campaign}))
+
+	row := skipRowByComposite(t, ledger, "camp-b7", "drop-b7", "")
+	if row.state != skipStateReleased {
+		t.Fatalf("expected SH2 to release the row for a provably disjoint occurrence, got state %q", row.state)
+	}
+
+	var reason string
+	if err := ledger.db.QueryRow(
+		`SELECT state_reason FROM drop_reward_skips WHERE account_key = ? AND campaign_id = ? AND drop_id = ? AND instance_id = ''`,
+		ledger.accountKey, "camp-b7", "drop-b7",
+	).Scan(&reason); err != nil {
+		t.Fatalf("read state_reason: %v", err)
+	}
+	if reason != "disjoint_occurrence" {
+		t.Fatalf("state_reason = %q, want %q", reason, "disjoint_occurrence")
+	}
+
+	// And the practical consequence: the later occurrence itself is now
+	// decidable as farmable, since a released row is excluded from every
+	// decide() tier.
+	postSnap, err := ledger.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	laterOccurrence := models.RewardIdentity{GameID: "game-b7", CampaignID: "camp-b7", DropID: "drop-b7", Window: laterDisjointWindow}
+	if skip, reason := postSnap.decide(laterOccurrence, false); skip {
+		t.Fatalf("decide() = SKIP (%s), want FARM: the later disjoint occurrence must remain farmable after SH2", reason)
+	}
+}
