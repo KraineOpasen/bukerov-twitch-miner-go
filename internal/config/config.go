@@ -93,7 +93,12 @@ type Config struct {
 	// file: only a CONFIRMED (login-matching, at the time the pin was still
 	// empty) validate result ever backfills it automatically. Empty preserves
 	// the exact pre-C3 login-anchor behavior.
-	OwnerUserID         string                  `json:"ownerUserId,omitempty"`
+	OwnerUserID string `json:"ownerUserId,omitempty"`
+	// ClaimDropsOnStartup is a deprecated compatibility no-op. Drop rewards
+	// have always been checked and claimed unconditionally during the normal
+	// first full sync (see SPECIFICATIONS.md's "Drop Claiming Flow") — this
+	// flag never gated that. It's kept only so config.json files written
+	// before this change still parse; never read anywhere else.
 	ClaimDropsOnStartup bool                    `json:"claimDropsOnStartup"`
 	EnableAnalytics     bool                    `json:"enableAnalytics"`
 	Priority            []Priority              `json:"priority"`

@@ -1056,10 +1056,6 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		// leaves the process.
 		m.webServer.SetSupportBundleSource(m.BuildDebugSnapshot)
 	}
-
-	if m.config.ClaimDropsOnStartup {
-		slog.Info("Claiming all drops from inventory on startup")
-	}
 }
 
 // notificationManager returns the write-once notifications Manager published

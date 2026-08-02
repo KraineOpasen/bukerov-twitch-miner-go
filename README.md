@@ -598,7 +598,6 @@ Generate a sample config with all options:
 ```json
 {
   "username": "your_twitch_username",
-  "claimDropsOnStartup": false,
   "enableAnalytics": true,
   "priority": ["STREAK", "DROPS", "ORDER"],
   "dropBlacklist": ["keyword to skip"],

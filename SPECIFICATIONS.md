@@ -281,7 +281,7 @@ The main controller coordinates all mining operations.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `username` | string | Required | Twitch username |
-| `claimDropsOnStartup` | boolean | false | Claim all drops from inventory on startup |
+| `claimDropsOnStartup` | boolean | false | Deprecated compatibility no-op. Drop rewards are checked and claimed unconditionally during the normal first full sync (see "Drop Claiming Flow"); this flag has no behavioral effect and is retained only so legacy config.json files still parse |
 | `enableAnalytics` | boolean | true | Enable analytics web server |
 | `priority` | array | [STREAK, DROPS, ORDER] | Streamer watching priority |
 | `streamerSettings` | object | Default | Default settings for streamers |
