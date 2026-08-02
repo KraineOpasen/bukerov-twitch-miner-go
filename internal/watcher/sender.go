@@ -246,7 +246,17 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", constants.TVUserAgent)
 
-	resp, err := s.httpClient.Do(req)
+	// The beacon POST must never follow a redirect: a redirected target could
+	// be cross-origin, downgrade https to http, or (for 307/308) replay the
+	// full beacon body to a third party. This override is local to a shallow
+	// copy of the shared client, so playlist/variant/segment requests made
+	// through s.httpClient elsewhere keep following redirects normally.
+	beaconClient := *s.httpClient
+	beaconClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := beaconClient.Do(req)
 	if err != nil {
 		return 0, false, err
 	}
