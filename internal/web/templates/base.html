@@ -65,6 +65,8 @@
     </script>
 </head>
 <body class="min-h-screen bg-neutral-900 text-neutral-100">
+    <a href="#main-content" class="skip-link">{{ t "a11y.skip_to_content" }}</a>
+
     <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-neutral-900/95 flex items-center justify-center z-[1000]">
         <div class="bg-neutral-800 border border-neutral-700 rounded-xl p-8 max-w-md w-[90%] text-center">
             <h2 id="status-title" class="text-purple-500 text-xl font-semibold mb-4">{{ t "js.overlay.initializing" }}</h2>
@@ -74,11 +76,16 @@
         </div>
     </div>
 
+    <div class="chrome-scrim" data-chrome-scrim aria-hidden="true"></div>
+
     <div class="app-shell">
         <button type="button" id="sidebar-toggle" class="sidebar-toggle qa-btn" aria-label="{{ t "a11y.toggle_menu" }}" aria-controls="app-sidebar" aria-expanded="false">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
         <aside class="app-sidebar" id="app-sidebar">
+            <button type="button" class="chrome-drawer-close" data-drawer-close aria-label="{{ t "a11y.close_menu" }}">
+                <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
             <a href="/" class="flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-neutral-100">
                 <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="31" height="52" class="shrink-0" style="height:52px;width:auto;object-fit:contain">
                 <span class="sidebar-brand">
@@ -87,45 +94,7 @@
                 </span>
             </a>
 
-            <nav class="flex flex-col py-1" aria-label="{{ t "a11y.primary_nav" }}">
-                <a href="/" data-nav="/" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
-                    {{ t "nav.overview" }}
-                </a>
-                {{/* The "Streamers" (/#grid) and "Predictions" (/#predictions) items
-                     were in-page anchor links to sections the Overview already
-                     renders (streamer grid + active predictions), so they offered
-                     no distinct destination and only duplicated Overview. Removed
-                     to keep the nav honest; the #grid / #predictions anchors still
-                     work via direct URL and the active-nav script still handles
-                     any remaining hash links, so no redirect is needed. */}}
-                <a href="/drops" data-nav="/drops" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
-                    {{ t "nav.drops" }}
-                </a>
-                <a href="/statistics" data-nav="/statistics" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                    {{ t "nav.statistics" }}
-                </a>
-                {{if .DiscordEnabled}}
-                <a href="/notifications" data-nav="/notifications" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
-                    {{ t "nav.notifications" }}
-                </a>
-                {{end}}
-                <a href="/logs" data-nav="/logs" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
-                    {{ t "nav.logs" }}
-                </a>
-                <a href="/health" data-nav="/health" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                    {{ t "nav.health" }}
-                </a>
-                <a href="/settings" data-nav="/settings" class="sidebar-link">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    {{ t "nav.settings" }}
-                </a>
-            </nav>
+            {{template "c2.nav" .}}
 
             <div class="now-watching" id="now-watching"
                  hx-get="/api/now-watching" hx-trigger="load, every 30s" hx-swap="innerHTML">
@@ -142,7 +111,8 @@
             </div>
         </aside>
 
-        <main class="app-main">
+        <div class="app-main-col">
+        <header class="app-topbar">
             <div class="flex items-center justify-end mb-3">{{block "topbar_widgets" .}}{{end}}
                 <div class="inline-flex rounded-md overflow-hidden border border-neutral-700 mr-2"
                      role="group" aria-label="{{ t "a11y.theme" }}" id="theme-toggle">
@@ -161,48 +131,68 @@
                     <button type="button" class="lang-btn{{if eq lang "en"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"en"}' hx-swap="none" aria-pressed="{{if eq lang "en"}}true{{else}}false{{end}}">EN</button>
                 </div>
             </div>
+        </header>
 
-            <div id="health-banner" class="hidden" role="alert">
-                <span id="health-banner-text"></span>
-            </div>
-
-            {{/* Ф4c: non-blocking re-auth banner for generation>1 (design v6
-                 §10 rule 2) — a SIBLING of #health-banner, own id, own
-                 markup (link + select-all code, reusing the overlay's proven
-                 structure at the auth_required case below and the same
-                 js.overlay.* keys), since #health-banner is text-only
-                 (className switch + textContent) and cannot host that
-                 markup. Hidden whenever status leaves an auth state, or is
-                 in one but at generation<=1 (the blocking overlay already
-                 covers that case). */}}
-            <div id="lifecycle-auth-banner" class="hidden" role="alert"></div>
+        <main class="app-main">
+<span id="main-content" tabindex="-1"></span>
+            {{template "c17.lifecycle_alert" .}}
 
             {{block "content" .}}{{end}}
         </main>
+        </div>
     </div>
+
+    {{template "c17.toast_stack" .}}
 
     {{block "scripts" .}}{{end}}
 
     <script>
-        // Highlight the active sidebar link. Real routes match by pathname; the
-        // in-page section links (#grid, #predictions) highlight when their
-        // section hash is active on the home page.
+        // Chrome nav activation + responsive drawer (S5-2). The active
+        // section is computed client-side from window.location.pathname —
+        // no per-page Go data is threaded through the nav, so every existing
+        // page handler stays untouched. aria-current="page" is set on at
+        // most one destination link: the System group's own top-level link
+        // never receives it when a child (Health/Logs) is the actual active
+        // destination, so exactly one element is ever marked current.
         (function() {
-            // Recomputed on every hash change (not just load) so clicking the
-            // in-page section tabs (#grid/#predictions) moves the highlight
-            // immediately instead of only after a reload.
+            var SECTION_RULES = [
+                { section: 'overview', test: function(p) { return p === '/' || p === '/overview'; } },
+                { section: 'drops', test: function(p) { return p === '/drops' || p.indexOf('/drops/') === 0; } },
+                { section: 'analytics', test: function(p) { return p === '/statistics' || p.indexOf('/analytics/') === 0; } },
+                { section: 'events', test: function(p) { return p === '/notifications' || p === '/events' || p.indexOf('/events/') === 0 || p.indexOf('/events') === 0; } },
+                { section: 'settings', test: function(p) { return p === '/settings' || p.indexOf('/settings/') === 0; } },
+                { section: 'system', test: function(p) { return p === '/health' || p === '/logs' || p.indexOf('/system/') === 0; } },
+                { section: 'help', test: function(p) { return p.indexOf('/help') === 0; } }
+            ];
+
+            function activeSection(path) {
+                for (var i = 0; i < SECTION_RULES.length; i++) {
+                    if (SECTION_RULES[i].test(path)) return SECTION_RULES[i].section;
+                }
+                return null;
+            }
+
             function updateActiveNav() {
-                const path = window.location.pathname;
-                const hash = window.location.hash;
-                document.querySelectorAll('[data-nav]').forEach(a => {
-                    const nav = a.getAttribute('data-nav');
-                    let active;
-                    if (nav.startsWith('#')) {
-                        active = path === '/' && nav === hash;
+                var path = window.location.pathname;
+                var active = activeSection(path);
+                document.querySelectorAll('[data-nav-section]').forEach(function (a) {
+                    var isParent = a.hasAttribute('data-nav-parent');
+                    var isChild = a.hasAttribute('data-nav-child');
+                    var sectionMatches = a.getAttribute('data-nav-section') === active;
+                    // Children (System's Health/Logs) share one section id, so
+                    // the actual destination is disambiguated by href — only
+                    // the one matching the current path is ever "current".
+                    // The group's own parent link is only ever visually
+                    // highlighted, never marked aria-current, so exactly one
+                    // element carries it at a time.
+                    var isCurrent = isChild ? (sectionMatches && a.getAttribute('href') === path) : sectionMatches;
+
+                    a.classList.toggle('is-active', isParent ? sectionMatches : isCurrent);
+                    if (!isParent && isCurrent) {
+                        a.setAttribute('aria-current', 'page');
                     } else {
-                        active = nav === path || (nav === '/' && path === '/' && !hash);
+                        a.removeAttribute('aria-current');
                     }
-                    a.classList.toggle('is-active', active);
                 });
             }
             updateActiveNav();
@@ -223,20 +213,50 @@
             requestAnimationFrame(scrollToHash);
             window.addEventListener('hashchange', scrollToHash);
 
-            // Mobile drawer toggle. The button lives outside the (off-canvas)
-            // sidebar so it can open it while the drawer is slid off-screen; the
-            // same button also closes it. aria-expanded mirrors the drawer state
-            // and Escape closes an open drawer for keyboard users.
+            // Responsive drawer (<1024px, see input.css): the button lives
+            // outside the (off-canvas) sidebar so it can open it while the
+            // drawer is slid off-screen; the same button also closes it.
+            // aria-expanded mirrors the drawer state. Escape, the scrim and
+            // outside interaction all close it; opening moves focus to the
+            // first nav destination, closing returns it to the toggle;
+            // Tab/Shift+Tab are trapped inside the sidebar while open; body
+            // scrolling is locked while open.
             const toggle = document.getElementById('sidebar-toggle');
             const sidebar = document.getElementById('app-sidebar');
+            const scrim = document.querySelector('[data-chrome-scrim]');
             if (toggle && sidebar) {
+                function focusableIn(container) {
+                    return Array.prototype.slice.call(
+                        container.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
+                    );
+                }
+
                 const setOpen = (open) => {
                     sidebar.classList.toggle('is-open', open);
+                    if (scrim) scrim.classList.toggle('is-open', open);
                     toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                    document.body.classList.toggle('chrome-scroll-lock', open);
+                    if (open) {
+                        const first = sidebar.querySelector('.c2-nav-link, .c2-nav-child');
+                        if (first) first.focus();
+                    } else {
+                        toggle.focus();
+                    }
                 };
                 toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('is-open')));
+                if (scrim) scrim.addEventListener('click', () => setOpen(false));
+                const drawerClose = sidebar.querySelector('[data-drawer-close]');
+                if (drawerClose) drawerClose.addEventListener('click', () => setOpen(false));
                 document.addEventListener('keydown', (e) => {
                     if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setOpen(false);
+                });
+                sidebar.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Tab' || !sidebar.classList.contains('is-open')) return;
+                    const items = focusableIn(sidebar);
+                    if (!items.length) return;
+                    const first = items[0], last = items[items.length - 1];
+                    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
                 });
             }
         })();
@@ -501,6 +521,49 @@
             window.addEventListener('pagehide', disconnectSSE);
             window.addEventListener('beforeunload', disconnectSSE);
         })();
+    </script>
+
+    <script>
+        // Shared C17 global toast (success/neutral only — errors are never
+        // toasts, see input.css/C1 inline-failure convention) and the generic
+        // inline-failure setter used at each converted error-toast call site
+        // across overview.html/notifications.html/settings.html. Centralized
+        // here (rather than duplicated per page) since the global toast
+        // region itself is now chrome, not page-local markup.
+        window.showToast = function (message) {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-success';
+            toast.tabIndex = 0;
+            toast.textContent = message;
+            container.appendChild(toast);
+
+            let remaining = 5000;
+            let start = Date.now();
+            let timer = setTimeout(remove, remaining);
+            function remove() { toast.remove(); }
+            function pause() { clearTimeout(timer); remaining -= (Date.now() - start); }
+            function resume() { if (remaining > 0) { start = Date.now(); timer = setTimeout(remove, remaining); } }
+            toast.addEventListener('mouseenter', pause);
+            toast.addEventListener('mouseleave', resume);
+            toast.addEventListener('focusin', pause);
+            toast.addEventListener('focusout', resume);
+        };
+
+        window.showInlineFailure = function (id, msg) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.textContent = msg;
+            el.hidden = false;
+        };
+
+        window.clearInlineFailure = function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.hidden = true;
+            el.textContent = '';
+        };
     </script>
 </body>
 </html>

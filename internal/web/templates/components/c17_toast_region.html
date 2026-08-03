@@ -1,0 +1,29 @@
+{{/* C17 — Toasts and alerts (Stage 4 §6 / task OD-S5-2-1 item 3). Exactly two
+     GLOBAL live regions exist in chrome, both rendered once per page from
+     here:
+       c17.toast_stack    — role="status" aria-live="polite", success/neutral
+                            only. Populated client-side by base.html's shared
+                            showToast(); errors never reach it (inline C1 at
+                            the failure site instead).
+       c17.lifecycle_alert — one wrapper carrying role="alert"; the existing
+                            #health-banner / #lifecycle-auth-banner children
+                            keep their ids and are targeted unchanged by
+                            base.html's status script, but no longer carry
+                            their own separate alert role — the wrapper is
+                            the sole live region for both.
+     Regional/page-local live regions (e.g. Overview's #lc-live) are untouched
+     by this component and are not part of the "exactly two" count — that
+     count is GLOBAL chrome regions only. */}}
+{{define "c17.toast_stack"}}<div id="toast-container" role="status" aria-live="polite" class="c17-toast-stack"></div>{{end}}
+{{define "c17.lifecycle_alert"}}<div id="lifecycle-alert-region" class="c17-lifecycle-alert" role="alert">
+    <div id="health-banner" class="hidden">
+        <span id="health-banner-text"></span>
+    </div>
+    {{/* Ф4c: non-blocking re-auth banner for generation>1 — a sibling of
+         #health-banner inside the same alert wrapper, own id, own markup
+         (link + select-all code), since #health-banner is text-only
+         (className switch + textContent) and cannot host that markup.
+         Hidden whenever status leaves an auth state, or is in one but at
+         generation<=1 (the blocking overlay already covers that case). */}}
+    <div id="lifecycle-auth-banner" class="hidden"></div>
+</div>{{end}}

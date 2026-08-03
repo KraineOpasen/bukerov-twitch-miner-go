@@ -1,0 +1,6 @@
+{{/* C0 — Provenance chip (Stage 4 §6). Freshness + source + session evidence
+     for exactly one live data region. Inputs (ProvenanceChipData):
+       AgeLabel string · Source string · Session bool · Aged bool · Unknown bool
+     Variants: live (default) / aged (S-STALE) / session (S-SESS) / unknown (S-UNK).
+     Non-interactive, plain visible text — no aria-live, no title-only content. */}}
+{{define "c0.provenance_chip"}}<span class="c0-chip{{if .Unknown}} c0-chip--unknown{{else if .Aged}} c0-chip--aged{{else if .Session}} c0-chip--session{{else}} c0-chip--live{{end}}"><svg class="c0-chip-ico" aria-hidden="true" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="c0-chip-text">{{if .Unknown}}{{ t "c0.unknown" }}{{else}}{{.AgeLabel}}{{if .Source}} · {{.Source}}{{end}}{{end}}{{if .Session}} · {{ t "c0.session" }}{{end}}</span></span>{{end}}

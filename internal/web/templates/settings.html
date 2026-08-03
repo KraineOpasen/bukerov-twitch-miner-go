@@ -3,6 +3,7 @@
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "set.title" }}</h1>
 <p class="text-neutral-400 text-sm mb-6">{{ t "set.subtitle" }}</p>
+<div id="settings-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-form" class="space-y-4">
     <details id="streamers" class="details-panel">
@@ -15,6 +16,8 @@
                 <button type="button" id="add-streamer-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.add" }}</button>
                 <button type="button" id="import-followed-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.import" }}</button>
             </div>
+
+            <div id="streamer-form-error" class="c1-inline-fail" role="alert" hidden></div>
 
             <ul class="space-y-2" id="streamer-list">
             </ul>
@@ -146,6 +149,8 @@
                 <input type="text" id="new-directory-game-input" placeholder="{{ t "set.directory.input_placeholder" }}" class="input-field flex-1">
                 <button type="button" id="add-directory-game-btn" class="btn-secondary whitespace-nowrap">{{ t "set.directory.add" }}</button>
             </div>
+
+            <div id="directory-game-form-error" class="c1-inline-fail" role="alert" hidden></div>
 
             <ul class="space-y-2" id="directory-game-list">
             </ul>
@@ -413,13 +418,12 @@
         </div>
     </details>
 
+    <div id="settings-action-error" class="c1-inline-fail" role="alert" hidden></div>
     <div class="flex gap-4 justify-end pt-4">
         <button type="button" class="btn-secondary" id="reset-btn">{{ t "set.reset" }}</button>
         <button type="submit" class="btn-primary" id="save-btn">{{ t "set.save" }}</button>
     </div>
 </form>
-
-<div id="toast-container" role="status" aria-live="polite"></div>
 {{end}}
 
 {{define "scripts"}}
@@ -605,7 +609,7 @@
             currentSettings = await response.json();
             populateForm(currentSettings);
         } catch (error) {
-            showToast(t('js.set.toast.load_failed'), 'error');
+            showInlineFailure('settings-load-error', t('js.set.toast.load_failed'));
             console.error(error);
         }
     }
@@ -710,19 +714,20 @@
         const input = document.getElementById('new-directory-game-input');
         const game = input.value.trim();
         if (!game) {
-            showToast(t('js.set.toast.game_name_required'), 'error');
+            showInlineFailure('directory-game-form-error', t('js.set.toast.game_name_required'));
             return;
         }
 
         const exists = Array.from(document.querySelectorAll('#directory-game-list .streamer-item'))
             .some(item => item.dataset.game.toLowerCase() === game.toLowerCase());
         if (exists) {
-            showToast(t('js.set.toast.game_exists'), 'error');
+            showInlineFailure('directory-game-form-error', t('js.set.toast.game_exists'));
             return;
         }
 
         document.getElementById('directory-game-list').appendChild(createDirectoryGameItem(game));
         input.value = '';
+        clearInlineFailure('directory-game-form-error');
         showToast(t('js.set.toast.game_added', { game: game }));
     }
 
@@ -1039,13 +1044,13 @@
         const input = document.getElementById('new-streamer-input');
         const username = input.value.trim().toLowerCase();
         if (!username) {
-            showToast(t('js.set.toast.username_required'), 'error');
+            showInlineFailure('streamer-form-error', t('js.set.toast.username_required'));
             return;
         }
 
         const existing = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
         if (existing) {
-            showToast(t('js.set.toast.streamer_exists'), 'error');
+            showInlineFailure('streamer-form-error', t('js.set.toast.streamer_exists'));
             return;
         }
 
@@ -1055,6 +1060,7 @@
         list.appendChild(li);
         setupStreamerDragAndDrop();
         input.value = '';
+        clearInlineFailure('streamer-form-error');
         showToast(t('js.set.toast.streamer_added', { username: username }));
     }
 
@@ -1207,14 +1213,8 @@
         });
     }
 
-    function showToast(message, type = 'success') {
-        const container = document.getElementById('toast-container');
-        const toast = document.createElement('div');
-        toast.className = `toast ${type === 'success' ? 'toast-success' : 'toast-error'}`;
-        toast.textContent = message;
-        container.appendChild(toast);
-        setTimeout(() => toast.remove(), 3000);
-    }
+    // showToast (success/neutral only) and showInlineFailure/clearInlineFailure
+    // are defined once, globally, in base.html.
 
     document.getElementById('add-streamer-btn').addEventListener('click', addStreamer);
     document.getElementById('new-streamer-input').addEventListener('keypress', (e) => {
@@ -1261,16 +1261,18 @@
             const newDiscordEnabled = data.discord?.enabled || false;
             
             if (oldDiscordEnabled !== newDiscordEnabled) {
+                clearInlineFailure('settings-action-error');
                 showToast(t('js.set.toast.saved_reloading'));
                 sessionStorage.removeItem('miner_loaded_' + window.location.pathname);
                 setTimeout(() => window.location.reload(), 500);
                 return;
             }
 
+            clearInlineFailure('settings-action-error');
             showToast(t('js.set.toast.saved'));
             currentSettings = data;
         } catch (error) {
-            showToast(error.message || t('js.set.toast.save_failed'), 'error');
+            showInlineFailure('settings-action-error', error.message || t('js.set.toast.save_failed'));
         } finally {
             saveBtn.disabled = false;
             saveBtn.textContent = t('js.set.save');
@@ -1292,9 +1294,10 @@
 
             const settings = await response.json();
             populateForm(settings);
+            clearInlineFailure('settings-action-error');
             showToast(t('js.set.toast.reset_done'));
         } catch (error) {
-            showToast(error.message || t('js.set.toast.reset_failed'), 'error');
+            showInlineFailure('settings-action-error', error.message || t('js.set.toast.reset_failed'));
         }
     });
 

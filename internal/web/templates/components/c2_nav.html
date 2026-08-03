@@ -1,0 +1,62 @@
+{{/* C2 — Navigation chrome (Stage 4 §6 / task OD-S5-2-1). Exactly seven
+     top-level sections, rendered identically regardless of Discord
+     configuration — only the CONTENT of /events varies by Discord
+     availability, never its presence in this list. Purely static/localized:
+     no per-request Go fields are threaded through here, since the active
+     section is computed client-side from window.location.pathname (see
+     base.html's nav-activation script) — the only design compatible with
+     every existing page handler staying untouched in this slice.
+     data-nav-section is the stable section identifier used by that script;
+     data-nav-child marks a System sub-destination (Health/Logs) as the one
+     that receives aria-current="page" when active, never the parent link,
+     so exactly one destination is ever marked current. */}}
+{{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
+    <ul class="c2-nav-list">
+        <li class="c2-nav-item">
+            <a href="/overview" class="c2-nav-link" data-nav-section="overview" aria-label="{{ t "nav.overview" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+                <span class="c2-nav-label">{{ t "nav.overview" }}</span>
+            </a>
+        </li>
+        <li class="c2-nav-item">
+            <a href="/drops" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
+                <span class="c2-nav-label">{{ t "nav.drops" }}</span>
+            </a>
+        </li>
+        <li class="c2-nav-item">
+            <a href="/statistics" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                <span class="c2-nav-label">{{ t "nav.analytics" }}</span>
+            </a>
+        </li>
+        <li class="c2-nav-item">
+            <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+                <span class="c2-nav-label">{{ t "nav.events" }}</span>
+            </a>
+        </li>
+        <li class="c2-nav-item">
+            <a href="/settings" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span class="c2-nav-label">{{ t "nav.settings" }}</span>
+            </a>
+        </li>
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/health" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <span class="c2-nav-label">{{ t "nav.system" }}</span>
+            </a>
+            <ul class="c2-nav-children">
+                <li><a href="/health" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.health" }}</a></li>
+                <li><a href="/logs" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.logs" }}</a></li>
+            </ul>
+        </li>
+        <li class="c2-nav-item">
+            <a href="/help/getting-started" class="c2-nav-link" data-nav-section="help" aria-label="{{ t "nav.help" }}">
+                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span class="c2-nav-label">{{ t "nav.help" }}</span>
+            </a>
+        </li>
+    </ul>
+</nav>{{end}}

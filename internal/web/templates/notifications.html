@@ -203,7 +203,9 @@
                 </label>
                 <button type="button" id="add-point-rule-btn" class="btn-secondary" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.points.add_rule" }}</button>
             </div>
-            
+
+            <div id="notif-rules-error" class="c1-inline-fail" role="alert" hidden></div>
+
             <div class="overflow-x-auto">
                 <table class="w-full" id="point-rules-table">
                     <thead>
@@ -299,13 +301,12 @@
         </div>
     </details>
 
+    <div id="notif-action-error" class="c1-inline-fail" role="alert" hidden></div>
     <div class="flex gap-4 justify-end pt-4">
         <button type="button" class="btn-secondary" id="test-notifications-btn" onclick="testNotifications()" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.test_all" }}</button>
         <button type="button" class="btn-primary" id="save-notifications-btn" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.save" }}</button>
     </div>
 </div>
-
-<div id="toast-container" role="status" aria-live="polite"></div>
 {{end}}
 
 {{define "scripts"}}
@@ -529,7 +530,7 @@
         const deleteOnTrigger = document.getElementById('point-rule-delete').checked;
 
         if (!streamer || !threshold || threshold < 1) {
-            showToast(t('js.notif.invalid_rule'), 'error');
+            showInlineFailure('notif-rules-error', t('js.notif.invalid_rule'));
             return;
         }
 
@@ -546,12 +547,13 @@
                 document.getElementById('point-rule-threshold').value = '';
                 document.getElementById('point-rule-delete').checked = false;
                 await loadPointRules();
+                clearInlineFailure('notif-rules-error');
                 showToast(t('js.notif.rule_added'));
             } else {
-                showToast(t('js.notif.rule_add_failed'), 'error');
+                showInlineFailure('notif-rules-error', t('js.notif.rule_add_failed'));
             }
         } catch (error) {
-            showToast(t('js.notif.rule_add_failed'), 'error');
+            showInlineFailure('notif-rules-error', t('js.notif.rule_add_failed'));
         } finally {
             if (btn) btn.disabled = false;
         }
@@ -564,12 +566,13 @@
             const response = await fetch(`/api/notifications/points/${id}`, { method: 'DELETE' });
             if (response.ok) {
                 await loadPointRules();
+                clearInlineFailure('notif-rules-error');
                 showToast(t('js.notif.rule_deleted'));
             } else {
-                showToast(t('js.notif.rule_delete_failed'), 'error');
+                showInlineFailure('notif-rules-error', t('js.notif.rule_delete_failed'));
             }
         } catch (error) {
-            showToast(t('js.notif.rule_delete_failed'), 'error');
+            showInlineFailure('notif-rules-error', t('js.notif.rule_delete_failed'));
         }
     }
 
@@ -603,43 +606,39 @@
             });
 
             if (response.ok) {
+                clearInlineFailure('notif-action-error');
                 showToast(t('js.notif.saved'));
             } else {
-                showToast(t('js.notif.save_failed'), 'error');
+                showInlineFailure('notif-action-error', t('js.notif.save_failed'));
             }
         } catch (error) {
-            showToast(t('js.notif.save_failed'), 'error');
+            showInlineFailure('notif-action-error', t('js.notif.save_failed'));
         } finally {
             if (btn) btn.disabled = false;
         }
     }
 
-    function showToast(message, type = 'success') {
-        const container = document.getElementById('toast-container');
-        const toast = document.createElement('div');
-        toast.className = `toast ${type === 'success' ? 'toast-success' : 'toast-error'}`;
-        toast.textContent = message;
-        container.appendChild(toast);
-        setTimeout(() => toast.remove(), 3000);
-    }
+    // showToast (success/neutral only) and showInlineFailure/clearInlineFailure
+    // are defined once, globally, in base.html.
 
     async function testNotifications() {
         const btn = document.getElementById('test-notifications-btn');
         const originalText = btn.textContent;
         btn.disabled = true;
         btn.textContent = t('js.notif.sending');
-        
+
         try {
             const response = await fetch('/api/notifications/test', { method: 'POST' });
             if (response.ok) {
                 const result = await response.json();
+                clearInlineFailure('notif-action-error');
                 showToast(t('js.notif.test_sent', { n: result.sent }));
             } else {
                 const error = await response.text();
-                showToast(t('js.notif.test_failed_prefix') + ' ' + error, 'error');
+                showInlineFailure('notif-action-error', t('js.notif.test_failed_prefix') + ' ' + error);
             }
         } catch (error) {
-            showToast(t('js.notif.test_failed'), 'error');
+            showInlineFailure('notif-action-error', t('js.notif.test_failed'));
         } finally {
             btn.disabled = false;
             btn.textContent = originalText;

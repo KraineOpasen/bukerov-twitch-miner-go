@@ -1,0 +1,12 @@
+{{/* C1 — State block (Stage 4 §6). The single host for S-EMPTY/PART/STALE/
+     UNK/DEGR/FAIL/BLOCK/DENY/DEFER (S-LOAD is the skeleton form; S-READY has
+     no state block). Inputs (StateBlockData):
+       State string        — one of EMPTY/PART/STALE/UNK/DEGR/FAIL/BLOCK/DENY/DEFER,
+                              or "" / "NOBACK" for S-NOBACK (absence, nothing renders)
+       Variant string       — "block" | "strip" | "inline"
+       Message, Cause, Time string
+       ActionLabel, ActionTarget string
+     Only the FAIL variant carries role="alert" (inline, never a toast); every
+     other state is plain content. S-NOBACK is a hard absence of the control —
+     never a grey placeholder. */}}
+{{define "c1.state_block"}}{{if and .State (ne .State "NOBACK")}}<div class="c1-block c1-block--{{.Variant}} c1-tier-{{if eq .State "FAIL"}}danger{{else if eq .State "DENY"}}danger{{else if eq .State "PART"}}caution{{else if eq .State "STALE"}}caution{{else if eq .State "DEGR"}}caution{{else if eq .State "BLOCK"}}caution{{else}}neutral{{end}}"{{if eq .State "FAIL"}} role="alert"{{end}}><span class="c1-block-icon" aria-hidden="true">{{if eq .State "EMPTY"}}▢{{else if eq .State "PART"}}◐{{else if eq .State "STALE"}}⏱{{else if eq .State "UNK"}}?{{else if eq .State "DEGR"}}▲{{else if eq .State "FAIL"}}⛔{{else if eq .State "BLOCK"}}⛨{{else if eq .State "DENY"}}⊘{{else if eq .State "DEFER"}}‖{{end}}</span><span class="c1-block-body"><span class="c1-block-message">{{.Message}}</span>{{if .Cause}}<span class="c1-block-cause">{{.Cause}}</span>{{end}}{{if .Time}}<span class="c1-block-time">{{.Time}}</span>{{end}}</span>{{if .ActionLabel}}<a class="c1-block-action" href="{{.ActionTarget}}">{{.ActionLabel}}</a>{{end}}</div>{{end}}{{end}}

@@ -606,6 +606,78 @@ type NotificationsPageData struct {
 	Streamers      []string
 }
 
+// --- S5-2 component library view types (C0/C1/C10/C11, Stage 4 §6) ---
+
+// ProvenanceChipData feeds the C0 provenance-chip component: freshness age,
+// source and session evidence for exactly one live data region.
+type ProvenanceChipData struct {
+	AgeLabel string
+	Source   string
+	Session  bool
+	Aged     bool
+	Unknown  bool
+}
+
+// StateBlockData feeds the C1 state-block component: the single host for the
+// non-loading, non-ready S-states. State is one of the 9 C1 state codes
+// (EMPTY/PART/STALE/UNK/DEGR/FAIL/BLOCK/DENY/DEFER); an empty State (or
+// "NOBACK") renders nothing — S-NOBACK is the absence of a control, never a
+// greyed-out placeholder.
+type StateBlockData struct {
+	State        string
+	Variant      string // "block" | "strip" | "inline"
+	Message      string
+	Cause        string
+	Time         string
+	ActionLabel  string
+	ActionTarget string
+}
+
+// BadgeData feeds the C10 badge component: a compact icon+text+tier status
+// encoding (channel status, claim state, reason code, session marker, etc).
+type BadgeData struct {
+	Tier  string // "ok" | "info" | "caution" | "danger" | "neutral"
+	Icon  string
+	Label string
+}
+
+// ProgressData feeds the C11 progress component. Mode "unknown" renders no
+// bar at all (S-UNK must never read as 0%); "indeterminate" is the thin
+// sliding-stripe variant reserved for in-flight sync attempts; "determinate"
+// is the normal percent bar with the mono percent rendered beside it.
+type ProgressData struct {
+	Mode    string // "determinate" | "unknown" | "indeterminate"
+	Percent int
+	Label   string
+}
+
+// EventsPageData feeds the minimal /events compatibility landing (S5-2): a
+// direct-rendered page that honestly states the Discord-availability of the
+// current notification configuration without implementing the future event
+// journal (deferred to S5-7).
+type EventsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+	// DisabledState is the C1 state-block payload shown when Discord is
+	// disabled (a neutral/empty state pointing at /settings); zero-valued
+	// and unused when DiscordEnabled is true.
+	DisabledState StateBlockData
+}
+
+// HelpPageData feeds the minimal /help/getting-started compatibility
+// landing (S5-2): orientation to the seven live sections only, no glossary
+// or troubleshooting content (deferred to S5-9).
+type HelpPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
 func convertStreamerInfo(info analytics.StreamerInfo) StreamerInfo {
 	// analytics.StreamerInfo carries only a boolean IsLive (from stored history),
 	// so its tri-state status is derived: online when live, otherwise offline.

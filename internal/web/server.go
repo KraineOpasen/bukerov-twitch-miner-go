@@ -29,7 +29,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
-//go:embed templates/*.html templates/partials/*.html
+//go:embed templates/*.html templates/partials/*.html templates/components/*.html
 var templatesFS embed.FS
 
 //go:embed static/*
@@ -297,13 +297,14 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	langs := i18n.SupportedLangs()
 	placeholder := placeholderFuncMap()
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
 			"templates/base.html",
 			"templates/"+page,
 			"templates/partials/*.html",
+			"templates/components/*.html",
 		)
 		if err != nil {
 			slog.Error("Failed to parse template", "page", page, "error", err)
@@ -323,7 +324,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	}
 
 	partials := make(map[string]*template.Template, len(langs))
-	if base, err := template.New("partials").Funcs(placeholder).ParseFS(templatesFS, "templates/partials/*.html"); err != nil {
+	if base, err := template.New("partials").Funcs(placeholder).ParseFS(templatesFS, "templates/partials/*.html", "templates/components/*.html"); err != nil {
 		slog.Error("Failed to parse partials", "error", err)
 	} else {
 		for _, lang := range langs {
@@ -759,6 +760,21 @@ func (s *Server) handler() http.Handler {
 	// POST-only and, being on this mux, inherits csrfProtectMiddleware below
 	// like every other mutating endpoint.
 	mux.HandleFunc("/api/lang", s.handleAPILang)
+
+	// S5-2 seven-section chrome: additive compatibility routes (handlers_chrome.go).
+	// Direct-render routes reuse/extend the existing rendering pipelines;
+	// every legacy route above keeps rendering directly and is never
+	// redirected. Deferred routes (e.g. /overview/queue, /drops/claims) are
+	// intentionally NOT registered here — they fall through to the existing
+	// "/" catch-all (handleDashboard), which 404s any path other than
+	// exactly "/", giving them honest 404 behavior with no new code.
+	mux.HandleFunc("/overview", s.handleOverviewPage)
+	mux.HandleFunc("/events", s.handleEventsPage)
+	mux.HandleFunc("/help/getting-started", s.handleHelpGettingStarted)
+
+	for route, target := range compatibilityRedirects {
+		mux.HandleFunc(route, redirectCompat(target))
+	}
 
 	// Middleware chain (outermost first): security headers on every
 	// response, then Basic Auth when configured, then the same-origin check

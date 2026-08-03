@@ -1,0 +1,21 @@
+{{/* Minimal /help/getting-started compatibility landing (S5-2, OD-S5-2-1
+     item 1). Orientation to the seven live sections only — no glossary,
+     troubleshooting procedures or diagnostics claims (those arrive in S5-9). */}}
+{{define "title"}}{{ t "help.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "help.title" }}</h1>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "help.lead" }}</p>
+
+<ul class="help-links-list">
+    <li><a href="/overview">{{ t "nav.overview" }}</a></li>
+    <li><a href="/drops">{{ t "nav.drops" }}</a></li>
+    <li><a href="/statistics">{{ t "nav.analytics" }}</a></li>
+    <li><a href="/events">{{ t "nav.events" }}</a></li>
+    <li><a href="/settings">{{ t "nav.settings" }}</a></li>
+    <li><a href="/health">{{ t "nav.system" }}</a></li>
+    <li><a href="/help/getting-started">{{ t "nav.help" }}</a></li>
+</ul>
+
+<p class="type-small text-text-muted mt-6">{{ t "help.pending" }}</p>
+{{end}}
