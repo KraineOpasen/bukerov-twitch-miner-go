@@ -9,6 +9,7 @@ package web
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -101,6 +102,63 @@ func TestS5_2C1NoBackRendersNothing(t *testing.T) {
 		if strings.TrimSpace(out) != "" {
 			t.Errorf("S-NOBACK (State=%q) must render nothing, got %q", state, out)
 		}
+	}
+}
+
+// s5_2NumericPercentRe matches any bare digit-percent token (e.g. "0%",
+// "42%") — used to prove the unknown C11 mode never renders a numeric
+// percent under any label text.
+var s5_2NumericPercentRe = regexp.MustCompile(`\d+%`)
+
+// TestS5_2C11ProgressModeSpecificStructure (test-gap) proves the C11
+// progress component renders genuinely mode-specific structure rather than
+// merely containing a percent substring somewhere: determinate output
+// carries the track/fill (at the exact width) and percent markup, while
+// unknown output carries none of that — no track, no fill, no percent node,
+// no bare numeric percent anywhere — only the dash and the localized
+// unknown label.
+func TestS5_2C11ProgressModeSpecificStructure(t *testing.T) {
+	det := execComponent(t, i18n.LangEN, "c11.progress", ProgressData{Mode: "determinate", Percent: 42, Label: "42/100"})
+	for _, want := range []string{
+		"c11-progress--determinate",
+		"c11-progress-track",
+		"c11-progress-fill",
+		`style="width:42%"`,
+		"c11-progress-percent",
+		"42%",
+	} {
+		if !strings.Contains(det, want) {
+			t.Errorf("determinate c11.progress missing %q, got %q", want, det)
+		}
+	}
+
+	unk := execComponent(t, i18n.LangEN, "c11.progress", ProgressData{Mode: "unknown"})
+	if !strings.Contains(unk, "c11-progress--unknown") {
+		t.Errorf("unknown c11.progress missing c11-progress--unknown, got %q", unk)
+	}
+	if !strings.Contains(unk, "c11-progress-dash") {
+		t.Errorf("unknown c11.progress missing c11-progress-dash, got %q", unk)
+	}
+
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	unknownLabel := loc.T(i18n.LangEN, "c11.unknown")
+	if unknownLabel == "" || unknownLabel == "c11.unknown" {
+		t.Fatalf("c11.unknown localized label is missing or unresolved: %q", unknownLabel)
+	}
+	if !strings.Contains(unk, unknownLabel) {
+		t.Errorf("unknown c11.progress missing the localized unknown label %q, got %q", unknownLabel, unk)
+	}
+
+	for _, banned := range []string{"c11-progress-track", "c11-progress-fill", "c11-progress-percent"} {
+		if strings.Contains(unk, banned) {
+			t.Errorf("unknown c11.progress must not render %q, got %q", banned, unk)
+		}
+	}
+	if s5_2NumericPercentRe.MatchString(unk) {
+		t.Errorf("unknown c11.progress must not render any numeric percent, got %q", unk)
 	}
 }
 

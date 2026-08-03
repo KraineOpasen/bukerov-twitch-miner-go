@@ -315,6 +315,12 @@
 
     async function sendSkip(eventId, skip, input) {
         if (input) input.disabled = true;
+        // The checkbox lives inside a [data-manual] card with its own
+        // [data-live-error] region; the "Undo" button (unskip) does not, so
+        // it falls back to the page-level action-error region. Resolved once
+        // here so the success path clears the exact same region the failure
+        // path would have written to.
+        const manual = input ? input.closest('[data-manual]') : null;
         try {
             const res = await fetch('/api/prediction/skip', {
                 method: 'POST',
@@ -323,14 +329,10 @@
             });
             const data = await res.json().catch(() => ({ success: false, message: t('js.ov.unexpected_response') }));
             if (res.status !== 200 || !data.success) throw new Error((data && data.message) || t('js.ov.could_not_update_autobet'));
-            clearInlineFailure('ov-action-error');
+            if (manual) { showLiveError(manual, ''); } else { clearInlineFailure('ov-action-error'); }
             showToast(data.message || (skip ? t('js.ov.autobet_skipped') : t('js.ov.autobet_reenabled')));
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
-            // The checkbox lives inside a [data-manual] card with its own
-            // [data-live-error] region; the "Undo" button (unskip) does not,
-            // so it falls back to the page-level action-error region.
-            const manual = input ? input.closest('[data-manual]') : null;
             const msg = e.message || t('js.ov.action_failed');
             if (manual) { showLiveError(manual, msg); } else { showInlineFailure('ov-action-error', msg); }
             if (input && input.type === 'checkbox') input.checked = !skip; // revert

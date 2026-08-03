@@ -718,18 +718,6 @@
   @apply text-neutral-400 text-xs mt-1;
 }
 
-@utility toast {
-  @apply fixed bottom-8 right-8 px-6 py-4 rounded-lg text-white font-medium z-[1000];
-}
-
-@utility toast-success {
-  @apply bg-green-600;
-}
-
-@utility toast-error {
-  @apply bg-red-600;
-}
-
 @utility live-badge {
   @apply bg-red-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
 }
@@ -2179,7 +2167,12 @@
 
 @media (min-width: 1024px) and (max-width: 1279.98px) {
   .app-shell { grid-template-columns: 56px minmax(0, 1fr); }
-  .app-sidebar { width: 56px; }
+  /* overflow: visible — the base .app-sidebar rule clips to its own box
+     (overflow: hidden), which would clip the label/children flyouts below
+     (they escape via left: 100%); the rail is the only breakpoint that
+     renders those flyouts, so only it needs to remove the clipping
+     ancestor. */
+  .app-sidebar { width: 56px; overflow: visible; }
   .sidebar-brand, .now-watching, .c2-nav-label, .c2-nav-children {
     display: none;
   }
@@ -2219,6 +2212,19 @@
   .c2-nav-item--group:hover .c2-nav-children .c2-nav-child,
   .c2-nav-item--group:focus-within .c2-nav-children .c2-nav-child {
     margin-left: 0;
+  }
+  /* Non-flyout rows: the ancestor overflow:visible above (needed for the
+     label/children flyouts) also unclips these two rows, which have no
+     flyout of their own, so each contains itself instead. */
+  .sidebar-brand-row {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .sidebar-footer {
+    display: none;
   }
 }
 

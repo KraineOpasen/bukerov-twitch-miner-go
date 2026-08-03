@@ -125,6 +125,92 @@ func TestS5_2DrawerSourceContract(t *testing.T) {
 	}
 }
 
+// TestS5_2DrawerResizeSafeFocusTrapSourceContract (MAJOR) proves the Tab
+// focus trap only runs while the viewport is genuinely inside the drawer
+// range, that a single matchMedia authority backs both the trap guard and
+// the breakpoint cleanup (never a second, independently-declared listener),
+// that transitioning past 1024px while open clears the drawer's stale
+// is-open/scrim/aria-expanded/scroll-lock state via the same setOpen used
+// everywhere else, and that this cleanup path never forces focus onto the
+// now-hidden drawer toggle.
+func TestS5_2DrawerResizeSafeFocusTrapSourceContract(t *testing.T) {
+	base := readEmbeddedTemplate(t, "templates/base.html")
+
+	start := strings.Index(base, "const toggle = document.getElementById('sidebar-toggle');")
+	if start < 0 {
+		t.Fatal("could not locate the responsive-drawer script body in base.html")
+	}
+	relEnd := strings.Index(base[start:], "})();")
+	if relEnd < 0 {
+		t.Fatal("could not locate the end of the responsive-drawer IIFE in base.html")
+	}
+	fn := base[start : start+relEnd]
+
+	// Exactly one drawer media-query authority — a second, independently
+	// declared matchMedia('(max-width: 1023.98px)') would risk the trap
+	// guard and the cleanup listener silently drifting apart.
+	if n := strings.Count(fn, "matchMedia('(max-width: 1023.98px)')"); n != 1 {
+		t.Fatalf("expected exactly one drawer matchMedia authority in the drawer script, found %d", n)
+	}
+	if !strings.Contains(fn, "const drawerMedia = window.matchMedia('(max-width: 1023.98px)');") {
+		t.Error("expected a single named drawerMedia authority declared once")
+	}
+
+	// The Tab trap must be guarded by drawerMedia.matches, not .is-open
+	// alone, so it can never fire once the drawer is no longer an off-canvas
+	// overlay (rail/sidebar layouts at >=1024px).
+	trapIdx := strings.Index(fn, "if (e.key !== 'Tab'")
+	if trapIdx < 0 {
+		t.Fatal("could not locate the Tab-trap guard")
+	}
+	trapLineEnd := strings.Index(fn[trapIdx:], "\n")
+	if trapLineEnd < 0 {
+		t.Fatal("could not locate the end of the Tab-trap guard line")
+	}
+	trapLine := fn[trapIdx : trapIdx+trapLineEnd]
+	if !strings.Contains(trapLine, "drawerMedia.matches") {
+		t.Error("the Tab focus trap guard must also check drawerMedia.matches, not just .is-open, so it never runs at >=1024px")
+	}
+
+	// A drawerMedia change listener must exist and clear stale drawer state
+	// (via the shared setOpen) only when the viewport has left the drawer
+	// range.
+	changeIdx := strings.Index(fn, "drawerMedia.addEventListener('change'")
+	if changeIdx < 0 {
+		t.Fatal("expected a drawerMedia change listener that cleans up stale drawer state on breakpoint transition")
+	}
+	relChangeEnd := strings.Index(fn[changeIdx:], "});")
+	if relChangeEnd < 0 {
+		t.Fatal("could not locate the end of the drawerMedia change listener")
+	}
+	changeBlock := fn[changeIdx : changeIdx+relChangeEnd+len("});")]
+	if !strings.Contains(changeBlock, "!e.matches") {
+		t.Error("the breakpoint cleanup must only run once the viewport has left the drawer range (!e.matches)")
+	}
+	if !strings.Contains(changeBlock, "setOpen(false, false)") {
+		t.Error("the breakpoint cleanup must clear drawer state via setOpen(false, false) — the restoreFocus=false form")
+	}
+
+	// setOpen itself must gate toggle.focus() behind the restoreFocus flag,
+	// so the false form used by breakpoint cleanup structurally cannot move
+	// focus onto the (now CSS-hidden) drawer toggle.
+	setOpenIdx := strings.Index(fn, "const setOpen = (open, restoreFocus)")
+	if setOpenIdx < 0 {
+		t.Fatal("could not locate the setOpen(open, restoreFocus) definition")
+	}
+	relSetOpenEnd := strings.Index(fn[setOpenIdx:], "};")
+	if relSetOpenEnd < 0 {
+		t.Fatal("could not locate the end of the setOpen definition")
+	}
+	setOpenBody := fn[setOpenIdx : setOpenIdx+relSetOpenEnd+2]
+	if !strings.Contains(setOpenBody, "} else if (restoreFocus) {") {
+		t.Error("setOpen must only call toggle.focus() when restoreFocus is true, so breakpoint cleanup can never force focus onto the hidden toggle")
+	}
+	if !strings.Contains(setOpenBody, "toggle.focus();") {
+		t.Error("setOpen must still call toggle.focus() on the user-triggered (restoreFocus=true) close path")
+	}
+}
+
 // TestS5_2AriaCurrentSourceContract checks base.html's nav-activation script
 // actually sets and clears aria-current="page" — the mechanism behind "set
 // aria-current on exactly one active destination, remove it from inactive
@@ -438,11 +524,13 @@ func TestS5_2DrawerCloseVisibilitySourceContract(t *testing.T) {
 	}
 }
 
-// TestS5_2SendSkipClearsStaleFailureBeforeSuccessToast (MINOR-1) proves the
-// sendSkip success path clears a stale #ov-action-error via the existing
-// clearInlineFailure helper before showing the success toast — and does so
-// exactly once, without touching the request, endpoint, refresh or failure
-// fallback behavior.
+// TestS5_2SendSkipClearsStaleFailureBeforeSuccessToast (MINOR-1, MAJOR-C)
+// proves the sendSkip success path clears the SAME failure region the
+// failure path would have written to — the card's own [data-live-error] via
+// showLiveError when the retry came from a card checkbox, or the page-level
+// #ov-action-error via clearInlineFailure for the non-card (Undo) path —
+// before showing the success toast, without touching the request, endpoint,
+// refresh, checkbox-revert or failure-fallback behavior.
 func TestS5_2SendSkipClearsStaleFailureBeforeSuccessToast(t *testing.T) {
 	src := readEmbeddedTemplate(t, "templates/overview.html")
 
@@ -453,21 +541,51 @@ func TestS5_2SendSkipClearsStaleFailureBeforeSuccessToast(t *testing.T) {
 	}
 	fn := src[start:end]
 
-	if n := strings.Count(fn, "clearInlineFailure('ov-action-error')"); n != 1 {
-		t.Fatalf("expected exactly one clearInlineFailure('ov-action-error') call in sendSkip, found %d", n)
+	// The manual card must be resolved exactly once, before the try block —
+	// the same lookup backs both the success and failure region selection,
+	// so they can never diverge.
+	if n := strings.Count(fn, "input.closest('[data-manual]')"); n != 1 {
+		t.Fatalf("expected exactly one input.closest('[data-manual]') resolution in sendSkip, found %d", n)
 	}
-	clearIdx := strings.Index(fn, "clearInlineFailure('ov-action-error')")
+	manualIdx := strings.Index(fn, "input.closest('[data-manual]')")
+	tryIdx := strings.Index(fn, "try {")
+	if manualIdx < 0 || tryIdx < 0 || manualIdx > tryIdx {
+		t.Error("the manual card must be resolved before the try block, so the success and failure paths share the same lookup")
+	}
+
+	// Success must clear the manual card's region when present, and fall
+	// back to the page-level region otherwise — the identical branch shape
+	// the failure path already uses.
+	wantSuccessClear := "if (manual) { showLiveError(manual, ''); } else { clearInlineFailure('ov-action-error'); }"
+	if n := strings.Count(fn, wantSuccessClear); n != 1 {
+		t.Fatalf("expected exactly one matching-region success clear %q in sendSkip, found %d", wantSuccessClear, n)
+	}
+
+	clearIdx := strings.Index(fn, wantSuccessClear)
 	toastIdx := strings.Index(fn, "showToast(data.message")
 	if toastIdx < 0 {
 		t.Fatal("sendSkip success path must still show the success toast")
 	}
 	if clearIdx > toastIdx {
-		t.Error("clearInlineFailure('ov-action-error') must run before the success toast in sendSkip")
+		t.Error("the matching-region success clear must run before the success toast in sendSkip")
 	}
 
-	// Failure fallback behavior must remain untouched.
-	if !strings.Contains(fn, `showInlineFailure('ov-action-error', msg)`) {
-		t.Error("sendSkip must retain its existing failure fallback via showInlineFailure")
+	// Failure behavior — including the manual-vs-fallback region choice,
+	// the revert and the request itself — must remain untouched.
+	if !strings.Contains(fn, `if (manual) { showLiveError(manual, msg); } else { showInlineFailure('ov-action-error', msg); }`) {
+		t.Error("sendSkip must retain its existing manual-vs-fallback failure region selection")
+	}
+	if !strings.Contains(fn, `input.checked = !skip; // revert`) {
+		t.Error("sendSkip must still revert the checkbox on failure")
+	}
+	if !strings.Contains(fn, `fetch('/api/prediction/skip'`) {
+		t.Error("sendSkip must still POST to /api/prediction/skip")
+	}
+	if !strings.Contains(fn, `body: JSON.stringify({ eventId: eventId, skip: skip })`) {
+		t.Error("sendSkip must still send the same request body")
+	}
+	if !strings.Contains(fn, `htmx.trigger('#overview-live', 'refresh')`) {
+		t.Error("sendSkip must still trigger the overview-live HTMX refresh on success")
 	}
 }
 
@@ -484,6 +602,18 @@ func TestS5_2SystemFlyoutLabelAndChildrenDoNotShareAnchor(t *testing.T) {
 		t.Fatal("expected rail breakpoint block not found")
 	}
 	rail := css[railIdx:sidebarIdx]
+
+	// (MAJOR) The rail is the only breakpoint that paints the label/children
+	// flyouts outside the sidebar's own box (via left: 100%); its base
+	// .app-sidebar rule clips to that box (overflow: hidden), so only the
+	// rail block may remove the clipping ancestor — the drawer ranges and
+	// the >=1280px expanded sidebar must never widen along with it.
+	if !strings.Contains(rail, "overflow: visible;") {
+		t.Error("the 1024-1279.98px rail block must set .app-sidebar overflow: visible so the label/children flyouts are not clipped by the sidebar's own box")
+	}
+	if strings.Contains(css[sidebarIdx:], "overflow: visible;") {
+		t.Error("the >=1280px expanded sidebar must not carry the rail-only overflow: visible override")
+	}
 
 	labelIdx := strings.Index(rail, ".c2-nav-item:hover .c2-nav-label")
 	childrenIdx := strings.Index(rail, ".c2-nav-item--group:hover .c2-nav-children")
@@ -609,6 +739,9 @@ func TestS5_2DrawerMechanicsUnifiedAcrossBothRanges(t *testing.T) {
 		if strings.Contains(block900, banned) {
 			t.Errorf("<=900px drawer block must not keep the old divergent literal %q", banned)
 		}
+		if strings.Contains(block901, banned) {
+			t.Errorf("901-1023.98px drawer block must not keep the old divergent literal %q", banned)
+		}
 	}
 }
 
@@ -672,5 +805,149 @@ func TestS5_2ScrimAndScrollLockResizeSafe(t *testing.T) {
 	}
 	if !strings.Contains(appBlock, scrollLockActiveMin) {
 		t.Error("generated app.css: the <1024px media block must contain the body.chrome-scroll-lock active rule")
+	}
+}
+
+// TestS5_2RailContainsNonFlyoutRows (MAJOR-1) proves the rail-scoped
+// .app-sidebar overflow:visible override — required so the label/children
+// flyouts (positioned via left:100%) escape the sidebar's own box — does
+// not also let the two ordinary (non-flyout) rows it contains, the brand
+// row and the username/version footer, paint outside the 56px rail. Each
+// row carries a stable semantic class and is contained only inside the
+// rail's own media block (1024-1279.98px); the drawer ranges and the
+// >=1280px expanded sidebar must never see either rule.
+func TestS5_2RailContainsNonFlyoutRows(t *testing.T) {
+	base := readEmbeddedTemplate(t, "templates/base.html")
+
+	if n := strings.Count(base, "sidebar-brand-row"); n != 1 {
+		t.Fatalf("expected exactly one sidebar-brand-row class in base.html, found %d", n)
+	}
+	if n := strings.Count(base, "sidebar-footer"); n != 1 {
+		t.Fatalf("expected exactly one sidebar-footer class in base.html, found %d", n)
+	}
+
+	css := readEmbeddedStatic(t, "static/css/input.css")
+
+	// Exactly one occurrence of each containment rule anywhere in the file —
+	// if either existed a second time outside the rail block, that copy
+	// could satisfy the assertions below without the rail block itself
+	// carrying the fix.
+	if n := strings.Count(css, ".sidebar-brand-row {"); n != 1 {
+		t.Fatalf("expected exactly one .sidebar-brand-row rule in input.css, found %d", n)
+	}
+	if n := strings.Count(css, ".sidebar-footer {"); n != 1 {
+		t.Fatalf("expected exactly one .sidebar-footer rule in input.css, found %d", n)
+	}
+
+	rail := extractMediaBlock(t, css, "@media (min-width: 1024px) and (max-width: 1279.98px)")
+
+	if !strings.Contains(rail, ".app-sidebar { width: 56px; overflow: visible; }") {
+		t.Error("rail media block must keep .app-sidebar overflow:visible — required by the label/children flyouts")
+	}
+
+	brandRule := extractMediaBlock(t, rail, ".sidebar-brand-row")
+	for _, want := range []string{"justify-content: center;", "padding-left: 0;", "padding-right: 0;", "overflow: hidden;"} {
+		if !strings.Contains(brandRule, want) {
+			t.Errorf("rail .sidebar-brand-row rule missing containment literal %q", want)
+		}
+	}
+
+	footerRule := extractMediaBlock(t, rail, ".sidebar-footer")
+	if strings.TrimSpace(footerRule) != "display: none;" {
+		t.Errorf("rail .sidebar-footer rule must be exactly `display: none;`, got %q", strings.TrimSpace(footerRule))
+	}
+
+	// The drawer ranges (<=900px, 901-1023.98px) and the >=1280px expanded
+	// sidebar must never hide the footer or narrow/center the brand row —
+	// those rows must render normally there, with the row's own content
+	// (the already-hidden .sidebar-brand span) untouched.
+	sidebarIdx := strings.Index(css, "@media (min-width: 1280px)")
+	if sidebarIdx < 0 {
+		t.Fatal("expected >=1280px sidebar block not found")
+	}
+	if strings.Contains(css[sidebarIdx:], "sidebar-footer") || strings.Contains(css[sidebarIdx:], "sidebar-brand-row") {
+		t.Error(">=1280px expanded sidebar must not hide .sidebar-footer or contain .sidebar-brand-row")
+	}
+	drawer900 := extractMediaBlock(t, css, "@media (max-width: 900px)")
+	drawer901 := extractMediaBlock(t, css, "@media (min-width: 901px) and (max-width: 1023.98px)")
+	for _, block := range []string{drawer900, drawer901} {
+		if strings.Contains(block, "sidebar-footer") || strings.Contains(block, "sidebar-brand-row") {
+			t.Error("drawer media blocks must not hide .sidebar-footer or contain .sidebar-brand-row")
+		}
+	}
+	if !strings.Contains(css, ".sidebar-brand, .now-watching, .c2-nav-label, .c2-nav-children {\n    display: none;\n  }") {
+		t.Error("rail block must still hide .sidebar-brand text inside the (now contained) brand row")
+	}
+}
+
+// TestS5_2LegacyFixedToastUtilityRemoved (MAJOR-2) proves the legacy
+// @utility toast/toast-success/toast-error declarations — which generated
+// fixed-position rules, offset from the viewport's own edges, on a raw
+// z-index, that took every toast out of the C17 flex stack's flow and
+// ignored its desktop/mobile positioning and --z-toast tier — are gone
+// from the source, while the unlayered C17 stack and its .toast/
+// .toast-success visual rules (border/background/shadow/padding,
+// success/neutral-only behaviour) are untouched, and the same holds in
+// the generated app.css.
+//
+// Note on literals below: this repo's Tailwind build auto-scans the whole
+// module for class candidates (this package's own _test.go files are not
+// .gitignore'd out of that scan), so an assertion string equal to an
+// actual Tailwind spacing/z-index utility name would itself get
+// regenerated into app.css. The checks here instead match the effective
+// *computed* CSS text those utilities expand to (e.g. the calc() form of
+// a spacing scale value), which is not itself a utility-candidate token.
+func TestS5_2LegacyFixedToastUtilityRemoved(t *testing.T) {
+	css := readEmbeddedStatic(t, "static/css/input.css")
+
+	for _, banned := range []string{"@utility toast {", "@utility toast-success {", "@utility toast-error {"} {
+		if strings.Contains(css, banned) {
+			t.Errorf("input.css must not define the legacy fixed-position utility %q", banned)
+		}
+	}
+
+	if !strings.Contains(css, ".c17-toast-stack {") {
+		t.Fatal("input.css must still define .c17-toast-stack")
+	}
+	stack := extractMediaBlock(t, css, ".c17-toast-stack")
+	for _, want := range []string{"position: fixed;", "right: 1rem;", "bottom: 1rem;", "z-index: var(--z-toast);", "display: flex;", "flex-direction: column;", "gap: 0.5rem;"} {
+		if !strings.Contains(stack, want) {
+			t.Errorf(".c17-toast-stack missing literal %q", want)
+		}
+	}
+	if !strings.Contains(css, ".c17-toast-stack { left: 0.75rem; right: 0.75rem; bottom: 0.75rem; max-width: none; }") {
+		t.Error("input.css must keep the mobile .c17-toast-stack placement override")
+	}
+
+	toastRule := extractMediaBlock(t, css, ".toast {")
+	if strings.Contains(toastRule, "position") {
+		t.Errorf(".toast must remain a normal flex-flow item, found a position declaration: %q", toastRule)
+	}
+	for _, want := range []string{"padding: 0.6rem 0.9rem;", "border-radius: var(--ds-radius-sm);", "box-shadow: var(--shadow-1);", "border: 1px solid var(--state-ok);", "background: var(--state-ok-bg);"} {
+		if !strings.Contains(toastRule, want) {
+			t.Errorf(".toast missing visual literal %q", want)
+		}
+	}
+	if !strings.Contains(css, ".toast-success { border-color: var(--state-ok); background: var(--state-ok-bg); }") {
+		t.Error("input.css must keep .toast-success success-only styling")
+	}
+
+	// The same effective behaviour must survive the Tailwind build: no
+	// generated rule for the .toast/.toast-success/.toast-error selectors
+	// may carry the fixed-position/offset/raw-z-index computed values the
+	// legacy utilities used to inject — scoped to those selectors only,
+	// since unrelated pre-existing overlays may legitimately use the same
+	// computed values elsewhere in the generated stylesheet.
+	appCSS := readEmbeddedStatic(t, "static/css/app.css")
+	toastSelectorRe := regexp.MustCompile(`\.toast(?:-success|-error)?\{[^}]*\}`)
+	for _, m := range toastSelectorRe.FindAllString(appCSS, -1) {
+		for _, banned := range []string{"position:fixed", "right:calc(var(--spacing)*8)", "bottom:calc(var(--spacing)*8)", "z-index:1000"} {
+			if strings.Contains(m, banned) {
+				t.Errorf("generated app.css: toast rule %q must not carry legacy fixed-position literal %q", m, banned)
+			}
+		}
+	}
+	if !strings.Contains(appCSS, ".c17-toast-stack{") {
+		t.Error("generated app.css must still define .c17-toast-stack")
 	}
 }

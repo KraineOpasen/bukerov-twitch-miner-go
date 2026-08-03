@@ -86,7 +86,7 @@
             <button type="button" class="chrome-drawer-close" data-drawer-close aria-label="{{ t "a11y.close_menu" }}">
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
-            <a href="/" class="flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-neutral-100">
+            <a href="/" class="sidebar-brand-row flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-neutral-100">
                 <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="31" height="52" class="shrink-0" style="height:52px;width:auto;object-fit:contain">
                 <span class="sidebar-brand">
                     <span class="sidebar-brand-title">Twitch Drops Miner</span>
@@ -102,7 +102,7 @@
                 <div class="skeleton h-16"></div>
             </div>
 
-            <div class="px-4 py-3 border-t border-neutral-700 text-xs text-neutral-400 flex items-center justify-between">
+            <div class="sidebar-footer px-4 py-3 border-t border-neutral-700 text-xs text-neutral-400 flex items-center justify-between">
                 <span class="inline-flex items-center gap-1.5">
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
                     {{.Username}}
@@ -231,7 +231,18 @@
                     );
                 }
 
-                const setOpen = (open) => {
+                // Single authority for "is the drawer the current off-canvas
+                // layout" (matches input.css's <1024px scrim/scroll-lock
+                // scoping exactly) — both the Tab trap and the breakpoint
+                // cleanup below read this same MediaQueryList so there is
+                // never a second, possibly-divergent listener.
+                const drawerMedia = window.matchMedia('(max-width: 1023.98px)');
+
+                // restoreFocus is false only for the breakpoint-cleanup path
+                // below: a resize to >=1024px must clear drawer state without
+                // yanking focus onto the now-hidden drawer toggle.
+                const setOpen = (open, restoreFocus) => {
+                    if (restoreFocus === undefined) restoreFocus = true;
                     sidebar.classList.toggle('is-open', open);
                     if (scrim) scrim.classList.toggle('is-open', open);
                     toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -239,7 +250,7 @@
                     if (open) {
                         const first = sidebar.querySelector('.c2-nav-link, .c2-nav-child');
                         if (first) first.focus();
-                    } else {
+                    } else if (restoreFocus) {
                         toggle.focus();
                     }
                 };
@@ -251,12 +262,21 @@
                     if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setOpen(false);
                 });
                 sidebar.addEventListener('keydown', (e) => {
-                    if (e.key !== 'Tab' || !sidebar.classList.contains('is-open')) return;
+                    if (e.key !== 'Tab' || !sidebar.classList.contains('is-open') || !drawerMedia.matches) return;
                     const items = focusableIn(sidebar);
                     if (!items.length) return;
                     const first = items[0], last = items[items.length - 1];
                     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
                     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+                });
+                // Breakpoint cleanup: a resize/rotation past 1024px while the
+                // drawer is open must not leave a stale .is-open (and with it
+                // the Tab trap, scrim and scroll lock) — the trap above is
+                // already media-guarded, but the drawer's own open state
+                // still needs clearing without moving focus to the toggle,
+                // which input.css hides at this width.
+                drawerMedia.addEventListener('change', (e) => {
+                    if (!e.matches && sidebar.classList.contains('is-open')) setOpen(false, false);
                 });
             }
         })();
