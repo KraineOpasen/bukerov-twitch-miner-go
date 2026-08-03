@@ -58,6 +58,8 @@
     </span>
 </div>
 
+<div id="ov-action-error" class="c1-inline-fail" role="alert" hidden></div>
+
 <div id="overview-live" hx-get="/api/overview" hx-trigger="every {{.PollSeconds}}s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
 </div>
@@ -69,8 +71,6 @@
 <dialog id="events-drawer" class="modal-dialog">
     <div id="events-drawer-body" class="p-0"></div>
 </dialog>
-
-<div id="toast-container"></div>
 {{end}}
 
 {{/* BKM-022: four resource mini-widgets rendered into the base top-bar row
@@ -109,16 +109,10 @@
 
 {{define "scripts"}}
 <script>
-    // Toasts.
-    function showToast(message, type) {
-        const container = document.getElementById('toast-container');
-        if (!container) return;
-        const toast = document.createElement('div');
-        toast.className = 'toast ' + (type === 'error' ? 'toast-error' : 'toast-success');
-        toast.textContent = message;
-        container.appendChild(toast);
-        setTimeout(() => toast.remove(), 2600);
-    }
+    // showToast (success/neutral only) and showInlineFailure/clearInlineFailure
+    // are defined once, globally, in base.html — the shared C17 toast stack
+    // and the generic inline-failure setter used at every converted
+    // error-toast call site on this page.
 
     // Card quick actions (priority cycle / watch toggle). Uses the same
     // settings pipeline as the Settings page; never opens the card.
@@ -132,6 +126,7 @@
             });
             const data = await res.json();
             if (!data.success) throw new Error(data.message || 'failed');
+            clearInlineFailure('ov-action-error');
             if (action === 'cycle-preference') {
                 const label = data.preference === 'prefer' ? t('js.ov.pref_preferred') : (data.preference === 'avoid' ? t('js.ov.pref_avoided') : t('js.ov.pref_neutral'));
                 showToast(name + ' → ' + label);
@@ -141,7 +136,7 @@
             // Refresh the live grid so badges/state reflect the change.
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
-            showToast(t('js.ov.action_failed'), 'error');
+            showInlineFailure('ov-action-error', t('js.ov.action_failed'));
         } finally {
             btn.disabled = false;
         }
@@ -301,7 +296,7 @@
             if (!data.success) {
                 st.inflight = false; st.confirming = false;
                 st.error = data.message || t('js.ov.bet_failed');
-                showToast(st.error, 'error');
+                showLiveError(manual, st.error);
                 updateBusy();
                 if (window.htmx) htmx.trigger('#overview-live', 'refresh');
                 return;
@@ -313,7 +308,6 @@
         } catch (e) {
             st.inflight = false; st.confirming = false;
             st.error = e.message || t('js.ov.conn_lost_bet');
-            showToast(st.error, 'error');
             showLiveError(manual, st.error);
             updateBusy();
         }
@@ -321,6 +315,12 @@
 
     async function sendSkip(eventId, skip, input) {
         if (input) input.disabled = true;
+        // The checkbox lives inside a [data-manual] card with its own
+        // [data-live-error] region; the "Undo" button (unskip) does not, so
+        // it falls back to the page-level action-error region. Resolved once
+        // here so the success path clears the exact same region the failure
+        // path would have written to.
+        const manual = input ? input.closest('[data-manual]') : null;
         try {
             const res = await fetch('/api/prediction/skip', {
                 method: 'POST',
@@ -329,10 +329,12 @@
             });
             const data = await res.json().catch(() => ({ success: false, message: t('js.ov.unexpected_response') }));
             if (res.status !== 200 || !data.success) throw new Error((data && data.message) || t('js.ov.could_not_update_autobet'));
+            if (manual) { showLiveError(manual, ''); } else { clearInlineFailure('ov-action-error'); }
             showToast(data.message || (skip ? t('js.ov.autobet_skipped') : t('js.ov.autobet_reenabled')));
             if (window.htmx) htmx.trigger('#overview-live', 'refresh');
         } catch (e) {
-            showToast(e.message || t('js.ov.action_failed'), 'error');
+            const msg = e.message || t('js.ov.action_failed');
+            if (manual) { showLiveError(manual, msg); } else { showInlineFailure('ov-action-error', msg); }
             if (input && input.type === 'checkbox') input.checked = !skip; // revert
         } finally {
             if (input) input.disabled = false;

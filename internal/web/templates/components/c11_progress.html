@@ -1,0 +1,10 @@
+{{/* C11 — Progress (Stage 4 §6). Inputs (ProgressData):
+       Mode string  — "determinate" | "unknown" | "indeterminate"
+       Percent int  — determinate only
+       Label string — optional trailing detail (e.g. "96/120 мин")
+     S-UNK is the R17 invariant: unknown progress renders NO bar at all (a
+     dash + "progress unknown" badge), never 0%. Indeterminate is the thin
+     sliding stripe reserved for in-flight sync attempts only, and is static
+     under prefers-reduced-motion (handled in CSS). The mono percent renders
+     BESIDE the bar, never inside it. */}}
+{{define "c11.progress"}}{{if eq .Mode "unknown"}}<span class="c11-progress c11-progress--unknown"><span class="c11-progress-dash" aria-hidden="true">—</span><span class="c11-progress-label">{{ t "c11.unknown" }}</span></span>{{else if eq .Mode "indeterminate"}}<span class="c11-progress c11-progress--indeterminate" role="img" aria-label="{{ t "c11.syncing" }}"><span class="c11-progress-track"><span class="c11-progress-stripe"></span></span></span>{{else}}<span class="c11-progress c11-progress--determinate"><span class="c11-progress-track"><span class="c11-progress-fill" style="width:{{.Percent}}%"></span></span><span class="c11-progress-percent num">{{.Percent}}%</span>{{if .Label}}<span class="c11-progress-label">{{.Label}}</span>{{end}}</span>{{end}}{{end}}

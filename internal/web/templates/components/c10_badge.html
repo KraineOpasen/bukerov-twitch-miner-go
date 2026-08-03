@@ -1,0 +1,10 @@
+{{/* C10 — Badge (Stage 4 §6). Compact status encoding: icon + text + tier
+     fill, never color alone. Inputs (BadgeData):
+       Tier string  — "ok" | "info" | "caution" | "danger" | "neutral"
+       Icon string  — decorative glyph (aria-hidden)
+       Label string — the real, visible status text
+     Generic host for the badge "sets" described in Stage 4 §6 (channel
+     status, claim state, reason code, "session" marker, nav counts, DP-C) —
+     the concrete vocabularies are wired by the pages that adopt this
+     component in later slices, never invented here. */}}
+{{define "c10.badge"}}<span class="c10-badge c10-badge--{{.Tier}}">{{if .Icon}}<span class="c10-badge-icon" aria-hidden="true">{{.Icon}}</span>{{end}}<span class="c10-badge-label">{{.Label}}</span></span>{{end}}

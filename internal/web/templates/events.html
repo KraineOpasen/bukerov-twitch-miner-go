@@ -1,0 +1,23 @@
+{{/* Minimal /events compatibility landing (S5-2, OD-S5-2-1 item 2). One of
+     the seven always-visible top-level sections; content honestly varies by
+     Discord availability. No event journal, delivery evidence, browser-audio
+     settings or other S5-7 functionality — that arrives in a later slice. */}}
+{{define "title"}}{{ t "events.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "events.title" }}</h1>
+
+{{if .DiscordEnabled}}
+<div class="c1-block c1-block--block c1-tier-info">
+    <span class="c1-block-icon" aria-hidden="true">i</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message">{{ t "events.enabled_text" }}</span>
+    </span>
+    <a class="c1-block-action" href="/notifications">{{ t "events.link_notifications" }}</a>
+</div>
+{{else}}
+{{template "c1.state_block" .DisabledState}}
+{{end}}
+
+<p class="type-small text-text-muted mt-4">{{ t "events.pending_note" }}</p>
+{{end}}
