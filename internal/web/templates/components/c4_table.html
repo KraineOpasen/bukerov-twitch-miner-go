@@ -1,0 +1,35 @@
+{{/* C4 — Table, data-dense (Stage 4 §6 / task Phase 6/10). The queue page's
+     desktop/compact representation of the full configured-streamer roster.
+     Semantic <table>, <th scope="col">, sortable headers as real <button>s
+     with aria-sort (client-side sort only - no new backend field, no query
+     contract). Reason codes render as mono type-code text, never linked to
+     /help/glossary (deferred), never the free-form Reason. Missing values
+     render "—" with an accessible "no data" label, never 0. No fabricated
+     queue-position column. Overflow-x lives on the card wrapper only - the
+     page itself never scrolls horizontally.
+     Inputs: .Roster []queueRosterRow */}}
+{{define "c4.roster_table"}}<div class="c4-table-card">
+<table class="c4-table" id="qr-table">
+    <caption class="visually-hidden">{{ t "queue.roster.caption" }}</caption>
+    <thead>
+        <tr>
+            <th scope="col">{{ t "queue.col.status" }}</th>
+            <th scope="col"><button type="button" class="c4-sort-btn" data-qr-sort="channel" aria-sort="none">{{ t "queue.col.channel" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+            <th scope="col">{{ t "queue.col.reason" }}</th>
+            <th scope="col" class="c4-th-num"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="points" aria-sort="none">{{ t "queue.col.points" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+            <th scope="col" class="c4-th-num"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="today" aria-sort="none">{{ t "queue.col.points_today" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+        </tr>
+    </thead>
+    <tbody id="qr-table-body">
+        {{range $i, $row := .Roster}}
+        <tr data-qr-row data-qr-channel="{{$row.Channel}}" data-qr-status="{{$row.Status}}" data-qr-points="{{$row.PointsRaw}}" data-qr-today="{{$row.PointsTodayRaw}}" data-qr-idx="{{$i}}">
+            <td>{{template "c10.badge" $row.StatusBadge}}</td>
+            <td><a href="/streamer/{{$row.Channel}}">{{$row.Channel}}</a></td>
+            <td>{{if $row.HasReasonCode}}<span class="type-code" title="{{$row.ReasonCode}}">{{$row.ReasonLabel}}</span>{{else}}<span class="type-code" aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+            <td class="num c4-td-num">{{if $row.HasPoints}}{{$row.Points}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+            <td class="num c4-td-num">{{if $row.HasPointsToday}}{{$row.PointsToday}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+</div>{{end}}

@@ -11,6 +11,24 @@
      without waiting out the fresh/delayed/stale age thresholds. */}}
 <span id="ov-meta" hidden data-generated="{{.GeneratedUnix}}" data-connection-lost="{{if .ConnectionLost}}1{{else}}0{{end}}"></span>
 
+{{/* S5-3 C12 slot pair (task Phase 4, corrected Q3 MAJOR-1): the only slot
+     rendering in the product, exactly two boxes always. Moved INSIDE
+     #overview-live (was a static sibling outside it) so it refreshes on the
+     exact same existing 30s cadence as the rest of this partial, instead of
+     staying frozen at whatever it looked like on the last full page load -
+     no new poll, no new endpoint, just sharing the boundary that already
+     exists. The C0 chip next to it surfaces the watch broker's own
+     EvaluatedAt evidence (never the page's render time), so a broker tick
+     that itself stalled is visible even though the surrounding partial keeps
+     swapping on schedule. */}}
+<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="mb-3">
+    <div class="flex items-center justify-between mb-1">
+        <span class="text-xs uppercase tracking-wide text-text-secondary">{{ t "sidebar.now_watching" }}</span>
+        {{template "c0.provenance_chip" .SlotPairProvenance}}
+    </div>
+    {{template "c12.pair" .SlotPair}}
+</div>
+
 <header class="flex flex-wrap items-center justify-between gap-3 mb-4">
     <div class="flex items-center gap-4 flex-wrap">
         <span class="inline-flex items-center gap-2 text-sm">

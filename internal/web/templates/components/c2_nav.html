@@ -1,22 +1,30 @@
-{{/* C2 — Navigation chrome (Stage 4 §6 / task OD-S5-2-1). Exactly seven
-     top-level sections, rendered identically regardless of Discord
-     configuration — only the CONTENT of /events varies by Discord
-     availability, never its presence in this list. Purely static/localized:
-     no per-request Go fields are threaded through here, since the active
-     section is computed client-side from window.location.pathname (see
-     base.html's nav-activation script) — the only design compatible with
-     every existing page handler staying untouched in this slice.
+{{/* C2 — Navigation chrome (Stage 4 §6 / task OD-S5-2-1, corrected S5-3
+     BLOCKER-1). Exactly seven top-level sections, rendered identically
+     regardless of Discord configuration — only the CONTENT of /events
+     varies by Discord availability, never its presence in this list.
+     Purely static/localized: no per-request Go fields are threaded through
+     here, since the active section is computed client-side from
+     window.location.pathname (see base.html's nav-activation script) — the
+     only design compatible with every existing page handler staying
+     untouched in this slice.
      data-nav-section is the stable section identifier used by that script;
-     data-nav-child marks a System sub-destination (Health/Logs) as the one
-     that receives aria-current="page" when active, never the parent link,
-     so exactly one destination is ever marked current. */}}
+     data-nav-child marks a group's sub-destination (Overview's own page /
+     Queue; System's Health/Logs) as the one that receives aria-current="page"
+     when active, never the parent link, so exactly one destination is ever
+     marked current. Overview is a group exactly like System: its own
+     top-level count stays at seven, /overview/queue is simply its second
+     child destination alongside /overview itself. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
-        <li class="c2-nav-item">
-            <a href="/overview" class="c2-nav-link" data-nav-section="overview" aria-label="{{ t "nav.overview" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/overview" class="c2-nav-link" data-nav-section="overview" aria-label="{{ t "nav.overview" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
                 <span class="c2-nav-label">{{ t "nav.overview" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/overview" class="c2-nav-child" data-nav-section="overview" data-nav-child>{{ t "nav.overview" }}</a></li>
+                <li><a href="/overview/queue" class="c2-nav-child" data-nav-section="overview" data-nav-child>{{ t "nav.queue" }}</a></li>
+            </ul>
         </li>
         <li class="c2-nav-item">
             <a href="/drops" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}">

@@ -156,7 +156,7 @@
         // destination, so exactly one element is ever marked current.
         (function() {
             var SECTION_RULES = [
-                { section: 'overview', test: function(p) { return p === '/' || p === '/overview'; } },
+                { section: 'overview', test: function(p) { return p === '/' || p === '/overview' || p.indexOf('/overview/') === 0; } },
                 { section: 'drops', test: function(p) { return p === '/drops' || p.indexOf('/drops/') === 0; } },
                 { section: 'analytics', test: function(p) { return p === '/statistics' || p.indexOf('/analytics/') === 0; } },
                 { section: 'events', test: function(p) { return p === '/notifications' || p === '/events' || p.indexOf('/events/') === 0 || p.indexOf('/events') === 0; } },

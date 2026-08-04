@@ -82,6 +82,20 @@ type OverviewPageData struct {
 	// hx-trigger so the client-side stale-clock thresholds and the actual
 	// poll interval are always derived from the same number.
 	PollSeconds int
+
+	// SlotPair is the S5-3 C12 component's two watch-slot boxes (task Phase
+	// 4). Built from the safe watchSlotEvidence adapter (OD-S5-3-1) plus this
+	// same request's streamer snapshot/stats for enrichment - never from
+	// slots.Reason (the pre-existing free-form path). Rendered inside
+	// overview_live.html (Q3 MAJOR-1 correction) so it refreshes on the same
+	// #overview-live boundary as the rest of the page, instead of staying
+	// static outside it indefinitely.
+	SlotPair [2]c12SlotData
+
+	// SlotPairProvenance is the C0 freshness chip for SlotPair (Q3 MAJOR-1
+	// item 6), built from the exact same evidence snapshot so both always
+	// describe the same underlying broker tick.
+	SlotPairProvenance ProvenanceChipData
 }
 
 // handleAPIOverview renders the live Overview content partial (header stats,
@@ -278,6 +292,11 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		GeneratedUnix: time.Now().Unix(),
 	}
 
+	// Read once and reuse for both the slot pair and its provenance chip, so
+	// the two always describe the same broker snapshot (never two separate
+	// reads that could observe different ticks).
+	evidence := s.watchSlotEvidence()
+
 	return OverviewPageData{
 		OverviewData:          data,
 		LiveCards:             toCardViews(live, stats),
@@ -288,6 +307,8 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		PredictionsState:      predState,
 		PredictionsStateLabel: tr("ov.pred_state." + predState),
 		PollSeconds:           overviewPollSeconds,
+		SlotPair:              c12Pair(evidence, streamersByName(streamers), stats, tr),
+		SlotPairProvenance:    c12PairProvenance(evidence),
 	}
 }
 
@@ -781,6 +802,20 @@ func (s *Server) buildNowWatching(
 	if !slots.NextRotationAt.IsZero() && len(view.Slots) > 0 {
 		view.HasNextRotation = true
 		view.NextRotationUnix = slots.NextRotationAt.Unix()
+	}
+
+	// S5-3 C12 padding (task Phase 4): bring the sidebar's total slot-box
+	// count to exactly two, using the safe adapter's Mode for the empty
+	// reason - never a Waiting channel's ReasonCode, never a third box even
+	// if len(view.Slots) were ever >= 2 already (padCount clamps at 0).
+	if padCount := 2 - len(view.Slots); padCount > 0 {
+		emptyMode := "unknown"
+		if s.watchSlotEvidence().Mode == "idle" {
+			emptyMode = "idle"
+		}
+		for i := 0; i < padCount; i++ {
+			view.EmptyPad = append(view.EmptyPad, c12SlotData{EmptyReasonMode: emptyMode, Link: "/overview/queue"})
+		}
 	}
 	return view
 }

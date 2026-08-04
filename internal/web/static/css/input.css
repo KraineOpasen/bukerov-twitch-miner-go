@@ -2119,6 +2119,64 @@
   to { transform: translateX(100%); }
 }
 
+/* -- C12 slots (exactly two, everywhere: sidebar-mini, overview-pair, queue-header) - */
+.c12-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 767.98px) {
+  .c12-pair { grid-template-columns: 1fr; }
+}
+.c12-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--ds-radius-md);
+}
+.c12-slot--active { border: 2px solid var(--brand-purple); padding: calc(0.75rem - 1px); }
+.c12-slot--empty { border-style: dashed; }
+.c12-slot-head { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.c12-slot-name { color: var(--text-primary); font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c12-slot-name:hover { text-decoration: underline; }
+.c12-slot-name--empty { color: var(--text-muted); font-weight: 500; }
+.c12-slot-campaign { color: var(--text-secondary); }
+.c12-slot-reason { font-size: 0.8rem; color: var(--text-secondary); }
+.c12-slot-game { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c12-slot-points-current { color: var(--text-primary); margin-left: auto; }
+.c12-slot-metrics { display: flex; align-items: center; justify-content: space-between; margin-top: auto; font-size: 0.82rem; color: var(--text-secondary); }
+.c12-slot-points--gain { color: var(--ui-gain); }
+.c12-slot-link { align-self: flex-start; font-size: 0.78rem; color: var(--link-text); text-decoration: underline; }
+
+/* -- C4 table, data-dense (queue roster desktop/compact) --------------------------- */
+.c4-table-card { overflow-x: auto; background: var(--surface-card); border: 1px solid var(--border-default); border-radius: var(--ds-radius-md); }
+.c4-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.c4-table thead th { position: sticky; top: 0; z-index: 10; background: var(--surface-card); color: var(--text-secondary); text-align: left; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-default); }
+.c4-th-num { text-align: right; }
+.c4-table tbody td { padding: 0.4rem 0.75rem; height: 32px; border-bottom: 1px solid var(--border-default); color: var(--text-primary); }
+.c4-table tbody tr:hover { background: var(--surface-elevated); }
+.c4-table tbody tr[hidden] { display: none; }
+.c4-td-num { text-align: right; font-variant-numeric: tabular-nums; }
+.c4-sort-btn { display: inline-flex; align-items: center; gap: 0.3rem; background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+.c4-sort-btn--num { flex-direction: row-reverse; }
+.c4-sort-ico { width: 0.7em; display: inline-block; }
+.c4-sort-btn[aria-sort="ascending"] .c4-sort-ico::after { content: "▲"; }
+.c4-sort-btn[aria-sort="descending"] .c4-sort-ico::after { content: "▼"; }
+
+/* -- C3 list-cards (queue roster <lg) ------------------------------------------------ */
+.c3-roster-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.c3-list-card { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.75rem; background: var(--surface-card); border: 1px solid var(--border-default); border-radius: var(--ds-radius-md); }
+.c3-list-card[hidden] { display: none; }
+.c3-list-card-evidence { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.c3-list-card-channel { color: var(--text-primary); font-weight: 600; text-decoration: none; min-height: 44px; display: inline-flex; align-items: center; }
+.c3-list-card-channel:hover { text-decoration: underline; }
+.c3-list-card-metadata { display: flex; gap: 1rem; font-size: 0.82rem; color: var(--text-secondary); }
+.c3-list-card-metric { display: inline-flex; align-items: center; gap: 0.3rem; }
+.c3-list-card-metric-label { color: var(--text-muted); }
+
+/* -- C18 DPBA passive affordance (queue page only) ---------------------------------- */
+.c18-dpba { display: flex; align-items: flex-start; gap: 0.5rem; margin-top: 1rem; padding: 0.75rem; background: var(--surface-inset); border-radius: var(--ds-radius-md); color: var(--text-secondary); font-size: 0.82rem; }
+.c18-dpba-icon { flex: none; color: var(--state-neutral); line-height: 1.4; }
+
 /* -- Help getting-started section link list --------------------------------------- */
 .help-links-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 .help-links-list a { color: var(--link-text); text-decoration: underline; }

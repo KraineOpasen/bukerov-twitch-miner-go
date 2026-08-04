@@ -22,7 +22,15 @@
      the only signal available. */}}
 <div id="lc-live" class="visually-hidden" aria-live="polite" role="status"></div>
 <div id="lifecycle-panel" hx-get="/api/lifecycle" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
-<div id="lc-conn-lost" hidden role="status"></div>
+{{/* S5-3: #lc-conn-lost now carries its own text node plus a diagnostics link
+     to the existing /health route (never the deferred /help/troubleshooting),
+     so the stale-gating script below can state that the current lifecycle
+     state cannot be confirmed without destroying the link via a bare
+     textContent write. */}}
+<div id="lc-conn-lost" hidden role="status">
+    <span id="lc-conn-lost-text"></span>
+    <a href="/health" id="lc-conn-lost-diag">{{ t "lc.stale.diagnostics_link" }}</a>
+</div>
 
 {{/* F2.1/F2.2/F2.5 toolbar — deliberately OUTSIDE #overview-live so the 30s
      htmx innerHTML swap never touches it: the filter input never loses focus
@@ -830,9 +838,25 @@
         var panel = document.getElementById('lifecycle-panel');
         var live = document.getElementById('lc-live');
         var connLost = document.getElementById('lc-conn-lost');
+        var connLostText = document.getElementById('lc-conn-lost-text');
         if (!panel) return;
 
         function nowMs() { return window.__OV_CLOCK ? window.__OV_CLOCK() : performance.now(); }
+
+        // S5-3 lifecycle honesty (case B): once the poll is judged lost, the
+        // browser genuinely no longer knows the current lifecycle state, so
+        // every action button must stop being actionable client-side rather
+        // than keep offering a command against a state that might already
+        // have changed. This is a client-side courtesy only — it never
+        // substitutes for server-side validation (Controller.Submit still
+        // rejects a forged/stale POST exactly as before); the very next
+        // successful #lifecycle-panel swap replaces this whole subtree with
+        // fresh, authoritative server-rendered capability state, which is
+        // what actually re-enables (or keeps disabling) each button — this
+        // function never re-enables anything itself.
+        function setLifecycleButtonsDisabled(disabled) {
+            panel.querySelectorAll('button').forEach(function (btn) { btn.disabled = disabled; });
+        }
 
         var lastAnnounced = null;
         var lastSwapAt = nowMs();
@@ -921,7 +945,15 @@
             var lost = (nowMs() - lastSwapAt) > STALE_AFTER_MS;
             if (lost === !connLost.hidden) return; // no visible change
             connLost.hidden = !lost;
-            if (lost) connLost.textContent = t('js.lc.conn_lost');
+            if (lost) {
+                // S5-3: the browser can no longer confirm the current
+                // lifecycle state (not just "reconnecting") — say so, gate
+                // every action button, and never toast it (inline only).
+                if (connLostText) connLostText.textContent = t('js.lc.state_unconfirmed');
+                setLifecycleButtonsDisabled(true);
+            } else if (connLostText) {
+                connLostText.textContent = '';
+            }
         }, 1000);
 
         applyAnnounce();

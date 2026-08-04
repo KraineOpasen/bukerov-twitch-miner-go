@@ -1,0 +1,383 @@
+package web
+
+// S5-3 Phase 5/6/7/8/10 tests: the /overview/queue route, the full
+// configured-streamer roster, C4 table semantics, C3 responsive semantics,
+// shared filter/sort state, and the exactly-once C18 DPBA card.
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+)
+
+// TestS5_3QueueRosterRowHasNoUnusedCampaignFields proves the Q3 MINOR-3 fix:
+// queueRosterRow no longer declares HasCampaign/Campaign - fields that were
+// never read by queue.html, the C4/C3 templates, or any handler (a dead,
+// never-rendered pair of struct fields, not a real campaign column).
+func TestS5_3QueueRosterRowHasNoUnusedCampaignFields(t *testing.T) {
+	typ := reflect.TypeOf(queueRosterRow{})
+	for _, name := range []string{"HasCampaign", "Campaign"} {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Errorf("queueRosterRow must not declare %s - it was never read by any template or handler", name)
+		}
+	}
+}
+
+// ---- Phase 5: route ---------------------------------------------------------
+
+// TestS5_3QueueRouteReturns200 proves /overview/queue is now a real
+// direct-render route (GET and HEAD), and /overview still is too.
+func TestS5_3QueueRouteReturns200(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+
+	for _, path := range []string{"/overview", "/overview/queue"} {
+		rec, body := httpGetBody(t, h, path)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200; body=%s", path, rec.Code, body)
+		}
+
+		recHead := httptest.NewRecorder()
+		h.ServeHTTP(recHead, httptest.NewRequest(http.MethodHead, path, nil))
+		if recHead.Code != http.StatusOK {
+			t.Errorf("HEAD %s = %d, want 200", path, recHead.Code)
+		}
+	}
+}
+
+// TestS5_3RemainingDeferredRoutesStill404 re-confirms (independently of
+// TestS5_2DeferredRoutesRemain404, which S5-3 was told to update by removing
+// exactly /overview/queue) that every OTHER deferred route, including
+// /help/glossary and /help/troubleshooting specifically, is still an honest
+// 404 - S5-3 must not have accidentally widened the route table.
+func TestS5_3RemainingDeferredRoutesStill404(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+	for _, path := range []string{
+		"/help/glossary", "/help/troubleshooting", "/help/notifications-audio", "/help/diagnostics-support",
+		"/drops/claims", "/events/browser", "/events/sound", "/events/discord",
+	} {
+		rec, _ := httpGetBody(t, h, path)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("deferred route %s = %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+// TestS5_3QueueRouteOneH1AndNoRedirectLoop proves the page has exactly one
+// h1, was never redirected, and does not capture any existing API/JSON path.
+func TestS5_3QueueRouteOneH1AndNoRedirectLoop(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+
+	rec, body := httpGetBody(t, h, "/overview/queue")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /overview/queue = %d, want 200", rec.Code)
+	}
+	if n := strings.Count(body, "<h1"); n != 1 {
+		t.Errorf("expected exactly one <h1>, found %d; body=%s", n, body)
+	}
+
+	// Existing API/JSON endpoints remain reachable and unaffected.
+	for _, path := range []string{"/api/settings", "/api/status", "/api/now-watching"} {
+		r2, b2 := httpGetBody(t, h, path)
+		if r2.Code != http.StatusOK {
+			t.Errorf("existing endpoint %s = %d, want 200; body=%s", path, r2.Code, b2)
+		}
+	}
+}
+
+// TestS5_3QueueTitleIsLocalized proves the Q3 MINOR-1 fix: /overview/queue's
+// <title> uses the existing translated queue.title key instead of a
+// hardcoded English string, so it actually changes with the language cookie.
+func TestS5_3QueueTitleIsLocalized(t *testing.T) {
+	srv := buildF3PageServer(t)
+	bodyEN := f3GetPage(t, srv, "/overview/queue", "en")
+	bodyRU := f3GetPage(t, srv, "/overview/queue", "ru")
+
+	// queue.title contains "&", so the rendered (HTML-escaped) title carries
+	// "&amp;" - this proves the key is actually going through {{ t ... }}
+	// (which auto-escapes), not just string-matched some other way.
+	if !strings.Contains(bodyEN, "<title>Queue &amp; assignments - Twitch Points Miner</title>") {
+		t.Errorf("[en] <title> must use the localized queue.title key, body=%s", bodyEN)
+	}
+	if !strings.Contains(bodyRU, "<title>Очередь и назначения - Twitch Points Miner</title>") {
+		t.Errorf("[ru] <title> must use the localized queue.title key, body=%s", bodyRU)
+	}
+	if strings.Contains(bodyEN, "<title>Queue - Twitch Points Miner</title>") {
+		t.Error("<title> must not be the old hardcoded, unlocalized string")
+	}
+}
+
+// ---- Phase 6: full roster ---------------------------------------------------
+
+// TestS5_3FullRosterIncludesEveryConfiguredState proves the roster is built
+// from the COMPLETE configured streamer list - offline, disabled-watch,
+// unknown, and watching entries all present - never a filtered subset
+// (LiveCards-only, Waiting-only, eligible-only, online-only).
+func TestS5_3FullRosterIncludesEveryConfiguredState(t *testing.T) {
+	watchingOne := models.NewStreamer("watching_one", models.DefaultStreamerSettings())
+	watchingOne.SetConfirmedOnline()
+
+	offlineOne := models.NewStreamer("offline_one", models.DefaultStreamerSettings())
+	offlineOne.SetConfirmedOffline()
+
+	disabledSettings := models.DefaultStreamerSettings()
+	disabledSettings.DisableWatch = true
+	disabledOne := models.NewStreamer("disabled_one", disabledSettings)
+	disabledOne.SetConfirmedOffline()
+
+	unknownOne := models.NewStreamer("unknown_one", models.DefaultStreamerSettings())
+	unknownOne.SetConfirmedOnline()
+	unknownOne.SetUnknown(models.ReasonTransportError)
+
+	streamers := []*models.Streamer{watchingOne, offlineOne, disabledOne, unknownOne}
+	slots := WatchSlotsView{Watching: map[string]bool{"watching_one": true}}
+
+	srv := &Server{}
+	rows := srv.buildQueueRoster(streamers, slots, map[string]streamerStats{}, watchSlotEvidence{}, enTR(t))
+	sortRosterByChannel(rows)
+
+	if len(rows) != 4 {
+		t.Fatalf("roster has %d rows, want 4 (full configured list); rows=%+v", len(rows), rows)
+	}
+	byName := map[string]queueRosterRow{}
+	for _, r := range rows {
+		byName[r.Channel] = r
+	}
+	if byName["watching_one"].Status != "watching" {
+		t.Errorf("watching_one status = %q, want watching", byName["watching_one"].Status)
+	}
+	if byName["offline_one"].Status != "offline" {
+		t.Errorf("offline_one status = %q, want offline", byName["offline_one"].Status)
+	}
+	if byName["disabled_one"].Status != "disabled" || !byName["disabled_one"].DisableWatch {
+		t.Errorf("disabled_one = %+v, want status=disabled, DisableWatch=true", byName["disabled_one"])
+	}
+	if byName["unknown_one"].Status != "unknown" {
+		t.Errorf("unknown_one status = %q, want unknown", byName["unknown_one"].Status)
+	}
+}
+
+// TestS5_3RosterNeverFabricatesQueuePosition proves queueRosterRow carries no
+// position/rank field and the rendered table/cards never print a "#1"-style
+// numbered position.
+func TestS5_3RosterNeverFabricatesQueuePosition(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	positionPattern := regexp.MustCompile(`#\d+\s*</`)
+	if positionPattern.MatchString(body) {
+		t.Errorf("rendered queue page must never print a fabricated numbered position, matched in: %s", body)
+	}
+}
+
+// TestS5_3RosterFullRosterOnLivePage exercises the real page render (not
+// just the unit-level builder) and proves an offline, non-watched streamer
+// from the F3 fixture set still appears on /overview/queue.
+func TestS5_3RosterFullRosterOnLivePage(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+	for _, want := range []string{"streamer_a", "streamer_b"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("queue page missing configured streamer %q", want)
+		}
+	}
+}
+
+// ---- Phase 6/10 item 16: ReasonCode rendered, free-form Reason absent -----
+
+// TestS5_3QueueTableRendersReasonCodeNeverFreeFormReason extends the Phase 3
+// leak proof (s5_3_watch_evidence_test.go) to the queue page specifically,
+// now that it exists: the safe ReasonCode surfaces, the sentinel never does.
+func TestS5_3QueueTableRendersReasonCodeNeverFreeFormReason(t *testing.T) {
+	srv := s53LeakTestServer(t)
+	for _, lang := range []string{"en", "ru"} {
+		body := f3GetPage(t, srv, "/overview/queue", lang)
+		if strings.Contains(body, s53SentinelSlotReason) || strings.Contains(body, s53SentinelWaitingReason) {
+			t.Errorf("[%s] /overview/queue leaked a free-form Reason sentinel", lang)
+		}
+	}
+	// The safe ReasonCode DOES surface somewhere (localized, not the raw code).
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+	if !strings.Contains(body, enTR(t)("queue.reason.priority")) {
+		t.Error("queue page must render the safe ReasonCode evidence somewhere")
+	}
+}
+
+// ---- Phase 7/10 item 17: C4 semantics ---------------------------------------
+
+func TestS5_3C4TableSemantics(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	if n := strings.Count(body, `<th scope="col">`); n < 2 {
+		t.Errorf(`<th scope="col"> count = %d, want at least 2`, n)
+	}
+	for _, want := range []string{
+		`data-qr-sort="channel"`, `data-qr-sort="points"`, `data-qr-sort="today"`,
+		`aria-sort="none"`,
+		`id="qr-sort-announce"`, `aria-live="polite"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("queue page missing C4 literal %q", want)
+		}
+	}
+	// Sortable headers are real buttons, not divs/spans pretending to be one.
+	if !regexp.MustCompile(`<button[^>]*data-qr-sort="channel"`).MatchString(body) {
+		t.Error("the channel sort control must be a real <button>")
+	}
+	// Overflow-x lives on the table's own card wrapper only.
+	if !strings.Contains(body, `class="c4-table-card"`) {
+		t.Error("queue page missing the c4-table-card overflow wrapper")
+	}
+}
+
+// ---- Phase 7/10 item 18: C3 status/evidence/metadata ordering --------------
+
+func TestS5_3C3CardOrderingStatusEvidenceMetadata(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	start := strings.Index(body, `id="qr-cards"`)
+	if start < 0 {
+		t.Fatal("queue page missing #qr-cards")
+	}
+	firstCardStart := strings.Index(body[start:], `class="c3-list-card"`)
+	if firstCardStart < 0 {
+		t.Fatal("no rendered .c3-list-card found")
+	}
+	region := body[start+firstCardStart:]
+	end := strings.Index(region, "</li>")
+	if end < 0 {
+		t.Fatal("first .c3-list-card is not closed with </li>")
+	}
+	card := region[:end]
+
+	statusIdx := strings.Index(card, "c3-list-card-status")
+	evidenceIdx := strings.Index(card, "c3-list-card-evidence")
+	metadataIdx := strings.Index(card, "c3-list-card-metadata")
+	if statusIdx < 0 || evidenceIdx < 0 || metadataIdx < 0 {
+		t.Fatalf("card missing one of status/evidence/metadata sections: %s", card)
+	}
+	if statusIdx >= evidenceIdx || evidenceIdx >= metadataIdx {
+		t.Errorf("card sections out of order (want status < evidence < metadata): status=%d evidence=%d metadata=%d\n%s", statusIdx, evidenceIdx, metadataIdx, card)
+	}
+}
+
+// TestS5_3C3NoFieldSilentlyDisappears proves the SAME channel/reason/points
+// evidence visible in the C4 table is also present in the C3 cards - one
+// logical data source, nothing dropped in the responsive transform.
+func TestS5_3C3NoFieldSilentlyDisappears(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	tableStart := strings.Index(body, `id="qr-table-body"`)
+	cardsStart := strings.Index(body, `id="qr-cards"`)
+	if tableStart < 0 || cardsStart < 0 {
+		t.Fatal("queue page missing #qr-table-body or #qr-cards")
+	}
+	table := body[tableStart:cardsStart]
+	cards := body[cardsStart:]
+
+	for _, channel := range []string{"streamer_a", "streamer_b"} {
+		if !strings.Contains(table, channel) {
+			t.Errorf("table missing channel %q", channel)
+		}
+		if !strings.Contains(cards, channel) {
+			t.Errorf("cards missing channel %q - field silently disappeared in the responsive transform", channel)
+		}
+	}
+}
+
+// ---- Phase 7/10 item 19: filter/sort state shared across representations --
+
+func TestS5_3FilterSortStateSharedAcrossRepresentations(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	// Exactly one filter/sort toolbar element (not duplicated per
+	// representation) - anchored on the actual element's opening tag, not
+	// the bare attribute name, which also appears in the JS selector string
+	// below.
+	if n := strings.Count(body, `<div class="ov-toolbar" data-qr-toolbar`); n != 1 {
+		t.Errorf(`toolbar element count = %d, want exactly 1 (one shared toolbar)`, n)
+	}
+	// Both the table rows and the cards carry the SAME data-qr-channel/
+	// data-qr-status markers the shared script filters/sorts on.
+	if !strings.Contains(body, `data-qr-channel="streamer_a"`) {
+		t.Error("rows must carry data-qr-channel for the shared filter/sort script")
+	}
+	// The script is a single-instance guarded IIFE operating on both
+	// containers in the same pass (source-literal pin, since this is
+	// client-side behavior no Go test can execute).
+	for _, want := range []string{
+		"window.__queueDelta", "if (window.__queueDelta) return;",
+		"[tableBody, cardsList].forEach(",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("queue page missing shared filter/sort literal %q", want)
+		}
+	}
+}
+
+// ---- Phase 8/10 items 20-21: C18 exactly once, five controls absent -------
+
+func TestS5_3C18AppearsExactlyOnceOnQueuePageOnly(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	queueBody := f3GetPage(t, srv, "/overview/queue", "en")
+	if n := strings.Count(queueBody, `class="c18-dpba"`); n != 1 {
+		t.Errorf("/overview/queue: c18-dpba count = %d, want exactly 1", n)
+	}
+
+	for _, page := range []string{"/overview", "/drops", "/statistics", "/health", "/logs", "/settings", "/notifications"} {
+		body := f3GetPage(t, srv, page, "en")
+		if strings.Contains(body, "c18-dpba") {
+			t.Errorf("%s must never render the C18 card - it is queue-page-exclusive", page)
+		}
+	}
+}
+
+func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	start := strings.Index(body, `class="c18-dpba"`)
+	if start < 0 {
+		t.Fatal("queue page missing the C18 card")
+	}
+	end := strings.Index(body[start:], "</div>")
+	if end < 0 {
+		t.Fatal("C18 card is not closed with </div>")
+	}
+	card := body[start : start+end]
+
+	if strings.Contains(card, "<button") || strings.Contains(card, "<select") || strings.Contains(card, "<a ") {
+		t.Errorf("C18 card must contain no buttons/menus/links, got: %s", card)
+	}
+	if strings.Contains(card, "disabled") {
+		t.Errorf("C18 card must contain no disabled ghost controls, got: %s", card)
+	}
+	if !strings.Contains(card, enTR(t)("queue.dpba.text")) {
+		t.Error("C18 card must state the deferred-pending-broker-audit text")
+	}
+
+	// The passive text names all five deferred controls (task Phase 8); the
+	// card itself implements none of them.
+	for _, ctrl := range []string{"favorite", "slot switching", "harvest", "override", "reorder"} {
+		if !strings.Contains(strings.ToLower(card), ctrl) {
+			t.Errorf("C18 text must name the deferred control %q, got: %s", ctrl, card)
+		}
+	}
+
+	// The troubleshooting link is intentionally omitted (deferred route).
+	if strings.Contains(card, "/help/troubleshooting") {
+		t.Error("C18 must not link to the still-deferred /help/troubleshooting route")
+	}
+}

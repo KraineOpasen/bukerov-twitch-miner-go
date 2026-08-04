@@ -1,0 +1,27 @@
+{{/* C3 — Cards, list-card variant (Stage 4 §6 / task Phase 7). The queue
+     page's <lg representation of the SAME roster data C4 renders - one
+     logical data source, no field silently disappears. Order within each
+     card is fixed: (1) status, (2) evidence (channel + reason), (3)
+     metadata (points). Shares filter/sort state with C4 via the same
+     data-qr-* attributes (no id attribute on either representation, so
+     there is nothing to collide on); the caller (queue.html) is responsible
+     for showing exactly one of C4/C3 per viewport via a plain CSS
+     hidden/lg:hidden toggle, which - unlike a hand-rolled aria-hidden -
+     already keeps the not-currently-shown representation out of the
+     accessibility tree for free.
+     Inputs: .Roster []queueRosterRow */}}
+{{define "c3.roster_cards"}}<ul class="c3-roster-cards" id="qr-cards">
+{{range $i, $row := .Roster}}
+<li class="c3-list-card" data-qr-row data-qr-channel="{{$row.Channel}}" data-qr-status="{{$row.Status}}" data-qr-points="{{$row.PointsRaw}}" data-qr-today="{{$row.PointsTodayRaw}}" data-qr-idx="{{$i}}">
+    <div class="c3-list-card-status">{{template "c10.badge" $row.StatusBadge}}</div>
+    <div class="c3-list-card-evidence">
+        <a href="/streamer/{{$row.Channel}}" class="c3-list-card-channel">{{$row.Channel}}</a>
+        {{if $row.HasReasonCode}}<span class="type-code" title="{{$row.ReasonCode}}">{{$row.ReasonLabel}}</span>{{else}}<span class="type-code" aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}
+    </div>
+    <div class="c3-list-card-metadata">
+        <span class="c3-list-card-metric"><span class="c3-list-card-metric-label">{{ t "queue.col.points" }}</span> <span class="num">{{if $row.HasPoints}}{{$row.Points}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</span></span>
+        <span class="c3-list-card-metric"><span class="c3-list-card-metric-label">{{ t "queue.col.points_today" }}</span> <span class="num">{{if $row.HasPointsToday}}{{$row.PointsToday}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</span></span>
+    </div>
+</li>
+{{end}}
+</ul>{{end}}

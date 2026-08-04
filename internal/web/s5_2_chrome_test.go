@@ -73,9 +73,11 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 	}
 }
 
-// TestS5_2NavChildDisambiguation pins the System group's structure: one
-// parent link (data-nav-parent) and exactly two children (data-nav-child)
-// sharing the "system" section id, each with its own distinct href.
+// TestS5_2NavChildDisambiguation pins BOTH group destinations' structure
+// (task Q3 BLOCKER-1): the System group (one parent, two children — Health/
+// Logs) AND the Overview group (one parent, two children — Overview itself/
+// Queue), for a combined two parent links (data-nav-parent) and four
+// children (data-nav-child), each with its own distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -83,17 +85,79 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	// Matched with the trailing ">" so the JS source's own string-literal
 	// references to these attribute names (e.g. hasAttribute('data-nav-parent'))
 	// aren't miscounted as HTML occurrences.
-	if n := strings.Count(body, `data-nav-parent>`); n != 1 {
-		t.Errorf("expected exactly one data-nav-parent, found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 2 {
+		t.Errorf("expected exactly two data-nav-parent groups (Overview, System), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 2 {
-		t.Errorf("expected exactly two data-nav-child destinations (Health, Logs), found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 4 {
+		t.Errorf("expected exactly four data-nav-child destinations (Overview, Queue, Health, Logs), found %d", n)
 	}
 	if !strings.Contains(body, `href="/health" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
 		t.Error("System group missing the Health child destination")
 	}
 	if !strings.Contains(body, `href="/logs" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
 		t.Error("System group missing the Logs child destination")
+	}
+	if !strings.Contains(body, `href="/overview" class="c2-nav-child" data-nav-section="overview" data-nav-child`) {
+		t.Error("Overview group missing the Overview child destination")
+	}
+	if !strings.Contains(body, `href="/overview/queue" class="c2-nav-child" data-nav-section="overview" data-nav-child`) {
+		t.Error("Overview group missing the Queue child destination")
+	}
+}
+
+// s5_3NavAnchorTagRe matches a rendered C2 nav anchor's full opening tag —
+// either a top-level .c2-nav-link or a group's .c2-nav-child — so
+// TestS5_3OverviewQueueExactlyOneAriaCurrentDestination can inspect every
+// candidate destination regardless of which group it belongs to.
+var s5_3NavAnchorTagRe = regexp.MustCompile(`<a href="[^"]*" class="c2-nav-(?:link|child)"[^>]*>`)
+var s5_3HrefAttrRe = regexp.MustCompile(`href="([^"]*)"`)
+var s5_3NavSectionAttrRe = regexp.MustCompile(`data-nav-section="([a-z]+)"`)
+
+// TestS5_3OverviewQueueExactlyOneAriaCurrentDestination proves BLOCKER-1's
+// fix end to end: it re-implements base.html's client-side updateActiveNav
+// decision (isCurrent = isChild ? sectionMatches && href===path :
+// sectionMatches; aria-current only when !isParent && isCurrent) in Go
+// against the ACTUAL rendered C2 markup for GET /overview/queue, proving
+// exactly one destination (the Queue child, never the Overview group's own
+// parent link and never its Overview child) would receive aria-current —
+// without requiring a browser to execute the real script.
+func TestS5_3OverviewQueueExactlyOneAriaCurrentDestination(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	const path = "/overview/queue"
+	const active = "overview" // SECTION_RULES: every /overview/* path -> overview
+
+	tags := s5_3NavAnchorTagRe.FindAllString(body, -1)
+	if len(tags) == 0 {
+		t.Fatal("no C2 nav destination anchors found in the rendered page")
+	}
+
+	var currentHrefs []string
+	for _, tag := range tags {
+		href := ""
+		if m := s5_3HrefAttrRe.FindStringSubmatch(tag); m != nil {
+			href = m[1]
+		}
+		section := ""
+		if m := s5_3NavSectionAttrRe.FindStringSubmatch(tag); m != nil {
+			section = m[1]
+		}
+		isParent := strings.Contains(tag, "data-nav-parent")
+		isChild := strings.Contains(tag, "data-nav-child")
+		sectionMatches := section == active
+		isCurrent := sectionMatches
+		if isChild {
+			isCurrent = sectionMatches && href == path
+		}
+		if !isParent && isCurrent {
+			currentHrefs = append(currentHrefs, href)
+		}
+	}
+	if len(currentHrefs) != 1 {
+		t.Errorf("simulated nav activation on %s must mark exactly one destination current, got %d: %v", path, len(currentHrefs), currentHrefs)
+	} else if currentHrefs[0] != path {
+		t.Errorf("the one current destination must be %s itself, got %s", path, currentHrefs[0])
 	}
 }
 

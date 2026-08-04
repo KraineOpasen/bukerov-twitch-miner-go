@@ -1,0 +1,243 @@
+{{define "title"}}{{ t "queue.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-2xl font-bold text-neutral-100 mb-3">{{ t "queue.title" }}</h1>
+
+{{/* S5-3 C12 slot header (task Phase 4): same shared component and safe
+     evidence as /overview's slot pair - never a third slot, never the
+     free-form Reason. */}}
+<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="mb-3">
+{{template "c12.pair" .SlotPair}}
+</div>
+
+{{if .RosterEmpty}}
+{{template "c1.state_block" .EmptyState}}
+{{else}}
+{{/* C5 filter/toolbar (task Phase 6): client-side only, no persistence, no
+     new backend field, no query-contract invention. Shared by both the C4
+     table and C3 cards below (__queueDelta owns all of it). */}}
+<div class="ov-toolbar" data-qr-toolbar role="group" aria-label="{{ t "queue.toolbar.label" }}">
+    <div class="ov-toolbar-group">
+        <label for="qr-filter-input" class="ov-toolbar-label">{{ t "queue.filter.label" }}</label>
+        <div class="ov-filter-wrap">
+            <input type="search" id="qr-filter-input" class="ov-filter-input" placeholder="{{ t "queue.filter.placeholder" }}" autocomplete="off" spellcheck="false">
+            <button type="button" id="qr-filter-clear" class="ov-filter-clear" aria-label="{{ t "queue.filter.clear" }}" hidden>&times;</button>
+        </div>
+    </div>
+    <div class="ov-toolbar-group">
+        <label for="qr-status-select" class="ov-toolbar-label">{{ t "queue.filter.status.label" }}</label>
+        <select id="qr-status-select" class="ov-sort-select">
+            <option value="">{{ t "queue.filter.status.all" }}</option>
+            <option value="watching">{{ t "queue.status.watching" }}</option>
+            <option value="queued">{{ t "queue.status.queued" }}</option>
+            <option value="offline">{{ t "queue.status.offline" }}</option>
+            <option value="disabled">{{ t "queue.status.disabled" }}</option>
+            <option value="unknown">{{ t "queue.status.unknown" }}</option>
+        </select>
+    </div>
+    <div class="ov-toolbar-group">
+        <label for="qr-sort-select" class="ov-toolbar-label">{{ t "queue.sort.label" }}</label>
+        <select id="qr-sort-select" class="ov-sort-select">
+            <option value="default">{{ t "queue.sort.default" }}</option>
+            <option value="channel">{{ t "queue.sort.channel" }}</option>
+            <option value="points">{{ t "queue.sort.points" }}</option>
+            <option value="today">{{ t "queue.sort.today" }}</option>
+        </select>
+    </div>
+    <button type="button" id="qr-reset" class="btn-secondary text-xs">{{ t "queue.filter.reset" }}</button>
+    <span id="qr-filter-count" class="ov-filter-count" aria-live="polite"></span>
+</div>
+
+<div class="hidden lg:block">
+{{template "c4.roster_table" .}}
+</div>
+<div class="lg:hidden">
+{{template "c3.roster_cards" .}}
+</div>
+
+<div id="qr-noresults" class="text-xs text-neutral-400 mt-2" hidden role="status"></div>
+<span id="qr-sort-announce" class="visually-hidden" aria-live="polite" role="status"></span>
+{{end}}
+
+{{/* C18 passive DPBA affordance (task Phase 8): exactly one instance,
+     queue-page only. */}}
+{{template "c18.dpba" .}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // =====================================================================
+    // S5-3 queue page: client-side filter (by channel name substring and
+    // status), client-side sort (default/channel/points/today), shared
+    // identically between the C4 table (#qr-table-body) and the C3 cards
+    // (#qr-cards) - both carry the same data-qr-* attributes on their
+    // [data-qr-row] elements, so one pass touches both representations at
+    // once. Single-instance guard, no persistence, no new backend field.
+    // =====================================================================
+    (function () {
+        if (window.__queueDelta) return;
+        window.__queueDelta = true;
+
+        var toolbar = document.querySelector('[data-qr-toolbar]');
+        var tableBody = document.getElementById('qr-table-body');
+        var cardsList = document.getElementById('qr-cards');
+        if (!toolbar || (!tableBody && !cardsList)) return; // roster empty: no toolbar rendered
+
+        var filterInput = document.getElementById('qr-filter-input');
+        var filterClear = document.getElementById('qr-filter-clear');
+        var statusSelect = document.getElementById('qr-status-select');
+        var sortSelect = document.getElementById('qr-sort-select');
+        var countEl = document.getElementById('qr-filter-count');
+        var noResults = document.getElementById('qr-noresults');
+        var announce = document.getElementById('qr-sort-announce');
+
+        var filterValue = '';
+        var statusValue = '';
+        var sortValue = 'default';
+
+        // Stamp the ORIGINAL server-rendered order once, at load. Unlike
+        // /overview there is no periodic server re-render here to re-anchor
+        // against, so "default" must always mean this initial order, never
+        // "whatever the DOM happens to be in right now".
+        [tableBody, cardsList].forEach(function (container) {
+            if (!container) return;
+            var rows = Array.prototype.slice.call(container.querySelectorAll('[data-qr-row]'));
+            rows.forEach(function (el, i) { el.setAttribute('data-qr-idx', i); });
+        });
+
+        function nameCmp(a, b) {
+            var an = (a.getAttribute('data-qr-channel') || '').toLocaleLowerCase();
+            var bn = (b.getAttribute('data-qr-channel') || '').toLocaleLowerCase();
+            return an.localeCompare(bn);
+        }
+        function numCmp(attr) {
+            return function (a, b) {
+                var d = (Number(b.getAttribute(attr)) || 0) - (Number(a.getAttribute(attr)) || 0);
+                return d !== 0 ? d : nameCmp(a, b);
+            };
+        }
+        function defaultCmp(a, b) {
+            return (Number(a.getAttribute('data-qr-idx')) || 0) - (Number(b.getAttribute('data-qr-idx')) || 0);
+        }
+        function comparatorFor(value) {
+            return value === 'channel' ? nameCmp
+                : value === 'points' ? numCmp('data-qr-points')
+                : value === 'today' ? numCmp('data-qr-today')
+                : defaultCmp;
+        }
+
+        function applySort() {
+            var cmp = comparatorFor(sortValue);
+            [tableBody, cardsList].forEach(function (container) {
+                if (!container) return;
+                var current = Array.prototype.slice.call(container.querySelectorAll('[data-qr-row]'));
+                if (current.length < 2) return;
+                var sorted = current.slice().sort(cmp);
+                var changed = false;
+                for (var i = 0; i < sorted.length; i++) { if (sorted[i] !== current[i]) { changed = true; break; } }
+                if (!changed) return;
+                for (var j = 0; j < sorted.length; j++) container.appendChild(sorted[j]);
+            });
+        }
+
+        // The header <button data-qr-sort> elements (C4) need aria-sort kept
+        // in sync with whichever trigger (header button or the toolbar
+        // select, reachable at every viewport per C5) last changed it.
+        function syncSortUI() {
+            document.querySelectorAll('[data-qr-sort]').forEach(function (btn) {
+                var col = btn.getAttribute('data-qr-sort');
+                var dir = col !== sortValue ? 'none' : (col === 'channel' ? 'ascending' : 'descending');
+                btn.setAttribute('aria-sort', dir);
+            });
+            if (sortSelect && sortSelect.value !== sortValue) sortSelect.value = sortValue;
+        }
+
+        function sortLabelFor(value) {
+            if (!sortSelect) return value;
+            for (var i = 0; i < sortSelect.options.length; i++) {
+                if (sortSelect.options[i].value === value) return sortSelect.options[i].textContent;
+            }
+            return value;
+        }
+
+        function setSort(value, announceChange) {
+            if (value === sortValue) return;
+            sortValue = value;
+            applySort();
+            syncSortUI();
+            if (announceChange && announce) {
+                announce.textContent = t('js.queue.sort_applied', { sort: sortLabelFor(value) });
+            }
+        }
+
+        function applyFilter() {
+            var q = (filterValue || '').trim().toLocaleLowerCase();
+            var shown = 0, total = 0;
+            [tableBody, cardsList].forEach(function (container) {
+                if (!container) return;
+                var rows = container.querySelectorAll('[data-qr-row]');
+                for (var i = 0; i < rows.length; i++) {
+                    var row = rows[i];
+                    var isTable = container === tableBody;
+                    if (isTable) total++; // count once - table and cards mirror the same rows
+                    var name = (row.getAttribute('data-qr-channel') || '').toLocaleLowerCase();
+                    var status = row.getAttribute('data-qr-status') || '';
+                    var match = (q === '' || name.indexOf(q) !== -1) && (statusValue === '' || status === statusValue);
+                    row.hidden = !match;
+                    if (match && isTable) shown++;
+                }
+            });
+            if (noResults) {
+                var empty = total > 0 && shown === 0;
+                noResults.hidden = !empty;
+                if (empty) noResults.textContent = t('js.queue.no_results');
+            }
+            var newCount = t('js.queue.shown_count', { shown: shown, total: total });
+            if (countEl && countEl.textContent !== newCount) countEl.textContent = newCount;
+        }
+
+        if (filterInput) {
+            filterInput.addEventListener('input', function () {
+                filterValue = filterInput.value;
+                if (filterClear) filterClear.hidden = !filterValue;
+                applyFilter();
+            });
+        }
+        if (filterClear) {
+            filterClear.addEventListener('click', function () {
+                filterValue = '';
+                if (filterInput) filterInput.value = '';
+                filterClear.hidden = true;
+                applyFilter();
+                if (filterInput) filterInput.focus();
+            });
+        }
+        if (statusSelect) {
+            statusSelect.addEventListener('change', function () {
+                statusValue = statusSelect.value;
+                applyFilter();
+            });
+        }
+        if (sortSelect) {
+            sortSelect.addEventListener('change', function () { setSort(sortSelect.value, true); });
+        }
+        document.querySelectorAll('[data-qr-sort]').forEach(function (btn) {
+            btn.addEventListener('click', function () { setSort(btn.getAttribute('data-qr-sort'), true); });
+        });
+        var resetBtn = document.getElementById('qr-reset');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', function () {
+                filterValue = ''; statusValue = '';
+                if (filterInput) filterInput.value = '';
+                if (filterClear) filterClear.hidden = true;
+                if (statusSelect) statusSelect.value = '';
+                setSort('default', false);
+                applyFilter();
+            });
+        }
+
+        syncSortUI();
+        applyFilter();
+    })();
+</script>
+{{end}}

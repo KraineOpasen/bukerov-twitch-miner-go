@@ -1,0 +1,15 @@
+{{/* C18 — DPBA passive affordance (Stage 4 §6 / task Phase 8). Exactly one
+     instance exists in the whole UI, on /overview/queue. States that the
+     five listed manual controls remain deferred pending broker audit - no
+     buttons, no menus, no greyed ghosts, no drag handles, no hidden active
+     implementation. The troubleshooting link is intentionally OMITTED
+     (S-NOBACK): /help/troubleshooting remains a deferred 404 route in this
+     slice, and this component must not link to it, nor substitute a
+     different route while labeling it "troubleshooting". S5-9 (the Help
+     section slice) owns wiring that link once /help/troubleshooting is
+     actually built - do not enable it in this or any earlier slice.
+     No inputs. */}}
+{{define "c18.dpba"}}<div class="c18-dpba" role="note">
+    <span class="c18-dpba-icon" aria-hidden="true">‖</span>
+    <span class="c18-dpba-text">{{ t "queue.dpba.text" }}</span>
+</div>{{end}}
