@@ -451,15 +451,6 @@ var rosterStatusIcons = map[string]string{
 // currently hold or are waiting for a slot. A channel neither occupied nor
 // waiting simply has HasReasonCode=false (rendered as "-", never a
 // fabricated code).
-// hasFormattedPointsToday gates the roster's Today-points cell on the
-// FORMATTED value itself, mirroring the HasPoints/PointsFormatted convention
-// just above (never on a stats-map entry merely existing): a stats entry
-// whose formatted PointsToday is still empty must render the "—" no-data
-// marker, never a blank cell.
-func hasFormattedPointsToday(pointsToday string) bool {
-	return pointsToday != ""
-}
-
 func (s *Server) buildQueueRoster(streamers []*models.Streamer, slots WatchSlotsView, stats map[string]streamerStats, evidence watchSlotEvidence, tr func(string) string) []queueRosterRow {
 	live, unknown, offline, untracked, _ := s.buildCards(streamers, slots, stats, map[string]bool{}, tr)
 
@@ -497,7 +488,7 @@ func (s *Server) buildQueueRoster(streamers []*models.Streamer, slots WatchSlots
 			row.PointsRaw = info.Points
 		}
 		if cs, ok := stats[info.Name]; ok {
-			row.HasPointsToday = hasFormattedPointsToday(info.PointsToday)
+			row.HasPointsToday = info.PointsToday != ""
 			row.PointsToday = info.PointsToday
 			row.PointsTodayRaw = cs.pointsToday
 		}

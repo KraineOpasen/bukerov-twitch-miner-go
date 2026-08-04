@@ -50,6 +50,16 @@ func s53T(t *testing.T, lang, key string) string {
 var (
 	lcPauseButtonRe = regexp.MustCompile(`<button[^>]*hx-post="/api/lifecycle/pause"[^>]*>`)
 	lcStopButtonRe  = regexp.MustCompile(`<button[^>]*hx-post="/api/lifecycle/stop"[^>]*>`)
+
+	// lcStandaloneDisabledRe matches the standalone HTML boolean "disabled"
+	// attribute, never the "hx-disabled-elt" substring that every lifecycle
+	// button carries unconditionally: it requires whitespace (or tag-start)
+	// immediately before "disabled" and whitespace/">" immediately after, so
+	// "hx-disabled-elt" (disabled bounded by "-" on both sides) can never
+	// match. A plain strings.Contains(tag, "disabled") check would pass on
+	// hx-disabled-elt alone and never prove the real conditional attribute
+	// rendered.
+	lcStandaloneDisabledRe = regexp.MustCompile(`(^|\s)disabled(\s|>)`)
 )
 
 // TestS5_3LifecycleTransitionReasonVisibleNearButtons proves that whenever the
@@ -86,8 +96,8 @@ func TestS5_3LifecycleTransitionReasonVisibleNearButtons(t *testing.T) {
 		if pauseTag == "" {
 			t.Fatalf("[%s] expected a Pause <button hx-post=\"/api/lifecycle/pause\"> in the primary action group; body=%s", lang, body)
 		}
-		if !strings.Contains(pauseTag, "disabled") {
-			t.Errorf("[%s] Pause button element itself must carry disabled while transitioning; tag=%s", lang, pauseTag)
+		if !lcStandaloneDisabledRe.MatchString(pauseTag) {
+			t.Errorf("[%s] Pause button element itself must carry a standalone disabled attribute while transitioning (hx-disabled-elt alone does not count); tag=%s", lang, pauseTag)
 		}
 		if !strings.Contains(primaryGroup, want) {
 			t.Errorf("[%s] transition reason %q must be visible within the Pause action group, not merely somewhere in the page; region=%s", lang, want, primaryGroup)
@@ -100,8 +110,8 @@ func TestS5_3LifecycleTransitionReasonVisibleNearButtons(t *testing.T) {
 		if stopTag == "" {
 			t.Fatalf("[%s] expected a Stop <button hx-post=\"/api/lifecycle/stop\"> in the Advanced action group; body=%s", lang, body)
 		}
-		if !strings.Contains(stopTag, "disabled") {
-			t.Errorf("[%s] Stop button element itself must carry disabled while transitioning; tag=%s", lang, stopTag)
+		if !lcStandaloneDisabledRe.MatchString(stopTag) {
+			t.Errorf("[%s] Stop button element itself must carry a standalone disabled attribute while transitioning (hx-disabled-elt alone does not count); tag=%s", lang, stopTag)
 		}
 		reasonBeforeStop := body[reasonStart:advancedStart]
 		if !strings.Contains(reasonBeforeStop, want) {

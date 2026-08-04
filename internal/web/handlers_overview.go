@@ -506,13 +506,14 @@ func (s *Server) buildCards(
 		settings := st.GetSettings()
 		status := st.GetStatus()
 		online := status == models.StatusOnline
-		watchingSlot := watching[st.GetUsername()]
+		username := st.GetUsername()
+		watchingSlot := watching[username]
 		// A streamer that went online→unknown while still holding a watch slot is
 		// shown in the live group as "watching" but flagged unconfirmed (never a
 		// red offline); it is not counted in LiveCount.
 		slottedUnconfirmed := status == models.StatusUnknown && watchingSlot
 		card := StreamerInfo{
-			Name:            st.GetUsername(),
+			Name:            username,
 			Points:          st.GetChannelPoints(),
 			PointsFormatted: util.FormatNumber(st.GetChannelPoints()),
 			Status:          status.String(),
@@ -522,7 +523,7 @@ func (s *Server) buildCards(
 			DisableWatch:    settings.DisableWatch,
 		}
 
-		if cs, ok := stats[st.GetUsername()]; ok {
+		if cs, ok := stats[username]; ok {
 			card.PointsToday = util.FormatNumber(cs.pointsToday)
 			if cs.hasRate {
 				card.PointsPerHour = util.FormatNumber(cs.pointsPerHour)
@@ -530,7 +531,7 @@ func (s *Server) buildCards(
 		}
 
 		// Last notable event for this streamer from the in-memory ring.
-		if text, ago := lastEventFor(tr, st.GetUsername()); text != "" {
+		if text, ago := lastEventFor(tr, username); text != "" {
 			card.LastEventText = text
 			card.LastEventAgo = ago
 		}
@@ -542,7 +543,7 @@ func (s *Server) buildCards(
 			card.GoalTitle = g.Title
 			card.GoalPercent = g.Percent
 			ticker = append(ticker, TickerItem{
-				Streamer: st.GetUsername(),
+				Streamer: username,
 				Kind:     "goal",
 				Label:    g.Title,
 				Percent:  g.Percent,
@@ -550,7 +551,7 @@ func (s *Server) buildCards(
 			})
 		}
 
-		card.HasActivePrediction = predByStreamer[st.GetUsername()]
+		card.HasActivePrediction = predByStreamer[username]
 
 		if online || slottedUnconfirmed {
 			// Confirmed online, or holding a slot during a transient unknown blip.
@@ -589,7 +590,7 @@ func (s *Server) buildCards(
 				}
 			}
 
-			card.WatchReason = slots.Reason[st.GetUsername()]
+			card.WatchReason = slots.Reason[username]
 			switch {
 			case settings.DisableWatch:
 				card.State = "disabled"
@@ -609,7 +610,7 @@ func (s *Server) buildCards(
 		} else if status == models.StatusUnknown {
 			// Unknown and NOT holding a slot: its own group, never rendered as a red
 			// offline card and never shown with an offline duration.
-			card.WatchReason = slots.Reason[st.GetUsername()]
+			card.WatchReason = slots.Reason[username]
 			if settings.DisableWatch {
 				card.State = "disabled"
 			} else {

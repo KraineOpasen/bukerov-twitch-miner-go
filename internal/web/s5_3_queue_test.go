@@ -5,6 +5,9 @@ package web
 // shared filter/sort state, and the exactly-once C18 DPBA card.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -165,18 +168,117 @@ func TestS5_3FullRosterIncludesEveryConfiguredState(t *testing.T) {
 	}
 }
 
-// TestS5_3PointsTodayGatedOnFormattedValueNotStatsPresence proves the exact
-// mechanism CodeRabbit flagged: HasPointsToday must be gated on the
-// FORMATTED PointsToday value, like HasPoints is on PointsFormatted — never
-// on a stats-map entry merely existing. An entry whose formatted PointsToday
-// is still empty must render the "—" no-data state instead of a blank cell,
-// while PointsTodayRaw stays available for client-side sorting.
-func TestS5_3PointsTodayGatedOnFormattedValueNotStatsPresence(t *testing.T) {
-	if hasFormattedPointsToday("") {
-		t.Error("hasFormattedPointsToday(\"\") = true, want false: a stats entry existing must not alone gate the display")
+// TestS5_3PointsTodayPreservedThroughBuildQueueRoster proves the real,
+// end-to-end path: a streamer with a genuine stats-map hit for today's points
+// comes back from buildQueueRoster with HasPointsToday=true and both the
+// formatted and raw values preserved — never gated on the stats entry merely
+// existing (CodeRabbit PR152 finding), and never lost through the Name/stats
+// key that buildCards and buildQueueRoster now share via a single
+// GetUsername() snapshot.
+func TestS5_3PointsTodayPreservedThroughBuildQueueRoster(t *testing.T) {
+	st := models.NewStreamer("alpha", models.DefaultStreamerSettings())
+	st.SetConfirmedOffline()
+	st.SetChannelPoints(9000)
+	stats := map[string]streamerStats{"alpha": {pointsToday: 4321}}
+
+	srv := &Server{}
+	rows := srv.buildQueueRoster([]*models.Streamer{st}, WatchSlotsView{}, stats, watchSlotEvidence{}, enTR(t))
+	if len(rows) != 1 {
+		t.Fatalf("roster has %d rows, want 1", len(rows))
 	}
-	if !hasFormattedPointsToday("1,234") {
-		t.Error("hasFormattedPointsToday(\"1,234\") = false, want true: a real formatted value must gate true")
+
+	row := rows[0]
+	if !row.HasPointsToday {
+		t.Errorf("row.HasPointsToday = false, want true: stats had a real, non-empty PointsToday hit; row=%+v", row)
+	}
+	if row.PointsToday != "4,321" {
+		t.Errorf("row.PointsToday = %q, want formatted \"4,321\"; row=%+v", row.PointsToday, row)
+	}
+	if row.PointsTodayRaw != 4321 {
+		t.Errorf("row.PointsTodayRaw = %d, want raw 4321; row=%+v", row.PointsTodayRaw, row)
+	}
+}
+
+// TestS5_3PointsTodayAbsentThroughBuildQueueRoster proves the complementary
+// no-stats case through the same real path: a streamer with no matching
+// stats-map entry comes back with HasPointsToday=false and an empty
+// formatted value, never a stale or defaulted value.
+func TestS5_3PointsTodayAbsentThroughBuildQueueRoster(t *testing.T) {
+	st := models.NewStreamer("beta", models.DefaultStreamerSettings())
+	st.SetConfirmedOffline()
+	st.SetChannelPoints(500)
+
+	srv := &Server{}
+	rows := srv.buildQueueRoster([]*models.Streamer{st}, WatchSlotsView{}, map[string]streamerStats{}, watchSlotEvidence{}, enTR(t))
+	if len(rows) != 1 {
+		t.Fatalf("roster has %d rows, want 1", len(rows))
+	}
+
+	row := rows[0]
+	if row.HasPointsToday {
+		t.Errorf("row.HasPointsToday = true, want false: no stats entry exists for this channel; row=%+v", row)
+	}
+	if row.PointsToday != "" {
+		t.Errorf("row.PointsToday = %q, want empty: no stats entry exists for this channel; row=%+v", row.PointsToday, row)
+	}
+}
+
+// TestS5_3BuildCardsSingleUsernameSnapshotAST proves, independent of any
+// runtime race window, that buildCards' streamer loop reads st.GetUsername()
+// exactly once per iteration and reuses that snapshot for every
+// identity-keyed lookup in the same iteration (card.Name, the stats key,
+// lastEventFor, the ticker's Streamer field, predByStreamer, and both
+// WatchReason assignments) — never a second independent read that a
+// concurrent RenameIfCurrent could observe differently from the first.
+func TestS5_3BuildCardsSingleUsernameSnapshotAST(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "handlers_overview.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse handlers_overview.go: %v", err)
+	}
+
+	var buildCards *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "buildCards" {
+			buildCards = fn
+			break
+		}
+	}
+	if buildCards == nil {
+		t.Fatal("buildCards function declaration not found in handlers_overview.go")
+	}
+
+	var streamerLoop *ast.RangeStmt
+	ast.Inspect(buildCards.Body, func(n ast.Node) bool {
+		if streamerLoop != nil {
+			return false
+		}
+		if rs, ok := n.(*ast.RangeStmt); ok {
+			if ident, ok := rs.X.(*ast.Ident); ok && ident.Name == "streamers" {
+				streamerLoop = rs
+				return false
+			}
+		}
+		return true
+	})
+	if streamerLoop == nil {
+		t.Fatal("buildCards: could not find `for _, st := range streamers` loop")
+	}
+
+	count := 0
+	ast.Inspect(streamerLoop.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "GetUsername" {
+			count++
+		}
+		return true
+	})
+
+	if count != 1 {
+		t.Errorf("buildCards streamer loop calls st.GetUsername() %d times, want exactly 1 (single snapshot reused for every identity-keyed read)", count)
 	}
 }
 
@@ -187,6 +289,13 @@ func TestS5_3PointsTodayGatedOnFormattedValueNotStatsPresence(t *testing.T) {
 func TestS5_3PointsTodayMissingRendersNoDataMarker(t *testing.T) {
 	row := queueRosterRow{
 		Channel: "streamer_a", Status: "offline", StatusLabel: "Offline",
+		// ReasonCode and Points are deliberately given real, present values
+		// (HasReasonCode/HasPoints=true) so only the Today column can produce
+		// the "no data" marker below - otherwise a page-wide Contains check
+		// could not tell a Today-specific regression apart from the other
+		// two columns' own (correct) no-data markers.
+		HasReasonCode: true, ReasonCode: "priority_slot", ReasonLabel: "Priority slot",
+		HasPoints: true, Points: "9,000", PointsRaw: 9000,
 		HasPointsToday: false, PointsToday: "", PointsTodayRaw: 500,
 	}
 	data := QueuePageData{Roster: []queueRosterRow{row}}
