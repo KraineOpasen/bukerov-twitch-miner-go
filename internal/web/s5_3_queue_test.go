@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
@@ -164,6 +165,66 @@ func TestS5_3FullRosterIncludesEveryConfiguredState(t *testing.T) {
 	}
 }
 
+// TestS5_3PointsTodayGatedOnFormattedValueNotStatsPresence proves the exact
+// mechanism CodeRabbit flagged: HasPointsToday must be gated on the
+// FORMATTED PointsToday value, like HasPoints is on PointsFormatted — never
+// on a stats-map entry merely existing. An entry whose formatted PointsToday
+// is still empty must render the "—" no-data state instead of a blank cell,
+// while PointsTodayRaw stays available for client-side sorting.
+func TestS5_3PointsTodayGatedOnFormattedValueNotStatsPresence(t *testing.T) {
+	if hasFormattedPointsToday("") {
+		t.Error("hasFormattedPointsToday(\"\") = true, want false: a stats entry existing must not alone gate the display")
+	}
+	if !hasFormattedPointsToday("1,234") {
+		t.Error("hasFormattedPointsToday(\"1,234\") = false, want true: a real formatted value must gate true")
+	}
+}
+
+// TestS5_3PointsTodayMissingRendersNoDataMarker proves the C4/C3 templates
+// render the existing "—" missing-data state (never a blank cell) when
+// HasPointsToday is false, while the raw sort attribute still carries the
+// stats-derived value for client-side sorting (task Phase 3 item H).
+func TestS5_3PointsTodayMissingRendersNoDataMarker(t *testing.T) {
+	row := queueRosterRow{
+		Channel: "streamer_a", Status: "offline", StatusLabel: "Offline",
+		HasPointsToday: false, PointsToday: "", PointsTodayRaw: 500,
+	}
+	data := QueuePageData{Roster: []queueRosterRow{row}}
+
+	partials := testPartialsLang(t, i18n.LangEN)
+	var buf strings.Builder
+	if err := partials.ExecuteTemplate(&buf, "c4.roster_table", data); err != nil {
+		t.Fatalf("render c4.roster_table: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `data-qr-today="500"`) {
+		t.Errorf("C4 row must still carry the raw sort attribute from PointsTodayRaw; body=%s", out)
+	}
+	if !strings.Contains(out, `aria-label="no data">—<`) {
+		t.Errorf("C4 row missing PointsToday must render the \"—\" no-data marker, not a blank cell; body=%s", out)
+	}
+}
+
+// TestS5_3QueueEmptyStateCTATargetsSettingsStreamers proves the empty-roster
+// state's action link targets the canonical streamer-roster owner route,
+// /settings/streamers - matching the doc comment above QueuePageData and
+// Stage 4's assignment of the streamer roster to that route - never the bare
+// /settings landing page (CodeRabbit PR152 finding: code and comment
+// disagreed).
+func TestS5_3QueueEmptyStateCTATargetsSettingsStreamers(t *testing.T) {
+	srv := buildF3PageServer(t)
+	srv.AttachStreamers(nil)
+	data := srv.buildQueuePageData("en")
+	// This fixture server has no configured streamers, so the roster is
+	// empty and the S-EMPTY state block renders.
+	if !data.RosterEmpty {
+		t.Fatal("expected an empty roster for a server with no configured streamers")
+	}
+	if data.EmptyState.ActionTarget != "/settings/streamers" {
+		t.Errorf("empty-state ActionTarget = %q, want /settings/streamers", data.EmptyState.ActionTarget)
+	}
+}
+
 // TestS5_3RosterNeverFabricatesQueuePosition proves queueRosterRow carries no
 // position/rank field and the rendered table/cards never print a "#1"-style
 // numbered position.
@@ -235,6 +296,92 @@ func TestS5_3C4TableSemantics(t *testing.T) {
 	// Overflow-x lives on the table's own card wrapper only.
 	if !strings.Contains(body, `class="c4-table-card"`) {
 		t.Error("queue page missing the c4-table-card overflow wrapper")
+	}
+}
+
+// TestS5_3C4TableCardHasVerticalScrollBoundForStickyHeader proves the C4
+// table wrapper has a genuine vertical scroll boundary (max-height + a
+// scrolling overflow, not just overflow-x), so the sticky <thead th> rule
+// has an actual nearest scroll ancestor to stick within (CodeRabbit PR152
+// finding: overflow-x alone makes overflow-y compute to auto with no height
+// bound, so the container never scrolls vertically and the header can never
+// separate from the rows). Horizontal scrolling and sticky headers both stay
+// enabled; the page itself must never scroll horizontally.
+func TestS5_3C4TableCardHasVerticalScrollBoundForStickyHeader(t *testing.T) {
+	css := readEmbeddedStatic(t, "static/css/input.css")
+
+	ruleRe := regexp.MustCompile(`\.c4-table-card\s*\{([^}]*)\}`)
+	m := ruleRe.FindStringSubmatch(css)
+	if m == nil {
+		t.Fatal("input.css missing the .c4-table-card rule")
+	}
+	rule := m[1]
+	if !regexp.MustCompile(`max-height\s*:\s*\d`).MatchString(rule) {
+		t.Errorf(".c4-table-card must declare a max-height so it has a real vertical scroll boundary; rule=%s", rule)
+	}
+	if !regexp.MustCompile(`overflow\s*:\s*auto`).MatchString(rule) && !regexp.MustCompile(`overflow-y\s*:\s*auto`).MatchString(rule) {
+		t.Errorf(".c4-table-card must set overflow (or overflow-y) to auto so the height bound actually scrolls; rule=%s", rule)
+	}
+
+	stickyRe := regexp.MustCompile(`\.c4-table thead th\s*\{([^}]*)\}`)
+	sm := stickyRe.FindStringSubmatch(css)
+	if sm == nil || !strings.Contains(sm[1], "position: sticky") {
+		t.Error("input.css must still declare position: sticky on .c4-table thead th")
+	}
+}
+
+// TestS5_3QueueCountsFromWhicheverRepresentationExists is a source-contract
+// test (no DOM/browser harness exists in this repository - task Phase 3 item
+// G) pinning the actual counting mechanism: applyFilter must count from
+// whichever of tableBody/cardsList actually exists, never hardcode
+// "container === tableBody" (CodeRabbit PR152 finding: on a cards-only
+// render, that guard left total/shown at 0 forever, reporting "0 of 0" and
+// suppressing the no-results note even when a filter matched nothing).
+func TestS5_3QueueCountsFromWhicheverRepresentationExists(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	if !strings.Contains(body, "var countFrom = tableBody || cardsList;") {
+		t.Error("queue.html must count from whichever representation exists: var countFrom = tableBody || cardsList;")
+	}
+	if strings.Contains(body, "var isTable = container === tableBody;") {
+		t.Error("queue.html must not gate counting on container === tableBody alone (the cards-only bug)")
+	}
+	if !strings.Contains(body, "var counts = container === countFrom;") {
+		t.Error("queue.html must gate counting on container === countFrom, not a hardcoded tableBody comparison")
+	}
+}
+
+// TestS5_3AriaSortOwnedByHeaderNeverByButton proves aria-sort lives only on
+// the owning <th scope="col"> (the ARIA-correct columnheader owner), never
+// on the nested sort <button> (CodeRabbit PR152 finding: aria-sort on a
+// button is invisible to assistive technology, which only recognizes it on
+// columnheader/rowheader roles). The button remains the activation control.
+func TestS5_3AriaSortOwnedByHeaderNeverByButton(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/overview/queue", "en")
+
+	buttonAriaSortRe := regexp.MustCompile(`<button[^>]*aria-sort[^>]*>`)
+	if m := buttonAriaSortRe.FindString(body); m != "" {
+		t.Errorf("a sort <button> must never carry aria-sort itself, found: %s", m)
+	}
+
+	thAriaSortRe := regexp.MustCompile(`<th[^>]*aria-sort="[^"]*"[^>]*>`)
+	tags := thAriaSortRe.FindAllString(body, -1)
+	if len(tags) < 3 {
+		t.Fatalf("expected aria-sort on at least the 3 sortable <th> headers (channel/points/today), found %d: %v", len(tags), tags)
+	}
+	for _, tag := range tags {
+		if !strings.Contains(tag, `scope="col"`) {
+			t.Errorf("every aria-sort-carrying header must be a <th scope=\"col\">, got: %s", tag)
+		}
+	}
+
+	// Every aria-sort occurrence anywhere on the page belongs to a <th> -
+	// the total count found on <th> must equal the total count on the page.
+	totalAriaSort := strings.Count(body, "aria-sort=")
+	if totalAriaSort != len(tags) {
+		t.Errorf("aria-sort appears %d times on the page but only %d are on <th> elements - some occurrence escaped the header", totalAriaSort, len(tags))
 	}
 }
 

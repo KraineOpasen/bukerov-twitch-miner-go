@@ -833,7 +833,7 @@
   "queue.reason.active_drop": "Активная кампания дропов",
   "queue.reason.fair_rotation": "Слот честной ротации",
   "queue.reason.priority": "Совпадение с настроенным приоритетом",
-  "queue.reason.discovery_fill": "Заполнение простого слота через дискавери",
+  "queue.reason.discovery_fill": "Заполнение свободного слота через дискавери",
   "queue.reason.lower_priority": "Оба слота заняты каналами с равным или более высоким приоритетом",
   "queue.reason.unknown": "причина неизвестна",
   "queue.status.watching": "Смотрим",

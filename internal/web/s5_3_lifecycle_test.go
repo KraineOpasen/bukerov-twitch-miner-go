@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -39,11 +40,25 @@ func s53T(t *testing.T, lang, key string) string {
 
 // ---- Case A: transition-pending / capabilities-unavailable -----------------
 
+// lcPauseButtonRe/lcStopButtonRe match the actual rendered opening tag of the
+// Pause and Stop buttons by their hx-post route, so assertions can target
+// that specific element instead of a page-wide "disabled" substring any
+// other button (e.g. the always-collapsed Stop control) could equally
+// satisfy (CodeRabbit PR152 finding: the page-wide check at the old line 60
+// passed only because Stop happened to be disabled, never proving Pause
+// was).
+var (
+	lcPauseButtonRe = regexp.MustCompile(`<button[^>]*hx-post="/api/lifecycle/pause"[^>]*>`)
+	lcStopButtonRe  = regexp.MustCompile(`<button[^>]*hx-post="/api/lifecycle/stop"[^>]*>`)
+)
+
 // TestS5_3LifecycleTransitionReasonVisibleNearButtons proves that whenever the
 // snapshot reports a transition in progress (capabilities unavailable for as
-// long as the pending-command slot is held), the rendered panel carries
-// visible reason text near the (now disabled) button group, in both
-// languages - never a bare disabled control with no explanation.
+// long as the pending-command slot is held), Pause and Stop are EACH
+// independently disabled on their own rendered element, and the reason text
+// is visible within their own associated action group - the primary button
+// row for Pause, the collapsed Advanced/Stop block for Stop - never merely
+// "somewhere in the complete page body", in both languages.
 func TestS5_3LifecycleTransitionReasonVisibleNearButtons(t *testing.T) {
 	snap := lifecycle.Snapshot{
 		Desired:      lifecycle.DesiredRunning,
@@ -53,17 +68,44 @@ func TestS5_3LifecycleTransitionReasonVisibleNearButtons(t *testing.T) {
 	}
 	for _, lang := range []string{"en", "ru"} {
 		body := lifecyclePanelHTMX(t, snap, lang)
-
-		if !strings.Contains(body, `hx-post="/api/lifecycle/pause"`) {
-			t.Fatalf("[%s] expected the Pause button to still render while Desired=running; body=%s", lang, body)
-		}
-		if !strings.Contains(body, `disabled`) {
-			t.Fatalf("[%s] expected the Pause button to be disabled while transitioning; body=%s", lang, body)
-		}
-
 		want := s53T(t, lang, "lc.reason.transitioning")
-		if !strings.Contains(body, want) {
-			t.Errorf("[%s] disabled controls during a transition must carry visible reason text %q; body=%s", lang, want, body)
+
+		groupStart := strings.Index(body, `role="group" aria-label="`)
+		reasonStart := strings.Index(body, `id="lc-transition-reason"`)
+		advancedStart := strings.Index(body, `id="lc-advanced"`)
+		if groupStart < 0 || reasonStart < 0 || advancedStart < 0 {
+			t.Fatalf("[%s] lifecycle_panel.html missing the expected primary group / transition-reason / advanced structure; body=%s", lang, body)
+		}
+
+		// ---- Pause: its own <button> element must carry disabled, and the
+		// reason must be visible within the primary action group's own
+		// region (the group through the reason element immediately
+		// following it).
+		primaryGroup := body[groupStart:advancedStart]
+		pauseTag := lcPauseButtonRe.FindString(primaryGroup)
+		if pauseTag == "" {
+			t.Fatalf("[%s] expected a Pause <button hx-post=\"/api/lifecycle/pause\"> in the primary action group; body=%s", lang, body)
+		}
+		if !strings.Contains(pauseTag, "disabled") {
+			t.Errorf("[%s] Pause button element itself must carry disabled while transitioning; tag=%s", lang, pauseTag)
+		}
+		if !strings.Contains(primaryGroup, want) {
+			t.Errorf("[%s] transition reason %q must be visible within the Pause action group, not merely somewhere in the page; region=%s", lang, want, primaryGroup)
+		}
+
+		// ---- Stop: its own <button> element must carry disabled, scoped to
+		// the Advanced action group that contains it; the shared reason
+		// explanation renders immediately before that group.
+		stopTag := lcStopButtonRe.FindString(body[advancedStart:])
+		if stopTag == "" {
+			t.Fatalf("[%s] expected a Stop <button hx-post=\"/api/lifecycle/stop\"> in the Advanced action group; body=%s", lang, body)
+		}
+		if !strings.Contains(stopTag, "disabled") {
+			t.Errorf("[%s] Stop button element itself must carry disabled while transitioning; tag=%s", lang, stopTag)
+		}
+		reasonBeforeStop := body[reasonStart:advancedStart]
+		if !strings.Contains(reasonBeforeStop, want) {
+			t.Errorf("[%s] transition reason %q must be visible in the region associated with the Stop action group; region=%s", lang, want, reasonBeforeStop)
 		}
 	}
 }
@@ -129,11 +171,22 @@ func lcPanelScriptBlock(t *testing.T) string {
 // clock disables every lifecycle action button once the poll is judged lost,
 // via the shared helper (not scattered per-button code), scoped to
 // #lifecycle-panel only.
+//
+// No DOM/browser test harness exists in this repository (no goja/jsdom/
+// Node/Playwright dependency, and adding one is out of scope for this
+// corrective pass - task Phase 3 item C), so this remains a source-contract
+// test. It is strengthened past mere syntax presence (function declared,
+// querySelectorAll called) to require the ACTUAL disabling assignment
+// itself: "btn.disabled = disabled" (CodeRabbit's Deterministic Test
+// Contract warning on PR152 - a mutant that emptied the forEach callback
+// body would previously still pass, since the old assertions only checked
+// the function/selector literals, never the assignment that does the work).
 func TestS5_3LifecycleStaleGatingDisablesButtons(t *testing.T) {
 	block := lcPanelScriptBlock(t)
 	for _, want := range []string{
 		"function setLifecycleButtonsDisabled(",
 		"panel.querySelectorAll('button')",
+		"btn.disabled = disabled;",
 		"setLifecycleButtonsDisabled(true)",
 	} {
 		if !strings.Contains(block, want) {

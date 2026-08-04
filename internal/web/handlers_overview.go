@@ -129,7 +129,7 @@ func (s *Server) handleAPINowWatching(w http.ResponseWriter, r *http.Request) {
 	if slots.Watching == nil {
 		slots.Watching = map[string]bool{}
 	}
-	view := s.buildNowWatching(streamers, slots, stats, status.ConnectionLost)
+	view := s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, s.watchSlotEvidence())
 
 	s.renderPartial(w, r, "now_watching", view)
 }
@@ -264,6 +264,13 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 
 	predState := predictionsState(provider != nil, status.Status == StatusRunning, len(predictions))
 
+	// Read once and reuse for the sidebar pair, the Overview slot pair and
+	// its provenance chip, so a single buildOverviewData execution never
+	// observes two different broker ticks across those surfaces (CodeRabbit
+	// PR152 finding: buildNowWatching used to call the provider again on its
+	// own).
+	evidence := s.watchSlotEvidence()
+
 	data := OverviewData{
 		Username:       s.username,
 		RefreshMinutes: refresh,
@@ -283,7 +290,7 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		PointsToday:    util.FormatNumber(today),
 		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
-		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost),
+		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, evidence),
 		// TrackedLive/TrackedUnknown/TrackedOffline/Untracked are deliberately
 		// left unset: no Overview template consumer reads them anymore (see
 		// the OverviewPageData doc comment above) — every render goes through
@@ -291,11 +298,6 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		// untracked slices without a second pass over the streamers.
 		GeneratedUnix: time.Now().Unix(),
 	}
-
-	// Read once and reuse for both the slot pair and its provenance chip, so
-	// the two always describe the same broker snapshot (never two separate
-	// reads that could observe different ticks).
-	evidence := s.watchSlotEvidence()
 
 	return OverviewPageData{
 		OverviewData:          data,
@@ -725,12 +727,16 @@ func eventLabel(tr func(string) string, e events.Event) string {
 }
 
 // buildNowWatching builds the pinned sidebar "Now Watching" block from the
-// active watch slots.
+// active watch slots. evidence is the caller's own watchSlotEvidence()
+// snapshot, read once and passed in - never re-read here - so a single
+// buildOverviewData execution never observes two different broker ticks for
+// the sidebar pair and the Overview pair (CodeRabbit PR152 finding).
 func (s *Server) buildNowWatching(
 	streamers []*models.Streamer,
 	slots WatchSlotsView,
 	stats map[string]streamerStats,
 	stale bool,
+	evidence watchSlotEvidence,
 ) NowWatchingView {
 	byName := make(map[string]*models.Streamer, len(streamers))
 	for _, st := range streamers {
@@ -810,7 +816,7 @@ func (s *Server) buildNowWatching(
 	// if len(view.Slots) were ever >= 2 already (padCount clamps at 0).
 	if padCount := 2 - len(view.Slots); padCount > 0 {
 		emptyMode := "unknown"
-		if s.watchSlotEvidence().Mode == "idle" {
+		if evidence.Mode == "idle" {
 			emptyMode = "idle"
 		}
 		for i := 0; i < padCount; i++ {

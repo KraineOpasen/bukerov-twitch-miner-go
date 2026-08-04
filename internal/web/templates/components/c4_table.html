@@ -1,12 +1,14 @@
 {{/* C4 — Table, data-dense (Stage 4 §6 / task Phase 6/10). The queue page's
      desktop/compact representation of the full configured-streamer roster.
      Semantic <table>, <th scope="col">, sortable headers as real <button>s
-     with aria-sort (client-side sort only - no new backend field, no query
-     contract). Reason codes render as mono type-code text, never linked to
-     /help/glossary (deferred), never the free-form Reason. Missing values
-     render "—" with an accessible "no data" label, never 0. No fabricated
-     queue-position column. Overflow-x lives on the card wrapper only - the
-     page itself never scrolls horizontally.
+     that trigger the sort while aria-sort lives on the owning <th> itself
+     (ARIA: aria-sort is defined for columnheader/rowheader roles, not
+     button - CodeRabbit PR152 finding). Reason codes render as mono
+     type-code text, never linked to /help/glossary (deferred), never the
+     free-form Reason. Missing values render "—" with an accessible "no
+     data" label, never 0. No fabricated queue-position column. Overflow-x
+     lives on the card wrapper only - the page itself never scrolls
+     horizontally.
      Inputs: .Roster []queueRosterRow */}}
 {{define "c4.roster_table"}}<div class="c4-table-card">
 <table class="c4-table" id="qr-table">
@@ -14,10 +16,10 @@
     <thead>
         <tr>
             <th scope="col">{{ t "queue.col.status" }}</th>
-            <th scope="col"><button type="button" class="c4-sort-btn" data-qr-sort="channel" aria-sort="none">{{ t "queue.col.channel" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+            <th scope="col" aria-sort="none"><button type="button" class="c4-sort-btn" data-qr-sort="channel">{{ t "queue.col.channel" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
             <th scope="col">{{ t "queue.col.reason" }}</th>
-            <th scope="col" class="c4-th-num"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="points" aria-sort="none">{{ t "queue.col.points" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
-            <th scope="col" class="c4-th-num"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="today" aria-sort="none">{{ t "queue.col.points_today" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+            <th scope="col" class="c4-th-num" aria-sort="none"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="points">{{ t "queue.col.points" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
+            <th scope="col" class="c4-th-num" aria-sort="none"><button type="button" class="c4-sort-btn c4-sort-btn--num" data-qr-sort="today">{{ t "queue.col.points_today" }}<span class="c4-sort-ico" aria-hidden="true"></span></button></th>
         </tr>
     </thead>
     <tbody id="qr-table-body">

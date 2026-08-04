@@ -84,7 +84,7 @@ func (s *Server) buildQueuePageData(lang string) QueuePageData {
 			Variant:      "block",
 			Message:      tr("queue.empty.title"),
 			ActionLabel:  tr("queue.empty.action"),
-			ActionTarget: "/settings",
+			ActionTarget: "/settings/streamers",
 		}
 	}
 	return data

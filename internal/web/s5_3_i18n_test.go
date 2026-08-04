@@ -8,6 +8,7 @@ package web
 // via `go test ./internal/i18n/...`; this pins the SPECIFIC S5-3 keys.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
@@ -60,6 +61,24 @@ func TestS5_3LocaleKeysPresentAndTranslated(t *testing.T) {
 		if en == ru && !s53DeliberatelyIdenticalKeys[k] {
 			t.Errorf("%q has identical EN/RU text %q — looks untranslated", k, en)
 		}
+	}
+}
+
+// TestS5_3DiscoveryFillRussianMeansFreeNotSimple proves the RU translation of
+// queue.reason.discovery_fill describes an unoccupied ("свободного") slot,
+// matching the EN "idle slot" meaning — never "простого" ("simple"), which
+// changes the meaning entirely (CodeRabbit PR152 finding).
+func TestS5_3DiscoveryFillRussianMeansFreeNotSimple(t *testing.T) {
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	ru := loc.T(i18n.LangRU, "queue.reason.discovery_fill")
+	if strings.Contains(ru, "простого") {
+		t.Errorf("queue.reason.discovery_fill RU text must not use \"простого\" (simple), got %q", ru)
+	}
+	if !strings.Contains(ru, "свободного") {
+		t.Errorf("queue.reason.discovery_fill RU text must describe an unoccupied slot with \"свободного\", got %q", ru)
 	}
 }
 

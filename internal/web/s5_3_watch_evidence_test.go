@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -235,6 +236,57 @@ func TestS5_3FreeFormReasonNeverLeaksIntoOverviewOrSidebar(t *testing.T) {
 	}
 }
 
+// ---- item I: single evidence snapshot per buildOverviewData execution -----
+
+// TestS5_3BuildOverviewDataReadsEvidenceOnce proves buildOverviewData calls
+// the support-bundle provider exactly once per execution (CodeRabbit PR152
+// finding: buildNowWatching used to call s.watchSlotEvidence() again on its
+// own, on top of the explicit read used for SlotPair/SlotPairProvenance -
+// two provider calls, two debug.Snapshot builds, per /overview render).
+func TestS5_3BuildOverviewDataReadsEvidenceOnce(t *testing.T) {
+	srv := buildF3PageServer(t)
+	var calls int32
+	srv.SetSupportBundleSource(func() debug.Snapshot {
+		atomic.AddInt32(&calls, 1)
+		return debug.Snapshot{Watching: debug.WatchingInfo{Mode: "idle", EvaluatedAt: time.Now()}}
+	})
+
+	srv.buildOverviewData("en")
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("support-bundle provider called %d times during one buildOverviewData execution, want exactly 1", got)
+	}
+}
+
+// TestS5_3BuildOverviewDataSidebarAndSlotPairShareOneEvidenceTick proves the
+// sidebar pair (NowWatching.EmptyPad) and the Overview slot pair (SlotPair)
+// can never observe two different broker ticks within one response: with an
+// evidence source that alternates Mode between calls, a regression that
+// re-reads the provider a second time would make the two disagree.
+func TestS5_3BuildOverviewDataSidebarAndSlotPairShareOneEvidenceTick(t *testing.T) {
+	srv := buildF3PageServer(t)
+	var calls int32
+	srv.SetSupportBundleSource(func() debug.Snapshot {
+		n := atomic.AddInt32(&calls, 1)
+		mode := "idle"
+		if n%2 == 0 {
+			mode = "direct" // deliberately NOT idle, so a second read is observably different
+		}
+		return debug.Snapshot{Watching: debug.WatchingInfo{Mode: mode, EvaluatedAt: time.Now()}}
+	})
+
+	data := srv.buildOverviewData("en")
+
+	if len(data.NowWatching.EmptyPad) == 0 {
+		t.Fatal("expected empty sidebar padding with no occupied slots")
+	}
+	sidebarMode := data.NowWatching.EmptyPad[0].EmptyReasonMode
+	slotPairMode := data.SlotPair[0].EmptyReasonMode
+	if sidebarMode != slotPairMode {
+		t.Errorf("sidebar pair mode %q != Overview slot pair mode %q - the sidebar and Overview pair observed different broker ticks within one response", sidebarMode, slotPairMode)
+	}
+}
+
 // TestS5_3NoNewSerializedAPIResponse proves S5-3 introduced no new JSON/API
 // endpoint that could carry the evidence (task Phase 3: "No new serialized
 // API response should normally exist") - the pre-existing /api/now-watching
@@ -247,6 +299,9 @@ func TestS5_3NoNewSerializedAPIResponse(t *testing.T) {
 	for _, path := range []string{"/api/now-watching", "/api/overview"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200 (a non-200 error response could otherwise make the JSON check below pass vacuously)", path, rec.Code)
+		}
 		ct := rec.Header().Get("Content-Type")
 		if strings.Contains(ct, "json") {
 			t.Errorf("%s must remain an HTML partial, not JSON (Content-Type=%q)", path, ct)

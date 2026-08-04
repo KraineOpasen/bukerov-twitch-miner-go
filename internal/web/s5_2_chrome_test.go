@@ -122,6 +122,20 @@ var s5_3NavSectionAttrRe = regexp.MustCompile(`data-nav-section="([a-z]+)"`)
 // parent link and never its Overview child) would receive aria-current —
 // without requiring a browser to execute the real script.
 func TestS5_3OverviewQueueExactlyOneAriaCurrentDestination(t *testing.T) {
+	// Pin the exact client-side rule this Go simulation mirrors from
+	// base.html's updateActiveNav, so an edit to that rule forces this test
+	// to be updated instead of silently drifting from the real script
+	// (CodeRabbit PR152 finding).
+	base := readEmbeddedTemplate(t, "templates/base.html")
+	for _, want := range []string{
+		`sectionMatches && a.getAttribute('href') === path`,
+		`!isParent && isCurrent`,
+	} {
+		if !strings.Contains(base, want) {
+			t.Fatalf("base.html no longer contains %q - update this simulation to match", want)
+		}
+	}
+
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview/queue", "en")
 

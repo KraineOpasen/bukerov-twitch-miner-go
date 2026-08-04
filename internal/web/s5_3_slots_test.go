@@ -37,7 +37,7 @@ func TestS5_3BuildNowWatchingPaddingIsExactlyTwoEndToEnd(t *testing.T) {
 	srv := &Server{}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			view := srv.buildNowWatching(streamers, WatchSlotsView{Watching: c.watching}, map[string]streamerStats{}, false)
+			view := srv.buildNowWatching(streamers, WatchSlotsView{Watching: c.watching}, map[string]streamerStats{}, false, watchSlotEvidence{})
 			total := len(view.Slots) + len(view.EmptyPad)
 			if total != 2 {
 				t.Fatalf("%s: len(Slots)+len(EmptyPad) = %d, want 2 (Slots=%d EmptyPad=%d)", c.name, total, len(view.Slots), len(view.EmptyPad))
@@ -49,9 +49,17 @@ func TestS5_3BuildNowWatchingPaddingIsExactlyTwoEndToEnd(t *testing.T) {
 				t.Fatalf("render now_watching: %v", err)
 			}
 			out := buf.String()
-			rendered := strings.Count(out, `class="watch-slot`) + countC12SlotBoxes(out)
-			if rendered != 2 {
-				t.Errorf("%s: rendered slot boxes = %d, want 2; body=%s", c.name, rendered, out)
+			// Assert each markup family independently (never summed): a
+			// regression that restores the legacy occupied-slot path would
+			// otherwise produce e.g. 1 legacy + 1 C12 == 2 and stay green
+			// (the exact bug this test previously hid; see
+			// TestS5_3SidebarNowWatchingAlwaysExactlyTwoBoxes's sibling
+			// comment).
+			if legacy := strings.Count(out, `class="watch-slot`); legacy != 0 {
+				t.Errorf("%s: found %d legacy .watch-slot boxes - every slot must render through the shared C12 component; body=%s", c.name, legacy, out)
+			}
+			if n := countC12SlotBoxes(out); n != 2 {
+				t.Errorf("%s: C12 slot boxes = %d, want 2; body=%s", c.name, n, out)
 			}
 		})
 	}

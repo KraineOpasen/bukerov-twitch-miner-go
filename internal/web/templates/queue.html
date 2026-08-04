@@ -140,14 +140,18 @@
             });
         }
 
-        // The header <button data-qr-sort> elements (C4) need aria-sort kept
-        // in sync with whichever trigger (header button or the toolbar
-        // select, reachable at every viewport per C5) last changed it.
+        // The header <button data-qr-sort> elements (C4) trigger sorting;
+        // aria-sort is kept in sync on their OWNING <th> (the correct ARIA
+        // owner - columnheader/rowheader roles, never button) with whichever
+        // trigger (header button or the toolbar select, reachable at every
+        // viewport per C5) last changed it.
         function syncSortUI() {
             document.querySelectorAll('[data-qr-sort]').forEach(function (btn) {
+                var th = btn.closest('th');
+                if (!th) return;
                 var col = btn.getAttribute('data-qr-sort');
                 var dir = col !== sortValue ? 'none' : (col === 'channel' ? 'ascending' : 'descending');
-                btn.setAttribute('aria-sort', dir);
+                th.setAttribute('aria-sort', dir);
             });
             if (sortSelect && sortSelect.value !== sortValue) sortSelect.value = sortValue;
         }
@@ -173,18 +177,23 @@
         function applyFilter() {
             var q = (filterValue || '').trim().toLocaleLowerCase();
             var shown = 0, total = 0;
+            // Count from whichever representation actually exists: the C4
+            // table on wide viewports, the C3 cards on narrow ones. Counting
+            // only from tableBody would report "0 of 0" whenever the roster
+            // renders cards-only (CodeRabbit PR152 finding).
+            var countFrom = tableBody || cardsList;
             [tableBody, cardsList].forEach(function (container) {
                 if (!container) return;
                 var rows = container.querySelectorAll('[data-qr-row]');
                 for (var i = 0; i < rows.length; i++) {
                     var row = rows[i];
-                    var isTable = container === tableBody;
-                    if (isTable) total++; // count once - table and cards mirror the same rows
+                    var counts = container === countFrom; // count once - table and cards mirror the same rows
+                    if (counts) total++;
                     var name = (row.getAttribute('data-qr-channel') || '').toLocaleLowerCase();
                     var status = row.getAttribute('data-qr-status') || '';
                     var match = (q === '' || name.indexOf(q) !== -1) && (statusValue === '' || status === statusValue);
                     row.hidden = !match;
-                    if (match && isTable) shown++;
+                    if (match && counts) shown++;
                 }
             });
             if (noResults) {
