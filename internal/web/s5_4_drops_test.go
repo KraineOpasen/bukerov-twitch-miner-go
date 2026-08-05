@@ -15,6 +15,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -562,6 +563,113 @@ func TestS5_4ClaimsFilterMarkupPresent(t *testing.T) {
 	}
 	if strings.Contains(body, "claims-filter-period") {
 		t.Error("Claims must not offer a period/time filter (no claim-time evidence exists)")
+	}
+}
+
+// s54ClaimsResetHandlerRe extracts the reset button's click-handler body, so
+// TestS5_4ClaimsFilterScriptContract can prove it clears both filters before
+// the same applyFilter recomputes visibility, not just cosmetically resets
+// the <select>s while a stale filter stays in effect.
+var s54ClaimsResetHandlerRe = regexp.MustCompile(`(?s)resetBtn\.addEventListener\('click', function \(\) \{(.*?)\}\);`)
+
+// TestS5_4ClaimsFilterScriptContract proves the rendered filter script keeps
+// its AND predicate over both data-claim-* attributes, drives the no-match
+// message off the very same per-row match flag each row's own visibility is
+// toggled from (so the message can never disagree with what the rows show),
+// and that resetting clears both filters before that shared function
+// recomputes visibility. None of this executes in a Go test process — it is
+// plain page-load JS — so this pins the exact source contract deterministically
+// instead of requiring a real browser. CodeRabbit (PR #153, Deterministic Test
+// Contract) found TestS5_4ClaimsFilterMarkupPresent only proved the filter
+// controls exist, not that any of this actually happens.
+func TestS5_4ClaimsFilterScriptContract(t *testing.T) {
+	c := s54Campaign("c1", "Camp", "Game", []*models.Drop{s54ClaimableDrop("D1", 5, 10)})
+	srv := s54ServerWith(t, []*models.Campaign{c}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now()})
+	body := f3GetPage(t, srv, "/drops/claims", "en")
+
+	for _, want := range []string{
+		`(!campaign || row.getAttribute('data-claim-campaign') === campaign) &&`,
+		`(!state || row.getAttribute('data-claim-state') === state);`,
+		`row.classList.toggle('hidden', !matches);`,
+		`if (matches) visible++;`,
+		`noMatch.classList.toggle('hidden', visible !== 0);`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Claims filter script missing expected contract fragment %q", want)
+		}
+	}
+
+	resetMatch := s54ClaimsResetHandlerRe.FindStringSubmatch(body)
+	if resetMatch == nil {
+		t.Fatal("could not locate the reset button's click handler in the rendered script")
+	}
+	resetBody := resetMatch[1]
+	campaignClearIdx := strings.Index(resetBody, "campaignSel.value = '';")
+	stateClearIdx := strings.Index(resetBody, "stateSel.value = '';")
+	reapplyIdx := strings.Index(resetBody, "applyFilter();")
+	if campaignClearIdx == -1 || stateClearIdx == -1 || reapplyIdx == -1 {
+		t.Fatalf("reset handler missing one of clear-campaign/clear-state/reapply: %q", resetBody)
+	}
+	if campaignClearIdx >= reapplyIdx || stateClearIdx >= reapplyIdx {
+		t.Error("reset handler must clear both filters before recomputing visibility, not after")
+	}
+}
+
+// s54ClaimsTableBodyRe and s54ClaimsCardListRe isolate the table and card
+// renderings of the claim rows, so TestS5_4ClaimsTableAndCardRowsSynchronized
+// can compare the two representations directly instead of assuming they stay
+// in lockstep just because both range over the same view-model slice.
+var s54ClaimsTableBodyRe = regexp.MustCompile(`(?s)<tbody id="claims-table-body">(.*?)</tbody>`)
+var s54ClaimsCardListRe = regexp.MustCompile(`(?s)<ul[^>]*id="claims-cards"[^>]*>(.*?)</ul>`)
+var s54ClaimRowAttrsRe = regexp.MustCompile(`data-claim-campaign="([^"]*)" data-claim-state="([^"]*)"`)
+
+func s54ExtractClaimPairs(section string) [][2]string {
+	matches := s54ClaimRowAttrsRe.FindAllStringSubmatch(section, -1)
+	pairs := make([][2]string, len(matches))
+	for i, m := range matches {
+		pairs[i] = [2]string{m[1], m[2]}
+	}
+	return pairs
+}
+
+// TestS5_4ClaimsTableAndCardRowsSynchronized proves the desktop table and the
+// mobile card list render the identical campaign/state row sequence, in the
+// same order, for a fixture spanning all four claim states across two
+// campaigns. The client-side filter script relies on this: it queries
+// [data-claim-row] once and applies one predicate to every match, so if the
+// two representations ever diverged (different row set, different order),
+// the filters would silently desync from whichever one the user is looking
+// at. This is a server-rendered-markup assertion — it needs no browser.
+func TestS5_4ClaimsTableAndCardRowsSynchronized(t *testing.T) {
+	c1 := s54Campaign("c1", "Camp One", "Game One", []*models.Drop{
+		s54ClaimableDrop("D1", 5, 10),
+		s54InProgressDrop("D2", 3, 10),
+	})
+	c2 := s54Campaign("c2", "Camp Two", "Game Two", []*models.Drop{
+		s54UnobservedDrop("D3", 20),
+		s54ClaimedDrop("D4", 15),
+	})
+	srv := s54ServerWith(t, []*models.Campaign{c1, c2}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now()})
+	body := f3GetPage(t, srv, "/drops/claims", "en")
+
+	tableMatch := s54ClaimsTableBodyRe.FindStringSubmatch(body)
+	cardMatch := s54ClaimsCardListRe.FindStringSubmatch(body)
+	if tableMatch == nil || cardMatch == nil {
+		t.Fatalf("could not locate the claims table body / card list in the rendered page")
+	}
+	tablePairs := s54ExtractClaimPairs(tableMatch[1])
+	cardPairs := s54ExtractClaimPairs(cardMatch[1])
+
+	if len(tablePairs) != 4 {
+		t.Fatalf("expected 4 rows in the table body, got %d: %+v", len(tablePairs), tablePairs)
+	}
+	if len(tablePairs) != len(cardPairs) {
+		t.Fatalf("table has %d rows but the card list has %d — they must render the identical row set", len(tablePairs), len(cardPairs))
+	}
+	for i := range tablePairs {
+		if tablePairs[i] != cardPairs[i] {
+			t.Errorf("row %d: table has campaign=%q state=%q but card has campaign=%q state=%q — table and card representations must stay in lockstep", i, tablePairs[i][0], tablePairs[i][1], cardPairs[i][0], cardPairs[i][1])
+		}
 	}
 }
 
