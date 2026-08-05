@@ -143,30 +143,53 @@ func TestF3PollIntervalLiteralsUnchanged(t *testing.T) {
 			t.Errorf("health page (lang=%s) missing the unchanged \"load, every 15s\" poll literal", lang)
 		}
 
+		// task S5-4 split the former single-page tab bar into direct routes:
+		// Current (/drops, discovery only) keeps its own "every 1m" for
+		// discovery; Upcoming's "every 1m" now lives on its own page
+		// (/drops/upcoming) instead of a tabpanel on this one.
 		drops := f3GetPage(t, srv, "/drops", lang)
 		if !strings.Contains(drops, "load, every 30s") {
 			t.Errorf("drops page (lang=%s) missing the unchanged \"load, every 30s\" poll literal", lang)
 		}
-		if n := strings.Count(drops, "every 1m"); n != 2 {
-			t.Errorf("drops page (lang=%s) has %d occurrences of \"every 1m\", want exactly 2 (upcoming + discovery)", lang, n)
+		if n := strings.Count(drops, "every 1m"); n != 1 {
+			t.Errorf("drops page (lang=%s) has %d occurrences of \"every 1m\", want exactly 1 (discovery)", lang, n)
+		}
+
+		dropsUpcoming := f3GetPage(t, srv, "/drops/upcoming", lang)
+		if n := strings.Count(dropsUpcoming, "every 1m"); n != 1 {
+			t.Errorf("drops/upcoming page (lang=%s) has %d occurrences of \"every 1m\", want exactly 1", lang, n)
 		}
 	}
 }
 
 // TestF3EndpointLiteralsUnchanged pins every API endpoint string this task
 // was forbidden from changing, wherever it appears (a bare page load, or a
-// partial only reachable via its own htmx poll).
+// partial only reachable via its own htmx poll). task S5-4 moved Upcoming and
+// Past off the Current page's tabpanels onto their own direct routes, so
+// their endpoint literals are checked on those routes instead — the
+// endpoints themselves (and this task's obligation not to touch them) are
+// unchanged.
 func TestF3EndpointLiteralsUnchanged(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, lang := range f3Langs {
 		drops := f3GetPage(t, srv, "/drops", lang)
 		for _, want := range []string{
-			"/api/drops", "/api/drops/sync", "/api/drops/upcoming", "/api/drops/past",
+			"/api/drops", "/api/drops/sync",
 			"/api/discovery", "/api/policy/mode",
 		} {
 			if !strings.Contains(drops, want) {
 				t.Errorf("drops page (lang=%s) missing endpoint literal %q", lang, want)
 			}
+		}
+
+		dropsUpcoming := f3GetPage(t, srv, "/drops/upcoming", lang)
+		if !strings.Contains(dropsUpcoming, "/api/drops/upcoming") {
+			t.Errorf("drops/upcoming page (lang=%s) missing endpoint literal \"/api/drops/upcoming\"", lang)
+		}
+
+		dropsPast := f3GetPage(t, srv, "/drops/past", lang)
+		if !strings.Contains(dropsPast, "/api/drops/past") {
+			t.Errorf("drops/past page (lang=%s) missing endpoint literal \"/api/drops/past\"", lang)
 		}
 
 		apiDrops := f3GetPage(t, srv, "/api/drops", lang)
@@ -470,29 +493,21 @@ func TestF3HealthGuardActiveElementRegexExcludesButton(t *testing.T) {
 // Drops
 // ---------------------------------------------------------------------
 
-// TestF3DropsTabsHaveRovingTabindexAndAria asserts the tablist/tabpanel ARIA
-// wiring and roving tabindex the design mandated.
-func TestF3DropsTabsHaveRovingTabindexAndAria(t *testing.T) {
+// TestF3DropsCurrentHasNoLegacyTabMarkup proves the S5-4 route migration
+// (task Phase 3) actually replaced the former client-only hidden-tabs
+// implementation this test used to pin (role=tablist/tab/tabpanel,
+// window.__dropsTabs): Upcoming/Past/Claims are now separate direct routes,
+// not tabpanels swapped on this one page. See s5_4_drops_test.go for the
+// full direct-route/nav/R17 coverage that replaces what this test used to
+// assert about the removed tab bar.
+func TestF3DropsCurrentHasNoLegacyTabMarkup(t *testing.T) {
 	srv := buildF3PageServer(t)
-	body := f3GetPage(t, srv, "/drops", "en")
-
-	if !strings.Contains(body, `role="tablist"`) {
-		t.Error("drops page missing role=\"tablist\"")
-	}
-	if n := strings.Count(body, `role="tab"`); n != 3 {
-		t.Errorf(`role="tab"`+" count = %d, want 3", n)
-	}
-	if n := strings.Count(body, `role="tabpanel"`); n != 3 {
-		t.Errorf(`role="tabpanel"`+" count = %d, want 3", n)
-	}
-	for _, want := range []string{
-		`aria-controls="tab-current"`, `aria-controls="tab-upcoming"`, `aria-controls="tab-past"`,
-		`aria-labelledby="drops-tab-current"`, `aria-labelledby="drops-tab-upcoming"`, `aria-labelledby="drops-tab-past"`,
-		`tabindex="0"`, `tabindex="-1"`,
-		"window.__dropsTabs", "ArrowRight", "ArrowLeft",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("drops page missing tab a11y literal %q", want)
+	for _, path := range []string{"/drops", "/drops/current"} {
+		body := f3GetPage(t, srv, path, "en")
+		for _, unwanted := range []string{`role="tablist"`, `role="tab"`, `role="tabpanel"`, "window.__dropsTabs"} {
+			if strings.Contains(body, unwanted) {
+				t.Errorf("%s must no longer contain legacy tab markup %q", path, unwanted)
+			}
 		}
 	}
 }

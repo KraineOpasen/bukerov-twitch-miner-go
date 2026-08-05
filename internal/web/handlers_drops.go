@@ -16,8 +16,12 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
+// handleDropsPage renders the Current-campaigns page at both its canonical
+// direct route (/drops/current) and the legacy /drops alias (task S5-4 Phase
+// 3) — the exact same pipeline for both, so the alias is never a second,
+// diverging implementation.
 func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/drops" {
+	if r.URL.Path != "/drops" && r.URL.Path != "/drops/current" {
 		http.NotFound(w, r)
 		return
 	}
@@ -53,6 +57,102 @@ func (s *Server) handleDropsPage(w http.ResponseWriter, r *http.Request) {
 // auto-refresh so progress stays live without a full page reload).
 func (s *Server) handleAPIDrops(w http.ResponseWriter, r *http.Request) {
 	s.renderDropsList(w, r)
+}
+
+// handleDropsUpcomingPage renders /drops/upcoming (task S5-4 Phase 3/5): a
+// direct-render page shell around the existing drops_upcoming partial, fed by
+// the existing /api/drops/upcoming endpoint exactly as the Current page's
+// former inline tab already did (load + 1m refresh, no new endpoint, no new
+// Twitch sync). Matches the established shell shape of handleOverviewPage /
+// handleDropsPastPage / handleDropsClaimsPage: no method gating, since
+// net/http already suppresses the body for HEAD at the transport layer.
+func (s *Server) handleDropsUpcomingPage(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	refresh := s.refresh
+	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
+	s.mu.RUnlock()
+
+	data := DropsUpcomingPageData{
+		Username:       s.username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+	}
+	s.renderPage(w, r, "drops_upcoming_page.html", data)
+}
+
+// handleDropsPastPage renders /drops/past (task S5-4 Phase 3/5): a
+// direct-render page shell around the existing drops_past partial, fed by the
+// existing /api/drops/past endpoint, load-only (no polling) exactly as the
+// Current page's former inline tab already did.
+func (s *Server) handleDropsPastPage(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	refresh := s.refresh
+	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
+	s.mu.RUnlock()
+
+	data := DropsPastPageData{
+		Username:       s.username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+	}
+	s.renderPage(w, r, "drops_past_page.html", data)
+}
+
+// handleDropsClaimsPage renders /drops/claims (task S5-4 Phase 3/5): the sole
+// owner of claim lifecycle across the Drops section. Fully server-rendered at
+// request time from the SAME CampaignsProvider.Campaigns() evidence the
+// Current tab already reads — no new provider method, no new API endpoint, no
+// polling (there is no live claim-event stream to poll, only this snapshot).
+// Unavailable (provider nil) is a distinct, honestly-labeled case, never
+// rendered as "no claims".
+func (s *Server) handleDropsClaimsPage(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	refresh := s.refresh
+	discordEnabled := s.discordEnabled
+	debugURL := s.debugURL
+	provider := s.campaignsProvider
+	s.mu.RUnlock()
+
+	tr := func(key string) string { return s.i18n.T(s.langFromRequest(r), key) }
+
+	data := DropsClaimsPageData{
+		Username:       s.username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+	}
+	if provider == nil {
+		data.Unavailable = true
+	} else {
+		data.Rows = buildDropsClaimsRows(provider.Campaigns(), tr)
+		data.CampaignNames = distinctClaimCampaignNames(data.Rows)
+	}
+	s.renderPage(w, r, "drops_claims.html", data)
+}
+
+// distinctClaimCampaignNames collects the order-preserving, de-duplicated
+// campaign names appearing in rows, for the Claims page's campaign filter.
+func distinctClaimCampaignNames(rows []ClaimRowView) []string {
+	seen := make(map[string]struct{}, len(rows))
+	var names []string
+	for _, r := range rows {
+		if r.CampaignName == "" {
+			continue
+		}
+		if _, ok := seen[r.CampaignName]; ok {
+			continue
+		}
+		seen[r.CampaignName] = struct{}{}
+		names = append(names, r.CampaignName)
+	}
+	return names
 }
 
 // handleAPIDropsSync backs the manual "Sync Drops now" action. It asks the drops
@@ -110,8 +210,10 @@ func (s *Server) renderDropsList(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	var campaigns []*models.Campaign
+	var status drops.SyncStatus
 	if provider != nil {
 		campaigns = provider.Campaigns()
+		status = provider.SyncStatus()
 	}
 
 	var progress health.ProgressSnapshot
@@ -128,9 +230,77 @@ func (s *Server) renderDropsList(w http.ResponseWriter, r *http.Request) {
 		policyByID = buildDropPolicyByCampaign(campaigns, decisions, rules, tr)
 	}
 
-	data := DropsListData{Campaigns: buildDropCampaignViews(campaigns, dropHealthByCampaign(progress, tr), policyByID, tr)}
+	views := buildDropCampaignViews(campaigns, dropHealthByCampaign(progress, tr), policyByID, tr)
+	data := buildDropsListData(views, status, tr, s.displayLocation())
 
 	s.renderPartial(w, r, "drops_list", data)
+}
+
+// buildDropsListData assembles the Current tab's mandatory R17 evidence (task
+// S5-4 Phase 4): a never-synced block (S-UNK), a failed-attempt strip
+// (S-DEGR, carrying the ATTEMPT clock), a successful-empty block (S-EMPTY),
+// and the freshness chip attached to every populated card (carrying the
+// DATA/SUCCESS clock). These two clocks are deliberately never merged into
+// one component — see SPECIFICATIONS.md "Drops & Campaign System" and Stage 4
+// §12. Built only from CampaignsProvider.SyncStatus fields already returned
+// today; no fabricated backend evidence.
+func buildDropsListData(views []DropCampaignView, status drops.SyncStatus, tr func(string) string, loc *time.Location) DropsListData {
+	data := DropsListData{Campaigns: views}
+
+	neverSynced := status.LastSyncAt.IsZero() && status.LastSuccessAt.IsZero()
+	if neverSynced {
+		data.NeverSyncedState = &StateBlockData{
+			State:   "UNK",
+			Variant: "block",
+			Message: tr("drops.current.state.unk"),
+		}
+		return data
+	}
+
+	if status.LastError != "" {
+		data.DegradedStrip = &StateBlockData{
+			State:   "DEGR",
+			Variant: "strip",
+			Message: tr("drops.current.state.degraded"),
+			Cause:   status.LastError,
+			Time:    tr("drops.current.state.attempted_at") + " " + formatLocalDateTime(status.LastSyncAt, loc),
+		}
+	}
+
+	if status.LastSuccessAt.IsZero() {
+		// An attempt happened (neverSynced is false) but none has ever
+		// succeeded: no freshness chip to show (S-NOBACK — there is no
+		// success clock to attribute it to), and the failed-attempt strip
+		// above already explains the state. The generic "no campaigns yet"
+		// fallback in drops_list.html covers the empty body honestly here,
+		// since a confident S-EMPTY would overstate what a sync that has
+		// never once succeeded actually proved.
+		return data
+	}
+
+	aged := status.IntervalMinutes > 0 && time.Since(status.LastSuccessAt) > 2*time.Duration(status.IntervalMinutes)*time.Minute
+	successText := tr("drops.upcoming.last_success") + " " + formatLocalDateTime(status.LastSuccessAt, loc)
+	chip := ProvenanceChipData{
+		AgeLabel: formatLocalDateTime(status.LastSuccessAt, loc),
+		Source:   tr("drops.current.chip.source"),
+		Aged:     aged,
+	}
+	for i := range data.Campaigns {
+		data.Campaigns[i].Chip = chip
+	}
+
+	if len(views) == 0 && status.LastError == "" {
+		data.EmptyState = &StateBlockData{
+			State:        "EMPTY",
+			Variant:      "block",
+			Message:      tr("drops.current.state.empty"),
+			Time:         successText,
+			ActionLabel:  tr("drops.current.state.empty_action_settings"),
+			ActionTarget: "/settings/drops",
+		}
+	}
+
+	return data
 }
 
 // handleAPIDropsUpcoming renders the dedicated "Upcoming" tab: campaigns Twitch
@@ -343,6 +513,80 @@ func buildPastGroups(records []drops.CatalogRecord, tr func(string) string) []Pa
 	return groups
 }
 
+// buildDropsClaimsRows builds the /drops/claims page's honest, session-scoped
+// rows (task S5-4 Phase 5) from the SAME in-memory CampaignsProvider.
+// Campaigns() snapshot the Current tab already reads — no new provider
+// method, no persistence (claims persistence, B2, remains an outstanding
+// backend dependency; see SPECIFICATIONS.md). State is derived only from
+// models.Drop.Claimability — the authoritative, server-derived field that is
+// NEVER locally inferred — and Campaign.ClaimedDropNames; a drop with no
+// authoritative signal this session is "unknown" and is never promoted to
+// claimed/failed/completed/delivered. There is deliberately no per-row
+// timestamp and no "period" filter: no authoritative claim-time evidence
+// exists yet to filter on.
+func buildDropsClaimsRows(campaigns []*models.Campaign, tr func(string) string) []ClaimRowView {
+	var rows []ClaimRowView
+	for _, c := range campaigns {
+		if c == nil {
+			continue
+		}
+		gameName := ""
+		if c.Game != nil {
+			gameName = c.Game.Name
+		}
+		for _, name := range c.ClaimedDropNames {
+			rows = append(rows, buildClaimRow(c.ID, c.Name, gameName, name, "", "claimed", tr))
+		}
+		for _, d := range c.Drops {
+			if d == nil {
+				continue
+			}
+			state := "in_progress"
+			switch {
+			case d.IsClaimed:
+				state = "claimed"
+			case d.Claimability == models.ClaimabilityKnownTrue:
+				state = "claimable"
+			case d.Claimability == models.ClaimabilityUnknown:
+				state = "unknown"
+			}
+			rows = append(rows, buildClaimRow(c.ID, c.Name, gameName, d.Name, d.Benefit, state, tr))
+		}
+	}
+	return rows
+}
+
+// buildClaimRow renders one claim row's localized label and C10 badge tier
+// for the given state. The default branch (reached only for an unrecognized
+// state string) is treated as "unknown", never a positive/negative outcome —
+// the same fail-closed rule buildDropsClaimsRows itself already applies.
+func buildClaimRow(campaignID, campaignName, gameName, dropName, benefit, state string, tr func(string) string) ClaimRowView {
+	row := ClaimRowView{
+		CampaignID:   campaignID,
+		CampaignName: campaignName,
+		GameName:     gameName,
+		DropName:     dropName,
+		Benefit:      benefit,
+		State:        state,
+	}
+	switch state {
+	case "claimed":
+		row.StatusLabel = tr("drops.claims.state.claimed")
+		row.Badge = BadgeData{Tier: "ok", Icon: "✓", Label: row.StatusLabel}
+	case "claimable":
+		row.StatusLabel = tr("drops.claims.state.claimable")
+		row.Badge = BadgeData{Tier: "caution", Icon: "↻", Label: row.StatusLabel}
+	case "in_progress":
+		row.StatusLabel = tr("drops.claims.state.in_progress")
+		row.Badge = BadgeData{Tier: "info", Icon: "●", Label: row.StatusLabel}
+	default:
+		row.State = "unknown"
+		row.StatusLabel = tr("drops.claims.state.unknown")
+		row.Badge = BadgeData{Tier: "neutral", Icon: "?", Label: row.StatusLabel}
+	}
+	return row
+}
+
 // buildDropCampaignViews turns tracked campaigns into the Drops-page queue,
 // ordered to mirror the watcher's DROPS priority: still-earnable campaigns
 // come before already-claimed ones, channel-restricted campaigns (whose
@@ -498,10 +742,40 @@ func buildDropCampaignView(c *models.Campaign, tr func(string) string) DropCampa
 			view.MinutesRequired = drop.MinutesRequired
 			view.MinutesRemaining = drop.MinutesRemaining()
 			view.MinutePercent = drop.ClampedProgress()
+			view.MinuteProgress = dropProgressData(drop)
 		}
 	}
 
+	switch c.AccountConnection {
+	case models.AccountConnectionConnected:
+		view.AccountLinkBadge = BadgeData{Tier: "ok", Icon: "✓", Label: tr("drops.card.account_linked")}
+	case models.AccountConnectionDisconnected:
+		view.AccountLinkBadge = BadgeData{Tier: "caution", Icon: "!", Label: tr("drops.card.account_not_linked")}
+	}
+	// models.AccountConnectionUnknown (the zero value) leaves AccountLinkBadge
+	// at its zero value (empty Label): the B11 badge renders nothing at all
+	// (S-NOBACK) rather than guessing.
+
+	view.DPCBadge = BadgeData{Tier: "neutral", Label: tr("drops.card.dpc_badge")}
+
 	return view
+}
+
+// dropProgressData feeds the C11 component for a still-earnable drop's
+// progress bar (task S5-4/R17 item 6): Mode is "unknown" — never a fabricated
+// 0% — only when Twitch has never supplied ANY authoritative inventory
+// observation for this drop at all: no minted DropInstanceID (the "ready to
+// observe" signal Twitch's inventory shape mints on the first merge) AND no
+// watched-minute observation yet. Requiring both — rather than gating on
+// Claimability alone — avoids miscasting a drop that genuinely has zero
+// watched minutes but HAS already been matched by an inventory response
+// (DropInstanceID present) as "unknown" instead of a confirmed 0%. Neither
+// field is new evidence: both already flow through Campaigns() today.
+func dropProgressData(d *models.Drop) ProgressData {
+	if d.CurrentMinutesWatched == 0 && d.DropInstanceID == "" && !d.IsClaimed {
+		return ProgressData{Mode: "unknown"}
+	}
+	return ProgressData{Mode: "determinate", Percent: d.ClampedProgress()}
 }
 
 // buildDropDetailViews assembles the per-drop breakdown shown in the Drops-page
@@ -525,6 +799,7 @@ func buildDropDetailViews(c *models.Campaign, tr func(string) string) []DropDeta
 			ImageURL:    d.ImageURL,
 			StatusLabel: tr("drops.status.in_progress"),
 			Percent:     d.ClampedProgress(),
+			Progress:    dropProgressData(d),
 		}
 		if d.MinutesRequired > 0 {
 			detail.HasMinuteProgress = true
@@ -540,6 +815,7 @@ func buildDropDetailViews(c *models.Campaign, tr func(string) string) []DropDeta
 			Claimed:     true,
 			StatusLabel: tr("drops.status.claimed"),
 			Percent:     100,
+			Progress:    ProgressData{Mode: "determinate", Percent: 100},
 		})
 	}
 

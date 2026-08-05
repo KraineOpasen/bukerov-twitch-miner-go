@@ -73,11 +73,13 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 	}
 }
 
-// TestS5_2NavChildDisambiguation pins BOTH group destinations' structure
-// (task Q3 BLOCKER-1): the System group (one parent, two children — Health/
-// Logs) AND the Overview group (one parent, two children — Overview itself/
-// Queue), for a combined two parent links (data-nav-parent) and four
-// children (data-nav-child), each with its own distinct href.
+// TestS5_2NavChildDisambiguation pins all THREE group destinations'
+// structure (task Q3 BLOCKER-1, extended by task S5-4): the System group
+// (one parent, two children — Health/Logs), the Overview group (one parent,
+// two children — Overview itself/Queue), and the Drops group (one parent,
+// four children — Current/Upcoming/Claims/Past), for a combined three parent
+// links (data-nav-parent) and eight children (data-nav-child), each with its
+// own distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -85,11 +87,11 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	// Matched with the trailing ">" so the JS source's own string-literal
 	// references to these attribute names (e.g. hasAttribute('data-nav-parent'))
 	// aren't miscounted as HTML occurrences.
-	if n := strings.Count(body, `data-nav-parent>`); n != 2 {
-		t.Errorf("expected exactly two data-nav-parent groups (Overview, System), found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 3 {
+		t.Errorf("expected exactly three data-nav-parent groups (Overview, Drops, System), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 4 {
-		t.Errorf("expected exactly four data-nav-child destinations (Overview, Queue, Health, Logs), found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 8 {
+		t.Errorf("expected exactly eight data-nav-child destinations (Overview, Queue, Current, Upcoming, Claims, Past, Health, Logs), found %d", n)
 	}
 	if !strings.Contains(body, `href="/health" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
 		t.Error("System group missing the Health child destination")
@@ -102,6 +104,18 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	}
 	if !strings.Contains(body, `href="/overview/queue" class="c2-nav-child" data-nav-section="overview" data-nav-child`) {
 		t.Error("Overview group missing the Queue child destination")
+	}
+	if !strings.Contains(body, `href="/drops/current" class="c2-nav-child" data-nav-section="drops" data-nav-child`) {
+		t.Error("Drops group missing the Current child destination")
+	}
+	if !strings.Contains(body, `href="/drops/upcoming" class="c2-nav-child" data-nav-section="drops" data-nav-child`) {
+		t.Error("Drops group missing the Upcoming child destination")
+	}
+	if !strings.Contains(body, `href="/drops/claims" class="c2-nav-child" data-nav-section="drops" data-nav-child`) {
+		t.Error("Drops group missing the Claims child destination")
+	}
+	if !strings.Contains(body, `href="/drops/past" class="c2-nav-child" data-nav-section="drops" data-nav-child`) {
+		t.Error("Drops group missing the Past child destination")
 	}
 }
 

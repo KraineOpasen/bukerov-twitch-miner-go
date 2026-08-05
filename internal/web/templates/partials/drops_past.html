@@ -31,6 +31,12 @@
 
             {{if $g.LastEnded}}<div class="text-xs text-neutral-500 mt-2">{{ t "drops.past.last_ended" }} {{$g.LastEnded}}</div>{{end}}
 
+            <!-- Claim-lifecycle authority link (task S5-4): Past never asserts
+                 its own claim outcome beyond this durable catalog snapshot —
+                 /drops/claims is the sole owner of claim detail, and only
+                 speaks to campaigns still in the currently-tracked pool. -->
+            <div class="text-xs mt-2"><a href="/drops/claims" class="text-purple-400 hover:underline">{{ t "drops.past.claims_link" }}</a></div>
+
             <details class="mt-2">
                 <summary class="text-xs text-neutral-400 cursor-pointer select-none">{{ t "drops.past.show_prefix" }} {{$g.Count}} {{ t "drops.past.instances_suffix" }}</summary>
                 <div class="overflow-x-auto mt-2">
