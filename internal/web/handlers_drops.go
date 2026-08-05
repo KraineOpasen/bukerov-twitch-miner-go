@@ -132,27 +132,30 @@ func (s *Server) handleDropsClaimsPage(w http.ResponseWriter, r *http.Request) {
 		data.Unavailable = true
 	} else {
 		data.Rows = buildDropsClaimsRows(provider.Campaigns(), tr)
-		data.CampaignNames = distinctClaimCampaignNames(data.Rows)
+		data.CampaignOptions = distinctClaimCampaignOptions(data.Rows)
 	}
 	s.renderPage(w, r, "drops_claims.html", data)
 }
 
-// distinctClaimCampaignNames collects the order-preserving, de-duplicated
-// campaign names appearing in rows, for the Claims page's campaign filter.
-func distinctClaimCampaignNames(rows []ClaimRowView) []string {
+// distinctClaimCampaignOptions collects the order-preserving, de-duplicated
+// campaigns appearing in rows, for the Claims page's campaign filter. Keyed
+// by CampaignID (not Name): two recurring/regional campaign variants can
+// share a display name, and deduping on name alone would collapse them into
+// one filter option that then matches rows from both.
+func distinctClaimCampaignOptions(rows []ClaimRowView) []ClaimCampaignOption {
 	seen := make(map[string]struct{}, len(rows))
-	var names []string
+	var options []ClaimCampaignOption
 	for _, r := range rows {
-		if r.CampaignName == "" {
+		if r.CampaignID == "" {
 			continue
 		}
-		if _, ok := seen[r.CampaignName]; ok {
+		if _, ok := seen[r.CampaignID]; ok {
 			continue
 		}
-		seen[r.CampaignName] = struct{}{}
-		names = append(names, r.CampaignName)
+		seen[r.CampaignID] = struct{}{}
+		options = append(options, ClaimCampaignOption{ID: r.CampaignID, Name: r.CampaignName})
 	}
-	return names
+	return options
 }
 
 // handleAPIDropsSync backs the manual "Sync Drops now" action. It asks the drops
@@ -737,12 +740,20 @@ func buildDropCampaignView(c *models.Campaign, tr func(string) string) DropCampa
 		view.DropName = drop.Name
 		view.DropBenefit = drop.Benefit
 		if drop.MinutesRequired > 0 {
-			view.HasMinuteProgress = true
-			view.MinutesWatched = drop.CurrentMinutesWatched
-			view.MinutesRequired = drop.MinutesRequired
-			view.MinutesRemaining = drop.MinutesRemaining()
 			view.MinutePercent = drop.ClampedProgress()
 			view.MinuteProgress = dropProgressData(drop)
+			// HasMinuteProgress (and the raw counters below) is gated on
+			// determinate progress only: for an unknown-progress drop, showing
+			// "0/120 min watched" would be the exact fabricated-zero assertion
+			// R17 forbids, just as text instead of a bar. The C11 bar itself
+			// (MinuteProgress) still renders unconditionally above, via
+			// c13_campaign_card.html's `if .MinuteProgress.Mode` gate.
+			if view.MinuteProgress.Mode == "determinate" {
+				view.HasMinuteProgress = true
+				view.MinutesWatched = drop.CurrentMinutesWatched
+				view.MinutesRequired = drop.MinutesRequired
+				view.MinutesRemaining = drop.MinutesRemaining()
+			}
 		}
 	}
 
@@ -801,7 +812,11 @@ func buildDropDetailViews(c *models.Campaign, tr func(string) string) []DropDeta
 			Percent:     d.ClampedProgress(),
 			Progress:    dropProgressData(d),
 		}
-		if d.MinutesRequired > 0 {
+		// Same R17 gate as buildDropCampaignView's minute block: the raw
+		// counters only render for determinate progress, never alongside an
+		// unknown C11 bar (that would be the same fabricated-zero assertion
+		// R17 forbids, just as text).
+		if d.MinutesRequired > 0 && detail.Progress.Mode == "determinate" {
 			detail.HasMinuteProgress = true
 			detail.MinutesWatched = d.CurrentMinutesWatched
 			detail.MinutesRequired = d.MinutesRequired

@@ -697,10 +697,19 @@ type DropsClaimsPageData struct {
 	Rows        []ClaimRowView
 	Unavailable bool
 
-	// CampaignNames is the distinct, order-preserving set of campaign names
-	// appearing in Rows, precomputed once so the campaign filter <select>
-	// never needs a template-side dict/grouping helper.
-	CampaignNames []string
+	// CampaignOptions is the distinct, order-preserving set of campaigns
+	// appearing in Rows (ID for filtering/matching, Name for display),
+	// precomputed once so the campaign filter <select> never needs a
+	// template-side dict/grouping helper. Keyed by CampaignID rather than
+	// name so two recurring/regional campaigns that happen to share a name
+	// never collapse into one filter option.
+	CampaignOptions []ClaimCampaignOption
+}
+
+// ClaimCampaignOption is one entry in the Claims page's campaign filter.
+type ClaimCampaignOption struct {
+	ID   string
+	Name string
 }
 
 // DiscoveredChannelView is one row in the Drops-page "Discovered Channels"

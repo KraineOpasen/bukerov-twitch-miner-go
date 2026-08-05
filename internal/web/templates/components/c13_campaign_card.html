@@ -6,8 +6,11 @@
      B11 account-link badge (rendered only with proven Connected/Disconnected
      evidence — AccountLinkBadge.Label is empty otherwise, so nothing renders
      at all, S-NOBACK) + DP-C badge + policy chip; body = current-drop name +
-     status pill + overall/minute progress via C11 (R17: unknown progress
-     renders C11's dash+"unknown" state, never a fabricated 0%) + watchdog
+     status pill + the campaign's overall percent (the existing aggregate
+     bar, unchanged by this task) + the current drop's minute progress via
+     C11 (R17: unknown minute progress renders C11's dash+"unknown" state,
+     never a fabricated 0% — including the raw watched/remaining counters,
+     which are gated on determinate progress the same way) + watchdog
      health badge + policy score/controls; footer = C0 freshness chip (the
      DATA/SUCCESS clock — distinct from any S-DEGR failed-attempt strip the
      caller renders above the whole list, never merged with it).
@@ -75,12 +78,14 @@
         </div>
     </div>
 
-    {{if .HasMinuteProgress}}
+    {{if or .HasMinuteProgress .MinuteProgress.Mode}}
     <div class="mt-3">
+        {{if .HasMinuteProgress}}
         <div class="flex justify-between text-xs text-neutral-400 mb-1">
             <span>{{.MinutesWatched}}/{{.MinutesRequired}} {{ t "drops.min_watched_suffix" }}</span>
             <span>{{.MinutesRemaining}} {{ t "drops.min_remaining_suffix" }}</span>
         </div>
+        {{end}}
         {{template "c11.progress" .MinuteProgress}}
     </div>
     {{end}}

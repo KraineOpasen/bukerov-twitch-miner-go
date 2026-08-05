@@ -201,6 +201,31 @@ func TestS5_4CurrentSuccessfulEmptyIsEmptyNotFailure(t *testing.T) {
 	}
 }
 
+// TestS5_4CurrentAttemptedButNeverSucceededHasNoChipOrEmptyState proves the
+// narrow branch between "never synced" (S-UNK) and "has succeeded at least
+// once" (S-DEGR/S-EMPTY/populated): an attempt happened (LastSyncAt set) but
+// none has ever succeeded (LastSuccessAt still zero). There is no success
+// clock to attribute a freshness chip to (S-NOBACK), and a confident S-EMPTY
+// would overstate what a sync that has never once succeeded actually proved
+// — the generic empty-list fallback in drops_list.html covers the body.
+func TestS5_4CurrentAttemptedButNeverSucceededHasNoChipOrEmptyState(t *testing.T) {
+	status := drops.SyncStatus{LastSyncAt: time.Now(), LastError: "inventory: HTTP 500", IntervalMinutes: 60}
+	data := buildDropsListData(nil, status, enTR(t), time.Local)
+
+	if data.NeverSyncedState != nil {
+		t.Error("an attempted sync (LastSyncAt set) must not report NeverSyncedState")
+	}
+	if data.DegradedStrip == nil {
+		t.Fatal("expected a DegradedStrip for the failed attempt")
+	}
+	if data.EmptyState != nil {
+		t.Error("a sync that has never once succeeded must not claim S-EMPTY — it hasn't proven the policy found nothing")
+	}
+	if len(data.Campaigns) != 0 {
+		t.Fatalf("expected no campaigns (none were passed in), got %d", len(data.Campaigns))
+	}
+}
+
 // TestS5_4CurrentRetainsCardsOnFailedSync proves a failed LAST attempt keeps
 // rendering the last-known-good cards (a backend guarantee this view layer
 // must not additionally hide) alongside an S-DEGR strip. M1 target: removing
@@ -448,6 +473,34 @@ func TestS5_4ClaimsStateMapping(t *testing.T) {
 	}
 }
 
+// TestS5_4DistinctClaimCampaignOptionsDedupesByIDPreservesOrder proves the
+// campaign filter's option list is order-preserving, deduped by CampaignID
+// (not by name, so two same-named campaign instances stay distinct options),
+// and skips rows with no campaign ID at all.
+func TestS5_4DistinctClaimCampaignOptionsDedupesByIDPreservesOrder(t *testing.T) {
+	rows := []ClaimRowView{
+		{CampaignID: "c1", CampaignName: "First"},
+		{CampaignID: "c2", CampaignName: "Second"},
+		{CampaignID: "c1", CampaignName: "First"},  // repeat of c1, must not duplicate
+		{CampaignID: "", CampaignName: "No ID"},    // no campaign id, must be skipped
+		{CampaignID: "c3", CampaignName: "Second"}, // same NAME as c2, different ID: distinct option
+	}
+	got := distinctClaimCampaignOptions(rows)
+	want := []ClaimCampaignOption{
+		{ID: "c1", Name: "First"},
+		{ID: "c2", Name: "Second"},
+		{ID: "c3", Name: "Second"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d options, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("option %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 // TestS5_4ClaimsClaimedWithinDropsListStillMapsToClaimed proves
 // buildDropsClaimsRows' defensive d.IsClaimed branch (a drop still present in
 // Campaign.Drops that is nonetheless already claimed — normally already
@@ -530,6 +583,11 @@ func TestS5_4NewLocaleKeysResolveInBothLanguages(t *testing.T) {
 		"drops.current.state.unk", "drops.current.state.degraded", "drops.current.state.attempted_at",
 		"drops.current.chip.source", "drops.current.state.empty", "drops.current.state.empty_action_settings",
 		"drops.current.state.empty_see_upcoming",
+		// Pre-existing key (not new), but the R17 empty/aged states newly
+		// depend on it — pinned here so a future removal is caught even
+		// though TestLocaleKeyParity alone would not (it only diffs the two
+		// catalogs against each other, not against actual usage).
+		"drops.upcoming.last_success",
 		"drops.card.dpc_badge", "drops.card.account_linked", "drops.card.account_not_linked", "drops.card.claims_link",
 		"drops.past.claims_link",
 		"drops.claims.subtitle", "drops.claims.session_banner", "drops.claims.empty", "drops.claims.unavailable",

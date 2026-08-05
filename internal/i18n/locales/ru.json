@@ -467,7 +467,7 @@
   "drops.current.state.empty": "Нет активных кампаний по вашей текущей политике.",
   "drops.current.state.empty_action_settings": "Настройки → Дропсы",
   "drops.current.state.empty_see_upcoming": "Смотреть предстоящие кампании →",
-  "drops.card.dpc_badge": "DP-C: макет по свидетельствам группы C",
+  "drops.card.dpc_badge": "DP-C: макет в ожидании свидетельств группы C",
   "drops.card.account_linked": "Аккаунт привязан",
   "drops.card.account_not_linked": "Аккаунт не привязан",
   "drops.card.claims_link": "Отследить статус клейма →",
