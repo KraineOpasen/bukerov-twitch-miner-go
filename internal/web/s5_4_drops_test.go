@@ -316,11 +316,32 @@ func TestS5_4UnknownProgressNeverZero(t *testing.T) {
 		t.Errorf("a drop with no authoritative observation must report Mode=unknown, got %+v", got)
 	}
 
-	campaign := s54Campaign("c1", "Fresh Campaign", "Game", []*models.Drop{unobserved})
-	srv := s54ServerWith(t, []*models.Campaign{campaign}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now(), IntervalMinutes: 60})
-	body := f3GetPage(t, srv, "/api/drops", "en")
-	if !strings.Contains(body, "c11-progress--unknown") {
+	unknownCampaign := s54Campaign("c1", "Fresh Campaign", "Game", []*models.Drop{unobserved})
+	unknownSrv := s54ServerWith(t, []*models.Campaign{unknownCampaign}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now(), IntervalMinutes: 60})
+	unknownBody := f3GetPage(t, unknownSrv, "/api/drops", "en")
+	if !strings.Contains(unknownBody, "c11-progress--unknown") {
 		t.Error("expected the C11 unknown-progress state to render for the never-observed drop")
+	}
+	// Deterministic rendered-output check (not just the CSS class): the
+	// fabricated "0/120 min watched" / "120 min remaining" counters this bug
+	// actually produced must be entirely absent, not merely coexisting with
+	// the honest C11 dash state.
+	if strings.Contains(unknownBody, "min watched") || strings.Contains(unknownBody, "min remaining") {
+		t.Error("an unknown-progress drop must not render fabricated watched/remaining minute counters")
+	}
+
+	// Contrast case: a drop with real, determinate progress DOES show its
+	// counters alongside C11's determinate bar - proving the gate above
+	// suppresses only the fabricated case, not minute counters generally.
+	observed := s54InProgressDrop("Observed Drop", 30, 120)
+	determinateCampaign := s54Campaign("c2", "Determinate Campaign", "Game", []*models.Drop{observed})
+	determinateSrv := s54ServerWith(t, []*models.Campaign{determinateCampaign}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now(), IntervalMinutes: 60})
+	determinateBody := f3GetPage(t, determinateSrv, "/api/drops", "en")
+	if !strings.Contains(determinateBody, "c11-progress--determinate") {
+		t.Error("expected the C11 determinate state to render for the observed drop")
+	}
+	if !strings.Contains(determinateBody, "30/120") || !strings.Contains(determinateBody, "min watched") {
+		t.Error("a determinate-progress drop must still render its real watched/remaining minute counters")
 	}
 }
 
