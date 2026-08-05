@@ -798,12 +798,18 @@ func (s *Server) buildNowWatching(
 		view.Slots = append(view.Slots, slot)
 	}
 
-	// Queued = online, not watched, not disabled.
+	// Queued = online, not watched, not disabled. username is read once and
+	// reused for both the Watching lookup and the appended name: two separate
+	// GetUsername() calls each take and release the streamer's RLock, so a
+	// concurrent RenameIfCurrent could commit between them and put a name into
+	// QueuedNames that was never the one checked against Watching (CodeRabbit
+	// PR152 finding, the same torn read already fixed in buildCards).
 	for _, st := range streamers {
-		if !st.GetIsOnline() || slots.Watching[st.GetUsername()] || st.GetSettings().DisableWatch {
+		username := st.GetUsername()
+		if !st.GetIsOnline() || slots.Watching[username] || st.GetSettings().DisableWatch {
 			continue
 		}
-		view.QueuedNames = append(view.QueuedNames, st.GetUsername())
+		view.QueuedNames = append(view.QueuedNames, username)
 	}
 
 	if !slots.NextRotationAt.IsZero() && len(view.Slots) > 0 {

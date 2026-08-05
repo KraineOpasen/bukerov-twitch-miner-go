@@ -282,6 +282,87 @@ func TestS5_3BuildCardsSingleUsernameSnapshotAST(t *testing.T) {
 	}
 }
 
+// TestS5_3BuildNowWatchingQueuedLoopSingleUsernameSnapshotAST extends the
+// same single-snapshot invariant to buildNowWatching's queued loop, which
+// carried the identical torn read: slots.Watching[st.GetUsername()] and the
+// view.QueuedNames append were two independent RLock-scoped reads in one
+// iteration, so a concurrent RenameIfCurrent landing between them could queue
+// a name that was never the one tested against the watching set (CodeRabbit
+// PR152 follow-up finding).
+//
+// buildNowWatching ranges over `streamers` twice - once to build the byName
+// index, once for the queued names - so the loop is identified by structural
+// evidence in its own body (it assigns to view.QueuedNames), never by its
+// numeric position among the function's loops.
+func TestS5_3BuildNowWatchingQueuedLoopSingleUsernameSnapshotAST(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "handlers_overview.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse handlers_overview.go: %v", err)
+	}
+
+	var buildNowWatching *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "buildNowWatching" {
+			buildNowWatching = fn
+			break
+		}
+	}
+	if buildNowWatching == nil {
+		t.Fatal("buildNowWatching function declaration not found in handlers_overview.go")
+	}
+
+	// Every `range streamers` loop whose body mentions view.QueuedNames. The
+	// byName loop does not, so it is excluded on evidence rather than order.
+	var queuedLoops []*ast.RangeStmt
+	ast.Inspect(buildNowWatching.Body, func(n ast.Node) bool {
+		rs, ok := n.(*ast.RangeStmt)
+		if !ok {
+			return true
+		}
+		ident, ok := rs.X.(*ast.Ident)
+		if !ok || ident.Name != "streamers" {
+			return true
+		}
+		touchesQueuedNames := false
+		ast.Inspect(rs.Body, func(inner ast.Node) bool {
+			sel, ok := inner.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "QueuedNames" {
+				return true
+			}
+			if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "view" {
+				touchesQueuedNames = true
+				return false
+			}
+			return true
+		})
+		if touchesQueuedNames {
+			queuedLoops = append(queuedLoops, rs)
+		}
+		return true
+	})
+
+	if len(queuedLoops) != 1 {
+		t.Fatalf("buildNowWatching: found %d `for ... := range streamers` loops assigning view.QueuedNames, want exactly 1 (the queued loop must stay unambiguously identifiable)", len(queuedLoops))
+	}
+
+	count := 0
+	ast.Inspect(queuedLoops[0].Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "GetUsername" {
+			count++
+		}
+		return true
+	})
+
+	if count != 1 {
+		t.Errorf("buildNowWatching queued loop calls st.GetUsername() %d times, want exactly 1 (one snapshot reused for both the Watching lookup and the QueuedNames append)", count)
+	}
+}
+
 // TestS5_3PointsTodayMissingRendersNoDataMarker proves the C4/C3 templates
 // render the existing "—" missing-data state (never a blank cell) when
 // HasPointsToday is false, while the raw sort attribute still carries the
@@ -417,7 +498,7 @@ func TestS5_3C4TableSemantics(t *testing.T) {
 // separate from the rows). Horizontal scrolling and sticky headers both stay
 // enabled; the page itself must never scroll horizontally.
 func TestS5_3C4TableCardHasVerticalScrollBoundForStickyHeader(t *testing.T) {
-	css := readEmbeddedStatic(t, "static/css/input.css")
+	css := stripCSSComments(readEmbeddedStatic(t, "static/css/input.css"))
 
 	ruleRe := regexp.MustCompile(`\.c4-table-card\s*\{([^}]*)\}`)
 	m := ruleRe.FindStringSubmatch(css)
@@ -425,17 +506,134 @@ func TestS5_3C4TableCardHasVerticalScrollBoundForStickyHeader(t *testing.T) {
 		t.Fatal("input.css missing the .c4-table-card rule")
 	}
 	rule := m[1]
-	if !regexp.MustCompile(`max-height\s*:\s*\d`).MatchString(rule) {
-		t.Errorf(".c4-table-card must declare a max-height so it has a real vertical scroll boundary; rule=%s", rule)
+	if !cssHasBoundedMaxHeight(rule) {
+		t.Errorf(".c4-table-card must declare a max-height with a real value so it has a genuine vertical scroll boundary; rule=%s", rule)
 	}
-	if !regexp.MustCompile(`overflow\s*:\s*auto`).MatchString(rule) && !regexp.MustCompile(`overflow-y\s*:\s*auto`).MatchString(rule) {
-		t.Errorf(".c4-table-card must set overflow (or overflow-y) to auto so the height bound actually scrolls; rule=%s", rule)
+	if !cssHasScrollingOverflow(rule) {
+		t.Errorf(".c4-table-card must set overflow (or overflow-y) to auto or scroll so the height bound actually scrolls; rule=%s", rule)
 	}
 
 	stickyRe := regexp.MustCompile(`\.c4-table thead th\s*\{([^}]*)\}`)
 	sm := stickyRe.FindStringSubmatch(css)
 	if sm == nil || !strings.Contains(sm[1], "position: sticky") {
 		t.Error("input.css must still declare position: sticky on .c4-table thead th")
+	}
+}
+
+// ---- CSS declaration matchers for the scroll-boundary contract -------------
+//
+// The first version of the contract above hard-coded the shipped rule's exact
+// spelling: max-height had to start with a digit and overflow had to be
+// literally `auto`. That rejected behaviour-equivalent CSS (`calc(...)`,
+// `var(...)`, `scroll`) purely on syntax, so the helpers below match on what
+// the declaration *means* for the sticky header instead - while staying
+// anchored to complete property declarations, so `not-max-height`,
+// `overflow-x` and commented-out declarations can never satisfy them.
+
+// stripCSSComments removes /* ... */ blocks so a commented-out declaration
+// never satisfies a contract, and a `}` inside a comment never truncates a
+// rule body.
+func stripCSSComments(css string) string {
+	return regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, " ")
+}
+
+// cssDeclValue returns the trimmed value of the prop declaration in a rule
+// body. The leading boundary group is what keeps the match anchored to a whole
+// property name: Go's regexp has no lookbehind, so the character before prop is
+// captured and required to be a non-identifier - that is what makes
+// `not-max-height` fail a `max-height` query, and `overflow-x` fail an
+// `overflow` query (there, `-x` simply is not the `:` the pattern demands).
+func cssDeclValue(rule, prop string) (string, bool) {
+	re := regexp.MustCompile(`(?i)(?:^|[^0-9A-Za-z_-])` + regexp.QuoteMeta(prop) + `\s*:([^;}]*)`)
+	m := re.FindStringSubmatch(rule)
+	if m == nil {
+		return "", false
+	}
+	return strings.TrimSpace(m[1]), true
+}
+
+// cssHasBoundedMaxHeight reports whether the rule bounds its height at all.
+// Any non-empty value counts - the sticky header only needs *a* bound, not a
+// particular unit - but a present-yet-empty declaration does not.
+func cssHasBoundedMaxHeight(rule string) bool {
+	v, ok := cssDeclValue(rule, "max-height")
+	return ok && v != ""
+}
+
+// cssHasScrollingOverflow reports whether the rule actually scrolls on the
+// vertical axis. `auto` and `scroll` both create a scroll container; `hidden`
+// and `visible` do not, so they must be rejected rather than merely unmatched.
+func cssHasScrollingOverflow(rule string) bool {
+	for _, prop := range []string{"overflow", "overflow-y"} {
+		v, ok := cssDeclValue(rule, prop)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(v) {
+		case "auto", "scroll":
+			return true
+		}
+	}
+	return false
+}
+
+// TestS5_3CSSMaxHeightMatcherAcceptsAnyRealBound pins the max-height matcher's
+// accept/reject matrix directly, so a future tightening or loosening of the
+// scroll-boundary contract fails here rather than silently changing what the
+// shipped CSS is allowed to say.
+func TestS5_3CSSMaxHeightMatcherAcceptsAnyRealBound(t *testing.T) {
+	cases := []struct {
+		name string
+		rule string
+		want bool
+	}{
+		{"shipped viewport unit", `overflow: auto; max-height: 72vh; background: red;`, true},
+		{"calc expression", `overflow: auto; max-height: calc(100vh - 20rem);`, true},
+		{"custom property", `overflow: auto; max-height: var(--queue-max-height);`, true},
+		{"plain pixels", `max-height: 400px;`, true},
+		{"empty value", `overflow: auto; max-height:;`, false},
+		{"whitespace-only value", `overflow: auto; max-height:   ;`, false},
+		{"declaration missing", `overflow: auto; background: red;`, false},
+		{"different property with matching suffix", `overflow: auto; not-max-height: 72vh;`, false},
+		{"commented out", stripCSSComments(`overflow: auto; /* max-height: 72vh; */`), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cssHasBoundedMaxHeight(c.rule); got != c.want {
+				t.Errorf("cssHasBoundedMaxHeight(%q) = %v, want %v", c.rule, got, c.want)
+			}
+		})
+	}
+}
+
+// TestS5_3CSSOverflowMatcherAcceptsOnlyScrollingValues pins the overflow half
+// of the same contract: both scrolling values on both axes-properties are
+// accepted, and every non-scrolling or off-axis declaration is rejected.
+func TestS5_3CSSOverflowMatcherAcceptsOnlyScrollingValues(t *testing.T) {
+	cases := []struct {
+		name string
+		rule string
+		want bool
+	}{
+		{"overflow auto", `max-height: 72vh; overflow: auto;`, true},
+		{"overflow scroll", `max-height: 72vh; overflow: scroll;`, true},
+		{"overflow-y auto", `max-height: 72vh; overflow-y: auto;`, true},
+		{"overflow-y scroll", `max-height: 72vh; overflow-y: scroll;`, true},
+		{"overflow hidden", `max-height: 72vh; overflow: hidden;`, false},
+		{"overflow-y hidden", `max-height: 72vh; overflow-y: hidden;`, false},
+		{"overflow visible", `max-height: 72vh; overflow: visible;`, false},
+		{"overflow-y visible", `max-height: 72vh; overflow-y: visible;`, false},
+		{"empty value", `max-height: 72vh; overflow:;`, false},
+		{"declaration missing", `max-height: 72vh; background: red;`, false},
+		{"horizontal axis only", `max-height: 72vh; overflow-x: auto;`, false},
+		{"commented out", stripCSSComments(`max-height: 72vh; /* overflow: auto; */`), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cssHasScrollingOverflow(c.rule); got != c.want {
+				t.Errorf("cssHasScrollingOverflow(%q) = %v, want %v", c.rule, got, c.want)
+			}
+		})
 	}
 }
 
