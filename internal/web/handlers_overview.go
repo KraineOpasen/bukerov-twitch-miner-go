@@ -82,6 +82,20 @@ type OverviewPageData struct {
 	// hx-trigger so the client-side stale-clock thresholds and the actual
 	// poll interval are always derived from the same number.
 	PollSeconds int
+
+	// SlotPair is the S5-3 C12 component's two watch-slot boxes (task Phase
+	// 4). Built from the safe watchSlotEvidence adapter (OD-S5-3-1) plus this
+	// same request's streamer snapshot/stats for enrichment - never from
+	// slots.Reason (the pre-existing free-form path). Rendered inside
+	// overview_live.html (Q3 MAJOR-1 correction) so it refreshes on the same
+	// #overview-live boundary as the rest of the page, instead of staying
+	// static outside it indefinitely.
+	SlotPair [2]c12SlotData
+
+	// SlotPairProvenance is the C0 freshness chip for SlotPair (Q3 MAJOR-1
+	// item 6), built from the exact same evidence snapshot so both always
+	// describe the same underlying broker tick.
+	SlotPairProvenance ProvenanceChipData
 }
 
 // handleAPIOverview renders the live Overview content partial (header stats,
@@ -115,7 +129,7 @@ func (s *Server) handleAPINowWatching(w http.ResponseWriter, r *http.Request) {
 	if slots.Watching == nil {
 		slots.Watching = map[string]bool{}
 	}
-	view := s.buildNowWatching(streamers, slots, stats, status.ConnectionLost)
+	view := s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, s.watchSlotEvidence())
 
 	s.renderPartial(w, r, "now_watching", view)
 }
@@ -250,6 +264,13 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 
 	predState := predictionsState(provider != nil, status.Status == StatusRunning, len(predictions))
 
+	// Read once and reuse for the sidebar pair, the Overview slot pair and
+	// its provenance chip, so a single buildOverviewData execution never
+	// observes two different broker ticks across those surfaces (CodeRabbit
+	// PR152 finding: buildNowWatching used to call the provider again on its
+	// own).
+	evidence := s.watchSlotEvidence()
+
 	data := OverviewData{
 		Username:       s.username,
 		RefreshMinutes: refresh,
@@ -269,7 +290,7 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		PointsToday:    util.FormatNumber(today),
 		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
-		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost),
+		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, evidence),
 		// TrackedLive/TrackedUnknown/TrackedOffline/Untracked are deliberately
 		// left unset: no Overview template consumer reads them anymore (see
 		// the OverviewPageData doc comment above) — every render goes through
@@ -288,6 +309,8 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		PredictionsState:      predState,
 		PredictionsStateLabel: tr("ov.pred_state." + predState),
 		PollSeconds:           overviewPollSeconds,
+		SlotPair:              c12Pair(evidence, streamersByName(streamers), stats, tr),
+		SlotPairProvenance:    c12PairProvenance(evidence),
 	}
 }
 
@@ -483,13 +506,14 @@ func (s *Server) buildCards(
 		settings := st.GetSettings()
 		status := st.GetStatus()
 		online := status == models.StatusOnline
-		watchingSlot := watching[st.GetUsername()]
+		username := st.GetUsername()
+		watchingSlot := watching[username]
 		// A streamer that went online→unknown while still holding a watch slot is
 		// shown in the live group as "watching" but flagged unconfirmed (never a
 		// red offline); it is not counted in LiveCount.
 		slottedUnconfirmed := status == models.StatusUnknown && watchingSlot
 		card := StreamerInfo{
-			Name:            st.GetUsername(),
+			Name:            username,
 			Points:          st.GetChannelPoints(),
 			PointsFormatted: util.FormatNumber(st.GetChannelPoints()),
 			Status:          status.String(),
@@ -499,7 +523,7 @@ func (s *Server) buildCards(
 			DisableWatch:    settings.DisableWatch,
 		}
 
-		if cs, ok := stats[st.GetUsername()]; ok {
+		if cs, ok := stats[username]; ok {
 			card.PointsToday = util.FormatNumber(cs.pointsToday)
 			if cs.hasRate {
 				card.PointsPerHour = util.FormatNumber(cs.pointsPerHour)
@@ -507,7 +531,7 @@ func (s *Server) buildCards(
 		}
 
 		// Last notable event for this streamer from the in-memory ring.
-		if text, ago := lastEventFor(tr, st.GetUsername()); text != "" {
+		if text, ago := lastEventFor(tr, username); text != "" {
 			card.LastEventText = text
 			card.LastEventAgo = ago
 		}
@@ -519,7 +543,7 @@ func (s *Server) buildCards(
 			card.GoalTitle = g.Title
 			card.GoalPercent = g.Percent
 			ticker = append(ticker, TickerItem{
-				Streamer: st.GetUsername(),
+				Streamer: username,
 				Kind:     "goal",
 				Label:    g.Title,
 				Percent:  g.Percent,
@@ -527,7 +551,7 @@ func (s *Server) buildCards(
 			})
 		}
 
-		card.HasActivePrediction = predByStreamer[st.GetUsername()]
+		card.HasActivePrediction = predByStreamer[username]
 
 		if online || slottedUnconfirmed {
 			// Confirmed online, or holding a slot during a transient unknown blip.
@@ -566,7 +590,7 @@ func (s *Server) buildCards(
 				}
 			}
 
-			card.WatchReason = slots.Reason[st.GetUsername()]
+			card.WatchReason = slots.Reason[username]
 			switch {
 			case settings.DisableWatch:
 				card.State = "disabled"
@@ -586,7 +610,7 @@ func (s *Server) buildCards(
 		} else if status == models.StatusUnknown {
 			// Unknown and NOT holding a slot: its own group, never rendered as a red
 			// offline card and never shown with an offline duration.
-			card.WatchReason = slots.Reason[st.GetUsername()]
+			card.WatchReason = slots.Reason[username]
 			if settings.DisableWatch {
 				card.State = "disabled"
 			} else {
@@ -704,12 +728,16 @@ func eventLabel(tr func(string) string, e events.Event) string {
 }
 
 // buildNowWatching builds the pinned sidebar "Now Watching" block from the
-// active watch slots.
+// active watch slots. evidence is the caller's own watchSlotEvidence()
+// snapshot, read once and passed in - never re-read here - so a single
+// buildOverviewData execution never observes two different broker ticks for
+// the sidebar pair and the Overview pair (CodeRabbit PR152 finding).
 func (s *Server) buildNowWatching(
 	streamers []*models.Streamer,
 	slots WatchSlotsView,
 	stats map[string]streamerStats,
 	stale bool,
+	evidence watchSlotEvidence,
 ) NowWatchingView {
 	byName := make(map[string]*models.Streamer, len(streamers))
 	for _, st := range streamers {
@@ -770,17 +798,37 @@ func (s *Server) buildNowWatching(
 		view.Slots = append(view.Slots, slot)
 	}
 
-	// Queued = online, not watched, not disabled.
+	// Queued = online, not watched, not disabled. username is read once and
+	// reused for both the Watching lookup and the appended name: two separate
+	// GetUsername() calls each take and release the streamer's RLock, so a
+	// concurrent RenameIfCurrent could commit between them and put a name into
+	// QueuedNames that was never the one checked against Watching (CodeRabbit
+	// PR152 finding, the same torn read already fixed in buildCards).
 	for _, st := range streamers {
-		if !st.GetIsOnline() || slots.Watching[st.GetUsername()] || st.GetSettings().DisableWatch {
+		username := st.GetUsername()
+		if !st.GetIsOnline() || slots.Watching[username] || st.GetSettings().DisableWatch {
 			continue
 		}
-		view.QueuedNames = append(view.QueuedNames, st.GetUsername())
+		view.QueuedNames = append(view.QueuedNames, username)
 	}
 
 	if !slots.NextRotationAt.IsZero() && len(view.Slots) > 0 {
 		view.HasNextRotation = true
 		view.NextRotationUnix = slots.NextRotationAt.Unix()
+	}
+
+	// S5-3 C12 padding (task Phase 4): bring the sidebar's total slot-box
+	// count to exactly two, using the safe adapter's Mode for the empty
+	// reason - never a Waiting channel's ReasonCode, never a third box even
+	// if len(view.Slots) were ever >= 2 already (padCount clamps at 0).
+	if padCount := 2 - len(view.Slots); padCount > 0 {
+		emptyMode := "unknown"
+		if evidence.Mode == "idle" {
+			emptyMode = "idle"
+		}
+		for i := 0; i < padCount; i++ {
+			view.EmptyPad = append(view.EmptyPad, c12SlotData{EmptyReasonMode: emptyMode, Link: "/overview/queue"})
+		}
 	}
 	return view
 }

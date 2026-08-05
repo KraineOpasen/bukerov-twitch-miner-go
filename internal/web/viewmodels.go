@@ -185,6 +185,12 @@ type NowWatchingView struct {
 	NextRotationUnix int64
 	Mode             string
 	Stale            bool
+
+	// EmptyPad is the S5-3 C12 padding (task Phase 4): exactly enough empty
+	// slot boxes to bring the sidebar's total up to two, built from the safe
+	// watchSlotEvidence adapter. Len is 0 (two real Slots already), 1, or 2 -
+	// never causes more than two slot-shaped boxes to render in total.
+	EmptyPad []c12SlotData
 }
 
 // OverviewData is the top-level view model for the redesigned Overview page.

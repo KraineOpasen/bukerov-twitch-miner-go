@@ -173,12 +173,13 @@ func TestS5_2ExistingLegacyRoutesUnchanged(t *testing.T) {
 // TestS5_2DeferredRoutesRemain404 proves every route explicitly deferred by
 // task §E (not yet built — no fake placeholder) keeps its honest 404,
 // falling through to the existing "/" catch-all exactly like any other
-// unregistered path.
+// unregistered path. S5-3 removed /overview/queue from this list: it is now
+// a real direct-render route (handlers_queue.go) - see
+// TestS5_3QueueRouteReturns200 and TestS5_3RemainingDeferredRoutesStill404.
 func TestS5_2DeferredRoutesRemain404(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 	deferred := []string{
-		"/overview/queue",
 		"/drops/claims",
 		"/events/browser",
 		"/events/sound",

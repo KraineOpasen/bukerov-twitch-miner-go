@@ -408,6 +408,14 @@ type LifecyclePanelView struct {
 	IsFailed        bool
 	IsDegraded      bool
 
+	// TransitionReason is the S5-3 lifecycle-honesty text shown next to the
+	// button group whenever IsTransitioning is true: the pending-command slot
+	// (design v6 §5.2 step 1) drives every Capabilities.Can* flag false for
+	// the duration, which would otherwise render a semantically-relevant
+	// button (Show*=true) as disabled with no visible explanation. Empty in
+	// every steady (non-transitioning) state — never a fabricated warning.
+	TransitionReason string
+
 	CanPause   bool
 	CanResume  bool
 	CanRestart bool
@@ -508,6 +516,9 @@ func (s *Server) buildLifecyclePanelView(available bool, snap lifecycle.Snapshot
 	vm.IsTransitioning = snap.Transition != lifecycle.TransitionNone
 	vm.IsFailed = snap.Observed == lifecycle.ObservedFailed
 	vm.IsDegraded = snap.Observed == lifecycle.ObservedDegraded
+	if vm.IsTransitioning {
+		vm.TransitionReason = s.lifecycleText(r, "lc.reason.transitioning")
+	}
 
 	vm.ShowPause = snap.Desired == lifecycle.DesiredRunning && !vm.IsDegraded
 	vm.ShowResume = (snap.Desired == lifecycle.DesiredPaused || snap.Desired == lifecycle.DesiredStopped) && !vm.IsDegraded

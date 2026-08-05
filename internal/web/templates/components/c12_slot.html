@@ -1,0 +1,60 @@
+{{/* C12 — Slots (Stage 4 §6 / task Phase 4, extended Q3 MAJOR-2). The only
+     slot rendering in the product: exactly two, everywhere - including the
+     pinned sidebar's occupied entries (sidebarSlotData, viewmodels_slots.go),
+     never a second, independent implementation. Inputs (c12SlotData,
+     viewmodels_slots.go):
+       Occupied bool, Channel string,
+       Unknown bool, UnknownBadge BadgeData,
+       HasReasonCode bool, ReasonCode string, ReasonLabel string, ReasonBadge BadgeData,
+       HasCampaign bool, Campaign string,
+       HasUptime bool, Uptime string, HasPointsDelta bool, PointsDelta string,
+       Active bool, EmptyReasonMode string, Link string.
+     Sidebar variant fields (Q3 MAJOR-2, populated ONLY by sidebarSlotData -
+     c12EntryFor, the /overview and /overview/queue builder, never sets them,
+     so this markup simply doesn't render there):
+       HasPoints bool, Points string, HasGame bool, Game string,
+       Discovery bool,
+       StreakPending bool, StreakMinutes int, StreakCapMinutes int, StreakPercent int.
+     "c12.pair" takes a [2]c12SlotData - the Go-side c12Pair() builder already
+     guarantees exactly two elements, so this template never truncates or
+     ranges over a variable-length slice; it always calls "c12.slot" exactly
+     twice, never a third time even if handed unexpected input. */}}
+{{define "c12.pair"}}<div class="c12-pair">{{template "c12.slot" (index . 0)}}{{template "c12.slot" (index . 1)}}</div>{{end}}
+
+{{define "c12.slot"}}<div class="c12-slot{{if .Occupied}} c12-slot--occupied{{if .Active}} c12-slot--active{{end}}{{else}} c12-slot--empty{{end}}">
+{{if .Occupied}}
+    <div class="c12-slot-head">
+        <span class="watch-dot{{if .Active}} on{{else if .Unknown}} unknown{{end}}" aria-hidden="true"></span>
+        {{if .Discovery}}
+        <span class="c12-slot-name" title="{{ t "now.discovered_title" }}">{{.Channel}}</span>
+        <span class="badge badge-queued" title="{{ t "now.discovery_slot_title" }}">{{ t "now.discovery" }}</span>
+        {{else}}
+        <a href="/streamer/{{.Channel}}" class="c12-slot-name">{{.Channel}}</a>
+        {{if .HasPoints}}<span class="num c12-slot-points-current">{{.Points}}</span>{{end}}
+        {{end}}
+        {{if .Unknown}}{{template "c10.badge" .UnknownBadge}}{{end}}
+    </div>
+    {{if .HasGame}}<div class="c12-slot-game type-small">{{.Game}}</div>{{end}}
+    {{if .HasReasonCode}}<span title="{{.ReasonCode}}">{{template "c10.badge" .ReasonBadge}}</span>{{end}}
+    {{if .HasCampaign}}<span class="c12-slot-campaign type-small">{{.Campaign}}</span>{{end}}
+    {{if not .Discovery}}
+    <div class="c12-slot-metrics">
+        <span class="c12-slot-uptime num">{{if .HasUptime}}{{.Uptime}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</span>
+        <span class="c12-slot-points num{{if .HasPointsDelta}} c12-slot-points--gain{{end}}">{{if .HasPointsDelta}}{{.PointsDelta}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</span>
+        {{if .StreakPending}}<span class="num text-online" title="{{ t "now.streak_title" }}">🔥 {{.StreakMinutes}}/{{.StreakCapMinutes}}</span>{{end}}
+    </div>
+    {{if .StreakPending}}<div class="bar bar-streak"><span style="width: {{.StreakPercent}}%"></span></div>{{end}}
+    {{end}}
+{{else}}
+    <div class="c12-slot-head">
+        <span class="watch-dot" aria-hidden="true"></span>
+        <span class="c12-slot-name c12-slot-name--empty">{{ t "queue.slot.empty" }}</span>
+    </div>
+    {{if eq .EmptyReasonMode "idle"}}
+    <span class="type-code c12-slot-reason">{{ t "queue.slot.mode_idle" }}</span>
+    {{else}}
+    <span class="c12-slot-reason"><span aria-label="{{ t "queue.reason.unknown" }}">—</span></span>
+    {{end}}
+{{end}}
+    <a class="c12-slot-link" href="{{.Link}}">{{ t "queue.slot.link_label" }}</a>
+</div>{{end}}

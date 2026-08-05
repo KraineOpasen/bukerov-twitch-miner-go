@@ -296,8 +296,13 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Template, map[string]*template.Template) {
 	langs := i18n.SupportedLangs()
 	placeholder := placeholderFuncMap()
+	// sidebarSlot is a pure data conversion (no localization), so it's set
+	// once here rather than in funcMapFor: now_watching.html uses it to route
+	// each occupied WatchSlotView through the shared c12.slot component (Q3
+	// MAJOR-2) without changing WatchSlotView's own shape.
+	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -764,11 +769,15 @@ func (s *Server) handler() http.Handler {
 	// S5-2 seven-section chrome: additive compatibility routes (handlers_chrome.go).
 	// Direct-render routes reuse/extend the existing rendering pipelines;
 	// every legacy route above keeps rendering directly and is never
-	// redirected. Deferred routes (e.g. /overview/queue, /drops/claims) are
+	// redirected. Deferred routes (e.g. /drops/claims, /help/glossary) are
 	// intentionally NOT registered here — they fall through to the existing
 	// "/" catch-all (handleDashboard), which 404s any path other than
 	// exactly "/", giving them honest 404 behavior with no new code.
 	mux.HandleFunc("/overview", s.handleOverviewPage)
+	// S5-3: /overview/queue (handlers_queue.go) — the Overview section's
+	// second page, no longer deferred. Direct-render, GET/HEAD, no new API
+	// endpoint or transport.
+	mux.HandleFunc("/overview/queue", s.handleOverviewQueuePage)
 	mux.HandleFunc("/events", s.handleEventsPage)
 	mux.HandleFunc("/help/getting-started", s.handleHelpGettingStarted)
 

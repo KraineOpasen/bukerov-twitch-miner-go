@@ -56,6 +56,14 @@
         {{end}}
     </div>
 
+    {{/* S5-3 lifecycle honesty: a transition holds the pending-command slot,
+         which drives every Capabilities.Can* flag false for its duration —
+         without this, a semantically-shown button would render disabled
+         with no visible cause nearby (never a bare disabled control). */}}
+    {{if .TransitionReason}}
+    <div class="lc-result lc-result-info" role="status" id="lc-transition-reason">{{.TransitionReason}}</div>
+    {{end}}
+
     {{/* Stop only lives inside a collapsed "Advanced actions" panel, with an
          honest confirm text (design v6 §10) — never a one-click primary
          action next to Pause/Resume/Restart. */}}
