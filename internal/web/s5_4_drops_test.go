@@ -572,27 +572,51 @@ func TestS5_4ClaimsFilterMarkupPresent(t *testing.T) {
 // the <select>s while a stale filter stays in effect.
 var s54ClaimsResetHandlerRe = regexp.MustCompile(`(?s)resetBtn\.addEventListener\('click', function \(\) \{(.*?)\}\);`)
 
-// TestS5_4ClaimsFilterScriptContract proves the rendered filter script keeps
-// its AND predicate over both data-claim-* attributes, drives the no-match
-// message off the very same per-row match flag each row's own visibility is
-// toggled from (so the message can never disagree with what the rows show),
-// and that resetting clears both filters before that shared function
-// recomputes visibility. None of this executes in a Go test process — it is
-// plain page-load JS — so this pins the exact source contract deterministically
-// instead of requiring a real browser. CodeRabbit (PR #153, Deterministic Test
-// Contract) found TestS5_4ClaimsFilterMarkupPresent only proved the filter
-// controls exist, not that any of this actually happens.
+// TestS5_4ClaimsFilterScriptContract proves the rendered filter script wires
+// each control to the right element by id/selector and to the shared
+// applyFilter (so a handler can never go quietly missing or point at the
+// wrong target), keeps its AND predicate over both data-claim-* attributes,
+// drives the no-match message off the very same per-row match flag each
+// row's own visibility is toggled from (so the message can never disagree
+// with what the rows show), and that resetting clears both filters before
+// that shared function recomputes visibility.
+//
+// This is a full-literal-source assertion, not a loose substring scan: the
+// entire {{define "scripts"}} block in drops_claims.html is static text with
+// no template actions inside it, so the exact strings asserted here are
+// byte-for-byte what ships to the browser — there is no daylight between
+// "this substring is present" and "this is the source the browser parses"
+// the way there would be for a templated block. What it cannot catch is a
+// JS-engine-level failure unrelated to these lines (e.g. a syntax error
+// elsewhere in the IIFE); proving that would need real DOM/JS execution,
+// which would require a browser-automation dependency this task's allowed
+// paths exclude (go.mod/go.sum) — see the PR reply for the full reasoning.
+//
+// CodeRabbit (PR #153, Deterministic Test Contract) first found
+// TestS5_4ClaimsFilterMarkupPresent only proved the filter controls exist,
+// not that any of this happens; then, reviewing that fix, found the
+// strengthened version still didn't prove the handlers were connected to
+// anything real rather than merely present in isolated fragments — the
+// getElementById/querySelectorAll/addEventListener assertions below close
+// that gap.
 func TestS5_4ClaimsFilterScriptContract(t *testing.T) {
 	c := s54Campaign("c1", "Camp", "Game", []*models.Drop{s54ClaimableDrop("D1", 5, 10)})
 	srv := s54ServerWith(t, []*models.Campaign{c}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now()})
 	body := f3GetPage(t, srv, "/drops/claims", "en")
 
 	for _, want := range []string{
+		`document.getElementById('claims-filter-campaign');`,
+		`document.getElementById('claims-filter-state');`,
+		`document.getElementById('claims-filter-reset');`,
+		`document.querySelectorAll('[data-claim-row]')`,
+		`document.getElementById('claims-no-match');`,
 		`(!campaign || row.getAttribute('data-claim-campaign') === campaign) &&`,
 		`(!state || row.getAttribute('data-claim-state') === state);`,
 		`row.classList.toggle('hidden', !matches);`,
 		`if (matches) visible++;`,
 		`noMatch.classList.toggle('hidden', visible !== 0);`,
+		`campaignSel.addEventListener('change', applyFilter);`,
+		`stateSel.addEventListener('change', applyFilter);`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Claims filter script missing expected contract fragment %q", want)
