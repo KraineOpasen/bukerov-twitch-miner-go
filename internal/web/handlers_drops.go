@@ -13,6 +13,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/supportbundle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -189,7 +190,12 @@ func (s *Server) handleAPIDropsSync(w http.ResponseWriter, r *http.Request) {
 		"dashboardCampaigns": st.DashboardCampaigns,
 		"recoveredCampaigns": st.RecoveredCampaigns,
 		"trackedCampaigns":   st.TrackedCampaigns,
-		"lastError":          st.LastError,
+		// st.LastError is a raw, unbounded Twitch GQL error string that can
+		// carry a header, a cookie, a secret assignment, or a signed URL —
+		// supportbundle.Redact is the approved sanitizing boundary (already
+		// relied on by the support bundle) crossed here before the value
+		// ever reaches this JSON response; a benign value passes unchanged.
+		"lastError": supportbundle.Redact(st.LastError),
 	})
 }
 
@@ -265,8 +271,15 @@ func buildDropsListData(views []DropCampaignView, status drops.SyncStatus, tr fu
 			State:   "DEGR",
 			Variant: "strip",
 			Message: tr("drops.current.state.degraded"),
-			Cause:   status.LastError,
-			Time:    tr("drops.current.state.attempted_at") + " " + formatLocalDateTime(status.LastSyncAt, loc),
+			// Cause crosses the same supportbundle.Redact boundary as
+			// handleAPIDropsSync's lastError. The gate above deliberately
+			// reads raw status.LastError, not the redacted Cause, so the
+			// strip's existence never depends on an implementation invariant
+			// of the sanitizer — Redact happens to map non-empty input
+			// to non-empty output today. The S-EMPTY gate's == "" below
+			// reads raw for the same reason.
+			Cause: supportbundle.Redact(status.LastError),
+			Time:  tr("drops.current.state.attempted_at") + " " + formatLocalDateTime(status.LastSyncAt, loc),
 		}
 	}
 

@@ -13,6 +13,7 @@ package web
 // (s54Campaigns) and Drop/Campaign builders these tests share.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -407,6 +408,230 @@ func TestS5_4B11AccountLinkBadgeRendersWhenProven(t *testing.T) {
 	}
 	if !strings.Contains(body, "Account not linked") {
 		t.Error("expected the account-not-linked badge for the Disconnected campaign")
+	}
+}
+
+// ---------------------------------------------------------------------
+// Privacy — SyncStatus.LastError redaction (task S5-4 privacy fix)
+// ---------------------------------------------------------------------
+//
+// drops.SyncStatus.LastError is a raw, unbounded error string that can carry
+// anything a failed Twitch GQL call put into it — an Authorization header, a
+// Set-Cookie value, a client_secret assignment, a signed request URL, an
+// embedded stack trace, or a high-entropy token. buildSupportBundleDrops's
+// doc comment (handlers_support_bundle.go) already calls this out as
+// "deliberately never read" for the support bundle. The Current tab's
+// DegradedStrip.Cause (buildDropsListData) and the manual-sync JSON endpoint
+// (handleAPIDropsSync) both surfaced this same raw field into dashboard HTTP
+// responses; this section proves both are routed through the same approved
+// sanitizer (supportbundle.Redact) the support bundle already relies on,
+// while a genuinely benign LastError still renders verbatim.
+
+// TestS5_4DegradedStripCauseRedactsSensitiveLastError proves the Current
+// tab's failed-attempt strip never leaks a sensitive SyncStatus.LastError,
+// at both the buildDropsListData unit level and through the rendered
+// /api/drops HTTP response, while the strip itself, both the ATTEMPT and
+// SUCCESS clocks, and the retained campaign card keep rendering around the
+// redacted cause.
+func TestS5_4DegradedStripCauseRedactsSensitiveLastError(t *testing.T) {
+	attemptTime := time.Date(2026, 3, 4, 10, 15, 0, 0, time.UTC)
+	successTime := time.Date(2026, 3, 4, 8, 5, 0, 0, time.UTC)
+	wantAttemptClock := formatLocalDateTime(attemptTime, time.UTC)
+	wantSuccessClock := formatLocalDateTime(successTime, time.UTC)
+	if wantAttemptClock == wantSuccessClock {
+		t.Fatalf("fixture bug: attempt/success clocks must render distinctly, both got %q", wantAttemptClock)
+	}
+
+	for _, canary := range s54SensitiveLastErrorCanaries {
+		t.Run(canary.name, func(t *testing.T) {
+			status := drops.SyncStatus{
+				LastSyncAt:      attemptTime,
+				LastSuccessAt:   successTime,
+				LastError:       canary.value,
+				IntervalMinutes: 60,
+			}
+
+			// Unit level: buildDropsListData must redact Cause exactly, with
+			// at least one populated (retained) campaign view present.
+			data := buildDropsListData([]DropCampaignView{{ID: "c1", Name: "Retained Campaign"}}, status, enTR(t), time.UTC)
+			if data.DegradedStrip == nil {
+				t.Fatal("expected a DegradedStrip for the failed attempt")
+			}
+			if data.DegradedStrip.Cause != "[REDACTED]" {
+				t.Errorf("DegradedStrip.Cause = %q, want exactly \"[REDACTED]\"", data.DegradedStrip.Cause)
+			}
+			if strings.Contains(data.DegradedStrip.Cause, canary.marker) {
+				t.Errorf("DegradedStrip.Cause leaked the raw canary marker %q: %q", canary.marker, data.DegradedStrip.Cause)
+			}
+
+			// Rendered level: the same sensitive LastError must never reach
+			// the HTTP response body, while the strip, both clocks, and the
+			// retained campaign card still render around the redacted cause.
+			campaign := s54Campaign("c1", "Retained Campaign", "Game", []*models.Drop{s54ClaimableDrop("D1", 5, 10)})
+			srv := s54ServerWith(t, []*models.Campaign{campaign}, status)
+			srv.SetDisplayLocation(time.UTC)
+			body := f3GetPage(t, srv, "/api/drops", "en")
+
+			if strings.Contains(body, canary.marker) {
+				t.Errorf("rendered body leaked the raw canary marker %q", canary.marker)
+			}
+			for _, absent := range canary.alsoAbsent {
+				if strings.Contains(body, absent) {
+					t.Errorf("rendered body leaked %q from the raw LastError", absent)
+				}
+			}
+			if !strings.Contains(body, "[REDACTED]") {
+				t.Error("expected the redacted marker \"[REDACTED]\" in the rendered body")
+			}
+			if !strings.Contains(body, enTR(t)("drops.current.state.degraded")) {
+				t.Error("expected the S-DEGR strip's localized degraded message to render")
+			}
+			if !strings.Contains(body, wantAttemptClock) {
+				t.Errorf("expected the ATTEMPT clock %q in the S-DEGR strip", wantAttemptClock)
+			}
+			if !strings.Contains(body, "Retained Campaign") {
+				t.Error("expected the retained campaign's card to still render")
+			}
+			if !strings.Contains(body, wantSuccessClock) {
+				t.Errorf("expected the SUCCESS/freshness clock %q in the campaign card's chip", wantSuccessClock)
+			}
+		})
+	}
+}
+
+// TestS5_4DegradedStripCausePreservesBenignLastError is the paired benign
+// control: a genuinely benign LastError (no sensitive shape at all) must
+// still render verbatim — the redaction seam is not a blanket wipe — exactly
+// as TestS5_4CurrentRetainsCardsOnFailedSync already assumes.
+func TestS5_4DegradedStripCausePreservesBenignLastError(t *testing.T) {
+	status := drops.SyncStatus{
+		LastSyncAt:      time.Now(),
+		LastSuccessAt:   time.Now().Add(-10 * time.Minute),
+		LastError:       s54BenignLastError,
+		IntervalMinutes: 60,
+	}
+
+	data := buildDropsListData([]DropCampaignView{{ID: "c1", Name: "Retained Campaign"}}, status, enTR(t), time.Local)
+	if data.DegradedStrip == nil {
+		t.Fatal("expected a DegradedStrip for the failed attempt")
+	}
+	if data.DegradedStrip.Cause != s54BenignLastError {
+		t.Errorf("DegradedStrip.Cause = %q, want the benign LastError preserved verbatim (%q)", data.DegradedStrip.Cause, s54BenignLastError)
+	}
+
+	campaign := s54Campaign("c1", "Retained Campaign", "Game", []*models.Drop{s54ClaimableDrop("D1", 5, 10)})
+	srv := s54ServerWith(t, []*models.Campaign{campaign}, status)
+	body := f3GetPage(t, srv, "/api/drops", "en")
+	if !strings.Contains(body, s54BenignLastError) {
+		t.Errorf("expected the benign LastError %q to still render verbatim in the rendered body", s54BenignLastError)
+	}
+}
+
+// TestS5_4HandleAPIDropsSyncRedactsSensitiveLastError proves the manual
+// "Sync Drops now" endpoint's JSON response never leaks a sensitive
+// SyncStatus.LastError — neither in the raw response bytes nor in the
+// decoded lastError field — while every other bookkeeping field the caller
+// depends on (triggered, retryAfterSecs, runs, lastSyncAtMillis,
+// dashboardCampaigns, recoveredCampaigns, trackedCampaigns) stays intact.
+func TestS5_4HandleAPIDropsSyncRedactsSensitiveLastError(t *testing.T) {
+	fixedTime := time.Date(2026, 5, 6, 9, 30, 0, 0, time.UTC)
+
+	for _, canary := range s54SensitiveLastErrorCanaries {
+		t.Run(canary.name, func(t *testing.T) {
+			srv := s54ServerWith(t, nil, drops.SyncStatus{
+				Runs:               3,
+				LastSyncAt:         fixedTime,
+				DashboardCampaigns: 2,
+				RecoveredCampaigns: 1,
+				TrackedCampaigns:   2,
+				LastError:          canary.value,
+			})
+			raw := s54PostDropsSync(t, srv)
+
+			if strings.Contains(string(raw), canary.marker) {
+				t.Errorf("raw response body leaked the canary marker %q: %s", canary.marker, raw)
+			}
+			for _, absent := range canary.alsoAbsent {
+				if strings.Contains(string(raw), absent) {
+					t.Errorf("raw response body leaked %q from the raw LastError: %s", absent, raw)
+				}
+			}
+
+			var got map[string]interface{}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode: %v; body=%s", err, raw)
+			}
+			if got["lastError"] != "[REDACTED]" {
+				t.Errorf("lastError = %v, want exactly \"[REDACTED]\"", got["lastError"])
+			}
+			if got["triggered"] != true {
+				t.Errorf("triggered = %v, want true", got["triggered"])
+			}
+			if got["retryAfterSecs"].(float64) != 0 {
+				t.Errorf("retryAfterSecs = %v, want 0", got["retryAfterSecs"])
+			}
+			if got["runs"].(float64) != 3 {
+				t.Errorf("runs = %v, want 3", got["runs"])
+			}
+			if int64(got["lastSyncAtMillis"].(float64)) != fixedTime.UnixMilli() {
+				t.Errorf("lastSyncAtMillis = %v, want %d", got["lastSyncAtMillis"], fixedTime.UnixMilli())
+			}
+			if got["dashboardCampaigns"].(float64) != 2 {
+				t.Errorf("dashboardCampaigns = %v, want 2", got["dashboardCampaigns"])
+			}
+			if got["recoveredCampaigns"].(float64) != 1 {
+				t.Errorf("recoveredCampaigns = %v, want 1", got["recoveredCampaigns"])
+			}
+			if got["trackedCampaigns"].(float64) != 2 {
+				t.Errorf("trackedCampaigns = %v, want 2", got["trackedCampaigns"])
+			}
+		})
+	}
+}
+
+// TestS5_4HandleAPIDropsSyncPreservesBenignLastError is the paired benign
+// control for TestS5_4HandleAPIDropsSyncRedactsSensitiveLastError: a
+// genuinely benign LastError still round-trips verbatim through the JSON
+// response, alongside the same other-field assertions.
+func TestS5_4HandleAPIDropsSyncPreservesBenignLastError(t *testing.T) {
+	fixedTime := time.Date(2026, 5, 6, 9, 30, 0, 0, time.UTC)
+	srv := s54ServerWith(t, nil, drops.SyncStatus{
+		Runs:               3,
+		LastSyncAt:         fixedTime,
+		DashboardCampaigns: 2,
+		RecoveredCampaigns: 1,
+		TrackedCampaigns:   2,
+		LastError:          s54BenignLastError,
+	})
+	raw := s54PostDropsSync(t, srv)
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, raw)
+	}
+	if got["lastError"] != s54BenignLastError {
+		t.Errorf("lastError = %v, want exactly %q", got["lastError"], s54BenignLastError)
+	}
+	if got["triggered"] != true {
+		t.Errorf("triggered = %v, want true", got["triggered"])
+	}
+	if got["retryAfterSecs"].(float64) != 0 {
+		t.Errorf("retryAfterSecs = %v, want 0", got["retryAfterSecs"])
+	}
+	if got["runs"].(float64) != 3 {
+		t.Errorf("runs = %v, want 3", got["runs"])
+	}
+	if int64(got["lastSyncAtMillis"].(float64)) != fixedTime.UnixMilli() {
+		t.Errorf("lastSyncAtMillis = %v, want %d", got["lastSyncAtMillis"], fixedTime.UnixMilli())
+	}
+	if got["dashboardCampaigns"].(float64) != 2 {
+		t.Errorf("dashboardCampaigns = %v, want 2", got["dashboardCampaigns"])
+	}
+	if got["recoveredCampaigns"].(float64) != 1 {
+		t.Errorf("recoveredCampaigns = %v, want 1", got["recoveredCampaigns"])
+	}
+	if got["trackedCampaigns"].(float64) != 2 {
+		t.Errorf("trackedCampaigns = %v, want 2", got["trackedCampaigns"])
 	}
 }
 

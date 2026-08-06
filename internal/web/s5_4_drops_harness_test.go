@@ -9,6 +9,8 @@ package web
 // AccountConnection) the R17/DP-C/B11/Claims logic reads.
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -105,4 +107,85 @@ func s54Campaign(id, name, game string, ds []*models.Drop) *models.Campaign {
 		Drops:       ds,
 		ClaimStatus: models.CampaignClaimStatusInProgress,
 	}
+}
+
+// s54SensitiveLastErrorCanary is one shared privacy-regression fixture: a
+// drops.SyncStatus.LastError value engineered to trip a specific
+// supportbundle.Redact detection rule (an Authorization/Set-Cookie header, a
+// key=value secret assignment, an embedded URL, an embedded newline, or a
+// long high-entropy run), carrying a unique marker substring so a test can
+// assert the raw value never reaches an HTTP response body. Shared by the
+// DegradedStrip.Cause (buildDropsListData) and handleAPIDropsSync redaction
+// tests in s5_4_drops_test.go (task S5-4 privacy fix) so the same six
+// canaries prove both LastError exposures are closed identically.
+type s54SensitiveLastErrorCanary struct {
+	name  string // subtest name
+	value string // the raw (pre-redaction) LastError value
+	// marker is a substring unique to this canary: its presence anywhere in
+	// a response proves the raw value leaked.
+	marker string
+	// alsoAbsent lists additional raw substrings (e.g. a bare hostname split
+	// out of an embedded URL) that must also never appear unredacted.
+	alsoAbsent []string
+}
+
+// s54SensitiveLastErrorCanaries are ASCII-only (so JSON/HTML escaping can
+// never mask a leak the way a multi-byte or quote-heavy value might).
+var s54SensitiveLastErrorCanaries = []s54SensitiveLastErrorCanary{
+	{
+		name:   "bearer",
+		value:  "twitch GQL ViewerDropsDashboard: request failed: Authorization: Bearer S5_4_CANARY_BEARER_TOKEN_1234",
+		marker: "S5_4_CANARY_BEARER_TOKEN_1234",
+	},
+	{
+		name:   "cookie",
+		value:  "twitch GQL Inventory: request failed, Set-Cookie: session=S5_4_CANARY_COOKIE_VALUE_5678",
+		marker: "S5_4_CANARY_COOKIE_VALUE_5678",
+	},
+	{
+		name:   "secret",
+		value:  "campaign details unavailable (stale Twitch query metadata): client_secret=S5_4_CANARY_SECRET_9012",
+		marker: "S5_4_CANARY_SECRET_9012",
+	},
+	{
+		name:       "url",
+		value:      `request failed: Post "https://gql.twitch.tv/gql?sig=S5_4_CANARY_SIG_3456": context deadline exceeded`,
+		marker:     "S5_4_CANARY_SIG_3456",
+		alsoAbsent: []string{"gql.twitch.tv"},
+	},
+	{
+		name:   "multiline",
+		value:  "twitch GQL Inventory: request failed: connection reset\nS5_4_CANARY_MULTILINE_TRACE_LINE",
+		marker: "S5_4_CANARY_MULTILINE_TRACE_LINE",
+	},
+	{
+		name:   "entropy",
+		value:  "campaign details unavailable: Xk9Qm2Pv7Rt4Ws8Zc6Fh0Jd5Lg8Nn3Ss7Uu",
+		marker: "Xk9Qm2Pv7Rt4Ws8Zc6Fh0Jd5Lg8Nn3Ss7Uu",
+	},
+}
+
+// s54BenignLastError is the paired benign control: a LastError value with no
+// sensitive shape at all, which must survive supportbundle.Redact unchanged
+// — exactly what the pre-existing TestS5_4CurrentRetainsCardsOnFailedSync /
+// TestS5_4CurrentAttemptedButNeverSucceededHasNoChipOrEmptyState fixtures
+// already assume (both already assert this literal renders verbatim).
+const s54BenignLastError = "inventory: HTTP 500"
+
+// s54PostDropsSync issues a POST against /api/drops/sync through srv's full
+// handler chain (routing and the csrfProtectMiddleware same-origin check
+// included) and fails the test on a non-200 response, returning the raw
+// response body. Mirrors f3GetPage's shape for the POST case — f3GetPage
+// itself only ever issues GET. A bare httptest.NewRequest carries no Origin/
+// Referer/Sec-Fetch-Site header, so checkSameOrigin's same-origin check
+// passes it through untouched, exactly like the pre-existing
+// handlers_drops_sync_test.go POST tests (e.g. TestHandleAPIDropsSyncTriggered).
+func s54PostDropsSync(t *testing.T, srv *Server) []byte {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/drops/sync", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/drops/sync = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.Bytes()
 }
