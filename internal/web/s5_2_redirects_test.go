@@ -20,10 +20,12 @@ import (
 // to that map's target values (not just its cardinality) is actually
 // caught, rather than the test tautologically re-deriving its own
 // expectation from the very map under test.
+//
+// task S5-4 removed /drops/current, /drops/upcoming and /drops/past from
+// this matrix: each is now its own direct-render route (handlers_drops.go),
+// not a redirect to /drops. See TestS5_4DropsDirectRoutes for their 200/
+// GET-HEAD/no-redirect coverage.
 var wantCompatibilityRedirects = map[string]string{
-	"/drops/current":                 "/drops",
-	"/drops/upcoming":                "/drops",
-	"/drops/past":                    "/drops",
 	"/analytics/points":              "/statistics",
 	"/analytics/roi":                 "/statistics",
 	"/settings/streamers":            "/settings",
@@ -60,8 +62,8 @@ func TestS5_2RedirectMatrix(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 
-	if len(wantCompatibilityRedirects) != 19 {
-		t.Fatalf("expected exactly 19 compatibility redirects, found %d", len(wantCompatibilityRedirects))
+	if len(wantCompatibilityRedirects) != 16 {
+		t.Fatalf("expected exactly 16 compatibility redirects, found %d", len(wantCompatibilityRedirects))
 	}
 
 	for route, target := range wantCompatibilityRedirects {
@@ -176,11 +178,12 @@ func TestS5_2ExistingLegacyRoutesUnchanged(t *testing.T) {
 // unregistered path. S5-3 removed /overview/queue from this list: it is now
 // a real direct-render route (handlers_queue.go) - see
 // TestS5_3QueueRouteReturns200 and TestS5_3RemainingDeferredRoutesStill404.
+// task S5-4 removed /drops/claims from this list: it is now a real
+// direct-render route (handlers_drops.go) - see s5_4_drops_test.go.
 func TestS5_2DeferredRoutesRemain404(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 	deferred := []string{
-		"/drops/claims",
 		"/events/browser",
 		"/events/sound",
 		"/events/discord",

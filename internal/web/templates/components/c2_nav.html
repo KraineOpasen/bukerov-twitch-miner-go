@@ -13,7 +13,10 @@
      when active, never the parent link, so exactly one destination is ever
      marked current. Overview is a group exactly like System: its own
      top-level count stays at seven, /overview/queue is simply its second
-     child destination alongside /overview itself. */}}
+     child destination alongside /overview itself. Drops (task S5-4) is a
+     third group, the same shape again: its own top-level count is still one
+     of the seven sections, and its four children (Current/Upcoming/Claims/
+     Past) are direct routes, not new sections. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -26,11 +29,17 @@
                 <li><a href="/overview/queue" class="c2-nav-child" data-nav-section="overview" data-nav-child>{{ t "nav.queue" }}</a></li>
             </ul>
         </li>
-        <li class="c2-nav-item">
-            <a href="/drops" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/drops/current" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
                 <span class="c2-nav-label">{{ t "nav.drops" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/drops/current" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.current" }}</a></li>
+                <li><a href="/drops/upcoming" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.upcoming" }}</a></li>
+                <li><a href="/drops/claims" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.claims" }}</a></li>
+                <li><a href="/drops/past" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.past" }}</a></li>
+            </ul>
         </li>
         <li class="c2-nav-item">
             <a href="/statistics" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}">

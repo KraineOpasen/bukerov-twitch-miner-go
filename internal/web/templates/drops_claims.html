@@ -1,0 +1,139 @@
+{{define "title"}}{{ t "drops.title" }} · {{ t "drops.tab.claims" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.claims" }}</h1>
+<p class="text-neutral-400 text-sm mb-4">{{ t "drops.claims.subtitle" }}</p>
+
+<!-- S-SESS: claim-history persistence (B2) does not exist yet — every row on
+     this page reflects only the currently-tracked campaign pool this running
+     process holds in memory, not a durable, cross-session log. This banner
+     is permanent context, not a poll-driven or dismissible state. -->
+<div class="card mb-6 text-sm" style="border-color:var(--color-status-warning);">
+    <span aria-hidden="true">⚑ </span>{{ t "drops.claims.session_banner" }}
+</div>
+
+{{if .Unavailable}}
+<div class="card text-center text-neutral-400">{{ t "drops.claims.unavailable" }}</div>
+{{else if not .Rows}}
+<div class="card text-center text-neutral-400">{{ t "drops.claims.empty" }}</div>
+{{else}}
+<div class="flex flex-wrap items-end gap-3 mb-4 text-sm" id="claims-filters">
+    <div>
+        <label for="claims-filter-campaign" class="block text-xs text-neutral-400 mb-1">{{ t "drops.claims.filter.campaign" }}</label>
+        <select id="claims-filter-campaign" class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+            <option value="">{{ t "drops.claims.filter.all" }}</option>
+            {{range .CampaignOptions}}
+            <option value="{{.ID}}">{{.Name}}</option>
+            {{end}}
+        </select>
+    </div>
+    <div>
+        <label for="claims-filter-state" class="block text-xs text-neutral-400 mb-1">{{ t "drops.claims.filter.state" }}</label>
+        <select id="claims-filter-state" class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+            <option value="">{{ t "drops.claims.filter.all" }}</option>
+            <option value="claimed">{{ t "drops.claims.state.claimed" }}</option>
+            <option value="claimable">{{ t "drops.claims.state.claimable" }}</option>
+            <option value="in_progress">{{ t "drops.claims.state.in_progress" }}</option>
+            <option value="unknown">{{ t "drops.claims.state.unknown" }}</option>
+        </select>
+    </div>
+    <button type="button" id="claims-filter-reset" class="btn-secondary text-sm">{{ t "drops.claims.filter.reset" }}</button>
+</div>
+
+<!-- Desktop/wide: data-dense table. Overflow-x lives on the card wrapper
+     only — the page itself never scrolls horizontally. -->
+<div class="hidden lg:block card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+        <caption class="visually-hidden">{{ t "drops.claims.table_caption" }}</caption>
+        <thead>
+            <tr class="text-left text-xs text-neutral-400 border-b border-neutral-700">
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.campaign" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.drop" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.state" }}</th>
+            </tr>
+        </thead>
+        <tbody id="claims-table-body">
+            {{range .Rows}}
+            <tr class="border-b border-neutral-800 last:border-b-0" data-claim-row data-claim-campaign="{{.CampaignID}}" data-claim-state="{{.State}}">
+                <td class="px-4 py-3">
+                    <div class="text-neutral-100">{{.CampaignName}}</div>
+                    {{if .GameName}}<div class="text-xs text-neutral-400">{{.GameName}}</div>{{end}}
+                </td>
+                <td class="px-4 py-3">
+                    <div class="text-neutral-100">{{.DropName}}</div>
+                    {{if .Benefit}}<div class="text-xs text-neutral-400">{{.Benefit}}</div>{{end}}
+                </td>
+                <td class="px-4 py-3">{{template "c10.badge" .Badge}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    </div>
+</div>
+
+<!-- Mobile/narrow: one card per row, same fields, same order. -->
+<ul class="lg:hidden space-y-3" id="claims-cards">
+    {{range .Rows}}
+    <li class="card" data-claim-row data-claim-campaign="{{.CampaignID}}" data-claim-state="{{.State}}">
+        <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+                <div class="text-neutral-100 font-medium truncate">{{.CampaignName}}</div>
+                {{if .GameName}}<div class="text-xs text-neutral-400 truncate">{{.GameName}}</div>{{end}}
+            </div>
+            {{template "c10.badge" .Badge}}
+        </div>
+        <div class="mt-2 text-sm">
+            <div class="text-neutral-100">{{.DropName}}</div>
+            {{if .Benefit}}<div class="text-xs text-neutral-400">{{.Benefit}}</div>{{end}}
+        </div>
+    </li>
+    {{end}}
+</ul>
+
+<p id="claims-no-match" class="text-neutral-400 text-sm hidden" role="status" aria-live="polite">{{ t "drops.claims.no_match" }}</p>
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // Client-side filtering only, over the real rows the server already
+    // rendered (task S5-4 Phase 5) — there is no invented backend query, no
+    // new endpoint, no polling: Claims is a plain page load. Both the table
+    // rows and the card <li>s share the same data-claim-* attributes, so one
+    // filter pass drives both representations at once.
+    (function () {
+        const campaignSel = document.getElementById('claims-filter-campaign');
+        const stateSel = document.getElementById('claims-filter-state');
+        const resetBtn = document.getElementById('claims-filter-reset');
+        if (!campaignSel || !stateSel) return;
+
+        const rows = Array.prototype.slice.call(document.querySelectorAll('[data-claim-row]'));
+        const noMatch = document.getElementById('claims-no-match');
+
+        function applyFilter() {
+            const campaign = campaignSel.value;
+            const state = stateSel.value;
+            let visible = 0;
+            rows.forEach(function (row) {
+                const matches =
+                    (!campaign || row.getAttribute('data-claim-campaign') === campaign) &&
+                    (!state || row.getAttribute('data-claim-state') === state);
+                row.classList.toggle('hidden', !matches);
+                if (matches) visible++;
+            });
+            if (noMatch) noMatch.classList.toggle('hidden', visible !== 0);
+        }
+
+        campaignSel.addEventListener('change', applyFilter);
+        stateSel.addEventListener('change', applyFilter);
+        if (resetBtn) {
+            resetBtn.addEventListener('click', function () {
+                campaignSel.value = '';
+                stateSel.value = '';
+                applyFilter();
+            });
+        }
+    })();
+</script>
+{{end}}

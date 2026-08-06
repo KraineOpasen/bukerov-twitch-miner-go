@@ -396,7 +396,17 @@ type DropDetailView struct {
 	ImageURL    string
 	Claimed     bool
 	StatusLabel string
-	Percent     int
+
+	// Percent is the drop's overall reward-progress percentage (kept for
+	// existing readers). Progress carries the SAME value through the C11
+	// component (task S5-4/R17): Mode is "unknown" when Twitch has never
+	// supplied an authoritative inventory observation for this still-earnable
+	// drop (no minted DropInstanceID yet AND no watched-minute observation
+	// yet) — rendered as C11's dash+"unknown" state, never a fabricated 0%.
+	// Already-claimed drops (from ClaimedDropNames) always carry a
+	// determinate 100% in both fields.
+	Percent  int
+	Progress ProgressData
 
 	// HasMinuteProgress and the minute fields mirror the card's precise
 	// watch-time bar; populated only for still-earnable drops with a known
@@ -444,7 +454,16 @@ type DropCampaignView struct {
 	MinutesWatched    int
 	MinutesRequired   int
 	MinutesRemaining  int
-	MinutePercent     int
+
+	// MinutePercent is the watch-time percentage (kept for existing readers).
+	// MinuteProgress carries the SAME value through the C11 component (task
+	// S5-4/R17): Mode is "unknown" — never a fabricated 0% — when Twitch has
+	// never supplied an authoritative inventory observation for this drop (no
+	// minted DropInstanceID yet AND no watched-minute observation yet). Zero
+	// value when HasMinuteProgress is false (the drop has no minute
+	// requirement at all, a distinct case from "unknown").
+	MinutePercent  int
+	MinuteProgress ProgressData
 
 	// Health is the progress watchdog's state for the campaign's current drop
 	// (nil when the watchdog is disabled or does not track this campaign).
@@ -458,6 +477,25 @@ type DropCampaignView struct {
 	// StartsInLabel is its "starts in Xh" / "starts on <date>" text.
 	Upcoming      bool
 	StartsInLabel string
+
+	// AccountLinkBadge is the B11 evidence gate (task S5-4): zero value (empty
+	// Label) when Twitch never authoritatively reported the campaign's
+	// account-link state — the card renders nothing at all (S-NOBACK), never
+	// a placeholder. Set only from Campaign.AccountConnection's proven
+	// Connected/Disconnected values, never inferred.
+	AccountLinkBadge BadgeData
+
+	// DPCBadge is the DP-C outline badge (Stage 4 §13): shown on every
+	// populated Current card until Group C evidence upgrades it, by a
+	// separate future task — never presented as parity.
+	DPCBadge BadgeData
+
+	// Chip is the C0 freshness footer shared by every populated card on the
+	// Current tab (task R17 item 2): the last SUCCESSFUL full-sync clock,
+	// distinct from any failed-attempt strip shown above the list. Zero value
+	// when there has never been a successful sync (card list is then empty
+	// anyway, so this only matters once campaigns exist).
+	Chip ProvenanceChipData
 }
 
 // PastCampaignGroup is a recurring campaign identity in the "Past" tab: all
@@ -524,6 +562,25 @@ type DropPolicyView struct {
 
 type DropsListData struct {
 	Campaigns []DropCampaignView
+
+	// R17 sync-status evidence for the Current tab (task S5-4 Phase 4), each
+	// nil when not applicable. Built only from CampaignsProvider.SyncStatus()
+	// fields already returned today (LastSyncAt/LastSuccessAt/LastError/
+	// IntervalMinutes) — no fabricated backend state. At most one of
+	// NeverSyncedState/EmptyState is ever set; DegradedStrip is independent
+	// (a failed LAST attempt can co-exist with retained cards from an earlier
+	// success).
+	//
+	// NeverSyncedState (S-UNK) shows when no sync has ever completed or
+	// failed (LastSyncAt and LastSuccessAt both zero).
+	NeverSyncedState *StateBlockData
+	// DegradedStrip (S-DEGR) shows the FAILED-ATTEMPT clock (LastSyncAt +
+	// LastError) — distinct from the freshness chip's SUCCESS clock — above
+	// whatever cards remain retained from the last-known-good pool.
+	DegradedStrip *StateBlockData
+	// EmptyState (S-EMPTY) shows only when the last sync succeeded and
+	// legitimately found zero campaigns — never confused with a failure.
+	EmptyState *StateBlockData
 }
 
 // UpcomingState is the honest lifecycle state of the Drops "Upcoming" tab, so it
@@ -574,6 +631,85 @@ type DropsUpcomingData struct {
 	// (empty when there has never been one).
 	LastSuccessText string
 	Campaigns       []UpcomingCampaignView
+}
+
+// DropsUpcomingPageData is the /drops/upcoming direct-render page shell (task
+// S5-4 Phase 3/5): a thin wrapper around the existing drops_upcoming partial,
+// fed by the existing /api/drops/upcoming endpoint exactly as the Current
+// page's former inline tab already did — no new endpoint, no new polling
+// cadence.
+type DropsUpcomingPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
+// DropsPastPageData is the /drops/past direct-render page shell (task S5-4
+// Phase 3/5): a thin wrapper around the existing drops_past partial, fed by
+// the existing /api/drops/past endpoint, load-only (no polling), exactly as
+// the Current page's former inline tab already did.
+type DropsPastPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
+// ClaimRowView is one drop-level claim row on /drops/claims (task S5-4 Phase
+// 5), built entirely from the SAME in-memory CampaignsProvider.Campaigns()
+// evidence the Current tab already reads — no new provider method, no
+// persistence (B2 remains a backend dependency). State is one of "claimed" /
+// "claimable" / "in_progress" / "unknown", derived only from
+// models.Drop.Claimability (the authoritative, server-derived, never-inferred
+// field) and Campaign.ClaimedDropNames — an "unknown" row is NEVER promoted
+// to claimed/failed/completed/delivered. There is deliberately no per-row
+// timestamp: no authoritative claim-time evidence exists yet, and inventing
+// one would be exactly the fabrication this task forbids.
+type ClaimRowView struct {
+	CampaignID   string
+	CampaignName string
+	GameName     string
+	DropName     string
+	Benefit      string
+
+	State       string // "claimed" | "claimable" | "in_progress" | "unknown"
+	StatusLabel string
+	Badge       BadgeData
+}
+
+// DropsClaimsPageData is the /drops/claims direct-render page (task S5-4
+// Phase 5): the sole owner of claim lifecycle across the Drops section.
+// Fully server-rendered at request time — no htmx, no polling, no new API
+// endpoint — since there is no live claim event stream to poll, only the
+// current in-memory snapshot. Unavailable is true when no campaigns provider
+// is wired at all (a distinct S-SESS/no-evidence case, never rendered as "no
+// claims").
+type DropsClaimsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+
+	Rows        []ClaimRowView
+	Unavailable bool
+
+	// CampaignOptions is the distinct, order-preserving set of campaigns
+	// appearing in Rows (ID for filtering/matching, Name for display),
+	// precomputed once so the campaign filter <select> never needs a
+	// template-side dict/grouping helper. Keyed by CampaignID rather than
+	// name so two recurring/regional campaigns that happen to share a name
+	// never collapse into one filter option.
+	CampaignOptions []ClaimCampaignOption
+}
+
+// ClaimCampaignOption is one entry in the Claims page's campaign filter.
+type ClaimCampaignOption struct {
+	ID   string
+	Name string
 }
 
 // DiscoveredChannelView is one row in the Drops-page "Discovered Channels"

@@ -302,7 +302,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -673,8 +673,15 @@ func (s *Server) handler() http.Handler {
 	// "/api/streamers" pattern above.
 	mux.HandleFunc("/api/streamer/", s.handleAPIStreamerRewards)
 
-	// Drops routes
+	// Drops routes. /drops/current, /drops/upcoming, /drops/claims and
+	// /drops/past are direct-render routes (task S5-4); /drops remains a
+	// compatibility alias for Current through the exact same handler. Every
+	// existing /api/drops*, discovery and policy endpoint below is unchanged.
 	mux.HandleFunc("/drops", s.handleDropsPage)
+	mux.HandleFunc("/drops/current", s.handleDropsPage)
+	mux.HandleFunc("/drops/upcoming", s.handleDropsUpcomingPage)
+	mux.HandleFunc("/drops/claims", s.handleDropsClaimsPage)
+	mux.HandleFunc("/drops/past", s.handleDropsPastPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
 	mux.HandleFunc("/api/drops/sync", s.handleAPIDropsSync)
 	mux.HandleFunc("/api/drops/upcoming", s.handleAPIDropsUpcoming)
@@ -769,10 +776,12 @@ func (s *Server) handler() http.Handler {
 	// S5-2 seven-section chrome: additive compatibility routes (handlers_chrome.go).
 	// Direct-render routes reuse/extend the existing rendering pipelines;
 	// every legacy route above keeps rendering directly and is never
-	// redirected. Deferred routes (e.g. /drops/claims, /help/glossary) are
-	// intentionally NOT registered here — they fall through to the existing
-	// "/" catch-all (handleDashboard), which 404s any path other than
-	// exactly "/", giving them honest 404 behavior with no new code.
+	// redirected. Deferred routes (e.g. /help/glossary) are intentionally NOT
+	// registered here — they fall through to the existing "/" catch-all
+	// (handleDashboard), which 404s any path other than exactly "/", giving
+	// them honest 404 behavior with no new code. /drops/claims was the one
+	// deferred route in this set; task S5-4 registered it above as a real
+	// direct-render route (handlers_drops.go), so it no longer falls through.
 	mux.HandleFunc("/overview", s.handleOverviewPage)
 	// S5-3: /overview/queue (handlers_queue.go) — the Overview section's
 	// second page, no longer deferred. Direct-render, GET/HEAD, no new API

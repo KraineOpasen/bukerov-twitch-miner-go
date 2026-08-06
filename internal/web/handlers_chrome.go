@@ -12,10 +12,14 @@ import (
 // are new pages — every target already renders directly via its own
 // existing route. This is a one-way, forward-only map (wireframe -> canon);
 // S5-2 never redirects a legacy canonical route anywhere.
+//
+// task S5-4 removed /drops/current, /drops/upcoming and /drops/past from
+// this map: each is now its own direct-render route registered in server.go
+// (handlers_drops.go), not a redirect to /drops. /drops itself remains a
+// compatibility alias for Current through the same handler — see
+// handleDropsPage — but that alias is not a 302 redirect, so it was never a
+// member of this map.
 var compatibilityRedirects = map[string]string{
-	"/drops/current":                 "/drops",
-	"/drops/upcoming":                "/drops",
-	"/drops/past":                    "/drops",
 	"/analytics/points":              "/statistics",
 	"/analytics/roi":                 "/statistics",
 	"/settings/streamers":            "/settings",

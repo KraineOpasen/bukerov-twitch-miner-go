@@ -1,149 +1,65 @@
-{{define "title"}}{{ t "drops.title" }} - Twitch Points Miner{{end}}
+{{define "title"}}{{ t "drops.title" }} · {{ t "drops.tab.current" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<style>
-.drops-tab{color:var(--color-neutral-400);background:transparent;border:0;border-bottom:2px solid transparent;cursor:pointer;padding:.5rem .9rem;font-size:.9rem;font-weight:500;transition:color .15s,border-color .15s}
-.drops-tab:hover{color:var(--color-neutral-100)}
-.drops-tab.is-active{color:var(--color-neutral-100);border-bottom-color:var(--color-purple-500)}
-.drops-tab:focus-visible{outline:2px solid var(--color-online);outline-offset:-2px}
-</style>
-
-<h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }}</h1>
+<h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.current" }}</h1>
 <p class="text-neutral-400 text-sm mb-4">{{ t "drops.subtitle" }}</p>
 
-<div class="flex gap-1 border-b border-neutral-700 mb-5" role="tablist" aria-label="{{ t "drops.tablist_aria" }}">
-    <button type="button" id="drops-tab-current" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true" aria-controls="tab-current" tabindex="0">{{ t "drops.tab.current" }}</button>
-    <button type="button" id="drops-tab-upcoming" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false" aria-controls="tab-upcoming" tabindex="-1">{{ t "drops.tab.upcoming" }}</button>
-    <button type="button" id="drops-tab-past" class="drops-tab" data-tab="past" role="tab" aria-selected="false" aria-controls="tab-past" tabindex="-1">{{ t "drops.tab.past" }}</button>
+<form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
+      class="flex items-center gap-2 text-sm mb-6">
+    <label class="text-neutral-400">{{ t "drops.policy.label" }}</label>
+    <select name="mode" onchange="this.form.requestSubmit()"
+            class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+        {{range .PolicyModes}}
+        <option value="{{.}}" {{if eq . $.PolicyMode}}selected{{end}}>{{.}}</option>
+        {{end}}
+    </select>
+    <span class="text-xs text-neutral-500">{{ t "drops.policy.hint" }}</span>
+</form>
+
+<!-- Manual "Sync Drops now": forces an immediate campaign resync (cooldown-
+     gated server-side so it can't storm). Useful when a campaign started right
+     after the last scheduled sync and shouldn't wait out the interval. -->
+<div class="flex items-center gap-3 mb-6">
+    <button type="button" id="drops-sync-now" class="btn-secondary text-sm">{{ t "drops.sync_now" }}</button>
+    <span id="drops-sync-result" class="text-xs text-neutral-500" aria-live="polite"></span>
 </div>
 
-<!-- Current -->
-<div id="tab-current" class="drops-panel" role="tabpanel" aria-labelledby="drops-tab-current" tabindex="-1">
-    <form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
-          class="flex items-center gap-2 text-sm mb-6">
-        <label class="text-neutral-400">{{ t "drops.policy.label" }}</label>
-        <select name="mode" onchange="this.form.requestSubmit()"
-                class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
-            {{range .PolicyModes}}
-            <option value="{{.}}" {{if eq . $.PolicyMode}}selected{{end}}>{{.}}</option>
-            {{end}}
-        </select>
-        <span class="text-xs text-neutral-500">{{ t "drops.policy.hint" }}</span>
-    </form>
+<!--
+    Polls every 30 seconds (not the dashboard-wide RefreshMinutes) so the fresher
+    backend progress — refreshed every DropProgressSyncInterval and on each
+    watched minute — reaches the page promptly without a manual refresh. This only
+    re-renders campaign data the server already holds in memory; it does not
+    trigger a Twitch sync.
+-->
+<section id="drops-queue"
+    hx-get="/api/drops"
+    hx-trigger="load, every 30s"
+    hx-swap="innerHTML"
+>
+    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.campaigns" }}</div>
+</section>
 
-    <!-- Manual "Sync Drops now": forces an immediate campaign resync (cooldown-
-         gated server-side so it can't storm). Useful when a campaign started right
-         after the last scheduled sync and shouldn't wait out the interval. -->
-    <div class="flex items-center gap-3 mb-6">
-        <button type="button" id="drops-sync-now" class="btn-secondary text-sm">{{ t "drops.sync_now" }}</button>
-        <span id="drops-sync-result" class="text-xs text-neutral-500" aria-live="polite"></span>
-    </div>
+<h2 class="text-xl font-bold mt-10 mb-2">{{ t "drops.discovered.heading" }}</h2>
+<p class="text-neutral-400 text-sm mb-4">{{ t "drops.discovered.subtitle" }}</p>
 
-    <!--
-        Polls every 30 seconds (not the dashboard-wide RefreshMinutes) so the fresher
-        backend progress — refreshed every DropProgressSyncInterval and on each
-        watched minute — reaches the page promptly without a manual refresh. This only
-        re-renders campaign data the server already holds in memory; it does not
-        trigger a Twitch sync.
-    -->
-    <section id="drops-queue"
-        hx-get="/api/drops"
-        hx-trigger="load, every 30s"
-        hx-swap="innerHTML"
-    >
-        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.campaigns" }}</div>
-    </section>
-
-    <h2 class="text-xl font-bold mt-10 mb-2">{{ t "drops.discovered.heading" }}</h2>
-    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.discovered.subtitle" }}</p>
-
-    <section
-        hx-get="/api/discovery"
-        hx-trigger="load, every 1m"
-        hx-swap="innerHTML"
-    >
-        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.discovered" }}</div>
-    </section>
-</div>
-
-<!-- Upcoming -->
-<div id="tab-upcoming" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-upcoming" tabindex="-1">
-    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
-    <!--
-        Re-reads the backend snapshot every minute so a new campaign surfaced by a
-        full sync (scheduled or manual "Sync Drops now") appears without a full
-        page reload. This only re-renders the upcoming set the server already holds
-        in memory — it never triggers a Twitch sync. One section, one trigger: tab
-        switching just toggles visibility, so no extra polling loops are created.
-    -->
-    <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load, every 1m" hx-swap="innerHTML">
-        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.upcoming" }}</div>
-    </section>
-</div>
-
-<!-- Past -->
-<div id="tab-past" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-past" tabindex="-1">
-    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
-    <section id="drops-past" hx-get="/api/drops/past" hx-trigger="load" hx-swap="innerHTML">
-        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.past" }}</div>
-    </section>
-</div>
+<section
+    hx-get="/api/discovery"
+    hx-trigger="load, every 1m"
+    hx-swap="innerHTML"
+>
+    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.discovered" }}</div>
+</section>
 {{end}}
 
 {{define "scripts"}}
 <script>
-    // __dropsTabs owns tab switching (roving tabindex + arrow-key navigation)
-    // and the drop-card modal dialogs (open/close + focus restore to the
-    // opening card). Single IIFE, re-init guarded: htmx only ever swaps the
-    // panel CONTENTS (#drops-queue, #drops-upcoming, #drops-past), never the
-    // tab buttons or panel wrappers themselves, so these listeners are
-    // attached exactly once for the page's lifetime.
+    // __dropsModals owns the drop-card modal dialogs (open/close + focus
+    // restore to the opening card). Single IIFE, re-init guarded: htmx only
+    // ever swaps #drops-queue's CONTENTS, never this script block, so these
+    // listeners are attached exactly once for the page's lifetime.
     (function () {
-        if (window.__dropsTabs) return;
-        window.__dropsTabs = true;
-
-        const tabs = Array.from(document.querySelectorAll('.drops-tab'));
-        const panels = {
-            current: document.getElementById('tab-current'),
-            upcoming: document.getElementById('tab-upcoming'),
-            past: document.getElementById('tab-past'),
-        };
-        const tablistEl = tabs.length ? tabs[0].closest('[role="tablist"]') : null;
-
-        function activate(tab, opts) {
-            const name = tab.dataset.tab;
-            tabs.forEach(function (t) {
-                const active = t === tab;
-                t.classList.toggle('is-active', active);
-                t.setAttribute('aria-selected', active ? 'true' : 'false');
-                t.tabIndex = active ? 0 : -1;
-            });
-            Object.keys(panels).forEach(function (key) {
-                if (panels[key]) panels[key].classList.toggle('hidden', key !== name);
-            });
-            if (opts && opts.focus) tab.focus();
-        }
-
-        tabs.forEach(function (tab) {
-            tab.addEventListener('click', function () { activate(tab); });
-        });
-
-        if (tablistEl) {
-            tablistEl.addEventListener('keydown', function (e) {
-                const idx = tabs.indexOf(document.activeElement);
-                if (idx === -1) return;
-                let next = null;
-                switch (e.key) {
-                    case 'ArrowRight': next = tabs[(idx + 1) % tabs.length]; break;
-                    case 'ArrowLeft': next = tabs[(idx - 1 + tabs.length) % tabs.length]; break;
-                    case 'Home': next = tabs[0]; break;
-                    case 'End': next = tabs[tabs.length - 1]; break;
-                    default: return;
-                }
-                e.preventDefault();
-                activate(next, { focus: true });
-            });
-        }
+        if (window.__dropsModals) return;
+        window.__dropsModals = true;
 
         // Delegated so it keeps working after htmx swaps the campaign list on
         // auto-refresh (the campaign cards and their <dialog> modals are

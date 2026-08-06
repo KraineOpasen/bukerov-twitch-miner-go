@@ -58,13 +58,15 @@ func TestS5_3QueueRouteReturns200(t *testing.T) {
 // TestS5_2DeferredRoutesRemain404, which S5-3 was told to update by removing
 // exactly /overview/queue) that every OTHER deferred route, including
 // /help/glossary and /help/troubleshooting specifically, is still an honest
-// 404 - S5-3 must not have accidentally widened the route table.
+// 404 - S5-3 must not have accidentally widened the route table. task S5-4
+// removed /drops/claims from this list: it is now a real direct-render
+// route (handlers_drops.go) - see s5_4_drops_test.go.
 func TestS5_3RemainingDeferredRoutesStill404(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 	for _, path := range []string{
 		"/help/glossary", "/help/troubleshooting", "/help/notifications-audio", "/help/diagnostics-support",
-		"/drops/claims", "/events/browser", "/events/sound", "/events/discord",
+		"/events/browser", "/events/sound", "/events/discord",
 	} {
 		rec, _ := httpGetBody(t, h, path)
 		if rec.Code != http.StatusNotFound {
