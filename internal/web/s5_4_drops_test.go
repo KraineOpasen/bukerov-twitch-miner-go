@@ -922,6 +922,36 @@ func TestS5_4ClaimsTableAndCardRowsSynchronized(t *testing.T) {
 	}
 }
 
+// s54ClaimsNoMatchOpenTagRe isolates the #claims-no-match element's own
+// opening tag, so TestS5_4ClaimsNoMatchIsAnAccessibleLiveRegion can prove
+// role="status" and aria-live="polite" are attributes of that exact
+// element — not merely present somewhere else on the page, which a plain
+// strings.Contains scan of the whole body would let slip past (e.g. if the
+// attributes moved onto an unrelated wrapper while remaining, coincidentally,
+// elsewhere in the markup).
+var s54ClaimsNoMatchOpenTagRe = regexp.MustCompile(`<p id="claims-no-match"[^>]*>`)
+
+// TestS5_4ClaimsNoMatchIsAnAccessibleLiveRegion proves the Claims "no
+// results" paragraph — the element TestS5_4ClaimsFilterScriptContract already
+// proves the filter script's noMatch reference toggles visible — is itself
+// announced to assistive technology: id, role="status" and
+// aria-live="polite" must all be attributes of that one opening tag.
+func TestS5_4ClaimsNoMatchIsAnAccessibleLiveRegion(t *testing.T) {
+	c := s54Campaign("c1", "Camp", "Game", []*models.Drop{s54ClaimableDrop("D1", 5, 10)})
+	srv := s54ServerWith(t, []*models.Campaign{c}, drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now()})
+	body := f3GetPage(t, srv, "/drops/claims", "en")
+
+	tag := s54ClaimsNoMatchOpenTagRe.FindString(body)
+	if tag == "" {
+		t.Fatal("could not locate the #claims-no-match opening tag in the rendered page")
+	}
+	for _, want := range []string{`id="claims-no-match"`, `role="status"`, `aria-live="polite"`} {
+		if !strings.Contains(tag, want) {
+			t.Errorf("#claims-no-match opening tag %q missing %q — the live-region contract must live on this exact element", tag, want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------
 // Past
 // ---------------------------------------------------------------------
@@ -999,5 +1029,39 @@ func TestS5_4LocalizedA11yLabelsBothLanguages(t *testing.T) {
 		if got := loc.T(lang, "nav.drops"); got == "" || got == "nav.drops" {
 			t.Errorf("[%s] nav.drops must resolve to real text, got %q", lang, got)
 		}
+	}
+}
+
+// TestS5_4DPCBadgeRUSemanticsNotInverted proves the Russian DP-C badge
+// resolves to its current, correct pending-evidence meaning and not the
+// earlier, semantically inverted wording: "макет по свидетельствам группы
+// C" reads as "mockup based on Group C evidence" (evidence already exists),
+// the opposite of what the badge means. TestS5_4DPCBadgePlacement only
+// proves the EN "DP-C" marker appears/is absent in the right places on the
+// rendered page; it never inspects RU content, so a silent revert of just
+// the RU locale value would pass every other S5-4 test.
+func TestS5_4DPCBadgeRUSemanticsNotInverted(t *testing.T) {
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+
+	const wantRU = "DP-C: макет в ожидании свидетельств группы C"
+	gotRU := loc.T(i18n.LangRU, "drops.card.dpc_badge")
+	if gotRU != wantRU {
+		t.Errorf("drops.card.dpc_badge[ru] = %q, want exactly %q", gotRU, wantRU)
+	}
+	if !strings.Contains(gotRU, "в ожидании") {
+		t.Errorf("drops.card.dpc_badge[ru] = %q, must contain %q (evidence pending — the badge's actual meaning)", gotRU, "в ожидании")
+	}
+	if strings.Contains(gotRU, "по свидетельствам") {
+		t.Errorf("drops.card.dpc_badge[ru] = %q, must not contain the semantically inverted phrase %q", gotRU, "по свидетельствам")
+	}
+	if gotRU == "" || gotRU == "drops.card.dpc_badge" {
+		t.Errorf("drops.card.dpc_badge[ru] resolved to %q, want real localized text, not a key fallback", gotRU)
+	}
+
+	if gotEN := loc.T(i18n.LangEN, "drops.card.dpc_badge"); gotEN == "" || gotEN == "drops.card.dpc_badge" {
+		t.Errorf("drops.card.dpc_badge[en] resolved to %q, want real localized text", gotEN)
 	}
 }
