@@ -9,14 +9,19 @@
      untouched in this slice.
      data-nav-section is the stable section identifier used by that script;
      data-nav-child marks a group's sub-destination (Overview's own page /
-     Queue; System's Health/Logs) as the one that receives aria-current="page"
-     when active, never the parent link, so exactly one destination is ever
-     marked current. Overview is a group exactly like System: its own
-     top-level count stays at seven, /overview/queue is simply its second
-     child destination alongside /overview itself. Drops (task S5-4) is a
-     third group, the same shape again: its own top-level count is still one
-     of the seven sections, and its four children (Current/Upcoming/Claims/
-     Past) are direct routes, not new sections. */}}
+     Queue; System's Status/Diagnostics/Logs) as the one that receives
+     aria-current="page" when active, never the parent link, so exactly one
+     destination is ever marked current. Overview is a group exactly like
+     System: its own top-level count stays at seven, /overview/queue is
+     simply its second child destination alongside /overview itself. Drops
+     (task S5-4) is a third group, the same shape again: its own top-level
+     count is still one of the seven sections, and its four children
+     (Current/Upcoming/Claims/Past) are direct routes, not new sections.
+     task S5-5 replaced System's former two children (Health/Logs, pointing
+     at the legacy /health and /logs pages) with three direct System routes
+     (/system/status, /system/diagnostics, /system/logs) — /health and /logs
+     themselves keep rendering directly, unchanged, just no longer linked
+     from this nav. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -60,13 +65,14 @@
             </a>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/health" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>
+            <a href="/system/status" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
                 <span class="c2-nav-label">{{ t "nav.system" }}</span>
             </a>
             <ul class="c2-nav-children">
-                <li><a href="/health" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.health" }}</a></li>
-                <li><a href="/logs" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.logs" }}</a></li>
+                <li><a href="/system/status" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "system.tab.status" }}</a></li>
+                <li><a href="/system/diagnostics" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "system.tab.diagnostics" }}</a></li>
+                <li><a href="/system/logs" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.logs" }}</a></li>
             </ul>
         </li>
         <li class="c2-nav-item">

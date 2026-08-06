@@ -25,6 +25,12 @@ import (
 // this matrix: each is now its own direct-render route (handlers_drops.go),
 // not a redirect to /drops. See TestS5_4DropsDirectRoutes for their 200/
 // GET-HEAD/no-redirect coverage.
+//
+// task S5-5 removed /system/status, /system/diagnostics and /system/logs
+// from this matrix: each is now its own direct-render route
+// (handlers_system.go), not a redirect to /health or /logs. See
+// s5_5_system_test.go for their 200/no-redirect coverage and the rest of the
+// S5-5 System-page contract.
 var wantCompatibilityRedirects = map[string]string{
 	"/analytics/points":              "/statistics",
 	"/analytics/roi":                 "/statistics",
@@ -38,9 +44,6 @@ var wantCompatibilityRedirects = map[string]string{
 	"/settings/events-notifications": "/settings",
 	"/settings/discord":              "/settings",
 	"/settings/system":               "/settings",
-	"/system/status":                 "/health",
-	"/system/diagnostics":            "/health",
-	"/system/logs":                   "/logs",
 	"/help":                          "/help/getting-started",
 }
 
@@ -62,8 +65,8 @@ func TestS5_2RedirectMatrix(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 
-	if len(wantCompatibilityRedirects) != 16 {
-		t.Fatalf("expected exactly 16 compatibility redirects, found %d", len(wantCompatibilityRedirects))
+	if len(wantCompatibilityRedirects) != 13 {
+		t.Fatalf("expected exactly 13 compatibility redirects, found %d", len(wantCompatibilityRedirects))
 	}
 
 	for route, target := range wantCompatibilityRedirects {
@@ -147,11 +150,16 @@ func TestS5_2RedirectTargetsRenderDirectly(t *testing.T) {
 	}
 }
 
-// TestS5_2CanonicalDirectRoutes proves the three new additive direct-render
-// routes return 200.
+// TestS5_2CanonicalDirectRoutes proves the additive direct-render routes
+// return 200. task S5-5 extended this list with the three System routes
+// (/system/status, /system/diagnostics, /system/logs), which replaced their
+// former /system/* compatibility-redirect entries with real direct renders.
 func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 	srv := buildF3PageServer(t)
-	for _, path := range []string{"/overview", "/events", "/help/getting-started"} {
+	for _, path := range []string{
+		"/overview", "/events", "/help/getting-started",
+		"/system/status", "/system/diagnostics", "/system/logs",
+	} {
 		body := f3GetPage(t, srv, path, "en")
 		if body == "" {
 			t.Errorf("%s rendered an empty body", path)

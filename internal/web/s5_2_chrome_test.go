@@ -74,12 +74,14 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 }
 
 // TestS5_2NavChildDisambiguation pins all THREE group destinations'
-// structure (task Q3 BLOCKER-1, extended by task S5-4): the System group
-// (one parent, two children — Health/Logs), the Overview group (one parent,
-// two children — Overview itself/Queue), and the Drops group (one parent,
-// four children — Current/Upcoming/Claims/Past), for a combined three parent
-// links (data-nav-parent) and eight children (data-nav-child), each with its
-// own distinct href.
+// structure (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task
+// S5-5): the System group (one parent, three children — Status/Diagnostics/
+// Logs, task S5-5 having replaced the former Health/Logs pair with direct
+// System routes), the Overview group (one parent, two children — Overview
+// itself/Queue), and the Drops group (one parent, four children —
+// Current/Upcoming/Claims/Past), for a combined three parent links
+// (data-nav-parent) and nine children (data-nav-child), each with its own
+// distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -90,13 +92,16 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	if n := strings.Count(body, `data-nav-parent>`); n != 3 {
 		t.Errorf("expected exactly three data-nav-parent groups (Overview, Drops, System), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 8 {
-		t.Errorf("expected exactly eight data-nav-child destinations (Overview, Queue, Current, Upcoming, Claims, Past, Health, Logs), found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 9 {
+		t.Errorf("expected exactly nine data-nav-child destinations (Overview, Queue, Current, Upcoming, Claims, Past, Status, Diagnostics, Logs), found %d", n)
 	}
-	if !strings.Contains(body, `href="/health" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
-		t.Error("System group missing the Health child destination")
+	if !strings.Contains(body, `href="/system/status" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
+		t.Error("System group missing the Status child destination")
 	}
-	if !strings.Contains(body, `href="/logs" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
+	if !strings.Contains(body, `href="/system/diagnostics" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
+		t.Error("System group missing the Diagnostics child destination")
+	}
+	if !strings.Contains(body, `href="/system/logs" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
 		t.Error("System group missing the Logs child destination")
 	}
 	if !strings.Contains(body, `href="/overview" class="c2-nav-child" data-nav-section="overview" data-nav-child`) {

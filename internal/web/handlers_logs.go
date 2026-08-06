@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/supportbundle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -27,26 +28,31 @@ func (s *Server) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.renderPage(w, r, "logs.html", s.buildLogsPageData())
+}
 
+// buildLogsPageData assembles the LogsPageData shared verbatim (task S5-5)
+// by the canonical /logs route (handleLogsPage above) and its /system/logs
+// alias (handleSystemLogsPage, handlers_system.go) — the exact same log
+// tail feeding the exact same "logs.html" template, extracted here so the
+// two routes can never drift apart.
+func (s *Server) buildLogsPageData() LogsPageData {
 	s.mu.RLock()
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
 	debugURL := s.debugURL
-	authEnabled := s.dashboard.AuthEnabled()
 	s.mu.RUnlock()
 
 	lines, enabled := s.readLogTail()
-	data := LogsPageData{
-		Username:               s.username,
-		RefreshMinutes:         refresh,
-		Version:                version.Version,
-		DiscordEnabled:         discordEnabled,
-		DebugURL:               debugURL,
-		SupportBundleAvailable: authEnabled,
-		Lines:                  lines,
-		FileLogging:            enabled,
+	return LogsPageData{
+		Username:       s.username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+		Lines:          lines,
+		FileLogging:    enabled,
 	}
-	s.renderPage(w, r, "logs.html", data)
 }
 
 // handleAPILogs renders just the log-lines partial for htmx auto-refresh.
@@ -80,8 +86,16 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		// Classification reads the RAW line (level=/msg=/reason=/result=
+		// tokens, an emoji prefix) so a later redaction can never skew which
+		// bucket a line lands in; only the rendered Text crosses the
+		// supportbundle.Redact boundary (task S5-5 privacy fix — the single
+		// seam covering /logs, /api/logs, and /system/logs). Redact leaves a
+		// benign line unchanged (aside from its 512-rune cap) and replaces
+		// an entire sensitive-shaped line with "[REDACTED]" — never a
+		// partial redaction.
 		p := classifyLogLine(line)
-		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: line})
+		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: supportbundle.Redact(line)})
 	}
 	return views, true
 }

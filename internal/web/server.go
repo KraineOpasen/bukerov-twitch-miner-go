@@ -302,7 +302,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html", "system_status.html", "system_diagnostics.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -789,6 +789,15 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/overview/queue", s.handleOverviewQueuePage)
 	mux.HandleFunc("/events", s.handleEventsPage)
 	mux.HandleFunc("/help/getting-started", s.handleHelpGettingStarted)
+
+	// S5-5 System pages: direct-render routes (handlers_system.go) replacing
+	// the three former /system/* compatibility redirects to /health and
+	// /logs. Registered before the redirect loop below so these three paths
+	// are never shadowed by (and no longer appear in) compatibilityRedirects.
+	// Legacy /health and /logs keep rendering directly, unchanged.
+	mux.HandleFunc("/system/status", s.handleSystemStatusPage)
+	mux.HandleFunc("/system/diagnostics", s.handleSystemDiagnosticsPage)
+	mux.HandleFunc("/system/logs", s.handleSystemLogsPage)
 
 	for route, target := range compatibilityRedirects {
 		mux.HandleFunc(route, redirectCompat(target))

@@ -348,20 +348,19 @@ type LogLineView struct {
 	Text  string
 }
 
+// LogsPageData feeds both /logs and its /system/logs alias (task S5-5) via
+// the identical logs.html template and buildLogsPageData builder. The
+// redacted support-bundle download used to live here
+// (SupportBundleAvailable); task S5-5 gave that link a single owner
+// (/system/diagnostics — see SystemDiagnosticsPageData) and removed the
+// field along with its {{if}} block in logs.html.
 type LogsPageData struct {
 	Username       string
 	RefreshMinutes int
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
-	// SupportBundleAvailable shows the redacted support-bundle download link.
-	// True only when the dashboard has REAL authentication configured
-	// (authEnabled()) - the server-side guard in handleSupportBundle is the
-	// actual enforcement; this only avoids offering a link that would 404
-	// (auth disabled) or that a bypassed, unauthenticated dashboard shouldn't
-	// advertise (DASHBOARD_INSECURE_NO_AUTH=true).
-	SupportBundleAvailable bool
-	Lines                  []LogLineView
+	Lines          []LogLineView
 	// FileLogging is false when the log file doesn't exist (file logging off),
 	// so the page can explain how to enable it.
 	FileLogging bool
@@ -818,6 +817,45 @@ type HelpPageData struct {
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
+}
+
+// SystemStatusPageData feeds /system/status (task S5-5): a pure
+// server-rendered snapshot built only from data already collected in
+// memory by existing providers — no htmx, no polling, no new API endpoint.
+// A same-route manual refresh link is the page's only "live" affordance.
+// Signals lists the lifecycle + OAuth/GQL-API/PubSub/drops-sync rows in
+// fixed display order (see handlers_system.go for SystemStatusRowView and
+// the builders).
+type SystemStatusPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+
+	Signals   []SystemStatusRowView
+	Resources SystemResourcesView
+}
+
+// SystemDiagnosticsPageData feeds /system/diagnostics (task S5-5): deeper,
+// still purely server-rendered operational evidence — the watch-transport
+// canary signal, the drops-progress watchdog's per-status drop counts,
+// best-effort update-availability evidence, and the canonical support-bundle
+// download link (shown only when the dashboard has real authentication
+// configured — see handlers_logs.go's identical AuthEnabled() gate, which
+// this page now solely owns instead of the old /logs-page control).
+type SystemDiagnosticsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+
+	Signals      []SystemStatusRowView
+	DropProgress SystemDropProgressView
+	Update       SystemUpdateView
+
+	SupportBundleAvailable bool
 }
 
 func convertStreamerInfo(info analytics.StreamerInfo) StreamerInfo {

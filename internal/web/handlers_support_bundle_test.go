@@ -752,36 +752,71 @@ func TestSupportBundleProviderPanicYieldsGenericError(t *testing.T) {
 	}
 }
 
-// T28: the Logs-page download control is visible only when real auth is
-// configured, and absent under the insecure bypass (and when auth is fully
-// disabled).
-func TestSupportBundleLogsPageButtonVisibility(t *testing.T) {
-	// Real auth configured: the control is present.
+// TestSupportBundleDiagnosticsPageButtonVisibility (re-scoped by task S5-5,
+// formerly TestSupportBundleLogsPageButtonVisibility): the redacted
+// support-bundle download moved to sole ownership by /system/diagnostics —
+// /logs no longer renders it at all (see logs.html's S5-5 edit removing the
+// old {{if .SupportBundleAvailable}} block; see also
+// TestS5_5SupportBundleSingleOwner in s5_5_system_test.go for the full
+// single-owner matrix across all four System/Logs pages). The control is
+// present on /system/diagnostics only when real dashboard auth is
+// configured, absent when unauthenticated, and absent under the insecure
+// bypass (and when auth is fully disabled) — exactly the same gating the
+// pre-S5-5 /logs-page control used.
+func TestSupportBundleDiagnosticsPageButtonVisibility(t *testing.T) {
+	// Real auth configured: /system/diagnostics shows the control...
 	sAuthed := newAuthedServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil)
+	req.SetBasicAuth("admin", "hunter2")
 	rec := httptest.NewRecorder()
-	sAuthed.handleLogsPage(rec, httptest.NewRequest(http.MethodGet, "/logs", nil))
+	sAuthed.handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("/logs = %d, want 200", rec.Code)
+		t.Fatalf("/system/diagnostics = %d, want 200", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), SupportBundlePath) {
-		t.Error("logs page should show the support-bundle link when real auth is configured")
+		t.Error("/system/diagnostics should show the support-bundle link when real auth is configured")
+	}
+
+	// ...while /logs (same authed server) never shows it anymore — single
+	// ownership.
+	reqLogs := httptest.NewRequest(http.MethodGet, "/logs", nil)
+	reqLogs.SetBasicAuth("admin", "hunter2")
+	recLogs := httptest.NewRecorder()
+	sAuthed.handler().ServeHTTP(recLogs, reqLogs)
+	if recLogs.Code != http.StatusOK {
+		t.Fatalf("/logs = %d, want 200", recLogs.Code)
+	}
+	if strings.Contains(recLogs.Body.String(), SupportBundlePath) {
+		t.Error("/logs must no longer show the support-bundle link (task S5-5 moved it to /system/diagnostics)")
+	}
+
+	// Unauthenticated /system/diagnostics: AuthEnabled() is true but this
+	// request carries no credentials, so basicAuthMiddleware denies it (401)
+	// before the page ever renders.
+	recNoCreds := httptest.NewRecorder()
+	sAuthed.handler().ServeHTTP(recNoCreds, httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil))
+	if recNoCreds.Code != http.StatusUnauthorized {
+		t.Fatalf("/system/diagnostics without credentials = %d, want 401", recNoCreds.Code)
+	}
+	if strings.Contains(recNoCreds.Body.String(), SupportBundlePath) {
+		t.Error("/system/diagnostics without credentials must not show the support-bundle link")
 	}
 
 	// Insecure bypass: AuthEnabled() is false, so the control must be hidden.
 	sInsecure := newRenderServer(t)
 	sInsecure.SetDashboardConfig(runtimeconfig.Dashboard{InsecureNoAuth: true})
 	rec2 := httptest.NewRecorder()
-	sInsecure.handleLogsPage(rec2, httptest.NewRequest(http.MethodGet, "/logs", nil))
+	sInsecure.handleSystemDiagnosticsPage(rec2, httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil))
 	if strings.Contains(rec2.Body.String(), SupportBundlePath) {
-		t.Error("logs page must NOT show the support-bundle link under the insecure bypass")
+		t.Error("/system/diagnostics must NOT show the support-bundle link under the insecure bypass")
 	}
 
 	// Auth fully disabled (zero Dashboard): also hidden.
 	sDisabled := newRenderServer(t)
 	rec3 := httptest.NewRecorder()
-	sDisabled.handleLogsPage(rec3, httptest.NewRequest(http.MethodGet, "/logs", nil))
+	sDisabled.handleSystemDiagnosticsPage(rec3, httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil))
 	if strings.Contains(rec3.Body.String(), SupportBundlePath) {
-		t.Error("logs page must NOT show the support-bundle link when auth is disabled")
+		t.Error("/system/diagnostics must NOT show the support-bundle link when auth is disabled")
 	}
 }
 

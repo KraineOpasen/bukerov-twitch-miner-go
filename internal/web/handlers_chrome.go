@@ -19,6 +19,10 @@ import (
 // compatibility alias for Current through the same handler — see
 // handleDropsPage — but that alias is not a 302 redirect, so it was never a
 // member of this map.
+//
+// task S5-5 removed /system/status, /system/diagnostics and /system/logs
+// from this map: each is now its own direct-render route registered in
+// server.go (handlers_system.go), not a redirect to /health or /logs.
 var compatibilityRedirects = map[string]string{
 	"/analytics/points":              "/statistics",
 	"/analytics/roi":                 "/statistics",
@@ -32,9 +36,6 @@ var compatibilityRedirects = map[string]string{
 	"/settings/events-notifications": "/settings",
 	"/settings/discord":              "/settings",
 	"/settings/system":               "/settings",
-	"/system/status":                 "/health",
-	"/system/diagnostics":            "/health",
-	"/system/logs":                   "/logs",
 	"/help":                          "/help/getting-started",
 }
 

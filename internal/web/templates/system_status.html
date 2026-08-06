@@ -1,0 +1,45 @@
+{{/* /system/status (task S5-5): a pure server-rendered, STATUS-ONLY snapshot
+     built only from data already collected in memory by existing providers.
+     No hx-get, no polling, no new API endpoint — the only "live" affordance
+     is the plain same-route manual refresh link below. This page never
+     renders a settings form or a lifecycle mutation control: every existing
+     config surface (Health Center's canary/watchdog forms, the lifecycle
+     panel's Pause/Resume/Restart/Stop) stays exactly where it is today.
+     Rows reuse the existing health-grid/health-card/health-sev-* classes
+     (already compiled into app.css from the Health Center) — no CSS
+     changes in this slice. */}}
+{{define "title"}}{{ t "system.status.heading" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "system.status.heading" }}</h1>
+    <div class="flex items-center gap-2">
+        <a href="/system/status" class="btn-secondary text-sm">{{ t "system.status.refresh" }}</a>
+        <a href="/system/diagnostics" class="btn-secondary text-sm">{{ t "system.tab.diagnostics" }}</a>
+        <a href="/system/logs" class="btn-secondary text-sm">{{ t "nav.logs" }}</a>
+    </div>
+</div>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "system.status.subtitle" }}</p>
+
+<div class="health-grid mb-6">
+    {{range .Signals}}
+    <div class="health-card {{.Sev}}">
+        <div class="health-card-label">{{.Label}}</div>
+        <div class="health-card-status">
+            <span class="num font-semibold health-card-status-text">{{.StatusText}}</span>
+        </div>
+        {{if .ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.ClockLabel}}</span>{{.ClockText}}</div>{{end}}
+        {{if .Clock2Label}}<div class="health-card-row"><span class="health-card-row-label">{{.Clock2Label}}</span>{{.Clock2Text}}</div>{{end}}
+        {{if .Secondary}}<div class="health-card-row">{{.Secondary}}</div>{{end}}
+        {{if .Detail}}<div class="health-card-row health-card-detail">{{.Detail}}</div>{{end}}
+    </div>
+    {{end}}
+</div>
+
+<div class="health-card">
+    <div class="health-card-label">{{ t "system.status.resources.heading" }}</div>
+    {{range .Resources.Rows}}
+    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{.Primary}}</span>{{if .Secondary}} <span class="num text-neutral-500">{{.Secondary}}</span>{{end}}</div>
+    {{end}}
+</div>
+{{end}}
