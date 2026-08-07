@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/supportbundle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -17,6 +19,21 @@ const (
 	logTailLines = 500
 	// logTailMaxBytes bounds how much of the file's tail is read (memory guard).
 	logTailMaxBytes = 2 << 20 // 2 MiB
+
+	// logRedactedMarker mirrors the fixed marker supportbundle.Redact
+	// substitutes for an ENTIRE sensitive-shaped string. It is repeated here
+	// as a plain literal — not a copy of any detection rule, and no part of
+	// the privacy boundary — solely so redactLogLine can tell Redact's two
+	// outcomes apart: "the whole line was replaced" vs "a benign line was
+	// bounded".
+	logRedactedMarker = "[REDACTED]"
+
+	// logTruncationMarker is appended to a benign log line that
+	// supportbundle.Redact shortened by its internal rune cap. It is a
+	// language-neutral editorial elision mark (so no locale key is needed on
+	// any page) and carries nothing about the dropped suffix — neither its
+	// content nor its length.
+	logTruncationMarker = " […]"
 )
 
 // handleLogsPage renders the full Logs page: a live tail of the miner's on-disk
@@ -27,26 +44,31 @@ func (s *Server) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.renderPage(w, r, "logs.html", s.buildLogsPageData())
+}
 
+// buildLogsPageData assembles the LogsPageData shared verbatim (task S5-5)
+// by the canonical /logs route (handleLogsPage above) and its /system/logs
+// alias (handleSystemLogsPage, handlers_system.go) — the exact same log
+// tail feeding the exact same "logs.html" template, extracted here so the
+// two routes can never drift apart.
+func (s *Server) buildLogsPageData() LogsPageData {
 	s.mu.RLock()
 	refresh := s.refresh
 	discordEnabled := s.discordEnabled
 	debugURL := s.debugURL
-	authEnabled := s.dashboard.AuthEnabled()
 	s.mu.RUnlock()
 
 	lines, enabled := s.readLogTail()
-	data := LogsPageData{
-		Username:               s.username,
-		RefreshMinutes:         refresh,
-		Version:                version.Version,
-		DiscordEnabled:         discordEnabled,
-		DebugURL:               debugURL,
-		SupportBundleAvailable: authEnabled,
-		Lines:                  lines,
-		FileLogging:            enabled,
+	return LogsPageData{
+		Username:       s.username,
+		RefreshMinutes: refresh,
+		Version:        version.Version,
+		DiscordEnabled: discordEnabled,
+		DebugURL:       debugURL,
+		Lines:          lines,
+		FileLogging:    enabled,
 	}
-	s.renderPage(w, r, "logs.html", data)
 }
 
 // handleAPILogs renders just the log-lines partial for htmx auto-refresh.
@@ -80,10 +102,46 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		// Classification reads the RAW line (level=/msg=/reason=/result=
+		// tokens, an emoji prefix) so a later redaction can never skew which
+		// bucket a line lands in; only the rendered Text crosses the
+		// supportbundle.Redact boundary, via redactLogLine below (task S5-5
+		// privacy fix — the single seam covering /logs, /api/logs, and
+		// /system/logs). Redact leaves a benign line unchanged aside from its
+		// rune cap, and replaces an entire sensitive-shaped line with
+		// "[REDACTED]" — never a partial redaction.
 		p := classifyLogLine(line)
-		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: line})
+		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: redactLogLine(line)})
 	}
 	return views, true
+}
+
+// redactLogLine renders one raw log line for display: supportbundle.Redact
+// first (the privacy boundary — never bypassed, never reimplemented here),
+// then an honest indication when Redact's OTHER outcome silently shortened
+// the line.
+//
+// Redact does exactly one of two things. A sensitive-shaped line is replaced
+// wholesale by the fixed "[REDACTED]" marker. A BENIGN line is capped at
+// Redact's internal rune limit — a pure size bound, not a redaction event,
+// and one that arrives with nothing on screen to say the tail was dropped. A
+// long technical log line simply appears to end early. This appends a
+// language-neutral marker so a shortened line reads as shortened.
+//
+// The marker is deliberately NOT attached to a redacted line: "[REDACTED]" is
+// a fixed constant precisely so it discloses nothing about the original's
+// length, and marking a long sensitive line would put that length signal
+// straight back. Detection compares RUNES, matching Redact's own rune-based
+// contract, so a multi-byte line is never misjudged by its byte count.
+func redactLogLine(line string) string {
+	out := supportbundle.Redact(line)
+	if out == logRedactedMarker {
+		return out
+	}
+	if utf8.RuneCountInString(out) < utf8.RuneCountInString(line) {
+		return out + logTruncationMarker
+	}
+	return out
 }
 
 // tailLogFile returns the last maxBytes of the file at path (aligned to the next

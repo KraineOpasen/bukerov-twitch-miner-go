@@ -1,0 +1,104 @@
+{{/* /system/diagnostics (task S5-5): deeper operational evidence, still pure
+     server-render — no auto-refresh; the page copy instructs the user to
+     reload for current status. Owns: the watch-transport canary signal, the
+     drops-progress watchdog's per-status counts, a manual "Run Canary"
+     action (POSTs the existing /api/health/canary/run with hx-swap="none",
+     so its legacy partial response is discarded, never inserted), the
+     current version, best-effort update-availability evidence, an honest
+     "build information unavailable" line (no fabricated SHA/digest/build
+     time — none exist in this codebase), and the canonical support-bundle
+     download link (its SOLE owner — /logs no longer renders it). No
+     settings editor, no config fields, no <form>. */}}
+{{define "title"}}{{ t "system.diagnostics.heading" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "system.diagnostics.heading" }}</h1>
+    <div class="flex items-center gap-2">
+        <a href="/system/status" class="btn-secondary text-sm">{{ t "system.tab.status" }}</a>
+        <a href="/system/logs" class="btn-secondary text-sm">{{ t "nav.logs" }}</a>
+    </div>
+</div>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "system.diagnostics.subtitle" }}</p>
+
+<div class="health-grid mb-6">
+    {{range .Signals}}
+    <div class="health-card {{.Sev}}">
+        <div class="health-card-label">{{.Label}}</div>
+        <div class="health-card-status">
+            <span class="num font-semibold health-card-status-text">{{.StatusText}}</span>
+        </div>
+        {{if .ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.ClockLabel}}</span>{{.ClockText}}</div>{{end}}
+        {{if .Detail}}<div class="health-card-row health-card-detail">{{.Detail}}</div>{{end}}
+    </div>
+    {{end}}
+
+    <div class="health-card{{if not .DropProgress.Available}} health-sev-neutral{{end}}">
+        <div class="health-card-label">{{ t "health.watchdog.title" }}</div>
+        {{if not .DropProgress.Available}}
+        <div class="health-card-status"><span class="num font-semibold health-card-status-text">{{ t "system.status.unavailable" }}</span></div>
+        {{else}}
+        <div class="health-card-status">
+            <span class="num font-semibold health-card-status-text">{{if .DropProgress.Enabled}}{{ t "system.diagnostics.watchdog.enabled" }}{{else}}{{ t "system.diagnostics.watchdog.disabled" }}{{end}}</span>
+        </div>
+        {{if .DropProgress.ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.DropProgress.ClockLabel}}</span>{{.DropProgress.ClockText}}</div>{{end}}
+        {{if .DropProgress.HasAnyDrops}}
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "health.status.healthy" }}</span><span class="num">{{.DropProgress.HealthyCount}}</span></div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "health.status.recovering" }}</span><span class="num">{{.DropProgress.RecoveringCount}}</span></div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "health.status.stalled" }}</span><span class="num">{{.DropProgress.StalledCount}}</span></div>
+        {{end}}
+        {{end}}
+    </div>
+</div>
+
+<div class="health-card mb-6">
+    <p class="health-card-row">{{ t "health.disclaimer" }}</p>
+    <div class="flex items-center gap-2 flex-wrap">
+        <button type="button" id="system-canary-run-btn" class="btn-secondary text-sm" hx-post="/api/health/canary/run" hx-swap="none">{{ t "health.canary.run_now" }}</button>
+        <span id="system-canary-run-status" role="status" aria-live="polite" class="text-xs text-neutral-500"></span>
+    </div>
+</div>
+
+<div class="health-card mb-6">
+    <div class="health-card-row"><span class="health-card-row-label">{{ t "system.diagnostics.version_label" }}</span><span class="num">{{.Version}}</span></div>
+    <p class="health-card-row">{{ t "system.diagnostics.build_info_unavailable" }}</p>
+    {{if .Update.State}}
+    <div class="health-card-row">
+        {{if eq .Update.State "available"}}{{ t "lc.update_available" }}{{else if eq .Update.State "failed"}}{{ t "lc.update_failed" }}{{else if eq .Update.State "applied"}}{{ t "lc.update_applied" }}{{end}}
+        {{if .Update.Version}} <span class="num">{{.Update.Version}}</span>{{end}}
+    </div>
+    {{end}}
+</div>
+
+{{if .SupportBundleAvailable}}
+<div class="health-card">
+    <a href="/api/support-bundle" class="btn-secondary text-sm">{{ t "logs.support_bundle" }}</a>
+</div>
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // __sysDiagCtl: announces the Run Canary action's outcome in a local
+    // live region, scoped to that one button via htmx:afterRequest's
+    // event.detail.elt. The endpoint's legacy health_center partial body is
+    // never inserted anywhere (the button's own hx-swap="none" discards
+    // it) — this script only reads event.detail.successful, never the
+    // response body. No auto-retry, no polling, no new endpoint.
+    (function () {
+        if (window.__sysDiagCtl) return;
+        window.__sysDiagCtl = true;
+
+        var btn = document.getElementById('system-canary-run-btn');
+        var status = document.getElementById('system-canary-run-status');
+        if (!btn || !status) return;
+
+        document.body.addEventListener('htmx:afterRequest', function (e) {
+            if (!e.detail || e.detail.elt !== btn) return;
+            status.textContent = e.detail.successful
+                ? window.t('js.system.canary_run_accepted')
+                : window.t('js.system.canary_run_failed');
+        });
+    })();
+</script>
+{{end}}

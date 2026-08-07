@@ -4,11 +4,14 @@
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "logs.heading" }}</h1>
     <div class="flex items-center gap-2">
-        {{if .SupportBundleAvailable}}<a href="/api/support-bundle" class="btn-secondary text-sm">{{ t "logs.support_bundle" }}</a>{{end}}
         {{if .DebugURL}}<a href="{{.DebugURL}}" target="_blank" rel="noopener" class="btn-secondary text-sm">{{ t "logs.debug_snapshot" }}</a>{{end}}
     </div>
 </div>
-<p class="text-neutral-400 text-sm mb-6">{{ t "logs.description" }}</p>
+<p class="text-neutral-400 text-sm mb-2">{{ t "logs.description" }}</p>
+<!-- S5-5: this page is the miner's raw technical journal, not a curated
+     product-event feed; the redacted support-bundle download moved to sole
+     ownership by /system/diagnostics (see handlers_system.go). -->
+<p class="text-neutral-500 text-xs mb-6">{{ t "logs.journal_note" }} <a href="/events">/events</a>.</p>
 
 <div class="logs-toolbar" role="toolbar" aria-label="{{ t "logs.filter.toolbar_aria" }}">
     <div class="logs-toolbar-group">
