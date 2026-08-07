@@ -506,10 +506,10 @@ func TestS5_5StatusRedactsLifecycleLastError(t *testing.T) {
 // the REAL handler/template chain for all THREE rendered log surfaces —
 // GET /logs, GET /api/logs and GET /system/logs: every sensitive line's raw
 // canary marker must be absent from the response and replaced by
-// "[REDACTED]"; the benign line must render verbatim; and the redacted lines
-// must still carry their correct log-error classification (the class
-// attribute, derived from the RAW line, is unaffected by the later redaction
-// of the display text).
+// "[REDACTED]"; the benign line must render verbatim; and EVERY redacted
+// line — not just one of them — must still carry its correct log-error
+// classification (the class attribute, derived from the RAW line, is
+// unaffected by the later redaction of the display text).
 //
 // /system/logs is exercised through its own real handler rather than trusted
 // to the shared buildLogsPageData builder: giving that one route a raw,
@@ -586,8 +586,15 @@ func TestS5_5LogsRedactSensitiveRenderedContent(t *testing.T) {
 			if !strings.Contains(body, benign) {
 				t.Errorf("%s: benign line %q must render verbatim, not redacted", path, benign)
 			}
-			if !strings.Contains(body, `class="log-line log-error"`) {
-				t.Errorf("%s: expected redacted lines to still carry their log-error classification", path)
+			// EVERY sensitive fixture is level=ERROR, so exactly len(lines)
+			// spans must carry the log-error class — counted, not merely
+			// witnessed once. A bare existence check survives a mutant that
+			// keeps the first ERROR line classified and downgrades all the
+			// later ones; an exact count kills it. The benign control is
+			// level=INFO and is deliberately NOT part of lines, so it never
+			// contributes to this count.
+			if got := strings.Count(body, `class="log-line log-error"`); got != len(lines) {
+				t.Errorf("%s: got %d log-error classified lines, want exactly %d", path, got, len(lines))
 			}
 		})
 	}
