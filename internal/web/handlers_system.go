@@ -242,7 +242,7 @@ func systemSignalRow(sig health.Signal, label, clockLabel string, tr func(string
 	}
 	if !sig.CheckedAt.IsZero() {
 		row.ClockLabel = clockLabel
-		row.ClockText = systemAgo(sig.CheckedAt)
+		row.ClockText = systemAgo(sig.CheckedAt, tr)
 	}
 	return row
 }
@@ -320,11 +320,11 @@ func (s *Server) buildSystemLifecycleRow(tr func(string) string) SystemStatusRow
 	row.Sev = systemLifecycleSeverity(snap.Observed)
 	if !snap.StartedAt.IsZero() {
 		row.ClockLabel = tr("system.status.lifecycle.started_label")
-		row.ClockText = systemAgo(snap.StartedAt)
+		row.ClockText = systemAgo(snap.StartedAt, tr)
 	}
 	if !snap.TransitionStartedAt.IsZero() {
 		row.Clock2Label = tr("system.status.lifecycle.transition_started_label")
-		row.Clock2Text = systemAgo(snap.TransitionStartedAt)
+		row.Clock2Text = systemAgo(snap.TransitionStartedAt, tr)
 	}
 	if snap.LastError != "" {
 		row.Detail = tr("lc.last_error_label") + ": " + supportbundle.Redact(snap.LastError)
@@ -382,11 +382,11 @@ func (s *Server) buildSystemDropsSyncRow(tr func(string) string) SystemStatusRow
 	}
 	if !sync.LastSyncAt.IsZero() {
 		row.ClockLabel = tr("system.status.drops_sync.attempt_label")
-		row.ClockText = systemAgo(sync.LastSyncAt)
+		row.ClockText = systemAgo(sync.LastSyncAt, tr)
 	}
 	if !sync.LastSuccessAt.IsZero() {
 		row.Clock2Label = tr("system.status.drops_sync.success_label")
-		row.Clock2Text = systemAgo(sync.LastSuccessAt)
+		row.Clock2Text = systemAgo(sync.LastSuccessAt, tr)
 	}
 	if sync.LastError != "" {
 		row.Detail = tr("lc.last_error_label") + ": " + supportbundle.Redact(sync.LastError)
@@ -438,9 +438,16 @@ func buildSystemResourcesView(fn func() resources.Snapshot, tr func(string) stri
 }
 
 // formatSystemBytes renders a byte count in compact IEEE-ish units
-// (B/K/M/G/T/P), independent of (and deliberately not shared with)
+// (B/K/M/G/T/P/E), independent of (and deliberately not shared with)
 // overview.html's client-side fmtBytes — this is a server-side render with
 // no JS counterpart to stay in sync with.
+//
+// The unit table must cover every exponent the divisor loop below can reach.
+// n >= 1<<60 drives exp to 5 (and no uint64 can reach 6, since 1<<70 overflows
+// the type), so "KMGTPE" — indices 0..5 — makes this a TOTAL function over
+// uint64 with no clamping needed. A value that large is not hypothetical: a
+// cgroup-v2 memory limit arrives as an ordinary uint64 the sampler surfaces
+// verbatim, and an out-of-range index here would panic mid-render.
 func formatSystemBytes(n uint64) string {
 	const unit = 1024
 	if n < unit {
@@ -451,7 +458,7 @@ func formatSystemBytes(n uint64) string {
 		div *= unit
 		exp++
 	}
-	units := "KMGTP"
+	units := "KMGTPE"
 	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), units[exp])
 }
 
@@ -479,7 +486,13 @@ func formatSystemCores(cores float64) string {
 // call into) handlers_health.go's own formatHealthAgo, kept local to this
 // file by design. Zero t (never happened) renders as "" so the caller can
 // omit the clock entirely rather than claim a false freshness.
-func systemAgo(t time.Time) string {
+//
+// The elapsed suffix comes from the request's own translator via the existing
+// repo-wide common.ago key (the same key handlers_overview.go:698,927 already
+// uses for its event clocks) — no new locale key, and no English literal
+// stranded on a Russian page. The numeric part is unchanged, so EN output is
+// byte-for-byte what it was.
+func systemAgo(t time.Time, tr func(string) string) string {
 	if t.IsZero() {
 		return ""
 	}
@@ -487,15 +500,16 @@ func systemAgo(t time.Time) string {
 	if d < 0 {
 		d = 0
 	}
+	ago := " " + tr("common.ago")
 	switch {
 	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+		return fmt.Sprintf("%ds", int(d.Seconds())) + ago
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+		return fmt.Sprintf("%dm", int(d.Minutes())) + ago
 	default:
 		h := int(d.Hours())
 		m := int(d.Minutes()) % 60
-		return fmt.Sprintf("%dh %dm ago", h, m)
+		return fmt.Sprintf("%dh %dm", h, m) + ago
 	}
 }
 
@@ -512,7 +526,7 @@ func buildSystemDropProgressView(provider DropProgressProvider, tr func(string) 
 	view.Enabled = snap.Enabled
 	if !snap.EvaluatedAt.IsZero() {
 		view.ClockLabel = tr("system.diagnostics.watchdog.evaluated_label")
-		view.ClockText = systemAgo(snap.EvaluatedAt)
+		view.ClockText = systemAgo(snap.EvaluatedAt, tr)
 	}
 	for _, d := range snap.Drops {
 		switch d.Status {

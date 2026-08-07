@@ -11,6 +11,7 @@ package web
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,10 +161,58 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // 2. Drops sync: two distinct clocks, never merged.
 // ---------------------------------------------------------------------
 
+// s55HealthCardRowValue returns the text rendered immediately after the label
+// span of the health-card-row whose label is exactly label, plus whether such
+// a row exists at all.
+//
+// The scan is bounded to a single row's `<div class="health-card-row">` ...
+// `</div>` span (see system_status.html:31-32, which emits the label span and
+// its value adjacently with no intervening markup), so an assertion built on
+// it binds a label to ITS OWN value. A page-wide strings.Contains check for
+// each label and each value independently cannot tell two correctly-paired
+// rows apart from two rows whose values have been transposed — which is
+// exactly the coverage gap this helper closes.
+func s55HealthCardRowValue(body, label string) (string, bool) {
+	const (
+		rowOpen    = `<div class="health-card-row">`
+		labelOpen  = `<span class="health-card-row-label">`
+		labelClose = `</span>`
+		rowClose   = `</div>`
+	)
+	for rest := body; ; {
+		i := strings.Index(rest, rowOpen)
+		if i < 0 {
+			return "", false
+		}
+		rest = rest[i+len(rowOpen):]
+
+		end := strings.Index(rest, rowClose)
+		if end < 0 {
+			return "", false
+		}
+		row := rest[:end]
+		rest = rest[end+len(rowClose):]
+
+		if !strings.HasPrefix(row, labelOpen) {
+			continue
+		}
+		inner := row[len(labelOpen):]
+		j := strings.Index(inner, labelClose)
+		if j < 0 || inner[:j] != label {
+			continue
+		}
+		return inner[j+len(labelClose):], true
+	}
+}
+
 // TestS5_5StatusDistinctAttemptAndSuccessClocks proves the drops-sync row
 // renders the attempt clock (LastSyncAt) and the success clock
 // (LastSuccessAt) as two separately labeled, separately valued lines — never
 // merged into one, and never one substituted for the other.
+//
+// Each clock is asserted INSIDE its own rendered row via
+// s55HealthCardRowValue, so transposing only the two values (leaving both
+// labels in place) fails here.
 func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 	srv := newRenderServer(t)
 	srv.SetCampaignsProvider(&s55FakeCampaignsProvider{status: drops.SyncStatus{
@@ -182,22 +231,18 @@ func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 	body := rec.Body.String()
 	tr := enTR(t)
 
-	if !strings.Contains(body, tr("system.status.drops_sync.attempt_label")) {
-		t.Error("missing the attempt-clock label")
-	}
-	if !strings.Contains(body, tr("system.status.drops_sync.success_label")) {
-		t.Error("missing the success-clock label")
-	}
-	const wantAttempt = "5m ago"
-	const wantSuccess = "3h 0m ago"
-	if !strings.Contains(body, wantAttempt) {
-		t.Errorf("expected the attempt clock %q to render", wantAttempt)
-	}
-	if !strings.Contains(body, wantSuccess) {
-		t.Errorf("expected the success clock %q to render", wantSuccess)
-	}
-	if wantAttempt == wantSuccess {
-		t.Fatal("fixture bug: attempt/success clocks must render distinctly")
+	for _, want := range []struct{ label, value string }{
+		{tr("system.status.drops_sync.attempt_label"), "5m ago"},
+		{tr("system.status.drops_sync.success_label"), "3h 0m ago"},
+	} {
+		got, ok := s55HealthCardRowValue(body, want.label)
+		if !ok {
+			t.Errorf("no health-card-row labeled %q was rendered", want.label)
+			continue
+		}
+		if got != want.value {
+			t.Errorf("row %q rendered value %q, want %q (label/value pair must not be transposed)", want.label, got, want.value)
+		}
 	}
 }
 
@@ -452,18 +497,24 @@ func TestS5_5StatusRedactsLifecycleLastError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// 9. Log-line redaction end to end, both /logs and /api/logs.
+// 9. Log-line redaction end to end: /logs, /api/logs AND /system/logs.
 // ---------------------------------------------------------------------
 
 // TestS5_5LogsRedactSensitiveRenderedContent writes a temp log file (the
 // same fixture shape as TestReadLogTailClassifies) containing one raw line
 // per S5-4 sensitivity category plus a benign control line, then exercises
-// the REAL handler/template chain for both GET /logs and GET /api/logs:
-// every sensitive line's raw canary marker must be absent from the response
-// and replaced by "[REDACTED]"; the benign line must render verbatim; and
-// the redacted lines must still carry their correct log-error classification
-// (the class attribute, derived from the RAW line, is unaffected by the
-// later redaction of the display text).
+// the REAL handler/template chain for all THREE rendered log surfaces —
+// GET /logs, GET /api/logs and GET /system/logs: every sensitive line's raw
+// canary marker must be absent from the response and replaced by
+// "[REDACTED]"; the benign line must render verbatim; and the redacted lines
+// must still carry their correct log-error classification (the class
+// attribute, derived from the RAW line, is unaffected by the later redaction
+// of the display text).
+//
+// /system/logs is exercised through its own real handler rather than trusted
+// to the shared buildLogsPageData builder: giving that one route a raw,
+// unsanitized builder is a mutation the /logs + /api/logs pair alone cannot
+// see, so the privacy boundary is proven per-surface here.
 func TestS5_5LogsRedactSensitiveRenderedContent(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.MkdirAll("logs", 0o755); err != nil {
@@ -507,14 +558,17 @@ func TestS5_5LogsRedactSensitiveRenderedContent(t *testing.T) {
 	srv := newRenderServer(t)
 	srv.username = username
 
-	for _, path := range []string{"/logs", "/api/logs"} {
+	for _, path := range []string{"/logs", "/api/logs", "/system/logs"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()
-			if path == "/logs" {
+			switch path {
+			case "/logs":
 				srv.handleLogsPage(rec, req)
-			} else {
+			case "/api/logs":
 				srv.handleAPILogs(rec, req)
+			default:
+				srv.handleSystemLogsPage(rec, req)
 			}
 			if rec.Code != http.StatusOK {
 				t.Fatalf("GET %s = %d, want 200", path, rec.Code)
@@ -755,6 +809,203 @@ func TestS5_5LocaleKeysPresentAndTranslated(t *testing.T) {
 		if en == ru && !s55DeliberatelyIdenticalKeys[k] {
 			t.Errorf("%q has identical EN/RU text %q — looks untranslated", k, en)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// 15. formatSystemBytes is total over the whole uint64 range.
+// ---------------------------------------------------------------------
+
+// s55SafeFormatSystemBytes calls formatSystemBytes and converts a panic into a
+// returned value, so one out-of-range input reports as a normal test failure
+// instead of tearing down the whole package's test binary.
+func s55SafeFormatSystemBytes(n uint64) (out string, panicked any) {
+	defer func() { panicked = recover() }()
+	out = formatSystemBytes(n)
+	return out, nil
+}
+
+// TestS5_5FormatSystemBytesTotalOverUint64 pins formatSystemBytes as a TOTAL
+// function over uint64. The unit table it indexes must cover every exponent
+// the divisor loop can reach: a value >= 1<<60 drives the exponent to 5, and
+// 5 is out of range for a five-rune "KMGTP" table — an index panic inside a
+// page render, reachable from a real resource snapshot (a cgroup-v2 memory
+// limit is an ordinary uint64 the sampler surfaces verbatim).
+//
+// Outputs below 1<<60 are pinned to their exact existing text, so widening
+// the table cannot silently reformat any value the dashboard renders today.
+func TestS5_5FormatSystemBytesTotalOverUint64(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   uint64
+		want string
+	}{
+		{"zero", 0, "0B"},
+		{"sub-unit", 512, "512B"},
+		{"exact KiB", 1 << 10, "1.0KB"},
+		{"fractional KiB", 1536, "1.5KB"},
+		{"exact MiB", 1 << 20, "1.0MB"},
+		{"exact GiB", 1 << 30, "1.0GB"},
+		{"exact TiB", 1 << 40, "1.0TB"},
+		{"exact PiB", 1 << 50, "1.0PB"},
+		{"exact EiB", 1 << 60, "1.0EB"},
+		{"max uint64", math.MaxUint64, "16.0EB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, panicked := s55SafeFormatSystemBytes(tc.in)
+			if panicked != nil {
+				t.Fatalf("formatSystemBytes(%d) panicked: %v", tc.in, panicked)
+			}
+			if got != tc.want {
+				t.Errorf("formatSystemBytes(%d) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestS5_5ResourcesRenderExtremeMemoryLimit drives the extreme value through
+// the REAL /system/status render path (the seam Q3-1 is actually reachable
+// from): a resource snapshot whose memory limit is the largest uint64 must
+// render a bounded string rather than panicking mid-response.
+func TestS5_5ResourcesRenderExtremeMemoryLimit(t *testing.T) {
+	srv := newRenderServer(t)
+	srv.SetResourceSnapshotProvider(func() resources.Snapshot {
+		return resources.Snapshot{
+			Available: true,
+			SampledAt: time.Now().UTC().Format(time.RFC3339),
+			Memory: resources.Memory{
+				Available:  true,
+				UsedBytes:  1 << 60,
+				LimitBytes: math.MaxUint64,
+			},
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/system/status", nil)
+	req.AddCookie(&http.Cookie{Name: langCookieName, Value: "en"})
+	rec := httptest.NewRecorder()
+	srv.handleSystemStatusPage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/system/status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"1.0EB", "/ 16.0EB"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the memory row to render %q", want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// 16. Elapsed-time clocks localize through the existing common.ago key.
+// ---------------------------------------------------------------------
+
+// TestS5_5StatusClockLocalizesElapsedSuffix proves every S5-5 freshness clock
+// renders its "ago" suffix through the request's own translator (the existing
+// repo-wide common.ago key — see handlers_overview.go:698,927 — reused, no new
+// locale key), not a hardcoded English literal. EN output is unchanged
+// byte-for-byte; RU renders "назад" and must not carry the English clock.
+func TestS5_5StatusClockLocalizesElapsedSuffix(t *testing.T) {
+	newSrv := func() *Server {
+		srv := newRenderServer(t)
+		srv.SetCampaignsProvider(&s55FakeCampaignsProvider{status: drops.SyncStatus{
+			LastSyncAt:    time.Now().Add(-5 * time.Minute),
+			LastSuccessAt: time.Now().Add(-3 * time.Hour),
+		}})
+		return srv
+	}
+	render := func(lang string) string {
+		req := httptest.NewRequest(http.MethodGet, "/system/status", nil)
+		req.AddCookie(&http.Cookie{Name: langCookieName, Value: lang})
+		rec := httptest.NewRecorder()
+		newSrv().handleSystemStatusPage(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s /system/status = %d, want 200", lang, rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	en, ru := render("en"), render("ru")
+	enTr, ruTr := enTR(t), ruTR(t)
+
+	// The suffix comes from common.ago in both languages.
+	if got := enTr("common.ago"); got != "ago" {
+		t.Fatalf("fixture drift: EN common.ago = %q, want %q", got, "ago")
+	}
+	if got := ruTr("common.ago"); got != "назад" {
+		t.Fatalf("fixture drift: RU common.ago = %q, want %q", got, "назад")
+	}
+
+	for _, tc := range []struct {
+		lang, body, label, want string
+	}{
+		{"en", en, enTr("system.status.drops_sync.attempt_label"), "5m ago"},
+		{"en", en, enTr("system.status.drops_sync.success_label"), "3h 0m ago"},
+		{"ru", ru, ruTr("system.status.drops_sync.attempt_label"), "5m назад"},
+		{"ru", ru, ruTr("system.status.drops_sync.success_label"), "3h 0m назад"},
+	} {
+		got, ok := s55HealthCardRowValue(tc.body, tc.label)
+		if !ok {
+			t.Errorf("%s: no health-card-row labeled %q was rendered", tc.lang, tc.label)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: row %q rendered %q, want %q", tc.lang, tc.label, got, tc.want)
+		}
+	}
+
+	// The RU page must not carry the English elapsed-clock text at all.
+	for _, leaked := range []string{"5m ago", "3h 0m ago", "m ago", "s ago"} {
+		if strings.Contains(ru, leaked) {
+			t.Errorf("RU /system/status leaked the English elapsed clock %q", leaked)
+		}
+	}
+}
+
+// TestS5_5SystemAgoSemanticsPreserved pins systemAgo's behavior across the
+// localization change: a zero timestamp still renders nothing at all (so the
+// caller omits the clock rather than claiming a false freshness), a future
+// timestamp still clamps to zero rather than rendering a negative duration,
+// and the seconds / minutes / hours+minutes thresholds are unmoved.
+func TestS5_5SystemAgoSemanticsPreserved(t *testing.T) {
+	en, ru := enTR(t), ruTR(t)
+	now := time.Now()
+
+	if got := systemAgo(time.Time{}, en); got != "" {
+		t.Errorf("systemAgo(zero) = %q, want \"\" (no clock at all)", got)
+	}
+	if got := systemAgo(time.Time{}, ru); got != "" {
+		t.Errorf("RU systemAgo(zero) = %q, want \"\"", got)
+	}
+	if got := systemAgo(now.Add(time.Hour), en); got != "0s ago" {
+		t.Errorf("systemAgo(future) = %q, want %q (clamped to zero, never negative)", got, "0s ago")
+	}
+	if got := systemAgo(now.Add(time.Hour), ru); got != "0s назад" {
+		t.Errorf("RU systemAgo(future) = %q, want %q", got, "0s назад")
+	}
+
+	for _, tc := range []struct {
+		name           string
+		ago            time.Duration
+		wantEN, wantRU string
+	}{
+		{"seconds", 30 * time.Second, "30s ago", "30s назад"},
+		{"just under a minute", 59 * time.Second, "59s ago", "59s назад"},
+		{"minutes", 5 * time.Minute, "5m ago", "5m назад"},
+		{"just under an hour", 59 * time.Minute, "59m ago", "59m назад"},
+		{"hours and minutes", 3*time.Hour + 7*time.Minute, "3h 7m ago", "3h 7m назад"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Nudge past the boundary so time elapsed during the call cannot
+			// tip the duration into the next bucket.
+			at := now.Add(-tc.ago - 100*time.Millisecond)
+			if got := systemAgo(at, en); got != tc.wantEN {
+				t.Errorf("EN systemAgo(-%v) = %q, want %q", tc.ago, got, tc.wantEN)
+			}
+			if got := systemAgo(at, ru); got != tc.wantRU {
+				t.Errorf("RU systemAgo(-%v) = %q, want %q", tc.ago, got, tc.wantRU)
+			}
+		})
 	}
 }
 
