@@ -26,7 +26,7 @@ func TestBuildCardsTriState(t *testing.T) {
 
 	srv := &Server{}
 	slots := WatchSlotsView{Watching: map[string]bool{}} // nobody holds a slot
-	live, unk, off, _, _ := srv.buildCards(
+	live, unk, off, _ := srv.buildCards(
 		[]*models.Streamer{online, unknown, offline},
 		slots, map[string]streamerStats{}, map[string]bool{}, echoTr,
 	)
@@ -73,7 +73,7 @@ func TestBuildCardsSlottedUnknownStaysLiveUnconfirmed(t *testing.T) {
 
 	srv := &Server{}
 	slots := WatchSlotsView{Watching: map[string]bool{"slotted": true}} // holds a slot
-	live, unk, _, _, _ := srv.buildCards(
+	live, unk, _, _ := srv.buildCards(
 		[]*models.Streamer{s}, slots, map[string]streamerStats{}, map[string]bool{}, echoTr,
 	)
 

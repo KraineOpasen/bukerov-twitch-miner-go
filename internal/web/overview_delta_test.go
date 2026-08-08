@@ -9,6 +9,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // ---------------------------------------------------------------------------
@@ -124,30 +125,42 @@ func TestBuildOverviewHealthDetail(t *testing.T) {
 	tr := enTR(t)
 
 	view := buildOverviewHealth(tr, false, health.Snapshot{}, false)
-	if view.State != "unknown" || view.Detail != tr("ov.health.detail.noprovider") {
+	if view.State != overviewHealthUnknown || view.Detail != tr("ov.health.detail.noprovider") {
 		t.Errorf("nil provider = %+v", view)
 	}
 
 	view = buildOverviewHealth(tr, true, health.Snapshot{}, false)
-	if view.State != "unknown" || view.Detail != tr("ov.health.detail.nosignals") {
+	if view.State != overviewHealthUnknown || view.Detail != tr("ov.health.detail.nosignals") {
 		t.Errorf("empty snapshot = %+v", view)
 	}
 
 	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusFailed)}}, false)
 	wantDetail := tr("ov.health.detail.signal") + ": OAuth"
-	if view.State != "unhealthy" || view.Detail != wantDetail {
+	if view.State != overviewHealthDegraded || view.Detail != wantDetail {
 		t.Errorf("failed signal = %+v, want detail %q", view, wantDetail)
 	}
 
-	// connectionLost forces unhealthy + its own detail even over a healthy snapshot.
+	// connectionLost forces a not-OK verdict + its own detail even over a
+	// healthy snapshot.
 	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusOK)}}, true)
-	if view.State != "unhealthy" || view.Detail != tr("ov.health.detail.connlost") {
+	if view.State != overviewHealthDegraded || view.Detail != tr("ov.health.detail.connlost") {
 		t.Errorf("connection lost = %+v", view)
 	}
 
 	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusOK)}}, false)
-	if view.State != "healthy" || view.Detail != "" {
+	if view.State != overviewHealthOK || view.Detail != "" {
 		t.Errorf("healthy = %+v, want empty detail", view)
+	}
+
+	// Every frozen value maps to a real localized label and a built CSS class —
+	// never an empty string that would render a blank chip.
+	for _, state := range []string{overviewHealthOK, overviewHealthDegraded, overviewHealthUnknown} {
+		if key := overviewHealthLabelKeys[state]; key == "" || tr(key) == "" || tr(key) == key {
+			t.Errorf("health value %q has no localized label", state)
+		}
+		if overviewHealthClasses[state] == "" {
+			t.Errorf("health value %q has no CSS class", state)
+		}
 	}
 }
 
@@ -181,87 +194,41 @@ func TestPredictionsState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F2.4 avatar fallback: deterministic initial + color bucket, zero network.
+// Live-count derivation. The Overview no longer renders per-streamer cards, so
+// the only thing it still reads out of buildCards is the CONFIRMED-online
+// count: a streamer merely holding a slot through a transient unknown is not
+// live.
 // ---------------------------------------------------------------------------
 
-func TestAvatarInitial(t *testing.T) {
-	cases := []struct {
-		name string
-		want string
-	}{
-		{"shroud", "S"},
-		{"  bob", "B"},
-		{"", "?"},
-		{"   ", "?"},
-		{"ёжик", "Ё"},
-		{"ñandú", "Ñ"},
-		{"123abc", "1"},
+func TestOverviewLiveCountCountsConfirmedOnlineOnly(t *testing.T) {
+	online := models.NewStreamer("liveone", models.DefaultStreamerSettings())
+	online.SetConfirmedOnline()
+
+	slotted := models.NewStreamer("unsure", models.DefaultStreamerSettings())
+	slotted.SetConfirmedOnline()
+	slotted.SetUnknown(models.ReasonTransportError) // unknown, but still holds a slot
+
+	offline := models.NewStreamer("gone", models.DefaultStreamerSettings())
+	offline.SetConfirmedOffline()
+
+	srv := &Server{}
+	slots := WatchSlotsView{Watching: map[string]bool{"unsure": true}}
+	live, _, _, _ := srv.buildCards(
+		[]*models.Streamer{online, slotted, offline},
+		slots, map[string]streamerStats{}, map[string]bool{}, echoTr,
+	)
+
+	if len(live) != 2 {
+		t.Fatalf("live group = %d entries, want 2 (confirmed-online + slotted-unconfirmed)", len(live))
 	}
-	for _, c := range cases {
-		si := StreamerInfo{Name: c.name}
-		if got := si.AvatarInitial(); got != c.want {
-			t.Errorf("AvatarInitial(%q) = %q, want %q", c.name, got, c.want)
+	confirmed := 0
+	for _, c := range live {
+		if c.IsLive {
+			confirmed++
 		}
 	}
-}
-
-func TestAvatarBucketRangeAndDeterminism(t *testing.T) {
-	names := []string{"shroud", "pokimane", "ёжик", "Ñandú", "", "  ", "a", "zzzzzzzzzzzzzzzzzzzz"}
-	for _, name := range names {
-		si := StreamerInfo{Name: name}
-		b1 := si.AvatarBucket()
-		b2 := si.AvatarBucket()
-		if b1 != b2 {
-			t.Errorf("AvatarBucket(%q) not deterministic: %d vs %d", name, b1, b2)
-		}
-		if b1 < 0 || b1 > 5 {
-			t.Errorf("AvatarBucket(%q) = %d, want 0..5", name, b1)
-		}
-	}
-
-	if got := (StreamerInfo{Name: ""}).AvatarBucket(); got != 0 {
-		t.Errorf("empty name bucket = %d, want 0", got)
-	}
-
-	// Case/whitespace-insensitive: same identity, same bucket.
-	a := StreamerInfo{Name: "Shroud"}.AvatarBucket()
-	b := StreamerInfo{Name: "  shroud  "}.AvatarBucket()
-	if a != b {
-		t.Errorf("bucket should be case/whitespace-insensitive: %d vs %d", a, b)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// PointsTodayRaw plumbing (toCardViews): raw ints only, never parsed back out
-// of a formatted string (I13).
-// ---------------------------------------------------------------------------
-
-func TestToCardViewsPointsTodayRaw(t *testing.T) {
-	infos := []StreamerInfo{{Name: "shroud", Points: 100000}, {Name: "summit", Points: 5000}}
-	stats := map[string]streamerStats{"shroud": {pointsToday: 1234}}
-
-	cards := toCardViews(infos, stats)
-	if len(cards) != 2 {
-		t.Fatalf("len(cards) = %d, want 2", len(cards))
-	}
-	if !cards[0].HasTodayRaw || cards[0].PointsTodayRaw != 1234 {
-		t.Errorf("shroud card = %+v, want HasTodayRaw=true PointsTodayRaw=1234", cards[0])
-	}
-	if cards[1].HasTodayRaw || cards[1].PointsTodayRaw != 0 {
-		t.Errorf("summit card (no stats entry) = %+v, want HasTodayRaw=false PointsTodayRaw=0", cards[1])
-	}
-
-	// nil stats map must not panic and must leave every card HasTodayRaw=false.
-	nilStatsCards := toCardViews(infos, nil)
-	for _, c := range nilStatsCards {
-		if c.HasTodayRaw {
-			t.Errorf("nil stats map: %+v should have HasTodayRaw=false", c)
-		}
-	}
-
-	// Empty input returns nil, so an empty group renders no heading.
-	if got := toCardViews(nil, stats); got != nil {
-		t.Errorf("toCardViews(nil, ...) = %v, want nil", got)
+	if confirmed != 1 {
+		t.Errorf("confirmed-online count = %d, want 1 (the unconfirmed slot holder must not count as live)", confirmed)
 	}
 }
 
@@ -287,26 +254,20 @@ func TestBuildOverviewDataGeneratedUnixAndPollSeconds(t *testing.T) {
 	}
 	// newOverviewTestServer wires no health provider: aggregate health must
 	// read "unknown", never a false-positive "healthy".
-	if data.Health.State != "unknown" {
+	if data.Health.State != overviewHealthUnknown {
 		t.Errorf("Health.State = %q, want unknown (no health provider wired)", data.Health.State)
 	}
-	// The fake overview provider + StatusRunning + 1 live prediction: active.
-	if data.PredictionsState != "active" {
-		t.Errorf("PredictionsState = %q, want active", data.PredictionsState)
+	// The fake overview provider + StatusRunning + 1 live prediction: active,
+	// reachable, and therefore a PROVEN round count.
+	if data.PredictionsKPI.State != "active" {
+		t.Errorf("PredictionsKPI.State = %q, want active", data.PredictionsKPI.State)
 	}
-	// shroud has a recorded points delta -> PointsTodayRaw should be plumbed
-	// through onto its live card.
-	found := false
-	for _, c := range data.LiveCards {
-		if c.Name == "shroud" {
-			found = true
-			if !c.HasTodayRaw {
-				t.Errorf("shroud live card missing HasTodayRaw")
-			}
-		}
+	if !data.PredictionsKPI.Available || data.PredictionsKPI.ActiveCount != 1 {
+		t.Errorf("PredictionsKPI = %+v, want Available=true ActiveCount=1", data.PredictionsKPI)
 	}
-	if !found {
-		t.Fatal("shroud not found in LiveCards")
+	// shroud is confirmed online, so it is counted as live.
+	if data.LiveCount != 1 {
+		t.Errorf("LiveCount = %d, want 1", data.LiveCount)
 	}
 }
 
@@ -330,59 +291,54 @@ func renderDashboardEN(t *testing.T, srv *Server) string {
 	return rec.Body.String()
 }
 
-// TestOverviewToolbarSemantics covers F2.1/F2.2: the toolbar renders a
-// labeled filter input, a clear button, and a sort select with all four
-// values — all OUTSIDE #overview-live.
-func TestOverviewToolbarSemantics(t *testing.T) {
+// TestOverviewFreshnessBadgeSurvivesToolbarRemoval pins what actually has to
+// stay true after the roster controls left the page: the freshness badge is
+// still rendered, still BEFORE #overview-live (so the 30s htmx swap can never
+// destroy the role="status" node mid-announcement), and the filter/sort
+// controls it used to sit beside are gone.
+func TestOverviewFreshnessBadgeSurvivesToolbarRemoval(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	toolbarIdx := strings.Index(body, `data-ov-toolbar`)
+	badgeIdx := strings.Index(body, `id="ov-stale-badge"`)
 	liveIdx := strings.Index(body, `id="overview-live"`)
-	if toolbarIdx < 0 || liveIdx < 0 {
-		t.Fatalf("missing toolbar or #overview-live marker in rendered page")
+	if badgeIdx < 0 {
+		t.Fatal("the freshness badge must survive the toolbar removal")
 	}
-	if toolbarIdx >= liveIdx {
-		t.Errorf("toolbar (offset %d) must render BEFORE #overview-live (offset %d), so it survives the htmx swap", toolbarIdx, liveIdx)
+	if liveIdx < 0 {
+		t.Fatal("missing #overview-live marker in rendered page")
+	}
+	if badgeIdx >= liveIdx {
+		t.Errorf("freshness badge (offset %d) must render BEFORE #overview-live (offset %d), so it survives the htmx swap", badgeIdx, liveIdx)
 	}
 
-	for _, want := range []string{
-		`id="ov-filter-input"`,
-		`id="ov-filter-clear"`,
-		`id="ov-sort-select"`,
-		`<option value="default">`,
-		`<option value="points">`,
-		`<option value="today">`,
-		`<option value="name">`,
-		`id="ov-filter-count"`,
-		`aria-live="polite"`,
-		"Filter streamers", "Filter by name", "Clear filter", "Sort",
+	for _, gone := range []string{
+		`data-ov-toolbar`, `id="ov-filter-input"`, `id="ov-filter-clear"`,
+		`id="ov-sort-select"`, `id="ov-filter-count"`, `<option value="points">`,
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("rendered page missing %q", want)
+		if strings.Contains(body, gone) {
+			t.Errorf("roster control %q is still rendered on /overview", gone)
 		}
 	}
 }
 
-// TestOverviewCardDataAttributes covers F2.2/F2.3: cards carry the raw
-// integer data attributes the sort comparators read (never a formatted
-// string), plus the F2.4 avatar span. data-ov-today pins I13 for the "today"
-// sort specifically: newOverviewTestServer seeds shroud with two same-day
-// RecordPoints calls (95000 then 100000), so points-today resolves to the
-// exact raw delta 5000 — never a formatted "5,000" string.
-func TestOverviewCardDataAttributes(t *testing.T) {
+// TestOverviewRendersNoStreamerCards is the counterpart to the removed card
+// data-attribute test: the raw sort attributes existed only for the roster
+// grid, which /overview/queue now owns. Non-vacuous — the same fixture
+// streamer is proven to still be reachable through the page's data.
+func TestOverviewRendersNoStreamerCards(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	for _, want := range []string{
-		`data-ov-name="shroud"`,
-		`data-ov-points="100000"`,
-		`data-ov-today="5000"`,
-		`class="s-avatar s-avatar-b`,
-		`aria-hidden="true">S</span>`,
+	if srv.buildOverviewData(i18n.LangEN).StreamerCount == 0 {
+		t.Fatal("precondition failed: no streamers in the fixture, so the assertions below are vacuous")
+	}
+	for _, gone := range []string{
+		`data-ov-name="shroud"`, `data-ov-points="100000"`, `data-ov-today="5000"`,
+		`class="s-avatar s-avatar-b`, `class="s-card`,
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("rendered page missing %q", want)
+		if strings.Contains(body, gone) {
+			t.Errorf("streamer-card surface %q is still rendered on /overview", gone)
 		}
 	}
 }
@@ -420,17 +376,33 @@ func TestOverviewMetaMarker(t *testing.T) {
 	}
 }
 
-// TestOverviewHealthChip covers F2.6: the aggregated health chip links to
-// /health and carries an icon + localized text (never color alone).
+// TestOverviewHealthChip covers the compact aggregate: it links to the
+// canonical System owner (never the legacy /health route) and carries an icon
+// plus localized text, never colour alone. This is the single owner of the
+// Overview's health-link invariants.
 func TestOverviewHealthChip(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	if !strings.Contains(body, `href="/health"`) {
-		t.Error("health chip must link to /health")
+	if !strings.Contains(body, `href="/system/status"`) {
+		t.Error("health chip must link to /system/status")
+	}
+	if strings.Contains(body, `href="/health"`) {
+		t.Error("health chip must not link to the legacy /health route")
+	}
+	// ...and that ban is about the LINK, not the route: /health itself is still
+	// served (its retirement is a separate, later step), so the check above can
+	// never be satisfied by the endpoint having quietly disappeared.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /health = %d, want 200 — only the Overview link moved, the route stays served", rec.Code)
+	}
+	if !strings.Contains(body, `data-ov-health-state="unknown"`) {
+		t.Error("health chip should render the aggregate 'unknown' (no health provider wired)")
 	}
 	if !strings.Contains(body, `class="ov-health ov-health-unknown"`) {
-		t.Errorf("health chip should render state 'unknown' (no health provider wired)")
+		t.Error("health chip missing its built CSS class for the unknown state")
 	}
 	if !strings.Contains(body, "<svg") {
 		t.Error("health chip should render an icon, not text alone")
@@ -492,38 +464,36 @@ func TestUpdaterSlotInert(t *testing.T) {
 }
 
 // TestOverviewScriptContracts is a static scan of the rendered page's script
-// content for the documented client-side contracts: the exact localStorage
-// key names (I24), the __ovDelta single-instance guard, the performance.now
-// test seam, and no newly-introduced external resource URLs (I26).
+// content, limited to the client-side names that are genuinely CONTRACTS with
+// something outside the script: the __ovDelta / __OV_CLOCK globals other code
+// and tests attach to, the performance.now test seam, the htmx swap hook, the
+// js.-prefixed i18n keys window.I18N must actually contain, and
+// resetStaleBaseline — the entry point overview_live.html's own #ov-meta
+// comment documents as the data-generated clamp. Plus no newly-introduced
+// external resource URLs (I26).
+//
+// Internal implementation details of the stale clock are deliberately NOT
+// pinned here. They have no rendered proxy and no cross-file contract, so a
+// byte-exact source assertion on them would only forbid refactoring.
 func TestOverviewScriptContracts(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
 	for _, want := range []string{
-		"'miner-ov-filter'",
-		"'miner-ov-sort'",
 		"window.__ovDelta",
 		"window.__OV_CLOCK",
 		"performance.now()",
 		"htmx:afterSwap",
-		"js.ov.shown_count",
-		"js.ov.sort_applied",
 		// Regression guard for the F2.5 bug: the stale-clock key-building
 		// literal must be the js.-prefixed "js.ov.fresh_" (+ state), never
 		// the bare server-only "ov.fresh." that doesn't resolve client-side.
 		"t('js.ov.fresh_' + state)",
 		"t('js.ov.fresh_aria')",
-		// Regression guard for the Q3 W1/W2 findings: per-second role="status"
-		// re-announcement spam from tickStale() rewriting the DOM every tick
-		// even when the state hadn't changed (W1), and the aria-live filter
-		// count being rewritten (and thus re-announced) on every 30s swap
-		// even when unchanged (W2). These literals pin the change-gating that
-		// fixed both, plus the data-generated clamp entry point (W3) that
-		// must stay wired in.
-		"lastStaleState",
-		"if (state === lastStaleState) return;",
+		// The data-generated clamp entry point (W3): overview_live.html's
+		// #ov-meta comment names resetStaleBaseline() as the function its
+		// data-generated attribute exists to feed, so the two files have a
+		// real contract on this name.
 		"resetStaleBaseline",
-		"countEl.textContent !== newCount",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("rendered page/script missing %q", want)
@@ -541,31 +511,26 @@ func TestOverviewScriptContracts(t *testing.T) {
 	}
 }
 
-// TestOverviewNoResultsElementPresent covers F2.1: the global empty-filter
-// state element exists in the grid, hidden by default.
-func TestOverviewNoResultsElementPresent(t *testing.T) {
+// TestOverviewRendersNoRosterGrid replaces the two grid-scoping tests (the
+// no-results element and the per-group wrappers): both existed only to support
+// the client-side filter over the card grid, and /overview/queue owns that
+// roster now. Non-vacuous — the fixture's groups are proven non-empty.
+func TestOverviewRendersNoRosterGrid(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	if !strings.Contains(body, `data-ov-noresults hidden`) {
-		t.Error("rendered page missing the hidden global no-results element")
+	live, _, offline, _ := srv.buildCards(srv.snapshotStreamers(), WatchSlotsView{Watching: map[string]bool{}}, nil, map[string]bool{}, echoTr)
+	if len(live) == 0 || len(offline) == 0 {
+		t.Fatalf("precondition failed: fixture has %d live / %d offline streamers, so the grid assertions are vacuous", len(live), len(offline))
 	}
-	if !strings.Contains(body, "No streamers match the filter.") {
-		t.Error("rendered page missing the localized no-results copy")
-	}
-}
 
-// TestOverviewGroupSections covers F2.1/F2.2: each card group is wrapped in
-// a data-ov-group section so the filter/sort JS can hide/scope per group.
-func TestOverviewGroupSections(t *testing.T) {
-	srv, _, _ := newOverviewTestServer(t)
-	body := renderDashboardEN(t, srv)
-
-	if !strings.Contains(body, `data-ov-group="live"`) {
-		t.Error("rendered page missing the live group's data-ov-group wrapper")
-	}
-	if !strings.Contains(body, `data-ov-group="offline"`) {
-		t.Error("rendered page missing the offline group's data-ov-group wrapper")
+	for _, gone := range []string{
+		`data-ov-noresults`, `data-ov-group="live"`, `data-ov-group="offline"`,
+		`id="grid"`, `class="card-grid`,
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("roster-grid surface %q is still rendered on /overview", gone)
+		}
 	}
 }
 
@@ -612,7 +577,6 @@ func TestOverviewScriptOnlyUsesJSPrefixedKeys(t *testing.T) {
 	}
 	wantClientKeys := []string{
 		"js.ov.fresh_fresh", "js.ov.fresh_delayed", "js.ov.fresh_stale", "js.ov.fresh_lost", "js.ov.fresh_aria",
-		"js.ov.shown_count", "js.ov.sort_applied",
 	}
 	for _, lang := range i18n.SupportedLangs() {
 		msgs := loc.JSMessages(lang)

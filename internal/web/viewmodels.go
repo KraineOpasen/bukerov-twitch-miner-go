@@ -77,11 +77,6 @@ type StreamerInfo struct {
 	StreakCapMinutes int  `json:"streak_cap_minutes,omitempty"`
 	StreakPercent    int  `json:"streak_percent,omitempty"`
 
-	// LastEventText/LastEventAgo summarise the most recent notable event for
-	// this streamer from the in-memory ring buffer.
-	LastEventText string `json:"last_event_text,omitempty"`
-	LastEventAgo  string `json:"last_event_ago,omitempty"`
-
 	// Goal* fields carry the streamer's furthest-along active community goal.
 	HasGoal     bool   `json:"has_goal,omitempty"`
 	GoalTitle   string `json:"goal_title,omitempty"`
@@ -90,16 +85,6 @@ type StreamerInfo struct {
 	// HasActivePrediction flags that a live prediction for this streamer is on
 	// the board (so the card can show a subtle marker).
 	HasActivePrediction bool `json:"has_active_prediction,omitempty"`
-}
-
-// TickerItem is one entry in the Overview events ticker (community goals and
-// other notable, in-progress streamer events).
-type TickerItem struct {
-	Streamer string
-	Kind     string // e.g. "goal", "moment", "drop"
-	Label    string
-	Percent  int
-	HasPct   bool
 }
 
 // PredictionOutcomeView is one outcome row on the live-predictions board.
@@ -217,7 +202,6 @@ type OverviewData struct {
 	LiveCount     int
 	PointsToday   string
 
-	Ticker      []TickerItem
 	Predictions []PredictionView
 	NowWatching NowWatchingView
 

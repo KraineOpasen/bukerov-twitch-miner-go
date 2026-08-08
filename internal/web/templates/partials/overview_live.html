@@ -11,17 +11,28 @@
      without waiting out the fresh/delayed/stale age thresholds. */}}
 <span id="ov-meta" hidden data-generated="{{.GeneratedUnix}}" data-connection-lost="{{if .ConnectionLost}}1{{else}}0{{end}}"></span>
 
-{{/* S5-3 C12 slot pair (task Phase 4, corrected Q3 MAJOR-1): the only slot
-     rendering in the product, exactly two boxes always. Moved INSIDE
-     #overview-live (was a static sibling outside it) so it refreshes on the
-     exact same existing 30s cadence as the rest of this partial, instead of
-     staying frozen at whatever it looked like on the last full page load -
-     no new poll, no new endpoint, just sharing the boundary that already
-     exists. The C0 chip next to it surfaces the watch broker's own
-     EvaluatedAt evidence (never the page's render time), so a broker tick
-     that itself stalled is visible even though the surrounding partial keeps
-     swapping on schedule. */}}
-<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="mb-3">
+{{/* There is deliberately no status/summary strip here. Stating the miner's
+     operational state belongs to the lifecycle panel, which renders just above
+     this partial on its own 2s poll; echoing it again on the 30s swap only
+     gave the page two clocks for one fact. Total points, +today and a
+     live/total streamer count are not part of the canonical composition at
+     all — /statistics and /overview/queue own those figures — and in
+     particular a roster count is NOT the queue preview: it carries no order
+     and no positions, so rendering it here would dress a count up as evidence
+     the product does not have. */}}
+
+{{/* -------------------------------------------------------------- WATCH PAIR
+     The S5-3 C12 slot pair: the only slot rendering in the product, exactly
+     two boxes always. It lives INSIDE #overview-live so it refreshes on the
+     same existing 30s cadence as the rest of this partial — no new poll, no
+     new endpoint. The C0 chip beside it surfaces the watch broker's own
+     EvaluatedAt evidence (never the page's render time), so a broker tick that
+     itself stalled stays visible even while the partial keeps swapping.
+
+     Together with the lifecycle panel above, this is the page's dominant
+     region: it answers "is the miner watching right now?", which is what
+     /overview exists to answer. */}}
+<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="mb-6" data-ov-slots>
     <div class="flex items-center justify-between mb-1">
         <span class="text-xs uppercase tracking-wide text-text-secondary">{{ t "sidebar.now_watching" }}</span>
         {{template "c0.provenance_chip" .SlotPairProvenance}}
@@ -29,153 +40,123 @@
     {{template "c12.pair" .SlotPair}}
 </div>
 
-<header class="flex flex-wrap items-center justify-between gap-3 mb-4">
-    <div class="flex items-center gap-4 flex-wrap">
-        <span class="inline-flex items-center gap-2 text-sm">
-            <span class="w-2.5 h-2.5 rounded-full {{if .Connected}}{{else if .ConnectionLost}}bg-event{{else}}bg-danger{{end}}" style="{{if .Connected}}background:var(--color-success);box-shadow:0 0 6px color-mix(in srgb, var(--color-success) 80%, transparent){{end}}"></span>
-            <span class="text-neutral-300">{{.BotStatusLabel}}</span>
-        </span>
-        <span class="inline-flex items-center gap-1.5 text-sm {{if eq .NetState "ok"}}text-success{{else if eq .NetState "degraded"}}text-event{{else}}text-danger{{end}}">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5a7 7 0 0 1 14 0"/><path d="M8.5 15.5a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
-            {{if eq .NetState "ok"}}{{ t "ov.connected" }}{{else if eq .NetState "degraded"}}{{ t "ov.degraded" }}{{else}}<span class="stale-pill">{{ t "ov.stale_data" }}</span>{{end}}
-        </span>
-        {{/* F2.6: aggregated health chip — icon + localized text (never color
-             alone), links to the full Health Center page. aria-label carries
-             both the label AND the detail (a title tooltip alone is
-             mouse-only and unreachable via keyboard/screen reader); the
-             title attribute is rendered only when there IS a detail, never
-             as an empty title="". */}}
-        <a href="/health" class="ov-health ov-health-{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
+{{/* ------------------------------------------------------------------ HEALTH
+     ONE compact aggregate value — OK / DEGRADED / UNKNOWN — and a link to its
+     owner. Per-subsystem rows and their freshness belong to /system/status;
+     duplicating them here is what turned this page into a second status
+     console. The verdict comes from aggregateHealth unchanged, so an unknown
+     or never-recorded subsystem can never read as healthy. Icon + text, never
+     colour alone (I18); the aria-label carries the deciding evidence, because
+     a title tooltip alone is mouse-only. */}}
+<section class="health-card mb-4" data-ov-health-summary aria-labelledby="ov-health-heading">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+        <span class="health-card-label" id="ov-health-heading">{{ t "system.status.heading" }}</span>
+        <a href="/system/status" class="ov-health {{.Health.Class}}" data-ov-health-state="{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
             <svg class="ov-health-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
             <span>{{.Health.Label}}</span>
         </a>
     </div>
-    <div class="flex items-center gap-4 flex-wrap">
-        <div class="text-right">
-            <div class="num text-lg font-bold text-neutral-100" title="{{ t "ov.total_points_title" }}">{{.TotalPoints}}</div>
-            <div class="text-xs text-neutral-400">{{ t "ov.total_points" }}</div>
-        </div>
-        <div class="text-right">
-            <div class="num text-lg font-bold text-success">+{{.PointsToday}}</div>
-            <div class="text-xs text-neutral-400">{{ t "ov.today" }}</div>
-        </div>
-        <div class="text-right">
-            <div class="num text-lg font-bold text-neutral-100">{{.LiveCount}}/{{.StreamerCount}}</div>
-            <div class="text-xs text-neutral-400">{{ t "ov.live" }}</div>
-        </div>
-        <button type="button" class="qa-btn" title="{{ t "ov.refresh_now" }}"
-                hx-get="/api/overview" hx-target="#overview-live" hx-swap="innerHTML">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        </button>
-    </div>
-</header>
-
-{{if .Ticker}}{{template "events_ticker" .}}{{end}}
-
-<section id="predictions" class="mb-6">
-    <div class="flex items-center gap-2 mb-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-400"><span class="sec-accent sec-accent-pred" aria-hidden="true"></span>{{ t "pred.heading" }}</h2>
-        {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}
-        {{/* F2.7: predictions board's technical status (never the betting
-             outcome) — icon + visible localized text (readable in the
-             accessibility tree via normal document order; no role=status
-             here — this chip lives inside #overview-live, so it's a brand
-             new DOM node on every 30s innerHTML swap and would never
-             actually fire a live-region announcement, only false-promise
-             one). No "degraded" state exists (documented omission); this
-             never touches manualUI/__predBusy. */}}
-        <span class="ov-pred-chip ov-pred-chip-{{.PredictionsState}}">
-            <svg class="ov-pred-chip-ico" aria-hidden="true" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-            <span>{{.PredictionsStateLabel}}</span>
-        </span>
-    </div>
-    {{if .Predictions}}
-    <div class="pred-board">
-        {{range .Predictions}}{{template "prediction_card" .}}{{end}}
-    </div>
-    {{else}}
-    <div class="board-empty">{{ t "pred.empty" }}</div>
-    {{end}}
 </section>
 
-<section id="grid">
-    {{/* F2.1/W13(b): each group heading's count is wrapped in
-         data-ov-group-count, carrying the server-rendered total in
-         data-ov-total. applyFilter() swaps its textContent to the group's
-         currently-VISIBLE count while a filter is active, and restores
-         data-ov-total when the filter is cleared — so the count always
-         reflects what's actually shown. */}}
-    {{if .LiveCards}}
-    <section class="ov-group" data-ov-group="live">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2"><span class="sec-accent sec-accent-grid" aria-hidden="true"></span>{{ t "grid.live" }} · <span data-ov-group-count data-ov-total="{{len .LiveCards}}">{{len .LiveCards}}</span></h3>
-        <div class="card-grid mb-6">
-            {{range .LiveCards}}{{template "overview_card" .}}{{end}}
-        </div>
-    </section>
-    {{end}}
+{{/* ---------------------------------------------------------- PREDICTIONS KPI
+     The compact, primary predictions summary. Counts render only when the
+     board is actually reachable: an unreachable board knows nothing, so it
+     shows a dash rather than a "0" that would read as positive evidence of no
+     rounds. Today and win rate carry no figure at all — this request holds no
+     bet-history evidence, and Analytics owns ROI. */}}
+<section class="health-card mb-4" data-ov-pred-kpi aria-labelledby="ov-pred-kpi-heading">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+        <span class="health-card-label" id="ov-pred-kpi-heading">{{ t "nav.predictions" }}</span>
+        {{/* F2.7 board-state chip, unchanged semantics: the TECHNICAL status of
+             the board, never a betting outcome. No role=status — this is a
+             brand new DOM node on every 30s swap, so a live region here would
+             only false-promise an announcement. */}}
+        <span class="ov-pred-chip ov-pred-chip-{{.PredictionsKPI.State}}">
+            <svg class="ov-pred-chip-ico" aria-hidden="true" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            <span>{{.PredictionsKPI.StateLabel}}</span>
+        </span>
+    </div>
+    <div class="health-card-row flex items-center gap-4 flex-wrap">
+        <span class="type-small text-text-secondary">
+            {{ t "ov.pred.active" }}
+            {{if .PredictionsKPI.Available}}
+            <span class="num text-neutral-100" data-ov-pred-active="{{.PredictionsKPI.ActiveCount}}">{{.PredictionsKPI.ActiveCount}}</span>
+            {{else}}
+            <span class="num" data-ov-pred-active="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+            {{end}}
+        </span>
+        <span class="type-small text-text-secondary">
+            {{ t "ov.today" }}
+            <span class="num" data-ov-pred-today="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+        </span>
+        <span class="type-small text-text-secondary">
+            {{ t "ov.pred.win_rate" }}
+            <span class="num" data-ov-pred-winrate="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+        </span>
+        <a href="/statistics" class="type-small hover:underline">{{ t "ov.pred.roi_link" }} →</a>
+    </div>
+</section>
 
-    {{if .UnknownCards}}
-    <section class="ov-group" data-ov-group="unknown">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.unknown" }} · <span data-ov-group-count data-ov-total="{{len .UnknownCards}}">{{len .UnknownCards}}</span></h3>
-        <div class="card-grid mb-6">
-            {{range .UnknownCards}}{{template "overview_card" .}}{{end}}
-        </div>
-    </section>
-    {{end}}
-
-    {{if .OfflineCards}}
-    <section class="ov-group" data-ov-group="offline">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.offline" }} · <span data-ov-group-count data-ov-total="{{len .OfflineCards}}">{{len .OfflineCards}}</span></h3>
-        <div class="card-grid mb-6">
-            {{range .OfflineCards}}{{template "overview_card" .}}{{end}}
-        </div>
-    </section>
-    {{end}}
-
-    {{if .UntrackedCards}}
-    <section class="ov-group" data-ov-group="untracked">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">{{ t "grid.untracked" }} · <span data-ov-group-count data-ov-total="{{len .UntrackedCards}}">{{len .UntrackedCards}}</span></h3>
-        <div class="card-grid mb-6">
-            {{range .UntrackedCards}}{{template "overview_card" .}}{{end}}
-        </div>
-    </section>
-    {{end}}
-
-    {{if not (or .LiveCards .UnknownCards .OfflineCards .UntrackedCards)}}
-    <p class="text-neutral-400">{{ t "grid.empty" }}</p>
-    {{end}}
-
-    {{/* F2.1: global "no results" state for the client-side name filter.
-         Hidden by default; shown by JS only when the filter matched zero
-         cards out of a non-empty grid (an empty grid already renders the
-         message above instead). */}}
-    <p data-ov-noresults hidden class="board-empty">{{ t "ov.noresults" }}</p>
+{{/* ------------------------------------------------------------------ CLAIMS
+     Evidence-gated: rendered only when a drop claim actually exists in the
+     in-memory event ring, with the age taken from that event's own timestamp.
+     No claim, no region — never an empty claims box. */}}
+{{if .Claim.Present}}
+<section class="health-card mb-4" data-ov-claims aria-labelledby="ov-claims-heading">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+        <span class="health-card-label" id="ov-claims-heading">{{ t "ov.claims.heading" }}</span>
+        <a href="/drops/claims" class="type-small hover:underline">{{ t "ov.claims.history_link" }} →</a>
+    </div>
+    <div class="health-card-row flex items-center gap-2 flex-wrap">
+        <span class="type-small text-neutral-100">{{.Claim.Label}}{{if .Claim.Detail}} · {{.Claim.Detail}}{{end}}</span>
+        <span class="type-small text-text-secondary">{{.Claim.Ago}}</span>
+    </div>
 </section>
 {{end}}
 
+{{/* ----------------------------------------------------------------- VERSION
+     Evidence-gated on the build-injected version value. The update line is
+     gated INDEPENDENTLY on a real updater signal: with nothing observed no
+     update text renders at all, and "up to date" is never written from the
+     absence of a signal. */}}
+{{if .Version}}
+<p class="type-small text-text-secondary mb-4" data-ov-version>
+    <span class="num text-neutral-100">v{{.Version}}</span>
+    {{if .Update.State}}
+    · <span data-ov-update-state="{{.Update.State}}">{{if eq .Update.State "available"}}{{ t "lc.update_available" }}{{else if eq .Update.State "failed"}}{{ t "lc.update_failed" }}{{else if eq .Update.State "applied"}}{{ t "lc.update_applied" }}{{end}}{{if .Update.Version}} <span class="num">{{.Update.Version}}</span>{{end}}</span>
+    {{end}}
+    · <a href="/system/diagnostics" class="hover:underline">{{ t "system.diagnostics.heading" }} →</a>
+</p>
+{{end}}
 
-{{define "events_ticker"}}
-<div class="ticker mb-4" aria-label="{{ t "ticker.aria" }}">
-    <div class="ticker-track">
-        {{range .Ticker}}
-        <span class="ticker-item">
-            <a href="/streamer/{{.Streamer}}" class="s-name hover:underline">{{.Streamer}}</a>
-            <span class="text-neutral-300">{{.Label}}</span>
-            {{if .HasPct}}<span class="num badge badge-event">{{.Percent}}%</span>{{end}}
-        </span>
-        <span class="ticker-sep">•</span>
+{{/* -------------------------------------------------- SECONDARY / COLLAPSED
+     The full live-predictions / manual-bet board, retained in FULL (no feature
+     removal, no new route, the sole strategy editor stays on
+     /settings/predictions) but demoted to a disclosure that is COLLAPSED by
+     default, so it never competes visually with lifecycle, slots or health.
+
+     It stays inside #overview-live, so the board still re-renders on the same
+     30s swap and the manual-bet scripts in overview.html keep working against
+     it unchanged: rehydrateManual() re-applies transient state after every
+     swap whether the <details> is open or closed, and __predBusy still
+     suspends the poll while a confirm bar is open or a bet is in flight.
+     #predictions stays on the board section itself so a bookmarked
+     /#predictions deep link still lands on it. */}}
+<details class="details-panel" data-ov-pred-board>
+    <summary class="text-sm">
+        {{ t "pred.heading" }}
+        {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}
+    </summary>
+    <section id="predictions" class="details-content">
+        {{if .Predictions}}
+        <div class="pred-board">
+            {{range .Predictions}}{{template "prediction_card" .}}{{end}}
+        </div>
+        {{else}}
+        <div class="board-empty">{{ t "pred.empty" }}</div>
         {{end}}
-        {{/* duplicate for a seamless loop */}}
-        {{range .Ticker}}
-        <span class="ticker-item" aria-hidden="true">
-            <span class="s-name">{{.Streamer}}</span>
-            <span class="text-neutral-300">{{.Label}}</span>
-            {{if .HasPct}}<span class="num badge badge-event">{{.Percent}}%</span>{{end}}
-        </span>
-        <span class="ticker-sep">•</span>
-        {{end}}
-    </div>
-</div>
+    </section>
+</details>
 {{end}}
 
 
@@ -269,111 +250,5 @@
         {{if .SkipUndoable}}<button type="button" class="pred-link" data-unskip data-event-id="{{.EventID}}">{{ t "common.undo" }}</button>{{end}}
     </div>
     {{end}}
-</article>
-{{end}}
-
-
-{{define "overview_card"}}
-<article class="s-card state-{{.State}}{{if .Unconfirmed}} unconfirmed{{end}}" tabindex="0" role="button"
-         data-card-streamer="{{.Name}}"
-         data-ov-name="{{.Name}}" data-ov-points="{{.Points}}" data-ov-today="{{if .HasTodayRaw}}{{.PointsTodayRaw}}{{else}}0{{end}}"
-         aria-label="{{.Name}}. {{ t "card.open_events" }}">
-    <div class="flex items-start justify-between gap-2 mb-1.5">
-        <div class="min-w-0 flex items-center gap-2">
-            {{/* F2.4: deterministic initial-letter avatar — decorative only,
-                 the adjacent visible name is what carries the identity, so
-                 this stays aria-hidden. No network call, no image. */}}
-            <span class="s-avatar s-avatar-b{{.AvatarBucket}}" aria-hidden="true">{{.AvatarInitial}}</span>
-            <span class="s-name text-base truncate">{{.Name}}</span>
-            {{if .HasActivePrediction}}<span class="text-event" title="{{ t "card.live_prediction_title" }}">◆</span>{{end}}
-        </div>
-        <div class="flex items-center gap-1 flex-shrink-0">
-            {{if eq .Preference "prefer"}}<span class="badge badge-prefer" title="{{ t "card.prefer_title" }}">{{ t "card.prefer" }}</span>
-            {{else if eq .Preference "avoid"}}<span class="badge badge-avoid" title="{{ t "card.avoid_title" }}">{{ t "card.avoid" }}</span>{{end}}
-        </div>
-    </div>
-
-    <div class="flex items-center gap-2 mb-2">
-        {{if eq .State "watching"}}
-        <span class="watch-dot on"></span><span class="badge badge-watching">{{ t "card.watching" }}</span>
-        {{if .Unconfirmed}}<span class="badge badge-unknown" title="{{ t "card.status_unavailable" }}">{{ t "card.unconfirmed" }}</span>{{end}}
-        {{else if eq .State "queued"}}
-        <span class="watch-dot queue"></span><span class="badge badge-queued">{{ t "card.queued" }}</span>
-        {{else if eq .State "disabled"}}
-        <span class="badge badge-disabled" title="{{.WatchReason}}">{{ t "card.disabled" }}</span>
-        {{else if eq .State "unknown"}}
-        <span class="watch-dot unknown"></span><span class="badge badge-unknown" title="{{ t "card.status_unavailable" }}">{{ t "card.status_unknown" }}</span>
-        {{else}}
-        <span class="badge badge-offline">{{ t "card.offline" }}</span>
-        {{end}}
-    </div>
-
-    <div class="num text-2xl font-bold s-points">{{.PointsFormatted}}</div>
-    <div class="text-xs text-neutral-400 flex items-center gap-2 flex-wrap">
-        <span>{{ t "card.channel_points" }}</span>
-        {{if .PointsPerHour}}<span class="badge-gain num">+{{.PointsPerHour}}/h</span>{{end}}
-        {{if .PointsToday}}<span class="text-neutral-400">· <span class="num">+{{.PointsToday}}</span> {{ t "ov.today" }}</span>{{end}}
-    </div>
-
-    {{if or .IsLive .Watching}}
-    {{if .Title}}
-    <div class="s-title" title="{{.Title}}">{{.Title}}</div>
-    {{end}}
-    {{if or .GameName .ViewersCount}}
-    <div class="text-xs text-neutral-400 mt-2 truncate">
-        {{if .GameName}}<span class="s-game">{{.GameName}}</span>{{end}}{{if and .GameName .ViewersCount}} · {{end}}{{if .ViewersCount}}<span class="num">{{.ViewersCountFormatted}}</span> {{ t "card.viewers" }}{{end}}
-    </div>
-    {{end}}
-    {{if .Tags}}
-    <div class="s-tags" aria-label="{{ t "card.tags" }}">
-        {{range .Tags}}<span class="s-tag">{{.}}</span>{{end}}
-    </div>
-    {{end}}
-
-    {{if .StreakPending}}
-    <div class="mt-2" title="{{ t "card.streak_title" }} ({{.StreakMinutes}}/{{.StreakCapMinutes}} {{ t "card.min" }})">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span>{{ t "card.streak" }}</span><span class="num">{{.StreakMinutes}}/{{.StreakCapMinutes}} {{ t "card.min" }}</span></div>
-        <div class="bar bar-streak"><span style="width: {{.StreakPercent}}%"></span></div>
-    </div>
-    {{end}}
-
-    {{if .HasCampaign}}
-    <div class="mt-2" title="{{ t "card.drop" }}: {{.CampaignName}}{{if .CampaignDropName}} — {{.CampaignDropName}}{{end}}">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1">
-            <span class="truncate">{{ t "card.drop" }}{{if .CampaignMinutesInfo}} · <span class="num">{{.CampaignMinutesInfo}}</span>{{end}}</span>
-            <span class="num flex-shrink-0">{{.CampaignPercent}}%</span>
-        </div>
-        <div class="bar bar-drop"><span style="width: {{.CampaignPercent}}%"></span></div>
-    </div>
-    {{end}}
-    {{else}}
-    <div class="text-xs text-neutral-400 mt-2">
-        {{if .Unconfirmed}}<span class="status-unavailable">{{ t "card.status_unavailable" }}</span>
-        {{else if .OfflineDuration}}{{ t "card.offline_for" }} {{.OfflineDuration}}{{end}}
-    </div>
-    {{end}}
-
-    {{if .HasGoal}}
-    <div class="mt-2" title="{{ t "card.goal_title" }}: {{.GoalTitle}}">
-        <div class="flex justify-between text-xs text-neutral-400 mb-1"><span class="truncate">{{ t "card.goal" }} · {{.GoalTitle}}</span><span class="num">{{.GoalPercent}}%</span></div>
-        <div class="bar bar-goal"><span style="width: {{.GoalPercent}}%"></span></div>
-    </div>
-    {{end}}
-
-    <div class="flex items-center justify-between gap-2 mt-3 pt-2 border-t border-neutral-700">
-        <div class="text-xs text-neutral-400 truncate min-w-0">
-            {{if .LastEventText}}<span title="{{.LastEventText}}">{{.LastEventText}}</span> · <span class="whitespace-nowrap">{{.LastEventAgo}}</span>{{else}}{{ t "card.no_events" }}{{end}}
-        </div>
-        <div class="flex items-center gap-1 flex-shrink-0">
-            <button type="button" class="qa-btn {{if eq .Preference "prefer"}}is-on{{else if eq .Preference "avoid"}}is-danger{{end}}"
-                    data-action="cycle-preference" data-streamer="{{.Name}}"
-                    title="{{ t "card.rotation_priority" }}: {{if eq .Preference "prefer"}}{{ t "card.pref_preferred" }}{{else if eq .Preference "avoid"}}{{ t "card.pref_avoided" }}{{else}}{{ t "card.pref_neutral" }}{{end}} ({{ t "card.click_to_cycle" }})">★</button>
-            <button type="button" class="qa-btn {{if .DisableWatch}}is-danger{{end}}"
-                    data-action="toggle-watch" data-streamer="{{.Name}}"
-                    title="{{if .DisableWatch}}{{ t "card.watch_disabled_hint" }}{{else}}{{ t "card.watch_enabled_hint" }}{{end}}">
-                {{if .DisableWatch}}⊘{{else}}▶{{end}}
-            </button>
-        </div>
-    </div>
 </article>
 {{end}}

@@ -452,7 +452,7 @@ var rosterStatusIcons = map[string]string{
 // waiting simply has HasReasonCode=false (rendered as "-", never a
 // fabricated code).
 func (s *Server) buildQueueRoster(streamers []*models.Streamer, slots WatchSlotsView, stats map[string]streamerStats, evidence watchSlotEvidence, tr func(string) string) []queueRosterRow {
-	live, unknown, offline, untracked, _ := s.buildCards(streamers, slots, stats, map[string]bool{}, tr)
+	live, unknown, offline, untracked := s.buildCards(streamers, slots, stats, map[string]bool{}, tr)
 
 	all := make([]StreamerInfo, 0, len(live)+len(unknown)+len(offline)+len(untracked))
 	all = append(all, live...)

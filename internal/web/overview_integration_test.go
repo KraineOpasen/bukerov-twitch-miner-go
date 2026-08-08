@@ -105,10 +105,22 @@ func TestHandleAPIOverview(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"shroud", "summit", "Активные предикшены", "Will they win?", "▶ Смотрим", "● Оффлайн", "VALORANT"} {
+	// The live partial renders the canonical regions — the watch pair (shroud
+	// holds a slot), the health aggregate, the predictions KPI and the
+	// collapsed manual board — never a per-streamer roster.
+	for _, want := range []string{
+		"data-ov-slots", "data-ov-health-summary",
+		"data-ov-pred-kpi", "data-ov-pred-board",
+		"shroud", "Активные предикшены", "Will they win?",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("overview body missing %q", want)
 		}
+	}
+	// summit is offline and holds no slot: the Overview has no surface for it
+	// any more, and /overview/queue owns the full roster.
+	if strings.Contains(body, "summit") {
+		t.Error("overview body still renders a non-slotted streamer (the roster moved to /overview/queue)")
 	}
 }
 

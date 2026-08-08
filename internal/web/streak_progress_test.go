@@ -37,23 +37,11 @@ func TestStreakProgressPercent(t *testing.T) {
 	}
 }
 
-// §8.18: the rendered overview + now-watching partials show the streak
-// denominator as /20 and never the obsolete /7.
+// §8.18: the rendered now-watching partial — the one surface that still shows
+// streak progress, now that /overview carries no per-streamer cards — uses /20
+// as the denominator and never the obsolete /7.
 func TestStreakRenderedDenominatorIsCap(t *testing.T) {
 	partials := testPartials(t)
-
-	var overview bytes.Buffer
-	if err := partials.ExecuteTemplate(&overview, "overview_live", sampleOverview()); err != nil {
-		t.Fatalf("render overview_live: %v", err)
-	}
-	out := overview.String()
-	// sampleOverview's live card has StreakMinutes:5, StreakCapMinutes:20.
-	if !strings.Contains(out, "5/20") {
-		t.Errorf("overview_live must render the streak as 5/20, got:\n%s", out)
-	}
-	if strings.Contains(out, "5/7") {
-		t.Errorf("overview_live must not render the obsolete 5/7 streak denominator:\n%s", out)
-	}
 
 	nw := NowWatchingView{
 		Slots: []WatchSlotView{

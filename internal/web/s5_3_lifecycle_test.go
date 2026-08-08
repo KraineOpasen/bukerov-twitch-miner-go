@@ -234,8 +234,8 @@ func TestS5_3LifecycleStaleGatingDiagnosticsLinkUsesExistingRoute(t *testing.T) 
 	if !strings.Contains(body, `id="lc-conn-lost-diag"`) {
 		t.Fatal("overview.html missing the #lc-conn-lost-diag diagnostics link")
 	}
-	if !strings.Contains(body, `href="/health"`) {
-		t.Error("#lc-conn-lost-diag must link to the existing /health route")
+	if !strings.Contains(body, `href="/system/diagnostics"`) {
+		t.Error("#lc-conn-lost-diag must link to the canonical /system/diagnostics route")
 	}
 	if strings.Contains(body, `href="/help/troubleshooting"`) {
 		t.Error("must not link to the deferred /help/troubleshooting route")
@@ -244,9 +244,9 @@ func TestS5_3LifecycleStaleGatingDiagnosticsLinkUsesExistingRoute(t *testing.T) 
 	// The target route must actually be live (200), not a fabricated path.
 	srv := newRenderServer(t)
 	rec := httptest.NewRecorder()
-	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil))
 	if rec.Code != http.StatusOK {
-		t.Errorf("GET /health = %d, want 200 (the diagnostics link must point at a live route)", rec.Code)
+		t.Errorf("GET /system/diagnostics = %d, want 200 (the diagnostics link must point at a live route)", rec.Code)
 	}
 }
 
