@@ -60,6 +60,12 @@ var (
 	// hx-disabled-elt alone and never prove the real conditional attribute
 	// rendered.
 	lcStandaloneDisabledRe = regexp.MustCompile(`(^|\s)disabled(\s|>)`)
+
+	// lcConnLostDiagRe matches the rendered opening tag of the stale-state
+	// diagnostics anchor by its id, so its href is read off THAT element rather
+	// than off the page at large (the Overview version line carries its own
+	// /system/diagnostics link and would otherwise satisfy the route check).
+	lcConnLostDiagRe = regexp.MustCompile(`<a[^>]*id="lc-conn-lost-diag"[^>]*>`)
 )
 
 // TestS5_3LifecycleTransitionReasonVisibleNearButtons proves that whenever the
@@ -230,23 +236,29 @@ func TestS5_3LifecycleStaleGatingStatesUnconfirmedNeverToast(t *testing.T) {
 // stale-state diagnostics link targets an already-registered, non-deferred
 // route (never a fabricated one, never the deferred /help/troubleshooting).
 func TestS5_3LifecycleStaleGatingDiagnosticsLinkUsesExistingRoute(t *testing.T) {
-	body := readEmbeddedTemplate(t, "templates/overview.html")
-	if !strings.Contains(body, `id="lc-conn-lost-diag"`) {
-		t.Fatal("overview.html missing the #lc-conn-lost-diag diagnostics link")
+	srv, _, _ := newOverviewTestServer(t)
+	body := renderDashboardEN(t, srv)
+
+	// The SAME anchor element must carry both the id and the href: two
+	// independent page-wide searches would let any other /system/diagnostics
+	// link on the page (the Overview version line has one) satisfy the route
+	// assertion while #lc-conn-lost-diag itself pointed somewhere else.
+	anchor := lcConnLostDiagRe.FindString(body)
+	if anchor == "" {
+		t.Fatalf("the rendered Overview has no <a ... id=%q ...> diagnostics link; body=%s", "lc-conn-lost-diag", body)
 	}
-	if !strings.Contains(body, `href="/health"`) {
-		t.Error("#lc-conn-lost-diag must link to the existing /health route")
+	if !strings.Contains(anchor, `href="/system/diagnostics"`) {
+		t.Errorf("#lc-conn-lost-diag must link to the canonical /system/diagnostics route; tag=%s", anchor)
 	}
 	if strings.Contains(body, `href="/help/troubleshooting"`) {
 		t.Error("must not link to the deferred /help/troubleshooting route")
 	}
 
 	// The target route must actually be live (200), not a fabricated path.
-	srv := newRenderServer(t)
 	rec := httptest.NewRecorder()
-	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	newRenderServer(t).handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil))
 	if rec.Code != http.StatusOK {
-		t.Errorf("GET /health = %d, want 200 (the diagnostics link must point at a live route)", rec.Code)
+		t.Errorf("GET /system/diagnostics = %d, want 200 (the diagnostics link must point at a live route)", rec.Code)
 	}
 }
 

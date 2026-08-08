@@ -12,12 +12,16 @@ import (
 // (blip/restart) must NOT show the "streak pending" badge — the watcher is
 // silent, and the dashboard must agree with it. A genuinely new broadcast
 // shows the badge again.
+//
+// It reads the pinned "Now Watching" block, which is where the streak bar
+// actually renders: /overview no longer carries per-streamer cards, and its
+// two watch slots deliberately never claim streak progress.
 func TestOverviewStreakBadgeHonorsBroadcastBinding(t *testing.T) {
 	srv, online, _ := newOverviewTestServer(t)
 
 	fetch := func() string {
 		rec := httptest.NewRecorder()
-		srv.handleAPIOverview(rec, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+		srv.handleAPINowWatching(rec, httptest.NewRequest(http.MethodGet, "/api/now-watching", nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}

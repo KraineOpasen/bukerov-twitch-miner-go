@@ -48,9 +48,6 @@
         {{if .ShowRetry}}
         <button type="button" class="btn-primary text-xs" hx-post="/api/lifecycle/resume" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" {{if or (not .CanResume) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.retry" }}</button>
         {{end}}
-        {{if .ShowRestart}}
-        <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/restart" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" hx-confirm="{{ t "lc.confirm.restart" }}" {{if or (not .CanRestart) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.restart" }}</button>
-        {{end}}
         {{if .ShowRestartProcess}}
         <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/restart-process" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" {{if or (not .CanRestartProcess) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.restart_process" }}</button>
         {{end}}
@@ -64,12 +61,17 @@
     <div class="lc-result lc-result-info" role="status" id="lc-transition-reason">{{.TransitionReason}}</div>
     {{end}}
 
-    {{/* Stop only lives inside a collapsed "Advanced actions" panel, with an
-         honest confirm text (design v6 §10) — never a one-click primary
-         action next to Pause/Resume/Restart. */}}
+    {{/* Both destructive actions live behind this one collapsed disclosure,
+         each keeping its honest confirm text (design v6 §10): Pause is the
+         only primarily-visible control, so neither Restart nor Stop is ever a
+         one-click peer of it. Their semantics, routes, capability gating and
+         disabled rules are unchanged — only their placement is. */}}
     <details class="details-panel mt-2" id="lc-advanced">
         <summary class="text-xs text-neutral-500 cursor-pointer">{{ t "lc.btn.advanced" }}</summary>
-        <div class="mt-2">
+        <div class="mt-2 flex items-center gap-2 flex-wrap">
+            {{if .ShowRestart}}
+            <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/restart" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" hx-confirm="{{ t "lc.confirm.restart" }}" {{if or (not .CanRestart) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.restart" }}</button>
+            {{end}}
             <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/stop" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" hx-confirm="{{ t "lc.confirm.stop" }}" {{if or (not .CanStop) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.stop" }}</button>
         </div>
     </details>

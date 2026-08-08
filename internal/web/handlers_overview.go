@@ -32,10 +32,10 @@ const overviewPollSeconds = 30
 
 // OverviewCardView wraps a streamer card with the raw (unformatted)
 // points-today figure the F2.2 numeric sort needs. It embeds StreamerInfo so
-// every existing `.Field` reference in overview_card keeps working unchanged
-// — this is purely additive. PointsTodayRaw/HasTodayRaw come straight from
-// the memoised streamerStats cache (never parsed back out of a formatted
-// string — I13).
+// every existing `.Field` reference on a card keeps working unchanged — this
+// is purely additive. PointsTodayRaw/HasTodayRaw come straight from the
+// memoised streamerStats cache (never parsed back out of a formatted string —
+// I13).
 type OverviewCardView struct {
 	StreamerInfo
 	PointsTodayRaw int
@@ -55,15 +55,22 @@ type OverviewHealthView struct {
 // OverviewPageData is the Overview page/partial view model. It embeds the
 // existing OverviewData so every current `.Field` reference (including in
 // handleDashboard, which is not touched by this change) keeps compiling, and
-// adds the F2 card-hierarchy/health/predictions/polling additions alongside
-// it. NOTE: as of the F2 card-hierarchy work, OverviewData's own
-// TrackedLive/TrackedUnknown/TrackedOffline/Untracked fields (declared in
-// viewmodels.go) are no longer populated by buildOverviewData below — every
-// Overview template consumer now reads the *Cards slices instead. The fields
-// stay declared (viewmodels.go is out of scope here, and StreamerGridData —
-// a distinct type — still uses same-named fields for the Streamers page) but
-// are write-only dead weight on this path; left as an intentional zero value
-// rather than duplicating card-building work nobody reads.
+// adds the health/predictions/polling regions alongside it.
+//
+// The Overview page itself no longer renders the per-streamer roster —
+// /overview/queue is its sole owner — so OverviewData's own TrackedLive/
+// TrackedUnknown/TrackedOffline/Untracked fields are left at their zero value
+// on this path. They stay declared because StreamerGridData — a distinct type
+// with same-named fields — still drives the Streamers page.
+//
+// The *Cards slices below are built and populated, but NOTHING READS THEM
+// today: the card template they fed was removed with the roster, and no other
+// template, handler or JSON response consumes them. They are kept because they
+// are this package's established shape for a built Overview card and are
+// restored deliberately, not because a consumer exists — the same is true of
+// OverviewData.Ticker and StreamerInfo.LastEventText/LastEventAgo. Anyone
+// adding a reader should treat that as re-activating a dormant contract, and
+// anyone deleting them should know they are removing a contract, not a bug.
 type OverviewPageData struct {
 	OverviewData
 	LiveCards      []OverviewCardView
@@ -98,11 +105,11 @@ type OverviewPageData struct {
 	SlotPairProvenance ProvenanceChipData
 }
 
-// handleAPIOverview renders the live Overview content partial (header stats,
-// events ticker, live-predictions board and the streamer grid) plus an
-// out-of-band update for the sidebar "Now Watching" block. Everything is built
-// from in-memory state; the only SQLite reads (points-today / per-hour) are
-// memoised behind statsTTL.
+// handleAPIOverview renders the live Overview content partial: the lifecycle
+// echo, the two watch slots, the health aggregate, the compact predictions
+// summary, the version region and the collapsed manual board. Everything is
+// built from in-memory state; the only SQLite reads (points-today / per-hour)
+// are memoised behind statsTTL.
 func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
 	data := s.buildOverviewData(s.langFromRequest(r))
 
@@ -244,9 +251,9 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 
 	live, unknown, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer, tr)
 
-	// LiveCount counts CONFIRMED-online streamers only; a card in the live group
-	// that is merely holding its slot during a transient unknown (Unconfirmed) is
-	// not counted as live.
+	// LiveCount counts CONFIRMED-online streamers only; a streamer in the live
+	// group that is merely holding its slot during a transient unknown
+	// (Unconfirmed) is not counted as live.
 	liveCount := 0
 	for _, c := range live {
 		if c.IsLive {
@@ -291,12 +298,7 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
 		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, evidence),
-		// TrackedLive/TrackedUnknown/TrackedOffline/Untracked are deliberately
-		// left unset: no Overview template consumer reads them anymore (see
-		// the OverviewPageData doc comment above) — every render goes through
-		// the *Cards slices below, built from the same live/unknown/offline/
-		// untracked slices without a second pass over the streamers.
-		GeneratedUnix: time.Now().Unix(),
+		GeneratedUnix:  time.Now().Unix(),
 	}
 
 	return OverviewPageData{
@@ -317,7 +319,7 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 // toCardViews wraps each StreamerInfo with its raw points-today figure looked
 // up from the memoised streamerStats cache (nil-safe: a nil/empty stats map
 // simply leaves HasTodayRaw false for every card). Returns nil for an empty
-// input so an empty group renders identically to before (no group heading).
+// input so an empty group carries no card at all.
 func toCardViews(infos []StreamerInfo, stats map[string]streamerStats) []OverviewCardView {
 	if len(infos) == 0 {
 		return nil
@@ -444,6 +446,15 @@ func buildOverviewHealth(tr func(string) string, providerPresent bool, snap heal
 	return view
 }
 
+// The predictions board's technical states. Only "unavailable" carries a
+// behavioural contract beyond its label: it is the state in which the round
+// count is unknown rather than proven.
+const (
+	predictionsStateActive      = "active"
+	predictionsStateIdle        = "idle"
+	predictionsStateUnavailable = "unavailable"
+)
+
 // predictionsState is the F2.7 pure classifier for the predictions board's
 // technical status (never the betting outcome): "unavailable" when there's no
 // provider or the miner isn't currently running, "active" when >=1 round is
@@ -452,12 +463,12 @@ func buildOverviewHealth(tr func(string) string, providerPresent bool, snap heal
 // distinguishes one (documented omission, design.md §1).
 func predictionsState(providerPresent, minerRunning bool, predictionCount int) string {
 	if !providerPresent || !minerRunning {
-		return "unavailable"
+		return predictionsStateUnavailable
 	}
 	if predictionCount > 0 {
-		return "active"
+		return predictionsStateActive
 	}
-	return "idle"
+	return predictionsStateIdle
 }
 
 // netState maps the miner status to the Overview network indicator's tri-state.
@@ -490,9 +501,10 @@ func botStatusLabel(tr func(string) string, status MinerStatus) string {
 	}
 }
 
-// buildCards enriches every tracked/untracked streamer into an Overview card
-// and collects ticker items (active community goals). Ordering mirrors the old
-// dashboard: live first (config order), then offline, then untracked.
+// buildCards enriches every tracked/untracked streamer into a card and collects
+// ticker items (active community goals). It groups the cards live / unknown /
+// offline / untracked, in config order. Its consumers are the Overview's live
+// count and card view models, and /overview/queue's full roster.
 func (s *Server) buildCards(
 	streamers []*models.Streamer,
 	slots WatchSlotsView,

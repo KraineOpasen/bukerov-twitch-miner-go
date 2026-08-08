@@ -10,50 +10,15 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
-// sampleOverview builds an OverviewPageData exercising every card state and
-// board branch, for template-render coverage. LiveCards/OfflineCards are the
-// only card source the Overview templates read (buildOverviewData no longer
-// populates OverviewData's own TrackedLive/TrackedOffline on this path — see
-// the OverviewPageData doc comment in handlers_overview.go), so this fixture
-// mirrors that: the live/offline fixtures feed LiveCards/OfflineCards only.
+// sampleOverview builds an OverviewPageData exercising every region the
+// canonical Overview renders: the lifecycle echo, the two watch slots, the
+// health aggregate, the compact predictions summary, the evidence-gated
+// version region and the secondary manual board with its branch variants.
 func sampleOverview() OverviewPageData {
-	live := []StreamerInfo{
-		{
-			Name: "shroud", State: "watching", Watching: true, IsLive: true,
-			PointsFormatted: "100,000", PointsPerHour: "1,200", PointsToday: "5,000",
-			GameName: "VALORANT", ViewersCount: 40000, ViewersCountFormatted: "40,000",
-			Title:         "☀️ 2X UPDATE + FAR CRY !DROPS ☀️ | Chilling w/ coffee",
-			Tags:          []string{"English", "DropsEnabled", "FPS"},
-			StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25,
-			HasCampaign: true, CampaignName: "Drop", CampaignPercent: 40, CampaignMinutesInfo: "8/20 min",
-			HasGoal: true, GoalTitle: "New Emote", GoalPercent: 72,
-			Preference: "prefer", HasActivePrediction: true,
-			LastEventText: "Bonus claimed", LastEventAgo: "2m ago",
-		},
-		{
-			Name: "pokimane", State: "queued", Queued: true, IsLive: true,
-			PointsFormatted: "80,000", Preference: "avoid",
-		},
-	}
-	offline := []StreamerInfo{
-		{Name: "summit", State: "offline", PointsFormatted: "5,000", OfflineDuration: "3h"},
-		{Name: "benched", State: "disabled", DisableWatch: true, PointsFormatted: "1,000", WatchReason: "watching disabled"},
-	}
-
 	data := OverviewData{
 		Username:       "tester",
 		RefreshMinutes: 5,
-		Version:        "test",
-		BotStatusLabel: "Running",
-		Connected:      true,
-		NetState:       "ok",
-		TotalPoints:    "1,234,567",
-		PointsToday:    "12,345",
-		StreamerCount:  4,
-		LiveCount:      2,
-		Ticker: []TickerItem{
-			{Streamer: "shroud", Kind: "goal", Label: "New Emote", Percent: 72, HasPct: true},
-		},
+		Version:        "0.29.0",
 		Predictions: []PredictionView{
 			{
 				Streamer: "shroud", Title: "Will they win?", Status: "ACTIVE",
@@ -71,12 +36,14 @@ func sampleOverview() OverviewPageData {
 
 	return OverviewPageData{
 		OverviewData:          data,
-		LiveCards:             toCardViews(live, map[string]streamerStats{"shroud": {pointsToday: 5000}}),
-		OfflineCards:          toCardViews(offline, nil),
-		Health:                OverviewHealthView{State: "healthy", Label: "Healthy", Detail: ""},
-		PredictionsState:      "active",
+		Health:                OverviewHealthView{State: "healthy", Label: "Healthy"},
+		PredictionsState:      predictionsStateActive,
 		PredictionsStateLabel: "Active",
 		PollSeconds:           overviewPollSeconds,
+		SlotPair: [2]c12SlotData{
+			{Occupied: true, Channel: "shroud", Active: true, Link: "/overview/queue"},
+			{EmptyReasonMode: "idle", Link: "/overview/queue"},
+		},
 	}
 }
 
@@ -91,33 +58,51 @@ func TestRenderOverviewTemplates(t *testing.T) {
 
 	// Localized partial renders the default language (RU) via testPartials.
 	for _, want := range []string{
-		"shroud", "pokimane", "summit", "benched",
+		// Every canonical region, in its rendered form.
+		"data-ov-slots", "data-ov-health", "data-ov-pred-kpi",
+		"data-ov-version", "data-ov-pred-board",
+		// The two watch slots and their owner link.
+		"shroud", `href="/overview/queue"`,
+		// Health aggregate + canonical owner. The chip's class is DERIVED from
+		// the same State the data attribute carries, so the two cannot drift.
+		`data-ov-health-state="healthy"`, `class="ov-health ov-health-healthy"`,
+		`href="/system/status"`,
+		// Predictions: the count comes from Predictions itself, so the compact
+		// figure and the board below can never describe different boards.
+		`data-ov-pred-active="2"`, `data-ov-pred-today="unknown"`,
+		`data-ov-pred-winrate="unknown"`, `href="/statistics"`,
+		// Evidence-gated version region.
+		"0.29.0", `href="/system/diagnostics"`,
+		// The full manual board, preserved inside the collapsed disclosure.
 		"Активные предикшены", "Will they win?", "Закрыто",
-		"▶ Смотрим", "◷ В очереди", "⊘ Отключён", "● Оффлайн",
-		"★ Приоритет", "Избегать",
-		"New Emote", "72%", "1,200/h", "cycle-preference", "toggle-watch",
-		"data-window-end", "data-card-streamer",
-		// Live-stream context on the card: dynamic title + tag chips ("+" in
-		// the fixture title renders HTML-escaped, so assert around it).
-		"FAR CRY !DROPS ☀️ | Chilling w/ coffee",
-		`class="s-title"`, `class="s-tag"`,
-		"English", "DropsEnabled", "FPS",
-		// In-page anchor sections the sidebar tabs target.
-		`id="predictions"`, `id="grid"`, "sec-accent",
+		"data-window-end", `id="predictions"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview_live output missing %q", want)
 		}
 	}
+
+	// The Overview owns no claims preview and no updater verdict: /drops and
+	// /system/diagnostics do. Banned here rather than only in the page-level
+	// test, so a region re-added straight to the partial cannot slip through.
+	for _, banned := range []string{
+		"data-ov-claims", `href="/drops/claims"`, "ov.claims",
+		"data-ov-update-state", "lc.update_available",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("overview_live still renders removed surface %q", banned)
+		}
+	}
 }
 
-// TestOverviewCardEscapesTitleAndTags proves the live title and tag chips are
-// plain escaped text: a hostile stream title can never inject markup.
-func TestOverviewCardEscapesTitleAndTags(t *testing.T) {
+// TestOverviewPredictionCardEscapesHostileText proves the escaping guarantee on
+// a surface that is actually RENDERED: prediction titles and outcome names come
+// straight from Twitch, so they are the hostile-input path on this page.
+func TestOverviewPredictionCardEscapesHostileText(t *testing.T) {
 	partials := testPartials(t)
 	data := sampleOverview()
-	data.LiveCards[0].Title = `<script>alert(1)</script> stream`
-	data.LiveCards[0].Tags = []string{`<img src=x onerror=alert(2)>`}
+	data.Predictions[0].Title = `<script>alert(1)</script> round`
+	data.Predictions[0].Outcomes[0].Title = `<img src=x onerror=alert(2)>`
 
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
@@ -126,32 +111,19 @@ func TestOverviewCardEscapesTitleAndTags(t *testing.T) {
 	out := buf.String()
 	for _, banned := range []string{"<script>alert(1)</script>", "<img src=x"} {
 		if strings.Contains(out, banned) {
-			t.Errorf("card rendered unescaped HTML %q", banned)
+			t.Errorf("prediction card rendered unescaped HTML %q", banned)
 		}
 	}
 	if !strings.Contains(out, "&lt;script&gt;") {
-		t.Errorf("title should render as escaped text")
+		t.Error("prediction title should render as escaped text")
 	}
 }
 
-// TestOverviewCardOmitsEmptyTitleAndTags: cards without live-stream context
-// render no empty title/tag containers.
-func TestOverviewCardOmitsEmptyTitleAndTags(t *testing.T) {
-	partials := testPartials(t)
-	data := sampleOverview()
-	data.LiveCards = data.LiveCards[1:] // pokimane: live, no title/tags
-
-	var buf bytes.Buffer
-	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
-		t.Fatalf("render overview_live: %v", err)
-	}
-	out := buf.String()
-	for _, banned := range []string{`class="s-title"`, `class="s-tag"`} {
-		if strings.Contains(out, banned) {
-			t.Errorf("empty-context card should not render %q", banned)
-		}
-	}
-}
+// The claim-detail escaping test that used to live here went with the claims
+// preview itself: the Overview no longer renders a Twitch-supplied drop name,
+// so there is no such surface left on this page to escape. The escaping
+// guarantee is still covered on the surfaces that DO carry Twitch text —
+// prediction titles and outcome names, above.
 
 // TestSidebarOmitsDuplicateOverviewTabs pins the information-architecture fix:
 // the «Стримеры» (/#grid) and «Предикшены» (/#predictions) sidebar tabs offered
@@ -183,10 +155,14 @@ func TestSidebarOmitsDuplicateOverviewTabs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read overview_live.html: %v", err)
 	}
-	for _, want := range []string{`id="grid"`, `id="predictions"`} {
-		if !strings.Contains(string(partial), want) {
-			t.Errorf("overview_live.html missing section anchor %q", want)
-		}
+	// #grid went with the roster it anchored (/overview/queue owns that now);
+	// #predictions must survive so a bookmarked /#predictions still lands on
+	// the board inside its disclosure.
+	if !strings.Contains(string(partial), `id="predictions"`) {
+		t.Error(`overview_live.html missing section anchor id="predictions"`)
+	}
+	if strings.Contains(string(partial), `id="grid"`) {
+		t.Error(`overview_live.html still carries the removed id="grid" roster anchor`)
 	}
 
 	// F1 theme-token consolidation moved overview.html's inline <style> block
@@ -224,7 +200,7 @@ func TestSidebarOmitsDuplicateOverviewTabs(t *testing.T) {
 }
 
 // TestRenderOverviewTemplatesEnglish renders the same fixture in English to
-// prove the cards localize both ways (not just the default RU).
+// prove every region localizes both ways (not just the default RU).
 func TestRenderOverviewTemplatesEnglish(t *testing.T) {
 	partials := testPartialsLang(t, i18n.LangEN)
 	var buf bytes.Buffer
@@ -233,15 +209,44 @@ func TestRenderOverviewTemplatesEnglish(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"Live Predictions", "Locked", "▶ Watching", "◷ Queued",
-		"⊘ Disabled", "● Offline", "★ Prefer", "Avoid",
+		"Live Predictions", "Locked", "System Status",
+		"active", "today", "win rate", "ROI in Analytics",
+		// The health chip's own label, which localizes through the same
+		// ov.health.<state> key the restored four-state vocabulary uses.
+		"Healthy",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("english overview_live missing %q", want)
 		}
 	}
-	if strings.Contains(out, "Смотрим") {
+	if strings.Contains(out, "Исправно") || strings.Contains(out, "Состояние системы") {
 		t.Errorf("english render leaked Russian text")
+	}
+	// Two of the keys above cannot be proven by the loop alone: "ov.pred.active"
+	// contains the substring "active" and "ov.today" contains "today", and the
+	// rendered page carries data-ov-pred-active / data-ov-pred-today attributes
+	// that contain them too. So neither an unresolved key nor a missing English
+	// entry can be detected by looking for the expected English words — each has
+	// to be banned in the form it would actually take:
+	//
+	//   - missing from BOTH catalogs -> i18n.T's last resort renders the raw key;
+	//   - missing from en.json only  -> i18n.T falls back lang -> default, so the
+	//     page renders the RUSSIAN text in an English render.
+	//
+	// The Russian value is read from the catalog rather than spelled out here, so
+	// this stays correct when a translation is reworded.
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	for _, key := range []string{"ov.pred.active", "ov.today"} {
+		if strings.Contains(out, key) {
+			t.Errorf("english overview_live rendered the unresolved key %q instead of its translation", key)
+		}
+		ru := loc.T(i18n.LangRU, key)
+		if ru != key && strings.Contains(out, ru) {
+			t.Errorf("english overview_live rendered the Russian text %q for %q — the English catalog entry is missing and i18n.T fell back to the default language", ru, key)
+		}
 	}
 }
 
@@ -400,35 +405,10 @@ func TestNetState(t *testing.T) {
 	}
 }
 
-// TestRenderOverviewNetStates proves the wifi indicator colours and labels the
-// three network states from .NetState (green/yellow/red), not a fixed icon.
-func TestRenderOverviewNetStates(t *testing.T) {
-	partials := testPartialsLang(t, i18n.LangEN)
-	cases := []struct {
-		netState  string
-		wantClass string
-		wantText  string
-	}{
-		{"ok", "text-success", "Connected"},
-		{"degraded", "text-event", "Unstable"},
-		{"lost", "text-danger", "Stale data"},
-	}
-	for _, c := range cases {
-		data := sampleOverview()
-		data.NetState = c.netState
-		var buf bytes.Buffer
-		if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
-			t.Fatalf("render overview_live (%s): %v", c.netState, err)
-		}
-		out := buf.String()
-		if !strings.Contains(out, c.wantClass) {
-			t.Errorf("net state %q: output missing class %q", c.netState, c.wantClass)
-		}
-		if !strings.Contains(out, c.wantText) {
-			t.Errorf("net state %q: output missing text %q", c.netState, c.wantText)
-		}
-	}
-}
+// The network indicator that used to render .NetState lived in the Overview's
+// top status strip, which is not part of the frozen composition and has been
+// removed; /overview has no surface for it any more. netState's own
+// classification stays covered by TestNetState above.
 
 func TestBotStatusLabel(t *testing.T) {
 	loc, err := i18n.New()
