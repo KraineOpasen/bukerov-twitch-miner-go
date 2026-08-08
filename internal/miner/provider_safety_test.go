@@ -217,7 +217,7 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		{"SetDropRule", func(*testing.T) { m.SetDropRule("some-reward-key", config.DropRule{}) }},
 		{"HealthSnapshot", func(*testing.T) { m.HealthSnapshot() }},
 		{"CurrentHealthSettings", func(*testing.T) { m.CurrentHealthSettings() }},
-		{"ApplyHealthSettings", func(*testing.T) { m.ApplyHealthSettings(m.CurrentHealthSettings()) }},
+		{"ApplyHealthSettings", func(*testing.T) { _ = m.ApplyHealthSettings(m.CurrentHealthSettings()) }},
 		{"GetGameIdentity (blank name, no network)", func(t *testing.T) {
 			id, err := m.client.GetGameIdentity("   ")
 			if err != nil {
