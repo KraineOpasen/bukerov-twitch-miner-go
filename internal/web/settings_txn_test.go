@@ -151,6 +151,11 @@ func TestSettingsPostPersistenceFailureNo200(t *testing.T) {
 		daysAgo: 7,
 	}
 	srv.onSettingsUpdate = func(ctx context.Context, rt settings.RuntimeSettings) error {
+		// Shallow copy, unlike the miner's cloneConfigLocked: reference fields
+		// (AutoRedeem, DropRules) stay aliased to cfg, so ApplyToConfig's
+		// ValidateConfig can reach them through the candidate. The assertions
+		// below only read Analytics, which are plain value fields — anything
+		// asserted on a map field would need a real deep copy first.
 		candidate := cfg
 		settings.ApplyToConfig(&candidate, rt)
 		if err := config.SaveConfig(missingDir, &candidate); err != nil {
