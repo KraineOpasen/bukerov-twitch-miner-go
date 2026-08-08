@@ -15,7 +15,9 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamerlifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
@@ -540,5 +542,274 @@ func TestApplySettingsLegacyPathIgnoresCancelledRequestCtx(t *testing.T) {
 	}
 	if got := m.streamers.Get(alpha).GetSettings().FollowRaid; got {
 		t.Fatal("posted setting was not applied")
+	}
+}
+
+// TestApplySettingsRemovalWithAdditionPersistsResolvedChannelIDs pins the
+// stored-identity anchor a cold restart depends on for SRAP's REMOVAL path,
+// the way settings_persistence_test.go's
+// TestApplySettingsNoRenamePersistsResolvedChannelIDs already pins it for the
+// no-rename path.
+//
+// One apply that both removes a streamer and adds a new one takes
+// applySettingsWithRemovals, whose commit point persists the candidate BEFORE
+// CommitPlan. A brand-new streamer is posted the way the Settings page posts
+// one — username only, no ChannelID — so the ONLY sources for its resolved
+// identity are this apply's own plan and, later, the committed roster. Without
+// a pre-persist stamp the candidate reaches config.json with an empty
+// ChannelID while finishApply's post-commit in-memory backstop quietly fills
+// the LIVE config, so runtime and disk disagree and the anchor is lost at the
+// next cold start — the file is what a restart reads.
+//
+// The apply is deterministic end to end: fakeStreamerAPI resolves every login
+// synchronously, and the two path proofs below are direct reads, not timing.
+func TestApplySettingsRemovalWithAdditionPersistsResolvedChannelIDs(t *testing.T) {
+	const victim, keep, added = "rmidvictim", "rmidkeep", "rmidadded"
+	m, _, _ := newCapabilityMiner(t, victim, keep)
+	wireDeletionStores(t, m)
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	m.configPath = configPath
+	if err := config.SaveConfig(configPath, m.config); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+
+	// The single posted body: victim dropped, `added` appended with no
+	// ChannelID (BuildRuntimeSettings carries the retained entries' own
+	// ChannelIDs through, so only the new one starts empty).
+	rs := removeStreamer(m.GetRuntimeSettings(), victim)
+	rs.Streamers = append(rs.Streamers, settings.StreamerConfig{Username: added})
+
+	// Path proof 1 (static). applySettings' switch is a pure function of
+	// len(PlannedRenames) and len(PlannedRemovals), so a plan with removals
+	// and no renames selects applySettingsWithRemovals and nothing else.
+	// Running PlanReconcile here is a decision pass over the same inputs; its
+	// only state effect is stamping a fresh login-observation generation
+	// (I12), which leaves the apply's own, later plan as the newest one rather
+	// than a stale one.
+	probe := m.streamers.PlanReconcile(
+		settings.StreamersFromDTO(rs.Streamers),
+		settings.StreamerSettingsFromDTO(rs.DefaultSettings),
+		nil,
+	)
+	if got := probe.PlannedRenames(); len(got) != 0 {
+		t.Fatalf("scenario does not exercise the no-rename removal path: PlannedRenames = %v, want none", got)
+	}
+	removals := probe.PlannedRemovals(m.streamers)
+	if len(removals) != 1 || removals[0].GetUsername() != victim {
+		t.Fatalf("scenario does not exercise the removal path: PlannedRemovals = %v, want exactly [%s]", removals, victim)
+	}
+	// ...and the plan really does resolve the new streamer, so an empty
+	// ChannelID on disk can only be a stamping gap, never a resolution one.
+	if got := probe.ResolvedChannelIDs()[added]; got != "chan-"+added {
+		t.Fatalf("plan did not resolve %q: ResolvedChannelIDs = %q, want %q", added, got, "chan-"+added)
+	}
+
+	// Path proof 2 (dynamic). Only the removal and rename paths bracket their
+	// commit with applyCommitBarrier — applySettingsNoRename deliberately has
+	// no bracket — so both phases firing proves the apply really did take a
+	// barrier-bracketed commit. The seam is invoked synchronously on this same
+	// goroutine, so the slice needs no synchronization.
+	var phases []applyCommitPhase
+	m.applyCommitBarrier = func(phase applyCommitPhase) { phases = append(phases, phase) }
+
+	if err := m.ApplySettings(context.Background(), rs); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	if len(phases) != 2 || phases[0] != applyPreCommit || phases[1] != applyPostCommit {
+		t.Fatalf("apply did not take a barrier-bracketed commit path (removal/rename): phases = %v", phases)
+	}
+
+	// The runtime resolved the new streamer — this is the identity the file is
+	// supposed to have captured.
+	tracked := m.streamers.Get(added)
+	if tracked == nil {
+		t.Fatalf("%q was not added to the runtime roster", added)
+	}
+	if got := tracked.ChannelID; got != "chan-"+added {
+		t.Fatalf("runtime roster ChannelID for %q = %q, want %q", added, got, "chan-"+added)
+	}
+
+	// THE ASSERTION: a cold restart reads the FILE, not the live config.
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	persisted := make(map[string]string, len(loaded.Streamers))
+	for _, sc := range loaded.Streamers {
+		persisted[sc.Username] = sc.ChannelID
+	}
+	if _, stillThere := persisted[victim]; stillThere {
+		t.Errorf("removed streamer %q survived in the persisted config: %+v", victim, loaded.Streamers)
+	}
+	for _, want := range []string{keep, added} {
+		got, ok := persisted[want]
+		if !ok {
+			t.Errorf("persisted config missing streamer %q: %+v", want, loaded.Streamers)
+			continue
+		}
+		if got != "chan-"+want {
+			t.Errorf("persisted config lost the resolved ChannelID for %q: got %q, want %q — a cold restart reloads this file and would come up without the stored-identity anchor", want, got, "chan-"+want)
+		}
+	}
+}
+
+// unresolvableAPI resolves every login as "chan-"+login until that login is
+// marked unresolvable, from which point its lookup returns an error — the way
+// a transient Twitch failure looks to PlanReconcile, which then keeps the
+// already-tracked streamer as an untouched survivor and carries NO id for it
+// in the plan.
+type unresolvableAPI struct {
+	mu   sync.Mutex
+	fail map[string]bool
+}
+
+func newUnresolvableAPI() *unresolvableAPI {
+	return &unresolvableAPI{fail: map[string]bool{}}
+}
+
+func (f *unresolvableAPI) breakLogin(login string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail[login] = true
+}
+
+func (f *unresolvableAPI) GetChannelID(username string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail[username] {
+		return "", errors.New("resolution unavailable this cycle")
+	}
+	return "chan-" + username, nil
+}
+
+func (*unresolvableAPI) LoadChannelPointsContext(*models.Streamer) error { return nil }
+func (*unresolvableAPI) CheckStreamerOnline(*models.Streamer) models.StatusTransition {
+	return models.StatusTransition{}
+}
+
+// newUnresolvableMiner mirrors newCapabilityMiner over a pluggable resolver so
+// a seeded streamer's LATER resolution can be made to fail. Seeding happens
+// while every login still resolves, so the roster holds real ChannelIDs while
+// the config entries (as newCapabilityMiner writes them, and as a hand-written
+// or -generate-config config.json has them) still carry none.
+func newUnresolvableMiner(t *testing.T, client *unresolvableAPI, seedLogins ...string) *Miner {
+	t.Helper()
+	cfg := &config.Config{
+		Username:         "tester",
+		StreamerSettings: models.DefaultStreamerSettings(),
+		Priority:         []config.Priority{config.PriorityOrder},
+		RateLimits:       config.RateLimitSettings{MinuteWatchedInterval: 60},
+	}
+	for _, u := range seedLogins {
+		cfg.Streamers = append(cfg.Streamers, config.StreamerConfig{Username: u})
+	}
+
+	mgr := streamer.NewManager(client, cfg.StreamerSettings)
+	if added, _, _, _ := mgr.ApplySettings(cfg.Streamers, cfg.StreamerSettings); len(added) != len(seedLogins) {
+		t.Fatalf("seeding failed: added=%d, want %d", len(added), len(seedLogins))
+	}
+
+	return &Miner{
+		config:             cfg,
+		streamers:          mgr,
+		capabilityTopics:   newFakeTopicReconciler(),
+		chatPresence:       newFakeChatReconciler(),
+		streamCheckTrigger: make(chan struct{}, 1),
+		autoRedeemState:    make(map[string]*autoRedeemRuntime),
+	}
+}
+
+// TestApplySettingsRemovalPersistsRosterChannelIDWhenResolutionFails covers the
+// SECOND of the removal path's two stamping sources, the one
+// TestApplySettingsRemovalWithAdditionPersistsResolvedChannelIDs cannot reach:
+// a RETAINED streamer whose resolution fails this cycle is absent from the
+// plan's own resolution, so only the already-committed roster still knows its
+// ChannelID. Without the roster stamp the removal path persists that streamer
+// with an empty anchor and a transient Twitch hiccup during an unrelated
+// deletion permanently erases an identity the process already had.
+//
+// This is the same coverage split applySettingsNoRename's step-2 comment
+// describes for its own two backfills — this test is what keeps the removal
+// path's roster half honest.
+func TestApplySettingsRemovalPersistsRosterChannelIDWhenResolutionFails(t *testing.T) {
+	const victim, stale = "rosteridvictim", "rosteridstale"
+	api := newUnresolvableAPI()
+	m := newUnresolvableMiner(t, api, victim, stale)
+	wireDeletionStores(t, m)
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	m.configPath = configPath
+	if err := config.SaveConfig(configPath, m.config); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+
+	// The roster resolved `stale` at seed time; the config never recorded it.
+	tracked := m.streamers.Get(stale)
+	if tracked == nil || tracked.ChannelID != "chan-"+stale {
+		t.Fatalf("seed precondition: roster ChannelID for %q = %+v, want %q", stale, tracked, "chan-"+stale)
+	}
+	for _, sc := range m.config.Streamers {
+		if sc.Username == stale && sc.ChannelID != "" {
+			t.Fatalf("seed precondition: config entry for %q already carries a ChannelID (%q); the test would not discriminate", stale, sc.ChannelID)
+		}
+	}
+
+	// From here on `stale` cannot be resolved.
+	api.breakLogin(stale)
+
+	rs := removeStreamer(m.GetRuntimeSettings(), victim)
+
+	// Path proof: still the no-rename removal path, and the plan genuinely
+	// carries NO id for `stale`, so the roster is the only remaining source.
+	probe := m.streamers.PlanReconcile(
+		settings.StreamersFromDTO(rs.Streamers),
+		settings.StreamerSettingsFromDTO(rs.DefaultSettings),
+		nil,
+	)
+	if got := probe.PlannedRenames(); len(got) != 0 {
+		t.Fatalf("scenario does not exercise the no-rename removal path: PlannedRenames = %v, want none", got)
+	}
+	removals := probe.PlannedRemovals(m.streamers)
+	if len(removals) != 1 || removals[0].GetUsername() != victim {
+		t.Fatalf("scenario does not exercise the removal path: PlannedRemovals = %v, want exactly [%s]", removals, victim)
+	}
+	if got, ok := probe.ResolvedChannelIDs()[stale]; ok && got != "" {
+		t.Fatalf("precondition: the plan still resolved %q as %q; the roster half would not be discriminated", stale, got)
+	}
+
+	// ...and, as in the sibling test, the barrier proves the apply actually
+	// took a barrier-bracketed commit rather than applySettingsNoRename.
+	var phases []applyCommitPhase
+	m.applyCommitBarrier = func(phase applyCommitPhase) { phases = append(phases, phase) }
+
+	if err := m.ApplySettings(context.Background(), rs); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	if len(phases) != 2 || phases[0] != applyPreCommit || phases[1] != applyPostCommit {
+		t.Fatalf("apply did not take a barrier-bracketed commit path (removal/rename): phases = %v", phases)
+	}
+
+	// The unresolvable streamer is kept, never deleted (fail-closed).
+	if m.streamers.Get(stale) == nil {
+		t.Fatalf("%q was dropped from the roster on a failed resolution", stale)
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	var found bool
+	for _, sc := range loaded.Streamers {
+		if sc.Username != stale {
+			continue
+		}
+		found = true
+		if sc.ChannelID != "chan-"+stale {
+			t.Errorf("persisted config lost the roster-known ChannelID for %q: got %q, want %q — the identity the process already held was erased by an unrelated removal", stale, sc.ChannelID, "chan-"+stale)
+		}
+	}
+	if !found {
+		t.Errorf("persisted config missing retained streamer %q: %+v", stale, loaded.Streamers)
 	}
 }

@@ -2,6 +2,8 @@ package miner
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -21,12 +23,13 @@ import (
 // two ApplySettings calls. Falls back to "chan-"+login for any login not
 // explicitly mapped, matching the package's other fakes.
 type renameCapableAPI struct {
-	mu  sync.Mutex
-	ids map[string]string
+	mu   sync.Mutex
+	ids  map[string]string
+	fail map[string]bool
 }
 
 func newRenameCapableAPI() *renameCapableAPI {
-	return &renameCapableAPI{ids: map[string]string{}}
+	return &renameCapableAPI{ids: map[string]string{}, fail: map[string]bool{}}
 }
 
 func (f *renameCapableAPI) set(login, id string) {
@@ -35,9 +38,25 @@ func (f *renameCapableAPI) set(login, id string) {
 	f.ids[login] = id
 }
 
+// breakLogin makes every LATER resolution of login fail, the way a transient
+// Twitch outage would. Seeding happens before it is called, so the roster
+// still holds the ChannelID resolved back then while the config entry — as
+// newRenameTestMiner writes it, and as a hand-written config.json has it —
+// carries none. srap_test.go's unresolvableAPI offers the same seam but
+// cannot also map two logins onto ONE stable id, which is what makes an
+// apply a rename rather than an add+remove.
+func (f *renameCapableAPI) breakLogin(login string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail[login] = true
+}
+
 func (f *renameCapableAPI) GetChannelID(username string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.fail[username] {
+		return "", errors.New("resolution unavailable this cycle")
+	}
 	if id, ok := f.ids[username]; ok {
 		return id, nil
 	}
@@ -353,5 +372,138 @@ func TestApplySettings_Rename_ConfigRestart_IDFirstReconstructsOneStreamer(t *te
 	if len(removed) != 0 || len(changed) != 0 || len(renamed) != 0 {
 		t.Fatalf("repeated post-restart apply was not a no-op: removed=%d changed=%d renamed=%d",
 			len(removed), len(changed), len(renamed))
+	}
+}
+
+// TestApplySettings_Rename_PersistsRosterChannelIDWhenResolutionFails covers
+// the SECOND stamping source on the rename path — the one the rename path,
+// alone among the three, did not have. applySettingsWithRename stamps the
+// candidate from this plan's OWN resolution only; a RETAINED streamer whose
+// resolution fails this cycle is absent from that resolution, so the
+// already-committed roster is the only thing that still knows its ChannelID.
+// Without the roster stamp a transient Twitch hiccup, riding along with an
+// unrelated rename, permanently erases from config.json an identity the
+// process already held: finishApply's backfill repairs only memory, and it
+// runs AFTER the write, so a cold restart reads the gap.
+//
+// This is the rename-path twin of
+// TestApplySettingsRemovalPersistsRosterChannelIDWhenResolutionFails
+// (srap_test.go), and the same coverage split applySettingsNoRename's step-2
+// comment describes for its own two backfills.
+func TestApplySettings_Rename_PersistsRosterChannelIDWhenResolutionFails(t *testing.T) {
+	const oldLogin, newLogin, stale = "renameidold", "renameidnew", "renameidstale"
+	const stableID = "id-rename-roster"
+
+	client := newRenameCapableAPI()
+	client.set(oldLogin, stableID)
+	m, _, _ := newRenameTestMiner(t, client, oldLogin, stale)
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	m.configPath = configPath
+	if err := config.SaveConfig(configPath, m.config); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+
+	// The roster resolved `stale` at seed time; the config never recorded it.
+	// Both halves are preconditions — without them the test cannot tell the
+	// roster source apart from the plan source.
+	tracked := m.streamers.Get(stale)
+	if tracked == nil || tracked.ChannelID != "chan-"+stale {
+		t.Fatalf("seed precondition: roster ChannelID for %q = %+v, want %q", stale, tracked, "chan-"+stale)
+	}
+	for _, sc := range m.config.Streamers {
+		if sc.Username == stale && sc.ChannelID != "" {
+			t.Fatalf("seed precondition: config entry for %q already carries a ChannelID (%q); the test would not discriminate", stale, sc.ChannelID)
+		}
+	}
+
+	// The rename resolves to the SAME stable id (that is what makes it a
+	// rename rather than an add+remove); `stale` stops resolving entirely.
+	client.set(newLogin, stableID)
+	client.breakLogin(stale)
+
+	rs := renameRuntimeStreamers(m, oldLogin, newLogin)
+
+	// Path proof, static half: exactly one planned rename and NO removals, and
+	// applySettings' switch is a pure function of those two lengths — so this
+	// is applySettingsWithRename and cannot be either sibling. The plan
+	// genuinely carries no id for `stale`, leaving the roster the only source.
+	probe := m.streamers.PlanReconcile(
+		settings.StreamersFromDTO(rs.Streamers),
+		settings.StreamerSettingsFromDTO(rs.DefaultSettings),
+		nil,
+	)
+	renames := probe.PlannedRenames()
+	if len(renames) != 1 || renames[0].OldLogin != oldLogin || renames[0].NewLogin != newLogin {
+		t.Fatalf("scenario does not exercise the rename path: PlannedRenames = %v, want exactly [%s -> %s]", renames, oldLogin, newLogin)
+	}
+	if got := probe.PlannedRemovals(m.streamers); len(got) != 0 {
+		t.Fatalf("scenario is not a pure rename: PlannedRemovals = %v, want none", got)
+	}
+	if got, ok := probe.ResolvedChannelIDs()[stale]; ok && got != "" {
+		t.Fatalf("precondition: the plan still resolved %q as %q; the roster half would not be discriminated", stale, got)
+	}
+
+	// Path proof, dynamic half: the barrier fires only on the removal and
+	// rename commit points (applySettingsNoRename deliberately has no
+	// bracket), so together with the static half the apply provably took the
+	// rename path rather than merely being planned onto it.
+	var phases []applyCommitPhase
+	m.applyCommitBarrier = func(phase applyCommitPhase) { phases = append(phases, phase) }
+
+	if err := m.ApplySettings(context.Background(), rs); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	if len(phases) != 2 || phases[0] != applyPreCommit || phases[1] != applyPostCommit {
+		t.Fatalf("apply did not take a barrier-bracketed commit path (removal/rename): phases = %v", phases)
+	}
+
+	// The unresolvable streamer is kept, never dropped (fail-closed), and the
+	// runtime still holds the identity it resolved at seed time.
+	runtimeStale := m.streamers.Get(stale)
+	if runtimeStale == nil {
+		t.Fatalf("%q was dropped from the roster on a failed resolution", stale)
+	}
+	if runtimeStale.ChannelID != "chan-"+stale {
+		t.Fatalf("runtime roster lost %q's ChannelID: got %q, want %q", stale, runtimeStale.ChannelID, "chan-"+stale)
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	// No old-login resurrection and no extra entry: exactly the two identities
+	// that went in come out.
+	if len(loaded.Streamers) != 2 {
+		t.Fatalf("persisted config has %d entries, want exactly 2: %+v", len(loaded.Streamers), loaded.Streamers)
+	}
+	byLogin := map[string]config.StreamerConfig{}
+	for _, sc := range loaded.Streamers {
+		byLogin[sc.Username] = sc
+	}
+	if _, resurrected := byLogin[oldLogin]; resurrected {
+		t.Errorf("persisted config still carries the OLD login %q: %+v", oldLogin, loaded.Streamers)
+	}
+
+	// The renamed identity keeps persisting its resolved stable id, exactly as
+	// before — the plan-source stamp must not be traded away for the roster one.
+	renamedEntry, ok := byLogin[newLogin]
+	if !ok {
+		t.Fatalf("persisted config missing the renamed streamer %q: %+v", newLogin, loaded.Streamers)
+	}
+	if renamedEntry.ChannelID != stableID {
+		t.Errorf("persisted config lost the renamed entry's resolved ChannelID for %q: got %q, want %q", newLogin, renamedEntry.ChannelID, stableID)
+	}
+
+	// The defect, stated as the divergence itself: the process holds the id in
+	// memory at the very moment the file it just wrote does not.
+	staleEntry, ok := byLogin[stale]
+	if !ok {
+		t.Fatalf("persisted config missing retained streamer %q: %+v", stale, loaded.Streamers)
+	}
+	if staleEntry.ChannelID != runtimeStale.ChannelID {
+		t.Errorf("runtime and config.json disagree about %q's identity after a rename-carrying apply: runtime has %q, the file has %q — a cold restart reads the file, so the identity the process already held is erased",
+			stale, runtimeStale.ChannelID, staleEntry.ChannelID)
 	}
 }
