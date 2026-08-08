@@ -2057,12 +2057,9 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // whichever path below applies, so Twitch is never queried twice for one
 // apply:
 //
-//   - No rename AND no removal planned: every other settings field applies
-//     directly to the live config — today's behavior, unchanged (a SaveConfig
-//     failure here is logged and non-fatal, exactly as before this pass,
-//     since no non-rename, non-removal change can split runtime/config/
-//     analytics identity across two owners, or leave an unaccounted-for
-//     purge).
+//   - No rename AND no removal planned: the ordinary Settings-page save. A
+//     CANDIDATE config is built and the live config is NEVER mutated until
+//     config.json persistence succeeds — see applySettingsNoRename.
 //   - A removal planned, no rename: SRAP's own two-phase protocol — see
 //     applySettingsWithRemovals.
 //   - At least one rename planned (with or without a removal riding along):
@@ -2125,15 +2122,85 @@ func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) e
 
 // applySettingsNoRename is the non-identity-mutating, non-removing path
 // (PlannedRenames and PlannedRemovals are BOTH empty — the caller already
-// checked): every posted setting (including the resolved streamer roster)
-// applies directly to the live config, exactly as ApplySettings always did
-// before the M1 pass. Zero behavior change: applyStreamerDeletions still runs
-// (for any RE-ADD's owed-purge reconciliation) on m.runCtx exactly as before,
-// since there is no removal in this apply to admit or commit.
+// checked): the ordinary shape of every Settings-page save. Like the removal
+// and rename paths, it is fail-closed around a single COMMIT POINT — durable
+// persistence — and builds a CANDIDATE config so the live one is never
+// touched until that persistence has succeeded. applyStreamerDeletions still
+// runs (for any RE-ADD's owed-purge reconciliation) on m.runCtx exactly as
+// before, since there is no removal in this apply to admit or commit.
+//
+// Persistence used to sit at the very END of this path, inside finishApply's
+// persisted=false branch, where a config.SaveConfig failure was only logged:
+// the live config had already been mutated in place and the runtime roster
+// already committed, so ApplySettings returned nil and POST /api/settings
+// answered 200 for a change that never reached disk — runtime and config.json
+// silently diverged until the next restart quietly reverted the change. There
+// is no partial-success story to tell here, and no rollback to attempt after
+// the fact: persistence is simply the commit point, exactly as it already was
+// for the other two paths, so a failed write means nothing happened at all.
+//
+// Unlike the other two paths, the ENTIRE candidate lifetime — clone, apply,
+// stamp, persist, publish — is ONE m.mu critical section. That is deliberate
+// and load-bearing, not incidental tidiness. A candidate that is cloned,
+// filled in off-lock and only then published reverts, at publication, every
+// live-config write that landed in the meantime: ApplyHealthSettings
+// (health.go) and ApplyCampaignPolicy (policy.go) mutate plain VALUE fields
+// of m.config under m.mu that cloneConfigLocked's shallow copy has already
+// snapshotted, so an edit racing the window would be silently rolled back in
+// memory AND on disk. applySettings' own doc comment records that window as a
+// known residual of the removal and rename paths, which have to open it
+// because they perform durable I/O (admission, analytics) between clone and
+// commit. THIS path performs none, so it does not have to open the window at
+// all — and must not, since it is the path every ordinary Settings-page save
+// takes, and the health/policy writers it would race are ordinary dashboard
+// actions. Never split this section to "avoid holding m.mu across SaveConfig":
+// SaveConfig under m.mu is a deliberate invariant in its own right (see
+// cloneConfigLocked's [R7] note), and holding the clone and the publish
+// together is what makes the swap atomic with respect to every other writer.
+//
+// The same property removes any need for refreshCandidateAutoRedeemLocked
+// here: nothing — including SetAutoRedeem — can mutate the live AutoRedeem
+// map between this clone and this publish, so the deep copy cloneConfigLocked
+// already makes is current by construction.
+//
+// Sequence, all under the one lock:
+//  1. Snapshot the live config into a candidate and apply the posted settings
+//     to THAT — the live config is never mutated in place.
+//  2. Stamp each entry's ChannelID from THIS plan's own resolution and from
+//     the current roster. finishApply's post-commit backfill used to be what
+//     put the stored-identity anchor a cold restart depends on into the file;
+//     persisting ahead of CommitPlan means the candidate must carry it
+//     instead. The two sources together cover both a brand-new streamer,
+//     known only to the plan, and a retained one whose resolution failed this
+//     cycle, known only to the roster. (m.mu -> streamer.Manager.mu is the
+//     documented lock order, and finishApply already reads the roster this
+//     way under m.mu.)
+//  3. THE COMMIT POINT: config.SaveConfig(candidate); only on success is
+//     m.config published. On failure: return, zero mutation — nothing outside
+//     this critical section has observed anything. configPath == "" stays a
+//     documented no-op success, exactly as on every other path.
+//  4. Past the commit point there is NO abort: CommitPlan + finishApply
+//     commit the runtime.
+//
+// There is deliberately no applyCommitBarrier bracket here, unlike the other
+// two commit points: that seam exists to let a test interleave a concurrent
+// write into the D1 (pre-commit) and D2 (post-commit, pre-CommitPlan)
+// windows, and this path has neither — D1 is closed by the single critical
+// section above, and D2 is about a removed login's state resurrecting, which
+// a path with no removals cannot suffer.
 func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer.ReconcilePlan, coord *streamerlifecycle.Coordinator) error {
 	m.mu.Lock()
-	settings.ApplyToConfig(m.config, s)
-	cfg := m.config
+	candidate := m.cloneConfigLocked()
+	settings.ApplyToConfig(candidate, s)
+	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
+	backfillChannelIDs(candidate, channelIDsByLogin(m.streamers.All()))
+	if m.configPath != "" {
+		if err := config.SaveConfig(m.configPath, candidate); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("settings apply rejected; no changes were made: persist config: %w", err)
+		}
+	}
+	m.config = candidate
 	m.mu.Unlock()
 
 	added, removed, changed, renamed, conflicts := m.streamers.CommitPlan(plan)
@@ -2143,7 +2210,7 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.finishApply(ctx, coord, cfg, added, removed, changed, renamed, false)
+	m.finishApply(ctx, coord, candidate, added, removed, changed, renamed)
 	return nil
 }
 
@@ -2264,7 +2331,7 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, true)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed)
 	return nil
 }
 
@@ -2416,7 +2483,7 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, true)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed)
 	return nil
 }
 
@@ -2467,19 +2534,22 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 	return &clone
 }
 
-// finishApply performs everything that must happen once the roster
-// reconciliation has been committed to the runtime AND — for a rename-
-// carrying apply — durable persistence has already succeeded: publish the new
-// config, wire the updated settings into every dependent component,
-// reconcile runtime capabilities (IRC/PubSub), reconcile the write-once
-// notifications manager's Discord config (M4 — see notificationManager()/
-// initNotificationManager; there is no longer a runtime create-or-rebuild
-// branch here, only an UpdateDiscordConfig call against whatever the
-// accessor returns), and — only for a non-rename apply (persisted=false) —
-// persist config.json (non-fatal on failure, exactly as ApplySettings always
-// did before this pass; a rename-carrying apply already persisted newConfig
-// durably at its own commit point in applySettingsWithRename before this
-// ran, so persisted=true skips a redundant save).
+// finishApply performs everything that must happen once durable persistence
+// has already succeeded AND the roster reconciliation has been committed to
+// the runtime: publish the new config, wire the updated settings into every
+// dependent component, reconcile runtime capabilities (IRC/PubSub), and
+// reconcile the write-once notifications manager's Discord config (M4 — see
+// notificationManager()/initNotificationManager; there is no longer a runtime
+// create-or-rebuild branch here, only an UpdateDiscordConfig call against
+// whatever the accessor returns).
+//
+// It performs NO persistence and cannot fail: EVERY apply path now persists
+// newConfig at its own commit point before calling this. It used to carry a
+// persisted=false branch that saved config.json here and merely logged a
+// failure — the one place left in the pipeline where a failed durable write
+// was still followed by a success return and a "Runtime settings updated"
+// log. That branch and its parameter are gone rather than left unused, so
+// persistence cannot drift back behind the runtime commit.
 //
 // [M2] The AutoRedeem runtime-STATE migration for a rename (BKM-006
 // Corrective Pass 1, C4) now happens PRIMARILY at the rename's own commit
@@ -2517,18 +2587,20 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 // this one apply — passed through to applyStreamerDeletions rather than
 // re-read from m.runCtx/m.streamerLifecycle here, so this function never
 // second-guesses the caller's own resolution of either value.
-func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, persisted bool) {
+func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent) {
 	m.mu.Lock()
 	m.config = newConfig
 	migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed)
 	// Best-effort backfill of ChannelID onto every entry the JUST-COMMITTED
-	// roster resolved (BKM-006 C1) — e.g. a brand-new streamer added by this
-	// very apply, which a rename-carrying apply's pre-commit backfill
-	// (applySettingsWithRename, from the plan's own resolution) already
-	// covers and this call is then a no-op for (never overwrites a non-empty
-	// ChannelID). Without this, a non-rename apply (the common case: adding a
-	// streamer, toggling a setting) would never persist the stored-identity
-	// anchor a cold restart depends on.
+	// roster resolved (BKM-006 C1). This is now a pure IN-MEMORY backstop:
+	// every apply path stamps its candidate from the same resolution before
+	// its own commit point, so by the time this runs it should have nothing
+	// left to fill (it never overwrites a non-empty ChannelID). Anything it
+	// did still fill would NOT reach config.json until the next apply — this
+	// runs after persistence, not before it. It used to be the pre-M1
+	// non-rename path's only source for the stored-identity anchor a cold
+	// restart depends on; that responsibility now sits at each path's
+	// pre-commit stamping, which is what the persisted file is built from.
 	backfillChannelIDs(m.config, channelIDsByLogin(m.streamers.All()))
 
 	if m.watcher != nil {
@@ -2627,18 +2699,6 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 
 	if webServer != nil {
 		webServer.SetDiscordEnabled(discordCfg.Enabled && notifMgr != nil)
-	}
-
-	if !persisted {
-		m.mu.Lock()
-		if m.configPath != "" {
-			if err := config.SaveConfig(m.configPath, m.config); err != nil {
-				slog.Error("Failed to save config", "error", err)
-			} else {
-				slog.Info("Settings saved to config file")
-			}
-		}
-		m.mu.Unlock()
 	}
 
 	slog.Info("Runtime settings updated")

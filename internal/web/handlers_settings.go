@@ -68,6 +68,41 @@ func (s *Server) writeSettingsConflict(w http.ResponseWriter, r *http.Request) {
 	writeConflict(w, s.i18n.T(s.langFromRequest(r), "lc.settings_conflict"))
 }
 
+// beginSettingsTxn acquires the settings mutation transaction and returns the
+// function that releases it. Every settings mutation is a read-modify-write:
+// the handler reads the CURRENT settings, merges the posted (usually partial)
+// body onto that snapshot, and hands the merged whole to the apply callback,
+// which replaces the config wholesale. Read and apply therefore have to be
+// one atomic step — two concurrent POSTs that both read before either applies
+// merge onto the same stale snapshot, and whichever applies last silently
+// reverts the other's change even when the two bodies touch entirely disjoint
+// keys. Serializing only the apply is not enough, and neither is the miner's
+// own coordinatorMu: the losing read has already happened by the time either
+// is reached. This is the same read-modify-write hazard healthFormMu closes
+// for the health forms, at the seam that owns the settings equivalent.
+//
+// Lock order: settingsTxnMu -> s.mu, never the reverse. The transaction holds
+// settingsTxnMu across the apply callback, which re-enters this Server
+// (AttachStreamers/SetDiscordEnabled) and takes s.mu there; s.mu is never
+// held while acquiring settingsTxnMu. No path takes both settingsTxnMu and
+// healthFormMu.
+//
+// The lock is held across the apply's disk and Discord I/O by design — the
+// transaction is not atomic otherwise — which is the same cost the miner's
+// coordinatorMu already imposes on every apply.
+//
+// The TryLock fast path exists only so the contended path has somewhere to
+// report from: see settingsTxnContended (server.go).
+func (s *Server) beginSettingsTxn() func() {
+	if !s.settingsTxnMu.TryLock() {
+		if s.settingsTxnContended != nil {
+			s.settingsTxnContended()
+		}
+		s.settingsTxnMu.Lock()
+	}
+	return s.settingsTxnMu.Unlock
+}
+
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	refresh := s.refresh
@@ -123,6 +158,13 @@ func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
 			writeBadRequest(w, "Failed to read request body: "+err.Error())
 			return
 		}
+
+		// Everything from here to the success bookkeeping is ONE transaction
+		// (see beginSettingsTxn). The body read stays outside it: it is
+		// client-paced I/O, and a slow sender must not hold every other
+		// settings mutation off.
+		releaseTxn := s.beginSettingsTxn()
+		defer releaseTxn()
 
 		// Decode ONTO the current settings, not onto a zero value: the apply
 		// path (settings.ApplyToConfig) replaces the config wholesale, so a
@@ -199,6 +241,14 @@ func (s *Server) handleAPISettingsReset(w http.ResponseWriter, r *http.Request) 
 		writeServiceUnavailable(w, "Settings not available")
 		return
 	}
+
+	// A reset is a settings mutation like any other and shares the same
+	// transaction (see beginSettingsTxn): without it, a reset could be
+	// interleaved with a partial POST such that the POST's merged snapshot —
+	// read before the reset applied — is written straight back over the
+	// defaults, leaving the settings neither reset nor as posted.
+	releaseTxn := s.beginSettingsTxn()
+	defer releaseTxn()
 
 	defaults := provider.GetDefaultSettings()
 

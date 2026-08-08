@@ -230,6 +230,24 @@ type Server struct {
 	statsCache map[string]streamerStats
 	statsAt    time.Time
 
+	// settingsTxnMu serializes the whole settings mutation transaction —
+	// snapshot read, partial-body merge, apply callback, success bookkeeping
+	// — for POST /api/settings and POST /api/settings/reset. See
+	// beginSettingsTxn (handlers_settings.go) for why the snapshot read has
+	// to be inside it, and for the lock order. GET /api/settings deliberately
+	// does NOT take it: a reader wants the current published state, and
+	// serializing reads behind an in-flight apply would only make the
+	// dashboard block on Discord reconnects for no added consistency.
+	settingsTxnMu sync.Mutex
+	// settingsTxnContended is a tests-only seam (nil in production),
+	// mirroring internal/miner's applyCommitBarrier: beginSettingsTxn invokes
+	// it SYNCHRONOUSLY at the moment a request finds the settings transaction
+	// already held by another request — i.e. exactly when the serialization
+	// below is doing its job. It exists so a concurrency test can observe
+	// that a second POST was held OUT of the transaction window without any
+	// wall-clock waiting. Set before serving; never written afterwards.
+	settingsTxnContended func()
+
 	// healthFormMu serializes the read-modify-write in handleAPIHealthSettings:
 	// the canary and watchdog forms each patch their own section over the
 	// current settings, and two concurrent section saves without this lock
