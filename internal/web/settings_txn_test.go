@@ -389,9 +389,9 @@ func decodeDiscordBlock(t *testing.T, rec *httptest.ResponseRecorder) settings.D
 	return got.Discord
 }
 
-// TestSettingsGetNeverExposesDiscordBotToken is the headline P2 guard: the
-// Discord bot token is a WRITE-ONLY secret, so GET /api/settings must never
-// serialize the real value — under EITHER ownership.
+// TestSettingsGetNeverExposesDiscordBotToken is the headline secrecy guard:
+// the Discord bot token is a WRITE-ONLY secret, so GET /api/settings must
+// never serialize the real value — under EITHER ownership.
 //
 // Env-managed was already hidden (uiBotToken). File-managed was not: the
 // dashboard handed the live bot token to every browser that loaded the
@@ -525,16 +525,42 @@ func TestSettingsPostCannotOverrideEnvManagedToken(t *testing.T) {
 	}
 }
 
+// TestSettingsResetCannotClearEnvManagedDiscordToken completes the env
+// ownership rule at this seam: the reset is the ONE writer whose DTO carries
+// an authoritative token, so it is the one that could clear a secret the
+// environment still owns. It must not — the token would come straight back on
+// the next load, while SaveConfig has already dropped the on-disk copy,
+// leaving config and runtime disagreeing about the secret.
+//
+// Pinned here and not only in internal/settings/builder_test.go because the
+// reset reaches ApplyToConfig through a different handler than the save, and
+// a regression on that path would otherwise pass the whole web suite.
+func TestSettingsResetCannotClearEnvManagedDiscordToken(t *testing.T) {
+	srv, cfg := newDiscordTokenServer(t, true)
+
+	rec := resetSettings(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if cfg.Discord.BotToken != discordTokenSentinel {
+		t.Errorf("reset cleared the env-managed token: %q", cfg.Discord.BotToken)
+	}
+	if strings.Contains(rec.Body.String(), discordTokenSentinel) {
+		t.Errorf("POST /api/settings/reset leaked the env-managed token in its body")
+	}
+}
+
 // TestSettingsResetClearsFileManagedDiscordToken PINS the pre-existing reset
-// semantics, unchanged by P2: "Reset to defaults" rebuilds the DTO from
-// config defaults, whose Discord block is entirely empty, and that reset
-// genuinely clears a file-managed token.
+// semantics, unchanged by the write-only rule: "Reset to defaults" rebuilds
+// the DTO from config defaults, whose Discord block is entirely empty, and
+// that reset genuinely clears a file-managed token.
 //
 // This is the constraint that rules out the obvious one-line fix. Preservation
 // cannot simply be "an empty token means keep the current one", because the
 // reset posts an empty token too and must keep clearing it. The two intents
-// have to be distinguishable, and this test is what stops P2 from silently
-// turning "Reset to defaults" into a reset that leaves the secret behind.
+// have to be distinguishable, and this test is what stops the secrecy work
+// from silently turning "Reset to defaults" into a reset that leaves the
+// secret behind.
 func TestSettingsResetClearsFileManagedDiscordToken(t *testing.T) {
 	srv, cfg := newDiscordTokenServer(t, false)
 
