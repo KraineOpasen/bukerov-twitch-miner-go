@@ -431,6 +431,12 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 // the very same object, with the very same contents, and the canary/progress
 // watchdog are never reached. configPath == "" is the existing documented
 // no-op-success case (no config file configured).
+//
+// Unlike applySettingsNoRename (an internal coordinator whose public
+// wrapper, ApplySettings, is the one place that logs a failure — see its
+// doc comment), ApplyHealthSettings has no separate outer wrapper: it IS
+// the public entry point the web handler calls directly, so a save failure
+// is logged here, not silently left to the caller.
 func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
 	m.mu.Lock()
 	candidate := m.cloneConfigLocked()
@@ -440,12 +446,21 @@ func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
 	if m.configPath != "" {
 		if err := config.SaveConfig(m.configPath, candidate); err != nil {
 			m.mu.Unlock()
+			slog.Error("Health settings apply rejected; no changes were made", "error", err)
 			return fmt.Errorf("health settings apply rejected; no changes were made: %w", err)
 		}
 	}
 	m.config = candidate
 	m.mu.Unlock()
 
+	// Load-bearing ordering: this must stay strictly after the SaveConfig
+	// success path above (both returns on failure happen before this point).
+	// internal/health's Canary/ProgressWatchdog keep cfg unexported with no
+	// synchronous exported observer, so a regression here — e.g. hoisting
+	// these calls above the save/lock section — cannot be caught by a
+	// dynamic test from this package; it can only be caught by keeping this
+	// function's control flow this simple (a single early return on the
+	// failure path) and by review.
 	if m.canary != nil {
 		m.canary.UpdateSettings(healthCanaryConfig(applied))
 	}
