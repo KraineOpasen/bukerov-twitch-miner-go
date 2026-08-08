@@ -92,9 +92,12 @@ func (f *f3Health) HealthSnapshot() health.Snapshot {
 		},
 	}
 }
-func (f *f3Health) RunCanaryNow()                                 {}
-func (f *f3Health) CurrentHealthSettings() config.HealthSettings  { return f.settings }
-func (f *f3Health) ApplyHealthSettings(cfg config.HealthSettings) { f.settings = cfg }
+func (f *f3Health) RunCanaryNow()                                {}
+func (f *f3Health) CurrentHealthSettings() config.HealthSettings { return f.settings }
+func (f *f3Health) ApplyHealthSettings(cfg config.HealthSettings) error {
+	f.settings = cfg
+	return nil
+}
 
 type f3Progress struct{}
 

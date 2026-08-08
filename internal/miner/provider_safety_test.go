@@ -217,7 +217,15 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		{"SetDropRule", func(*testing.T) { m.SetDropRule("some-reward-key", config.DropRule{}) }},
 		{"HealthSnapshot", func(*testing.T) { m.HealthSnapshot() }},
 		{"CurrentHealthSettings", func(*testing.T) { m.CurrentHealthSettings() }},
-		{"ApplyHealthSettings", func(*testing.T) { m.ApplyHealthSettings(m.CurrentHealthSettings()) }},
+		{"ApplyHealthSettings", func(t *testing.T) {
+			// newStartupCleanupMiner constructs this Miner with configPath ==
+			// "" (see startup_cleanup_test.go), which ApplyHealthSettings
+			// documents as an unconditional no-op success — deterministically
+			// nil here, not just "some sane result".
+			if err := m.ApplyHealthSettings(m.CurrentHealthSettings()); err != nil {
+				t.Errorf("ApplyHealthSettings after teardown = %v, want nil (configPath is empty, a documented no-op-success case)", err)
+			}
+		}},
 		{"GetGameIdentity (blank name, no network)", func(t *testing.T) {
 			id, err := m.client.GetGameIdentity("   ")
 			if err != nil {

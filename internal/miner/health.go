@@ -419,27 +419,66 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 	return m.config.Health
 }
 
-// ApplyHealthSettings validates, applies (runtime, no restart), and persists new
-// canary settings.
-func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
+// ApplyHealthSettings validates, durably persists, and — only once that write
+// has actually succeeded — applies new canary/watchdog settings to the live
+// config and the running canary/progress watchdog (no restart).
+//
+// Persistence is the commit point: this builds a candidate off
+// cloneConfigLocked() and never touches the live m.config until
+// config.SaveConfig on the candidate has succeeded, mirroring the discipline
+// applySettingsNoRename (miner.go) already uses for the general settings
+// path. A save failure returns the error and leaves m.config the very same
+// object, with the very same contents; the canary/watchdog are never
+// reached. This function has no separate outer wrapper the way ApplySettings
+// has — it IS the public entry point the web handler calls directly, so a
+// save failure is logged here rather than left to the caller.
+// configPath == "" stays the existing documented no-op-persist case (no
+// config file configured) and still hot-applies the validated settings to
+// the live config and to the canary/watchdog.
+//
+// healthApplyMu (Miner struct, miner.go) serializes this entire sequence —
+// the m.mu-guarded commit AND both dependent notifications — end to end
+// across concurrent callers, so two overlapping applies can never publish
+// m.config/config.json at one update while notifying the canary/watchdog of
+// another.
+func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
+	m.healthApplyMu.Lock()
+	defer m.healthApplyMu.Unlock()
+
 	m.mu.Lock()
-	m.config.Health = s
-	config.ValidateConfig(m.config)
-	applied := m.config.Health
+	candidate := m.cloneConfigLocked()
+	candidate.Health = s
+	config.ValidateConfig(candidate)
+	applied := candidate.Health
 	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
-			slog.Error("Failed to save config", "error", err)
+		if err := config.SaveConfig(m.configPath, candidate); err != nil {
+			m.mu.Unlock()
+			slog.Error("Health settings apply rejected; no changes were made", "error", err)
+			return fmt.Errorf("health settings apply rejected; no changes were made: %w", err)
 		}
 	}
+	m.config = candidate
 	m.mu.Unlock()
 
-	if m.canary != nil {
+	// Load-bearing ordering: this must stay strictly after the SaveConfig
+	// success path above (both return points on failure sit before this
+	// line, and both sit before healthApplyMu is released by the deferred
+	// Unlock above). healthCanaryUpdate/healthWatchdogUpdate default (nil) to
+	// the real canary/progressWatchdog calls; tests inject a spy to observe
+	// this call — see the seam fields' doc comment on the Miner struct
+	// (miner.go).
+	if m.healthCanaryUpdate != nil {
+		m.healthCanaryUpdate(healthCanaryConfig(applied))
+	} else if m.canary != nil {
 		m.canary.UpdateSettings(healthCanaryConfig(applied))
 	}
-	if m.progressWatchdog != nil {
+	if m.healthWatchdogUpdate != nil {
+		m.healthWatchdogUpdate(healthWatchdogConfig(applied))
+	} else if m.progressWatchdog != nil {
 		m.progressWatchdog.UpdateSettings(healthWatchdogConfig(applied))
 	}
 	slog.Info("Health settings updated",
 		"canaryEnabled", applied.CanaryEnabled, "canaryChannel", applied.CanaryChannel,
 		"watchdogEnabled", applied.WatchdogEnabled)
+	return nil
 }
