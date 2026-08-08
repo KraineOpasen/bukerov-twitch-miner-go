@@ -2390,11 +2390,14 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 	// Config surgery for each planned rename: update the entry's Username in
 	// place (settings pointer untouched) and stamp ChannelID, then backfill
 	// ChannelID onto every OTHER entry from this SAME plan's resolution — all
-	// on the candidate, still before any durable or runtime commit. This
-	// early pass also touches candidate.AutoRedeem, but that result is
-	// discarded: the commit-point refreshCandidateAutoRedeemLocked below
-	// replaces candidate.AutoRedeem wholesale from the LIVE map — see
-	// applyConfigRenames' doc comment (rename_reconcile.go).
+	// on the candidate, still before any durable or runtime commit. This is
+	// only the PLAN half of the two-source stamping the other two paths do;
+	// the roster half cannot run here (it must hold m.mu) and runs at the
+	// commit point below. This early pass also touches candidate.AutoRedeem,
+	// but that result is discarded: the commit-point
+	// refreshCandidateAutoRedeemLocked below replaces candidate.AutoRedeem
+	// wholesale from the LIVE map — see applyConfigRenames' doc comment
+	// (rename_reconcile.go).
 	applyConfigRenames(candidate, plannedRenames)
 	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
 
@@ -2462,6 +2465,19 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 	}
 	m.mu.Lock()
 	clashes := m.refreshCandidateAutoRedeemLocked(candidate, plannedRenames, removedLogins)
+	// The ROSTER half of the two-source ChannelID stamping, for the reason
+	// applySettingsNoRename's step 2 records. The plan half already ran
+	// off-lock above, coupled to applyConfigRenames; this half must read the
+	// roster under m.mu (m.mu -> streamer.Manager.mu, the documented order)
+	// and so belongs here, where it also sees the roster as of the write
+	// rather than as of before the unlocked admission/analytics I/O. It covers
+	// the one entry this plan's own resolution cannot: a RETAINED streamer
+	// whose resolution failed this cycle. CommitPlan has not repointed the
+	// roster yet, so the renamed streamer is still keyed under its OLD login
+	// here — an inert key: backfillChannelIDs only fills entries ALREADY in
+	// the candidate, and applyConfigRenames leaves none under that login, even
+	// when this same apply re-adds it (its both-exist branch coalesces first).
+	backfillChannelIDs(candidate, channelIDsByLogin(m.streamers.All()))
 	if configPath != "" {
 		if err := config.SaveConfig(configPath, candidate); err != nil {
 			m.mu.Unlock()
