@@ -12,6 +12,13 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 )
 
+// healthPartialMarker is a stable, non-localized structural marker from the
+// health_center partial's root element (templates/partials/health.html) —
+// present in any rendering of it regardless of language, used to tell "the
+// partial rendered" from "an error body was written instead" without
+// depending on translated text.
+const healthPartialMarker = `class="health-grid`
+
 // healthPersistenceFakeProvider is a HealthProvider whose ApplyHealthSettings
 // outcome the test fully controls (success or a specific error), so the
 // HTTP-layer error-propagation contract of POST /api/health/settings can be
@@ -95,6 +102,14 @@ func TestHandleAPIHealthSettingsApplyFailureReturnsNonSuccess(t *testing.T) {
 	if got := provider.CurrentHealthSettings(); got.CanaryChannel != "before_channel" {
 		t.Errorf("provider settings changed despite the reported apply failure: got %+v", got)
 	}
+	// The error path must go through writeInternalError, never fall through
+	// to renderHealthPartial (see health_center's root element in
+	// templates/partials/health.html) — belt-and-suspenders alongside the
+	// status-code check above, in case a future change starts writing 200
+	// with an error body or vice versa.
+	if strings.Contains(rec.Body.String(), healthPartialMarker) {
+		t.Errorf("error response body contains the health partial marker %q; the partial must not render on a persistence failure: body=%q", healthPartialMarker, rec.Body.String())
+	}
 }
 
 // TestHandleAPIHealthSettingsApplySuccessRendersPartial preserves the
@@ -122,6 +137,9 @@ func TestHandleAPIHealthSettingsApplySuccessRendersPartial(t *testing.T) {
 	}
 	if provider.lastApplied.CanaryChannel != "after_channel" {
 		t.Errorf("applied CanaryChannel = %q, want after_channel", provider.lastApplied.CanaryChannel)
+	}
+	if !strings.Contains(rec.Body.String(), healthPartialMarker) {
+		t.Errorf("success response body missing the health partial marker %q; the partial must render on a successful apply: body=%q", healthPartialMarker, rec.Body.String())
 	}
 }
 
