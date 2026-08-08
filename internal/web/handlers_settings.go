@@ -81,6 +81,12 @@ func (s *Server) writeSettingsConflict(w http.ResponseWriter, r *http.Request) {
 // is reached. This is the same read-modify-write hazard healthFormMu closes
 // for the health forms, at the seam that owns the settings equivalent.
 //
+// EVERY settings writer that has this shape must take it, or the hazard stays
+// open across endpoints rather than being closed: POST /api/settings, POST
+// /api/settings/reset, and the Overview card quick action
+// (handleAPIStreamerQuickAction) are the full set. GET /api/settings does not
+// mutate and is deliberately excluded (see below).
+//
 // Lock order: settingsTxnMu -> s.mu, never the reverse. The transaction holds
 // settingsTxnMu across the apply callback, which re-enters this Server
 // (AttachStreamers/SetDiscordEnabled) and takes s.mu there; s.mu is never

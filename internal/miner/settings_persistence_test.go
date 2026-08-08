@@ -25,18 +25,17 @@ import (
 //
 // The persistence failure is induced with breakConfigPathForNextSave — the
 // same deterministic seam the rename path's C2-B matrix test already uses —
-// so a real config.json is written first and can be read back afterwards to
-// prove the ON-DISK state is untouched too.
+// which replaces a real config.json with a directory so SaveConfig fails at
+// its atomic rename. Note what that seam can and cannot prove about disk:
+// the original file is gone by the time the apply runs, so there are no
+// original bytes left to compare against; the observable property is that no
+// NEW config content was ever written (see the disk assertion below).
 func TestApplySettingsNoRenamePersistFailureIsReportedAndMutatesNothing(t *testing.T) {
 	m, topics, chat := newCapabilityMiner(t, "alpha", "beta")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	m.configPath = configPath
 	if err := config.SaveConfig(configPath, m.config); err != nil {
 		t.Fatalf("seed config: %v", err)
-	}
-	onDiskBefore, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read seeded config: %v", err)
 	}
 	breakConfigPathForNextSave(t, configPath)
 
@@ -79,20 +78,22 @@ func TestApplySettingsNoRenamePersistFailureIsReportedAndMutatesNothing(t *testi
 		t.Errorf("chat presence was reconciled despite the persistence failure: %d ToggleChat calls for alpha", n)
 	}
 
-	// And nothing may have reached disk: restoring the path back to a plain
-	// file must reveal exactly the bytes that were there before the apply.
-	if err := os.Remove(configPath); err != nil {
-		t.Fatalf("unbreak config path: %v", err)
-	}
-	if err := os.WriteFile(configPath, onDiskBefore, 0o600); err != nil {
-		t.Fatalf("restore config: %v", err)
-	}
-	reloaded, err := config.LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if reloaded.Logger.ConsoleLevel != consoleBefore {
-		t.Errorf("on-disk config changed despite the persistence failure: Logger.ConsoleLevel = %q, want %q", reloaded.Logger.ConsoleLevel, consoleBefore)
+	// And no new content may have reached disk. The path breakConfigPathForNextSave
+	// installed (a directory) must still BE that directory: config.SaveConfig
+	// writes via WriteFileAtomic, whose failing os.Rename is the step that
+	// would have replaced the path with a regular file, so "still a directory"
+	// is exactly "nothing was written". This is the same assertion the rename
+	// and removal paths' own SaveConfig-failure tests make
+	// (cp1_c2_matrix_test.go, srap_test.go).
+	//
+	// Deliberately NOT asserted: byte-for-byte preservation of the previous
+	// config.json. This seam removes that file to install the failure, so an
+	// assertion phrased that way could only pass by restoring the captured
+	// bytes itself and reading them back — which proves nothing about the
+	// apply.
+	info, statErr := os.Stat(configPath)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("configPath must still be the untouched directory this test installed (no new config content was ever written): stat=%v, err=%v", info, statErr)
 	}
 }
 

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -120,6 +121,121 @@ func TestSettingsPostConcurrentPartialBodiesKeepBothChanges(t *testing.T) {
 	}
 	if gotDaysAgo != 3 {
 		t.Errorf("request B's change was lost: Analytics.DaysAgo = %d, want 3", gotDaysAgo)
+	}
+}
+
+// TestQuickActionAndSettingsPostConcurrentKeepBothChanges is the CROSS-WRITER
+// half of the BLOCK-5 guard. The Overview card quick action is a third
+// settings writer with the same read-modify-write shape as the Settings-page
+// save — GetRuntimeSettings, change one per-streamer field, hand the merged
+// whole to the apply callback — so serializing only the two /api/settings
+// entry points leaves the hazard fully open across the two endpoints: a card
+// toggle and a Settings-page POST that overlap both merge onto the same stale
+// snapshot, and whichever applies last reverts the other. That is a lost
+// update between DISJOINT keys (one per-streamer field vs. one non-streamer
+// analytics field), which is why both must survive.
+//
+// Same barrier discipline as the test above — channel rendezvous only, no
+// sleep and no wall-clock wait, and neither branch can stall:
+//
+//   - The QUICK ACTION is started first and parks INSIDE its apply callback,
+//     in the window between "it has read the snapshot and mutated" and "it has
+//     published", so it is guaranteed to apply LAST and thus be the writer
+//     whose stale snapshot would do the reverting.
+//   - Only then is the settings POST started. With the quick action inside the
+//     transaction the POST cannot reach its snapshot read at all and reports
+//     from the lock's contention seam (bContended); without it the POST sails
+//     through, reads the stale snapshot and applies (bApplied). Either signal
+//     releases the quick action, so the test converges in both worlds and
+//     asserts the same thing in both.
+func TestQuickActionAndSettingsPostConcurrentKeepBothChanges(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Username = "tester"
+	cfg.Streamers = []config.StreamerConfig{{Username: "alpha"}}
+	cfg.Analytics.DaysAgo = 7
+
+	// cfgMu guards cfg itself, exactly as in the test above: the two requests
+	// genuinely run concurrently, and it is deliberately NOT the thing under
+	// test — held only around each individual read or apply, it leaves the
+	// read-modify-write window between them wide open.
+	var cfgMu sync.Mutex
+	readSettings := func() settings.RuntimeSettings {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		return settings.BuildRuntimeSettings(&cfg)
+	}
+
+	quickInApply := make(chan struct{})
+	postContended := make(chan struct{})
+	postApplied := make(chan struct{})
+	var applies int
+
+	srv := &Server{settingsProvider: &funcSettingsProvider{get: readSettings}}
+	srv.settingsTxnContended = func() { close(postContended) }
+	srv.onSettingsUpdate = func(ctx context.Context, rt settings.RuntimeSettings) error {
+		cfgMu.Lock()
+		first := applies == 0
+		applies++
+		cfgMu.Unlock()
+
+		if first {
+			// This is the quick action: it has read and mutated, but has
+			// published nothing yet. Open the window, then let the POST decide
+			// how it ends.
+			close(quickInApply)
+			select {
+			case <-postContended:
+			case <-postApplied:
+			}
+		}
+
+		cfgMu.Lock()
+		settings.ApplyToConfig(&cfg, rt)
+		cfgMu.Unlock()
+
+		if !first {
+			close(postApplied)
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/streamer-action/alpha", strings.NewReader(`{"action":"toggle-watch"}`))
+		srv.handleAPIStreamerQuickAction(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("quick action status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+	}()
+
+	<-quickInApply
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if rec := postSettings(t, srv, `{"analytics":{"daysAgo":3}}`); rec.Code != http.StatusOK {
+			t.Errorf("settings POST status = %d, want 200", rec.Code)
+		}
+	}()
+
+	wg.Wait()
+
+	cfgMu.Lock()
+	gotDaysAgo := cfg.Analytics.DaysAgo
+	var gotDisableWatch bool
+	if len(cfg.Streamers) == 1 && cfg.Streamers[0].Settings != nil {
+		gotDisableWatch = cfg.Streamers[0].Settings.DisableWatch
+	}
+	cfgMu.Unlock()
+
+	if !gotDisableWatch {
+		t.Errorf("the quick action's change was lost: alpha DisableWatch = %v, want true", gotDisableWatch)
+	}
+	if gotDaysAgo != 3 {
+		t.Errorf("the settings POST's change was lost: Analytics.DaysAgo = %d, want 3", gotDaysAgo)
 	}
 }
 

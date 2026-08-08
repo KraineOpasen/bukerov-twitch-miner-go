@@ -232,7 +232,9 @@ type Server struct {
 
 	// settingsTxnMu serializes the whole settings mutation transaction —
 	// snapshot read, partial-body merge, apply callback, success bookkeeping
-	// — for POST /api/settings and POST /api/settings/reset. See
+	// — for POST /api/settings, POST /api/settings/reset and the Overview
+	// card quick action (POST /api/streamer-action/{name}), which is the same
+	// read-modify-write against the same pipeline. See
 	// beginSettingsTxn (handlers_settings.go) for why the snapshot read has
 	// to be inside it, and for the lock order. GET /api/settings deliberately
 	// does NOT take it: a reader wants the current published state, and
