@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
@@ -101,6 +102,14 @@ func s53cDataOvAttrs(body string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// s53cClaimAgeRe matches the SHAPE buildOverviewClaim gives a claim's age — a
+// util.FormatDuration value followed by the localized "ago" word. Asserting the
+// shape (rather than a concrete "0s ago") keeps the check independent of how
+// long the test itself takes to run, while still failing on an empty, zero-less
+// or unformatted age; the concrete value is pinned separately from an event
+// with an explicit, known timestamp.
+var s53cClaimAgeRe = regexp.MustCompile(`^[0-9]+[smhd] \S+$`)
 
 // s53cHealthProvider is a health provider whose snapshot the test controls.
 type s53cHealthProvider struct{ snap health.Snapshot }
@@ -548,6 +557,79 @@ func TestS5_3CPredictionsKPIUnknownNeverBecomesZero(t *testing.T) {
 	}
 }
 
+// s53cUnknownKPIValue extracts the full rendered element for ONE unknown
+// predictions figure — the data-ov-pred-<name>="unknown" span through its own
+// matching closing tag — by walking that element's <span>/</span> nesting. Its
+// accessibility assertions are then made against that element alone, so no
+// similar-looking markup elsewhere on the page (another figure, another dash)
+// can satisfy them, and no child ordering is baked in.
+func s53cUnknownKPIValue(t *testing.T, body, attr string) string {
+	t.Helper()
+	open := `<span class="num" data-ov-pred-` + attr + `="unknown">`
+	at := strings.Index(body, open)
+	if at < 0 {
+		t.Fatalf("no unknown %s figure rendered (looked for %s); body=%s", attr, open, body)
+	}
+
+	depth, i := 1, at+len(open)
+	for depth > 0 {
+		nested := strings.Index(body[i:], "<span")
+		closed := strings.Index(body[i:], "</span>")
+		if closed < 0 {
+			t.Fatalf("the unknown %s figure element is never closed; body=%s", attr, body[at:])
+		}
+		if nested >= 0 && nested < closed {
+			depth++
+			i += nested + len("<span")
+			continue
+		}
+		depth--
+		i += closed + len("</span>")
+	}
+	return body[at:i]
+}
+
+// TestS5_3CUnknownKPIValuesExposeNoDataToAssistiveTech: an unknown figure shows
+// a dash to sighted readers, but a dash is not an accessible NAME — a bare span
+// carries no ARIA role, so an aria-label on it is not reliably announced and the
+// only text content ("—") announces as "dash" or as nothing at all. Each unknown
+// figure therefore hides its dash from assistive technology and carries the
+// translated "no data" wording as real text, in BOTH languages.
+func TestS5_3CUnknownKPIValuesExposeNoDataToAssistiveTech(t *testing.T) {
+	for _, lang := range []string{"en", "ru"} {
+		t.Run(lang, func(t *testing.T) {
+			srv, _, _ := newOverviewTestServer(t)
+			srv.SetOverviewProvider(nil) // unreachable board: all three figures unknown
+			body := s53cPageFor(t, srv, lang)
+			noData := s53T(t, lang, "queue.slot.no_data")
+			if noData == "" || noData == "queue.slot.no_data" {
+				t.Fatalf("[%s] queue.slot.no_data must resolve to real text, got %q", lang, noData)
+			}
+
+			for _, attr := range []string{"active", "today", "winrate"} {
+				el := s53cUnknownKPIValue(t, body, attr)
+
+				// The dash stays VISIBLE — this is not a "drop the dash" fix.
+				if !strings.Contains(el, "—") {
+					t.Errorf("[%s] unknown %s figure no longer shows the em dash; el=%s", lang, attr, el)
+				}
+				// ...but it is hidden from assistive technology.
+				if !strings.Contains(el, `<span aria-hidden="true">—</span>`) {
+					t.Errorf("[%s] unknown %s figure must hide its em dash from assistive technology; el=%s", lang, attr, el)
+				}
+				// ...and the meaning is exposed as real, translated text rather
+				// than as an aria-label on a role-less span.
+				if !strings.Contains(el, `<span class="visually-hidden">`+noData+`</span>`) {
+					t.Errorf("[%s] unknown %s figure must expose the translated %q meaning as visually-hidden text; el=%s", lang, attr, noData, el)
+				}
+				if strings.Contains(el, "aria-label") {
+					t.Errorf("[%s] unknown %s figure still names itself with an aria-label on a bare span; el=%s", lang, attr, el)
+				}
+			}
+		})
+	}
+}
+
 // TestS5_3CPredictionsKPIProvenZeroStaysZero is the other half of the numeric
 // contract: a reachable board with no rounds is a PROVEN zero and must render 0.
 func TestS5_3CPredictionsKPIProvenZeroStaysZero(t *testing.T) {
@@ -630,24 +712,62 @@ func TestS5_3CClaimsRegionIsEvidenceGated(t *testing.T) {
 	})
 
 	t.Run("wired to the live event evidence", func(t *testing.T) {
-		// Evidence is created the way the product creates it — through the
-		// public events surface drops.go writes a real claim to — and then
-		// read back off the RENDERED page, never off an internal field.
-		srv, _, _ := newOverviewTestServer(t)
-		events.Record(events.TypeDropClaimed, "", "S5-3c Fixture Drop")
+		// Evidence is created the way the product creates it — a real
+		// events.TypeDropClaimed record, read back off the RENDERED region and
+		// never off an internal field — but in a CALLER-OWNED events.Log, not
+		// the process-wide default one. events.Record writes into a package
+		// global with no teardown, so a single call here would leave the claim
+		// in that ring for the remainder of the test binary and silently switch
+		// the claims region on for every later test that renders /overview.
+		// The contract under test is therefore
+		// caller-owned Log -> buildOverviewClaim -> rendered claim region; that
+		// the handler feeds it from events.Recent is wiring, not behaviour, and
+		// is not worth contaminating the process to restate.
+		before := events.Recent(1)
 
-		body := s53cPageFor(t, srv, "en")
+		tr := enTR(t)
+		log := events.NewLog(4)
+		log.Record(events.TypeDropClaimed, "", "S5-3c Fixture Drop")
+
+		claim := buildOverviewClaim(tr, log.Recent(overviewClaimScan))
+		if !claim.Present {
+			t.Fatal("a recorded drop-claim event produced no claim evidence at all")
+		}
+
+		body := s53cRenderLive(t, OverviewPageData{Claim: claim})
 		if !strings.Contains(body, "data-ov-claims") {
 			t.Fatal("a recorded drop-claim event did not render the Overview claims region")
 		}
 		if !strings.Contains(body, "S5-3c Fixture Drop") {
 			t.Error("the rendered claims region does not name the claimed drop")
 		}
-		// The age comes from the event's own timestamp, so it renders as a real
-		// "<duration> ago" phrase rather than an empty span.
-		ago := enTR(t)("common.ago")
-		if !strings.Contains(body, ago) {
-			t.Errorf("the rendered claims region must carry the claim's age (%q) from the event's own timestamp", ago)
+		if !strings.Contains(body, `href="/drops/claims"`) {
+			t.Error("the rendered claims region must link to its claim-history owner /drops/claims")
+		}
+		// The age renders as a real "<duration> ago" phrase, never an empty
+		// span. The value itself is asserted separately below, because how long
+		// THIS test takes to run must never decide whether it passes.
+		ago := tr("common.ago")
+		if !s53cClaimAgeRe.MatchString(claim.Ago) || !strings.HasSuffix(claim.Ago, " "+ago) || !strings.Contains(body, claim.Ago) {
+			t.Errorf("the claims region must render a real age phrase (want /%s/ ending in %q, rendered on the page); got Ago=%q, body=%s", s53cClaimAgeRe, ago, claim.Ago, body)
+		}
+
+		// ...and the age is derived from the EVENT's own timestamp, not from
+		// render time and not from a zero value: an event stamped 90 minutes
+		// ago must render as "1h ago", which neither of those could produce.
+		aged := buildOverviewClaim(tr, []events.Event{{
+			Time: time.Now().Add(-90 * time.Minute), Type: events.TypeDropClaimed, Detail: "S5-3c Aged Drop",
+		}})
+		agedBody := s53cRenderLive(t, OverviewPageData{Claim: aged})
+		if want := "1h " + ago; !strings.Contains(agedBody, want) {
+			t.Errorf("claim age must come from the event's own timestamp (want %q rendered); body=%s", want, agedBody)
+		}
+
+		// The process-wide ring is exactly as it was — same depth, same newest
+		// event — so no later test inherits a claims region from this one.
+		after := events.Recent(1)
+		if len(after) != len(before) || (len(after) == 1 && after[0] != before[0]) {
+			t.Errorf("this test mutated the process-wide events log (newest %v -> %v); it must own its own Log", before, after)
 		}
 	})
 }

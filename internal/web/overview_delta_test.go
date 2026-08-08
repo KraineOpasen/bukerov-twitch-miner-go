@@ -177,12 +177,12 @@ func TestPredictionsState(t *testing.T) {
 		count           int
 		want            string
 	}{
-		{"active with rounds on the board", true, true, 2, "active"},
-		{"idle, provider present, nothing on the board", true, true, 0, "idle"},
-		{"unavailable, no provider", false, true, 0, "unavailable"},
-		{"unavailable, no provider even with a stale count", false, true, 3, "unavailable"},
-		{"unavailable, miner not running", true, false, 0, "unavailable"},
-		{"unavailable, miner not running even with rounds", true, false, 5, "unavailable"},
+		{"active with rounds on the board", true, true, 2, predictionsStateActive},
+		{"idle, provider present, nothing on the board", true, true, 0, predictionsStateIdle},
+		{"unavailable, no provider", false, true, 0, predictionsStateUnavailable},
+		{"unavailable, no provider even with a stale count", false, true, 3, predictionsStateUnavailable},
+		{"unavailable, miner not running", true, false, 0, predictionsStateUnavailable},
+		{"unavailable, miner not running even with rounds", true, false, 5, predictionsStateUnavailable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -508,6 +508,144 @@ func TestOverviewScriptContracts(t *testing.T) {
 	// vendored/local), so this is an absolute assertion.
 	if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
 		t.Error("rendered Overview page must not load any external http(s) resource")
+	}
+}
+
+// ovScriptFunctionBody extracts the body of `function <name>(...) { ... }` from
+// the RENDERED page by matching braces from the function's own opening one, so
+// an assertion can be scoped to that function instead of to the whole page.
+// Brace matching (rather than an indentation or line pattern) is what keeps this
+// off the script's formatting: reflowing the file must never change a contract.
+// Brace counting is deliberately naive about braces inside string literals —
+// there are none in the functions this is used on — so callers must sanity-check
+// the returned slice against landmarks it has to contain, and fail loudly on a
+// mis-extraction rather than let a negative assertion pass on garbage.
+func ovScriptFunctionBody(t *testing.T, body, name string) string {
+	t.Helper()
+	sig := regexp.MustCompile(`function\s+` + regexp.QuoteMeta(name) + `\s*\([^)]*\)\s*\{`)
+	loc := sig.FindStringIndex(body)
+	if loc == nil {
+		t.Fatalf("rendered page declares no function %s(...)", name)
+	}
+	if sig.FindStringIndex(body[loc[1]:]) != nil {
+		t.Fatalf("rendered page declares function %s(...) more than once — extraction is ambiguous", name)
+	}
+	depth := 1
+	for i := loc[1]; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return body[loc[1]:i]
+			}
+		}
+	}
+	t.Fatalf("function %s(...) is never closed in the rendered page", name)
+	return ""
+}
+
+// ovStaleDedupGuardRe matches an early return guarded by an equality comparison
+// of two identifiers — `if (a === b) return;` — capturing BOTH so a test can
+// work out which one is the previous-state cache from what the code does with
+// them, instead of hard-coding the cache's name.
+var ovStaleDedupGuardRe = regexp.MustCompile(`if\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*===\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*return\s*;`)
+
+// TestOverviewStaleClockSkipsRewriteWhenStateUnchanged is the W1 regression
+// guard. tickStale() runs once a second, but #ov-stale-badge is a role="status"
+// live region: rewriting its classes/text/aria-label on a tick where the
+// computed freshness state did NOT change re-announces the very same state to
+// assistive technology every second, which is exactly the announcement spam
+// role="status" exists to avoid.
+//
+// The contract asserted is semantic, not textual: tickStale() keeps a
+// previous-state cache OUTSIDE itself, returns early when the newly computed
+// state equals it, updates it only once past that guard, and performs every DOM
+// write after it. The cache's identifier is captured from the code rather than
+// spelled out here, and no whitespace or formatting is part of the contract.
+func TestOverviewStaleClockSkipsRewriteWhenStateUnchanged(t *testing.T) {
+	srv, _, _ := newOverviewTestServer(t)
+	body := renderDashboardEN(t, srv)
+
+	tick := ovScriptFunctionBody(t, body, "tickStale")
+	// Sanity-check the extraction FIRST: these are the freshness clock's own
+	// landmarks, so their absence means the slice is not tickStale()'s body and
+	// every assertion below would be meaningless. This also keeps the
+	// js.ov.fresh_* client-key usage pinned inside the function that resolves it.
+	for _, landmark := range []string{
+		"staleBadge", "POLL_MS",
+		"t('js.ov.fresh_' + state)", "t('js.ov.fresh_aria')",
+	} {
+		if !strings.Contains(tick, landmark) {
+			t.Fatalf("extracted tickStale() body is missing landmark %q — either the extraction is wrong or the freshness clock was rewritten; body=%s", landmark, tick)
+		}
+	}
+
+	guard := ovStaleDedupGuardRe.FindStringSubmatchIndex(tick)
+	if guard == nil {
+		t.Fatalf("tickStale() has no `if (<state> === <cache>) return;` early return, so an unchanged freshness state still rewrites the role=\"status\" badge on every one-second tick; body=%s", tick)
+	}
+	guardEnd := guard[1]
+	lhs, rhs := tick[guard[2]:guard[3]], tick[guard[4]:guard[5]]
+
+	// Which operand is the CACHE is decided by what the code does, not by its
+	// name: the cache is the one the freshly computed state gets written into.
+	var cache, state string
+	assignAt := -1
+	for _, pair := range [2][2]string{{lhs, rhs}, {rhs, lhs}} {
+		assign := regexp.MustCompile(`\b` + regexp.QuoteMeta(pair[0]) + `\s*=\s*` + regexp.QuoteMeta(pair[1]) + `\s*;`)
+		if at := assign.FindStringIndex(tick); at != nil {
+			cache, state, assignAt = pair[0], pair[1], at[0]
+			break
+		}
+	}
+	if cache == "" {
+		t.Fatalf("neither operand of tickStale()'s `%s === %s` guard is ever assigned the other, so nothing remembers the state last written and the guard can never be true; body=%s", lhs, rhs, tick)
+	}
+
+	// The cache is updated only PAST the guard. A write before it would compare
+	// the newly computed state against itself, and the early return would never
+	// fire on a genuinely unchanged state.
+	if assignAt < guardEnd {
+		t.Errorf("tickStale() writes `%s = %s` at offset %d, before its own de-dup guard ends at %d — the same-state comparison can then never be true", cache, state, assignAt, guardEnd)
+	}
+
+	// ...and so is every DOM write the guard exists to skip.
+	for _, write := range []string{"classList", "textContent", "setAttribute"} {
+		at := strings.Index(tick, write)
+		if at < 0 {
+			t.Errorf("tickStale() performs no %q DOM write at all — the de-dup guard has nothing left to protect", write)
+			continue
+		}
+		if at < guardEnd {
+			t.Errorf("tickStale() performs a %q DOM write at offset %d, before the same-state early return at %d — an unchanged state still rewrites the badge", write, at, guardEnd)
+		}
+	}
+
+	// The cache must live OUTSIDE tickStale(): a per-call declaration is reset
+	// on every tick, so the comparison would always be against a fresh initial
+	// value and the guard would never fire however correct it looks.
+	decl := regexp.MustCompile(`\b(?:var|let|const)\s+` + regexp.QuoteMeta(cache) + `\b`)
+	if decl.MatchString(tick) {
+		t.Errorf("the previous-state cache %s is declared INSIDE tickStale(), so it is discarded on every tick and the de-dup guard can never fire", cache)
+	}
+	if !decl.MatchString(body) {
+		t.Errorf("the previous-state cache %s is never declared in the rendered script", cache)
+	}
+
+	// Non-vacuity: the element the guard protects really is a live region — that
+	// is the entire reason an unchanged state must not be rewritten — and the
+	// baseline anchor that feeds this clock is still wired in.
+	badge := regexp.MustCompile(`<[a-z]+[^>]*id="ov-stale-badge"[^>]*>`).FindString(body)
+	if badge == "" {
+		t.Fatal("#ov-stale-badge is not rendered, so tickStale() writes to nothing and this guard is vacuous")
+	}
+	if !strings.Contains(badge, `role="status"`) {
+		t.Errorf(`#ov-stale-badge must still carry role="status" — without a live region there is nothing for the de-dup guard to protect; tag=%s`, badge)
+	}
+	if !strings.Contains(body, "resetStaleBaseline") {
+		t.Error("resetStaleBaseline — the data-generated clamp that anchors this clock — is no longer in the rendered script")
 	}
 }
 

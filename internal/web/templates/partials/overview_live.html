@@ -76,22 +76,32 @@
             <span>{{.PredictionsKPI.StateLabel}}</span>
         </span>
     </div>
+    {{/* Each unknown figure renders the em dash for sighted readers and the
+         translated "no data" wording for assistive technology. The dash is
+         aria-hidden (it announces as "dash", or as nothing at all) and the
+         meaning is carried by real text in a .visually-hidden span rather than
+         by an aria-label on a bare <span>: a generic span has no ARIA role, so
+         several screen readers ignore aria-label on it entirely and the honest
+         "no data" meaning would simply be lost. Same aria-hidden-dash +
+         separate-label shape the c11 progress component already uses; the
+         data-ov-pred-* attribute stays on the outer element it has always been
+         on. */}}
     <div class="health-card-row flex items-center gap-4 flex-wrap">
         <span class="type-small text-text-secondary">
             {{ t "ov.pred.active" }}
             {{if .PredictionsKPI.Available}}
             <span class="num text-neutral-100" data-ov-pred-active="{{.PredictionsKPI.ActiveCount}}">{{.PredictionsKPI.ActiveCount}}</span>
             {{else}}
-            <span class="num" data-ov-pred-active="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+            <span class="num" data-ov-pred-active="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
             {{end}}
         </span>
         <span class="type-small text-text-secondary">
             {{ t "ov.today" }}
-            <span class="num" data-ov-pred-today="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+            <span class="num" data-ov-pred-today="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
         </span>
         <span class="type-small text-text-secondary">
             {{ t "ov.pred.win_rate" }}
-            <span class="num" data-ov-pred-winrate="unknown" aria-label="{{ t "queue.slot.no_data" }}">—</span>
+            <span class="num" data-ov-pred-winrate="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
         </span>
         <a href="/statistics" class="type-small hover:underline">{{ t "ov.pred.roi_link" }} →</a>
     </div>

@@ -119,8 +119,18 @@ func TestOverviewClaimEscapesHostileText(t *testing.T) {
 	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
 		t.Fatalf("render overview_live: %v", err)
 	}
-	if strings.Contains(buf.String(), "<script>alert(3)</script>") {
+	out := buf.String()
+	if strings.Contains(out, "<script>alert(3)</script>") {
 		t.Error("claim region rendered unescaped HTML")
+	}
+	// The other half: the detail is ESCAPED, not dropped. Without this, the ban
+	// above would pass just as happily on a template that stopped rendering the
+	// claim detail at all — which is not an escaping guarantee.
+	if !strings.Contains(out, "data-ov-claims") {
+		t.Fatal("the claims region did not render at all, so the escaping assertion is vacuous")
+	}
+	if !strings.Contains(out, "&lt;script&gt;alert(3)&lt;/script&gt;") {
+		t.Errorf("claim region must still render the hostile detail, HTML-escaped; out=%s", out)
 	}
 }
 
@@ -217,6 +227,32 @@ func TestRenderOverviewTemplatesEnglish(t *testing.T) {
 	}
 	if strings.Contains(out, "Клеймы") || strings.Contains(out, "Состояние системы") {
 		t.Errorf("english render leaked Russian text")
+	}
+	// Two of the keys above cannot be proven by the loop alone: "ov.pred.active"
+	// contains the substring "active" and "ov.today" contains "today", and the
+	// rendered page carries data-ov-pred-active / data-ov-pred-today attributes
+	// that contain them too. So neither an unresolved key nor a missing English
+	// entry can be detected by looking for the expected English words — each has
+	// to be banned in the form it would actually take:
+	//
+	//   - missing from BOTH catalogs -> i18n.T's last resort renders the raw key;
+	//   - missing from en.json only  -> i18n.T falls back lang -> default, so the
+	//     page renders the RUSSIAN text in an English render.
+	//
+	// The Russian value is read from the catalog rather than spelled out here, so
+	// this stays correct when a translation is reworded.
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	for _, key := range []string{"ov.pred.active", "ov.today"} {
+		if strings.Contains(out, key) {
+			t.Errorf("english overview_live rendered the unresolved key %q instead of its translation", key)
+		}
+		ru := loc.T(i18n.LangRU, key)
+		if ru != key && strings.Contains(out, ru) {
+			t.Errorf("english overview_live rendered the Russian text %q for %q — the English catalog entry is missing and i18n.T fell back to the default language", ru, key)
+		}
 	}
 }
 

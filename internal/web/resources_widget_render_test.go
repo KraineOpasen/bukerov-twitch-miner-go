@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,10 @@ func renderOverview(t *testing.T, lang string) string {
 }
 
 // renderSystemStatus renders /system/status, the sole owner of host resources.
+// It goes through the registered mux rather than calling handleSystemStatusPage
+// directly, so the ownership assertions below cover ROUTE registration too: a
+// /system/status route that is renamed or dropped would otherwise keep passing
+// them, since a direct handler call ignores the request path entirely.
 func renderSystemStatus(t *testing.T, lang string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/system/status", nil)
@@ -32,7 +37,7 @@ func renderSystemStatus(t *testing.T, lang string) string {
 		req.AddCookie(&http.Cookie{Name: langCookieName, Value: lang})
 	}
 	rec := httptest.NewRecorder()
-	newRenderServer(t).handleSystemStatusPage(rec, req)
+	newRenderServer(t).handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /system/status = %d, want 200", rec.Code)
 	}
@@ -86,6 +91,16 @@ func TestResourceLabelsLocalizeOnTheirOwnerPage(t *testing.T) {
 	}
 }
 
+// topBarLangGroupRe matches the actual RU/EN language switcher: one role="group"
+// element holding the two /api/lang buttons with their visible labels. \s* keeps
+// whitespace out of the contract, so this is a structural assertion rather than
+// a byte-exact snapshot of the rendered markup.
+var topBarLangGroupRe = regexp.MustCompile(
+	`<div[^>]*role="group"[^>]*>\s*` +
+		`<button[^>]*hx-vals='\{"lang":"ru"\}'[^>]*>RU</button>\s*` +
+		`<button[^>]*hx-vals='\{"lang":"en"\}'[^>]*>EN</button>\s*` +
+		`</div>`)
+
 // TestTopBarWidgetBlockEmptyOnEveryPage: with the Overview's topbar_widgets
 // override gone, EVERY page (Overview included) now falls back to base.html's
 // empty default, so the top-bar language-switcher row is identical everywhere.
@@ -105,11 +120,34 @@ func TestTopBarWidgetBlockEmptyOnEveryPage(t *testing.T) {
 		if i < 0 {
 			t.Fatalf("%s page missing the top-bar row", name)
 		}
-		// Nothing is injected between the row's opening tag and the RU/EN
-		// group that follows it: the block renders empty on both pages.
-		rest := strings.TrimLeft(body[i+len(row):], " \t\r\n")
-		if !strings.HasPrefix(rest, "<div") {
-			t.Errorf("%s page injects content into the top-bar widget block", name)
+		end := strings.Index(body[i:], "</header>")
+		if end < 0 {
+			t.Fatalf("%s page: the top-bar row is not inside a closed <header>", name)
+		}
+		inner := body[i+len(row) : i+end]
+
+		// The widget block renders EMPTY, so the first thing inside the row is
+		// base.html's OWN theme-toggle group — identified by its id, not by
+		// "some <div>", which any injected widget would satisfy just as well.
+		lt := strings.IndexByte(inner, '<')
+		if lt < 0 {
+			t.Fatalf("%s page: the top-bar row contains no elements at all; inner=%q", name, inner)
+		}
+		if pre := strings.TrimSpace(inner[:lt]); pre != "" {
+			t.Errorf("%s page injects the text %q into the top-bar widget block", name, pre)
+		}
+		gt := strings.IndexByte(inner[lt:], '>')
+		if gt < 0 {
+			t.Fatalf("%s page: the first element inside the top-bar row is never closed; inner=%q", name, inner[lt:])
+		}
+		if boundary := inner[lt : lt+gt+1]; !strings.Contains(boundary, `id="theme-toggle"`) {
+			t.Errorf("%s page: the first element after the top-bar widget block is %s, want base.html's own #theme-toggle group — an injected widget would take exactly this position", name, boundary)
+		}
+
+		// ...and the RU/EN switcher itself is the expected language group, so
+		// this can never pass on a row that renders arbitrary markup instead.
+		if !topBarLangGroupRe.MatchString(inner) {
+			t.Errorf("%s page: the top-bar row does not render the expected RU/EN language group; inner=%s", name, inner)
 		}
 	}
 }
