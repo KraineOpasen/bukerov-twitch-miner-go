@@ -54,6 +54,19 @@ func (s *Server) handleAPIStreamerQuickAction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A quick action is the same read-modify-write as every other settings
+	// mutation — read the CURRENT settings, change one per-streamer field,
+	// hand the merged WHOLE back to the apply callback, which replaces the
+	// config wholesale — so it joins the SAME transaction the Settings-page
+	// save and the reset use (see beginSettingsTxn, handlers_settings.go).
+	// Outside it, a card toggle and a Settings-page POST that overlap both
+	// merge onto the same stale snapshot, and whichever applies last silently
+	// reverts the other even when the two touch entirely disjoint keys.
+	// The body decode above deliberately stays OUTSIDE the lock: it is
+	// client-paced I/O, exactly as on POST /api/settings.
+	releaseTxn := s.beginSettingsTxn()
+	defer releaseTxn()
+
 	rt := provider.GetRuntimeSettings()
 
 	idx := -1
