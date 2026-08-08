@@ -3,6 +3,7 @@ package miner
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -311,5 +312,121 @@ func TestApplyHealthSettingsPersistSuccessWithRealDependentsWiredDoesNotPanic(t 
 	}
 	if got := m.CurrentHealthSettings(); got != next {
 		t.Errorf("CurrentHealthSettings not updated: got %+v, want %+v", got, next)
+	}
+}
+
+// TestApplyHealthSettingsConcurrentApplyKeepsDependentsInSyncWithCommit is
+// the TDD/mutation-tested proof for PR #160's Major review finding: without
+// healthApplyMu (miner.go) serializing the ENTIRE apply — commit through
+// both dependent notifications — two concurrent ApplyHealthSettings calls
+// can leave the canary/watchdog holding an earlier call's settings even
+// though a LATER call's settings are what actually got persisted and
+// published.
+//
+// It forces exactly that interleaving deterministically, with no sleep or
+// polling: goroutine A commits sA, then blocks — via the healthCanaryUpdate
+// seam, the first thing ApplyHealthSettings calls after publishing — before
+// notifying either dependent. This test then drives B's ApplyHealthSettings
+// (sB) to full completion — commit, canary notify, AND watchdog notify —
+// before ever releasing A to make its own, by-then-stale, notifications.
+//
+// Which of the two branches below runs is decided once, deterministically,
+// by a single TryLock on m.healthApplyMu taken immediately after A signals
+// it has committed. By that point A has already called healthApplyMu.Lock()
+// as ApplyHealthSettings' very first statement, if that call exists at all
+// — so the probe can never race it: held means the fix is present and B is
+// guaranteed to block on entry until A fully returns (release A
+// immediately; B simply follows once unblocked); free means nothing can
+// block B, so this drives B to completion synchronously, on this goroutine,
+// before A is ever released — reproducing the bad interleaving the Major
+// finding describes.
+//
+// Either branch converges on the same assertion: both seams' final observed
+// values must equal the final CurrentHealthSettings() — B's, in every case
+// this test drives — never A's superseded ones.
+func TestApplyHealthSettingsConcurrentApplyKeepsDependentsInSyncWithCommit(t *testing.T) {
+	before := config.DefaultHealthSettings()
+	m := newHealthTestMiner(t, before)
+
+	sA := changedHealthSettings(before)
+	sB := changedHealthSettings(sA)
+
+	var mu sync.Mutex
+	canaryCalls, watchdogCalls := 0, 0
+	var canaryLast health.CanaryConfig
+	var watchdogLast health.WatchdogConfig
+	aPaused := false
+
+	aAtCanary := make(chan struct{})
+	aResume := make(chan struct{})
+
+	m.healthCanaryUpdate = func(cfg health.CanaryConfig) {
+		mu.Lock()
+		first := !aPaused
+		aPaused = true
+		mu.Unlock()
+		if first {
+			close(aAtCanary)
+			<-aResume
+		}
+		mu.Lock()
+		canaryCalls++
+		canaryLast = cfg
+		mu.Unlock()
+	}
+	m.healthWatchdogUpdate = func(cfg health.WatchdogConfig) {
+		mu.Lock()
+		watchdogCalls++
+		watchdogLast = cfg
+		mu.Unlock()
+	}
+
+	aErrCh := make(chan error, 1)
+	go func() { aErrCh <- m.ApplyHealthSettings(sA) }()
+	<-aAtCanary // A has committed sA and is paused before notifying either dependent.
+
+	bErrCh := make(chan error, 1)
+	if !m.healthApplyMu.TryLock() {
+		// Held by A: ApplyHealthSettings serializes on it, so B cannot make
+		// any progress — not even its own m.mu.Lock() — until A fully
+		// returns. Release A now; B simply follows once unblocked, with no
+		// further coordination needed.
+		go func() { bErrCh <- m.ApplyHealthSettings(sB) }()
+		close(aResume)
+	} else {
+		m.healthApplyMu.Unlock() // undo the probe; nothing else uses this lock.
+		// Free: nothing stops B from running to completion right now, on
+		// this goroutine, while A sits paused — commit, both notifications,
+		// return — before A is ever released. This is the exact
+		// interleaving the Major finding describes.
+		bErrCh <- m.ApplyHealthSettings(sB)
+		close(aResume)
+	}
+
+	if err := <-aErrCh; err != nil {
+		t.Fatalf("A: ApplyHealthSettings: %v", err)
+	}
+	if err := <-bErrCh; err != nil {
+		t.Fatalf("B: ApplyHealthSettings: %v", err)
+	}
+
+	final := m.CurrentHealthSettings()
+	if final != sB {
+		t.Fatalf("final CurrentHealthSettings = %+v, want B's %+v", final, sB)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if canaryCalls != 2 {
+		t.Fatalf("canary seam called %d times, want exactly 2 (one per concurrent apply)", canaryCalls)
+	}
+	if want := healthCanaryConfig(sB); canaryLast != want {
+		t.Errorf("canary seam's last-observed config = %+v, want the final committed %+v (a stale, superseded notification survived)", canaryLast, want)
+	}
+	if watchdogCalls != 2 {
+		t.Fatalf("watchdog seam called %d times, want exactly 2", watchdogCalls)
+	}
+	if want := healthWatchdogConfig(sB); watchdogLast != want {
+		t.Errorf("watchdog seam's last-observed config = %+v, want the final committed %+v (a stale, superseded notification survived)", watchdogLast, want)
 	}
 }

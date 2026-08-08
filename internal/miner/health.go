@@ -435,7 +435,16 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 // configPath == "" stays the existing documented no-op-persist case (no
 // config file configured) and still hot-applies the validated settings to
 // the live config and to the canary/watchdog.
+//
+// healthApplyMu (Miner struct, miner.go) serializes this entire sequence —
+// the m.mu-guarded commit AND both dependent notifications — end to end
+// across concurrent callers, so two overlapping applies can never publish
+// m.config/config.json at one update while notifying the canary/watchdog of
+// another.
 func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
+	m.healthApplyMu.Lock()
+	defer m.healthApplyMu.Unlock()
+
 	m.mu.Lock()
 	candidate := m.cloneConfigLocked()
 	candidate.Health = s
@@ -453,9 +462,11 @@ func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
 
 	// Load-bearing ordering: this must stay strictly after the SaveConfig
 	// success path above (both return points on failure sit before this
-	// line). healthCanaryUpdate/healthWatchdogUpdate default (nil) to the
-	// real canary/progressWatchdog calls; tests inject a spy to observe this
-	// call — see the seam fields' doc comment on the Miner struct (miner.go).
+	// line, and both sit before healthApplyMu is released by the deferred
+	// Unlock above). healthCanaryUpdate/healthWatchdogUpdate default (nil) to
+	// the real canary/progressWatchdog calls; tests inject a spy to observe
+	// this call — see the seam fields' doc comment on the Miner struct
+	// (miner.go).
 	if m.healthCanaryUpdate != nil {
 		m.healthCanaryUpdate(healthCanaryConfig(applied))
 	} else if m.canary != nil {
