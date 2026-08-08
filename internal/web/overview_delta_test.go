@@ -210,6 +210,57 @@ func TestPredictionsState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// F2.4 avatar fallback: deterministic initial + color bucket, zero network.
+// ---------------------------------------------------------------------------
+
+func TestAvatarInitial(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"shroud", "S"},
+		{"  bob", "B"},
+		{"", "?"},
+		{"   ", "?"},
+		{"ёжик", "Ё"},
+		{"ñandú", "Ñ"},
+		{"123abc", "1"},
+	}
+	for _, c := range cases {
+		si := StreamerInfo{Name: c.name}
+		if got := si.AvatarInitial(); got != c.want {
+			t.Errorf("AvatarInitial(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestAvatarBucketRangeAndDeterminism(t *testing.T) {
+	names := []string{"shroud", "pokimane", "ёжик", "Ñandú", "", "  ", "a", "zzzzzzzzzzzzzzzzzzzz"}
+	for _, name := range names {
+		si := StreamerInfo{Name: name}
+		b1 := si.AvatarBucket()
+		b2 := si.AvatarBucket()
+		if b1 != b2 {
+			t.Errorf("AvatarBucket(%q) not deterministic: %d vs %d", name, b1, b2)
+		}
+		if b1 < 0 || b1 > 5 {
+			t.Errorf("AvatarBucket(%q) = %d, want 0..5", name, b1)
+		}
+	}
+
+	if got := (StreamerInfo{Name: ""}).AvatarBucket(); got != 0 {
+		t.Errorf("empty name bucket = %d, want 0", got)
+	}
+
+	// Case/whitespace-insensitive: same identity, same bucket.
+	a := StreamerInfo{Name: "Shroud"}.AvatarBucket()
+	b := StreamerInfo{Name: "  shroud  "}.AvatarBucket()
+	if a != b {
+		t.Errorf("bucket should be case/whitespace-insensitive: %d vs %d", a, b)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Live-count derivation: a streamer merely holding a slot through a transient
 // unknown is grouped live but is NOT counted as confirmed-online.
 // ---------------------------------------------------------------------------

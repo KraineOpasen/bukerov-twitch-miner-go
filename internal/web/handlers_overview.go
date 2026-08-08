@@ -2,10 +2,13 @@ package web
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
@@ -331,6 +334,41 @@ func toCardViews(infos []StreamerInfo, stats map[string]streamerStats) []Overvie
 		out[i] = cv
 	}
 	return out
+}
+
+// AvatarInitial returns the uppercased first rune of the trimmed streamer
+// name for the F2.4 avatar-initial fallback, or "?" for an empty/whitespace
+// name. Twitch exposes no profile-image URL anywhere in this in-memory model
+// (design.md §1), so this deterministic initial is the only honest fallback —
+// no network call is ever made for it.
+func (si StreamerInfo) AvatarInitial() string {
+	name := strings.TrimSpace(si.Name)
+	if name == "" {
+		return "?"
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	if size == 0 || r == utf8.RuneError {
+		return "?"
+	}
+	return string(unicode.ToUpper(r))
+}
+
+// avatarBucketCount is the number of avatar color buckets, matching the
+// input.css --chart-series-1..6 tokens (s-avatar-b0..b5).
+const avatarBucketCount = 6
+
+// AvatarBucket deterministically maps the streamer's lowercased, trimmed name
+// to one of avatarBucketCount color buckets (FNV-1a 32 % 6) so the same name
+// always renders the same avatar color and an empty name lands on bucket 0.
+// Pure, no network, no dependency beyond the standard library.
+func (si StreamerInfo) AvatarBucket() int {
+	name := strings.ToLower(strings.TrimSpace(si.Name))
+	if name == "" {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return int(h.Sum32() % avatarBucketCount)
 }
 
 // aggregateHealth reduces the Health Center snapshot to the single aggregate
