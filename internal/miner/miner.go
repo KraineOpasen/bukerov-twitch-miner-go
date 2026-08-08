@@ -105,10 +105,20 @@ type Miner struct {
 	canary           *health.Canary
 	avoidList        *health.AvoidList
 	progressWatchdog *health.ProgressWatchdog
-	policySnap       atomic.Pointer[policySnapshot]
-	analyticsSvc     *analytics.Service
-	webServer        *web.Server
-	notifications    *notifications.Manager
+	// healthCanaryUpdate/healthWatchdogUpdate are ApplyHealthSettings'
+	// (health.go) dependent-notification seams: nil in production, where a
+	// successful apply falls back to calling canary.UpdateSettings /
+	// progressWatchdog.UpdateSettings directly. Tests inject a spy here
+	// because internal/health's Canary/ProgressWatchdog keep cfg unexported
+	// with no synchronous exported observer — this is the only place a
+	// dynamic test can observe whether, and with what values, they were
+	// notified.
+	healthCanaryUpdate   func(health.CanaryConfig)
+	healthWatchdogUpdate func(health.WatchdogConfig)
+	policySnap           atomic.Pointer[policySnapshot]
+	analyticsSvc         *analytics.Service
+	webServer            *web.Server
+	notifications        *notifications.Manager
 	// notificationsRepo is a standalone notification repository over the shared
 	// DB, created whenever the DB exists regardless of whether a notifications
 	// Manager was constructed successfully. Since M4 a Manager is built at

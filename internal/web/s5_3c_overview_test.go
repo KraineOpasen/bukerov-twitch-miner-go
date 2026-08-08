@@ -110,7 +110,7 @@ func (p *s53cHealthProvider) RunCanaryNow()                   {}
 func (p *s53cHealthProvider) CurrentHealthSettings() config.HealthSettings {
 	return config.HealthSettings{}
 }
-func (p *s53cHealthProvider) ApplyHealthSettings(_ config.HealthSettings) {}
+func (p *s53cHealthProvider) ApplyHealthSettings(_ config.HealthSettings) error { return nil }
 
 // ---------------------------------------------------------------------------
 // Region inventory and order (v3 §A/§B, owner ruling B)

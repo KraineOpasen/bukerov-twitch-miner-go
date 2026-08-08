@@ -224,7 +224,13 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 		cfg.CanaryIntervalMinutes = atoiDefault(r.FormValue("canaryIntervalMinutes"), cur.CanaryIntervalMinutes)
 		cfg.CanaryMaxStalenessHours = atoiDefault(r.FormValue("canaryMaxStalenessHours"), cur.CanaryMaxStalenessHours)
 	}
-	provider.ApplyHealthSettings(cfg)
+	// Fail-closed: on error, no re-render — the caller must not be told a
+	// change applied when persistence rejected it (see ApplyHealthSettings,
+	// internal/miner/health.go).
+	if err := provider.ApplyHealthSettings(cfg); err != nil {
+		writeInternalError(w, "Health settings could not be applied; no changes were made")
+		return
+	}
 	s.renderHealthPartial(w, r)
 }
 

@@ -87,7 +87,10 @@ type HealthProvider interface {
 	HealthSnapshot() health.Snapshot
 	RunCanaryNow()
 	CurrentHealthSettings() config.HealthSettings
-	ApplyHealthSettings(config.HealthSettings)
+	// ApplyHealthSettings validates, durably persists, and only then applies
+	// new canary/watchdog settings. A non-nil error means persistence failed
+	// and nothing was changed — the caller must not treat this as success.
+	ApplyHealthSettings(config.HealthSettings) error
 }
 
 // DropProgressProvider exposes the drop-progress watchdog's published per-drop
