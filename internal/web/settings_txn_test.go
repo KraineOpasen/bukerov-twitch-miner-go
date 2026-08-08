@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -297,5 +298,276 @@ func TestSettingsPostPersistenceFailureNo200(t *testing.T) {
 	srv.mu.RUnlock()
 	if gotRefresh != 5 || gotDaysAgo != 7 {
 		t.Errorf("display cache changed after a failed durable write: refresh=%d daysAgo=%d, want 5,7", gotRefresh, gotDaysAgo)
+	}
+}
+
+// --- Discord bot token secrecy: the token as a write-only secret ---
+//
+// These cover GET /api/settings and BOTH settings writers that can carry a
+// token (the save and the reset), so they sit with the other whole-endpoint
+// settings-transaction guards rather than in settings_reset_test.go — the
+// reset case here is one half of a single invariant, not a reset-specific
+// one, and splitting the pair would hide what makes each necessary.
+// Deliberately duplicated one layer down in internal/settings/builder_test.go:
+// these pin the HTTP seam a browser actually reaches, those pin the DTO rules
+// that seam depends on, and a bug in either layer must not be masked by the
+// other.
+
+// discordTokenSentinel is the fake value planted as the FILE-managed Discord
+// bot token. It is deliberately distinctive so a raw-body substring search can
+// prove the secret never reaches the browser through ANY part of the response
+// — not just through the one field the parsed assertions look at.
+const discordTokenSentinel = "file-managed-sentinel-not-a-real-token"
+
+// discordTokenProvider serves both the live runtime settings and the reset
+// defaults from one config through the REAL builder, so these tests exercise
+// the production GET/POST/reset pipeline (BuildRuntimeSettings /
+// BuildDefaultSettings / ApplyToConfig) rather than a hand-written DTO that
+// could agree with a broken builder.
+//
+// funcSettingsProvider is not reused: it answers GetRuntimeSettings and
+// GetDefaultSettings from the SAME closure, and the whole point here is that
+// the two differ — only the defaults carry the marker that clears the token.
+type discordTokenProvider struct{ cfg *config.Config }
+
+func (p *discordTokenProvider) GetRuntimeSettings() settings.RuntimeSettings {
+	return settings.BuildRuntimeSettings(p.cfg)
+}
+
+func (p *discordTokenProvider) GetDefaultSettings() settings.RuntimeSettings {
+	return settings.BuildDefaultSettings(p.cfg.Streamers)
+}
+
+// newDiscordTokenServer wires a Server whose apply callback runs the same
+// settings.ApplyToConfig commit the miner's apply path runs, against the
+// returned config. Persistence is out of scope here (BLOCK-1 owns that seam);
+// what is under test is which token value survives the DTO round trip.
+func newDiscordTokenServer(t *testing.T, fromEnv bool) (*Server, *config.Config) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Username = "tester"
+	cfg.Streamers = []config.StreamerConfig{{Username: "alpha"}}
+	cfg.Analytics.DaysAgo = 7
+	cfg.Discord.Enabled = true
+	cfg.Discord.BotToken = discordTokenSentinel
+	cfg.Discord.GuildID = "guild-1"
+	cfg.DiscordTokenFromEnv = fromEnv
+
+	srv := &Server{settingsProvider: &discordTokenProvider{cfg: &cfg}}
+	srv.onSettingsUpdate = func(_ context.Context, rt settings.RuntimeSettings) error {
+		settings.ApplyToConfig(&cfg, rt)
+		return nil
+	}
+	return srv, &cfg
+}
+
+func getSettings(t *testing.T, srv *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.handleAPISettings(rec, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	return rec
+}
+
+func resetSettings(t *testing.T, srv *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.handleAPISettingsReset(rec, httptest.NewRequest(http.MethodPost, "/api/settings/reset", nil))
+	return rec
+}
+
+// decodeDiscordBlock pulls the discord block out of a settings response so an
+// assertion can name the field, while the caller separately searches the RAW
+// body for the sentinel.
+func decodeDiscordBlock(t *testing.T, rec *httptest.ResponseRecorder) settings.DiscordUIConfig {
+	t.Helper()
+	var got struct {
+		Discord settings.DiscordUIConfig `json:"discord"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding the settings response failed: %v", err)
+	}
+	return got.Discord
+}
+
+// TestSettingsGetNeverExposesDiscordBotToken is the headline P2 guard: the
+// Discord bot token is a WRITE-ONLY secret, so GET /api/settings must never
+// serialize the real value — under EITHER ownership.
+//
+// Env-managed was already hidden (uiBotToken). File-managed was not: the
+// dashboard handed the live bot token to every browser that loaded the
+// Settings page, where it sat in the DOM, in the browser's memory, and in any
+// proxy/devtools/HAR capture of that response.
+//
+// The assertion is made on the RAW body, not only on the decoded field, so it
+// covers the whole response rather than the one key the fix touches.
+func TestSettingsGetNeverExposesDiscordBotToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fromEnv bool
+	}{
+		{"file-managed", false},
+		{"env-managed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newDiscordTokenServer(t, tc.fromEnv)
+
+			rec := getSettings(t, srv)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), discordTokenSentinel) {
+				t.Errorf("GET /api/settings leaked the Discord bot token in its body")
+			}
+			discord := decodeDiscordBlock(t, rec)
+			if discord.BotToken != "" {
+				t.Errorf("discord.botToken = %q, want the secret withheld", discord.BotToken)
+			}
+			// Non-secret Discord state must still round-trip: withholding the
+			// token must not blank the block the Settings page renders.
+			if !discord.Enabled {
+				t.Errorf("discord.enabled = false, want the non-secret state preserved")
+			}
+			if discord.GuildID != "guild-1" {
+				t.Errorf("discord.guildId = %q, want %q", discord.GuildID, "guild-1")
+			}
+		})
+	}
+}
+
+// TestSettingsPostWithoutTokenPreservesFileManagedToken is the other half of
+// the fix, and the reason GET redaction cannot be done on its own.
+//
+// Every settings mutation is a read-modify-write over the DTO, and the
+// Settings page posts the whole DTO back — including discord.botToken, which
+// is now always empty because GET withholds it. Redacting GET without adding
+// preservation semantics would therefore make the FIRST unrelated save (or
+// any card quick action, or a followed-channel import) silently erase the
+// configured token. An omitted or empty token means "no new token", not
+// "clear it".
+func TestSettingsPostWithoutTokenPreservesFileManagedToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			// Exactly what the Settings page sends after GET withheld the
+			// secret: the discord block is present, its token empty.
+			name: "explicit empty token",
+			body: `{"analytics":{"refresh":5,"daysAgo":3},"discord":{"enabled":true,"botToken":"","guildId":"guild-1"}}`,
+		},
+		{
+			// A partial body that never mentions discord at all.
+			name: "discord block omitted",
+			body: `{"analytics":{"refresh":5,"daysAgo":3}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cfg := newDiscordTokenServer(t, false)
+
+			rec := postSettings(t, srv, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			if cfg.Discord.BotToken != discordTokenSentinel {
+				t.Errorf("the file-managed Discord token was erased by an unrelated save: %q", cfg.Discord.BotToken)
+			}
+			// The rest of the save must still have landed.
+			if cfg.Analytics.DaysAgo != 3 {
+				t.Errorf("analytics.daysAgo = %d, want 3", cfg.Analytics.DaysAgo)
+			}
+			if !cfg.Discord.Enabled || cfg.Discord.GuildID != "guild-1" {
+				t.Errorf("non-secret Discord state changed: %+v", cfg.Discord)
+			}
+		})
+	}
+}
+
+// TestSettingsPostWithExplicitTokenReplacesFileManagedToken pins the write
+// half of the write-only secret: typing a new token into the Settings page
+// still replaces the stored one. Preservation must apply to the ABSENCE of a
+// value, never to a value the user actually supplied.
+func TestSettingsPostWithExplicitTokenReplacesFileManagedToken(t *testing.T) {
+	srv, cfg := newDiscordTokenServer(t, false)
+
+	rec := postSettings(t, srv, `{"discord":{"enabled":true,"botToken":"replacement-token","guildId":"guild-2"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if cfg.Discord.BotToken != "replacement-token" {
+		t.Errorf("discord token = %q, want the explicitly posted replacement", cfg.Discord.BotToken)
+	}
+	if cfg.Discord.GuildID != "guild-2" {
+		t.Errorf("discord.guildId = %q, want %q", cfg.Discord.GuildID, "guild-2")
+	}
+}
+
+// TestSettingsPostCannotOverrideEnvManagedToken pins the env ownership rule
+// end to end: while DISCORD_BOT_TOKEN is set the environment is the sole
+// source of truth, so no posted value — empty or not — may reach the config.
+func TestSettingsPostCannotOverrideEnvManagedToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"explicit token", `{"discord":{"enabled":true,"botToken":"attacker-supplied","guildId":"guild-1"}}`},
+		{"empty token", `{"discord":{"enabled":true,"botToken":"","guildId":"guild-1"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cfg := newDiscordTokenServer(t, true)
+
+			if rec := postSettings(t, srv, tc.body); rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			if cfg.Discord.BotToken != discordTokenSentinel {
+				t.Errorf("a POST overrode the env-managed token: %q", cfg.Discord.BotToken)
+			}
+		})
+	}
+}
+
+// TestSettingsResetClearsFileManagedDiscordToken PINS the pre-existing reset
+// semantics, unchanged by P2: "Reset to defaults" rebuilds the DTO from
+// config defaults, whose Discord block is entirely empty, and that reset
+// genuinely clears a file-managed token.
+//
+// This is the constraint that rules out the obvious one-line fix. Preservation
+// cannot simply be "an empty token means keep the current one", because the
+// reset posts an empty token too and must keep clearing it. The two intents
+// have to be distinguishable, and this test is what stops P2 from silently
+// turning "Reset to defaults" into a reset that leaves the secret behind.
+func TestSettingsResetClearsFileManagedDiscordToken(t *testing.T) {
+	srv, cfg := newDiscordTokenServer(t, false)
+
+	rec := resetSettings(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if cfg.Discord.BotToken != "" {
+		t.Errorf("reset to defaults left the Discord token behind: %q", cfg.Discord.BotToken)
+	}
+	if cfg.Discord.Enabled || cfg.Discord.GuildID != "" {
+		t.Errorf("reset left non-default Discord state: %+v", cfg.Discord)
+	}
+	// The reset's own response echoes the applied defaults; it must not carry
+	// the secret it just cleared either.
+	if strings.Contains(rec.Body.String(), discordTokenSentinel) {
+		t.Errorf("POST /api/settings/reset leaked the Discord bot token in its body")
+	}
+}
+
+// TestSettingsResetIsNotTriggeredByAnEquivalentPost guards the mechanism that
+// makes the two intents above distinguishable: "clear the token" is carried
+// by the reset DTO itself, NOT inferred from its contents. A hand-crafted POST
+// whose body happens to look like the defaults is still an ordinary save, so
+// it preserves the token rather than clearing it.
+func TestSettingsResetIsNotTriggeredByAnEquivalentPost(t *testing.T) {
+	srv, cfg := newDiscordTokenServer(t, false)
+
+	rec := postSettings(t, srv, `{"discord":{"enabled":false,"botToken":"","guildId":""}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if cfg.Discord.BotToken != discordTokenSentinel {
+		t.Errorf("a defaults-shaped POST cleared the token like a reset: %q", cfg.Discord.BotToken)
 	}
 }

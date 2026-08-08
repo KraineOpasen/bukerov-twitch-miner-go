@@ -70,8 +70,11 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			EnableChatLogs: cfg.Analytics.EnableChatLogs,
 		},
 		Discord: DiscordUIConfig{
-			Enabled:  cfg.Discord.Enabled,
-			BotToken: uiBotToken(cfg),
+			Enabled: cfg.Discord.Enabled,
+			// Never read back, under either ownership — the field is a
+			// write-only request channel, not the stored value. See
+			// DiscordUIConfig.BotToken.
+			BotToken: "",
 			GuildID:  cfg.Discord.GuildID,
 		},
 		DropBlacklist:             cfg.DropBlacklist,
@@ -87,16 +90,6 @@ func BuildRuntimeSettings(cfg *config.Config) RuntimeSettings {
 			HealthGateEnabled: cfg.PredictionRisk.HealthGateEnabled,
 		},
 	}
-}
-
-// uiBotToken hides an env-managed Discord token from the Settings UI: with
-// DISCORD_BOT_TOKEN set the secret never travels to the browser, and the
-// empty value round-tripping back is ignored by ApplyToConfig.
-func uiBotToken(cfg *config.Config) string {
-	if cfg.DiscordTokenFromEnv {
-		return ""
-	}
-	return cfg.Discord.BotToken
 }
 
 // BuildDefaultSettings constructs a RuntimeSettings DTO from defaults, preserving current streamers.
@@ -152,6 +145,14 @@ func BuildDefaultSettings(currentStreamers []config.StreamerConfig) RuntimeSetti
 			Enabled:  defaults.Discord.Enabled,
 			BotToken: defaults.Discord.BotToken,
 			GuildID:  defaults.Discord.GuildID,
+			// The token above is authoritative, not a request: a reset
+			// genuinely clears a file-managed token and always has, and an
+			// empty BotToken can no longer say so on its own. Marking it
+			// explicit also keeps this sourced from the defaults rather
+			// than hardcoding the clear — should DefaultDiscordSettings
+			// ever ship a token, a reset would apply it instead of
+			// silently discarding it.
+			botTokenExplicit: true,
 		},
 		DropBlacklist:             defaults.DropBlacklist,
 		DirectoryGames:            defaults.DirectoryGames,
@@ -226,12 +227,7 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 	cfg.Analytics.EnableChatLogs = s.Analytics.EnableChatLogs
 
 	cfg.Discord.Enabled = s.Discord.Enabled
-	// While DISCORD_BOT_TOKEN is set, the environment is the source of truth
-	// for the token: the UI never sees the real value (uiBotToken), so
-	// whatever comes back here must not overwrite the env-supplied one.
-	if !cfg.DiscordTokenFromEnv {
-		cfg.Discord.BotToken = s.Discord.BotToken
-	}
+	applyBotToken(cfg, s.Discord)
 	cfg.Discord.GuildID = s.Discord.GuildID
 
 	cfg.DropBlacklist = normalizeBlacklist(s.DropBlacklist)
@@ -250,6 +246,36 @@ func ApplyToConfig(cfg *config.Config, s RuntimeSettings) {
 
 	config.LogPredictionRiskClamps(cfg.PredictionRisk, "Settings API")
 	config.ValidateConfig(cfg)
+}
+
+// applyBotToken resolves the write-only Discord bot token channel
+// (DiscordUIConfig.BotToken) against the stored token. It is the ONLY writer
+// of cfg.Discord.BotToken on the settings path, so every intent the DTO can
+// express is decided in one place.
+//
+// While DISCORD_BOT_TOKEN is set the environment owns the token outright and
+// nothing here writes it: no posted value, empty or not, may reach the config,
+// and a reset must not clear it either — it would come straight back on the
+// next load, while SaveConfig has already dropped the on-disk copy.
+//
+// Otherwise the token is file-managed and the DTO carries one of two intents.
+// An EXPLICIT token is authoritative and applied verbatim, so "Reset to
+// defaults" — the only thing that can set that marker — still clears it by
+// carrying the empty default. A REQUESTED token is applied only when it is
+// non-empty: the UI never received the secret, so every ordinary save posts
+// this field empty, and treating that as "clear it" would erase the token on
+// the first unrelated save, card quick action, or followed-channel import.
+func applyBotToken(cfg *config.Config, d DiscordUIConfig) {
+	if cfg.DiscordTokenFromEnv {
+		return
+	}
+	if d.botTokenExplicit {
+		cfg.Discord.BotToken = d.BotToken
+		return
+	}
+	if d.BotToken != "" {
+		cfg.Discord.BotToken = d.BotToken
+	}
 }
 
 // normalizeGameList trims each game name, drops blanks, and removes
