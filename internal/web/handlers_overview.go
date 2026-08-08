@@ -27,83 +27,26 @@ const statsTTL = 60 * time.Second
 // the server-rendered trigger interval can never drift apart (I1).
 const overviewPollSeconds = 30
 
-// The frozen Overview health vocabulary: the compact aggregate is exactly one
-// of these three values and nothing else.
-const (
-	overviewHealthOK       = "ok"
-	overviewHealthDegraded = "degraded"
-	overviewHealthUnknown  = "unknown"
-)
-
-// overviewHealthDisplay collapses aggregateHealth's four-state verdict onto
-// that vocabulary. "unhealthy" (a failed/stalled signal, or a lost connection)
-// joins "degraded": both mean known-and-not-OK, and the per-subsystem detail
-// that tells them apart is owned by /system/status, which this region links to.
-// No aggregation decision is re-made here — aggregateHealth stays the single
-// source of the verdict.
-var overviewHealthDisplay = map[string]string{
-	"healthy":   overviewHealthOK,
-	"degraded":  overviewHealthDegraded,
-	"unhealthy": overviewHealthDegraded,
-	"unknown":   overviewHealthUnknown,
+// OverviewCardView wraps a streamer card with the raw (unformatted)
+// points-today figure the F2.2 numeric sort needs. It embeds StreamerInfo so
+// every existing `.Field` reference on a card keeps working unchanged — this
+// is purely additive. PointsTodayRaw/HasTodayRaw come straight from the
+// memoised streamerStats cache (never parsed back out of a formatted string —
+// I13).
+type OverviewCardView struct {
+	StreamerInfo
+	PointsTodayRaw int
+	HasTodayRaw    bool
 }
 
-// overviewHealthLabelKeys and overviewHealthClasses map each frozen value to
-// its localized label and to the pre-existing built CSS class, so the rendered
-// chip never depends on a class Tailwind has not emitted.
-var overviewHealthLabelKeys = map[string]string{
-	overviewHealthOK:       "ov.health.healthy",
-	overviewHealthDegraded: "ov.health.degraded",
-	overviewHealthUnknown:  "ov.health.unknown",
-}
-
-var overviewHealthClasses = map[string]string{
-	overviewHealthOK:       "ov-health-healthy",
-	overviewHealthDegraded: "ov-health-degraded",
-	overviewHealthUnknown:  "ov-health-unknown",
-}
-
-// OverviewHealthView is the single compact aggregate health value shown on the
-// Overview. State is the frozen machine token, Class the built CSS class it
-// styles through (never color alone — I18), and Label/Detail are localized
-// human strings (Detail carries the deciding signal(s) or the reason a verdict
-// couldn't be reached, e.g. "no provider").
+// OverviewHealthView is the aggregated health chip shown on the Overview
+// header. State drives the chip's icon/class (never color alone — I18); Label
+// and Detail are both localized, human strings (Detail carries the deciding
+// signal(s) or the reason a verdict couldn't be reached, e.g. "no provider").
 type OverviewHealthView struct {
-	State  string // overviewHealthOK | overviewHealthDegraded | overviewHealthUnknown
-	Class  string
+	State  string // "healthy" | "degraded" | "unhealthy" | "unknown"
 	Label  string
 	Detail string
-}
-
-// OverviewPredictionsKPI is the compact, primary predictions summary.
-// Available separates a REACHABLE board — whose round count is proven
-// evidence, including a proven zero — from an unreachable one, whose count is
-// unknown and must render as a dash rather than a 0 that would read as "no
-// rounds". There are deliberately no today/win-rate figures: this request
-// holds no bet-history evidence and Analytics owns ROI.
-type OverviewPredictionsKPI struct {
-	State       string
-	StateLabel  string
-	Available   bool
-	ActiveCount int
-}
-
-// OverviewClaimView is the compact claim preview. Present is the region's
-// whole evidence gate: false means no drop claim exists in the event ring, and
-// the region then does not render at all rather than rendering an empty shell.
-type OverviewClaimView struct {
-	Present bool
-	Label   string
-	Detail  string
-	Ago     string
-}
-
-// OverviewUpdateView is the update status, gated INDEPENDENTLY of the version
-// line. An empty State means the updater observed nothing, so no update text
-// renders — absence of a signal is never presented as "up to date".
-type OverviewUpdateView struct {
-	State   string
-	Version string
 }
 
 // OverviewPageData is the Overview page/partial view model. It embeds the
@@ -111,17 +54,34 @@ type OverviewUpdateView struct {
 // handleDashboard, which is not touched by this change) keeps compiling, and
 // adds the health/predictions/polling regions alongside it.
 //
-// The Overview no longer renders per-streamer cards at all: /overview/queue is
-// the sole owner of the roster, so OverviewData's own TrackedLive/
+// The Overview page itself no longer renders the per-streamer roster —
+// /overview/queue is its sole owner — so OverviewData's own TrackedLive/
 // TrackedUnknown/TrackedOffline/Untracked fields are left at their zero value
 // on this path. They stay declared because StreamerGridData — a distinct type
 // with same-named fields — still drives the Streamers page.
+//
+// The *Cards slices below are built and populated, but NOTHING READS THEM
+// today: the card template they fed was removed with the roster, and no other
+// template, handler or JSON response consumes them. They are kept because they
+// are this package's established shape for a built Overview card and are
+// restored deliberately, not because a consumer exists — the same is true of
+// OverviewData.Ticker and StreamerInfo.LastEventText/LastEventAgo. Anyone
+// adding a reader should treat that as re-activating a dormant contract, and
+// anyone deleting them should know they are removing a contract, not a bug.
 type OverviewPageData struct {
 	OverviewData
-	Health OverviewHealthView
-	// PredictionsKPI is the compact primary summary; the full manual board is
-	// a secondary, collapsed disclosure fed by OverviewData.Predictions.
-	PredictionsKPI OverviewPredictionsKPI
+	LiveCards      []OverviewCardView
+	UnknownCards   []OverviewCardView
+	OfflineCards   []OverviewCardView
+	UntrackedCards []OverviewCardView
+	Health         OverviewHealthView
+	// PredictionsState is the technical (not betting-outcome) status of the
+	// live-predictions board: "active" (>=1 round), "idle" (board reachable,
+	// nothing on it right now), or "unavailable" (no provider, or the miner
+	// isn't running). There is no "degraded" state — nothing in the system
+	// honestly distinguishes it (documented omission, design.md §1).
+	PredictionsState      string
+	PredictionsStateLabel string
 	// PollSeconds is overviewPollSeconds, rendered into the partial's
 	// hx-trigger so the client-side stale-clock thresholds and the actual
 	// poll interval are always derived from the same number.
@@ -140,19 +100,13 @@ type OverviewPageData struct {
 	// item 6), built from the exact same evidence snapshot so both always
 	// describe the same underlying broker tick.
 	SlotPairProvenance ProvenanceChipData
-
-	// Claim and Update are the page's two evidence-gated regions: each is a
-	// zero value when the evidence behind it does not exist, and the template
-	// renders nothing at all for a zero value.
-	Claim  OverviewClaimView
-	Update OverviewUpdateView
 }
 
 // handleAPIOverview renders the live Overview content partial: the lifecycle
-// echo, the two watch slots, the health aggregate, the predictions KPI, the
-// evidence-gated claim/version regions and the collapsed manual board.
-// Everything is built from in-memory state; the only SQLite reads
-// (points-today / per-hour) are memoised behind statsTTL.
+// echo, the two watch slots, the health aggregate, the compact predictions
+// summary, the version region and the collapsed manual board. Everything is
+// built from in-memory state; the only SQLite reads (points-today / per-hour)
+// are memoised behind statsTTL.
 func (s *Server) handleAPIOverview(w http.ResponseWriter, r *http.Request) {
 	data := s.buildOverviewData(s.langFromRequest(r))
 
@@ -272,9 +226,6 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 	// healthProvider is read under the same RLock as the other providers
 	// above (server.go's SetHealthProvider writes it under s.mu.Lock()).
 	healthProvider := s.healthProvider
-	// updateFn is the SAME best-effort updater seam /system/diagnostics reads;
-	// the Overview only mirrors its verdict, it never derives its own.
-	updateFn := s.lifecycleUpdateState
 	s.mu.RUnlock()
 
 	status := s.status.GetStatus()
@@ -295,11 +246,7 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		predByStreamer[p.Streamer] = true
 	}
 
-	// buildCards is still the source of the live/offline classification the
-	// live count is derived from; the per-streamer cards it enriches are no
-	// longer rendered here (the roster moved to /overview/queue), so only the
-	// live group is read back.
-	live, _, _, _ := s.buildCards(streamers, slots, stats, predByStreamer, tr)
+	live, unknown, offline, untracked, ticker := s.buildCards(streamers, slots, stats, predByStreamer, tr)
 
 	// LiveCount counts CONFIRMED-online streamers only; a streamer in the live
 	// group that is merely holding its slot during a transient unknown
@@ -345,65 +292,45 @@ func (s *Server) buildOverviewData(lang string) OverviewPageData {
 		StreamerCount:  len(streamers),
 		LiveCount:      liveCount,
 		PointsToday:    util.FormatNumber(today),
+		Ticker:         ticker,
 		Predictions:    buildPredictionViews(predictions),
 		NowWatching:    s.buildNowWatching(streamers, slots, stats, status.ConnectionLost, evidence),
 		GeneratedUnix:  time.Now().Unix(),
 	}
 
 	return OverviewPageData{
-		OverviewData:       data,
-		Health:             healthView,
-		PredictionsKPI:     buildOverviewPredictionsKPI(tr, predState, len(predictions)),
-		PollSeconds:        overviewPollSeconds,
-		SlotPair:           c12Pair(evidence, streamersByName(streamers), stats, tr),
-		SlotPairProvenance: c12PairProvenance(evidence),
-		Claim:              buildOverviewClaim(tr, events.Recent(overviewClaimScan)),
-		// The updater evidence /system/diagnostics already renders, read
-		// through the identical nil-safe reader. An empty State means nothing
-		// was observed, and it stays empty: the Overview never converts "no
-		// update signal" into "up to date".
-		Update: OverviewUpdateView(lifecycleUpdateStateOf(updateFn)),
+		OverviewData:          data,
+		LiveCards:             toCardViews(live, stats),
+		UnknownCards:          toCardViews(unknown, stats),
+		OfflineCards:          toCardViews(offline, stats),
+		UntrackedCards:        toCardViews(untracked, stats),
+		Health:                healthView,
+		PredictionsState:      predState,
+		PredictionsStateLabel: tr("ov.pred_state." + predState),
+		PollSeconds:           overviewPollSeconds,
+		SlotPair:              c12Pair(evidence, streamersByName(streamers), stats, tr),
+		SlotPairProvenance:    c12PairProvenance(evidence),
 	}
 }
 
-// buildOverviewPredictionsKPI turns the board's technical state into the
-// compact KPI. It adds no classification of its own: Available is simply
-// "predictionsState did not say unavailable", which is exactly the condition
-// under which activeCount is proven evidence rather than a guess.
-func buildOverviewPredictionsKPI(tr func(string) string, state string, activeCount int) OverviewPredictionsKPI {
-	return OverviewPredictionsKPI{
-		State:       state,
-		StateLabel:  tr("ov.pred_state." + state),
-		Available:   state != predictionsStateUnavailable,
-		ActiveCount: activeCount,
+// toCardViews wraps each StreamerInfo with its raw points-today figure looked
+// up from the memoised streamerStats cache (nil-safe: a nil/empty stats map
+// simply leaves HasTodayRaw false for every card). Returns nil for an empty
+// input so an empty group carries no card at all.
+func toCardViews(infos []StreamerInfo, stats map[string]streamerStats) []OverviewCardView {
+	if len(infos) == 0 {
+		return nil
 	}
-}
-
-// overviewClaimScan bounds how far back the Overview looks in the in-memory
-// event ring for the most recent drop claim. It matches the depth the card
-// last-event lookup already reads from the same ring.
-const overviewClaimScan = 200
-
-// buildOverviewClaim builds the compact claim preview from the process-wide
-// event ring — the same read-only, in-memory seam handleAPIOverviewEvents
-// already reads, and the only place in this process that records a claim
-// together with the time it happened. recent is newest-first, so the first
-// drop-claim entry in it is the most recent one. No claim in the ring returns
-// the zero value, and the region then does not render at all: absence of
-// evidence is never an empty claims box.
-func buildOverviewClaim(tr func(string) string, recent []events.Event) OverviewClaimView {
-	for _, e := range recent {
-		if e.Type != events.TypeDropClaimed {
-			continue
+	out := make([]OverviewCardView, len(infos))
+	for i, info := range infos {
+		cv := OverviewCardView{StreamerInfo: info}
+		if cs, ok := stats[info.Name]; ok {
+			cv.PointsTodayRaw = cs.pointsToday
+			cv.HasTodayRaw = true
 		}
-		return OverviewClaimView{
-			Present: true,
-			Label:   tr("event.drop_claimed"),
-			Detail:  e.Detail,
-			Ago:     util.FormatDuration(time.Since(e.Time)) + " " + tr("common.ago"),
-		}
+		out[i] = cv
 	}
-	return OverviewClaimView{}
+	return out
 }
 
 // aggregateHealth reduces the Health Center snapshot to the single aggregate
@@ -467,7 +394,7 @@ func aggregateHealth(providerPresent bool, snap health.Snapshot, connectionLost 
 // providerPresent/snapshot contents itself.
 func buildOverviewHealth(tr func(string) string, providerPresent bool, snap health.Snapshot, connectionLost bool) OverviewHealthView {
 	state, reason, offending := aggregateHealth(providerPresent, snap, connectionLost)
-	view := overviewHealthDisplayView(tr, state)
+	view := OverviewHealthView{State: state, Label: tr("ov.health." + state)}
 	switch reason {
 	case "connlost":
 		view.Detail = tr("ov.health.detail.connlost")
@@ -479,28 +406,6 @@ func buildOverviewHealth(tr func(string) string, providerPresent bool, snap heal
 		view.Detail = tr("ov.health.detail.signal") + ": " + strings.Join(offending, ", ")
 	}
 	return view
-}
-
-// overviewHealthDisplayView is the whole verdict -> rendered-chip mapping, and
-// the ONLY way overviewHealthDisplay is read: the display value, the built CSS
-// class it styles through, and the localized label. Keeping the three together
-// is what guarantees they can never disagree.
-//
-// A verdict the map does not recognise is not evidence of health, so it lands
-// on UNKNOWN in all three at once — never on the map's zero value, which would
-// render a chip with no state, no class and an untranslatable empty key, and
-// so read as "nothing is wrong". Unreachable while aggregateHealth is the sole
-// caller; the point is that a fifth verdict added there can only fail honest.
-func overviewHealthDisplayView(tr func(string) string, state string) OverviewHealthView {
-	display, ok := overviewHealthDisplay[state]
-	if !ok {
-		display = overviewHealthUnknown
-	}
-	return OverviewHealthView{
-		State: display,
-		Class: overviewHealthClasses[display],
-		Label: tr(overviewHealthLabelKeys[display]),
-	}
 }
 
 // The predictions board's technical states. Only "unavailable" carries a
@@ -558,16 +463,17 @@ func botStatusLabel(tr func(string) string, status MinerStatus) string {
 	}
 }
 
-// buildCards enriches every tracked/untracked streamer into a card and groups
-// them live / unknown / offline / untracked, in config order. Its consumers are
-// the Overview's live count and /overview/queue's full roster.
+// buildCards enriches every tracked/untracked streamer into a card and collects
+// ticker items (active community goals). It groups the cards live / unknown /
+// offline / untracked, in config order. Its consumers are the Overview's live
+// count and card view models, and /overview/queue's full roster.
 func (s *Server) buildCards(
 	streamers []*models.Streamer,
 	slots WatchSlotsView,
 	stats map[string]streamerStats,
 	predByStreamer map[string]bool,
 	tr func(string) string,
-) (live, unknown, offline, untracked []StreamerInfo) {
+) (live, unknown, offline, untracked []StreamerInfo, ticker []TickerItem) {
 	watching := slots.Watching
 
 	for _, st := range streamers {
@@ -598,12 +504,25 @@ func (s *Server) buildCards(
 			}
 		}
 
-		// Furthest-along active community goal.
+		// Last notable event for this streamer from the in-memory ring.
+		if text, ago := lastEventFor(tr, username); text != "" {
+			card.LastEventText = text
+			card.LastEventAgo = ago
+		}
+
+		// Active community goal (also feeds the ticker).
 		if goals := st.ActiveCommunityGoals(); len(goals) > 0 {
 			g := goals[0]
 			card.HasGoal = true
 			card.GoalTitle = g.Title
 			card.GoalPercent = g.Percent
+			ticker = append(ticker, TickerItem{
+				Streamer: username,
+				Kind:     "goal",
+				Label:    g.Title,
+				Percent:  g.Percent,
+				HasPct:   true,
+			})
 		}
 
 		card.HasActivePrediction = predByStreamer[username]
@@ -686,7 +605,9 @@ func (s *Server) buildCards(
 		}
 	}
 
-	return live, unknown, offline, untracked
+	// Sort ticker by completion desc so the most interesting goals lead.
+	sort.SliceStable(ticker, func(i, j int) bool { return ticker[i].Percent > ticker[j].Percent })
+	return live, unknown, offline, untracked, ticker
 }
 
 // streakCapMinutes is the watch-streak progress-bar denominator: the watcher's
@@ -739,6 +660,18 @@ func fmtSeconds(sec int) string {
 		sec = 0
 	}
 	return fmt.Sprintf("%d:%02d", sec/60, sec%60)
+}
+
+// lastEventFor returns a short human summary + relative time of the most recent
+// event recorded for the given streamer, or ("","") if none.
+func lastEventFor(tr func(string) string, username string) (text, ago string) {
+	for _, e := range events.Recent(200) {
+		if !strings.EqualFold(e.Streamer, username) {
+			continue
+		}
+		return eventLabel(tr, e), util.FormatDuration(time.Since(e.Time)) + " " + tr("common.ago")
+	}
+	return "", ""
 }
 
 // eventTypeKeys maps each event type to its localization key. The Detail suffix

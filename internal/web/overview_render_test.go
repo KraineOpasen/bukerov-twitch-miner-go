@@ -12,8 +12,8 @@ import (
 
 // sampleOverview builds an OverviewPageData exercising every region the
 // canonical Overview renders: the lifecycle echo, the two watch slots, the
-// health aggregate, the predictions KPI, both evidence-gated regions (claims
-// and version) and the secondary manual board with its branch variants.
+// health aggregate, the compact predictions summary, the evidence-gated
+// version region and the secondary manual board with its branch variants.
 func sampleOverview() OverviewPageData {
 	data := OverviewData{
 		Username:       "tester",
@@ -35,18 +35,15 @@ func sampleOverview() OverviewPageData {
 	}
 
 	return OverviewPageData{
-		OverviewData: data,
-		Health:       OverviewHealthView{State: overviewHealthOK, Class: "ov-health-healthy", Label: "Healthy"},
-		PredictionsKPI: OverviewPredictionsKPI{
-			State: "active", StateLabel: "Active", Available: true, ActiveCount: 2,
-		},
-		PollSeconds: overviewPollSeconds,
+		OverviewData:          data,
+		Health:                OverviewHealthView{State: "healthy", Label: "Healthy"},
+		PredictionsState:      predictionsStateActive,
+		PredictionsStateLabel: "Active",
+		PollSeconds:           overviewPollSeconds,
 		SlotPair: [2]c12SlotData{
 			{Occupied: true, Channel: "shroud", Active: true, Link: "/overview/queue"},
 			{EmptyReasonMode: "idle", Link: "/overview/queue"},
 		},
-		Claim:  OverviewClaimView{Present: true, Label: "Drop claimed", Detail: "Golden Kappa", Ago: "2m ago"},
-		Update: OverviewUpdateView{State: "available", Version: "0.30.0"},
 	}
 }
 
@@ -63,23 +60,37 @@ func TestRenderOverviewTemplates(t *testing.T) {
 	for _, want := range []string{
 		// Every canonical region, in its rendered form.
 		"data-ov-slots", "data-ov-health", "data-ov-pred-kpi",
-		"data-ov-claims", "data-ov-version", "data-ov-pred-board",
+		"data-ov-version", "data-ov-pred-board",
 		// The two watch slots and their owner link.
 		"shroud", `href="/overview/queue"`,
-		// Health aggregate + canonical owner.
-		`data-ov-health-state="ok"`, `href="/system/status"`,
-		// Predictions: proven count, honest unknowns, ROI owner.
+		// Health aggregate + canonical owner. The chip's class is DERIVED from
+		// the same State the data attribute carries, so the two cannot drift.
+		`data-ov-health-state="healthy"`, `class="ov-health ov-health-healthy"`,
+		`href="/system/status"`,
+		// Predictions: the count comes from Predictions itself, so the compact
+		// figure and the board below can never describe different boards.
 		`data-ov-pred-active="2"`, `data-ov-pred-today="unknown"`,
 		`data-ov-pred-winrate="unknown"`, `href="/statistics"`,
-		// Evidence-gated regions.
-		"Golden Kappa", "2m ago", `href="/drops/claims"`,
-		"0.29.0", `data-ov-update-state="available"`, `href="/system/diagnostics"`,
+		// Evidence-gated version region.
+		"0.29.0", `href="/system/diagnostics"`,
 		// The full manual board, preserved inside the collapsed disclosure.
 		"Активные предикшены", "Will they win?", "Закрыто",
 		"data-window-end", `id="predictions"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview_live output missing %q", want)
+		}
+	}
+
+	// The Overview owns no claims preview and no updater verdict: /drops and
+	// /system/diagnostics do. Banned here rather than only in the page-level
+	// test, so a region re-added straight to the partial cannot slip through.
+	for _, banned := range []string{
+		"data-ov-claims", `href="/drops/claims"`, "ov.claims",
+		"data-ov-update-state", "lc.update_available",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("overview_live still renders removed surface %q", banned)
 		}
 	}
 }
@@ -108,31 +119,11 @@ func TestOverviewPredictionCardEscapesHostileText(t *testing.T) {
 	}
 }
 
-// TestOverviewClaimEscapesHostileText: the claim detail is a Twitch-supplied
-// drop name, rendered through the same escaping guarantee.
-func TestOverviewClaimEscapesHostileText(t *testing.T) {
-	partials := testPartials(t)
-	data := sampleOverview()
-	data.Claim.Detail = `<script>alert(3)</script>`
-
-	var buf bytes.Buffer
-	if err := partials.ExecuteTemplate(&buf, "overview_live", data); err != nil {
-		t.Fatalf("render overview_live: %v", err)
-	}
-	out := buf.String()
-	if strings.Contains(out, "<script>alert(3)</script>") {
-		t.Error("claim region rendered unescaped HTML")
-	}
-	// The other half: the detail is ESCAPED, not dropped. Without this, the ban
-	// above would pass just as happily on a template that stopped rendering the
-	// claim detail at all — which is not an escaping guarantee.
-	if !strings.Contains(out, "data-ov-claims") {
-		t.Fatal("the claims region did not render at all, so the escaping assertion is vacuous")
-	}
-	if !strings.Contains(out, "&lt;script&gt;alert(3)&lt;/script&gt;") {
-		t.Errorf("claim region must still render the hostile detail, HTML-escaped; out=%s", out)
-	}
-}
+// The claim-detail escaping test that used to live here went with the claims
+// preview itself: the Overview no longer renders a Twitch-supplied drop name,
+// so there is no such surface left on this page to escape. The escaping
+// guarantee is still covered on the surfaces that DO carry Twitch text —
+// prediction titles and outcome names, above.
 
 // TestSidebarOmitsDuplicateOverviewTabs pins the information-architecture fix:
 // the «Стримеры» (/#grid) and «Предикшены» (/#predictions) sidebar tabs offered
@@ -218,14 +209,17 @@ func TestRenderOverviewTemplatesEnglish(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"Live Predictions", "Locked", "System Status", "Claims", "Claim history",
+		"Live Predictions", "Locked", "System Status",
 		"active", "today", "win rate", "ROI in Analytics",
+		// The health chip's own label, which localizes through the same
+		// ov.health.<state> key the restored four-state vocabulary uses.
+		"Healthy",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("english overview_live missing %q", want)
 		}
 	}
-	if strings.Contains(out, "Клеймы") || strings.Contains(out, "Состояние системы") {
+	if strings.Contains(out, "Исправно") || strings.Contains(out, "Состояние системы") {
 		t.Errorf("english render leaked Russian text")
 	}
 	// Two of the keys above cannot be proven by the loop alone: "ov.pred.active"

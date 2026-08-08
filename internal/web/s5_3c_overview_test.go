@@ -20,11 +20,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
@@ -103,14 +102,6 @@ func s53cDataOvAttrs(body string) []string {
 	return out
 }
 
-// s53cClaimAgeRe matches the SHAPE buildOverviewClaim gives a claim's age — a
-// util.FormatDuration value followed by the localized "ago" word. Asserting the
-// shape (rather than a concrete "0s ago") keeps the check independent of how
-// long the test itself takes to run, while still failing on an empty, zero-less
-// or unformatted age; the concrete value is pinned separately from an event
-// with an explicit, known timestamp.
-var s53cClaimAgeRe = regexp.MustCompile(`^[0-9]+[smhd] \S+$`)
-
 // s53cHealthProvider is a health provider whose snapshot the test controls.
 type s53cHealthProvider struct{ snap health.Snapshot }
 
@@ -134,10 +125,10 @@ func TestS5_3COverviewHasExactlyOneH1(t *testing.T) {
 }
 
 // TestS5_3CRegionOrder pins the frozen DOM order:
-// lifecycle -> exactly two slots -> health aggregate -> predictions KPI ->
-// (claims) -> (version) -> full manual prediction board (secondary).
+// lifecycle -> exactly two slots -> health aggregate -> predictions summary ->
+// (version) -> full manual prediction board (secondary).
 // Up Next and the queue preview are absent by evidence verdict, so they simply
-// do not appear between health and the KPI.
+// do not appear between health and the predictions summary.
 func TestS5_3CRegionOrder(t *testing.T) {
 	body := s53cPage(t, "en")
 
@@ -183,14 +174,10 @@ func TestS5_3CNoOtherTopLevelRegions(t *testing.T) {
 		"data-ov-pred-winrate",
 		"data-ov-pred-board",
 	}
-	// Rendered only when their evidence exists. They are ALLOWED here rather
-	// than required: whether the process-wide event ring holds a drop claim
-	// depends on what else has run, and their gates are pinned by
-	// TestS5_3CClaimsRegionIsEvidenceGated / TestS5_3CVersionRegionIsEvidenceGated.
+	// Rendered only when its evidence exists. ALLOWED here rather than
+	// required; its gate is pinned by TestS5_3CVersionRegionIsEvidenceGated.
 	conditional := []string{
-		"data-ov-claims",
 		"data-ov-version",
-		"data-ov-update-state",
 	}
 
 	allowed := map[string]bool{}
@@ -207,6 +194,16 @@ func TestS5_3CNoOtherTopLevelRegions(t *testing.T) {
 	for _, m := range always {
 		if !strings.Contains(body, m) {
 			t.Errorf("/overview is missing unconditional region marker %q", m)
+		}
+	}
+
+	// The claims preview and the updater echo are not conditional regions of
+	// this page — they are not regions of it at all. The closed vocabulary above
+	// already rejects them; naming them gives the failure a reason rather than
+	// just "outside the composition", since both were once allowed here.
+	for _, gone := range []string{"data-ov-claims", "data-ov-update-state"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("/overview renders %q: /drops owns claim history and /system/diagnostics owns the updater verdict", gone)
 		}
 	}
 }
@@ -391,21 +388,24 @@ func TestS5_3CNoPerSubsystemHealthRows(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestS5_3CCompactAggregateHealth: exactly one aggregate value, drawn from the
-// frozen {ok, degraded, unknown} vocabulary, linking to /system/status.
+// {healthy, degraded, unhealthy, unknown} vocabulary, linking to /system/status.
+// A failed signal is UNHEALTHY on the page, not merely degraded: the page shows
+// aggregateHealth's verdict as it is, and the chip's CSS class is derived from
+// that same value so a rendered class can never disagree with the state.
 func TestS5_3CCompactAggregateHealth(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		signals []health.Signal
 		want    string
 	}{
-		{"all ok", []health.Signal{{Name: health.SignalOAuth, Status: health.StatusOK}}, "ok"},
+		{"all ok", []health.Signal{{Name: health.SignalOAuth, Status: health.StatusOK}}, "healthy"},
 		{"one degraded", []health.Signal{
 			{Name: health.SignalOAuth, Status: health.StatusOK},
 			{Name: health.SignalPubSub, Status: health.StatusDegraded},
 		}, "degraded"},
-		{"one failed collapses to degraded", []health.Signal{
+		{"one failed stays unhealthy", []health.Signal{
 			{Name: health.SignalOAuth, Status: health.StatusFailed},
-		}, "degraded"},
+		}, "unhealthy"},
 		{"one unknown", []health.Signal{
 			{Name: health.SignalOAuth, Status: health.StatusOK},
 			{Name: health.SignalPubSub, Status: health.StatusUnknown},
@@ -422,6 +422,21 @@ func TestS5_3CCompactAggregateHealth(t *testing.T) {
 			want := `data-ov-health-state="` + tc.want + `"`
 			if !strings.Contains(body, want) {
 				t.Errorf("aggregate health is not %s; body does not contain %q", tc.want, want)
+			}
+			// The class is derived from the SAME state, so the two are pinned
+			// together: a mapping that softened the state would have to soften
+			// the class with it, and both assertions would fail at once.
+			if wantClass := `class="ov-health ov-health-` + tc.want + `"`; !strings.Contains(body, wantClass) {
+				t.Errorf("health chip class is not derived from state %q; body does not contain %q", tc.want, wantClass)
+			}
+			// The chip carries readable, localized text — never colour alone
+			// (I18) and never the untranslated key.
+			label := s53T(t, "en", "ov.health."+tc.want)
+			if label == "" || label == "ov.health."+tc.want {
+				t.Fatalf("health state %q has no localized label, so the chip would render a raw key", tc.want)
+			}
+			if !strings.Contains(body, ">"+label+"<") {
+				t.Errorf("health chip does not render the localized label %q for state %q", label, tc.want)
 			}
 			if !strings.Contains(body, `href="/system/status"`) {
 				t.Error("aggregate health must link to its canonical owner /system/status")
@@ -457,8 +472,8 @@ func TestS5_3CUnknownHealthNeverRendersHealthy(t *testing.T) {
 			if !strings.Contains(body, `data-ov-health-state="unknown"`) {
 				t.Errorf("unknown health did not render as unknown")
 			}
-			if strings.Contains(body, `data-ov-health-state="ok"`) {
-				t.Error("unknown health rendered as OK")
+			if strings.Contains(body, `data-ov-health-state="healthy"`) {
+				t.Error("unknown health rendered as healthy")
 			}
 			if strings.Contains(body, ">"+healthyLabel+"<") {
 				t.Errorf("unknown health rendered the healthy label %q", healthyLabel)
@@ -467,47 +482,57 @@ func TestS5_3CUnknownHealthNeverRendersHealthy(t *testing.T) {
 	}
 }
 
-// TestS5_3CUnmappedHealthDisplayStateRendersUnknown closes the last hole in the
-// honesty invariant: a state the display mapping does not recognise at all.
-// Today aggregateHealth is the only caller and only emits four known verdicts,
-// so this is unreachable from a request — which is exactly why it needs pinning
-// rather than assuming: a fifth verdict added later must degrade to the honest
-// UNKNOWN, never to a blank chip with no label and no class (which reads as
-// "nothing is wrong") and never to healthy.
-func TestS5_3CUnmappedHealthDisplayStateRendersUnknown(t *testing.T) {
-	tr := enTR(t)
-	healthyLabel := tr("ov.health.healthy")
+// TestS5_3CEveryHealthVerdictIsLocalized closes the honesty invariant at the
+// seam rather than at one language's render: buildOverviewHealth labels a chip
+// with tr("ov.health."+state), so a verdict aggregateHealth can emit but a
+// catalog is missing renders the RAW KEY — a chip reading "ov.health.unhealthy"
+// to the user. Every verdict is exercised through buildOverviewHealth itself
+// (not a hand-written list of strings), in BOTH languages, so adding a fifth
+// verdict without its locale entries fails here instead of in production.
+func TestS5_3CEveryHealthVerdictIsLocalized(t *testing.T) {
+	// Real inputs, one per verdict aggregateHealth can reach.
+	verdicts := []struct {
+		name           string
+		providerAbsent bool
+		signals        []health.Signal
+		connectionLost bool
+		want           string
+	}{
+		{name: "healthy", signals: []health.Signal{{Name: health.SignalOAuth, Status: health.StatusOK}}, want: "healthy"},
+		{name: "degraded", signals: []health.Signal{{Name: health.SignalOAuth, Status: health.StatusDegraded}}, want: "degraded"},
+		{name: "unhealthy", signals: []health.Signal{{Name: health.SignalOAuth, Status: health.StatusFailed}}, want: "unhealthy"},
+		{name: "unhealthy via connection lost", signals: []health.Signal{{Name: health.SignalOAuth, Status: health.StatusOK}}, connectionLost: true, want: "unhealthy"},
+		{name: "unknown", providerAbsent: true, want: "unknown"},
+	}
 
-	// "ok" is in the list deliberately: it is the DISPLAY vocabulary's own
-	// value, and feeding it back in as a verdict is the most likely way this
-	// mapping ever gets an input it does not know.
-	for _, unmapped := range []string{"", "ok", "bogus", "Healthy", "critical"} {
-		t.Run(fmt.Sprintf("%q", unmapped), func(t *testing.T) {
-			view := overviewHealthDisplayView(tr, unmapped)
+	seen := map[string]bool{}
+	for _, lang := range []string{"en", "ru"} {
+		for _, v := range verdicts {
+			t.Run(lang+"/"+v.name, func(t *testing.T) {
+				tr := func(key string) string { return s53T(t, lang, key) }
+				view := buildOverviewHealth(tr, !v.providerAbsent, health.Snapshot{Signals: v.signals}, v.connectionLost)
 
-			if view.State != overviewHealthUnknown {
-				t.Errorf("unmapped health verdict %q maps to state %q, want %q", unmapped, view.State, overviewHealthUnknown)
-			}
-			if view.Class == "" {
-				t.Error("unmapped health verdict rendered no CSS class at all")
-			}
-			if view.Label == "" {
-				t.Error("unmapped health verdict rendered a blank label")
-			}
+				if view.State != v.want {
+					t.Fatalf("state = %q, want %q", view.State, v.want)
+				}
+				seen[view.State] = true
 
-			body := s53cRenderLive(t, OverviewPageData{Health: view})
-			if !strings.Contains(body, `data-ov-health-state="unknown"`) {
-				t.Errorf("unmapped health verdict did not render as unknown; body=%s", body)
-			}
-			if strings.Contains(body, ">"+healthyLabel+"<") {
-				t.Errorf("unmapped health verdict rendered the healthy label %q", healthyLabel)
-			}
-			// The chip carries readable text, not just a class: icon+text, never
-			// colour alone, and never an empty label element.
-			if !strings.Contains(body, ">"+view.Label+"<") {
-				t.Errorf("unmapped health verdict rendered no chip label text (want %q); body=%s", view.Label, body)
-			}
-		})
+				// The label is REAL translated text: not empty, and not the key
+				// itself, which is what i18n.T falls back to when neither the
+				// requested catalog nor the default one holds the entry.
+				if view.Label == "" || view.Label == "ov.health."+view.State {
+					t.Errorf("[%s] verdict %q renders label %q — the catalog is missing ov.health.%s, so the chip shows a raw key", lang, view.State, view.Label, view.State)
+				}
+			})
+		}
+	}
+
+	// Non-vacuity: the table really did exercise all four verdicts, so a future
+	// edit that drops one cannot quietly shrink this test's coverage.
+	for _, want := range []string{"healthy", "degraded", "unhealthy", "unknown"} {
+		if !seen[want] {
+			t.Errorf("no case in this test produced the %q verdict", want)
+		}
 	}
 }
 
@@ -680,101 +705,51 @@ func TestS5_3CFullPredictionBoardIsCollapsedSecondaryDisclosure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Evidence-gated regions: claims and version
+// Evidence-gated region: version
 // ---------------------------------------------------------------------------
 
-// TestS5_3CClaimsRegionIsEvidenceGated: no claim evidence -> no region at all
-// (S-NOBACK); real claim evidence -> a compact line naming the drop, its age
-// and a link to the claim-history owner.
-func TestS5_3CClaimsRegionIsEvidenceGated(t *testing.T) {
-	t.Run("absent without evidence", func(t *testing.T) {
-		body := s53cRenderLive(t, OverviewPageData{})
-		if strings.Contains(body, "data-ov-claims") {
-			t.Error("the claims region rendered with no claim evidence")
-		}
-		if strings.Contains(body, `href="/drops/claims"`) {
-			t.Error("a claims link rendered with no claim evidence")
-		}
-	})
+// TestS5_3CNoClaimsPreview: /overview renders no claims preview at all. A claim
+// the Overview could show is one event pulled out of the in-memory ring — no
+// history, no totals — and /drops owns that surface.
+//
+// The ban is on the claims REGION's own markers and on its retired locale keys,
+// never on `href="/drops/claims"`: the sidebar nav links there on every page,
+// and banning it would fail on a link that is entirely correct.
+func TestS5_3CNoClaimsPreview(t *testing.T) {
+	body := s53cPage(t, "en")
 
-	t.Run("present with evidence", func(t *testing.T) {
-		body := s53cRenderLive(t, OverviewPageData{Claim: OverviewClaimView{
-			Present: true, Label: "Drop claimed", Detail: "Golden Kappa", Ago: "2m ago",
-		}})
-		if !strings.Contains(body, "data-ov-claims") {
-			t.Fatal("the claims region did not render despite real claim evidence")
+	// Non-vacuity: the page really did render its canonical regions, so the
+	// bans below are asserted against a real Overview and not an empty body.
+	for _, present := range []string{"data-ov-health-summary", "data-ov-pred-kpi", "data-ov-pred-board"} {
+		if !strings.Contains(body, present) {
+			t.Fatalf("precondition failed: /overview did not render %q, so the claim bans are vacuous", present)
 		}
-		for _, want := range []string{"Golden Kappa", "2m ago", `href="/drops/claims"`} {
-			if !strings.Contains(body, want) {
-				t.Errorf("claims region missing %q", want)
+	}
+
+	for _, gone := range []string{"data-ov-claims", "ov-claims-heading", "ov.claims"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("/overview still renders claim surface %q", gone)
+		}
+	}
+
+	// The retired keys are gone from BOTH catalogs, so neither language can
+	// resurrect the region's wording — and neither can be left as an orphan.
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	for _, lang := range []string{i18n.LangEN, i18n.LangRU} {
+		for _, key := range []string{"ov.claims.heading", "ov.claims.history_link"} {
+			if got := loc.T(lang, key); got != key {
+				t.Errorf("[%s] retired claims key %q still resolves to %q; it must be removed from the catalog", lang, key, got)
 			}
 		}
-	})
-
-	t.Run("wired to the live event evidence", func(t *testing.T) {
-		// Evidence is created the way the product creates it — a real
-		// events.TypeDropClaimed record, read back off the RENDERED region and
-		// never off an internal field — but in a CALLER-OWNED events.Log, not
-		// the process-wide default one. events.Record writes into a package
-		// global with no teardown, so a single call here would leave the claim
-		// in that ring for the remainder of the test binary and silently switch
-		// the claims region on for every later test that renders /overview.
-		// The contract under test is therefore
-		// caller-owned Log -> buildOverviewClaim -> rendered claim region; that
-		// the handler feeds it from events.Recent is wiring, not behaviour, and
-		// is not worth contaminating the process to restate.
-		before := events.Recent(1)
-
-		tr := enTR(t)
-		log := events.NewLog(4)
-		log.Record(events.TypeDropClaimed, "", "S5-3c Fixture Drop")
-
-		claim := buildOverviewClaim(tr, log.Recent(overviewClaimScan))
-		if !claim.Present {
-			t.Fatal("a recorded drop-claim event produced no claim evidence at all")
-		}
-
-		body := s53cRenderLive(t, OverviewPageData{Claim: claim})
-		if !strings.Contains(body, "data-ov-claims") {
-			t.Fatal("a recorded drop-claim event did not render the Overview claims region")
-		}
-		if !strings.Contains(body, "S5-3c Fixture Drop") {
-			t.Error("the rendered claims region does not name the claimed drop")
-		}
-		if !strings.Contains(body, `href="/drops/claims"`) {
-			t.Error("the rendered claims region must link to its claim-history owner /drops/claims")
-		}
-		// The age renders as a real "<duration> ago" phrase, never an empty
-		// span. The value itself is asserted separately below, because how long
-		// THIS test takes to run must never decide whether it passes.
-		ago := tr("common.ago")
-		if !s53cClaimAgeRe.MatchString(claim.Ago) || !strings.HasSuffix(claim.Ago, " "+ago) || !strings.Contains(body, claim.Ago) {
-			t.Errorf("the claims region must render a real age phrase (want /%s/ ending in %q, rendered on the page); got Ago=%q, body=%s", s53cClaimAgeRe, ago, claim.Ago, body)
-		}
-
-		// ...and the age is derived from the EVENT's own timestamp, not from
-		// render time and not from a zero value: an event stamped 90 minutes
-		// ago must render as "1h ago", which neither of those could produce.
-		aged := buildOverviewClaim(tr, []events.Event{{
-			Time: time.Now().Add(-90 * time.Minute), Type: events.TypeDropClaimed, Detail: "S5-3c Aged Drop",
-		}})
-		agedBody := s53cRenderLive(t, OverviewPageData{Claim: aged})
-		if want := "1h " + ago; !strings.Contains(agedBody, want) {
-			t.Errorf("claim age must come from the event's own timestamp (want %q rendered); body=%s", want, agedBody)
-		}
-
-		// The process-wide ring is exactly as it was — same depth, same newest
-		// event — so no later test inherits a claims region from this one.
-		after := events.Recent(1)
-		if len(after) != len(before) || (len(after) == 1 && after[0] != before[0]) {
-			t.Errorf("this test mutated the process-wide events log (newest %v -> %v); it must own its own Log", before, after)
-		}
-	})
+	}
 }
 
 // TestS5_3CVersionRegionIsEvidenceGated: the version line renders only when a
-// version value actually exists, and update status is gated INDEPENDENTLY —
-// absence of an update signal never becomes "up to date".
+// version value actually exists, and carries no updater verdict of its own —
+// /system/diagnostics owns that signal, and the Overview links to it.
 func TestS5_3CVersionRegionIsEvidenceGated(t *testing.T) {
 	t.Run("absent without a version value", func(t *testing.T) {
 		body := s53cRenderLive(t, OverviewPageData{})
@@ -794,21 +769,9 @@ func TestS5_3CVersionRegionIsEvidenceGated(t *testing.T) {
 		if !strings.Contains(body, `href="/system/diagnostics"`) {
 			t.Error("version region must link to its owner /system/diagnostics")
 		}
+		// The updater's verdict has exactly one owner, and it is not this page.
 		if strings.Contains(body, "data-ov-update-state") {
-			t.Error("an update-status line rendered with no update signal")
-		}
-	})
-
-	t.Run("update status only with a real signal", func(t *testing.T) {
-		body := s53cRenderLive(t, OverviewPageData{
-			OverviewData: OverviewData{Version: "0.29.0"},
-			Update:       OverviewUpdateView{State: "available", Version: "0.30.0"},
-		})
-		if !strings.Contains(body, `data-ov-update-state="available"`) {
-			t.Fatal("a real update signal did not render an update-status line")
-		}
-		if !strings.Contains(body, "0.30.0") {
-			t.Error("update-status line does not name the available version")
+			t.Error("the version region carries an update-status line; /system/diagnostics owns the updater verdict")
 		}
 	})
 }

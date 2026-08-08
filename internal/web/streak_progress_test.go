@@ -60,3 +60,58 @@ func TestStreakRenderedDenominatorIsCap(t *testing.T) {
 		t.Errorf("now_watching must not render the obsolete /7 streak denominator:\n%s", sideOut)
 	}
 }
+
+// TestStreakRenderedSevenOfTwentyIsThirtyFivePercent is the end-to-end pin for
+// ONE known input: 7 continuously-watched minutes against the 20-minute pursuit
+// cap renders "7/20" as text and a bar exactly 35% wide.
+//
+// Both figures come from production code rather than from the fixture — the
+// denominator is streakCapMinutes and the width is streakProgressPercent(7) —
+// so a changed cap or a changed percent formula fails here instead of silently
+// rendering a bar that disagrees with its own label. §8.14 pins 7 -> 35 as
+// arithmetic; this pins that the RENDERED page actually says so.
+//
+// Fully deterministic: no sleep, no wall-clock reads, no dependence on any
+// other test having run first.
+func TestStreakRenderedSevenOfTwentyIsThirtyFivePercent(t *testing.T) {
+	const mins = 7
+
+	// Pin the two numbers as literals first. Without this the render
+	// assertions below would happily follow a changed formula wherever it went.
+	if streakCapMinutes != 20 {
+		t.Fatalf("streakCapMinutes = %d, want 20", streakCapMinutes)
+	}
+	pct := streakProgressPercent(mins)
+	if pct != 35 {
+		t.Fatalf("streakProgressPercent(%d) = %d, want 35", mins, pct)
+	}
+
+	partials := testPartials(t)
+	nw := NowWatchingView{
+		Slots: []WatchSlotView{{
+			Name: "shroud", Points: "100,000", Game: "VALORANT",
+			StreakPending:    true,
+			StreakMinutes:    mins,
+			StreakCapMinutes: streakCapMinutes,
+			StreakPercent:    pct,
+		}},
+	}
+	var buf bytes.Buffer
+	if err := partials.ExecuteTemplate(&buf, "now_watching", nw); err != nil {
+		t.Fatalf("render now_watching: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "7/20") {
+		t.Errorf("rendered streak must read 7/20; out=\n%s", out)
+	}
+	if !strings.Contains(out, "width: 35%") {
+		t.Errorf("rendered streak bar must be 35%% wide; out=\n%s", out)
+	}
+	// The label and the bar describe the same progress, so a denominator the
+	// bar does not agree with is a rendered contradiction, not a rounding
+	// difference.
+	if strings.Contains(out, "7/7") {
+		t.Errorf("rendered streak used the obsolete /7 denominator; out=\n%s", out)
+	}
+}

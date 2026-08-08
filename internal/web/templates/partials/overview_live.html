@@ -41,29 +41,39 @@
 </div>
 
 {{/* ------------------------------------------------------------------ HEALTH
-     ONE compact aggregate value — OK / DEGRADED / UNKNOWN — and a link to its
-     owner. Per-subsystem rows and their freshness belong to /system/status;
-     duplicating them here is what turned this page into a second status
-     console. The verdict comes from aggregateHealth unchanged, so an unknown
-     or never-recorded subsystem can never read as healthy. Icon + text, never
-     colour alone (I18); the aria-label carries the deciding evidence, because
-     a title tooltip alone is mouse-only. */}}
+     ONE compact aggregate value — healthy / degraded / unhealthy / unknown —
+     and a link to its owner. Per-subsystem rows and their freshness belong to
+     /system/status; duplicating them here is what turned this page into a
+     second status console. The verdict is aggregateHealth's own, passed
+     through unchanged: the chip's class is derived from that same State, so
+     the two can never disagree, and an unhealthy verdict is never softened
+     into a degraded one on the way to the page. An unknown or never-recorded
+     subsystem can never read as healthy. Icon + text, never colour alone
+     (I18); the aria-label carries the deciding evidence, because a title
+     tooltip alone is mouse-only. */}}
 <section class="health-card mb-4" data-ov-health-summary aria-labelledby="ov-health-heading">
     <div class="flex items-center justify-between gap-2 flex-wrap">
         <span class="health-card-label" id="ov-health-heading">{{ t "system.status.heading" }}</span>
-        <a href="/system/status" class="ov-health {{.Health.Class}}" data-ov-health-state="{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
+        <a href="/system/status" class="ov-health ov-health-{{.Health.State}}" data-ov-health-state="{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
             <svg class="ov-health-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
             <span>{{.Health.Label}}</span>
         </a>
     </div>
 </section>
 
-{{/* ---------------------------------------------------------- PREDICTIONS KPI
-     The compact, primary predictions summary. Counts render only when the
-     board is actually reachable: an unreachable board knows nothing, so it
-     shows a dash rather than a "0" that would read as positive evidence of no
-     rounds. Today and win rate carry no figure at all — this request holds no
-     bet-history evidence, and Analytics owns ROI. */}}
+{{/* ------------------------------------------------------- PREDICTIONS SUMMARY
+     The compact, primary predictions summary. It is built from the page's
+     EXISTING contracts only — PredictionsState/PredictionsStateLabel for the
+     board's technical status and Predictions for the rounds themselves — so
+     the compact figure and the collapsed board below can never describe two
+     different boards.
+
+     The count renders only when the board is actually reachable. "unavailable"
+     is precisely the state in which the round count is unknown rather than
+     proven, so it shows a dash; rendering a "0" there would dress the absence
+     of a board up as positive evidence of no rounds. Today and win rate carry
+     no figure at all — this request holds no bet-history evidence, and
+     Analytics owns ROI. */}}
 <section class="health-card mb-4" data-ov-pred-kpi aria-labelledby="ov-pred-kpi-heading">
     <div class="flex items-center justify-between gap-2 flex-wrap">
         <span class="health-card-label" id="ov-pred-kpi-heading">{{ t "nav.predictions" }}</span>
@@ -71,9 +81,9 @@
              the board, never a betting outcome. No role=status — this is a
              brand new DOM node on every 30s swap, so a live region here would
              only false-promise an announcement. */}}
-        <span class="ov-pred-chip ov-pred-chip-{{.PredictionsKPI.State}}">
+        <span class="ov-pred-chip ov-pred-chip-{{.PredictionsState}}">
             <svg class="ov-pred-chip-ico" aria-hidden="true" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-            <span>{{.PredictionsKPI.StateLabel}}</span>
+            <span>{{.PredictionsStateLabel}}</span>
         </span>
     </div>
     {{/* Each unknown figure renders the em dash for sighted readers and the
@@ -89,8 +99,8 @@
     <div class="health-card-row flex items-center gap-4 flex-wrap">
         <span class="type-small text-text-secondary">
             {{ t "ov.pred.active" }}
-            {{if .PredictionsKPI.Available}}
-            <span class="num text-neutral-100" data-ov-pred-active="{{.PredictionsKPI.ActiveCount}}">{{.PredictionsKPI.ActiveCount}}</span>
+            {{if ne .PredictionsState "unavailable"}}
+            <span class="num text-neutral-100" data-ov-pred-active="{{len .Predictions}}">{{len .Predictions}}</span>
             {{else}}
             <span class="num" data-ov-pred-active="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
             {{end}}
@@ -107,34 +117,19 @@
     </div>
 </section>
 
-{{/* ------------------------------------------------------------------ CLAIMS
-     Evidence-gated: rendered only when a drop claim actually exists in the
-     in-memory event ring, with the age taken from that event's own timestamp.
-     No claim, no region — never an empty claims box. */}}
-{{if .Claim.Present}}
-<section class="health-card mb-4" data-ov-claims aria-labelledby="ov-claims-heading">
-    <div class="flex items-center justify-between gap-2 flex-wrap">
-        <span class="health-card-label" id="ov-claims-heading">{{ t "ov.claims.heading" }}</span>
-        <a href="/drops/claims" class="type-small hover:underline">{{ t "ov.claims.history_link" }} →</a>
-    </div>
-    <div class="health-card-row flex items-center gap-2 flex-wrap">
-        <span class="type-small text-neutral-100">{{.Claim.Label}}{{if .Claim.Detail}} · {{.Claim.Detail}}{{end}}</span>
-        <span class="type-small text-text-secondary">{{.Claim.Ago}}</span>
-    </div>
-</section>
-{{end}}
+{{/* There is deliberately no claims preview here. A claim the Overview could
+     show is a single event pulled out of the in-memory ring, which carries no
+     claim history and no totals; /drops owns that surface, and reproducing one
+     row of it here only added a second, shallower place to look. */}}
 
 {{/* ----------------------------------------------------------------- VERSION
-     Evidence-gated on the build-injected version value. The update line is
-     gated INDEPENDENTLY on a real updater signal: with nothing observed no
-     update text renders at all, and "up to date" is never written from the
-     absence of a signal. */}}
+     Evidence-gated on the build-injected version value alone. The updater's
+     own verdict belongs to /system/diagnostics, which this line links to —
+     echoing it here gave the same signal two owners, and "up to date" is never
+     written from the absence of a signal in either place. */}}
 {{if .Version}}
 <p class="type-small text-text-secondary mb-4" data-ov-version>
     <span class="num text-neutral-100">v{{.Version}}</span>
-    {{if .Update.State}}
-    · <span data-ov-update-state="{{.Update.State}}">{{if eq .Update.State "available"}}{{ t "lc.update_available" }}{{else if eq .Update.State "failed"}}{{ t "lc.update_failed" }}{{else if eq .Update.State "applied"}}{{ t "lc.update_applied" }}{{end}}{{if .Update.Version}} <span class="num">{{.Update.Version}}</span>{{end}}</span>
-    {{end}}
     · <a href="/system/diagnostics" class="hover:underline">{{ t "system.diagnostics.heading" }} →</a>
 </p>
 {{end}}

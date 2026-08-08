@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -125,41 +126,56 @@ func TestBuildOverviewHealthDetail(t *testing.T) {
 	tr := enTR(t)
 
 	view := buildOverviewHealth(tr, false, health.Snapshot{}, false)
-	if view.State != overviewHealthUnknown || view.Detail != tr("ov.health.detail.noprovider") {
+	if view.State != "unknown" || view.Detail != tr("ov.health.detail.noprovider") {
 		t.Errorf("nil provider = %+v", view)
 	}
 
 	view = buildOverviewHealth(tr, true, health.Snapshot{}, false)
-	if view.State != overviewHealthUnknown || view.Detail != tr("ov.health.detail.nosignals") {
+	if view.State != "unknown" || view.Detail != tr("ov.health.detail.nosignals") {
 		t.Errorf("empty snapshot = %+v", view)
 	}
 
-	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusFailed)}}, false)
 	wantDetail := tr("ov.health.detail.signal") + ": OAuth"
-	if view.State != overviewHealthDegraded || view.Detail != wantDetail {
-		t.Errorf("failed signal = %+v, want detail %q", view, wantDetail)
+
+	// A failed signal reads UNHEALTHY and is never softened into "degraded":
+	// they are distinct verdicts, and collapsing the worse one onto the milder
+	// one understates a subsystem that has actually failed.
+	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusFailed)}}, false)
+	if view.State != "unhealthy" || view.Detail != wantDetail {
+		t.Errorf("failed signal = %+v, want state \"unhealthy\" and detail %q", view, wantDetail)
 	}
 
-	// connectionLost forces a not-OK verdict + its own detail even over a
-	// healthy snapshot.
+	// ...and a degraded signal stays DEGRADED, so the separation is pinned from
+	// both sides rather than only against one direction of a collapse.
+	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusDegraded)}}, false)
+	if view.State != "degraded" || view.Detail != wantDetail {
+		t.Errorf("degraded signal = %+v, want state \"degraded\" and detail %q", view, wantDetail)
+	}
+
+	// An unknown-status signal is its own verdict too — neither of the above.
+	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusUnknown)}}, false)
+	if view.State != "unknown" || view.Detail != wantDetail {
+		t.Errorf("unknown signal = %+v, want state \"unknown\" and detail %q", view, wantDetail)
+	}
+
+	// connectionLost forces UNHEALTHY + its own detail even over a healthy
+	// snapshot: a fully lost connection is never merely impaired (I14).
 	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusOK)}}, true)
-	if view.State != overviewHealthDegraded || view.Detail != tr("ov.health.detail.connlost") {
+	if view.State != "unhealthy" || view.Detail != tr("ov.health.detail.connlost") {
 		t.Errorf("connection lost = %+v", view)
 	}
 
 	view = buildOverviewHealth(tr, true, health.Snapshot{Signals: []health.Signal{sig(health.SignalOAuth, health.StatusOK)}}, false)
-	if view.State != overviewHealthOK || view.Detail != "" {
+	if view.State != "healthy" || view.Detail != "" {
 		t.Errorf("healthy = %+v, want empty detail", view)
 	}
 
-	// Every frozen value maps to a real localized label and a built CSS class —
-	// never an empty string that would render a blank chip.
-	for _, state := range []string{overviewHealthOK, overviewHealthDegraded, overviewHealthUnknown} {
-		if key := overviewHealthLabelKeys[state]; key == "" || tr(key) == "" || tr(key) == key {
-			t.Errorf("health value %q has no localized label", state)
-		}
-		if overviewHealthClasses[state] == "" {
-			t.Errorf("health value %q has no CSS class", state)
+	// Every state in the vocabulary resolves to a real localized label — never
+	// an empty string, and never the raw key, either of which would render a
+	// blank or untranslated chip.
+	for _, state := range []string{"healthy", "degraded", "unhealthy", "unknown"} {
+		if label := tr("ov.health." + state); label == "" || label == "ov.health."+state {
+			t.Errorf("health state %q has no localized label", state)
 		}
 	}
 }
@@ -194,10 +210,8 @@ func TestPredictionsState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Live-count derivation. The Overview no longer renders per-streamer cards, so
-// the only thing it still reads out of buildCards is the CONFIRMED-online
-// count: a streamer merely holding a slot through a transient unknown is not
-// live.
+// Live-count derivation: a streamer merely holding a slot through a transient
+// unknown is grouped live but is NOT counted as confirmed-online.
 // ---------------------------------------------------------------------------
 
 func TestOverviewLiveCountCountsConfirmedOnlineOnly(t *testing.T) {
@@ -213,7 +227,7 @@ func TestOverviewLiveCountCountsConfirmedOnlineOnly(t *testing.T) {
 
 	srv := &Server{}
 	slots := WatchSlotsView{Watching: map[string]bool{"unsure": true}}
-	live, _, _, _ := srv.buildCards(
+	live, _, _, _, _ := srv.buildCards(
 		[]*models.Streamer{online, slotted, offline},
 		slots, map[string]streamerStats{}, map[string]bool{}, echoTr,
 	)
@@ -229,6 +243,119 @@ func TestOverviewLiveCountCountsConfirmedOnlineOnly(t *testing.T) {
 	}
 	if confirmed != 1 {
 		t.Errorf("confirmed-online count = %d, want 1 (the unconfirmed slot holder must not count as live)", confirmed)
+	}
+}
+
+// buildCardsLastEventStreamer is this test's OWN streamer name. The last-event
+// lookup reads the process-wide event ring (events.Recent), which has no reset
+// hook, so the one event recorded below is scoped to a name no other test in
+// this binary builds a card for — it can therefore never enrich anyone else's
+// card, however long the ring keeps it.
+const buildCardsLastEventStreamer = "m5-lastevent-fixture"
+
+// buildCardsAgoRe matches the SHAPE of a rendered relative age — a
+// util.FormatDuration value followed by the localized "ago" word. The shape is
+// asserted rather than a concrete "0s ago" so the result never depends on how
+// long this test itself takes to run, while an empty, unformatted or
+// unit-less age still fails.
+var buildCardsAgoRe = regexp.MustCompile(`^[0-9]+[smhd] \S+$`)
+
+// TestBuildCardsPopulatesLastEventAndGoalTicker is the BEHAVIOURAL guard on
+// buildCards' two producer side-effects — not a compile-time check that the
+// fields and the fifth return value merely exist.
+//
+// A card whose streamer has a recorded event must come back carrying that
+// event's summary and age, and a streamer with an active community goal must
+// produce a ticker entry describing that goal. Declaring LastEventText,
+// LastEventAgo, TickerItem and the ticker return without ever assigning or
+// appending to them compiles perfectly and passes every type-level assertion —
+// and fails here, which is the point.
+func TestBuildCardsPopulatesLastEventAndGoalTicker(t *testing.T) {
+	st := models.NewStreamer(buildCardsLastEventStreamer, models.DefaultStreamerSettings())
+	st.SetConfirmedOnline()
+	st.AddCommunityGoal(&models.CommunityGoal{
+		GoalID: "m5-goal", Title: "M5 Fixture Goal", Status: models.CommunityGoalStarted,
+		IsInStock: true, PointsContributed: 250, GoalAmount: 1000,
+	})
+
+	// Recorded AFTER the fixture is built: SetConfirmedOnline records its own
+	// "went live" event for this same streamer, and lastEventFor returns the
+	// NEWEST match. Recording last is what makes the expected value below a
+	// deterministic one rather than a race with the fixture's own events.
+	events.Record(events.TypeDropClaimed, buildCardsLastEventStreamer, "M5 Fixture Drop")
+
+	srv := &Server{}
+	tr := enTR(t)
+	live, _, _, _, ticker := srv.buildCards(
+		[]*models.Streamer{st},
+		WatchSlotsView{Watching: map[string]bool{}},
+		map[string]streamerStats{}, map[string]bool{}, tr,
+	)
+
+	if len(live) != 1 {
+		t.Fatalf("live group = %d cards, want 1", len(live))
+	}
+	card := live[0]
+
+	// The last-event summary is the localized event label plus the event's own
+	// detail — the exact string eventLabel produces, not merely "something".
+	wantText := tr("event.drop_claimed") + " · M5 Fixture Drop"
+	if card.LastEventText != wantText {
+		t.Errorf("LastEventText = %q, want %q — buildCards did not populate the card's last event", card.LastEventText, wantText)
+	}
+	// The age is a real "<duration> ago" phrase ending in the localized word,
+	// never the empty string an unassigned field would leave behind.
+	ago := tr("common.ago")
+	if !buildCardsAgoRe.MatchString(card.LastEventAgo) || !strings.HasSuffix(card.LastEventAgo, " "+ago) {
+		t.Errorf("LastEventAgo = %q, want a /%s/ phrase ending in %q", card.LastEventAgo, buildCardsAgoRe, ago)
+	}
+
+	// The active goal enriches the card AND produces the ticker entry.
+	if !card.HasGoal || card.GoalTitle != "M5 Fixture Goal" || card.GoalPercent != 25 {
+		t.Errorf("goal fields = {HasGoal:%v Title:%q Percent:%d}, want {true \"M5 Fixture Goal\" 25}", card.HasGoal, card.GoalTitle, card.GoalPercent)
+	}
+	if len(ticker) != 1 {
+		t.Fatalf("ticker = %d items, want 1 — an active community goal must append a ticker entry", len(ticker))
+	}
+	want := TickerItem{
+		Streamer: buildCardsLastEventStreamer, Kind: "goal",
+		Label: "M5 Fixture Goal", Percent: 25, HasPct: true,
+	}
+	if ticker[0] != want {
+		t.Errorf("ticker[0] = %+v, want %+v", ticker[0], want)
+	}
+}
+
+// TestBuildCardsTickerSortsByCompletionDesc pins the ordering half of the
+// ticker contract: the most complete goal leads, so the entries a viewer sees
+// first are the ones closest to paying out.
+func TestBuildCardsTickerSortsByCompletionDesc(t *testing.T) {
+	mk := func(name, title string, contributed int) *models.Streamer {
+		st := models.NewStreamer(name, models.DefaultStreamerSettings())
+		st.SetConfirmedOnline()
+		st.AddCommunityGoal(&models.CommunityGoal{
+			GoalID: title, Title: title, Status: models.CommunityGoalStarted,
+			IsInStock: true, PointsContributed: contributed, GoalAmount: 1000,
+		})
+		return st
+	}
+
+	srv := &Server{}
+	_, _, _, _, ticker := srv.buildCards(
+		// Deliberately supplied in ASCENDING completion order, so an
+		// unsorted ticker would come back in exactly the wrong order.
+		[]*models.Streamer{mk("low", "Low", 100), mk("mid", "Mid", 500), mk("high", "High", 900)},
+		WatchSlotsView{Watching: map[string]bool{}},
+		map[string]streamerStats{}, map[string]bool{}, echoTr,
+	)
+
+	if len(ticker) != 3 {
+		t.Fatalf("ticker = %d items, want 3", len(ticker))
+	}
+	for i, want := range []string{"High", "Mid", "Low"} {
+		if ticker[i].Label != want {
+			t.Errorf("ticker[%d].Label = %q, want %q (ticker must sort by completion desc); got %+v", i, ticker[i].Label, want, ticker)
+		}
 	}
 }
 
@@ -254,16 +381,20 @@ func TestBuildOverviewDataGeneratedUnixAndPollSeconds(t *testing.T) {
 	}
 	// newOverviewTestServer wires no health provider: aggregate health must
 	// read "unknown", never a false-positive "healthy".
-	if data.Health.State != overviewHealthUnknown {
+	if data.Health.State != "unknown" {
 		t.Errorf("Health.State = %q, want unknown (no health provider wired)", data.Health.State)
 	}
 	// The fake overview provider + StatusRunning + 1 live prediction: active,
-	// reachable, and therefore a PROVEN round count.
-	if data.PredictionsKPI.State != "active" {
-		t.Errorf("PredictionsKPI.State = %q, want active", data.PredictionsKPI.State)
+	// reachable, and therefore a PROVEN round count carried by Predictions
+	// itself — the compact summary has no separate count of its own.
+	if data.PredictionsState != predictionsStateActive {
+		t.Errorf("PredictionsState = %q, want %q", data.PredictionsState, predictionsStateActive)
 	}
-	if !data.PredictionsKPI.Available || data.PredictionsKPI.ActiveCount != 1 {
-		t.Errorf("PredictionsKPI = %+v, want Available=true ActiveCount=1", data.PredictionsKPI)
+	if want := "Active"; data.PredictionsStateLabel != want {
+		t.Errorf("PredictionsStateLabel = %q, want %q", data.PredictionsStateLabel, want)
+	}
+	if len(data.Predictions) != 1 {
+		t.Errorf("len(Predictions) = %d, want 1", len(data.Predictions))
 	}
 	// shroud is confirmed online, so it is counted as live.
 	if data.LiveCount != 1 {
@@ -657,7 +788,7 @@ func TestOverviewRendersNoRosterGrid(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	live, _, offline, _ := srv.buildCards(srv.snapshotStreamers(), WatchSlotsView{Watching: map[string]bool{}}, nil, map[string]bool{}, echoTr)
+	live, _, offline, _, _ := srv.buildCards(srv.snapshotStreamers(), WatchSlotsView{Watching: map[string]bool{}}, nil, map[string]bool{}, echoTr)
 	if len(live) == 0 || len(offline) == 0 {
 		t.Fatalf("precondition failed: fixture has %d live / %d offline streamers, so the grid assertions are vacuous", len(live), len(offline))
 	}
