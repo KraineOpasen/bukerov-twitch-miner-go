@@ -2239,7 +2239,17 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 //  4. THE COMMIT POINT: under m.mu, refreshCandidateAutoRedeemLocked first
 //     rebuilds candidate.AutoRedeem from the CURRENT live map and applies
 //     this apply's own removal deletions (I2 — a SetAutoRedeem committed
-//     during step 2's unlocked admission I/O is never lost, D1); then
+//     during step 2's unlocked admission I/O is never lost, D1); each
+//     surviving entry's ChannelID is then stamped from the SAME two sources
+//     applySettingsNoRename uses, for the reason its own step 2 records —
+//     persisting ahead of CommitPlan means the candidate itself must carry
+//     the stored-identity anchor a cold restart depends on, since
+//     finishApply's backfill runs AFTER this write and only reaches memory.
+//     A removed login cannot resurrect through either source:
+//     backfillChannelIDs only fills entries ALREADY in the candidate, and
+//     this apply's removals are exactly the entries the posted settings
+//     dropped. (m.mu -> streamer.Manager.mu is the documented lock order,
+//     the same way finishApply reads the roster.) Then
 //     config.SaveConfig(candidate) runs; on success publish m.config =
 //     candidate AND, in THE SAME critical section, delete
 //     m.autoRedeemState[login] and bump its generation for every committed
@@ -2306,6 +2316,8 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 	}
 	m.mu.Lock()
 	m.refreshCandidateAutoRedeemLocked(candidate, nil, removedLogins)
+	backfillChannelIDs(candidate, plan.ResolvedChannelIDs())
+	backfillChannelIDs(candidate, channelIDsByLogin(m.streamers.All()))
 	if configPath != "" {
 		if err := config.SaveConfig(configPath, candidate); err != nil {
 			m.mu.Unlock()
