@@ -419,18 +419,31 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 	return m.config.Health
 }
 
-// ApplyHealthSettings validates, applies (runtime, no restart), and persists new
-// canary settings.
-func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
+// ApplyHealthSettings validates, durably persists, and — only once that write
+// has actually succeeded — applies new canary/watchdog settings to the live
+// config and the running canary/progress watchdog (no restart).
+//
+// Persistence is the commit point: this builds a candidate off
+// cloneConfigLocked() and never touches the live m.config until
+// config.SaveConfig on the candidate has succeeded, mirroring the discipline
+// applySettingsNoRename already uses for the general settings path
+// (miner.go) — a SaveConfig failure returns the error and leaves m.config
+// the very same object, with the very same contents, and the canary/progress
+// watchdog are never reached. configPath == "" is the existing documented
+// no-op-success case (no config file configured).
+func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
 	m.mu.Lock()
-	m.config.Health = s
-	config.ValidateConfig(m.config)
-	applied := m.config.Health
+	candidate := m.cloneConfigLocked()
+	candidate.Health = s
+	config.ValidateConfig(candidate)
+	applied := candidate.Health
 	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
-			slog.Error("Failed to save config", "error", err)
+		if err := config.SaveConfig(m.configPath, candidate); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("health settings apply rejected; no changes were made: %w", err)
 		}
 	}
+	m.config = candidate
 	m.mu.Unlock()
 
 	if m.canary != nil {
@@ -442,4 +455,5 @@ func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
 	slog.Info("Health settings updated",
 		"canaryEnabled", applied.CanaryEnabled, "canaryChannel", applied.CanaryChannel,
 		"watchdogEnabled", applied.WatchdogEnabled)
+	return nil
 }

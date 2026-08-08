@@ -74,7 +74,7 @@ func (f *s55FakeHealthProvider) RunCanaryNow()                   {}
 func (f *s55FakeHealthProvider) CurrentHealthSettings() config.HealthSettings {
 	return config.HealthSettings{}
 }
-func (f *s55FakeHealthProvider) ApplyHealthSettings(config.HealthSettings) {}
+func (f *s55FakeHealthProvider) ApplyHealthSettings(config.HealthSettings) error { return nil }
 
 // s55FakeCampaignsProvider is a minimal CampaignsProvider whose SyncStatus is
 // fully test-controlled (distinct from the package's own
