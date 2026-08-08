@@ -65,9 +65,41 @@ type PredictionRiskConfig struct {
 
 // DiscordUIConfig contains Discord integration settings for the UI.
 type DiscordUIConfig struct {
-	Enabled  bool   `json:"enabled"`
+	Enabled bool `json:"enabled"`
+
+	// BotToken is a WRITE-ONLY channel carrying a REQUESTED NEW bot token —
+	// never a readback of the stored one. BuildRuntimeSettings always leaves
+	// it empty, whoever owns the token (env or config file), so GET
+	// /api/settings cannot serialize the secret to a browser, where it would
+	// otherwise sit in the DOM and in any proxy/devtools/HAR capture of that
+	// response. There is deliberately no endpoint that reveals it.
+	//
+	// Because the value is never sent out, the Settings page posts the whole
+	// DTO back with this field empty on every ordinary save. Empty therefore
+	// means "no new token" and ApplyToConfig KEEPS the stored one; only a
+	// non-empty value replaces it. A supplied value is stored verbatim (no
+	// trimming), exactly as before.
+	//
+	// Consequence, by design: emptying the Settings page field no longer
+	// clears a stored token, because "left blank" and "cleared" are the same
+	// bytes on the wire. Clearing goes through "Reset to defaults" (see
+	// botTokenExplicit) or by editing config.json.
 	BotToken string `json:"botToken"`
-	GuildID  string `json:"guildId"`
+
+	GuildID string `json:"guildId"`
+
+	// botTokenExplicit marks BotToken as an AUTHORITATIVE choice rather than
+	// a request, so it is applied verbatim — an empty value then CLEARS the
+	// stored token instead of preserving it. That is the only way to express
+	// removal once empty means "no new token" on every ordinary save.
+	//
+	// It is unexported on purpose: encoding/json can neither read nor write
+	// it, so no request body can reach it and it never appears in a response.
+	// Only BuildDefaultSettings sets it, which keeps "Reset to defaults"
+	// clearing the token exactly as it did before this field existed, while
+	// an ordinary save — even one whose body happens to look like the
+	// defaults — preserves it.
+	botTokenExplicit bool
 }
 
 // RateLimitSettings contains timing intervals for various miner operations.

@@ -1,6 +1,8 @@
 package settings
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
@@ -259,20 +261,126 @@ func TestEnvManagedBotTokenHiddenAndPreserved(t *testing.T) {
 	}
 }
 
-// Without env management the existing behavior is unchanged: the UI sees the
-// token and its value is applied.
-func TestFileManagedBotTokenRoundTrips(t *testing.T) {
+// A FILE-managed token is a write-only secret too: the DTO never carries it
+// outbound, and the empty value the UI posts back on every ordinary save keeps
+// the stored one rather than erasing it.
+//
+// This replaces the previous round-trip expectation, which asserted that the
+// DTO SHOULD carry the file-managed token. That was the defect: the dashboard
+// handed the live bot token to every browser that loaded the Settings page.
+func TestFileManagedBotTokenIsHiddenAndPreserved(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Discord.BotToken = "file-token"
 
 	rs := BuildRuntimeSettings(&cfg)
-	if rs.Discord.BotToken != "file-token" {
-		t.Errorf("UI DTO should carry the file-managed token, got %q", rs.Discord.BotToken)
+	if rs.Discord.BotToken != "" {
+		t.Errorf("UI DTO must hide the file-managed token, got %q", rs.Discord.BotToken)
 	}
 
+	// Round-trip the DTO back, as every ordinary save does.
+	ApplyToConfig(&cfg, rs)
+	if cfg.Discord.BotToken != "file-token" {
+		t.Errorf("an empty write erased the file-managed token: %q", cfg.Discord.BotToken)
+	}
+}
+
+// An explicitly supplied token still replaces the stored one — preservation
+// applies to the ABSENCE of a value, never to one the user actually typed.
+func TestExplicitBotTokenReplacesFileManagedToken(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.BotToken = "file-token"
+
+	rs := BuildRuntimeSettings(&cfg)
 	rs.Discord.BotToken = "updated-token"
 	ApplyToConfig(&cfg, rs)
 	if cfg.Discord.BotToken != "updated-token" {
 		t.Errorf("file-managed token not applied: %q", cfg.Discord.BotToken)
+	}
+}
+
+// BuildDefaultSettings marks its (empty) token explicit, so "Reset to
+// defaults" keeps removing a file-managed token exactly as it did before the
+// token became write-only. Pinned at this seam because an empty BotToken alone
+// can no longer express it — and because the marker is what separates a reset
+// from an ordinary save whose body merely looks like the defaults.
+func TestResetClearsFileManagedBotTokenButAnEquivalentSaveDoesNot(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.Enabled = true
+	cfg.Discord.BotToken = "file-token"
+	cfg.Discord.GuildID = "guild-1"
+
+	// An ordinary save carrying the same VALUES as the defaults preserves it.
+	asIfPosted := BuildRuntimeSettings(&cfg)
+	asIfPosted.Discord = DiscordUIConfig{Enabled: false, BotToken: "", GuildID: ""}
+	ApplyToConfig(&cfg, asIfPosted)
+	if cfg.Discord.BotToken != "file-token" {
+		t.Errorf("a defaults-shaped save cleared the token like a reset: %q", cfg.Discord.BotToken)
+	}
+
+	// The reset DTO itself clears it.
+	ApplyToConfig(&cfg, BuildDefaultSettings(cfg.Streamers))
+	if cfg.Discord.BotToken != "" {
+		t.Errorf("reset to defaults left the token behind: %q", cfg.Discord.BotToken)
+	}
+}
+
+// A reset must not clear an ENV-managed token: the environment still owns it,
+// so it would return on the next load while SaveConfig has already dropped the
+// on-disk copy — leaving config and runtime disagreeing about the secret.
+func TestResetDoesNotClearEnvManagedBotToken(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.BotToken = "env-token"
+	cfg.DiscordTokenFromEnv = true
+
+	ApplyToConfig(&cfg, BuildDefaultSettings(cfg.Streamers))
+	if cfg.Discord.BotToken != "env-token" {
+		t.Errorf("reset cleared the env-managed token: %q", cfg.Discord.BotToken)
+	}
+}
+
+// The explicit marker is DTO state, not wire state: a request body cannot set
+// it, so no client can turn an ordinary save into a token-clearing one. The
+// spellings matter because encoding/json matches field names
+// case-INsensitively, so an unexported field is the guarantee here — not the
+// absence of a tag.
+func TestBotTokenExplicitMarkerIsUnreachableFromJSON(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Discord.BotToken = "file-token"
+
+	// Every spelling a client could try, decoded onto the live snapshot the
+	// POST handler seeds from.
+	for _, body := range []string{
+		`{"discord":{"botToken":"","botTokenExplicit":true}}`,
+		`{"discord":{"botToken":"","BotTokenExplicit":true}}`,
+		`{"discord":{"botToken":"","bottokenexplicit":true}}`,
+	} {
+		rs := BuildRuntimeSettings(&cfg)
+		if err := json.Unmarshal([]byte(body), &rs); err != nil {
+			t.Fatalf("decoding %s failed: %v", body, err)
+		}
+		probe := cfg
+		ApplyToConfig(&probe, rs)
+		if probe.Discord.BotToken != "file-token" {
+			t.Errorf("body %s reached the explicit marker: token = %q", body, probe.Discord.BotToken)
+		}
+	}
+}
+
+// BuildRuntimeSettings must not serialize the token under EITHER ownership —
+// asserted on the marshaled bytes, so it covers the whole DTO rather than the
+// one field the other tests name.
+func TestRuntimeSettingsNeverMarshalsTheBotToken(t *testing.T) {
+	for _, fromEnv := range []bool{false, true} {
+		cfg := config.DefaultConfig()
+		cfg.Discord.BotToken = "secret-sentinel-value"
+		cfg.DiscordTokenFromEnv = fromEnv
+
+		encoded, err := json.Marshal(BuildRuntimeSettings(&cfg))
+		if err != nil {
+			t.Fatalf("marshaling the DTO failed: %v", err)
+		}
+		if strings.Contains(string(encoded), "secret-sentinel-value") {
+			t.Errorf("DiscordTokenFromEnv=%v: the marshaled DTO carries the bot token", fromEnv)
+		}
 	}
 }
