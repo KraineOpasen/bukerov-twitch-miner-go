@@ -327,18 +327,28 @@
         dialog: document.getElementById('settings-cat-discard-dialog'),
         load: async function () {
             const settingsResp = await fetch('/api/settings');
-            if (settingsResp.ok) {
-                const settings = await settingsResp.json();
-                streamerUsernames = (settings.streamers || []).map(function (s) { return s.username; });
-                const sel = document.getElementById('point-rule-streamer');
-                sel.innerHTML = '';
-                streamerUsernames.forEach(function (name) {
-                    const opt = document.createElement('option');
-                    opt.value = name;
-                    opt.textContent = name;
-                    sel.appendChild(opt);
-                });
-            }
+            // The streamer roster is load-bearing, not decoration: the
+            // mentions/online/offline allow-lists gather() sends are read off
+            // checkboxes streamerCheckboxRow() builds from streamerUsernames,
+            // and POST /api/notifications/config is a FULL-ROW write. An
+            // unknown roster renders as zero checkboxes — indistinguishable
+            // from "the operator deselected everything" — so tolerating a
+            // failed fetch here would baseline those lists as [] and let a
+            // later, entirely unrelated edit silently blank the persisted
+            // ones. Fail the category load instead: C6 then never records a
+            // baseline, isDirty() stays false, and the save handler's early
+            // return makes a save from this state impossible.
+            if (!settingsResp.ok) throw new Error(t('js.setcat.load_error'));
+            const settings = await settingsResp.json();
+            streamerUsernames = (settings.streamers || []).map(function (s) { return s.username; });
+            const sel = document.getElementById('point-rule-streamer');
+            sel.innerHTML = '';
+            streamerUsernames.forEach(function (name) {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                sel.appendChild(opt);
+            });
             await loadChannels();
             const resp = await fetch('/api/notifications/config');
             if (!resp.ok) throw new Error(t('js.setcat.load_error'));

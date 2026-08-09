@@ -13,6 +13,9 @@ package web
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -553,17 +556,144 @@ func TestS5_6EvidenceHarness(t *testing.T) {
 	// sequence for it to reflect.
 	srv.GetStatusBroadcaster().SetStatus(StatusRunning, "")
 
-	httpSrv := &http.Server{Addr: addr, Handler: srv.handler(), ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = httpSrv.ListenAndServe() }()
-	t.Logf("S5-6 evidence harness serving on http://%s — try /settings/streamers, /settings/rotation, /settings/drops, /settings/predictions, /settings/chat-raids, /settings/transport, /settings/analytics-logging, /settings/events-notifications, /settings/discord, /settings/system", addr)
+	handle, err := startS5_6EvidenceHarness(srv.handler(), addr)
+	if err != nil {
+		t.Fatalf("evidence harness failed to start: %v", err)
+	}
+	// Checked cleanup, and it still runs if the select below Fatalf's.
+	defer func() {
+		if err := handle.stop(); err != nil {
+			t.Errorf("evidence harness shutdown: %v", err)
+		}
+	}()
+	t.Logf("S5-6 evidence harness serving on http://%s — try /settings/streamers, /settings/rotation, /settings/drops, /settings/predictions, /settings/chat-raids, /settings/transport, /settings/analytics-logging, /settings/events-notifications, /settings/discord, /settings/system", handle.Addr)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sig)
 	select {
 	case <-sig:
+	case serveErr := <-handle.errCh:
+		// The server stopped on its own — never a successful evidence run,
+		// however long it had been up.
+		t.Fatalf("evidence harness stopped serving before it was asked to: %v", serveErr)
 	case <-time.After(30 * time.Minute):
 	}
-	_ = httpSrv.Shutdown(context.Background())
+}
+
+// s56HarnessHandle is a started evidence-harness server: the address it is
+// actually listening on, the channel carrying the serve goroutine's terminal
+// error, and a checked stop function.
+type s56HarnessHandle struct {
+	Addr net.Addr
+	// errCh receives exactly one value — the serve goroutine's terminal
+	// error, nil for a clean http.ErrServerClosed shutdown — and is then
+	// closed, so both the harness's select and stop() can receive from it
+	// without either one starving the other.
+	errCh <-chan error
+	stop  func() error
+}
+
+// startS5_6EvidenceHarness binds addr and serves handler on it.
+//
+// The bind happens SYNCHRONOUSLY, so a port collision (or any other listen
+// failure) comes back to the caller as an error instead of being discarded
+// inside a goroutine. That is the whole point: a harness that swallows its
+// startup error goes on to log "serving on ..." and let a browser-evidence
+// run claim readiness — and then success — against a server that never came
+// up. Readiness needs no sleep either, since the listener is already bound
+// when this returns. After startup, a non-http.ErrServerClosed serve error is
+// surfaced on the handle's channel rather than dropped, and stop() reports
+// both the Shutdown error and the serve goroutine's own verdict.
+func startS5_6EvidenceHarness(handler http.Handler, addr string) (*s56HarnessHandle, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("evidence harness could not bind %s: %w", addr, err)
+	}
+	httpSrv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	errCh := make(chan error, 1)
+	go func() {
+		serveErr := httpSrv.Serve(ln)
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		errCh <- serveErr
+		close(errCh)
+	}()
+	stop := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		shutdownErr := httpSrv.Shutdown(ctx)
+		serveErr := <-errCh
+		if shutdownErr != nil {
+			return shutdownErr
+		}
+		return serveErr
+	}
+	return &s56HarnessHandle{Addr: ln.Addr(), errCh: errCh, stop: stop}, nil
+}
+
+// TestS5_6EvidenceHarnessSurfacesStartupFailure proves the harness reports a
+// failed start instead of discarding it. Deterministic by construction: the
+// address handed to the harness is one this test is already listening on, so
+// the bind cannot succeed, and no timing window is involved.
+func TestS5_6EvidenceHarnessSurfacesStartupFailure(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not occupy a port for the collision: %v", err)
+	}
+	defer func() { _ = occupied.Close() }()
+	addr := occupied.Addr().String()
+
+	srv := buildF3PageServer(t)
+	handle, err := startS5_6EvidenceHarness(srv.handler(), addr)
+	if err == nil {
+		if handle != nil {
+			_ = handle.stop()
+		}
+		t.Fatalf("startS5_6EvidenceHarness(%s) reported success, but that address is already in use — a discarded startup error lets an evidence run claim readiness against a server that never came up", addr)
+	}
+	if handle != nil {
+		t.Errorf("startS5_6EvidenceHarness must return a nil handle when it could not start, got %+v", handle)
+	}
+	if !strings.Contains(err.Error(), addr) {
+		t.Errorf("the startup error must name the address it failed to bind, got %v", err)
+	}
+}
+
+// TestS5_6EvidenceHarnessServesAndShutsDownCleanly is the other half of the
+// contract: a harness that started really is serving (no sleep-based
+// readiness guess — the listener is bound before startS5_6EvidenceHarness
+// returns), reports nothing on errCh while healthy, and its checked shutdown
+// reports no error.
+func TestS5_6EvidenceHarnessServesAndShutsDownCleanly(t *testing.T) {
+	srv := buildF3PageServer(t)
+	handle, err := startS5_6EvidenceHarness(srv.handler(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startS5_6EvidenceHarness: %v", err)
+	}
+
+	// Proxy explicitly disabled: the harness is loopback-only and must never
+	// depend on the ambient environment's proxy settings.
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
+	resp, err := client.Get("http://" + handle.Addr.String() + "/settings/events-notifications")
+	if err != nil {
+		t.Fatalf("GET against the started harness failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("harness GET /settings/events-notifications = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	select {
+	case serveErr := <-handle.errCh:
+		t.Fatalf("harness reported a serve error while it was healthy: %v", serveErr)
+	default:
+	}
+
+	if err := handle.stop(); err != nil {
+		t.Errorf("checked shutdown of a healthy harness must report no error, got %v", err)
+	}
 }
 
 // TestS5_6RedirectMapNoLongerContainsSettingsRoutes proves none of the ten
@@ -1038,5 +1168,118 @@ func TestS5_6Q3R6CommittedTruthComesFromResponseNotPayload(t *testing.T) {
 	clickHandler := s56ExtractJSFunction(t, c6Src, "saveBtn.addEventListener('click', async function (e) {")
 	if !strings.Contains(clickHandler, "committed !== undefined && committed !== null ? committed : payload") {
 		t.Error("c6_form.html: the generic engine must fall back to `payload` when opts.save() returns no committed-truth value, so ordinary (non-route-22) categories keep their exact prior baseline/canonical behavior")
+	}
+}
+
+// ---------------------------------------------------------------------
+// R7: an UNKNOWN streamer roster must never be persisted as an EMPTY one.
+// ---------------------------------------------------------------------
+
+// TestS5_6Q3R7RosterLoadFailureCannotBlankStreamerAllowLists pins route 20's
+// load seam against a silent-data-loss path.
+//
+// Route 20's three allow-lists (mentionsStreamers/onlineStreamers/
+// offlineStreamers) are gathered from checkbox containers that
+// streamerCheckboxRow() builds by iterating `streamerUsernames`, and that
+// roster comes from GET /api/settings. POST /api/notifications/config is a
+// FULL-ROW write (this route's sole-ownership rationale). So when the roster
+// fetch fails and the page carries on regardless, the containers render zero
+// checkboxes, selectedFrom() returns [] for all three lists, C6 baselines
+// that [] as truth, and a later edit to an entirely unrelated field (say the
+// system-notifications toggle) posts those [] values — silently blanking the
+// operator's persisted allow-lists. An empty roster and an unknown roster are
+// indistinguishable once rendered, which is precisely the bug.
+//
+// The invariant: UNKNOWN roster must never become EMPTY roster. A failed
+// /api/settings response is therefore load-bearing — it must throw out of
+// opts.load() BEFORE C6 records a baseline. That leaves baseline null, which
+// keeps isDirty() false, which makes the save handler's own early return fire
+// first, so no POST can be produced from that failed-load state at all.
+func TestS5_6Q3R7RosterLoadFailureCannotBlankStreamerAllowLists(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_events_notifications.html")
+	loadFn := s56ExtractJSFunction(t, src, "load: async function () {")
+
+	// The exact pre-fix literal: a bare ok-check that silently tolerates a
+	// failed roster fetch and falls through with streamerUsernames still [].
+	if strings.Contains(loadFn, "if (settingsResp.ok) {") {
+		t.Errorf("load() must not treat a failed /api/settings as merely \"no streamers\" — an unknown roster then serializes as an empty allow-list and a later unrelated save blanks it; got:\n%s", loadFn)
+	}
+	const guard = "if (!settingsResp.ok) throw new Error(t('js.setcat.load_error'));"
+	if !strings.Contains(loadFn, guard) {
+		t.Fatalf("load() must treat a failed /api/settings as a load-bearing failure via %q — the same existing error machinery the /api/notifications/config fetch below it already uses; got:\n%s", guard, loadFn)
+	}
+
+	// Ordering: the guard must precede every use of the roster and the
+	// function's own successful return, so no editable state is ever
+	// baselined from an unknown roster.
+	guardIdx := strings.Index(loadFn, guard)
+	for _, after := range []string{
+		"streamerUsernames = (settings.streamers || [])",
+		"return resp.json();",
+	} {
+		idx := strings.Index(loadFn, after)
+		if idx < 0 {
+			t.Errorf("load() no longer contains %q", after)
+			continue
+		}
+		if guardIdx > idx {
+			t.Errorf("the failed-/api/settings guard must run BEFORE %q — otherwise the page still reaches an editable, save-capable state built on an unknown roster", after)
+		}
+	}
+
+	// Healthy route 20 behavior must be unchanged by the corrective seam.
+	for _, kept := range []string{
+		"const settings = await settingsResp.json();",
+		"streamerUsernames = (settings.streamers || []).map(function (s) { return s.username; });",
+		"const sel = document.getElementById('point-rule-streamer');",
+		"await loadChannels();",
+		"const resp = await fetch('/api/notifications/config');",
+		"if (!resp.ok) throw new Error(t('js.setcat.load_error'));",
+	} {
+		if !strings.Contains(loadFn, kept) {
+			t.Errorf("healthy-path behavior must be unchanged: load() must still contain %q; got:\n%s", kept, loadFn)
+		}
+	}
+
+	// Why the roster is load-bearing at all: gather() reads the three
+	// allow-lists out of containers streamerCheckboxRow() fills from
+	// streamerUsernames. If either half of that coupling moves, this pin
+	// must be revisited rather than silently passing.
+	gatherFn := s56ExtractJSFunction(t, src, "function gather() {")
+	for _, field := range []string{
+		"mentionsStreamers: selectedFrom('mentions-streamers'),",
+		"onlineStreamers: selectedFrom('online-streamers'),",
+		"offlineStreamers: selectedFrom('offline-streamers'),",
+	} {
+		if !strings.Contains(gatherFn, field) {
+			t.Errorf("gather() must still serialize %q — this pin assumes the allow-lists come from the roster-built checkboxes", field)
+		}
+	}
+	rowFn := s56ExtractJSFunction(t, src, "function streamerCheckboxRow(containerId, values) {")
+	if !strings.Contains(rowFn, "streamerUsernames.forEach(") {
+		t.Error("streamerCheckboxRow() must still build its checkboxes from streamerUsernames — that coupling is what makes a failed roster fetch data-loss-bearing")
+	}
+
+	// The consequence, in the shared engine: a throw from opts.load() leaves
+	// baseline null, and both isDirty() and the save handler refuse to act on
+	// a null baseline. That is what makes "no POST from a failed load" true
+	// rather than merely intended.
+	c6 := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+	c6Load := s56ExtractJSFunction(t, c6, "async function load() {")
+	awaitIdx := strings.Index(c6Load, "const data = await opts.load();")
+	baselineIdx := strings.Index(c6Load, "baseline = JSON.stringify(opts.gather());")
+	if awaitIdx < 0 || baselineIdx < 0 {
+		t.Fatalf("c6 load() no longer awaits opts.load() before baselining; got:\n%s", c6Load)
+	}
+	if awaitIdx > baselineIdx {
+		t.Error("c6 load() must await opts.load() BEFORE baselining, so a load failure cannot produce a baseline at all")
+	}
+	isDirtyFn := s56ExtractJSFunction(t, c6, "function isDirty() {")
+	if !strings.Contains(isDirtyFn, "baseline !== null") {
+		t.Error("isDirty() must stay false while baseline is null — that is what prevents any save from a failed-load state")
+	}
+	clickHandler := s56ExtractJSFunction(t, c6, "saveBtn.addEventListener('click', async function (e) {")
+	if !strings.Contains(clickHandler, "if (!isDirty() || saving) return;") {
+		t.Error("the save handler must return before opts.save() when isDirty() is false, so a failed load can never produce a POST")
 	}
 }
