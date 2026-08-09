@@ -672,6 +672,24 @@ func TestS5_6EvidenceHarnessServesAndShutsDownCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startS5_6EvidenceHarness: %v", err)
 	}
+	// Registered immediately, BEFORE any assertion that can Fatal: every
+	// t.Fatalf below returns from the test through runtime.Goexit, and the
+	// explicit checked shutdown at the end would simply never run — leaving the
+	// listener bound and the serve goroutine alive for the rest of the
+	// package's tests. The explicit shutdown stays the assertion (it is what
+	// this test is about), so this cleanup only covers the paths that never
+	// reach it; `stopped` keeps the healthy path reporting exactly once, and
+	// stop() is idempotent regardless (see
+	// TestS5_6EvidenceHarnessStopIsIdempotent).
+	stopped := false
+	t.Cleanup(func() {
+		if stopped {
+			return
+		}
+		if err := handle.stop(); err != nil {
+			t.Errorf("checked shutdown of the harness during cleanup must report no error, got %v", err)
+		}
+	})
 
 	// Proxy explicitly disabled: the harness is loopback-only and must never
 	// depend on the ambient environment's proxy settings.
@@ -693,6 +711,28 @@ func TestS5_6EvidenceHarnessServesAndShutsDownCleanly(t *testing.T) {
 
 	if err := handle.stop(); err != nil {
 		t.Errorf("checked shutdown of a healthy harness must report no error, got %v", err)
+	}
+	stopped = true
+}
+
+// TestS5_6EvidenceHarnessStopIsIdempotent pins what makes the registered
+// cleanup above safe to pair with an explicit checked shutdown: stop() may run
+// twice and the second run must be a silent no-op, not a hang and not a
+// spurious failure. Shutdown on an already-shut-down server returns nil, and
+// errCh is closed after its single value so a second receive yields nil
+// immediately — no timing window, no sleep, and no ordering assumption between
+// the explicit call and the cleanup.
+func TestS5_6EvidenceHarnessStopIsIdempotent(t *testing.T) {
+	srv := buildF3PageServer(t)
+	handle, err := startS5_6EvidenceHarness(srv.handler(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startS5_6EvidenceHarness: %v", err)
+	}
+	if err := handle.stop(); err != nil {
+		t.Fatalf("first checked shutdown of a healthy harness must report no error, got %v", err)
+	}
+	if err := handle.stop(); err != nil {
+		t.Errorf("a second checked shutdown must be a no-op reporting no error, got %v — a cleanup that runs after the explicit shutdown would otherwise fail an otherwise-passing test", err)
 	}
 }
 
@@ -1281,5 +1321,226 @@ func TestS5_6Q3R7RosterLoadFailureCannotBlankStreamerAllowLists(t *testing.T) {
 	clickHandler := s56ExtractJSFunction(t, c6, "saveBtn.addEventListener('click', async function (e) {")
 	if !strings.Contains(clickHandler, "if (!isDirty() || saving) return;") {
 		t.Error("the save handler must return before opts.save() when isDirty() is false, so a failed load can never produce a POST")
+	}
+}
+
+// TestS5_6Q3R8UnknownChannelDiscoveryCannotBlankPersistedChannelIds pins route
+// 20's other unknown-vs-empty seam — the sibling of R7's roster fix, on the
+// five Discord channel ids.
+//
+// The five channel <select>s are server-rendered carrying a single
+// <option value=""> placeholder; every real option is added at runtime by
+// loadChannels(). A <select> silently refuses a value no option carries — the
+// assignment deselects everything and the empty placeholder wins the reset, so
+// sel.value reads back "". When discovery adds no options, populate()'s
+// persisted ids therefore evaporate on assignment: gather() reads "" for all
+// five, C6 baselines those blanks as truth, and POST /api/notifications/config
+// is a FULL-ROW write — so a later save of an entirely unrelated field (say the
+// system-notifications toggle) writes five empty channel ids over the
+// operator's persisted ones.
+//
+// Discovery legitimately adds nothing on two routinely reachable paths, and
+// neither is "the operator has no channels configured": configValid=false
+// (Discord enabled but not yet validly configured — the request is
+// deliberately never made) and a request that was made and failed.
+//
+// The invariant: UNKNOWN/UNAVAILABLE channel discovery must never become EMPTY
+// persisted channel ids. A SUCCESSFUL discovery stays authoritative and
+// unchanged — an id the server no longer lists still clears exactly as before.
+func TestS5_6Q3R8UnknownChannelDiscoveryCannotBlankPersistedChannelIds(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_events_notifications.html")
+	populateFn := s56ExtractJSFunction(t, src, "function populate(cfg) {")
+
+	// The exact pre-fix literals: a raw assignment onto a select that may
+	// carry no matching option at all.
+	for _, id := range []string{"mentions", "points", "online", "offline", "system"} {
+		clobber := "document.getElementById('" + id + "-channel').value = cfg."
+		if strings.Contains(populateFn, clobber) {
+			t.Errorf("populate() must not assign the persisted %s-channel id straight onto the select — with no matching <option> the value lands as \"\" and gather() then full-row-writes that blank over the stored id; got:\n%s", id, populateFn)
+		}
+	}
+
+	// Every one of the five must go through the preservation seam instead.
+	for _, want := range []string{
+		"setChannel('mentions-channel', cfg.mentionsChannelId);",
+		"setChannel('points-channel', cfg.pointsChannelId);",
+		"setChannel('online-channel', cfg.onlineChannelId);",
+		"setChannel('offline-channel', cfg.offlineChannelId);",
+		"setChannel('system-channel', cfg.systemChannelId);",
+	} {
+		if !strings.Contains(populateFn, want) {
+			t.Errorf("populate() must route the persisted channel id through the preservation seam: missing %q; got:\n%s", want, populateFn)
+		}
+	}
+
+	setFn := s56ExtractJSFunction(t, src, "function setChannel(id, value) {")
+
+	// The seam itself: while the channel list is unknown, carry the persisted
+	// id in as its own option so the assignment has something to match.
+	const unknownGuard = "if (v !== '' && !channelsKnown) {"
+	if !strings.Contains(setFn, unknownGuard) {
+		t.Fatalf("setChannel() must preserve a non-empty persisted id only while the channel list is unknown (%q) — that scoping is what leaves a SUCCESSFUL discovery authoritative; got:\n%s", unknownGuard, setFn)
+	}
+	// Idempotent across repeated populate() calls (C6 revert() re-populates
+	// from canonical), and it never shadows a real discovered option.
+	const dedupe = "Array.prototype.some.call(sel.options, function (o) { return o.value === v; })"
+	if !strings.Contains(setFn, dedupe) {
+		t.Errorf("setChannel() must add its carrier option only when the id is not already an option (%q) — otherwise a Cancel/re-populate cycle stacks duplicates; got:\n%s", dedupe, setFn)
+	}
+	appendIdx := strings.Index(setFn, "sel.appendChild(opt);")
+	assignIdx := strings.Index(setFn, "sel.value = v;")
+	if appendIdx < 0 || assignIdx < 0 {
+		t.Fatalf("setChannel() must append the carrier option and then assign the value; got:\n%s", setFn)
+	}
+	if appendIdx > assignIdx {
+		t.Error("setChannel() must append the carrier option BEFORE assigning the value — the other order assigns against a select that still has no matching option, which is the clobber itself")
+	}
+
+	loadChannelsFn := s56ExtractJSFunction(t, src, "async function loadChannels() {")
+
+	// configValid=false skips discovery entirely — no request, so no failure
+	// to report — and the seam above is what keeps the stored ids intact.
+	const skip = "if (!configValid) return;"
+	skipIdx := strings.Index(loadChannelsFn, skip)
+	if skipIdx < 0 {
+		t.Fatalf("loadChannels() must still skip discovery entirely when configValid is false (%q); got:\n%s", skip, loadChannelsFn)
+	}
+
+	// Only a list that actually came back makes the channel list known.
+	const known = "channelsKnown = true;"
+	if n := strings.Count(loadChannelsFn, known); n != 1 {
+		t.Fatalf("loadChannels() must mark the channel list known exactly once, on the success path only; found %d occurrences of %q in:\n%s", n, known, loadChannelsFn)
+	}
+	knownIdx := strings.Index(loadChannelsFn, known)
+	jsonIdx := strings.Index(loadChannelsFn, "const channels = await resp.json();")
+	if jsonIdx < 0 {
+		t.Fatalf("loadChannels() no longer parses the channel list; got:\n%s", loadChannelsFn)
+	}
+	if knownIdx < jsonIdx {
+		t.Error("loadChannels() must only mark the channel list known AFTER a real list came back and was applied — marking it known any earlier hands populate() a false \"discovery succeeded\" and re-opens the clobber")
+	}
+	// Monotonic: nothing may un-know an already-discovered list (the sole
+	// `= false` is the declaration itself). A failed refresh leaves the last
+	// known options in the DOM untouched, so it does not make them unknown.
+	if n := strings.Count(src, "channelsKnown = false"); n != 1 {
+		t.Errorf("channelsKnown must only ever be initialized to false (its declaration), never reset — found %d occurrences of \"channelsKnown = false\"", n)
+	}
+
+	// A discovery that was attempted and failed must say so, deterministically,
+	// on both failure paths — reusing the page's existing inline region and an
+	// existing js.* catalog key (window.I18N only ever carries js.* keys).
+	const chanFail = "showInlineFailure('settings-cat-load-error', t('js.setcat.load_error'));"
+	if strings.Contains(loadChannelsFn, "if (!resp.ok) return;") {
+		t.Errorf("loadChannels() must not drop a failed channel fetch silently — an operator cannot tell an unavailable channel list from an empty one; got:\n%s", loadChannelsFn)
+	}
+	if n := strings.Count(loadChannelsFn, chanFail); n != 2 {
+		t.Errorf("loadChannels() must surface %q on BOTH attempted-and-failed paths (non-OK response and a rejected fetch); found %d; got:\n%s", chanFail, n, loadChannelsFn)
+	}
+	if !strings.Contains(loadChannelsFn, "clearInlineFailure('settings-cat-load-error');") {
+		t.Errorf("loadChannels() must clear the inline failure once discovery succeeds, so a recovered reload does not leave a stale error on screen; got:\n%s", loadChannelsFn)
+	}
+	// The skip path reports nothing: no request was made to fail.
+	if firstFail := strings.Index(loadChannelsFn, "showInlineFailure("); firstFail >= 0 && firstFail < skipIdx {
+		t.Error("the configValid=false skip must come BEFORE any failure surface — discovery that was never attempted has not failed")
+	}
+	if !strings.Contains(src, `<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>`) {
+		t.Error("the page must keep its existing #settings-cat-load-error inline region — the channel-load failure surface reuses it rather than adding new UI")
+	}
+
+	// Why this is data-loss-bearing at all: gather() reads the five ids
+	// straight off those selects, and route 20 posts the FULL object. If
+	// either half moves, this pin must be revisited rather than silently pass.
+	gatherFn := s56ExtractJSFunction(t, src, "function gather() {")
+	for _, field := range []string{
+		"mentionsChannelId: document.getElementById('mentions-channel').value,",
+		"pointsChannelId: document.getElementById('points-channel').value,",
+		"onlineChannelId: document.getElementById('online-channel').value,",
+		"offlineChannelId: document.getElementById('offline-channel').value,",
+		"systemChannelId: document.getElementById('system-channel').value,",
+	} {
+		if !strings.Contains(gatherFn, field) {
+			t.Errorf("gather() must still serialize %q — this pin assumes the posted ids come from those selects", field)
+		}
+	}
+
+	// Healthy discovery behavior must be unchanged by the corrective seam.
+	for _, kept := range []string{
+		"const resp = await fetch('/api/notifications/channels');",
+		"const current = sel.value;",
+		`Array.from(sel.querySelectorAll('option[value]:not([value=""])')).forEach(function (o) { o.remove(); });`,
+		"sel.value = current;",
+	} {
+		if !strings.Contains(loadChannelsFn, kept) {
+			t.Errorf("healthy-path behavior must be unchanged: loadChannels() must still contain %q; got:\n%s", kept, loadChannelsFn)
+		}
+	}
+}
+
+// TestS5_6Q3R9PointRuleLoadFailureIsVisible pins route 20's point-rules list
+// against a silent failure.
+//
+// loadRules() renders the Point Goals table from GET /api/notifications/points.
+// Returning on a non-OK response leaves the table exactly as it was — empty on
+// first load — with no signal at all, so "the request failed" and "you have no
+// point rules" look identical. The rules themselves are never lost (add/delete
+// are immediate, separate actions against their own endpoints), but an
+// operator reading an empty table has no way to know the list is stale, and
+// may re-add a rule that already exists.
+//
+// The failure must be visible through the page's existing #notif-rules-error
+// inline region — the same surface the add and delete handlers already use. No
+// schema, API, or backend change: the endpoint and the healthy render path are
+// untouched.
+func TestS5_6Q3R9PointRuleLoadFailureIsVisible(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_events_notifications.html")
+	loadRulesFn := s56ExtractJSFunction(t, src, "async function loadRules() {")
+
+	// The exact pre-fix literal: a bare ok-check that renders nothing and
+	// reports nothing.
+	if strings.Contains(loadRulesFn, "if (!resp.ok) return;") {
+		t.Errorf("loadRules() must not return silently on a failed load — an empty table then means both \"no rules\" and \"could not load\"; got:\n%s", loadRulesFn)
+	}
+	const rulesFail = "showInlineFailure('notif-rules-error', t('js.setcat.load_error'));"
+	if !strings.Contains(loadRulesFn, rulesFail) {
+		t.Fatalf("loadRules() must surface the failure via %q — the existing inline region the add/delete handlers already use, with an existing js.* catalog key; got:\n%s", rulesFail, loadRulesFn)
+	}
+	if !strings.Contains(loadRulesFn, "clearInlineFailure('notif-rules-error');") {
+		t.Errorf("loadRules() must clear the inline failure once the list loads, so a recovered reload does not leave a stale error on screen; got:\n%s", loadRulesFn)
+	}
+	if !strings.Contains(src, `<div id="notif-rules-error" class="c1-inline-fail" role="alert" hidden></div>`) {
+		t.Error("the page must keep its existing #notif-rules-error inline region — the load failure reuses it rather than adding new UI")
+	}
+
+	// Healthy load behavior unchanged: same endpoint, same render call.
+	for _, kept := range []string{
+		"await fetch('/api/notifications/points')",
+		"renderRules(await resp.json());",
+	} {
+		if !strings.Contains(loadRulesFn, kept) {
+			t.Errorf("healthy-path behavior must be unchanged: loadRules() must still contain %q; got:\n%s", kept, loadRulesFn)
+		}
+	}
+
+	// Add and delete are outside this seam and must be untouched, including
+	// their own distinct failure messages.
+	addHandler := s56ExtractJSFunction(t, src, "document.getElementById('add-point-rule-btn').addEventListener('click', async function () {")
+	for _, kept := range []string{
+		"showInlineFailure('notif-rules-error', t('js.notif.invalid_rule'));",
+		"clearInlineFailure('notif-rules-error');",
+		"await loadRules();",
+		"showInlineFailure('notif-rules-error', t('js.notif.rule_add_failed'));",
+	} {
+		if !strings.Contains(addHandler, kept) {
+			t.Errorf("the add-rule handler must be unchanged: missing %q; got:\n%s", kept, addHandler)
+		}
+	}
+	renderFn := s56ExtractJSFunction(t, src, "function renderRules(rules) {")
+	for _, kept := range []string{
+		"await fetch('/api/notifications/points/' + rule.id, { method: 'DELETE' });",
+		"showInlineFailure('notif-rules-error', t('js.notif.rule_delete_failed'));",
+	} {
+		if !strings.Contains(renderFn, kept) {
+			t.Errorf("the delete-rule handler must be unchanged: missing %q; got:\n%s", kept, renderFn)
+		}
 	}
 }

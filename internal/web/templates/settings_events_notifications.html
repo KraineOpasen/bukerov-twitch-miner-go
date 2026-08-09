@@ -177,11 +177,24 @@
     // fetch, exactly like that page's loadChannels(forceRefresh) does.
     const configValid = document.getElementById('settings-cat-form').dataset.configValid === 'true';
 
+    // channelsKnown is this page's channel-discovery outcome: true only once
+    // GET /api/notifications/channels has actually returned a list and it has
+    // been applied to the selects. It stays false while discovery is SKIPPED
+    // (configValid=false — there is no Discord session to query) or was
+    // ATTEMPTED AND FAILED, and it never goes back to false: a failed refresh
+    // returns before touching the DOM, so the last known list is still on
+    // screen and has not become unknown.
+    let channelsKnown = false;
+
     async function loadChannels() {
         if (!configValid) return;
         try {
             const resp = await fetch('/api/notifications/channels');
-            if (!resp.ok) return;
+            // Discovery that was attempted and failed is reported, not
+            // swallowed: an operator otherwise cannot tell an unavailable
+            // channel list from an empty one. Reuses the page's existing
+            // inline region and an existing js.* catalog key.
+            if (!resp.ok) { showInlineFailure('settings-cat-load-error', t('js.setcat.load_error')); return; }
             const channels = await resp.json();
             ['mentions-channel', 'points-channel', 'online-channel', 'offline-channel', 'system-channel'].forEach(function (id) {
                 const sel = document.getElementById(id);
@@ -195,16 +208,53 @@
                 });
                 sel.value = current;
             });
-        } catch (e) { /* best-effort — channel selects simply stay at their current values */ }
+            channelsKnown = true;
+            clearInlineFailure('settings-cat-load-error');
+        } catch (e) {
+            showInlineFailure('settings-cat-load-error', t('js.setcat.load_error'));
+        }
     }
     document.querySelectorAll('[data-reload-channels]').forEach(function (b) { b.addEventListener('click', function () { loadChannels(); }); });
 
+    // A <select> silently refuses a value no <option> carries: the assignment
+    // deselects everything, the empty placeholder wins the reset, and the value
+    // reads back "". The five channel selects ship with only that placeholder,
+    // and loadChannels() legitimately adds nothing whenever discovery was
+    // SKIPPED (configValid=false) or ATTEMPTED AND FAILED — neither of which
+    // means "no channels are configured". gather() would then read "" for an id
+    // the operator really has persisted, and POST /api/notifications/config is
+    // a FULL-ROW write, so one later save of an unrelated toggle would blank
+    // all five stored ids. An unknown channel list and an empty one are
+    // indistinguishable once rendered, which is exactly the bug: while the list
+    // is unknown, carry the persisted id in as its own option so it round-trips
+    // untouched instead.
+    //
+    // Only while it is unknown. A SUCCESSFUL discovery is authoritative and its
+    // behavior is unchanged — no carrier is added, so an id the server no
+    // longer lists still clears exactly as it did before. The dedupe check also
+    // keeps repeated populate() calls (C6's revert() re-populates from
+    // canonical) from stacking duplicate options.
+    function setChannel(id, value) {
+        const sel = document.getElementById(id);
+        const v = value || '';
+        if (v !== '' && !channelsKnown) {
+            const has = Array.prototype.some.call(sel.options, function (o) { return o.value === v; });
+            if (!has) {
+                const opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v;
+                sel.appendChild(opt);
+            }
+        }
+        sel.value = v;
+    }
+
     function populate(cfg) {
-        document.getElementById('mentions-channel').value = cfg.mentionsChannelId || '';
-        document.getElementById('points-channel').value = cfg.pointsChannelId || '';
-        document.getElementById('online-channel').value = cfg.onlineChannelId || '';
-        document.getElementById('offline-channel').value = cfg.offlineChannelId || '';
-        document.getElementById('system-channel').value = cfg.systemChannelId || '';
+        setChannel('mentions-channel', cfg.mentionsChannelId);
+        setChannel('points-channel', cfg.pointsChannelId);
+        setChannel('online-channel', cfg.onlineChannelId);
+        setChannel('offline-channel', cfg.offlineChannelId);
+        setChannel('system-channel', cfg.systemChannelId);
 
         document.getElementById('system-enabled').checked = !!cfg.systemEnabled;
         document.getElementById('upcoming-drops-enabled').checked = !!cfg.upcomingDropsEnabled;
@@ -287,10 +337,20 @@
         });
     }
 
+    // A failed load must not read as "no point rules configured": the table
+    // simply stays as it was, so silence makes an unavailable list and an empty
+    // one identical on screen. Report it through the same inline region the
+    // add/delete handlers already use — same endpoint, same render path, no
+    // backend change.
     async function loadRules() {
-        const resp = await fetch('/api/notifications/points');
-        if (!resp.ok) return;
-        renderRules(await resp.json());
+        try {
+            const resp = await fetch('/api/notifications/points');
+            if (!resp.ok) throw new Error();
+            renderRules(await resp.json());
+            clearInlineFailure('notif-rules-error');
+        } catch (e) {
+            showInlineFailure('notif-rules-error', t('js.setcat.load_error'));
+        }
     }
 
     document.getElementById('add-point-rule-btn').addEventListener('click', async function () {
