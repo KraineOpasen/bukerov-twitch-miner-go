@@ -1,0 +1,248 @@
+{{define "title"}}{{ t "setcat.drops.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.drops.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.drops.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
+    <section>
+        <h2 class="text-lg font-medium mb-1">{{ t "set.drops.title" }}</h2>
+        <div class="setting-row items-start">
+            <div class="pr-4">
+                <div class="setting-label">{{ t "set.drops.blacklist_label" }}</div>
+                <div class="setting-description">{{ t "set.drops.blacklist_desc" }}</div>
+            </div>
+            <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropBlacklist" placeholder="beta&#10;league of legends&#10;emote"></textarea>
+        </div>
+        <div class="setting-row items-start">
+            <div class="pr-4">
+                <div class="setting-label">{{ t "set.drops.game_ids_label" }}</div>
+                <div class="setting-description">{{ t "set.drops.game_ids_desc" }}</div>
+            </div>
+            <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropCampaignGameIDs" placeholder="18122&#10;493057"></textarea>
+        </div>
+        <div class="setting-row items-start">
+            <div class="pr-4">
+                <div class="setting-label">{{ t "set.drops.games_label" }}</div>
+                <div class="setting-description">{{ t "set.drops.games_desc" }}</div>
+            </div>
+            <textarea class="input-field w-72 h-28 font-mono text-sm" id="dropCampaignGames" placeholder="World of Tanks&#10;World of Warships"></textarea>
+        </div>
+        <div class="setting-row items-start">
+            <div class="pr-4">
+                <div class="setting-label">{{ t "set.drops.gameid_lookup_label" }}</div>
+                <div class="setting-description">{{ t "set.drops.gameid_lookup_desc" }}</div>
+            </div>
+            <div class="w-72">
+                <div class="flex gap-2">
+                    <input type="text" id="gameIdLookupInput" class="input-field flex-1" placeholder="World of Tanks">
+                    <button type="button" id="gameIdLookupBtn" class="btn-secondary whitespace-nowrap">{{ t "set.drops.gameid_lookup_button" }}</button>
+                </div>
+                <div id="gameIdLookupResult" class="mt-2 text-sm"></div>
+            </div>
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.ratelimits.campaign_sync_label" }}</div>
+                <div class="setting-description">{{ t "set.ratelimits.campaign_sync_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="campaignSyncInterval" min="5" max="120">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.ratelimits.drop_progress_label" }}</div>
+                <div class="setting-description">{{ t "set.ratelimits.drop_progress_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="dropProgressSyncInterval" min="1" max="60">
+        </div>
+    </section>
+
+    <section>
+        <h2 class="text-lg font-medium mb-1">{{ t "set.directory.title" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-neutral-100">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
+
+        <div class="flex gap-3 mb-4">
+            <input type="text" id="new-directory-game-input" placeholder="{{ t "set.directory.input_placeholder" }}" class="input-field flex-1">
+            <button type="button" id="add-directory-game-btn" class="btn-secondary whitespace-nowrap">{{ t "set.directory.add" }}</button>
+        </div>
+
+        <div id="directory-game-form-error" class="c1-inline-fail" role="alert" hidden></div>
+
+        <ul class="space-y-2" id="directory-game-list"></ul>
+
+        <div class="setting-row mt-4">
+            <div>
+                <div class="setting-label">{{ t "set.directory.mode_label" }}</div>
+                <div class="setting-description">{{ t "set.directory.mode_desc" }}</div>
+            </div>
+            <select class="input-field w-48" id="discoveryMode">
+                <option value="all">{{ t "set.directory.mode_all" }}</option>
+                <option value="tracked_only">{{ t "set.directory.mode_tracked_only" }}</option>
+            </select>
+        </div>
+        <div class="setting-row mt-4">
+            <div>
+                <div class="setting-label">{{ t "set.directory.prefer_tracked_label" }}</div>
+                <div class="setting-description">{{ t "set.directory.prefer_tracked_desc" }}</div>
+            </div>
+            <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-purple-600">
+        </div>
+        <div class="setting-row mt-4">
+            <div>
+                <div class="setting-label">{{ t "set.directory.prefer_subscribed_label" }}</div>
+                <div class="setting-description">{{ t "set.directory.prefer_subscribed_desc" }}</div>
+            </div>
+            <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-purple-600">
+        </div>
+    </section>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    function parseBlacklist(raw) {
+        return raw.split(/[\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+    }
+
+    function createDirectoryGameItem(game) {
+        const li = document.createElement('li');
+        li.className = 'streamer-item';
+        li.dataset.game = game;
+        const header = document.createElement('div');
+        header.className = 'streamer-header';
+        const name = document.createElement('span');
+        name.className = 'flex-1 text-neutral-100 font-medium';
+        name.textContent = game;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.textContent = '✕';
+        removeBtn.addEventListener('click', function () {
+            li.remove();
+            document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        header.appendChild(name);
+        header.appendChild(removeBtn);
+        li.appendChild(header);
+        return li;
+    }
+
+    function renderDirectoryGames(games) {
+        const list = document.getElementById('directory-game-list');
+        list.innerHTML = '';
+        (games || []).forEach(g => list.appendChild(createDirectoryGameItem(g)));
+    }
+
+    function gatherDirectoryGames() {
+        return Array.from(document.querySelectorAll('#directory-game-list .streamer-item')).map(item => item.dataset.game);
+    }
+
+    function addDirectoryGame() {
+        const input = document.getElementById('new-directory-game-input');
+        const game = input.value.trim();
+        if (!game) { showInlineFailure('directory-game-form-error', t('js.set.toast.game_name_required')); return; }
+        const exists = Array.from(document.querySelectorAll('#directory-game-list .streamer-item'))
+            .some(item => item.dataset.game.toLowerCase() === game.toLowerCase());
+        if (exists) { showInlineFailure('directory-game-form-error', t('js.set.toast.game_exists')); return; }
+        document.getElementById('directory-game-list').appendChild(createDirectoryGameItem(game));
+        input.value = '';
+        clearInlineFailure('directory-game-form-error');
+        document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function resolveGameId() {
+        const input = document.getElementById('gameIdLookupInput');
+        const result = document.getElementById('gameIdLookupResult');
+        const setMsg = (text, cls) => { result.textContent = text; result.className = 'mt-2 text-sm ' + cls; };
+        const name = input.value.trim();
+        if (!name) { setMsg(t('js.set.gameid.err_empty'), 'text-red-400'); return; }
+        setMsg('…', 'text-neutral-400');
+        try {
+            const resp = await fetch('/api/settings/resolve-game-id', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name }),
+            });
+            if (!resp.ok) { setMsg(t('js.set.gameid.err_fetch'), 'text-red-400'); return; }
+            const data = await resp.json();
+            if (!data.found) { setMsg(t('js.set.gameid.err_notfound'), 'text-red-400'); return; }
+            result.textContent = '';
+            result.className = 'mt-2 text-sm text-neutral-300';
+            const label = document.createElement('span');
+            label.textContent = t('js.set.gameid.result') + ' ';
+            const code = document.createElement('code');
+            code.className = 'text-neutral-100 font-mono select-all';
+            code.textContent = data.gameId;
+            result.appendChild(label);
+            result.appendChild(code);
+        } catch (e) {
+            setMsg(t('js.set.gameid.err_fetch'), 'text-red-400');
+        }
+    }
+
+    function populate(data) {
+        document.getElementById('dropBlacklist').value = (data.dropBlacklist || []).join('\n');
+        document.getElementById('dropCampaignGameIDs').value = (data.dropCampaignGameIDs || []).join('\n');
+        document.getElementById('dropCampaignGames').value = (data.dropCampaignGames || []).join('\n');
+        document.getElementById('campaignSyncInterval').value = data.rateLimits.campaignSyncInterval;
+        document.getElementById('dropProgressSyncInterval').value = data.rateLimits.dropProgressSyncInterval;
+        renderDirectoryGames(data.directoryGames);
+        document.getElementById('discoveryMode').value = data.discoveryMode || 'all';
+        document.getElementById('discoveryPreferTracked').checked = !!data.discoveryPreferTracked;
+        document.getElementById('discoveryPreferSubscribed').checked = !!data.discoveryPreferSubscribed;
+    }
+
+    function gather() {
+        return {
+            dropBlacklist: parseBlacklist(document.getElementById('dropBlacklist').value),
+            dropCampaignGameIDs: parseBlacklist(document.getElementById('dropCampaignGameIDs').value),
+            dropCampaignGames: parseBlacklist(document.getElementById('dropCampaignGames').value),
+            rateLimits: {
+                campaignSyncInterval: parseInt(document.getElementById('campaignSyncInterval').value),
+                dropProgressSyncInterval: parseInt(document.getElementById('dropProgressSyncInterval').value),
+            },
+            directoryGames: gatherDirectoryGames(),
+            discoveryMode: document.getElementById('discoveryMode').value,
+            discoveryPreferTracked: document.getElementById('discoveryPreferTracked').checked,
+            discoveryPreferSubscribed: document.getElementById('discoveryPreferSubscribed').checked,
+        };
+    }
+
+    document.getElementById('gameIdLookupBtn').addEventListener('click', resolveGameId);
+    document.getElementById('gameIdLookupInput').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); resolveGameId(); }
+    });
+    document.getElementById('add-directory-game-btn').addEventListener('click', addDirectoryGame);
+    document.getElementById('new-directory-game-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); addDirectoryGame(); }
+    });
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+})();
+</script>
+{{end}}

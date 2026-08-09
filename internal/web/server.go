@@ -325,7 +325,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html", "system_status.html", "system_diagnostics.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -821,6 +821,23 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/system/status", s.handleSystemStatusPage)
 	mux.HandleFunc("/system/diagnostics", s.handleSystemDiagnosticsPage)
 	mux.HandleFunc("/system/logs", s.handleSystemLogsPage)
+
+	// S5-6 Settings category routes (13-22): direct-render routes
+	// (handlers_settings_categories.go) replacing the ten former
+	// /settings/* compatibility redirects — registered before the redirect
+	// loop below (same ordering S5-4/S5-5 used) so these ten paths are never
+	// shadowed by, and no longer appear in, compatibilityRedirects. Legacy
+	// /settings (the mega-form) keeps rendering directly, unchanged.
+	mux.HandleFunc("/settings/streamers", s.handleSettingsStreamersPage)
+	mux.HandleFunc("/settings/rotation", s.handleSettingsRotationPage)
+	mux.HandleFunc("/settings/drops", s.handleSettingsDropsPage)
+	mux.HandleFunc("/settings/predictions", s.handleSettingsPredictionsPage)
+	mux.HandleFunc("/settings/chat-raids", s.handleSettingsChatRaidsPage)
+	mux.HandleFunc("/settings/transport", s.handleSettingsTransportPage)
+	mux.HandleFunc("/settings/analytics-logging", s.handleSettingsAnalyticsLoggingPage)
+	mux.HandleFunc("/settings/events-notifications", s.handleSettingsEventsNotificationsPage)
+	mux.HandleFunc("/settings/discord", s.handleSettingsDiscordPage)
+	mux.HandleFunc("/settings/system", s.handleSettingsSystemPage)
 
 	for route, target := range compatibilityRedirects {
 		mux.HandleFunc(route, redirectCompat(target))

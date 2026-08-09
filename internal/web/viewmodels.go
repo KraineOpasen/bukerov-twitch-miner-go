@@ -325,6 +325,23 @@ type SettingsPageData struct {
 	DebugURL       string
 }
 
+// EventsNotificationsPageData is settings_events_notifications.html's (S5-6
+// route 20) own page data: SettingsPageData's usual shell fields plus
+// ConfigValid, the same signal handleNotificationsPage's NotificationsPageData
+// already carries — the client-side script must skip its own
+// GET /api/notifications/channels call while Discord is enabled but not yet
+// validly configured (no bot token), exactly like the legacy /notifications
+// page's own configValid gate, rather than firing a request that error-fails
+// against a Discord session that doesn't exist yet.
+type EventsNotificationsPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+	ConfigValid    bool
+}
+
 type DropsPageData struct {
 	Username       string
 	RefreshMinutes int

@@ -1,0 +1,87 @@
+{{define "title"}}{{ t "setcat.transport.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.transport.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.transport.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-0" data-c6-form novalidate>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.ratelimits.ws_ping_label" }}</div>
+            <div class="setting-description">{{ t "set.ratelimits.ws_ping_desc" }}</div>
+        </div>
+        <input type="number" class="input-field w-28" id="websocketPingInterval" min="20" max="60">
+    </div>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.ratelimits.reconnect_delay_label" }}</div>
+            <div class="setting-description">{{ t "set.ratelimits.reconnect_delay_desc" }}</div>
+        </div>
+        <input type="number" class="input-field w-28" id="reconnectDelay" min="30" max="300">
+    </div>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.ratelimits.stream_check_label" }}</div>
+            <div class="setting-description">{{ t "set.ratelimits.stream_check_desc" }}</div>
+        </div>
+        <input type="number" class="input-field w-28" id="streamCheckInterval" min="60" max="900">
+    </div>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.ratelimits.conn_timeout_label" }}</div>
+            <div class="setting-description">{{ t "set.ratelimits.conn_timeout_desc" }}</div>
+        </div>
+        <input type="number" class="input-field w-28" id="connectionTimeoutMinutes" min="5" max="60">
+    </div>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    function populate(data) {
+        document.getElementById('websocketPingInterval').value = data.rateLimits.websocketPingInterval;
+        document.getElementById('reconnectDelay').value = data.rateLimits.reconnectDelay;
+        document.getElementById('streamCheckInterval').value = data.rateLimits.streamCheckInterval;
+        document.getElementById('connectionTimeoutMinutes').value = data.rateLimits.connectionTimeoutMinutes;
+    }
+
+    function gather() {
+        return {
+            rateLimits: {
+                websocketPingInterval: parseInt(document.getElementById('websocketPingInterval').value),
+                reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),
+                streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value),
+                connectionTimeoutMinutes: parseInt(document.getElementById('connectionTimeoutMinutes').value),
+            },
+        };
+    }
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+})();
+</script>
+{{end}}

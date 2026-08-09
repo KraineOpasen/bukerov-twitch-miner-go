@@ -31,20 +31,15 @@ import (
 // (handlers_system.go), not a redirect to /health or /logs. See
 // s5_5_system_test.go for their 200/no-redirect coverage and the rest of the
 // S5-5 System-page contract.
+//
+// task S5-6 removed all ten /settings/* entries from this matrix: each is
+// now its own direct-render route (handlers_settings_categories.go), not a
+// redirect to /settings. See s5_6_settings_test.go for their 200/no-redirect
+// coverage and the rest of the S5-6 category-page contract.
 var wantCompatibilityRedirects = map[string]string{
-	"/analytics/points":              "/statistics",
-	"/analytics/roi":                 "/statistics",
-	"/settings/streamers":            "/settings",
-	"/settings/rotation":             "/settings",
-	"/settings/drops":                "/settings",
-	"/settings/predictions":          "/settings",
-	"/settings/chat-raids":           "/settings",
-	"/settings/transport":            "/settings",
-	"/settings/analytics-logging":    "/settings",
-	"/settings/events-notifications": "/settings",
-	"/settings/discord":              "/settings",
-	"/settings/system":               "/settings",
-	"/help":                          "/help/getting-started",
+	"/analytics/points": "/statistics",
+	"/analytics/roi":    "/statistics",
+	"/help":             "/help/getting-started",
 }
 
 // TestS5_2CompatibilityRedirectsMapMatchesSpec proves the production map
@@ -65,8 +60,8 @@ func TestS5_2RedirectMatrix(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 
-	if len(wantCompatibilityRedirects) != 13 {
-		t.Fatalf("expected exactly 13 compatibility redirects, found %d", len(wantCompatibilityRedirects))
+	if len(wantCompatibilityRedirects) != 3 {
+		t.Fatalf("expected exactly 3 compatibility redirects, found %d", len(wantCompatibilityRedirects))
 	}
 
 	for route, target := range wantCompatibilityRedirects {
@@ -154,11 +149,16 @@ func TestS5_2RedirectTargetsRenderDirectly(t *testing.T) {
 // return 200. task S5-5 extended this list with the three System routes
 // (/system/status, /system/diagnostics, /system/logs), which replaced their
 // former /system/* compatibility-redirect entries with real direct renders.
+// task S5-6 extended it again with the ten Settings category routes, which
+// replaced their former /settings/* compatibility-redirect entries.
 func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, path := range []string{
 		"/overview", "/events", "/help/getting-started",
 		"/system/status", "/system/diagnostics", "/system/logs",
+		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
+		"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",
+		"/settings/events-notifications", "/settings/discord", "/settings/system",
 	} {
 		body := f3GetPage(t, srv, path, "en")
 		if body == "" {

@@ -1,0 +1,51 @@
+{{/* Route 22 (System) is the one S5-6 category that does NOT use the C6/C7/C8
+     engine: per task scope it owns "Health P3 canary/watchdog only via
+     existing APIs", so this page reuses the EXACT SAME #health-center
+     htmx partial (GET /api/health, forms POSTing to POST /api/health/settings)
+     that /health already renders — preserving healthFormMu and
+     ApplyHealthSettings's sequential-save/partial-failure semantics exactly,
+     rather than re-routing them through the settings-category machinery. */}}
+{{define "title"}}{{ t "setcat.system.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.system.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.system.subtitle" }}</p>
+
+<section id="health-center" hx-get="/api/health" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    <div class="animate-pulse text-neutral-400">{{ t "health.loading" }}</div>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // Identical guard to health.html's own (see that file for the full
+    // rationale): defers the timed #health-center poll while the operator is
+    // mid-edit inside the canary/watchdog forms, without blocking the forms'
+    // own POSTs or the "Run now" button.
+    (function () {
+        if (window.__healthGuard) return;
+        window.__healthGuard = true;
+
+        document.addEventListener('htmx:beforeRequest', function (evt) {
+            const cfg = evt.detail && evt.detail.requestConfig;
+            const elt = cfg && cfg.elt;
+            const center = document.getElementById('health-center');
+            if (!elt || !center || elt !== center) return;
+
+            const active = document.activeElement;
+            const activeInside = !!(active && center.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+
+            let dirty = false;
+            center.querySelectorAll('input, select, textarea').forEach(function (el) {
+                if (el.type === 'checkbox' || el.type === 'radio') {
+                    if (el.checked !== el.defaultChecked) dirty = true;
+                } else if ('defaultValue' in el && el.value !== el.defaultValue) {
+                    dirty = true;
+                }
+            });
+
+            if (activeInside || dirty) evt.preventDefault();
+        });
+    })();
+</script>
+{{end}}

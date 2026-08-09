@@ -1,0 +1,587 @@
+package web
+
+// S5-6 Settings category tests: the ten new direct-render category routes
+// (13-22, handlers_settings_categories.go) replacing the former /settings/*
+// compatibility redirects — GET/HEAD 200 + non-GET method contract, exactly
+// one aria-current nav destination per route, the shared C6/C7/C8
+// dirty-boundary engine's source contract (dirty tracking, sticky save bar,
+// discard dialog focus-trap/least-destructive-default/nav-interception),
+// payload isolation (no category outside route 13 ever posts "streamers"),
+// all 13 backend prediction strategies, Discord GuildID read/write vs
+// BotToken write-only, point_rules id/triggered never editable, S-NOBACK
+// field absences, legacy /settings untouched, and the new locale keys.
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/signal"
+	"regexp"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
+)
+
+// s56StreamersPayloadKeyRe matches the JSON object key "streamers" (a
+// colon-anchored, lowercase, word-bounded match) — deliberately NOT a bare
+// substring check, since several routes legitimately use unrelated
+// identifiers/string-literals that happen to CONTAIN "streamers" as a
+// substring without ever sending it as a top-level payload key: route 20's
+// own mentionsStreamers/onlineStreamers/offlineStreamers fields (real
+// NotificationConfig fields, camelCase so case-sensitively distinct from
+// "streamers"), and DOM element id string literals like
+// selectedFrom('mentions-streamers').
+var s56StreamersPayloadKeyRe = regexp.MustCompile(`\bstreamers\s*:`)
+
+// s56CategoryRoutes is the full set of ten S5-6 direct-render routes.
+var s56CategoryRoutes = []string{
+	"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
+	"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",
+	"/settings/events-notifications", "/settings/discord", "/settings/system",
+}
+
+// s56CategoryTemplates maps each route to its embedded template file, for
+// tests that need to inspect page-specific source rather than rendered
+// output (httptest never executes JS, so client-side logic — e.g. which
+// strategy values populate a <select> — can only be pinned at the source
+// level, the same approach TestS5_2DrawerSourceContract and its siblings
+// already use throughout this package).
+var s56CategoryTemplates = map[string]string{
+	"/settings/streamers":            "templates/settings_streamers.html",
+	"/settings/rotation":             "templates/settings_rotation.html",
+	"/settings/drops":                "templates/settings_drops.html",
+	"/settings/predictions":          "templates/settings_predictions.html",
+	"/settings/chat-raids":           "templates/settings_chat_raids.html",
+	"/settings/transport":            "templates/settings_transport.html",
+	"/settings/analytics-logging":    "templates/settings_analytics_logging.html",
+	"/settings/events-notifications": "templates/settings_events_notifications.html",
+	"/settings/discord":              "templates/settings_discord.html",
+	"/settings/system":               "templates/settings_system.html",
+}
+
+// ---------------------------------------------------------------------
+// 1. Ten direct GET/HEAD 200 + non-GET method contract.
+// ---------------------------------------------------------------------
+
+// TestS5_6DirectRoutesGetHeadOKMethodContract proves every category route
+// answers GET and HEAD with 200 and rejects every other method with 405
+// (Allow: GET, HEAD) — the explicit method-gating contract task S5-6
+// requires (unlike the S5-4/S5-5 page precedent, which deliberately skips
+// it — see requireGetOrHead's doc comment).
+func TestS5_6DirectRoutesGetHeadOKMethodContract(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+
+	for _, route := range s56CategoryRoutes {
+		t.Run(route, func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(method, route, nil))
+				if rec.Code != http.StatusOK {
+					t.Errorf("%s %s = %d, want 200", method, route, rec.Code)
+				}
+			}
+			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(method, route, nil))
+				if rec.Code != http.StatusMethodNotAllowed {
+					t.Errorf("%s %s = %d, want 405", method, route, rec.Code)
+				}
+				if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+					t.Errorf("%s %s Allow header = %q, want %q", method, route, allow, "GET, HEAD")
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------
+// 2. Exactly one aria-current nav destination per category route.
+// ---------------------------------------------------------------------
+
+// TestS5_6EachCategoryExactlyOneAriaCurrent mirrors
+// TestS5_3OverviewQueueExactlyOneAriaCurrentDestination /
+// TestS5_5SystemActiveChildPerRoute's approach for the ten new Settings
+// children: re-implements base.html's client-side updateActiveNav rule in Go
+// against the rendered C2 nav, proving each route marks exactly one
+// destination current, and it is the right one.
+func TestS5_6EachCategoryExactlyOneAriaCurrent(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	for _, path := range s56CategoryRoutes {
+		t.Run(path, func(t *testing.T) {
+			body := f3GetPage(t, srv, path, "en")
+			const active = "settings"
+
+			tags := s5_3NavAnchorTagRe.FindAllString(body, -1)
+			if len(tags) == 0 {
+				t.Fatal("no C2 nav destination anchors found in the rendered page")
+			}
+
+			var currentHrefs []string
+			for _, tag := range tags {
+				href := ""
+				if m := s5_3HrefAttrRe.FindStringSubmatch(tag); m != nil {
+					href = m[1]
+				}
+				section := ""
+				if m := s5_3NavSectionAttrRe.FindStringSubmatch(tag); m != nil {
+					section = m[1]
+				}
+				isParent := strings.Contains(tag, "data-nav-parent")
+				isChild := strings.Contains(tag, "data-nav-child")
+				sectionMatches := section == active
+				isCurrent := sectionMatches
+				if isChild {
+					isCurrent = sectionMatches && href == path
+				}
+				if !isParent && isCurrent {
+					currentHrefs = append(currentHrefs, href)
+				}
+			}
+			if len(currentHrefs) != 1 {
+				t.Errorf("simulated nav activation on %s must mark exactly one destination current, got %d: %v", path, len(currentHrefs), currentHrefs)
+			} else if currentHrefs[0] != path {
+				t.Errorf("the one current destination must be %s itself, got %s", path, currentHrefs[0])
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------
+// 3. C6/C7/C8 shared engine source contract.
+// ---------------------------------------------------------------------
+
+// TestS5_6C6EngineSourceContract pins the shared dirty-boundary engine's
+// required behaviors at the source level: dirty detection via gather()
+// comparison, the Tab/Shift+Tab focus trap inside the discard dialog,
+// Escape/"keep editing" as the least-destructive default (the dialog's
+// native 'cancel' event is handled as a no-op, never as discard),
+// nav-interception on internal link clicks, and the beforeunload guard for
+// real navigation/tab-close.
+func TestS5_6C6EngineSourceContract(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+	for _, want := range []string{
+		"JSON.stringify(opts.gather())",
+		// The Tab/Shift+Tab focus-trap block, specifically — not just the
+		// bare "e.key !== 'Tab'"/"shiftKey" tokens, which also appear
+		// (unrelatedly, guarding modified clicks) in the nav-interception
+		// block below, so a mutant that deletes ONLY the focus trap while
+		// leaving nav-interception intact must still fail this check.
+		"dialog.addEventListener('keydown', function (e) {\n                if (e.key !== 'Tab') return;",
+		"dialog.querySelectorAll('button, [href], input, select, textarea",
+		"if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }",
+		"dialog.addEventListener('cancel', function () {})",
+		"document.addEventListener('click', function (e) {",
+		"}, true);",
+		"window.addEventListener('beforeunload', function (e) {",
+		"e.preventDefault();\n            e.returnValue = '';",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("c6_form.html missing engine contract literal %q", want)
+		}
+	}
+}
+
+// TestS5_6C8LeastDestructiveDefaultSourceContract proves the nav-discard
+// dialog's "keep editing" button carries autofocus and is declared BEFORE
+// "discard changes" in source order, so a dialog opened by any means always
+// lands focus on the non-destructive choice by default.
+func TestS5_6C8LeastDestructiveDefaultSourceContract(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/components/c8_dialog.html")
+	keepIdx := strings.Index(src, "data-c8-keep autofocus")
+	discardIdx := strings.Index(src, "data-c8-discard")
+	if keepIdx < 0 {
+		t.Fatal("c8_dialog.html: \"keep editing\" button missing the autofocus attribute")
+	}
+	if discardIdx < 0 {
+		t.Fatal("c8_dialog.html: \"discard\" button not found")
+	}
+	if keepIdx > discardIdx {
+		t.Error("c8_dialog.html: the autofocused \"keep editing\" button must come before \"discard\" in source order")
+	}
+}
+
+// TestS5_6C7SaveBarHiddenWhileClean proves the C7 save bar renders hidden
+// (data-state="clean", the c7-savebar--hidden class) by default in the
+// static server-render, before any client-side dirty state exists.
+func TestS5_6C7SaveBarHiddenWhileClean(t *testing.T) {
+	srv := buildF3PageServer(t)
+	for _, path := range s56CategoryRoutes {
+		if path == "/settings/system" {
+			continue // route 22 reuses the Health partial and carries no C7 bar.
+		}
+		body := f3GetPage(t, srv, path, "en")
+		if !strings.Contains(body, `class="c7-savebar c7-savebar--hidden" data-state="clean"`) {
+			t.Errorf("%s: C7 save bar must render hidden/clean by default", path)
+		}
+		if !strings.Contains(body, "data-c7-save") || !strings.Contains(body, "data-c7-cancel") {
+			t.Errorf("%s: C7 save bar missing Save/Cancel controls", path)
+		}
+	}
+}
+
+// s56ExtractJSFunction returns the balanced-brace body of a JS function
+// declared as `functionName() {` inside src, using the same brace-balancing
+// approach as extractMediaBlock (s5_2_chrome_test.go) so the excerpt cannot
+// accidentally swallow unrelated later code.
+func s56ExtractJSFunction(t *testing.T, src, signature string) string {
+	t.Helper()
+	idx := strings.Index(src, signature)
+	if idx < 0 {
+		t.Fatalf("could not locate %q", signature)
+	}
+	rel := strings.IndexByte(src[idx:], '{')
+	if rel < 0 {
+		t.Fatalf("no opening brace found after %q", signature)
+	}
+	openIdx := idx + rel
+	depth := 0
+	for i := openIdx; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[openIdx : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces locating the end of %q", signature)
+	return ""
+}
+
+// ---------------------------------------------------------------------
+// 4. Payload isolation: outside route 13, gather() never sends "streamers".
+// ---------------------------------------------------------------------
+
+// TestS5_6PayloadIsolationNoStreamersOutsideRoute13 proves every category
+// page's own gather() function — the object actually POSTed to /api/settings
+// — never includes a "streamers" key, for every route except /settings/streamers
+// itself. Scoped to the gather() function body specifically (not the whole
+// page source), since routes 16/predictions and 17/chat-raids legitimately
+// READ data.streamers in populate() to render a read-only override summary —
+// that is not a payload isolation violation, only WRITING it would be.
+func TestS5_6PayloadIsolationNoStreamersOutsideRoute13(t *testing.T) {
+	for path, tmpl := range s56CategoryTemplates {
+		if path == "/settings/streamers" || path == "/settings/system" {
+			continue // route 13 legitimately owns "streamers"; route 22 has no gather().
+		}
+		t.Run(path, func(t *testing.T) {
+			src := readEmbeddedTemplate(t, tmpl)
+			fn := s56ExtractJSFunction(t, src, "function gather()")
+			if s56StreamersPayloadKeyRe.MatchString(fn) {
+				t.Errorf("%s: gather() must never send a \"streamers\" payload key (outside route 13), got:\n%s", path, fn)
+			}
+		})
+	}
+}
+
+// TestS5_6StreamersPageOwnsStreamersPayload is the positive control for the
+// isolation test above: /settings/streamers' OWN gather() legitimately
+// includes "streamers" — proving the isolation test isn't vacuously true
+// because no page ever references the token at all.
+func TestS5_6StreamersPageOwnsStreamersPayload(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_streamers.html")
+	fn := s56ExtractJSFunction(t, src, "function gather()")
+	if !strings.Contains(fn, "streamers: gatherStreamers()") {
+		t.Error("/settings/streamers gather() must own the streamers payload key")
+	}
+}
+
+// ---------------------------------------------------------------------
+// 5. All 13 backend prediction strategies rendered.
+// ---------------------------------------------------------------------
+
+// TestS5_6AllThirteenPredictionStrategies proves settings_predictions.html's
+// strategyOptions literal carries all 13 internal/models/bet.go Strategy
+// values (SMART, MOST_VOTED, HIGH_ODDS, PERCENTAGE, SMART_MONEY, NUMBER_1..8)
+// — pinned at the source level since the <select>'s <option> elements are
+// built client-side and httptest never executes JS.
+func TestS5_6AllThirteenPredictionStrategies(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_predictions.html")
+	want := []string{
+		"SMART", "MOST_VOTED", "HIGH_ODDS", "PERCENTAGE", "SMART_MONEY",
+		"NUMBER_1", "NUMBER_2", "NUMBER_3", "NUMBER_4", "NUMBER_5", "NUMBER_6", "NUMBER_7", "NUMBER_8",
+	}
+	for _, strategy := range want {
+		if !strings.Contains(src, "value: '"+strategy+"'") {
+			t.Errorf("settings_predictions.html missing strategy option %q", strategy)
+		}
+	}
+	// bet.filterCondition is a real backend field (internal/models/bet.go)
+	// deliberately never exposed here (S-NOBACK).
+	if strings.Contains(src, "filterCondition") {
+		t.Error("settings_predictions.html must not expose bet.filterCondition (S-NOBACK)")
+	}
+}
+
+// ---------------------------------------------------------------------
+// 6. Discord: GuildID read/write, BotToken write-only.
+// ---------------------------------------------------------------------
+
+// TestS5_6DiscordGuildIdReadWriteBotTokenWriteOnly proves settings_discord.html
+// populates guildId from the loaded settings but ALWAYS clears the bot-token
+// field on load — the same write-only-secret contract dto.go's
+// DiscordUIConfig.BotToken documents (P2), never a readback of the stored
+// value.
+func TestS5_6DiscordGuildIdReadWriteBotTokenWriteOnly(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_discord.html")
+	fn := s56ExtractJSFunction(t, src, "function populate(data)")
+	if !strings.Contains(fn, "document.getElementById('discordGuildId').value = d.guildId || '';") {
+		t.Error("populate() must read guildId back from the loaded settings")
+	}
+	if !strings.Contains(fn, "document.getElementById('discordBotToken').value = '';") {
+		t.Error("populate() must always clear the bot-token field, never populate it from the response")
+	}
+	if strings.Contains(fn, "d.botToken") {
+		t.Error("populate() must never reference d.botToken — the field is write-only and never returned by the API")
+	}
+}
+
+// ---------------------------------------------------------------------
+// 7. point_rules: id/triggered are never editable inputs.
+// ---------------------------------------------------------------------
+
+// TestS5_6PointRuleIdTriggeredNeverEditable proves settings_events_notifications.html
+// only ever uses a point rule's id (as the DELETE URL segment) and triggered
+// (as read-only display text) — never binds either to an editable form
+// control.
+func TestS5_6PointRuleIdTriggeredNeverEditable(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_events_notifications.html")
+	for _, banned := range []string{
+		`data-field="id"`, `data-field="triggered"`,
+		`id="point-rule-id"`, `id="point-rule-triggered"`,
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("settings_events_notifications.html must never expose an editable %q control", banned)
+		}
+	}
+	if !strings.Contains(src, "'/api/notifications/points/' + rule.id") {
+		t.Error("expected rule.id used only as the DELETE URL segment")
+	}
+	if !strings.Contains(src, "rule.triggered ? t('js.notif.triggered') : t('js.notif.waiting')") {
+		t.Error("expected rule.triggered rendered only as read-only status text")
+	}
+}
+
+// ---------------------------------------------------------------------
+// 8. S-NOBACK: fields with no backend counterpart stay absent.
+// ---------------------------------------------------------------------
+
+// TestS5_6SNoBackFieldsAbsent proves every category page omits UI for a
+// field the task brief explicitly scoped out (either genuinely absent from
+// the backend, or deliberately carved into a different route): route 18
+// (Transport) never exposes requestDelay/proxy/client-id/user-agent; route
+// 20 (Events & Notifications) never exposes sound/quiet-hours/upload
+// controls (NotificationConfig has no such fields); route 22 (System) never
+// exposes an updater editor or a LAN-CIDR control.
+func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	transport := f3GetPage(t, srv, "/settings/transport", "en")
+	for _, banned := range []string{"requestDelay", "proxy", "client-id", "clientId", "user-agent", "userAgent"} {
+		if strings.Contains(transport, banned) {
+			t.Errorf("/settings/transport must not expose %q", banned)
+		}
+	}
+
+	events := f3GetPage(t, srv, "/settings/events-notifications", "en")
+	for _, banned := range []string{"sound", "Sound", "quiet hour", "quietHour", "upload", "Upload"} {
+		if strings.Contains(events, banned) {
+			t.Errorf("/settings/events-notifications must not expose %q (B4/B5/B9, S-NOBACK)", banned)
+		}
+	}
+
+	system := f3GetPage(t, srv, "/settings/system", "en")
+	for _, banned := range []string{"updater", "Updater", "CIDR", "cidr"} {
+		if strings.Contains(system, banned) {
+			t.Errorf("/settings/system must not expose %q", banned)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// 9. Legacy /settings, /api/settings, /api/settings/reset untouched.
+// ---------------------------------------------------------------------
+
+// TestS5_6LegacySettingsPageAndAPIsStillDirect200 proves the legacy
+// /settings mega-form still renders directly (never redirected), and its
+// GET /api/settings + POST /api/settings/reset endpoints are unchanged —
+// task S5-6 explicitly keeps legacy /api/settings/reset "/settings-only
+// until S5-10".
+func TestS5_6LegacySettingsPageAndAPIsStillDirect200(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /settings = %d, want 200 (direct, not redirected)", rec.Code)
+	}
+
+	recAPI := httptest.NewRecorder()
+	h.ServeHTTP(recAPI, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if recAPI.Code != http.StatusOK {
+		t.Errorf("GET /api/settings = %d, want 200", recAPI.Code)
+	}
+
+	recReset := httptest.NewRecorder()
+	h.ServeHTTP(recReset, httptest.NewRequest(http.MethodPost, "/api/settings/reset", nil))
+	if recReset.Code != http.StatusOK {
+		t.Errorf("POST /api/settings/reset = %d, want 200", recReset.Code)
+	}
+}
+
+// ---------------------------------------------------------------------
+// 10. New locale keys: present, non-empty, translated in both languages.
+// ---------------------------------------------------------------------
+
+// s56DeliberatelyIdenticalKeys lists S5-6 keys whose EN/RU values are
+// deliberately identical (the brand proper noun "Discord"), mirroring the
+// s53/s55DeliberatelyIdenticalKeys precedent for this task's own key set.
+var s56DeliberatelyIdenticalKeys = map[string]bool{
+	"nav.set.discord":      true,
+	"setcat.discord.title": true,
+}
+
+func TestS5_6LocaleKeysPresentAndTranslated(t *testing.T) {
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	keys := []string{
+		"nav.set.streamers", "nav.set.rotation", "nav.set.drops", "nav.set.predictions",
+		"nav.set.chatraids", "nav.set.transport", "nav.set.analyticslogging",
+		"nav.set.eventsnotifications", "nav.set.discord", "nav.set.system",
+		"setcat.streamers.title", "setcat.streamers.subtitle",
+		"setcat.rotation.title", "setcat.rotation.subtitle",
+		"setcat.drops.title", "setcat.drops.subtitle",
+		"setcat.predictions.title", "setcat.predictions.subtitle",
+		"setcat.chatraids.title", "setcat.chatraids.subtitle",
+		"setcat.transport.title", "setcat.transport.subtitle",
+		"setcat.analyticslogging.title", "setcat.analyticslogging.subtitle",
+		"setcat.eventsnotifications.title", "setcat.eventsnotifications.subtitle",
+		"setcat.discord.title", "setcat.discord.subtitle",
+		"setcat.system.title", "setcat.system.subtitle",
+		"js.setcat.dirty", "js.setcat.saving", "js.setcat.saved", "js.setcat.error",
+		"js.setcat.load_error", "js.setcat.blocked",
+		"setcat.save", "setcat.cancel",
+		"setcat.discard_title", "setcat.discard_body", "setcat.discard_confirm", "setcat.discard_keep",
+		"setcat.streamers.delete_title", "setcat.streamers.delete_body",
+		"setcat.streamers.delete_confirm", "setcat.streamers.delete_keep",
+		"setcat.predictions.overrides_heading", "setcat.predictions.overrides_empty", "setcat.predictions.overrides_link",
+		"setcat.chatraids.overrides_heading", "setcat.chatraids.overrides_empty", "setcat.chatraids.overrides_link",
+		"js.set.opt.strategy.number_3", "js.set.opt.strategy.number_4", "js.set.opt.strategy.number_5",
+		"js.set.opt.strategy.number_6", "js.set.opt.strategy.number_7", "js.set.opt.strategy.number_8",
+	}
+	for _, k := range keys {
+		en := loc.T(i18n.LangEN, k)
+		ru := loc.T(i18n.LangRU, k)
+		if en == k {
+			t.Errorf("EN missing translation for %q (echoed the key back)", k)
+		}
+		if ru == k {
+			t.Errorf("RU missing translation for %q (echoed the key back)", k)
+		}
+		if strings.TrimSpace(en) == "" || strings.TrimSpace(ru) == "" {
+			t.Errorf("%q has an empty value in one language (en=%q ru=%q)", k, en, ru)
+		}
+		if en == ru && !s56DeliberatelyIdenticalKeys[k] {
+			t.Errorf("%q has identical EN/RU text %q — looks untranslated", k, en)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// 11. Redirect map: exactly 3 remain, none of the ten settings routes.
+// ---------------------------------------------------------------------
+
+// TestS5_6GeneratedCSSContainsC6C7C8Classes proves the Tailwind build
+// actually picked up the new C6/C7/C8 selectors from input.css into the
+// generated (minified) app.css — the same input.css/app.css sync check
+// TestS5_2DrawerCloseVisibilitySourceContract's siblings already run for
+// other slices.
+func TestS5_6GeneratedCSSContainsC6C7C8Classes(t *testing.T) {
+	css := readEmbeddedStatic(t, "static/css/input.css")
+	appCSS := readEmbeddedStatic(t, "static/css/app.css")
+	for _, want := range []string{".c7-savebar", ".c7-savebar--hidden", ".c8-dialog", ".c8-dialog-actions"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("input.css missing %q", want)
+		}
+		if !strings.Contains(appCSS, want+"{") {
+			t.Errorf("generated app.css missing selector %q — run `make tailwind` to regenerate it from input.css", want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// S5-6 browser-evidence harness: mirrors the TestF3EvidenceHarness/
+// TestS5_5EvidenceHarness precedent (f3_harness_test.go — READ-ONLY
+// reference, never edited here) but reuses the already-wired
+// buildF3PageServer fixture directly, since none of the ten category pages
+// need a bespoke provider contrast — they all read/write through the SAME
+// GET/POST /api/settings and /api/notifications/* endpoints every other
+// F3/S5-x page already exercises. Env-gated: skipped unless
+// MINER_S5_6_HARNESS=1. Never talks to Twitch, Discord, or any real network.
+//
+// Usage:
+//
+//	MINER_S5_6_HARNESS=1 MINER_S5_6_HARNESS_ADDR=127.0.0.1:8975 \
+//	  go test -run TestS5_6EvidenceHarness -timeout 1800s ./internal/web/
+//
+// The server stops when the harness receives SIGINT/SIGTERM or 30 minutes
+// elapse.
+func TestS5_6EvidenceHarness(t *testing.T) {
+	if os.Getenv("MINER_S5_6_HARNESS") != "1" {
+		t.Skip("harness disabled (set MINER_S5_6_HARNESS=1)")
+	}
+	addr := os.Getenv("MINER_S5_6_HARNESS_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:8975"
+	}
+
+	srv := buildF3PageServer(t)
+	// Report "running" so the status overlay never covers the pages during
+	// browser evidence runs — buildF3PageServer wires every provider these
+	// pages read from with deterministic fakes, so there is no real startup
+	// sequence for it to reflect.
+	srv.GetStatusBroadcaster().SetStatus(StatusRunning, "")
+
+	httpSrv := &http.Server{Addr: addr, Handler: srv.handler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = httpSrv.ListenAndServe() }()
+	t.Logf("S5-6 evidence harness serving on http://%s — try /settings/streamers, /settings/rotation, /settings/drops, /settings/predictions, /settings/chat-raids, /settings/transport, /settings/analytics-logging, /settings/events-notifications, /settings/discord, /settings/system", addr)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case <-sig:
+	case <-time.After(30 * time.Minute):
+	}
+	_ = httpSrv.Shutdown(context.Background())
+}
+
+// TestS5_6RedirectMapNoLongerContainsSettingsRoutes proves none of the ten
+// category routes remain in compatibilityRedirects (they would otherwise
+// collide with their own direct-route registration — see server.go's
+// registration-before-redirect-loop ordering — and panic srv.handler()).
+func TestS5_6RedirectMapNoLongerContainsSettingsRoutes(t *testing.T) {
+	if len(compatibilityRedirects) != 3 {
+		t.Fatalf("len(compatibilityRedirects) = %d, want 3", len(compatibilityRedirects))
+	}
+	for _, route := range s56CategoryRoutes {
+		if _, ok := compatibilityRedirects[route]; ok {
+			t.Errorf("compatibilityRedirects must no longer contain %q", route)
+		}
+	}
+	// Building the full mux is itself part of the proof: a route left in
+	// both this map and its own direct registration panics srv.handler()
+	// with "pattern already registered" before any assertion below runs.
+	srv := buildF3PageServer(t)
+	_ = srv.handler()
+}

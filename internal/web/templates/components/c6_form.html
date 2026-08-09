@@ -1,0 +1,216 @@
+{{/* C6 — Settings category dirty-boundary engine (task S5-6). Every S5-6
+     category page (routes 13-21; route 22 reuses the existing Health P3
+     partial verbatim and does not use this engine at all) wraps its fields
+     in <form class="c6-form" data-c6-form> and calls
+     window.initSettingsCategoryForm({...}) from its own {{define "scripts"}}
+     block, passing load/populate/gather/save (and optionally validate/
+     onLoaded). This file defines that shared engine exactly once; C7 (save
+     bar) and C8 (discard dialog) are the markup halves it drives.
+
+     Contract: a category is the dirty boundary — no autosave, ever. State
+     machine: clean -> dirty -> saving -> success (back to clean) | error |
+     validation-blocked. Attempting to leave the page (an internal <a> click,
+     or a real navigation/tab-close via beforeunload) while dirty is
+     intercepted and routed through the C8 discard-confirmation dialog;
+     Escape or the dialog's own "keep editing" button is the least-destructive
+     default (autofocused), and focus returns to whatever was clicked once
+     the dialog closes. Errors render inline in the C7 bar's own region —
+     never as a global toast; a successful save may use the existing global
+     toast (window.showToast), matching every other settings surface. */}}
+{{define "c6.engine"}}<script>
+(function () {
+    if (window.initSettingsCategoryForm) return;
+
+    window.initSettingsCategoryForm = function (opts) {
+        const form = opts.form;
+        const saveBar = opts.saveBar;
+        const dialog = opts.dialog || null;
+        const statusEl = saveBar.querySelector('[data-c7-status]');
+        const saveBtn = saveBar.querySelector('[data-c7-save]');
+        const cancelBtn = saveBar.querySelector('[data-c7-cancel]');
+        const errorEl = saveBar.querySelector('[data-c7-error]');
+        const dialogDiscardBtn = dialog ? dialog.querySelector('[data-c8-discard]') : null;
+        const dialogKeepBtn = dialog ? dialog.querySelector('[data-c8-keep]') : null;
+
+        let baseline = null;
+        let pendingHref = null;
+        let lastTrigger = null;
+
+        function setState(state, message) {
+            saveBar.dataset.state = state;
+            saveBar.classList.toggle('c7-savebar--hidden', state === 'clean');
+            if (statusEl) statusEl.textContent = message || '';
+            saveBtn.disabled = state === 'saving' || state === 'clean';
+            cancelBtn.disabled = state === 'saving';
+            if (state === 'error' || state === 'blocked') {
+                if (errorEl) { errorEl.hidden = false; errorEl.textContent = message || t('js.setcat.error'); }
+            } else if (errorEl) {
+                errorEl.hidden = true;
+                errorEl.textContent = '';
+            }
+        }
+
+        function isDirty() {
+            return baseline !== null && JSON.stringify(opts.gather()) !== baseline;
+        }
+
+        function recheck() {
+            setState(isDirty() ? 'dirty' : 'clean', isDirty() ? t('js.setcat.dirty') : '');
+        }
+
+        async function load() {
+            const data = await opts.load();
+            opts.populate(data);
+            if (opts.onLoaded) opts.onLoaded(data);
+            baseline = JSON.stringify(opts.gather());
+            setState('clean', '');
+            return data;
+        }
+
+        function revert() {
+            const data = JSON.parse(baseline);
+            opts.populate(data);
+            if (opts.onLoaded) opts.onLoaded(data);
+            setState('clean', '');
+        }
+
+        form.addEventListener('input', recheck);
+        form.addEventListener('change', recheck);
+
+        saveBtn.addEventListener('click', async function (e) {
+            e.preventDefault();
+            if (!isDirty()) return;
+            if (opts.validate) {
+                const problem = opts.validate();
+                if (problem) { setState('blocked', problem); return; }
+            }
+            setState('saving', t('js.setcat.saving'));
+            try {
+                await opts.save(opts.gather());
+                baseline = JSON.stringify(opts.gather());
+                setState('clean', '');
+                if (window.showToast) window.showToast(t('js.setcat.saved'));
+            } catch (err) {
+                setState('error', (err && err.message) || t('js.setcat.error'));
+            }
+        });
+
+        cancelBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            revert();
+        });
+
+        function closeDialogAndFocus() {
+            if (dialog.open) dialog.close();
+        }
+
+        if (dialog) {
+            if (dialogDiscardBtn) {
+                dialogDiscardBtn.addEventListener('click', function () {
+                    const href = pendingHref;
+                    revert();
+                    closeDialogAndFocus();
+                    if (href) window.location.href = href;
+                });
+            }
+            if (dialogKeepBtn) {
+                dialogKeepBtn.addEventListener('click', function () { closeDialogAndFocus(); });
+            }
+            // Escape fires the native 'cancel' event on <dialog>; letting it
+            // close normally (no discard) is the least-destructive default —
+            // identical outcome to clicking "keep editing".
+            dialog.addEventListener('cancel', function () {});
+            dialog.addEventListener('close', function () {
+                pendingHref = null;
+                if (lastTrigger && document.contains(lastTrigger)) lastTrigger.focus();
+                lastTrigger = null;
+            });
+
+            // Tab/Shift+Tab focus trap while the dialog is open.
+            dialog.addEventListener('keydown', function (e) {
+                if (e.key !== 'Tab') return;
+                const focusables = Array.prototype.slice.call(
+                    dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+                ).filter(function (el) { return !el.disabled; });
+                if (!focusables.length) return;
+                const first = focusables[0], last = focusables[focusables.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            });
+
+            // Internal-navigation interception: only a plain left-click on a
+            // same-origin, non-new-tab internal link while dirty is
+            // intercepted. Modified clicks (ctrl/cmd/shift/middle-click,
+            // target=_blank) are left alone so "open in new tab" still works.
+            document.addEventListener('click', function (e) {
+                if (!isDirty()) return;
+                if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                const a = e.target.closest && e.target.closest('a[href]');
+                if (!a || a.target === '_blank') return;
+                const href = a.getAttribute('href');
+                if (!href || href.charAt(0) !== '/') return;
+                if (dialog.contains(a)) return;
+                e.preventDefault();
+                pendingHref = a.href;
+                lastTrigger = a;
+                if (typeof dialog.showModal === 'function') dialog.showModal();
+            }, true);
+        }
+
+        window.addEventListener('beforeunload', function (e) {
+            if (!isDirty()) return;
+            e.preventDefault();
+            e.returnValue = '';
+        });
+
+        load().catch(function (err) {
+            setState('error', (err && err.message) || t('js.setcat.load_error'));
+        });
+
+        return { recheck: recheck, isDirty: isDirty, revert: revert };
+    };
+
+    // initConfirmDialog wires a SECOND, independent <dialog class="c8-dialog">
+    // instance for a page-specific destructive confirmation (e.g. route 13's
+    // "remove streamer") that reuses the exact same C8 markup/focus-trap/
+    // least-destructive-default contract as the nav-discard dialog above, but
+    // is otherwise unrelated to the dirty-boundary engine: no baseline, no
+    // revert, just confirm/cancel. onConfirm receives the same `detail` value
+    // openConfirmDialog was called with (e.g. the username to remove).
+    window.initConfirmDialog = function (dialog, onConfirm) {
+        const confirmBtn = dialog.querySelector('[data-c8-discard]');
+        const keepBtn = dialog.querySelector('[data-c8-keep]');
+        let lastTrigger = null;
+        let pending = null;
+
+        confirmBtn.addEventListener('click', function () {
+            const detail = pending;
+            dialog.close();
+            onConfirm(detail);
+        });
+        keepBtn.addEventListener('click', function () { dialog.close(); });
+        dialog.addEventListener('cancel', function () {});
+        dialog.addEventListener('close', function () {
+            pending = null;
+            if (lastTrigger && document.contains(lastTrigger)) lastTrigger.focus();
+            lastTrigger = null;
+        });
+        dialog.addEventListener('keydown', function (e) {
+            if (e.key !== 'Tab') return;
+            const focusables = Array.prototype.slice.call(
+                dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+            ).filter(function (el) { return !el.disabled; });
+            if (!focusables.length) return;
+            const first = focusables[0], last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        });
+
+        return function open(detail, trigger) {
+            pending = detail;
+            lastTrigger = trigger || document.activeElement;
+            if (typeof dialog.showModal === 'function') dialog.showModal();
+        };
+    };
+})();
+</script>{{end}}

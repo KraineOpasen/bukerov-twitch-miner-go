@@ -1,0 +1,529 @@
+{{/* Route 13 is the sole owner of `streamers[]` (roster + full per-streamer
+     override forms, including bet/chat/followRaid — no other category route
+     may post the "streamers" key) and of `defaultSettings`' non-betting,
+     non-chat/raid fields (makePredictions, claimDrops, claimMoments,
+     watchStreak, communityGoals). defaultSettings.bet.* and
+     defaultSettings.chat/followRaid are routes 16/17's own scoped default
+     editors instead — carved out of this page's own defaultSettings save
+     payload to avoid two pages clobbering the same field. */}}
+{{define "title"}}{{ t "setcat.streamers.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.streamers.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.streamers.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
+    <section>
+        <h2 class="text-lg font-medium mb-1">{{ t "set.streamers.title" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.streamers.desc" }}</p>
+
+        <div class="flex gap-3 mb-4">
+            <input type="text" id="new-streamer-input" placeholder="{{ t "set.streamers.input_placeholder" }}" class="input-field flex-1">
+            <button type="button" id="add-streamer-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.add" }}</button>
+            <button type="button" id="import-followed-btn" class="btn-secondary whitespace-nowrap">{{ t "set.streamers.import" }}</button>
+        </div>
+
+        <div id="streamer-form-error" class="c1-inline-fail" role="alert" hidden></div>
+
+        <ul class="space-y-2" id="streamer-list"></ul>
+
+        <style>
+            #followed-import-modal { width: min(90vw, 32rem); }
+            #followed-import-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
+            #followed-list { max-height: 45vh; }
+        </style>
+        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-neutral-800 border border-neutral-700 text-neutral-100">
+            <div class="p-5">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-lg font-semibold">{{ t "set.followed.title" }}</h3>
+                    <button type="button" data-followed-close class="text-neutral-400 hover:text-neutral-100 text-xl leading-none">&times;</button>
+                </div>
+                <p class="text-neutral-400 text-sm mb-3">{{ t "set.followed.desc" }}</p>
+                <div id="followed-truncated" class="hidden mb-3 text-xs text-amber-500" role="status"></div>
+                <div id="followed-loading" class="py-8 text-center text-neutral-400">{{ t "set.followed.loading" }}</div>
+                <div id="followed-error" class="hidden py-8 text-center">
+                    <p class="text-sm mb-3" style="color: var(--color-danger)" id="followed-error-msg"></p>
+                    <button type="button" id="followed-retry" class="btn-secondary">{{ t "set.followed.retry" }}</button>
+                </div>
+                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">{{ t "set.followed.empty" }}</div>
+                <div id="followed-list-wrap" class="hidden">
+                    <div class="flex items-center justify-between mb-2 text-xs text-neutral-400">
+                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">{{ t "set.followed.select_all" }}</button>
+                        <span id="followed-selected-count">{{ t "set.followed.selected_zero" }}</span>
+                    </div>
+                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-neutral-700 rounded-md p-2"></ul>
+                </div>
+                <div class="flex justify-end gap-2 mt-4">
+                    <button type="button" data-followed-close class="btn-secondary">{{ t "common.cancel" }}</button>
+                    <button type="button" id="followed-add-btn" class="btn-primary" disabled>{{ t "set.followed.add_selected" }}</button>
+                </div>
+            </div>
+        </dialog>
+    </section>
+
+    <section>
+        <h2 class="text-lg font-medium mb-1">{{ t "set.defaults.title" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
+        <div id="default-settings-container"></div>
+    </section>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+
+<dialog id="streamer-delete-dialog" class="c8-dialog" aria-labelledby="streamer-delete-title">
+    <div class="c8-dialog-body">
+        <h2 id="streamer-delete-title" class="c8-dialog-title">{{ t "setcat.streamers.delete_title" }}</h2>
+        <p class="c8-dialog-text" id="streamer-delete-body"></p>
+        <div class="c8-dialog-actions">
+            <button type="button" class="btn-secondary" data-c8-keep autofocus>{{ t "setcat.streamers.delete_keep" }}</button>
+            <button type="button" class="btn-primary c8-dialog-destructive" data-c8-discard>{{ t "setcat.streamers.delete_confirm" }}</button>
+        </div>
+    </div>
+</dialog>
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    const chatOptions = [
+        { value: 'ONLINE', label: t('js.set.opt.chat.online') },
+        { value: 'OFFLINE', label: t('js.set.opt.chat.offline') },
+        { value: 'ALWAYS', label: t('js.set.opt.chat.always') },
+        { value: 'NEVER', label: t('js.set.opt.chat.never') },
+    ];
+    const preferenceOptions = [
+        { value: '', label: t('js.set.opt.pref.none') },
+        { value: 'prefer', label: t('js.set.opt.pref.prefer') },
+        { value: 'avoid', label: t('js.set.opt.pref.avoid') },
+    ];
+    const strategyOptions = [
+        { value: 'SMART', label: t('js.set.opt.strategy.smart') },
+        { value: 'MOST_VOTED', label: t('js.set.opt.strategy.most_voted') },
+        { value: 'HIGH_ODDS', label: t('js.set.opt.strategy.high_odds') },
+        { value: 'PERCENTAGE', label: t('js.set.opt.strategy.percentage') },
+        { value: 'SMART_MONEY', label: t('js.set.opt.strategy.smart_money') },
+        { value: 'NUMBER_1', label: t('js.set.opt.strategy.number_1') },
+        { value: 'NUMBER_2', label: t('js.set.opt.strategy.number_2') },
+        { value: 'NUMBER_3', label: t('js.set.opt.strategy.number_3') },
+        { value: 'NUMBER_4', label: t('js.set.opt.strategy.number_4') },
+        { value: 'NUMBER_5', label: t('js.set.opt.strategy.number_5') },
+        { value: 'NUMBER_6', label: t('js.set.opt.strategy.number_6') },
+        { value: 'NUMBER_7', label: t('js.set.opt.strategy.number_7') },
+        { value: 'NUMBER_8', label: t('js.set.opt.strategy.number_8') },
+    ];
+    const delayModeOptions = [
+        { value: 'FROM_END', label: t('js.set.opt.delay.from_end') },
+        { value: 'FROM_START', label: t('js.set.opt.delay.from_start') },
+        { value: 'PERCENTAGE', label: t('js.set.opt.delay.percentage') },
+    ];
+
+    function checkboxAttrs(value) { return value ? 'checked' : ''; }
+    function selectValue(value, def) { return value !== undefined && value !== null ? value : def; }
+
+    // Full per-streamer settings form: every StreamerSettingsConfig field,
+    // including bet/chat/followRaid — only THIS route ever writes
+    // `streamers[]`, so their per-streamer overrides live here regardless of
+    // which route owns editing the corresponding DEFAULT value.
+    function renderStreamerSettingsForm(prefix, settings, isOverride) {
+        const bet = settings.bet || {};
+        return `
+            <div class="space-y-0">
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.make_predictions')}</div><div class="setting-description">${t('js.set.form.make_predictions.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs(settings.makePredictions)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.follow_raid')}</div><div class="setting-description">${t('js.set.form.follow_raid.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs(settings.followRaid)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.claim_drops')}</div><div class="setting-description">${t('js.set.form.claim_drops.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs(settings.claimDrops)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.claim_moments')}</div><div class="setting-description">${t('js.set.form.claim_moments.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs(settings.claimMoments)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.watch_streak')}</div><div class="setting-description">${t('js.set.form.watch_streak.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs(settings.watchStreak)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.community_goals')}</div><div class="setting-description">${t('js.set.form.community_goals.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs(settings.communityGoals)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.max_contribution_percent')}</div><div class="setting-description">${t('js.set.form.max_contribution_percent.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="communityGoalsMaxPercent" data-prefix="${prefix}" min="0" max="100" value="${settings.communityGoalsMaxPercent !== undefined ? settings.communityGoalsMaxPercent : 10}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.max_contribution_amount')}</div><div class="setting-description">${t('js.set.form.max_contribution_amount.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="communityGoalsMaxAmount" data-prefix="${prefix}" min="0" value="${settings.communityGoalsMaxAmount !== undefined ? settings.communityGoalsMaxAmount : 0}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.chat_presence')}</div><div class="setting-description">${t('js.set.form.chat_presence.desc')}</div></div>
+                    <select class="input-field w-36" data-field="chat" data-prefix="${prefix}">
+                        ${chatOptions.map(o => `<option value="${o.value}" ${selectValue(settings.chat, 'ONLINE') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>
+                ${isOverride ? `
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.rotation_preference')}</div><div class="setting-description">${t('js.set.form.rotation_preference.desc')}</div></div>
+                    <select class="input-field w-36" data-field="preference" data-prefix="${prefix}">
+                        ${preferenceOptions.map(o => `<option value="${o.value}" ${selectValue(settings.preference, '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>` : ''}
+                <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.strategy')}</div><div class="setting-description">${t('js.set.form.strategy.desc')}</div></div>
+                    <select class="input-field w-40" data-field="bet.strategy" data-prefix="${prefix}">
+                        ${strategyOptions.map(o => `<option value="${o.value}" ${selectValue(bet.strategy, 'SMART') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.bet_percentage')}</div><div class="setting-description">${t('js.set.form.bet_percentage.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="bet.percentage" data-prefix="${prefix}" min="1" max="100" value="${bet.percentage !== undefined ? bet.percentage : 5}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.percentage_gap')}</div><div class="setting-description">${t('js.set.form.percentage_gap.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="bet.percentageGap" data-prefix="${prefix}" min="0" max="100" value="${bet.percentageGap !== undefined ? bet.percentageGap : 20}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.max_points')}</div><div class="setting-description">${t('js.set.form.max_points.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="bet.maxPoints" data-prefix="${prefix}" min="0" value="${bet.maxPoints !== undefined ? bet.maxPoints : 50000}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.minimum_points')}</div><div class="setting-description">${t('js.set.form.minimum_points.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="bet.minimumPoints" data-prefix="${prefix}" min="0" value="${bet.minimumPoints !== undefined ? bet.minimumPoints : 0}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.stealth_mode')}</div><div class="setting-description">${t('js.set.form.stealth_mode.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs(bet.stealthMode)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.delay')}</div><div class="setting-description">${t('js.set.form.delay.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-field="bet.delay" data-prefix="${prefix}" min="0" step="0.5" value="${bet.delay !== undefined ? bet.delay : 6}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.delay_mode')}</div><div class="setting-description">${t('js.set.form.delay_mode.desc')}</div></div>
+                    <select class="input-field w-36" data-field="bet.delayMode" data-prefix="${prefix}">
+                        ${delayModeOptions.map(o => `<option value="${o.value}" ${selectValue(bet.delayMode, 'FROM_END') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>
+            </div>`;
+    }
+
+    function toggleStreamerExpand(li) {
+        const panel = li.querySelector('.settings-panel');
+        const icon = li.querySelector('.expand-icon');
+        panel.classList.toggle('hidden');
+        icon.style.transform = panel.classList.contains('hidden') ? '' : 'rotate(180deg)';
+    }
+
+    function toggleOverride(checkbox) {
+        const panel = checkbox.closest('.settings-panel');
+        panel.querySelector('.settings-content').style.display = checkbox.checked ? '' : 'none';
+        document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    let openConfirmDelete = null;
+
+    function createStreamerItem(streamer, index) {
+        const li = document.createElement('li');
+        li.className = 'streamer-item';
+        li.draggable = true;
+        li.dataset.index = index;
+        li.dataset.username = streamer.username;
+        li.dataset.channelId = streamer.channelId || '';
+        const hasOverrides = streamer.settings && Object.keys(streamer.settings).length > 0;
+
+        const header = document.createElement('div');
+        header.className = 'streamer-header';
+        header.addEventListener('click', () => toggleStreamerExpand(li));
+        header.innerHTML = `
+            <div class="text-neutral-400 text-lg cursor-grab">☰</div>
+            <span class="flex-1 text-neutral-100 font-medium">${streamer.username}</span>
+            ${hasOverrides ? '<span class="override-badge">' + t('js.set.streamer.custom') + '</span>' : ''}
+            <span class="text-neutral-400 text-xs transition-transform duration-200 expand-icon">▼</span>`;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.textContent = '✕';
+        removeBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            document.getElementById('streamer-delete-body').textContent = t('setcat.streamers.delete_body', { username: streamer.username });
+            openConfirmDelete(streamer.username, removeBtn);
+        });
+        header.appendChild(removeBtn);
+
+        const body = document.createElement('div');
+        body.className = 'hidden border-t border-neutral-700 bg-neutral-800 settings-panel';
+        body.innerHTML = `
+            <div class="p-4 border-b border-neutral-700">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600 use-override-checkbox" ${hasOverrides ? 'checked' : ''}>
+                    <span class="text-neutral-100">${t('js.set.streamer.use_custom')}</span>
+                </label>
+            </div>
+            <div class="p-4 settings-content" style="${hasOverrides ? '' : 'display: none;'}">
+                ${renderStreamerSettingsForm(streamer.username, streamer.settings || {}, true)}
+            </div>`;
+        body.querySelector('.use-override-checkbox').addEventListener('change', function () { toggleOverride(this); });
+
+        li.appendChild(header);
+        li.appendChild(body);
+        return li;
+    }
+
+    function setupStreamerDragAndDrop() {
+        const list = document.getElementById('streamer-list');
+        let draggedItem = null;
+        list.querySelectorAll('.streamer-item').forEach(item => {
+            item.addEventListener('dragstart', () => { draggedItem = item; item.classList.add('dragging'); });
+            item.addEventListener('dragend', () => {
+                item.classList.remove('dragging');
+                draggedItem = null;
+                document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+            });
+            item.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                if (draggedItem && draggedItem !== item) {
+                    const rect = item.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    if (e.clientY < midY) list.insertBefore(draggedItem, item);
+                    else list.insertBefore(draggedItem, item.nextSibling);
+                }
+            });
+        });
+    }
+
+    function populateStreamerList(streamers) {
+        const list = document.getElementById('streamer-list');
+        list.innerHTML = '';
+        (streamers || []).forEach((s, i) => list.appendChild(createStreamerItem(s, i)));
+        setupStreamerDragAndDrop();
+    }
+
+    function gatherStreamerSettings(prefix) {
+        const settings = {};
+        document.querySelectorAll(`[data-prefix="${prefix}"]`).forEach(input => {
+            const field = input.dataset.field;
+            let value;
+            if (input.type === 'checkbox') value = input.checked;
+            else if (input.type === 'number') value = input.step && input.step !== '1' ? parseFloat(input.value) : parseInt(input.value);
+            else value = input.value;
+            if (field.startsWith('bet.')) {
+                if (!settings.bet) settings.bet = {};
+                settings.bet[field.substring(4)] = value;
+            } else {
+                settings[field] = value;
+            }
+        });
+        return settings;
+    }
+
+    function gatherStreamers() {
+        const items = document.querySelectorAll('#streamer-list .streamer-item');
+        const streamers = [];
+        items.forEach(item => {
+            const username = item.dataset.username;
+            const useOverride = item.querySelector('.use-override-checkbox').checked;
+            const streamer = { username };
+            if (item.dataset.channelId) streamer.channelId = item.dataset.channelId;
+            if (useOverride) streamer.settings = gatherStreamerSettings(username);
+            streamers.push(streamer);
+        });
+        return streamers;
+    }
+
+    function addStreamer() {
+        const input = document.getElementById('new-streamer-input');
+        const username = input.value.trim().toLowerCase();
+        if (!username) { showInlineFailure('streamer-form-error', t('js.set.toast.username_required')); return; }
+        if (document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`)) {
+            showInlineFailure('streamer-form-error', t('js.set.toast.streamer_exists'));
+            return;
+        }
+        const list = document.getElementById('streamer-list');
+        list.appendChild(createStreamerItem({ username, settings: null }, list.children.length));
+        setupStreamerDragAndDrop();
+        input.value = '';
+        clearInlineFailure('streamer-form-error');
+        document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Defaults: excludes bet/chat/followRaid — routes 16/17 own those
+    // defaultSettings fields.
+    function renderDefaultsForm(settings) {
+        return `
+            <div class="space-y-0">
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.make_predictions')}</div><div class="setting-description">${t('js.set.form.make_predictions.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="makePredictions" ${checkboxAttrs(settings.makePredictions)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.claim_drops')}</div><div class="setting-description">${t('js.set.form.claim_drops.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="claimDrops" ${checkboxAttrs(settings.claimDrops)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.claim_moments')}</div><div class="setting-description">${t('js.set.form.claim_moments.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="claimMoments" ${checkboxAttrs(settings.claimMoments)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.watch_streak')}</div><div class="setting-description">${t('js.set.form.watch_streak.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="watchStreak" ${checkboxAttrs(settings.watchStreak)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.community_goals')}</div><div class="setting-description">${t('js.set.form.community_goals.desc')}</div></div>
+                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="communityGoals" ${checkboxAttrs(settings.communityGoals)}>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.max_contribution_percent')}</div><div class="setting-description">${t('js.set.form.max_contribution_percent.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-def-field="communityGoalsMaxPercent" min="0" max="100" value="${settings.communityGoalsMaxPercent !== undefined ? settings.communityGoalsMaxPercent : 10}">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">${t('js.set.form.max_contribution_amount')}</div><div class="setting-description">${t('js.set.form.max_contribution_amount.desc')}</div></div>
+                    <input type="number" class="input-field w-28" data-def-field="communityGoalsMaxAmount" min="0" value="${settings.communityGoalsMaxAmount !== undefined ? settings.communityGoalsMaxAmount : 0}">
+                </div>
+            </div>`;
+    }
+
+    function gatherDefaults() {
+        const out = {};
+        document.querySelectorAll('#default-settings-container [data-def-field]').forEach(input => {
+            const field = input.dataset.defField;
+            out[field] = input.type === 'checkbox' ? input.checked : parseInt(input.value);
+        });
+        return out;
+    }
+
+    function populate(data) {
+        populateStreamerList(data.streamers);
+        document.getElementById('default-settings-container').innerHTML = renderDefaultsForm(data.defaultSettings || {});
+    }
+
+    function gather() {
+        return { streamers: gatherStreamers(), defaultSettings: gatherDefaults() };
+    }
+
+    document.getElementById('add-streamer-btn').addEventListener('click', addStreamer);
+    document.getElementById('new-streamer-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); addStreamer(); }
+    });
+
+    // --- Import followed channels (unchanged, separate endpoint) ---
+    (function () {
+        const modal = document.getElementById('followed-import-modal');
+        const els = {
+            openBtn: document.getElementById('import-followed-btn'),
+            truncated: document.getElementById('followed-truncated'),
+            loading: document.getElementById('followed-loading'),
+            error: document.getElementById('followed-error'),
+            errorMsg: document.getElementById('followed-error-msg'),
+            retry: document.getElementById('followed-retry'),
+            empty: document.getElementById('followed-empty'),
+            listWrap: document.getElementById('followed-list-wrap'),
+            list: document.getElementById('followed-list'),
+            selectAll: document.getElementById('followed-select-all'),
+            count: document.getElementById('followed-selected-count'),
+            addBtn: document.getElementById('followed-add-btn'),
+        };
+        function show(state) {
+            els.loading.classList.toggle('hidden', state !== 'loading');
+            els.error.classList.toggle('hidden', state !== 'error');
+            els.empty.classList.toggle('hidden', state !== 'empty');
+            els.listWrap.classList.toggle('hidden', state !== 'list');
+        }
+        function selectedLogins() { return Array.from(els.list.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value); }
+        function refreshCount() {
+            const n = selectedLogins().length;
+            els.count.textContent = t('js.set.followed.selected', { n: n });
+            els.addBtn.disabled = n === 0;
+        }
+        function escapeHTML(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+        function renderList(data) {
+            const channels = data.channels || [];
+            els.truncated.classList.toggle('hidden', !data.truncated);
+            if (data.truncated) els.truncated.textContent = t('js.set.followed.truncated', { cap: data.cap });
+            if (channels.filter(c => !c.alreadyTracked).length === 0) { show('empty'); return; }
+            els.list.innerHTML = channels.map(c => {
+                const disabled = c.alreadyTracked ? 'disabled' : '';
+                const cls = c.alreadyTracked ? 'opacity-50' : '';
+                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">' + t('js.set.followed.already_tracked') + '</span>' : '';
+                return '<li class="flex items-center gap-2 ' + cls + '"><input type="checkbox" value="' + escapeHTML(c.login) + '" ' + disabled + ' class="followed-cb"><span class="text-sm">' + escapeHTML(c.displayName) + tag + '</span></li>';
+            }).join('');
+            els.list.querySelectorAll('.followed-cb').forEach(cb => cb.addEventListener('change', refreshCount));
+            refreshCount();
+            show('list');
+        }
+        async function load() {
+            show('loading');
+            try {
+                const resp = await fetch('/api/followed');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                renderList(await resp.json());
+            } catch (err) { els.errorMsg.textContent = String(err.message || err); show('error'); }
+        }
+        function open() { if (typeof modal.showModal === 'function') modal.showModal(); load(); }
+        function close() { modal.close(); }
+        els.openBtn.addEventListener('click', open);
+        modal.querySelectorAll('[data-followed-close]').forEach(b => b.addEventListener('click', close));
+        modal.addEventListener('click', e => { if (e.target === modal) close(); });
+        els.retry.addEventListener('click', load);
+        els.selectAll.addEventListener('click', () => {
+            els.list.querySelectorAll('input[type=checkbox]:not(:disabled)').forEach(cb => { cb.checked = true; });
+            refreshCount();
+        });
+        els.addBtn.addEventListener('click', async () => {
+            const logins = selectedLogins();
+            if (logins.length === 0) return;
+            els.addBtn.disabled = true;
+            els.addBtn.textContent = t('js.set.followed.adding');
+            try {
+                const resp = await fetch('/api/followed/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ logins }) });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                close();
+                location.reload();
+            } catch (err) { els.errorMsg.textContent = String(err.message || err); show('error'); }
+            finally { els.addBtn.textContent = t('js.set.followed.add_selected'); els.addBtn.disabled = false; }
+        });
+    })();
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+
+    // Heavy C8 delete confirmation: removing a streamer is destructive
+    // (drops their per-streamer overrides too), so it goes through the same
+    // modal/focus-trap/least-destructive-default C8 contract as nav-discard,
+    // via its own independent dialog instance (see c6_form.html).
+    openConfirmDelete = initConfirmDialog(document.getElementById('streamer-delete-dialog'), function (username) {
+        const item = document.querySelector(`#streamer-list .streamer-item[data-username="${username}"]`);
+        if (item) {
+            item.remove();
+            document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    });
+})();
+</script>
+{{end}}
