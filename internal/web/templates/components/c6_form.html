@@ -130,21 +130,29 @@
             setState('saving', t('js.setcat.saving'));
             try {
                 // Gathered ONCE, before the await: this exact snapshot is
-                // both what's sent AND what baseline is set from after it
-                // resolves (M1) — a second, post-await gather() here would
-                // silently fold whatever the operator typed while the
+                // what's SENT (M1) — a second, post-await gather() here
+                // would silently fold whatever the operator typed while the
                 // request was in flight into "saved", when only the
                 // pre-await snapshot was ever actually persisted.
                 const payload = opts.gather();
-                await opts.save(payload);
-                baseline = JSON.stringify(payload);
-                // Merge, not replace: payload only carries this page's own
+                // opts.save MAY return the actual committed state the
+                // server confirmed (R6) — ApplyHealthSettings validates and
+                // can normalize a candidate before persisting/publishing it,
+                // so the request payload is not necessarily what actually
+                // got committed. Ordinary categories' save() returns
+                // nothing (undefined), in which case payload — the exact
+                // snapshot invariant already in place — remains the source
+                // of truth, unchanged from before this pass.
+                const committed = await opts.save(payload);
+                const truth = committed !== undefined && committed !== null ? committed : payload;
+                baseline = JSON.stringify(truth);
+                // Merge, not replace: truth only carries this page's own
                 // owned top-level keys (gather()'s shape), so this refreshes
                 // exactly what was just persisted while leaving any
                 // read-only context this page doesn't own (e.g. streamers)
                 // at its last-known value — re-established as the canonical
                 // baseline a later Cancel restores to.
-                canonical = Object.assign({}, canonical, payload);
+                canonical = Object.assign({}, canonical, truth);
                 saving = false;
                 // Not a blind setState('clean', ''): recheck() re-derives
                 // the real state from the current DOM against the baseline

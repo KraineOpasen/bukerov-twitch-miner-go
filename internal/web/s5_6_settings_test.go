@@ -651,13 +651,21 @@ func TestS5_6Q3B2Route22SubmitInterceptedAndSavesSequentially(t *testing.T) {
 	}
 
 	saveFn := s56ExtractJSFunction(t, src, "save: async function (payload) {")
-	canaryIdx := strings.Index(saveFn, "postSection('canary', payload.canary)")
-	watchdogIdx := strings.Index(saveFn, "postSection('watchdog', payload.watchdog)")
+	canaryIdx := strings.Index(saveFn, "commitSection('canary', payload.canary)")
+	watchdogIdx := strings.Index(saveFn, "commitSection('watchdog', payload.watchdog)")
 	if canaryIdx < 0 || watchdogIdx < 0 {
-		t.Fatalf("save() must post both sections via postSection(), from C6's own captured payload (R3); got:\n%s", saveFn)
+		t.Fatalf("save() must commit both sections via commitSection(), from C6's own captured payload (R3); got:\n%s", saveFn)
 	}
 	if canaryIdx > watchdogIdx {
 		t.Error("save() must POST canary strictly before watchdog (sequential, matching healthFormMu's own serialization)")
+	}
+
+	// commitSection itself must post from the exact snapshot, never a live
+	// DOM re-read (R3's invariant, now centralized in one helper both
+	// sections funnel through).
+	commitFn := s56ExtractJSFunction(t, src, "async function commitSection(section, snapshot) {")
+	if !strings.Contains(commitFn, "postSection(section, snapshot)") {
+		t.Errorf("commitSection must POST the exact snapshot passed to it; got:\n%s", commitFn)
 	}
 
 	if !strings.Contains(src, `{{template "c7.savebar" .}}`) || !strings.Contains(src, `{{template "c8.dialog" .}}`) {
@@ -697,11 +705,12 @@ func TestS5_6Q3B3CancelRestoresCanonicalNotScopedBaseline(t *testing.T) {
 	}
 
 	// After a successful save, canonical must be refreshed (merged with the
-	// just-sent payload) so a LATER edit-then-Cancel cycle also restores to
-	// the just-saved state, not the original page-load snapshot.
+	// actual committed truth — R6: opts.save()'s return value when it
+	// provides one, else payload) so a LATER edit-then-Cancel cycle also
+	// restores to the just-saved state, not the original page-load snapshot.
 	clickHandler := s56ExtractJSFunction(t, src, "saveBtn.addEventListener('click', async function (e) {")
-	if !strings.Contains(clickHandler, "canonical = Object.assign({}, canonical, payload)") {
-		t.Error("save success path must refresh canonical (merge payload) before a later Cancel can rely on it")
+	if !strings.Contains(clickHandler, "canonical = Object.assign({}, canonical, truth)") {
+		t.Error("save success path must refresh canonical (merge truth) before a later Cancel can rely on it")
 	}
 }
 
@@ -723,11 +732,17 @@ func TestS5_6Q3M1SaveGathersOnceBeforeAwait(t *testing.T) {
 	if gatherCalls != 1 {
 		t.Errorf("save handler must call opts.gather() exactly once (got %d) — a second post-await call would re-baseline any in-flight edit as saved", gatherCalls)
 	}
-	if !strings.Contains(clickHandler, "await opts.save(payload);") {
+	if !strings.Contains(clickHandler, "const committed = await opts.save(payload);") {
 		t.Error("save handler must send the captured `payload`, not a fresh gather()")
 	}
-	if !strings.Contains(clickHandler, "baseline = JSON.stringify(payload);") {
-		t.Error("save handler must baseline from the captured `payload`, not a fresh gather()")
+	// R6: opts.save() may return the actual committed state (route 22
+	// does); when it doesn't (every ordinary category), `payload` — the
+	// same snapshot invariant as before this pass — remains truth.
+	if !strings.Contains(clickHandler, "const truth = committed !== undefined && committed !== null ? committed : payload;") {
+		t.Error("save handler must fall back to `payload` as truth when opts.save() returns nothing, preserving ordinary categories' exact prior behavior")
+	}
+	if !strings.Contains(clickHandler, "baseline = JSON.stringify(truth);") {
+		t.Error("save handler must baseline from `truth` (committed state if opts.save() provided one, else the captured payload) — never a fresh gather()")
 	}
 	if !strings.Contains(clickHandler, "if (!isDirty() || saving) return;") {
 		t.Error("save handler must refuse a second, overlapping save while one is already in flight")
@@ -845,9 +860,10 @@ func TestS5_6Q3R1RunNowGuardedWhileDirty(t *testing.T) {
 // postSection — the exact values C6 will baseline against must be the
 // exact values sent) and the route-22 half of the R2 fix (a canary-success/
 // watchdog-failure partial commit must be reported back to C6 as
-// err.committed, and watchdog's own committed DOM must NOT be reapplied on
-// full success — doing so risks clobbering a newer edit made during
-// watchdog's real await window with a value that was never actually sent).
+// err.committed). commitSection's own reconcile-or-preserve and
+// actual-committed-truth behavior is pinned separately by
+// TestS5_6Q3R5SectionReconciliationPreservesNewerEdit and
+// TestS5_6Q3R6CommittedTruthComesFromResponseNotPayload.
 func TestS5_6Q3R2R3Route22PostsSnapshotAndPropagatesPartialCommit(t *testing.T) {
 	src := readEmbeddedTemplate(t, "templates/settings_system.html")
 
@@ -860,24 +876,17 @@ func TestS5_6Q3R2R3Route22PostsSnapshotAndPropagatesPartialCommit(t *testing.T) 
 	}
 
 	saveFn := s56ExtractJSFunction(t, src, "save: async function (payload) {")
-	if !strings.Contains(saveFn, "postSection('canary', payload.canary)") {
-		t.Errorf("save() must POST canary from payload.canary (C6's own snapshot); got:\n%s", saveFn)
+	if !strings.Contains(saveFn, "commitSection('canary', payload.canary)") {
+		t.Errorf("save() must commit canary from payload.canary (C6's own snapshot); got:\n%s", saveFn)
 	}
-	if !strings.Contains(saveFn, "postSection('watchdog', payload.watchdog)") {
-		t.Errorf("save() must POST watchdog from payload.watchdog (C6's own snapshot), not a live re-read taken after canary's await; got:\n%s", saveFn)
+	if !strings.Contains(saveFn, "commitSection('watchdog', payload.watchdog)") {
+		t.Errorf("save() must commit watchdog from payload.watchdog (C6's own snapshot), not a live re-read taken after canary's await; got:\n%s", saveFn)
 	}
-	if !strings.Contains(saveFn, "err.committed = { canary: payload.canary };") {
-		t.Error("save() must attach the committed canary snapshot to the thrown error when watchdog fails after canary succeeds, so C6's catch can advance baseline/canonical for canary alone (R2)")
+	if !strings.Contains(saveFn, "err.committed = { canary: canaryCommitted };") {
+		t.Error("save() must attach the ACTUAL committed canary value (from canary's own response, not payload.canary — R6) to the thrown error when watchdog fails after canary succeeds, so C6's catch can advance baseline/canonical for canary alone (R2)")
 	}
-	// Exactly one applyFields call (canary's, immediately after its own
-	// postSection — safe, no await separates it from the payload snapshot).
-	// Watchdog's committed fields must never be re-applied to its own live
-	// DOM on the full-success path.
-	if strings.Count(saveFn, "applyFields(") != 1 {
-		t.Errorf("save() must call applyFields exactly once (for canary only) — got %d; re-applying watchdog's committed DOM on full success risks clobbering a newer edit made during its own await window with a value that was never sent, got:\n%s", strings.Count(saveFn, "applyFields("), saveFn)
-	}
-	if !strings.Contains(saveFn, "applyFields(sectionForm('canary')") {
-		t.Error("save() must still reconcile canary's own DOM with its committed response")
+	if !strings.Contains(saveFn, "return { canary: canaryCommitted, watchdog: watchdogCommitted };") {
+		t.Error("save() must return the ACTUAL committed state for both sections on full success, for C6 to baseline against (R6)")
 	}
 }
 
@@ -934,5 +943,100 @@ func TestS5_6Q3R4ToastOnlyWhenNotDirty(t *testing.T) {
 	toastIdx := strings.Index(clickHandler, "showToast(t('js.setcat.saved'))")
 	if recheckIdx < 0 || toastIdx < 0 || recheckIdx > toastIdx {
 		t.Error("save handler must call recheck() before deciding whether to show the Saved toast")
+	}
+}
+
+// ---------------------------------------------------------------------
+// S5-6 Route22 final reconciliation: R5-R6 source-level regression pins.
+// Live browser evidence gathered separately (localhost-only disposable
+// harnesses under /tmp, never against a tracked branch).
+// ---------------------------------------------------------------------
+
+// TestS5_6Q3R5SectionReconciliationPreservesNewerEdit pins the R5 fix:
+// commitSection must NEVER unconditionally applyFields() a section's
+// response onto its own DOM. A section's own POST is never instantaneous
+// (its own await is a real window — canary included, not just watchdog),
+// so an edit made to that SAME section while its own request is in flight
+// must survive; the response may only be written back if the section's
+// live values still match the exact snapshot that was sent.
+func TestS5_6Q3R5SectionReconciliationPreservesNewerEdit(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_system.html")
+
+	unchangedFn := s56ExtractJSFunction(t, src, "function sectionUnchangedSince(section, snapshot) {")
+	if !strings.Contains(unchangedFn, "JSON.stringify(fieldsOf(sectionForm(section))) === JSON.stringify(snapshot)") {
+		t.Errorf("sectionUnchangedSince must compare the section's CURRENT live DOM against the exact snapshot that was sent; got:\n%s", unchangedFn)
+	}
+
+	commitFn := s56ExtractJSFunction(t, src, "async function commitSection(section, snapshot) {")
+	ifIdx := strings.Index(commitFn, "if (sectionUnchangedSince(section, snapshot)) {")
+	applyIdx := strings.Index(commitFn, "applyFields(sectionForm(section), committed);")
+	if ifIdx < 0 || applyIdx < 0 || ifIdx > applyIdx {
+		t.Fatalf("commitSection must only applyFields() INSIDE an if (sectionUnchangedSince(...)) guard — an unconditional call would silently overwrite a newer edit made to that section during its own in-flight request; got:\n%s", commitFn)
+	}
+	// The guard must wrap the assignment, not merely precede it — reject a
+	// mutant that keeps both lines present but un-nests the applyFields
+	// call from the if-block.
+	guardedBody := commitFn[ifIdx:]
+	closeBraceIdx := strings.Index(guardedBody, "}")
+	if closeBraceIdx < 0 || !strings.Contains(guardedBody[:closeBraceIdx], "applyFields(sectionForm(section), committed);") {
+		t.Errorf("applyFields() must be nested inside the sectionUnchangedSince if-block's body, not merely follow it; got:\n%s", commitFn)
+	}
+	// commitSection must return the committed values regardless of whether
+	// reconciliation happened — the return statement must sit OUTSIDE (after)
+	// the if-block, unconditional.
+	returnIdx := strings.LastIndex(commitFn, "return committed;")
+	if returnIdx < 0 || returnIdx < closeBraceIdx+ifIdx {
+		t.Errorf("commitSection must unconditionally return the committed values (R6), regardless of whether the DOM was reconciled; got:\n%s", commitFn)
+	}
+}
+
+// TestS5_6Q3R6CommittedTruthComesFromResponseNotPayload pins the R6 fix:
+// ApplyHealthSettings (internal/miner/health.go) runs config.ValidateConfig
+// on the candidate and publishes THAT, so the request payload is never
+// authoritative committed state. commitSection must parse the actual
+// committed values from the response (committedFields), never assume the
+// request payload equals what got committed — and save() must propagate
+// THOSE parsed values, never payload.canary/payload.watchdog directly, both
+// on a canary-success/watchdog-failure partial commit (err.committed) and
+// on full success (the return value C6 baselines against — R6's other
+// requirement, that on full success baseline/canonical represent the
+// ACTUAL committed Canary+Watchdog state).
+func TestS5_6Q3R6CommittedTruthComesFromResponseNotPayload(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_system.html")
+
+	commitFn := s56ExtractJSFunction(t, src, "async function commitSection(section, snapshot) {")
+	if !strings.Contains(commitFn, "const committed = committedFields(html, section);") {
+		t.Errorf("commitSection must parse the ACTUAL committed values out of the response via committedFields — never assume the request snapshot equals what was committed; got:\n%s", commitFn)
+	}
+
+	saveFn := s56ExtractJSFunction(t, src, "save: async function (payload) {")
+	// The exact literal that would regress R6: reporting the REQUEST
+	// payload as committed truth instead of the parsed response.
+	for _, regressed := range []string{
+		"err.committed = { canary: payload.canary };",
+		"return { canary: payload.canary, watchdog: payload.watchdog };",
+	} {
+		if strings.Contains(saveFn, regressed) {
+			t.Errorf("save() must never report the request payload as committed truth (%q) — ApplyHealthSettings can validate/normalize a candidate before persisting it, so only the response's own parsed values are authoritative; got:\n%s", regressed, saveFn)
+		}
+	}
+	if !strings.Contains(saveFn, "const canaryCommitted = await commitSection('canary', payload.canary);") {
+		t.Errorf("save() must capture commitSection's returned (actual, response-derived) canary value; got:\n%s", saveFn)
+	}
+	if !strings.Contains(saveFn, "const watchdogCommitted = await commitSection('watchdog', payload.watchdog);") {
+		t.Errorf("save() must capture commitSection's returned (actual, response-derived) watchdog value; got:\n%s", saveFn)
+	}
+
+	// Generic engine: the optional-return-value contract itself, and that
+	// ordinary categories (whose save() never returns anything) are
+	// unaffected — the fallback to `payload` when opts.save() returns
+	// undefined must remain intact (already asserted in
+	// TestS5_6Q3M1SaveGathersOnceBeforeAwait; re-asserted narrowly here so
+	// a mutant that removes JUST the fallback, leaving the rest of that
+	// test's other assertions passing, still fails).
+	c6Src := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+	clickHandler := s56ExtractJSFunction(t, c6Src, "saveBtn.addEventListener('click', async function (e) {")
+	if !strings.Contains(clickHandler, "committed !== undefined && committed !== null ? committed : payload") {
+		t.Error("c6_form.html: the generic engine must fall back to `payload` when opts.save() returns no committed-truth value, so ordinary (non-route-22) categories keep their exact prior baseline/canonical behavior")
 	}
 }

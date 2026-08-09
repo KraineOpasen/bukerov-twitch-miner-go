@@ -15,12 +15,23 @@
      silently discarded any unsaved edit sitting in the OTHER section's DOM.
      C6's single Save button drives both sections instead, sequentially via
      fetch, from the exact snapshot C6 itself captured before the request
-     (R3) — never a live re-read mid-flight. Only canary's own committed
-     fields are ever re-applied to its own DOM (safe — no await separates
-     it from the snapshot); watchdog's are not, and a canary-success/
-     watchdog-failure partial commit is reported back to C6 so baseline/
-     canonical only advance for the section that actually persisted (R2) —
-     the sibling section's DOM is never touched by either request. */}}
+     (R3) — never a live re-read mid-flight.
+
+     A section's own POST is never instantaneous, so its own await is
+     itself a real window for a newer edit to land in that SAME section
+     (R5 corrective pass) — commitSection only reconciles a section's DOM
+     to its response if that section's live values still match what was
+     sent; a newer edit made during the request is preserved untouched
+     instead. And since ApplyHealthSettings validates/can normalize a
+     candidate before persisting it (internal/miner/health.go,
+     config.ValidateConfig), the request payload is never treated as
+     authoritative committed state (R6): commitSection always returns the
+     ACTUAL values parsed from the response, which is what save() reports
+     back to C6 (via its return value on full success, or err.committed on
+     a canary-success/watchdog-failure partial commit) for baseline/
+     canonical bookkeeping — regardless of whether that section's own DOM
+     was reconciled or a newer edit was preserved. The sibling section's DOM
+     is never touched by either request. */}}
 {{define "title"}}{{ t "setcat.system.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -112,6 +123,13 @@
             });
         }
 
+        // R5: true only if the section's LIVE DOM still exactly matches the
+        // click-time snapshot that was sent — i.e. nothing changed there
+        // during this section's own await window.
+        function sectionUnchangedSince(section, snapshot) {
+            return JSON.stringify(fieldsOf(sectionForm(section))) === JSON.stringify(snapshot);
+        }
+
         // Pulls one section's committed field values out of the existing
         // POST /api/health/settings response (a full health_center render)
         // via a detached parse — never touches the sibling section's live DOM.
@@ -136,6 +154,36 @@
             const resp = await fetch('/api/health/settings', { method: 'POST', body: body });
             if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
             return resp.text();
+        }
+
+        // R5/R6: POSTs one section from its click-time snapshot, then
+        // reconciles that section's OWN DOM to the server's ACTUAL
+        // committed response — but ONLY if nothing changed there during
+        // this section's own await (sectionUnchangedSince). A newer edit
+        // made while the request was in flight is preserved untouched
+        // instead of being silently overwritten by the response — this
+        // section's own await is a real window (fetch is never
+        // instantaneous), so "no await separates it from the snapshot" is
+        // never actually true for either section, canary included.
+        //
+        // Always RETURNS the actual committed values parsed from the
+        // response — never `values` (the request payload) — regardless of
+        // whether the DOM was reconciled: ApplyHealthSettings validates and
+        // can normalize a candidate (internal/miner/health.go,
+        // config.ValidateConfig) before persisting/publishing it, so the
+        // request payload is not authoritative committed state (R6). C6's
+        // baseline/canonical bookkeeping always advances to this ACTUAL
+        // truth; if a newer edit was preserved above, gather() will differ
+        // from that truth and correctly stay dirty — if not, gather()
+        // matches it exactly (DOM was just reconciled to it) and reads
+        // clean.
+        async function commitSection(section, snapshot) {
+            const html = await postSection(section, snapshot);
+            const committed = committedFields(html, section);
+            if (sectionUnchangedSince(section, snapshot)) {
+                applyFields(sectionForm(section), committed);
+            }
+            return committed;
         }
 
         function waitForSections() {
@@ -169,41 +217,39 @@
             // healthFormMu's own serialization on the server. Both sections
             // are posted from `payload` (C6's own pre-await gather()
             // snapshot), never a live re-read (R3) — the exact values C6
-            // baselines against are the exact values sent.
+            // baselines against are the exact values sent, PLUS whatever the
+            // server actually confirmed once each response lands (R5/R6,
+            // see commitSection).
             //
             // If canary fails outright, nothing here is touched: both
             // sections' real unsaved deltas remain exactly as the operator
             // left them, and the thrown error carries no `committed` data,
             // so C6's catch leaves baseline/canonical untouched too.
             //
-            // If canary commits and watchdog then fails (R2), the
-            // now-committed canary values are applied back onto canary's
-            // own DOM from the response (safe — canary's postSection call
-            // runs synchronously right after `payload` was captured, no
-            // await in between, so there's no window for a newer edit to
-            // land there first) and attached to the thrown error as
-            // `committed`, so C6's catch can advance baseline/canonical for
-            // canary alone — it stops showing falsely dirty, and a later
-            // Cancel restores the ACTUAL committed value instead of the
-            // stale pre-save one — while watchdog's own live DOM (its real
-            // unsaved delta, whatever the operator has typed by then) is
-            // never touched, so it correctly remains the only dirty/error
-            // part of the form.
+            // If canary commits and watchdog then fails (R2), the ACTUAL
+            // committed canary values (parsed from canary's own response,
+            // never the request payload — R6) are attached to the thrown
+            // error as `committed`, so C6's catch can advance
+            // baseline/canonical for canary alone — it stops showing
+            // falsely dirty, and a later Cancel restores the ACTUAL
+            // committed value instead of a stale or merely-assumed one —
+            // while watchdog's own live DOM (its real unsaved delta,
+            // whatever the operator has typed by then) is never touched,
+            // so it correctly remains the only dirty/error part of the form.
             //
-            // On full success (both commit), watchdog's committed DOM is
-            // deliberately NOT re-applied: C6's own baseline=payload
-            // bookkeeping already covers it without touching the DOM, and
-            // writing the just-sent value back here would risk clobbering a
-            // newer edit made during watchdog's own await window with a
-            // value that was never actually sent — manufacturing a false
-            // "clean" read on an edit that's genuinely unsaved.
+            // On full success, the return value carries BOTH sections'
+            // actual committed state (again from their own responses, never
+            // the request payload) for C6 to baseline against — the
+            // optional opts.save() return value C6's engine now supports;
+            // ordinary categories' save() returns nothing and keep their
+            // exact prior behavior.
             save: async function (payload) {
-                const canaryHtml = await postSection('canary', payload.canary);
-                applyFields(sectionForm('canary'), committedFields(canaryHtml, 'canary'));
+                const canaryCommitted = await commitSection('canary', payload.canary);
                 try {
-                    await postSection('watchdog', payload.watchdog);
+                    const watchdogCommitted = await commitSection('watchdog', payload.watchdog);
+                    return { canary: canaryCommitted, watchdog: watchdogCommitted };
                 } catch (err) {
-                    err.committed = { canary: payload.canary };
+                    err.committed = { canary: canaryCommitted };
                     throw err;
                 }
             },
