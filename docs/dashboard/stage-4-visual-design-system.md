@@ -345,8 +345,8 @@ Density: **D** dense / **S** standard / **R** reading. Transform codes: **T** = 
 | 17 | `/settings/chat-raids` (Настройки) | S | C6, C7 | C7 cycle | — | IDX | IRC/raids config |
 | 18 | `/settings/transport` (Настройки) | S | C6, C7, C9 | C7 cycle | «влияет на здоровье» banner | IDX | limits/backoff config |
 | 19 | `/settings/analytics-logging` (Настройки) | S | C6, C7 | C7 cycle | — | IDX | analytics/log-level config |
-| 20 | `/settings/events-notifications` (Настройки) | S | C6 matrix, gesture preview, Сброс, C7 | C7 cycle, S-BLOCK preview | TZ [BE:B9]; Upload/Delete S-NOBACK [BE:B5]; prefs note [BE:B4]; fail-open line | IDX | sound/notification **config** |
-| 21 | `/settings/discord` (Настройки) | S | C6 masked token, C7 | C7 cycle | no «показать токен»; test at route 12 | IDX | Discord token/channels/rules config |
+| 20 | `/settings/events-notifications` (Настройки) | S | C6 matrix, gesture preview, Сброс, C7 | C7 cycle, S-BLOCK preview | TZ [BE:B9]; Upload/Delete S-NOBACK [BE:B5]; prefs note [BE:B4]; fail-open line | IDX | sound/notification **config** — sole owner of every SQLite `notification_config`+`point_rules` field |
+| 21 | `/settings/discord` (Настройки) | S | C6 masked token, C7 | C7 cycle | no «показать токен»; test at route 12; channels/rules editing → route 20 | IDX | Discord **connection** config only — `config.json` `discord.enabled` + write-only `botToken`/`guildId` |
 | 22 | `/settings/system` (Настройки) | S | C6, read-only LAN, C7 | C7 cycle | config only; status → Система | IDX | canary/watchdog/updater **config** |
 | 23 | `/system/status` (Система) | D | C4, **C0 per row**, links | S-UNK ≠ green, S-DEGR, S-STALE per row | freshness on every row mandatory | T | subsystem health snapshot display |
 | 24 | `/system/diagnostics` (Система) | S | C16, C8, snapshot btn | S-FAIL canary, S-NOBACK version [BE:B8] | absence ≠ «последняя версия» | ST | canary run + **Diagnostic Snapshot (canonical)** [CP] |
@@ -356,6 +356,21 @@ Density: **D** dense / **S** standard / **R** reading. Transform codes: **T** = 
 | 28 | `/help/troubleshooting` (Справка) | R | prose + deep links | — | must distinguish неизвестно/устарело/деградация/сбой | R | editorial content |
 | 29 | `/help/notifications-audio` (Справка) | R | prose + static themed SVG | — | fail-open model explained | R | editorial content |
 | 30 | `/help/diagnostics-support` (Справка) | R | prose + link to route 24 | — | help never generates snapshots | R | editorial content |
+
+**Route 20/21 ownership — owner-approved governance re-ownership before S5-6.** This narrows the earlier
+"Discord token/channels/rules config" wording for route 21 and makes route 20's scope exhaustive; it does not
+add, remove, or renumber any of the 30 routes and does not change B-gate render behavior.
+
+- **Route 20** (`/settings/events-notifications`) is the **sole owner** of every field in the SQLite
+  `notification_config` and `point_rules` tables: channel mappings (mentions/points/online/offline/system),
+  per-event enable toggles, streamer allow-lists, and point-threshold rules.
+- **Route 21** (`/settings/discord`) owns **only** the `config.json` `discord` block — the `enabled` flag and
+  the write-only `botToken`/`guildId` connection fields (masked/never redisplayed once set). Channel and rule
+  editing is route 20's domain, not route 21's; route 21 links out to route 20 for that.
+- **Route 12** (`/events/discord`) is unchanged: it remains sole owner of Discord test/delivery-status, as
+  already stated in its row above.
+- **B4/B5/B9** (§13) remain **S-NOBACK** exactly as specified below — this re-ownership is a documentation
+  clarification of which route authors which stored field, not a change to any gate's render behavior.
 
 ## 12. Mandatory R17 visual semantics (`/drops/current`) — exact
 
