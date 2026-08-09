@@ -1,0 +1,279 @@
+{{/* C6 — Settings category dirty-boundary engine (task S5-6). Every S5-6
+     category page (routes 13-22) wraps its fields in <form class="c6-form"
+     data-c6-form> (route 22/System instead passes the existing #health-center
+     section as `form` — see settings_system.html) and calls
+     window.initSettingsCategoryForm({...}) from its own {{define "scripts"}}
+     block, passing load/populate/gather/save (and optionally validate/
+     onLoaded). This file defines that shared engine exactly once; C7 (save
+     bar) and C8 (discard dialog) are the markup halves it drives.
+
+     Contract: a category is the dirty boundary — no autosave, ever. State
+     machine: clean -> dirty -> saving -> success (back to clean) | error |
+     validation-blocked. Attempting to leave the page (an internal <a> click,
+     or a real navigation/tab-close via beforeunload) while dirty is
+     intercepted and routed through the C8 discard-confirmation dialog;
+     Escape or the dialog's own "keep editing" button is the least-destructive
+     default (autofocused), and focus returns to whatever was clicked once
+     the dialog closes. Errors render inline in the C7 bar's own region —
+     never as a global toast; a successful save may use the existing global
+     toast (window.showToast), matching every other settings surface. */}}
+{{define "c6.engine"}}<script>
+(function () {
+    if (window.initSettingsCategoryForm) return;
+
+    window.initSettingsCategoryForm = function (opts) {
+        const form = opts.form;
+        const saveBar = opts.saveBar;
+        const dialog = opts.dialog || null;
+        const statusEl = saveBar.querySelector('[data-c7-status]');
+        const saveBtn = saveBar.querySelector('[data-c7-save]');
+        const cancelBtn = saveBar.querySelector('[data-c7-cancel]');
+        const errorEl = saveBar.querySelector('[data-c7-error]');
+        const dialogDiscardBtn = dialog ? dialog.querySelector('[data-c8-discard]') : null;
+        const dialogKeepBtn = dialog ? dialog.querySelector('[data-c8-keep]') : null;
+
+        let baseline = null;
+        // canonical is the full data object opts.load() returned (refreshed
+        // after each successful save) — separate from `baseline`, which is
+        // only the JSON snapshot of opts.gather()'s narrower, page-owned
+        // shape (B3). Routes 16/17 intentionally omit read-only context
+        // like data.streamers from gather() (route 13 owns that key), so
+        // JSON.parse(baseline) never has it; Cancel restores from canonical
+        // instead so read-only context (e.g. the overrides summary list)
+        // stays truthful across an edit-then-Cancel cycle instead of being
+        // wiped to its empty state.
+        let canonical = null;
+        let pendingHref = null;
+        let lastTrigger = null;
+        // saving guards against a second Save while one is still in flight
+        // (M1): recheck() runs on every input/change event, including ones
+        // that land while a save's await is pending, and must not flip the
+        // save bar back to 'dirty'/re-enable Save mid-request — that would
+        // let a second click start an overlapping save racing the first.
+        // It still tracks correctly: the explicit recheck() call once the
+        // in-flight save settles (see the click handler) picks up any edit
+        // that happened during the request and marks it dirty, rather than
+        // ever folding it into the just-sent baseline.
+        let saving = false;
+
+        function setState(state, message) {
+            saveBar.dataset.state = state;
+            saveBar.classList.toggle('c7-savebar--hidden', state === 'clean');
+            if (statusEl) statusEl.textContent = message || '';
+            saveBtn.disabled = state === 'saving' || state === 'clean';
+            cancelBtn.disabled = state === 'saving';
+            if (state === 'error' || state === 'blocked') {
+                if (errorEl) { errorEl.hidden = false; errorEl.textContent = message || t('js.setcat.error'); }
+            } else if (errorEl) {
+                errorEl.hidden = true;
+                errorEl.textContent = '';
+            }
+        }
+
+        function isDirty() {
+            return baseline !== null && JSON.stringify(opts.gather()) !== baseline;
+        }
+
+        function recheck() {
+            if (saving) return;
+            setState(isDirty() ? 'dirty' : 'clean', isDirty() ? t('js.setcat.dirty') : '');
+        }
+
+        // M2: a required numeric field left empty serializes as NaN ->
+        // JSON null, which encoding/json silently no-ops onto the seeded
+        // (old) value server-side — a false "Saved". Block before opts.save
+        // is ever called instead, for every <input type="number"> in the
+        // form (including ones added dynamically, e.g. per-streamer
+        // override rows) so no category page has to enumerate its own
+        // fields by hand. An explicit "0" is not empty and passes.
+        function firstEmptyRequiredNumeric() {
+            const inputs = form.querySelectorAll('input[type="number"]');
+            for (let i = 0; i < inputs.length; i++) {
+                if (inputs[i].value.trim() === '') return inputs[i];
+            }
+            return null;
+        }
+
+        async function load() {
+            const data = await opts.load();
+            canonical = data;
+            opts.populate(data);
+            if (opts.onLoaded) opts.onLoaded(data);
+            baseline = JSON.stringify(opts.gather());
+            setState('clean', '');
+            return data;
+        }
+
+        function revert() {
+            opts.populate(canonical);
+            if (opts.onLoaded) opts.onLoaded(canonical);
+            setState('clean', '');
+        }
+
+        form.addEventListener('input', recheck);
+        form.addEventListener('change', recheck);
+
+        saveBtn.addEventListener('click', async function (e) {
+            e.preventDefault();
+            if (!isDirty() || saving) return;
+            const emptyNumeric = firstEmptyRequiredNumeric();
+            if (emptyNumeric) {
+                setState('blocked', t('js.setcat.blocked'));
+                emptyNumeric.focus();
+                return;
+            }
+            if (opts.validate) {
+                const problem = opts.validate();
+                if (problem) { setState('blocked', problem); return; }
+            }
+            saving = true;
+            setState('saving', t('js.setcat.saving'));
+            try {
+                // Gathered ONCE, before the await: this exact snapshot is
+                // both what's sent AND what baseline is set from after it
+                // resolves (M1) — a second, post-await gather() here would
+                // silently fold whatever the operator typed while the
+                // request was in flight into "saved", when only the
+                // pre-await snapshot was ever actually persisted.
+                const payload = opts.gather();
+                await opts.save(payload);
+                baseline = JSON.stringify(payload);
+                // Merge, not replace: payload only carries this page's own
+                // owned top-level keys (gather()'s shape), so this refreshes
+                // exactly what was just persisted while leaving any
+                // read-only context this page doesn't own (e.g. streamers)
+                // at its last-known value — re-established as the canonical
+                // baseline a later Cancel restores to.
+                canonical = Object.assign({}, canonical, payload);
+                saving = false;
+                // Not a blind setState('clean', ''): recheck() re-derives
+                // the real state from the current DOM against the baseline
+                // just set, so an edit made during the request correctly
+                // surfaces as dirty instead of being reported saved.
+                recheck();
+                if (window.showToast) window.showToast(t('js.setcat.saved'));
+            } catch (err) {
+                saving = false;
+                setState('error', (err && err.message) || t('js.setcat.error'));
+            }
+        });
+
+        cancelBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            revert();
+        });
+
+        function closeDialogAndFocus() {
+            if (dialog.open) dialog.close();
+        }
+
+        if (dialog) {
+            if (dialogDiscardBtn) {
+                dialogDiscardBtn.addEventListener('click', function () {
+                    const href = pendingHref;
+                    revert();
+                    closeDialogAndFocus();
+                    if (href) window.location.href = href;
+                });
+            }
+            if (dialogKeepBtn) {
+                dialogKeepBtn.addEventListener('click', function () { closeDialogAndFocus(); });
+            }
+            // Escape fires the native 'cancel' event on <dialog>; letting it
+            // close normally (no discard) is the least-destructive default —
+            // identical outcome to clicking "keep editing".
+            dialog.addEventListener('cancel', function () {});
+            dialog.addEventListener('close', function () {
+                pendingHref = null;
+                if (lastTrigger && document.contains(lastTrigger)) lastTrigger.focus();
+                lastTrigger = null;
+            });
+
+            // Tab/Shift+Tab focus trap while the dialog is open.
+            dialog.addEventListener('keydown', function (e) {
+                if (e.key !== 'Tab') return;
+                const focusables = Array.prototype.slice.call(
+                    dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+                ).filter(function (el) { return !el.disabled; });
+                if (!focusables.length) return;
+                const first = focusables[0], last = focusables[focusables.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            });
+
+            // Internal-navigation interception: only a plain left-click on a
+            // same-origin, non-new-tab internal link while dirty is
+            // intercepted. Modified clicks (ctrl/cmd/shift/middle-click,
+            // target=_blank) are left alone so "open in new tab" still works.
+            document.addEventListener('click', function (e) {
+                if (!isDirty()) return;
+                if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                const a = e.target.closest && e.target.closest('a[href]');
+                if (!a || a.target === '_blank') return;
+                const href = a.getAttribute('href');
+                if (!href || href.charAt(0) !== '/') return;
+                if (dialog.contains(a)) return;
+                e.preventDefault();
+                pendingHref = a.href;
+                lastTrigger = a;
+                if (typeof dialog.showModal === 'function') dialog.showModal();
+            }, true);
+        }
+
+        window.addEventListener('beforeunload', function (e) {
+            if (!isDirty()) return;
+            e.preventDefault();
+            e.returnValue = '';
+        });
+
+        load().catch(function (err) {
+            setState('error', (err && err.message) || t('js.setcat.load_error'));
+        });
+
+        return { recheck: recheck, isDirty: isDirty, revert: revert };
+    };
+
+    // initConfirmDialog wires a SECOND, independent <dialog class="c8-dialog">
+    // instance for a page-specific destructive confirmation (e.g. route 13's
+    // "remove streamer") that reuses the exact same C8 markup/focus-trap/
+    // least-destructive-default contract as the nav-discard dialog above, but
+    // is otherwise unrelated to the dirty-boundary engine: no baseline, no
+    // revert, just confirm/cancel. onConfirm receives the same `detail` value
+    // openConfirmDialog was called with (e.g. the username to remove).
+    window.initConfirmDialog = function (dialog, onConfirm) {
+        const confirmBtn = dialog.querySelector('[data-c8-discard]');
+        const keepBtn = dialog.querySelector('[data-c8-keep]');
+        let lastTrigger = null;
+        let pending = null;
+
+        confirmBtn.addEventListener('click', function () {
+            const detail = pending;
+            dialog.close();
+            onConfirm(detail);
+        });
+        keepBtn.addEventListener('click', function () { dialog.close(); });
+        dialog.addEventListener('cancel', function () {});
+        dialog.addEventListener('close', function () {
+            pending = null;
+            if (lastTrigger && document.contains(lastTrigger)) lastTrigger.focus();
+            lastTrigger = null;
+        });
+        dialog.addEventListener('keydown', function (e) {
+            if (e.key !== 'Tab') return;
+            const focusables = Array.prototype.slice.call(
+                dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+            ).filter(function (el) { return !el.disabled; });
+            if (!focusables.length) return;
+            const first = focusables[0], last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        });
+
+        return function open(detail, trigger) {
+            pending = detail;
+            lastTrigger = trigger || document.activeElement;
+            if (typeof dialog.showModal === 'function') dialog.showModal();
+        };
+    };
+})();
+</script>{{end}}

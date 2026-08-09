@@ -1,0 +1,113 @@
+{{define "title"}}{{ t "setcat.discord.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.discord.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.discord.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form" data-c6-form novalidate>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.discord.enable_label" }}</div>
+            <div class="setting-description">{{ t "set.discord.enable_desc" }}</div>
+        </div>
+        <input type="checkbox" class="w-5 h-5 accent-purple-600" id="discordEnabled">
+    </div>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.discord.token_label" }}</div>
+            <div class="setting-description">{{ t "set.discord.token_desc" }}</div>
+        </div>
+        <input type="password" class="input-field w-72" id="discordBotToken" placeholder="••••••••" autocomplete="new-password">
+    </div>
+    <div class="setting-row">
+        <div>
+            <div class="setting-label">{{ t "set.discord.guild_label" }}</div>
+            <div class="setting-description">{{ t "set.discord.guild_desc" }}</div>
+        </div>
+        <input type="text" class="input-field w-52" id="discordGuildId" placeholder="123456789012345678">
+    </div>
+
+    <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4 mt-4">
+        <div class="text-neutral-100 font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
+        <ol class="text-neutral-400 text-sm space-y-1 list-decimal pl-5">
+            <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.portal" }}</a></li>
+            <li>{{ t "set.discord.s2_pre" }}<strong class="text-neutral-100">New Application</strong>{{ t "set.discord.s2_post" }}</li>
+            <li>{{ t "set.discord.s3_pre" }}<strong class="text-neutral-100">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-neutral-100">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
+            <li>{{ t "set.discord.s4_pre" }}<strong class="text-neutral-100">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
+            <li>{{ t "set.discord.s5_pre" }}<strong class="text-neutral-100">OAuth2 → URL Generator</strong></li>
+            <li>{{ t "set.discord.s6_pre" }}<strong class="text-neutral-100">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-neutral-100">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-neutral-100">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
+            <li>{{ t "set.discord.s7" }}</li>
+        </ol>
+        <div class="text-neutral-100 font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
+        <p class="text-neutral-400 text-sm">
+            {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
+        </p>
+    </div>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    // P2 write-only-secret semantics preserved exactly: GET /api/settings
+    // never returns discord.botToken, so the field always loads empty; the
+    // baseline is therefore also empty, and only a NON-empty typed value
+    // marks the form dirty and is sent as a REQUEST to replace the stored
+    // token (see internal/settings/dto.go's DiscordUIConfig.BotToken doc).
+    function populate(data) {
+        const d = data.discord || {};
+        document.getElementById('discordEnabled').checked = !!d.enabled;
+        document.getElementById('discordBotToken').value = '';
+        document.getElementById('discordGuildId').value = d.guildId || '';
+    }
+
+    function gather() {
+        return {
+            discord: {
+                enabled: document.getElementById('discordEnabled').checked,
+                botToken: document.getElementById('discordBotToken').value,
+                guildId: document.getElementById('discordGuildId').value,
+            },
+        };
+    }
+
+    let loadedDiscordEnabled = false;
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: function (data) {
+            loadedDiscordEnabled = !!(data.discord && data.discord.enabled);
+            populate(data);
+        },
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+            // A Discord-enabled toggle FLIP (same before/after comparison the
+            // legacy settings.html save handler already makes) needs a reload
+            // to keep the sidebar's Discord-gated state (e.g. the Events
+            // section) honest; an ordinary token/guild-ID edit does not.
+            if (payload.discord.enabled !== loadedDiscordEnabled) {
+                window.location.reload();
+            }
+        },
+    });
+})();
+</script>
+{{end}}

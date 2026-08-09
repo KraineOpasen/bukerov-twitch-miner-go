@@ -73,15 +73,17 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 	}
 }
 
-// TestS5_2NavChildDisambiguation pins all THREE group destinations'
-// structure (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task
-// S5-5): the System group (one parent, three children — Status/Diagnostics/
-// Logs, task S5-5 having replaced the former Health/Logs pair with direct
-// System routes), the Overview group (one parent, two children — Overview
-// itself/Queue), and the Drops group (one parent, four children —
-// Current/Upcoming/Claims/Past), for a combined three parent links
-// (data-nav-parent) and nine children (data-nav-child), each with its own
-// distinct href.
+// TestS5_2NavChildDisambiguation pins all FOUR group destinations' structure
+// (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task S5-5,
+// extended again by task S5-6): the System group (one parent, three children
+// — Status/Diagnostics/Logs, task S5-5 having replaced the former
+// Health/Logs pair with direct System routes), the Overview group (one
+// parent, two children — Overview itself/Queue), the Drops group (one
+// parent, four children — Current/Upcoming/Claims/Past), and the Settings
+// group (one parent, ten children — the S5-6 category routes replacing the
+// former /settings/* compatibility redirects), for a combined four parent
+// links (data-nav-parent) and nineteen children (data-nav-child), each with
+// its own distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -89,11 +91,21 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	// Matched with the trailing ">" so the JS source's own string-literal
 	// references to these attribute names (e.g. hasAttribute('data-nav-parent'))
 	// aren't miscounted as HTML occurrences.
-	if n := strings.Count(body, `data-nav-parent>`); n != 3 {
-		t.Errorf("expected exactly three data-nav-parent groups (Overview, Drops, System), found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 4 {
+		t.Errorf("expected exactly four data-nav-parent groups (Overview, Drops, System, Settings), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 9 {
-		t.Errorf("expected exactly nine data-nav-child destinations (Overview, Queue, Current, Upcoming, Claims, Past, Status, Diagnostics, Logs), found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 19 {
+		t.Errorf("expected exactly nineteen data-nav-child destinations, found %d", n)
+	}
+	for _, href := range []string{
+		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
+		"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",
+		"/settings/events-notifications", "/settings/discord", "/settings/system",
+	} {
+		want := `href="` + href + `" class="c2-nav-child" data-nav-section="settings" data-nav-child`
+		if !strings.Contains(body, want) {
+			t.Errorf("Settings group missing child destination %q", href)
+		}
 	}
 	if !strings.Contains(body, `href="/system/status" class="c2-nav-child" data-nav-section="system" data-nav-child`) {
 		t.Error("System group missing the Status child destination")

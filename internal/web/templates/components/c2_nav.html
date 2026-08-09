@@ -21,7 +21,20 @@
      at the legacy /health and /logs pages) with three direct System routes
      (/system/status, /system/diagnostics, /system/logs) — /health and /logs
      themselves keep rendering directly, unchanged, just no longer linked
-     from this nav. */}}
+     from this nav.
+
+     task S5-6 makes Settings a fourth group, the same shape again: total
+     parent groups 3 -> 4, total children 9 -> 19. Its ten children are the
+     new direct-render category routes (/settings/streamers ...
+     /settings/system) replacing the ten former /settings/* compatibility
+     redirects (see handlers_chrome.go's compatibilityRedirects, now holding
+     only the unrelated /analytics/* and /help entries). The group's own
+     parent link points at the first child (/settings/streamers), the same
+     "parent href = first child" convention Drops (/drops/current) and
+     System (/system/status) already use. Exactly like /health and /logs
+     after S5-5, the legacy /settings mega-form keeps rendering directly at
+     its own unchanged route — it is simply no longer linked from this nav,
+     superseded here by the ten new category destinations. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -58,11 +71,23 @@
                 <span class="c2-nav-label">{{ t "nav.events" }}</span>
             </a>
         </li>
-        <li class="c2-nav-item">
-            <a href="/settings" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/settings/streamers" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 <span class="c2-nav-label">{{ t "nav.settings" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/settings/streamers" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.streamers" }}</a></li>
+                <li><a href="/settings/rotation" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.rotation" }}</a></li>
+                <li><a href="/settings/drops" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.drops" }}</a></li>
+                <li><a href="/settings/predictions" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.predictions" }}</a></li>
+                <li><a href="/settings/chat-raids" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.chatraids" }}</a></li>
+                <li><a href="/settings/transport" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.transport" }}</a></li>
+                <li><a href="/settings/analytics-logging" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.analyticslogging" }}</a></li>
+                <li><a href="/settings/events-notifications" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.eventsnotifications" }}</a></li>
+                <li><a href="/settings/discord" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.discord" }}</a></li>
+                <li><a href="/settings/system" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.system" }}</a></li>
+            </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
             <a href="/system/status" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>

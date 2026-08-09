@@ -1,0 +1,169 @@
+{{/* Route 22 (System) participates in the C6/C7/C8 dirty boundary like
+     every other S5-6 category page, but through a custom load/populate/
+     gather/save adapter instead of a JSON /api/settings payload: it reuses
+     the EXACT SAME #health-center htmx partial (GET /api/health, POST
+     /api/health/settings) that /health already renders — no new endpoint,
+     DTO, or schema — preserving healthFormMu and ApplyHealthSettings's
+     fail-closed persistence semantics exactly. What changes here is only
+     the ORCHESTRATION: the canary and watchdog forms embedded in that
+     partial still each carry their own hx-post/hx-target="#health-center"/
+     hx-swap="innerHTML" (partials/health.html is shared with the legacy
+     /health page and out of this task's scope to edit), but their native
+     submit is intercepted before htmx ever sees it — a whole-partial
+     innerHTML swap after either section's own submit was the S5-6 B2 bug:
+     it silently discarded any unsaved edit sitting in the OTHER section's
+     DOM. C6's single Save button drives both sections instead, sequentially
+     via fetch, applying only each section's own committed fields back onto
+     its own live form once its POST resolves — the sibling section's DOM is
+     never touched by either request. */}}
+{{define "title"}}{{ t "setcat.system.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.system.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.system.subtitle" }}</p>
+
+<section id="health-center" hx-get="/api/health" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    <div class="animate-pulse text-neutral-400">{{ t "health.loading" }}</div>
+</section>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+    (function () {
+        if (window.__healthGuard) return;
+        window.__healthGuard = true;
+
+        // Identical guard to health.html's own (see that file for the full
+        // rationale): defers the timed #health-center poll while the operator
+        // is mid-edit, without blocking the two forms' own submit (now routed
+        // through C6's Save below) or the "Run now" button.
+        document.addEventListener('htmx:beforeRequest', function (evt) {
+            const cfg = evt.detail && evt.detail.requestConfig;
+            const elt = cfg && cfg.elt;
+            const center = document.getElementById('health-center');
+            if (!elt || !center || elt !== center) return;
+
+            const active = document.activeElement;
+            const activeInside = !!(active && center.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+
+            let dirty = false;
+            center.querySelectorAll('input, select, textarea').forEach(function (el) {
+                if (el.type === 'checkbox' || el.type === 'radio') {
+                    if (el.checked !== el.defaultChecked) dirty = true;
+                } else if ('defaultValue' in el && el.value !== el.defaultValue) {
+                    dirty = true;
+                }
+            });
+
+            if (activeInside || dirty) evt.preventDefault();
+        });
+
+        // Capture phase fires before htmx's own bubble-phase submit listener
+        // ever sees the event, so the two canary/watchdog forms' native
+        // hx-post never runs — C6's Save button drives them instead (B2).
+        document.addEventListener('submit', function (e) {
+            if (e.target.closest && e.target.closest('#health-center form[hx-post="/api/health/settings"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
+
+        function sectionForm(section) {
+            const center = document.getElementById('health-center');
+            if (!center) return null;
+            return Array.from(center.querySelectorAll('form[hx-post="/api/health/settings"]')).find(function (f) {
+                const s = f.querySelector('input[name="section"]');
+                return s && s.value === section;
+            }) || null;
+        }
+
+        function fieldsOf(form) {
+            const out = {};
+            if (!form) return out;
+            Array.from(form.elements).forEach(function (el) {
+                if (!el.name || el.name === 'section') return;
+                out[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+            });
+            return out;
+        }
+
+        function applyFields(form, values) {
+            if (!form || !values) return;
+            Object.keys(values).forEach(function (name) {
+                const el = form.querySelector('[name="' + name + '"]');
+                if (!el) return;
+                if (el.type === 'checkbox') { el.checked = !!values[name]; el.defaultChecked = el.checked; }
+                else { el.value = values[name]; el.defaultValue = el.value; }
+            });
+        }
+
+        // Pulls one section's committed field values out of the existing
+        // POST /api/health/settings response (a full health_center render)
+        // via a detached parse — never touches the sibling section's live DOM.
+        function committedFields(html, section) {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const match = Array.from(doc.querySelectorAll('form[hx-post="/api/health/settings"]')).find(function (f) {
+                const s = f.querySelector('input[name="section"]');
+                return s && s.value === section;
+            });
+            return fieldsOf(match);
+        }
+
+        async function postSection(section) {
+            const form = sectionForm(section);
+            const body = new URLSearchParams(Object.assign({ section: section }, fieldsOf(form)));
+            const resp = await fetch('/api/health/settings', { method: 'POST', body: body });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+            return resp.text();
+        }
+
+        function waitForSections() {
+            return new Promise(function (resolve) {
+                if (sectionForm('canary') && sectionForm('watchdog')) { resolve(); return; }
+                document.body.addEventListener('htmx:afterSwap', function once(evt) {
+                    if (evt.detail && evt.detail.target && evt.detail.target.id === 'health-center' && sectionForm('canary') && sectionForm('watchdog')) {
+                        document.body.removeEventListener('htmx:afterSwap', once);
+                        resolve();
+                    }
+                });
+            });
+        }
+
+        initSettingsCategoryForm({
+            form: document.getElementById('health-center'),
+            saveBar: document.getElementById('settings-cat-savebar'),
+            dialog: document.getElementById('settings-cat-discard-dialog'),
+            load: async function () {
+                await waitForSections();
+                return { canary: fieldsOf(sectionForm('canary')), watchdog: fieldsOf(sectionForm('watchdog')) };
+            },
+            populate: function (data) {
+                applyFields(sectionForm('canary'), data.canary);
+                applyFields(sectionForm('watchdog'), data.watchdog);
+            },
+            gather: function () {
+                return { canary: fieldsOf(sectionForm('canary')), watchdog: fieldsOf(sectionForm('watchdog')) };
+            },
+            // Canary, then watchdog — sequential, never concurrent, matching
+            // healthFormMu's own serialization on the server. If canary fails
+            // outright, nothing here is touched: both sections' real unsaved
+            // deltas remain exactly as the operator left them. If canary
+            // commits and watchdog then fails, the now-committed canary
+            // values are applied from that response while watchdog's own
+            // unsaved DOM is left untouched; the engine's catch keeps the
+            // form in 'error' state, never 'clean' — no partial success is
+            // ever claimed.
+            save: async function () {
+                const canaryHtml = await postSection('canary');
+                applyFields(sectionForm('canary'), committedFields(canaryHtml, 'canary'));
+                const watchdogHtml = await postSection('watchdog');
+                applyFields(sectionForm('watchdog'), committedFields(watchdogHtml, 'watchdog'));
+            },
+        });
+    })();
+</script>
+{{end}}
