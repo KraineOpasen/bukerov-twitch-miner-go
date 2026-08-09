@@ -345,8 +345,8 @@ Density: **D** dense / **S** standard / **R** reading. Transform codes: **T** = 
 | 17 | `/settings/chat-raids` (Настройки) | S | C6, C7 | C7 cycle | — | IDX | IRC/raids config |
 | 18 | `/settings/transport` (Настройки) | S | C6, C7, C9 | C7 cycle | «влияет на здоровье» banner | IDX | limits/backoff config |
 | 19 | `/settings/analytics-logging` (Настройки) | S | C6, C7 | C7 cycle | — | IDX | analytics/log-level config |
-| 20 | `/settings/events-notifications` (Настройки) | S | C6 matrix, gesture preview, Сброс, C7 | C7 cycle, S-BLOCK preview | TZ [BE:B9]; Upload/Delete S-NOBACK [BE:B5]; prefs note [BE:B4]; fail-open line | IDX | sound/notification **config** |
-| 21 | `/settings/discord` (Настройки) | S | C6 masked token, C7 | C7 cycle | no «показать токен»; test at route 12 | IDX | Discord token/channels/rules config |
+| 20 | `/settings/events-notifications` (Настройки) | S | C6 matrix, gesture preview, Сброс, C7 | C7 cycle, S-BLOCK preview | TZ [BE:B9]; Upload/Delete S-NOBACK [BE:B5]; prefs note [BE:B4]; fail-open line | IDX | sound/notification **config** — sole owner of `notification_config`'s user-configurable fields + `point_rules`' `streamer`/`threshold`/`delete_on_trigger` (never `id`/`triggered`) |
+| 21 | `/settings/discord` (Настройки) | S | C6 masked token, C7 | C7 cycle | no «показать токен»; test at route 12; channels/rules editing → route 20 | IDX | Discord **connection** config only — `config.json` `enabled`+`GuildID` (read/write) + write-only `BotToken` |
 | 22 | `/settings/system` (Настройки) | S | C6, read-only LAN, C7 | C7 cycle | config only; status → Система | IDX | canary/watchdog/updater **config** |
 | 23 | `/system/status` (Система) | D | C4, **C0 per row**, links | S-UNK ≠ green, S-DEGR, S-STALE per row | freshness on every row mandatory | T | subsystem health snapshot display |
 | 24 | `/system/diagnostics` (Система) | S | C16, C8, snapshot btn | S-FAIL canary, S-NOBACK version [BE:B8] | absence ≠ «последняя версия» | ST | canary run + **Diagnostic Snapshot (canonical)** [CP] |
@@ -356,6 +356,28 @@ Density: **D** dense / **S** standard / **R** reading. Transform codes: **T** = 
 | 28 | `/help/troubleshooting` (Справка) | R | prose + deep links | — | must distinguish неизвестно/устарело/деградация/сбой | R | editorial content |
 | 29 | `/help/notifications-audio` (Справка) | R | prose + static themed SVG | — | fail-open model explained | R | editorial content |
 | 30 | `/help/diagnostics-support` (Справка) | R | prose + link to route 24 | — | help never generates snapshots | R | editorial content |
+
+**Route 20/21 ownership — owner-approved governance re-ownership before S5-6.** This narrows the earlier
+"Discord token/channels/rules config" wording for route 21 and makes route 20's scope exhaustive over
+user-configurable fields; it does not add, remove, or renumber any of the 30 routes and does not change any
+B-gate's render behavior.
+
+- **Rationale**: `NotificationConfig.SaveConfig` (`internal/notifications/repository.go`) full-row-writes every
+  `notification_config` column on each save, so exactly one C7 category must own that row — otherwise two
+  categories editing concurrently would stale-read and full-row-clobber each other.
+- **Route 20** (`/settings/events-notifications`) is the **sole owner** of every user-configurable
+  `notification_config` field (channel mappings, per-event enable toggles, streamer allow-lists,
+  `upcoming_drops_enabled`) and of `point_rules`' UI CRUD/config fields — `streamer`, `threshold`,
+  `delete_on_trigger`. It does **not** own `point_rules.id` (DB primary key) or `point_rules.triggered`
+  (backend runtime state) — those stay backend-owned.
+- **Route 21** (`/settings/discord`) owns only `config.json`'s Discord connection. `enabled` and `GuildID` are
+  normal read/write settings, redisplayed on the page like any other field. `BotToken` alone stays
+  write-only/masked/never read back — unchanged from its existing wording above. Channel and rule editing is
+  route 20's domain; route 21 links out to route 20 for that.
+- **Route 12** (`/events/discord`) is unchanged: it remains sole owner of Discord test/delivery-status, as
+  already stated in its row above.
+- **B4/B5/B9** (§13) remain **S-NOBACK** exactly as specified below — unchanged gating; this is a
+  documentation correction of which route authors which stored field, not a gate change.
 
 ## 12. Mandatory R17 visual semantics (`/drops/current`) — exact
 
@@ -575,7 +597,9 @@ One PR-sized change per slice, each under its own task contract; per-slice revie
 
 ## 18. Final acceptance checklist (per slice and at S5-10)
 
-1. 7 sections / 30 routes intact — none added, removed, renamed, re-owned.
+1. 7 sections / 30 routes intact — none added, removed, or renamed; no re-ownership beyond the sole
+   owner-approved routes-20/21 field-ownership correction in §11/§13 — no further re-ownership relative to the
+   canonical §11 mapping.
 2. All 13 S-states render per §7; unknown never converts to positive; S-NOBACK = absence, never grey.
 3. R17: last-known-good retained; attempt clock ≠ data clock (distinct components); discarded stale sync renders nothing; valid empty Inventory = S-EMPTY; only existing evidence fields.
 4. Stage 2 canon: exactly two slots (empty = definite state); full roster; Claims sole authority; C7 canon on all 10 categories; no autosave; fail-open stated; DPBA = single passive C18 card only.
