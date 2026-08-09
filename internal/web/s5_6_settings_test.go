@@ -728,11 +728,90 @@ func TestS5_6EvidenceHarnessStopIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startS5_6EvidenceHarness: %v", err)
 	}
+	// Registered immediately, BEFORE the first explicit stop assertion below:
+	// that assertion is a t.Fatalf, and a Fatal there returns from the test
+	// through runtime.Goexit, so the second stop() — the only other call that
+	// would shut this server down — would never run, stranding the listener
+	// and the serve goroutine for the rest of the package's tests. Safe
+	// precisely because of what this test proves: stop() is idempotent, so on
+	// the healthy path this is a silent third no-op, and both explicit
+	// assertions below remain exactly as strong as they were.
+	t.Cleanup(func() { _ = handle.stop() })
 	if err := handle.stop(); err != nil {
 		t.Fatalf("first checked shutdown of a healthy harness must report no error, got %v", err)
 	}
 	if err := handle.stop(); err != nil {
 		t.Errorf("a second checked shutdown must be a no-op reporting no error, got %v — a cleanup that runs after the explicit shutdown would otherwise fail an otherwise-passing test", err)
+	}
+}
+
+// TestS5_6EvidenceHarnessIdempotencyCleanupRegisteredBeforeFirstStop pins the
+// safety net inside the test above, which is the one harness test that has no
+// other way to release its listener.
+//
+// The first explicit shutdown there is a t.Fatalf assertion: if it ever fires,
+// the test returns through runtime.Goexit and the second stop() — the only
+// other call that would shut the server down — never runs, leaving the
+// listener bound and the serve goroutine alive for the remainder of the
+// package's tests. Its sibling, TestS5_6EvidenceHarnessServesAndShutsDownCleanly,
+// already guards exactly this with an immediately-registered t.Cleanup.
+//
+// So: the cleanup must be registered as soon as the harness has started, ahead
+// of the first assertion that can Fatal. That is safe precisely because of
+// what the test proves — stop() is idempotent — so on the healthy path the
+// cleanup is a silent third no-op, and both explicit assertions stay exactly
+// as strong as they were. Checked at the source level because a stranded
+// listener has no in-process signal to assert on from the test that stranded
+// it, the same approach TestF3HarnessReportsRunningStatus already uses.
+func TestS5_6EvidenceHarnessIdempotencyCleanupRegisteredBeforeFirstStop(t *testing.T) {
+	raw, err := os.ReadFile("s5_6_settings_test.go")
+	if err != nil {
+		t.Fatalf("read s5_6_settings_test.go: %v", err)
+	}
+	src := string(raw)
+
+	// Scope every literal below to that one test's body — the next top-level
+	// declaration ends it — so nothing here can be satisfied by a match
+	// somewhere else in the file (including inside this test).
+	const sig = "func TestS5_6EvidenceHarnessStopIsIdempotent(t *testing.T) {"
+	start := strings.Index(src, sig)
+	if start < 0 {
+		t.Fatalf("could not locate %q", sig)
+	}
+	body := src[start:]
+	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+		body = body[:end+1]
+	}
+
+	const cleanup = "t.Cleanup(func() { _ = handle.stop() })"
+	cleanupIdx := strings.Index(body, cleanup)
+	if cleanupIdx < 0 {
+		t.Fatalf("TestS5_6EvidenceHarnessStopIsIdempotent must register %q right after a successful start, or a Fatal from its first explicit stop strands the listener and the serve goroutine; got:\n%s", cleanup, body)
+	}
+
+	const firstStop = "if err := handle.stop(); err != nil {"
+	firstStopIdx := strings.Index(body, firstStop)
+	if firstStopIdx < 0 {
+		t.Fatalf("could not locate the explicit stop assertions in:\n%s", body)
+	}
+	if cleanupIdx > firstStopIdx {
+		t.Errorf("the cleanup must be registered BEFORE the first explicit stop assertion — registered after it, it cannot run when that assertion Fatals, which is the only case it exists for; got:\n%s", body)
+	}
+
+	// The cleanup is an addition, never a replacement: both explicit
+	// assertions — and the start check that makes handle safe to close over
+	// — must survive verbatim, and no fourth stop() call may creep in.
+	for _, kept := range []string{
+		`t.Fatalf("startS5_6EvidenceHarness: %v", err)`,
+		`t.Fatalf("first checked shutdown of a healthy harness must report no error, got %v", err)`,
+		`t.Errorf("a second checked shutdown must be a no-op reporting no error, got %v`,
+	} {
+		if !strings.Contains(body, kept) {
+			t.Errorf("the cleanup must not weaken the test's own assertions: missing %q; got:\n%s", kept, body)
+		}
+	}
+	if n := strings.Count(body, "handle.stop()"); n != 3 {
+		t.Errorf("TestS5_6EvidenceHarnessStopIsIdempotent must call handle.stop() exactly three times (cleanup + the two explicit assertions), got %d; body:\n%s", n, body)
 	}
 }
 
@@ -1542,5 +1621,103 @@ func TestS5_6Q3R9PointRuleLoadFailureIsVisible(t *testing.T) {
 		if !strings.Contains(renderFn, kept) {
 			t.Errorf("the delete-rule handler must be unchanged: missing %q; got:\n%s", kept, renderFn)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// R10: Cancel before the first successful load is a harmless no-op.
+// ---------------------------------------------------------------------
+
+// TestS5_6Q3R10CancelBeforeCanonicalIsHarmlessNoOp pins the c6 engine's
+// pre-canonical Cancel seam.
+//
+// canonical starts null and is only assigned once opts.load() resolves, but
+// revert() — the function Cancel is wired to — called opts.populate(canonical)
+// unconditionally. Cancel pressed while the category load is still in flight,
+// or after it rejected, therefore reached populate(null). Every category
+// page's populate() dereferences the data object it is handed, so that throws
+// a TypeError out of the click handler; and on any page that happens to
+// tolerate it, the setState-to-clean immediately after would hide the save
+// bar and erase the very load error the operator is looking at. Either way the
+// stable load-error lifecycle — the one surface telling the operator the page
+// never loaded — is destroyed by a button that had nothing to restore.
+//
+// The invariant: Cancel/revert before the first successful load is a harmless
+// no-op. It must not call populate, must not clear or replace the existing
+// error state, must not change baseline, and must not create a
+// dirty/save-capable state. The narrow seam is a canonical-null guard at the
+// very top of revert(); everything after it — the healthy
+// populate/onLoaded/clean sequence — is unchanged, and no other part of the
+// state machine moves.
+func TestS5_6Q3R10CancelBeforeCanonicalIsHarmlessNoOp(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+
+	// The precondition the guard reads: canonical is null until a load
+	// resolves, which is what makes "no successful load yet" detectable.
+	if !strings.Contains(src, "let canonical = null;") {
+		t.Fatal("c6_form.html: canonical must start null — the guard below has no other way to detect that no load has succeeded yet")
+	}
+
+	revertFn := s56ExtractJSFunction(t, src, "function revert()")
+	const guard = "if (canonical === null) return;"
+	guardIdx := strings.Index(revertFn, guard)
+	if guardIdx < 0 {
+		t.Fatalf("revert() must return early while canonical is still null — Cancel during a pending load, or after a rejected one, otherwise runs the whole restore path against null; got:\n%s", revertFn)
+	}
+
+	// Scenarios 1 and 2 (pending load + Cancel, rejected load + Cancel),
+	// structurally: the guard has to precede EVERY effect revert() has, or a
+	// pre-canonical Cancel still performs one of them.
+	for _, effect := range []string{
+		// populate(null) — the throw itself.
+		"opts.populate(canonical);",
+		// the page's own post-populate hook, re-run against null.
+		"opts.onLoaded(canonical)",
+		// the state stomp: hides the bar and clears the visible load error.
+		"setState('clean', '');",
+	} {
+		effectIdx := strings.Index(revertFn, effect)
+		if effectIdx < 0 {
+			t.Errorf("revert() lost its healthy-path effect %q; got:\n%s", effect, revertFn)
+			continue
+		}
+		if guardIdx > effectIdx {
+			t.Errorf("the canonical-null guard must come BEFORE %q in revert(), or a pre-canonical Cancel still runs it; got:\n%s", effect, revertFn)
+		}
+	}
+
+	// A no-op really is a no-op: revert() must not have grown its own
+	// error rendering or baseline handling, so whatever the load().catch
+	// handler put on screen stays exactly as it was.
+	if strings.Contains(revertFn, "baseline =") {
+		t.Errorf("revert() must not assign baseline — a pre-canonical Cancel must leave the (still null) baseline alone; got:\n%s", revertFn)
+	}
+	if strings.Contains(revertFn, "setState('error',") {
+		t.Errorf("revert() must not re-render the error state — it leaves whatever load().catch set untouched; got:\n%s", revertFn)
+	}
+
+	// Scenario 3, and the guard's own release condition: Cancel is still
+	// wired straight to revert(), and a load that succeeds later still
+	// assigns canonical — so an early Cancel costs nothing and every Cancel
+	// after that first success behaves exactly as before.
+	cancelHandler := s56ExtractJSFunction(t, src, "cancelBtn.addEventListener('click', function (e) {")
+	if !strings.Contains(cancelHandler, "revert();") {
+		t.Errorf("Cancel must still be wired to revert(); got:\n%s", cancelHandler)
+	}
+	loadFn := s56ExtractJSFunction(t, src, "async function load()")
+	if !strings.Contains(loadFn, "canonical = data;") {
+		t.Error("load() must still assign canonical, so a load that succeeds after an early Cancel opens the guard for every later Cancel")
+	}
+
+	// Save stays impossible across the whole pre-canonical window: baseline
+	// is still null, isDirty() is false for that reason alone, and the save
+	// handler refuses a click that is not dirty. A pre-canonical Cancel
+	// changes none of it, because it now changes nothing at all.
+	isDirtyFn := s56ExtractJSFunction(t, src, "function isDirty()")
+	if !strings.Contains(isDirtyFn, "baseline !== null") {
+		t.Error("isDirty() must stay false while baseline is null, so Save is impossible before the first successful load")
+	}
+	if !strings.Contains(src, "if (!isDirty() || saving) return;") {
+		t.Error("the save handler must still refuse a click while the form is not dirty")
 	}
 }

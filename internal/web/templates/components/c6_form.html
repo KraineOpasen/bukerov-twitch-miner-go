@@ -105,6 +105,19 @@
         }
 
         function revert() {
+            // Cancel before the first successful load has nothing to restore
+            // to: canonical is still null because opts.load() is either in
+            // flight or rejected. populate(null) throws inside the page's own
+            // populate() (every category dereferences the data object it is
+            // handed), and the state reset below would hide the save bar and
+            // erase the load error load().catch put on screen — the operator's
+            // only signal that the page never loaded. So a pre-canonical
+            // Cancel is a deliberate no-op: nothing populated, nothing reset,
+            // the error lifecycle left exactly as it was. Save stays
+            // impossible on this path anyway (baseline is null, so isDirty()
+            // is false), and the first load to succeed assigns canonical,
+            // after which Cancel behaves exactly as it always has.
+            if (canonical === null) return;
             opts.populate(canonical);
             if (opts.onLoaded) opts.onLoaded(canonical);
             setState('clean', '');
