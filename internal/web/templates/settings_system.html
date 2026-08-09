@@ -10,12 +10,17 @@
      hx-swap="innerHTML" (partials/health.html is shared with the legacy
      /health page and out of this task's scope to edit), but their native
      submit is intercepted before htmx ever sees it — a whole-partial
-     innerHTML swap after either section's own submit was the S5-6 B2 bug:
-     it silently discarded any unsaved edit sitting in the OTHER section's
-     DOM. C6's single Save button drives both sections instead, sequentially
-     via fetch, applying only each section's own committed fields back onto
-     its own live form once its POST resolves — the sibling section's DOM is
-     never touched by either request. */}}
+     innerHTML swap after either section's own submit (or, R1 corrective
+     pass, after a dirty "Run now" click) was the S5-6 B2/R1 bug: it
+     silently discarded any unsaved edit sitting in the OTHER section's DOM.
+     C6's single Save button drives both sections instead, sequentially via
+     fetch, from the exact snapshot C6 itself captured before the request
+     (R3) — never a live re-read mid-flight. Only canary's own committed
+     fields are ever re-applied to its own DOM (safe — no await separates
+     it from the snapshot); watchdog's are not, and a canary-success/
+     watchdog-failure partial commit is reported back to C6 so baseline/
+     canonical only advance for the section that actually persisted (R2) —
+     the sibling section's DOM is never touched by either request. */}}
 {{define "title"}}{{ t "setcat.system.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -37,15 +42,21 @@
         if (window.__healthGuard) return;
         window.__healthGuard = true;
 
-        // Identical guard to health.html's own (see that file for the full
-        // rationale): defers the timed #health-center poll while the operator
-        // is mid-edit, without blocking the two forms' own submit (now routed
-        // through C6's Save below) or the "Run now" button.
+        // Defers ANY htmx request that would swap #health-center's innerHTML
+        // while the operator is mid-edit: the timed poll (elt === center)
+        // AND the "Run now" button (elt is a descendant of center — its
+        // own hx-post lives on the button, not the section, so elt !==
+        // center for it; R1 corrective pass — the original center-only
+        // check let a dirty "Run now" click through and silently discard
+        // the edit via the same whole-partial innerHTML swap B2 already
+        // fixed for the two forms' own submit). The two forms' own submit
+        // is intercepted separately below and never reaches htmx at all.
+        // Still lets Run now through normally while clean.
         document.addEventListener('htmx:beforeRequest', function (evt) {
             const cfg = evt.detail && evt.detail.requestConfig;
             const elt = cfg && cfg.elt;
             const center = document.getElementById('health-center');
-            if (!elt || !center || elt !== center) return;
+            if (!elt || !center || (elt !== center && !center.contains(elt))) return;
 
             const active = document.activeElement;
             const activeInside = !!(active && center.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
@@ -113,9 +124,15 @@
             return fieldsOf(match);
         }
 
-        async function postSection(section) {
-            const form = sectionForm(section);
-            const body = new URLSearchParams(Object.assign({ section: section }, fieldsOf(form)));
+        // R3: takes the EXACT values to send instead of re-reading the live
+        // section DOM — the same snapshot invariant C6's own engine applies
+        // (opts.gather() captured once, before any await). Watchdog is only
+        // ever posted after canary's own await returns, a real window in
+        // which the operator can keep typing; re-reading the DOM at that
+        // later point would silently send whatever they've since typed
+        // instead of the values that were current when Save was clicked.
+        async function postSection(section, values) {
+            const body = new URLSearchParams(Object.assign({ section: section }, values));
             const resp = await fetch('/api/health/settings', { method: 'POST', body: body });
             if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
             return resp.text();
@@ -149,19 +166,46 @@
                 return { canary: fieldsOf(sectionForm('canary')), watchdog: fieldsOf(sectionForm('watchdog')) };
             },
             // Canary, then watchdog — sequential, never concurrent, matching
-            // healthFormMu's own serialization on the server. If canary fails
-            // outright, nothing here is touched: both sections' real unsaved
-            // deltas remain exactly as the operator left them. If canary
-            // commits and watchdog then fails, the now-committed canary
-            // values are applied from that response while watchdog's own
-            // unsaved DOM is left untouched; the engine's catch keeps the
-            // form in 'error' state, never 'clean' — no partial success is
-            // ever claimed.
-            save: async function () {
-                const canaryHtml = await postSection('canary');
+            // healthFormMu's own serialization on the server. Both sections
+            // are posted from `payload` (C6's own pre-await gather()
+            // snapshot), never a live re-read (R3) — the exact values C6
+            // baselines against are the exact values sent.
+            //
+            // If canary fails outright, nothing here is touched: both
+            // sections' real unsaved deltas remain exactly as the operator
+            // left them, and the thrown error carries no `committed` data,
+            // so C6's catch leaves baseline/canonical untouched too.
+            //
+            // If canary commits and watchdog then fails (R2), the
+            // now-committed canary values are applied back onto canary's
+            // own DOM from the response (safe — canary's postSection call
+            // runs synchronously right after `payload` was captured, no
+            // await in between, so there's no window for a newer edit to
+            // land there first) and attached to the thrown error as
+            // `committed`, so C6's catch can advance baseline/canonical for
+            // canary alone — it stops showing falsely dirty, and a later
+            // Cancel restores the ACTUAL committed value instead of the
+            // stale pre-save one — while watchdog's own live DOM (its real
+            // unsaved delta, whatever the operator has typed by then) is
+            // never touched, so it correctly remains the only dirty/error
+            // part of the form.
+            //
+            // On full success (both commit), watchdog's committed DOM is
+            // deliberately NOT re-applied: C6's own baseline=payload
+            // bookkeeping already covers it without touching the DOM, and
+            // writing the just-sent value back here would risk clobbering a
+            // newer edit made during watchdog's own await window with a
+            // value that was never actually sent — manufacturing a false
+            // "clean" read on an edit that's genuinely unsaved.
+            save: async function (payload) {
+                const canaryHtml = await postSection('canary', payload.canary);
                 applyFields(sectionForm('canary'), committedFields(canaryHtml, 'canary'));
-                const watchdogHtml = await postSection('watchdog');
-                applyFields(sectionForm('watchdog'), committedFields(watchdogHtml, 'watchdog'));
+                try {
+                    await postSection('watchdog', payload.watchdog);
+                } catch (err) {
+                    err.committed = { canary: payload.canary };
+                    throw err;
+                }
             },
         });
     })();

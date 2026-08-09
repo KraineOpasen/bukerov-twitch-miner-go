@@ -650,11 +650,11 @@ func TestS5_6Q3B2Route22SubmitInterceptedAndSavesSequentially(t *testing.T) {
 		t.Error("settings_system.html missing the capture-phase submit interceptor for the canary/watchdog forms")
 	}
 
-	saveFn := s56ExtractJSFunction(t, src, "save: async function ()")
-	canaryIdx := strings.Index(saveFn, "postSection('canary')")
-	watchdogIdx := strings.Index(saveFn, "postSection('watchdog')")
+	saveFn := s56ExtractJSFunction(t, src, "save: async function (payload) {")
+	canaryIdx := strings.Index(saveFn, "postSection('canary', payload.canary)")
+	watchdogIdx := strings.Index(saveFn, "postSection('watchdog', payload.watchdog)")
 	if canaryIdx < 0 || watchdogIdx < 0 {
-		t.Fatalf("save() must post both sections via postSection(); got:\n%s", saveFn)
+		t.Fatalf("save() must post both sections via postSection(), from C6's own captured payload (R3); got:\n%s", saveFn)
 	}
 	if canaryIdx > watchdogIdx {
 		t.Error("save() must POST canary strictly before watchdog (sequential, matching healthFormMu's own serialization)")
@@ -807,5 +807,132 @@ func TestS5_6Q3M3FlexInputsHaveMinWidthZero(t *testing.T) {
 	}
 	if !strings.Contains(streamersSrc, `<div class="flex flex-wrap gap-3 mb-4">`) {
 		t.Error("settings_streamers.html: the add-streamer/import-followed button row needs flex-wrap too — two whitespace-nowrap buttons plus the input still overflow a narrow viewport with only min-w-0 on the input")
+	}
+}
+
+// ---------------------------------------------------------------------
+// S5-6 Q3 residual corrective pass: R1-R4 source-level regression pins.
+// Live browser evidence for each was gathered separately (localhost-only
+// disposable harnesses under /tmp, never against a tracked branch) — see
+// the corrective pass's evidence report; a rendered dirty-guard/partial-
+// commit/toast timing bug cannot be proven from HTML source alone, but the
+// specific fix CAN be pinned so a future regression fails CI immediately.
+// ---------------------------------------------------------------------
+
+// TestS5_6Q3R1RunNowGuardedWhileDirty pins the R1 fix: the
+// htmx:beforeRequest dirty-guard in settings_system.html must cover any
+// request that would swap #health-center's innerHTML while the operator is
+// mid-edit — not just requests whose own htmx element IS #health-center
+// (the periodic poll), but also descendants of it, e.g. the "Run now"
+// button, whose own hx-post lives on the button itself. Before this fix the
+// guard's elt !== center check let a dirty Run-now click straight through,
+// silently discarding the edit via the same whole-partial innerHTML swap
+// B2 already fixed for the two forms' own submit.
+func TestS5_6Q3R1RunNowGuardedWhileDirty(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_system.html")
+	guardFn := s56ExtractJSFunction(t, src, "document.addEventListener('htmx:beforeRequest', function (evt) {")
+	if !strings.Contains(guardFn, "(elt !== center && !center.contains(elt))") {
+		t.Errorf("settings_system.html: htmx:beforeRequest guard must also cover elements INSIDE #health-center (e.g. the Run now button), not just center itself; got:\n%s", guardFn)
+	}
+	if strings.Contains(guardFn, "elt !== center)") && !strings.Contains(guardFn, "!center.contains(elt)") {
+		t.Error(`settings_system.html: guard regressed to the center-only check ("elt !== center)" with no descendant coverage)`)
+	}
+}
+
+// TestS5_6Q3R2R3Route22PostsSnapshotAndPropagatesPartialCommit pins the R3
+// fix (route 22's save() must use C6's own captured payload snapshot for
+// both sections, never a live re-read of the section DOM inside
+// postSection — the exact values C6 will baseline against must be the
+// exact values sent) and the route-22 half of the R2 fix (a canary-success/
+// watchdog-failure partial commit must be reported back to C6 as
+// err.committed, and watchdog's own committed DOM must NOT be reapplied on
+// full success — doing so risks clobbering a newer edit made during
+// watchdog's real await window with a value that was never actually sent).
+func TestS5_6Q3R2R3Route22PostsSnapshotAndPropagatesPartialCommit(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/settings_system.html")
+
+	postSectionFn := s56ExtractJSFunction(t, src, "async function postSection(section, values) {")
+	if !strings.Contains(postSectionFn, "Object.assign({ section: section }, values)") {
+		t.Errorf("postSection must build its POST body from the `values` parameter, not a live DOM read; got:\n%s", postSectionFn)
+	}
+	if strings.Contains(postSectionFn, "fieldsOf(form)") || strings.Contains(postSectionFn, "fieldsOf(sectionForm") {
+		t.Error("postSection must not re-read the live section DOM (fieldsOf) for the values it sends — that reintroduces the M1-style stale-snapshot bug for route 22 specifically")
+	}
+
+	saveFn := s56ExtractJSFunction(t, src, "save: async function (payload) {")
+	if !strings.Contains(saveFn, "postSection('canary', payload.canary)") {
+		t.Errorf("save() must POST canary from payload.canary (C6's own snapshot); got:\n%s", saveFn)
+	}
+	if !strings.Contains(saveFn, "postSection('watchdog', payload.watchdog)") {
+		t.Errorf("save() must POST watchdog from payload.watchdog (C6's own snapshot), not a live re-read taken after canary's await; got:\n%s", saveFn)
+	}
+	if !strings.Contains(saveFn, "err.committed = { canary: payload.canary };") {
+		t.Error("save() must attach the committed canary snapshot to the thrown error when watchdog fails after canary succeeds, so C6's catch can advance baseline/canonical for canary alone (R2)")
+	}
+	// Exactly one applyFields call (canary's, immediately after its own
+	// postSection — safe, no await separates it from the payload snapshot).
+	// Watchdog's committed fields must never be re-applied to its own live
+	// DOM on the full-success path.
+	if strings.Count(saveFn, "applyFields(") != 1 {
+		t.Errorf("save() must call applyFields exactly once (for canary only) — got %d; re-applying watchdog's committed DOM on full success risks clobbering a newer edit made during its own await window with a value that was never sent, got:\n%s", strings.Count(saveFn, "applyFields("), saveFn)
+	}
+	if !strings.Contains(saveFn, "applyFields(sectionForm('canary')") {
+		t.Error("save() must still reconcile canary's own DOM with its committed response")
+	}
+}
+
+// TestS5_6Q3R2GenericCatchAdvancesPartialCommit pins the generic (c6_form.html)
+// half of the R2 fix: when opts.save() throws an error carrying a
+// `committed` property (a partial object in gather()'s own shape), the
+// catch block must merge exactly that portion into both baseline and
+// canonical before rendering the error — never the whole payload (only the
+// genuinely committed part), and never nothing at all (the pre-fix bug,
+// which left an already-committed section falsely dirty and let a
+// subsequent Cancel restore stale, pre-save UI instead of the real
+// committed state).
+func TestS5_6Q3R2GenericCatchAdvancesPartialCommit(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+	clickHandler := s56ExtractJSFunction(t, src, "saveBtn.addEventListener('click', async function (e) {")
+
+	catchIdx := strings.Index(clickHandler, "} catch (err) {")
+	if catchIdx < 0 {
+		t.Fatalf("could not locate the save handler's catch block; got:\n%s", clickHandler)
+	}
+	catchBlock := clickHandler[catchIdx:]
+
+	for _, want := range []string{
+		"if (err && err.committed) {",
+		"const committedBaseline = JSON.parse(baseline);",
+		"Object.assign(committedBaseline, err.committed);",
+		"baseline = JSON.stringify(committedBaseline);",
+		"canonical = Object.assign({}, canonical, err.committed);",
+	} {
+		if !strings.Contains(catchBlock, want) {
+			t.Errorf("save handler's catch block missing %q; got:\n%s", want, catchBlock)
+		}
+	}
+}
+
+// TestS5_6Q3R4ToastOnlyWhenNotDirty pins the R4 fix: the generic engine's
+// success path must not announce "Saved" unconditionally — recheck() may
+// have just landed on 'dirty' (an edit made while the save request was in
+// flight, never sent — M1), and telling the operator their CURRENT,
+// still-unsaved edit was persisted is exactly the false claim R4 forbids.
+func TestS5_6Q3R4ToastOnlyWhenNotDirty(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/components/c6_form.html")
+	clickHandler := s56ExtractJSFunction(t, src, "saveBtn.addEventListener('click', async function (e) {")
+
+	if !strings.Contains(clickHandler, "if (!isDirty() && window.showToast) window.showToast(t('js.setcat.saved'));") {
+		t.Errorf("save handler must only call showToast('Saved') when !isDirty(); got:\n%s", clickHandler)
+	}
+	if strings.Contains(clickHandler, "if (window.showToast) window.showToast(t('js.setcat.saved'));") {
+		t.Error("save handler regressed to an unconditional showToast('Saved') call, ignoring recheck()'s dirty verdict")
+	}
+	// The toast call must come strictly after recheck() so it reflects
+	// recheck()'s just-computed state, not a stale one.
+	recheckIdx := strings.Index(clickHandler, "recheck();")
+	toastIdx := strings.Index(clickHandler, "showToast(t('js.setcat.saved'))")
+	if recheckIdx < 0 || toastIdx < 0 || recheckIdx > toastIdx {
+		t.Error("save handler must call recheck() before deciding whether to show the Saved toast")
 	}
 }

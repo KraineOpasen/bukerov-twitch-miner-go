@@ -151,9 +151,29 @@
                 // just set, so an edit made during the request correctly
                 // surfaces as dirty instead of being reported saved.
                 recheck();
-                if (window.showToast) window.showToast(t('js.setcat.saved'));
+                // R4: recheck() may have just landed on 'dirty' (an edit
+                // made while the request was in flight, never sent — see
+                // above). Announcing "Saved" here regardless would tell the
+                // operator their CURRENT, still-unsaved edit was persisted;
+                // only claim it when the save bar is truly clean.
+                if (!isDirty() && window.showToast) window.showToast(t('js.setcat.saved'));
             } catch (err) {
                 saving = false;
+                // R2: opts.save can throw after PART of a multi-section
+                // save already committed (route 22's canary/watchdog split
+                // is the only current case) and report exactly what that
+                // was via err.committed — a partial object in gather()'s
+                // own shape. Folding just that part into baseline/canonical
+                // means only the piece that's genuinely still unsaved shows
+                // dirty, and a later Cancel restores the committed piece to
+                // what the server actually has, not the stale pre-save
+                // value — never a lie about committed state either way.
+                if (err && err.committed) {
+                    const committedBaseline = JSON.parse(baseline);
+                    Object.assign(committedBaseline, err.committed);
+                    baseline = JSON.stringify(committedBaseline);
+                    canonical = Object.assign({}, canonical, err.committed);
+                }
                 setState('error', (err && err.message) || t('js.setcat.error'));
             }
         });
