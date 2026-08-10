@@ -23,20 +23,16 @@ import (
 // task S5-5 removed /system/status, /system/diagnostics and /system/logs
 // from this map: each is now its own direct-render route registered in
 // server.go (handlers_system.go), not a redirect to /health or /logs.
+//
+// task S5-6 removed all ten /settings/* entries from this map: each is now
+// its own direct-render route registered in server.go
+// (handlers_settings_categories.go), not a redirect to /settings. Legacy
+// /settings (the mega-form) keeps rendering directly, unchanged — it is
+// simply no longer linked from the C2 nav.
 var compatibilityRedirects = map[string]string{
-	"/analytics/points":              "/statistics",
-	"/analytics/roi":                 "/statistics",
-	"/settings/streamers":            "/settings",
-	"/settings/rotation":             "/settings",
-	"/settings/drops":                "/settings",
-	"/settings/predictions":          "/settings",
-	"/settings/chat-raids":           "/settings",
-	"/settings/transport":            "/settings",
-	"/settings/analytics-logging":    "/settings",
-	"/settings/events-notifications": "/settings",
-	"/settings/discord":              "/settings",
-	"/settings/system":               "/settings",
-	"/help":                          "/help/getting-started",
+	"/analytics/points": "/statistics",
+	"/analytics/roi":    "/statistics",
+	"/help":             "/help/getting-started",
 }
 
 // handleOverviewPage renders the additive /overview compatibility route

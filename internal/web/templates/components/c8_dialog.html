@@ -1,0 +1,28 @@
+{{/* C8 — Discard-confirmation dialog (task S5-6). Paired with C6's engine
+     (c6.engine, initSettingsCategoryForm): shown when a dirty category page
+     is about to be navigated away from via an internal link click. Native
+     <dialog>.showModal() provides the modal semantics; the engine adds the
+     Tab/Shift+Tab focus trap, routes Escape (the native 'cancel' event) to
+     the least-destructive outcome (closing without discarding, identical to
+     "keep editing"), and returns focus to whatever was clicked once the
+     dialog closes. "Keep editing" carries the autofocus attribute so a
+     modal opened by anything other than deliberate keyboard/mouse choice
+     never lands the user on the destructive action by default.
+
+     A page with its OWN destructive confirmation distinct from nav-discard
+     (route 13's "remove streamer") renders a second, independent dialog
+     using this exact same .c8-dialog structure/classes with its own
+     copy, wired through the shared window.initConfirmDialog(dialog, onConfirm)
+     helper (see c6_form.html) rather than this named template — the same
+     modal/focus-trap/least-destructive-default contract, a different id and
+     a different pair of button labels. */}}
+{{define "c8.dialog"}}<dialog id="settings-cat-discard-dialog" class="c8-dialog" aria-labelledby="settings-cat-discard-title">
+    <div class="c8-dialog-body">
+        <h2 id="settings-cat-discard-title" class="c8-dialog-title">{{ t "setcat.discard_title" }}</h2>
+        <p class="c8-dialog-text">{{ t "setcat.discard_body" }}</p>
+        <div class="c8-dialog-actions">
+            <button type="button" class="btn-secondary" data-c8-keep autofocus>{{ t "setcat.discard_keep" }}</button>
+            <button type="button" class="btn-primary c8-dialog-destructive" data-c8-discard>{{ t "setcat.discard_confirm" }}</button>
+        </div>
+    </div>
+</dialog>{{end}}

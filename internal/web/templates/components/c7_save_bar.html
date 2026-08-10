@@ -1,0 +1,19 @@
+{{/* C7 — Sticky category save bar (task S5-6). Paired with C6's engine
+     (c6.engine, initSettingsCategoryForm), which owns the state machine
+     (clean -> dirty -> saving -> success|error|blocked) and toggles this
+     bar's visibility/labels via data-state. Hidden entirely while clean (no
+     autosave, nothing to save); a save/validation error renders inline in
+     [data-c7-error] (role="alert", the same C1-inline-fail convention used
+     elsewhere) — never as a global toast. A successful save clears the
+     error region and may use the existing global toast (window.showToast),
+     same as every other settings surface. */}}
+{{define "c7.savebar"}}<div id="settings-cat-savebar" class="c7-savebar c7-savebar--hidden" data-state="clean" role="region" aria-label="{{ t "setcat.save" }}">
+    <div id="settings-cat-error" class="c1-inline-fail" role="alert" hidden data-c7-error></div>
+    <div class="c7-savebar-row">
+        <span class="c7-savebar-status" data-c7-status aria-live="polite"></span>
+        <div class="c7-savebar-actions">
+            <button type="button" class="btn-secondary" data-c7-cancel>{{ t "setcat.cancel" }}</button>
+            <button type="button" class="btn-primary" data-c7-save>{{ t "setcat.save" }}</button>
+        </div>
+    </div>
+</div>{{end}}

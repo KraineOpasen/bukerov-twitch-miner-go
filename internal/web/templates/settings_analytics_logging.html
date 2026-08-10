@@ -1,0 +1,125 @@
+{{define "title"}}{{ t "setcat.analyticslogging.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.analyticslogging.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.analyticslogging.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
+    <section class="space-y-0">
+        <h2 class="text-lg font-medium mb-1">{{ t "set.logger.title" }}</h2>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.logger.console_label" }}</div>
+                <div class="setting-description">{{ t "set.logger.console_desc" }}</div>
+            </div>
+            <select class="input-field w-36" id="consoleLevel">
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.logger.file_label" }}</div>
+                <div class="setting-description">{{ t "set.logger.file_desc" }}</div>
+            </div>
+            <select class="input-field w-36" id="fileLevel">
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.logger.colored_label" }}</div>
+                <div class="setting-description">{{ t "set.logger.colored_desc" }}</div>
+            </div>
+            <input type="checkbox" id="colored" class="w-5 h-5 accent-purple-600">
+        </div>
+        <p class="setting-description text-amber-500 mt-1">{{ t "set.logger.restart_note" }}</p>
+    </section>
+
+    <section class="space-y-0">
+        <h2 class="text-lg font-medium mb-1">{{ t "set.analytics.title" }}</h2>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.analytics.refresh_label" }}</div>
+                <div class="setting-description">{{ t "set.analytics.refresh_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="refresh" min="1" max="60">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.analytics.days_label" }}</div>
+                <div class="setting-description">{{ t "set.analytics.days_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="daysAgo" min="1" max="365">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.analytics.chatlogs_label" }}</div>
+                <div class="setting-description">{{ t "set.analytics.chatlogs_desc" }}</div>
+            </div>
+            <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-purple-600">
+        </div>
+    </section>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    function populate(data) {
+        document.getElementById('consoleLevel').value = data.logger.consoleLevel;
+        document.getElementById('fileLevel').value = data.logger.fileLevel;
+        document.getElementById('colored').checked = data.logger.colored;
+        document.getElementById('refresh').value = data.analytics.refresh;
+        document.getElementById('daysAgo').value = data.analytics.daysAgo;
+        document.getElementById('enableChatLogs').checked = data.analytics.enableChatLogs;
+    }
+
+    function gather() {
+        return {
+            logger: {
+                consoleLevel: document.getElementById('consoleLevel').value,
+                fileLevel: document.getElementById('fileLevel').value,
+                colored: document.getElementById('colored').checked,
+            },
+            analytics: {
+                refresh: parseInt(document.getElementById('refresh').value),
+                daysAgo: parseInt(document.getElementById('daysAgo').value),
+                enableChatLogs: document.getElementById('enableChatLogs').checked,
+            },
+        };
+    }
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+})();
+</script>
+{{end}}

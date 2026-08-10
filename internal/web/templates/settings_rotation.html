@@ -1,0 +1,141 @@
+{{define "title"}}{{ t "setcat.rotation.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.rotation.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.rotation.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
+    <section>
+        <h2 class="text-lg font-medium mb-1">{{ t "set.priority.title" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.priority.desc" }}</p>
+        <ul class="space-y-2" id="priority-list"></ul>
+    </section>
+
+    <section class="space-y-0">
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.ratelimits.rotation_min_label" }}</div>
+                <div class="setting-description">{{ t "set.ratelimits.rotation_min_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="rotationIntervalMinMinutes" min="5" max="180">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.ratelimits.rotation_max_label" }}</div>
+                <div class="setting-description">{{ t "set.ratelimits.rotation_max_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="rotationIntervalMaxMinutes" min="5" max="240">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.ratelimits.minute_watched_label" }}</div>
+                <div class="setting-description">{{ t "set.ratelimits.minute_watched_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="minuteWatchedInterval" min="30" max="120">
+        </div>
+    </section>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    const priorityLabels = {
+        'STREAK': t('js.set.opt.priority.streak'),
+        'DROPS': t('js.set.opt.priority.drops'),
+        'ORDER': t('js.set.opt.priority.order'),
+        'SUBSCRIBED': t('js.set.opt.priority.subscribed'),
+        'POINTS_ASCENDING': t('js.set.opt.priority.points_asc'),
+        'POINTS_DESCENDING': t('js.set.opt.priority.points_desc')
+    };
+
+    function setupPriorityDragAndDrop() {
+        const list = document.getElementById('priority-list');
+        let draggedItem = null;
+        list.querySelectorAll('.priority-item').forEach(item => {
+            item.addEventListener('dragstart', () => { draggedItem = item; item.classList.add('dragging'); });
+            item.addEventListener('dragend', () => { item.classList.remove('dragging'); draggedItem = null; });
+            item.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                if (draggedItem && draggedItem !== item) {
+                    const rect = item.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    if (e.clientY < midY) list.insertBefore(draggedItem, item);
+                    else list.insertBefore(draggedItem, item.nextSibling);
+                }
+            });
+        });
+    }
+
+    function renderPriority(priority) {
+        const list = document.getElementById('priority-list');
+        list.innerHTML = '';
+        (priority || []).forEach(p => {
+            const li = document.createElement('li');
+            li.className = 'priority-item';
+            li.draggable = true;
+            li.dataset.priority = p;
+            li.innerHTML = `<span class="text-neutral-400 text-lg cursor-grab">☰</span> <span class="text-neutral-100">${priorityLabels[p] || p}</span>`;
+            list.appendChild(li);
+        });
+        setupPriorityDragAndDrop();
+    }
+
+    function gatherPriority() {
+        return Array.from(document.querySelectorAll('#priority-list .priority-item')).map(i => i.dataset.priority);
+    }
+
+    function populate(data) {
+        renderPriority(data.priority);
+        document.getElementById('rotationIntervalMinMinutes').value = data.rateLimits.rotationIntervalMinMinutes;
+        document.getElementById('rotationIntervalMaxMinutes').value = data.rateLimits.rotationIntervalMaxMinutes;
+        document.getElementById('minuteWatchedInterval').value = data.rateLimits.minuteWatchedInterval;
+    }
+
+    function gather() {
+        return {
+            priority: gatherPriority(),
+            rateLimits: {
+                rotationIntervalMinMinutes: parseInt(document.getElementById('rotationIntervalMinMinutes').value),
+                rotationIntervalMaxMinutes: parseInt(document.getElementById('rotationIntervalMaxMinutes').value),
+                minuteWatchedInterval: parseInt(document.getElementById('minuteWatchedInterval').value),
+            },
+        };
+    }
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        onLoaded: function () {
+            // Reordering via drag-and-drop doesn't fire a native 'input'/
+            // 'change' event, so the drop handler above must trigger a
+            // recheck itself once dragend settles the new order.
+            document.getElementById('priority-list').addEventListener('dragend', function () {
+                document.getElementById('settings-cat-form').dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        },
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+})();
+</script>
+{{end}}

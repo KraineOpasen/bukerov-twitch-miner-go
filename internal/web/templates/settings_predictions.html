@@ -1,0 +1,223 @@
+{{define "title"}}{{ t "setcat.predictions.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-2">{{ t "setcat.predictions.title" }}</h1>
+<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.predictions.subtitle" }}</p>
+<div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
+
+<form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
+    <section class="space-y-0">
+        <h2 class="text-lg font-medium mb-1">{{ t "js.set.form.betting_heading" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.strategy" }}</div>
+                <div class="setting-description">{{ t "js.set.form.strategy.desc" }}</div>
+            </div>
+            <select class="input-field w-40" id="betStrategy"></select>
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.bet_percentage" }}</div>
+                <div class="setting-description">{{ t "js.set.form.bet_percentage.desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="betPercentage" min="1" max="100">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.percentage_gap" }}</div>
+                <div class="setting-description">{{ t "js.set.form.percentage_gap.desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="betPercentageGap" min="0" max="100">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.max_points" }}</div>
+                <div class="setting-description">{{ t "js.set.form.max_points.desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="betMaxPoints" min="0">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.minimum_points" }}</div>
+                <div class="setting-description">{{ t "js.set.form.minimum_points.desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="betMinimumPoints" min="0">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.stealth_mode" }}</div>
+                <div class="setting-description">{{ t "js.set.form.stealth_mode.desc" }}</div>
+            </div>
+            <input type="checkbox" id="betStealthMode" class="w-5 h-5 accent-purple-600">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.delay" }}</div>
+                <div class="setting-description">{{ t "js.set.form.delay.desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="betDelay" min="0" step="0.5">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "js.set.form.delay_mode" }}</div>
+                <div class="setting-description">{{ t "js.set.form.delay_mode.desc" }}</div>
+            </div>
+            <select class="input-field w-36" id="betDelayMode">
+                <option value="FROM_END">{{ t "js.set.opt.delay.from_end" }}</option>
+                <option value="FROM_START">{{ t "js.set.opt.delay.from_start" }}</option>
+                <option value="PERCENTAGE">{{ t "js.set.opt.delay.percentage" }}</option>
+            </select>
+        </div>
+    </section>
+
+    <section class="space-y-0">
+        <h2 class="text-lg font-medium mb-1">{{ t "set.predrisk.title" }}</h2>
+        <p class="text-neutral-400 text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.predrisk.max_stake_label" }}</div>
+                <div class="setting-description">{{ t "set.predrisk.max_stake_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="predictionRiskMaxStakePercent" min="0" max="100">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.predrisk.reserve_label" }}</div>
+                <div class="setting-description">{{ t "set.predrisk.reserve_desc" }}</div>
+            </div>
+            <input type="number" class="input-field w-28" id="predictionRiskReservePoints" min="0">
+        </div>
+        <div class="setting-row">
+            <div>
+                <div class="setting-label">{{ t "set.predrisk.healthgate_label" }}</div>
+                <div class="setting-description">{{ t "set.predrisk.healthgate_desc" }}</div>
+            </div>
+            <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-purple-600">
+        </div>
+    </section>
+
+    <section>
+        <h2 class="text-lg font-medium mb-3">{{ t "setcat.predictions.overrides_heading" }}</h2>
+        <ul class="space-y-1 text-sm" id="bet-overrides-list"></ul>
+    </section>
+</form>
+
+{{template "c7.savebar" .}}
+{{template "c8.dialog" .}}
+{{end}}
+
+{{define "scripts"}}
+{{template "c6.engine" .}}
+<script>
+(function () {
+    // All 13 backend strategies (internal/models/bet.go): 5 named + NUMBER_1..8.
+    const strategyOptions = [
+        { value: 'SMART', label: t('js.set.opt.strategy.smart') },
+        { value: 'MOST_VOTED', label: t('js.set.opt.strategy.most_voted') },
+        { value: 'HIGH_ODDS', label: t('js.set.opt.strategy.high_odds') },
+        { value: 'PERCENTAGE', label: t('js.set.opt.strategy.percentage') },
+        { value: 'SMART_MONEY', label: t('js.set.opt.strategy.smart_money') },
+        { value: 'NUMBER_1', label: t('js.set.opt.strategy.number_1') },
+        { value: 'NUMBER_2', label: t('js.set.opt.strategy.number_2') },
+        { value: 'NUMBER_3', label: t('js.set.opt.strategy.number_3') },
+        { value: 'NUMBER_4', label: t('js.set.opt.strategy.number_4') },
+        { value: 'NUMBER_5', label: t('js.set.opt.strategy.number_5') },
+        { value: 'NUMBER_6', label: t('js.set.opt.strategy.number_6') },
+        { value: 'NUMBER_7', label: t('js.set.opt.strategy.number_7') },
+        { value: 'NUMBER_8', label: t('js.set.opt.strategy.number_8') },
+    ];
+    const select = document.getElementById('betStrategy');
+    strategyOptions.forEach(function (o) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        select.appendChild(opt);
+    });
+
+    function renderOverrides(streamers) {
+        const list = document.getElementById('bet-overrides-list');
+        list.innerHTML = '';
+        const withOverride = (streamers || []).filter(function (s) { return s.settings && s.settings.bet; });
+        if (!withOverride.length) {
+            const li = document.createElement('li');
+            li.className = 'text-neutral-500 italic';
+            li.textContent = t('js.setcat.predictions.overrides_empty');
+            list.appendChild(li);
+            return;
+        }
+        withOverride.forEach(function (s) {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.href = '/settings/streamers';
+            a.className = 'text-neutral-100 hover:text-purple-400 transition-colors';
+            a.textContent = s.username + ' — ' + t('js.setcat.predictions.overrides_link');
+            li.appendChild(a);
+            list.appendChild(li);
+        });
+    }
+
+    function populate(data) {
+        const bet = (data.defaultSettings && data.defaultSettings.bet) || {};
+        document.getElementById('betStrategy').value = bet.strategy || 'SMART';
+        document.getElementById('betPercentage').value = bet.percentage !== undefined ? bet.percentage : 5;
+        document.getElementById('betPercentageGap').value = bet.percentageGap !== undefined ? bet.percentageGap : 20;
+        document.getElementById('betMaxPoints').value = bet.maxPoints !== undefined ? bet.maxPoints : 50000;
+        document.getElementById('betMinimumPoints').value = bet.minimumPoints !== undefined ? bet.minimumPoints : 0;
+        document.getElementById('betStealthMode').checked = !!bet.stealthMode;
+        document.getElementById('betDelay').value = bet.delay !== undefined ? bet.delay : 6;
+        document.getElementById('betDelayMode').value = bet.delayMode || 'FROM_END';
+
+        const risk = data.predictionRisk || {};
+        document.getElementById('predictionRiskMaxStakePercent').value = risk.maxStakePercent || 0;
+        document.getElementById('predictionRiskReservePoints').value = risk.reservePoints || 0;
+        document.getElementById('predictionRiskHealthGate').checked = !!risk.healthGateEnabled;
+
+        renderOverrides(data.streamers);
+    }
+
+    function gather() {
+        return {
+            defaultSettings: {
+                bet: {
+                    strategy: document.getElementById('betStrategy').value,
+                    percentage: parseInt(document.getElementById('betPercentage').value),
+                    percentageGap: parseInt(document.getElementById('betPercentageGap').value),
+                    maxPoints: parseInt(document.getElementById('betMaxPoints').value),
+                    minimumPoints: parseInt(document.getElementById('betMinimumPoints').value),
+                    stealthMode: document.getElementById('betStealthMode').checked,
+                    delay: parseFloat(document.getElementById('betDelay').value),
+                    delayMode: document.getElementById('betDelayMode').value,
+                },
+            },
+            predictionRisk: {
+                maxStakePercent: parseInt(document.getElementById('predictionRiskMaxStakePercent').value) || 0,
+                reservePoints: parseInt(document.getElementById('predictionRiskReservePoints').value) || 0,
+                healthGateEnabled: document.getElementById('predictionRiskHealthGate').checked,
+            },
+        };
+    }
+
+    initSettingsCategoryForm({
+        form: document.getElementById('settings-cat-form'),
+        saveBar: document.getElementById('settings-cat-savebar'),
+        dialog: document.getElementById('settings-cat-discard-dialog'),
+        load: async function () {
+            const resp = await fetch('/api/settings');
+            if (!resp.ok) throw new Error(t('js.setcat.load_error'));
+            return resp.json();
+        },
+        populate: populate,
+        gather: gather,
+        save: async function (payload) {
+            const resp = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error((await resp.text()) || t('js.setcat.error'));
+        },
+    });
+})();
+</script>
+{{end}}
