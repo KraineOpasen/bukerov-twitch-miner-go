@@ -377,13 +377,35 @@ func TestS5_6PointRuleIdTriggeredNeverEditable(t *testing.T) {
 // 8. S-NOBACK: fields with no backend counterpart stay absent.
 // ---------------------------------------------------------------------
 
+// s5_6MainContent slices a rendered page body down to its <main> content
+// region, excluding the shared chrome (sidebar/nav/topbar). Introduced by
+// task S5-7 and used ONLY where the chrome forced it: the C2 nav's Events
+// group legitimately carries a "Sound" child label on EVERY page, so route
+// 20's sound/quiet-hours/upload bans must be scoped to the category page's
+// own content/form — which is exactly what B4/B5/B9 always meant (route 20
+// exposes no sound/quiet-hours/upload CONTROLS). The transport and system
+// bans below need no such carve-out and stay full-body.
+func s5_6MainContent(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, `<main class="app-main">`)
+	end := strings.Index(body, "</main>")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatalf("could not locate the <main> content region in the rendered page")
+	}
+	return body[start:end]
+}
+
 // TestS5_6SNoBackFieldsAbsent proves every category page omits UI for a
 // field the task brief explicitly scoped out (either genuinely absent from
 // the backend, or deliberately carved into a different route): route 18
 // (Transport) never exposes requestDelay/proxy/client-id/user-agent; route
 // 20 (Events & Notifications) never exposes sound/quiet-hours/upload
 // controls (NotificationConfig has no such fields); route 22 (System) never
-// exposes an updater editor or a LAN-CIDR control.
+// exposes an updater editor or a LAN-CIDR control. The transport and system
+// bans hold over the ENTIRE rendered body — nothing in the shared chrome
+// legitimately carries those terms. Only route 20's bans are scoped to its
+// own <main> content region (see s5_6MainContent): the Events nav group's
+// "Sound" child label is legitimate chrome on every page.
 func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
 	srv := buildF3PageServer(t)
 
@@ -394,7 +416,7 @@ func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
 		}
 	}
 
-	events := f3GetPage(t, srv, "/settings/events-notifications", "en")
+	events := s5_6MainContent(t, f3GetPage(t, srv, "/settings/events-notifications", "en"))
 	for _, banned := range []string{"sound", "Sound", "quiet hour", "quietHour", "upload", "Upload"} {
 		if strings.Contains(events, banned) {
 			t.Errorf("/settings/events-notifications must not expose %q (B4/B5/B9, S-NOBACK)", banned)

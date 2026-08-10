@@ -1,23 +1,76 @@
-{{/* Minimal /events compatibility landing (S5-2, OD-S5-2-1 item 2). One of
-     the seven always-visible top-level sections; content honestly varies by
-     Discord availability. No event journal, delivery evidence, browser-audio
-     settings or other S5-7 functionality — that arrives in a later slice. */}}
+{{/* /events (task S5-7, route 9): the session-scoped event journal. Pure
+     server render over the in-memory event ring (events.Recent only):
+     S-SESS banner, five presentation-group filters (same-route GET links),
+     S-EMPTY, a manual same-route Refresh link as the ONLY liveness
+     affordance — no polling, no SSE/WS, no htmx, no new API endpoint. No
+     delivery column or facet exists (B3 has no backend). Desktop renders
+     the C4 table, narrow viewports the card list — same rows, same data. */}}
 {{define "title"}}{{ t "events.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<h1 class="type-h1 text-text-primary mb-3">{{ t "events.title" }}</h1>
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "events.title" }}</h1>
+    <a href="{{.RefreshHref}}" class="btn-secondary text-sm" data-events-refresh>{{ t "events.refresh" }}</a>
+</div>
 
-{{if .DiscordEnabled}}
-<div class="c1-block c1-block--block c1-tier-info">
-    <span class="c1-block-icon" aria-hidden="true">i</span>
+<div class="c1-block c1-block--strip c1-tier-caution mb-4" data-events-session-note>
+    <span class="c1-block-icon" aria-hidden="true">⚑</span>
     <span class="c1-block-body">
-        <span class="c1-block-message">{{ t "events.enabled_text" }}</span>
+        <span class="c1-block-message">{{ t "events.session_note" }}</span>
     </span>
-    <a class="c1-block-action" href="/notifications">{{ t "events.link_notifications" }}</a>
+</div>
+
+<div class="ov-toolbar mb-4" role="group" aria-label="{{ t "events.filter.label" }}">
+    <span class="ov-toolbar-label">{{ t "events.filter.label" }}</span>
+    {{range .Filters}}
+    {{if .Active}}
+    <a href="{{.Href}}" class="btn-primary text-xs" aria-current="true" data-ev-filter="{{.Key}}" data-ev-filter-active>{{.Label}}</a>
+    {{else}}
+    <a href="{{.Href}}" class="btn-secondary text-xs" data-ev-filter="{{.Key}}">{{.Label}}</a>
+    {{end}}
+    {{end}}
+</div>
+
+{{if .Rows}}
+<div class="hidden lg:block">
+    <div class="c4-table-card">
+        <table class="c4-table" data-ev-table>
+            <caption class="visually-hidden">{{ t "events.table_caption" }}</caption>
+            <thead>
+                <tr>
+                    <th scope="col">{{ t "events.col.time" }}</th>
+                    <th scope="col">{{ t "events.col.group" }}</th>
+                    <th scope="col">{{ t "events.col.event" }}</th>
+                    <th scope="col">{{ t "events.col.channel" }}</th>
+                    <th scope="col">{{ t "events.col.detail" }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Rows}}
+                <tr data-ev-row data-ev-type="{{.TypeKey}}" data-ev-group="{{.GroupKey}}">
+                    <td class="num whitespace-nowrap">{{.Ago}}</td>
+                    <td>{{.GroupLabel}}</td>
+                    <td>{{.Label}}</td>
+                    <td>{{if .Streamer}}{{.Streamer}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+                    <td class="text-text-muted">{{if .Detail}}{{.Detail}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+<div class="lg:hidden" data-ev-cards>
+    {{range .Rows}}
+    <div class="health-card mb-3" data-ev-card data-ev-type="{{.TypeKey}}" data-ev-group="{{.GroupKey}}">
+        <div class="health-card-label">{{.GroupLabel}}</div>
+        <div class="health-card-status"><span class="font-semibold health-card-status-text">{{.Label}}</span></div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.time" }}</span><span class="num">{{.Ago}}</span></div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.channel" }}</span>{{if .Streamer}}{{.Streamer}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.detail" }}</span>{{if .Detail}}{{.Detail}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</div>
+    </div>
+    {{end}}
 </div>
 {{else}}
-{{template "c1.state_block" .DisabledState}}
+{{template "c1.state_block" .EmptyState}}
 {{end}}
-
-<p class="type-small text-text-muted mt-4">{{ t "events.pending_note" }}</p>
 {{end}}

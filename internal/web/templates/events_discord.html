@@ -1,0 +1,127 @@
+{{/* /events/discord (task S5-7, route 12): Discord notification status and
+     a manual test. Status/test ONLY: this page never reads or writes any
+     notification or connection config — route 20
+     (/settings/events-notifications) owns notification_config/point rules
+     and route 21 (/settings/discord) owns the Discord connection; this
+     page only links there. The test button POSTs the EXISTING
+     /api/notifications/test endpoint on an explicit click, with an
+     in-flight guard against double-fire and an inline S-FAIL + Retry on
+     failure. The bot token is never read, rendered or logged; the
+     config-invalid reason is the manager's own static, token-free message.
+     Last delivery is an honest S-UNK: no delivery history backend exists
+     (B3), and upcoming_campaign_notifications does not satisfy it. */}}
+{{define "title"}}{{ t "events.discord.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-2">{{ t "events.discord.title" }}</h1>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "events.discord.lead" }}</p>
+
+{{if not .DiscordEnabled}}
+<div class="c1-block c1-block--block c1-tier-neutral">
+    <span class="c1-block-icon" aria-hidden="true">—</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message">{{ t "events.discord.disabled" }}</span>
+    </span>
+    <a class="c1-block-action" href="/settings/discord">{{ t "events.discord.link_settings" }}</a>
+</div>
+{{else if not .ConfigValid}}
+<div class="c1-block c1-block--block c1-tier-caution">
+    <span class="c1-block-icon" aria-hidden="true">!</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message">{{ t "events.discord.invalid" }}</span>
+        {{if .ConfigError}}<span class="c1-block-cause">{{.ConfigError}}</span>{{end}}
+    </span>
+    <a class="c1-block-action" href="/settings/discord">{{ t "events.discord.link_settings" }}</a>
+</div>
+{{else}}
+<div class="c1-block c1-block--block c1-tier-info">
+    <span class="c1-block-icon" aria-hidden="true">✓</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message">{{ t "events.discord.ready" }}</span>
+    </span>
+    <a class="c1-block-action" href="/settings/discord">{{ t "events.discord.link_settings" }}</a>
+</div>
+
+<div class="flex items-center gap-2 mt-4">
+    <button type="button" id="evd-test" class="btn-primary text-sm">{{ t "events.discord.test" }}</button>
+    <span id="evd-result" class="text-sm text-text-secondary" role="status" hidden></span>
+</div>
+
+<div id="evd-fail" class="c1-block c1-block--inline c1-tier-danger mt-3" role="alert" hidden>
+    <span class="c1-block-body">
+        <span class="c1-block-message" id="evd-fail-msg"></span>
+        <span class="c1-block-cause num" id="evd-fail-time"></span>
+    </span>
+    <button type="button" id="evd-retry" class="btn-secondary text-xs">{{ t "events.discord.retry" }}</button>
+</div>
+{{end}}
+
+<h2 class="type-h2 text-text-primary mt-6 mb-2">{{ t "events.discord.delivery_heading" }}</h2>
+<div class="c1-block c1-block--block c1-tier-neutral" data-evd-delivery>
+    <span class="c1-block-icon" aria-hidden="true">?</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message">{{ t "events.discord.delivery_unknown" }}</span>
+    </span>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // S5-7 route 12: gesture-only manual test against the EXISTING
+    // POST /api/notifications/test endpoint. `busy` is the in-flight
+    // double-fire guard; failures land in the single inline S-FAIL region
+    // whose Retry re-runs the same gesture-driven send. The S-FAIL cause is
+    // always safe and localized: an HTTP failure carries only the numeric
+    // status code (never the response body), any other failure the static
+    // network cause (never raw exception text); every failure stamps the
+    // current attempt time. Repeated failures overwrite the same region —
+    // nothing stacks — and a success leaves it hidden.
+    (function () {
+        var btn = document.getElementById('evd-test');
+        if (!btn) return; // disabled/config-invalid states render no test control
+        var okEl = document.getElementById('evd-result');
+        var failEl = document.getElementById('evd-fail');
+        var failMsg = document.getElementById('evd-fail-msg');
+        var failTime = document.getElementById('evd-fail-time');
+        var retry = document.getElementById('evd-retry');
+
+        var busy = false;
+        function send() {
+            if (busy) return;
+            busy = true;
+            btn.disabled = true;
+            retry.disabled = true;
+            okEl.hidden = true;
+            failEl.hidden = true;
+            fetch('/api/notifications/test', { method: 'POST' })
+                .then(function (res) {
+                    if (!res.ok) {
+                        var httpErr = new Error('http');
+                        httpErr.httpStatus = res.status;
+                        throw httpErr;
+                    }
+                    return res.json();
+                })
+                .then(function (data) {
+                    okEl.textContent = t('js.evd.sent', { n: (data && data.sent) || 0 });
+                    okEl.hidden = false;
+                })
+                .catch(function (err) {
+                    failMsg.textContent = (err && err.httpStatus)
+                        ? t('js.evd.failed_http', { code: err.httpStatus })
+                        : t('js.evd.failed_network');
+                    failTime.textContent = t('js.evd.failed_at', { time: new Date().toLocaleTimeString(document.documentElement.lang || undefined) });
+                    failEl.hidden = false;
+                })
+                .finally(function () {
+                    busy = false;
+                    btn.disabled = false;
+                    retry.disabled = false;
+                });
+        }
+
+        btn.addEventListener('click', send);
+        retry.addEventListener('click', send);
+    })();
+</script>
+{{end}}

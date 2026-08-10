@@ -2,10 +2,10 @@
 <div class="flex items-start justify-between gap-4 px-5 py-4 border-b border-neutral-700">
     <div class="min-w-0">
         <h3 class="s-name font-semibold">{{.Name}}</h3>
-        <div class="text-xs text-neutral-400">Recent events (up to 20)</div>
+        <div class="text-xs text-neutral-400">{{ t "drawer.recent_events" }}</div>
     </div>
-    <a href="/streamer/{{.Name}}" class="btn-secondary text-sm whitespace-nowrap">Full page →</a>
-    <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" data-drawer-close aria-label="Close">✕</button>
+    <a href="/streamer/{{.Name}}" class="btn-secondary text-sm whitespace-nowrap">{{ t "drawer.full_page" }} →</a>
+    <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" data-drawer-close aria-label="{{ t "drawer.close" }}">✕</button>
 </div>
 <div class="px-5 py-3 max-h-[60vh] overflow-y-auto">
     {{if .Events}}
@@ -16,7 +16,7 @@
     </div>
     {{end}}
     {{else}}
-    <div class="text-neutral-400 text-sm py-6 text-center">No events recorded for this streamer yet.</div>
+    <div class="text-neutral-400 text-sm py-6 text-center">{{ t "drawer.empty" }}</div>
     {{end}}
 </div>
 {{end}}

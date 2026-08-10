@@ -298,7 +298,15 @@ func TestRenderEventsDrawer(t *testing.T) {
 		t.Fatalf("render events_drawer: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"shroud", "Bonus claimed", "2m ago", "Full page"} {
+	// The drawer chrome is localized since task S5-7 (Г2); testPartials
+	// renders the default language, so expect that language's catalog text
+	// rather than a hardcoded English literal.
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	fullPage := loc.T(i18n.DefaultLang, "drawer.full_page")
+	for _, want := range []string{"shroud", "Bonus claimed", "2m ago", fullPage} {
 		if !strings.Contains(out, want) {
 			t.Errorf("events_drawer output missing %q", want)
 		}

@@ -18,6 +18,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -253,6 +254,13 @@ type Server struct {
 	// wall-clock waiting. Set before serving; never written afterwards.
 	settingsTxnContended func()
 
+	// recentEvents is a tests-only seam over the process-wide event ring
+	// (task S5-7): nil in production, where the /events journal reads
+	// events.Recent directly — the journal has no other data source, no
+	// persistence and no new provider. Set before serving in tests (like
+	// settingsTxnContended); never written afterwards.
+	recentEvents func(n int) []events.Event
+
 	// healthFormMu serializes the read-modify-write in handleAPIHealthSettings:
 	// the canary and watchdog forms each patch their own section over the
 	// current settings, and two concurrent section saves without this lock
@@ -325,7 +333,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "events_browser.html", "events_sound.html", "events_discord.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -812,6 +820,16 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/overview/queue", s.handleOverviewQueuePage)
 	mux.HandleFunc("/events", s.handleEventsPage)
 	mux.HandleFunc("/help/getting-started", s.handleHelpGettingStarted)
+
+	// S5-7 Events pages (routes 9-12, handlers_events.go): /events is the
+	// real session-scoped journal (superseding the S5-2 minimal landing
+	// through the same route registration above), and the three former
+	// deferred 404s become direct-render status pages. Registered before
+	// the redirect loop below, the same ordering S5-4/S5-5/S5-6 used; no
+	// entry is ever added to (or removed from) compatibilityRedirects.
+	mux.HandleFunc("/events/browser", s.handleEventsBrowserPage)
+	mux.HandleFunc("/events/sound", s.handleEventsSoundPage)
+	mux.HandleFunc("/events/discord", s.handleEventsDiscordPage)
 
 	// S5-5 System pages: direct-render routes (handlers_system.go) replacing
 	// the three former /system/* compatibility redirects to /health and

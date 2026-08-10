@@ -1,0 +1,78 @@
+{{/* /events/browser (task S5-7, route 10): browser-notification status and
+     test. Pure Notification API — no backend call, no persistence, no
+     polling. The server renders only the honest initial unknown state;
+     the real state is computed client-side from Notification.permission.
+     Requesting permission and firing the test notification happen ONLY on
+     an explicit user gesture (the two buttons' click listeners below), and
+     the not-yet-requested 'default' permission is presented as blocked —
+     never as ready. */}}
+{{define "title"}}{{ t "events.browser.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-2">{{ t "events.browser.title" }}</h1>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "events.browser.lead" }}</p>
+
+<div id="evb-status" class="c1-block c1-block--block c1-tier-neutral" data-evb-status="unknown">
+    <span class="c1-block-icon" aria-hidden="true">?</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message" id="evb-status-text">{{ t "events.browser.initial" }}</span>
+    </span>
+</div>
+
+<div class="flex items-center gap-2 mt-4">
+    <button type="button" id="evb-request" class="btn-secondary text-sm" disabled>{{ t "events.browser.request" }}</button>
+    <button type="button" id="evb-test" class="btn-secondary text-sm" disabled>{{ t "events.browser.test" }}</button>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // S5-7 route 10: honest client-side Notification API status. Only the
+    // 'granted' permission ever reads as ready; the not-yet-requested
+    // 'default' state stays blocked until the user explicitly allows it.
+    (function () {
+        var statusEl = document.getElementById('evb-status');
+        var textEl = document.getElementById('evb-status-text');
+        var reqBtn = document.getElementById('evb-request');
+        var testBtn = document.getElementById('evb-test');
+        if (!statusEl || !textEl || !reqBtn || !testBtn) return;
+
+        function computeState() {
+            if (!('Notification' in window)) return 'unsupported';
+            var p = Notification.permission;
+            if (p === 'granted') return 'ready';
+            if (p === 'denied') return 'denied';
+            // 'default': permission has not been granted — never positive.
+            return 'blocked';
+        }
+
+        var STATE_TEXT = { ready: 'js.evb.ready', blocked: 'js.evb.blocked', denied: 'js.evb.denied', unsupported: 'js.evb.unsupported' };
+        var STATE_TIER = { ready: 'c1-tier-info', blocked: 'c1-tier-caution', denied: 'c1-tier-danger', unsupported: 'c1-tier-neutral' };
+        var TIERS = ['c1-tier-info', 'c1-tier-caution', 'c1-tier-danger', 'c1-tier-neutral'];
+
+        function render() {
+            var st = computeState();
+            statusEl.setAttribute('data-evb-status', st);
+            TIERS.forEach(function (c) { statusEl.classList.remove(c); });
+            statusEl.classList.add(STATE_TIER[st]);
+            textEl.textContent = t(STATE_TEXT[st]);
+            reqBtn.disabled = st !== 'blocked';
+            testBtn.disabled = st !== 'ready';
+        }
+
+        // Permission is requested ONLY on this explicit user gesture.
+        reqBtn.addEventListener('click', function () {
+            if (computeState() !== 'blocked') return;
+            Notification.requestPermission().then(render, render);
+        });
+
+        // The test notification fires ONLY on this explicit user gesture.
+        testBtn.addEventListener('click', function () {
+            if (computeState() !== 'ready') return;
+            new Notification(t('js.evb.test_title'), { body: t('js.evb.test_body') });
+        });
+
+        render();
+    })();
+</script>
+{{end}}

@@ -809,20 +809,94 @@ type ProgressData struct {
 	Label   string
 }
 
-// EventsPageData feeds the minimal /events compatibility landing (S5-2): a
-// direct-rendered page that honestly states the Discord-availability of the
-// current notification configuration without implementing the future event
-// journal (deferred to S5-7).
+// EventsPageData feeds the /events session journal (task S5-7 route 9): a
+// pure server-rendered view over the process-wide in-memory event ring
+// (internal/events.Recent) — session-scoped (S-SESS), never persisted, no
+// polling/SSE, no delivery evidence (B3 has no backend). Rows carry only
+// the ten journal event types, presented in the five OWNER-mandated
+// presentation groups; the underlying event types are unchanged.
 type EventsPageData struct {
 	Username       string
 	RefreshMinutes int
 	Version        string
 	DiscordEnabled bool
 	DebugURL       string
-	// DisabledState is the C1 state-block payload shown when Discord is
-	// disabled (a neutral/empty state pointing at /settings); zero-valued
-	// and unused when DiscordEnabled is true.
-	DisabledState StateBlockData
+
+	// Filters is the All + five-group same-route filter strip; ActiveGroup
+	// is the normalized ?group= value ("" = All).
+	Filters     []EventFilterView
+	ActiveGroup string
+	// Rows are the journal entries surviving the active group filter,
+	// newest first, rendered as both the desktop table and mobile cards.
+	Rows []EventRowView
+	// EmptyState is the honest S-EMPTY block (nil when Rows is non-empty):
+	// distinct messages for an entirely empty session journal vs a
+	// populated journal whose selected group has no events.
+	EmptyState *StateBlockData
+	// RefreshHref is the manual same-route refresh link, preserving the
+	// active group — the page's only liveness affordance.
+	RefreshHref string
+}
+
+// EventFilterView is one entry of the journal's group filter strip.
+type EventFilterView struct {
+	Key    string
+	Label  string
+	Href   string
+	Active bool
+}
+
+// EventRowView is one journal entry: the localized event label and
+// presentation group, the relative age, and the event's own streamer/detail
+// evidence — deliberately no delivery column (B3 has no backend).
+type EventRowView struct {
+	Ago        string
+	TypeKey    string
+	GroupKey   string
+	GroupLabel string
+	Label      string
+	Streamer   string
+	Detail     string
+}
+
+// EventsBrowserPageData feeds /events/browser (task S5-7 route 10): a pure
+// Notification-API status page. All state is determined client-side; the
+// server renders only the honest initial unknown state and the two
+// gesture-only controls.
+type EventsBrowserPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
+// EventsSoundPageData feeds /events/sound (task S5-7 route 11): a status +
+// gesture-driven WebAudio test page with a visible fail-open statement and
+// no persisted sound preference.
+type EventsSoundPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+}
+
+// EventsDiscordPageData feeds /events/discord (task S5-7 route 12): a
+// status/test-only surface over the existing notification manager.
+// ConfigValid/ConfigError mirror handleNotificationsPage's use of
+// Manager.IsConfigValid (static, token-free reasons only — the bot token is
+// never read, rendered or logged here). Route 21 (/settings/discord)
+// remains the sole owner of the Discord connection config; this page only
+// links there.
+type EventsDiscordPageData struct {
+	Username       string
+	RefreshMinutes int
+	Version        string
+	DiscordEnabled bool
+	DebugURL       string
+	ConfigValid    bool
+	ConfigError    string
 }
 
 // HelpPageData feeds the minimal /help/getting-started compatibility

@@ -73,17 +73,18 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 	}
 }
 
-// TestS5_2NavChildDisambiguation pins all FOUR group destinations' structure
+// TestS5_2NavChildDisambiguation pins all FIVE group destinations' structure
 // (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task S5-5,
-// extended again by task S5-6): the System group (one parent, three children
-// — Status/Diagnostics/Logs, task S5-5 having replaced the former
-// Health/Logs pair with direct System routes), the Overview group (one
-// parent, two children — Overview itself/Queue), the Drops group (one
-// parent, four children — Current/Upcoming/Claims/Past), and the Settings
-// group (one parent, ten children — the S5-6 category routes replacing the
-// former /settings/* compatibility redirects), for a combined four parent
-// links (data-nav-parent) and nineteen children (data-nav-child), each with
-// its own distinct href.
+// extended again by tasks S5-6 and S5-7): the System group (one parent,
+// three children — Status/Diagnostics/Logs, task S5-5 having replaced the
+// former Health/Logs pair with direct System routes), the Overview group
+// (one parent, two children — Overview itself/Queue), the Drops group (one
+// parent, four children — Current/Upcoming/Claims/Past), the Settings group
+// (one parent, ten children — the S5-6 category routes replacing the former
+// /settings/* compatibility redirects), and the Events group (one parent,
+// four children — task S5-7's Journal/Browser/Sound/Discord direct routes),
+// for a combined five parent links (data-nav-parent) and twenty-three
+// children (data-nav-child), each with its own distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -91,11 +92,17 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	// Matched with the trailing ">" so the JS source's own string-literal
 	// references to these attribute names (e.g. hasAttribute('data-nav-parent'))
 	// aren't miscounted as HTML occurrences.
-	if n := strings.Count(body, `data-nav-parent>`); n != 4 {
-		t.Errorf("expected exactly four data-nav-parent groups (Overview, Drops, System, Settings), found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 5 {
+		t.Errorf("expected exactly five data-nav-parent groups (Overview, Drops, Events, Settings, System), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 19 {
-		t.Errorf("expected exactly nineteen data-nav-child destinations, found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 23 {
+		t.Errorf("expected exactly twenty-three data-nav-child destinations, found %d", n)
+	}
+	for _, href := range []string{"/events", "/events/browser", "/events/sound", "/events/discord"} {
+		want := `href="` + href + `" class="c2-nav-child" data-nav-section="events" data-nav-child`
+		if !strings.Contains(body, want) {
+			t.Errorf("Events group missing child destination %q", href)
+		}
 	}
 	for _, href := range []string{
 		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
@@ -441,20 +448,18 @@ func TestS5_2NoErrorPathCallsGlobalToast(t *testing.T) {
 	}
 }
 
-// TestS5_2EventsPageDiscordEnabled: /events direct-renders 200, links to the
-// existing Notifications page, and states no fabricated journal content.
+// TestS5_2EventsPageDiscordEnabled: /events direct-renders 200. Task S5-7
+// superseded the minimal S5-2 landing with the real session-scoped journal,
+// which renders IDENTICALLY regardless of Discord configuration — no
+// Discord-availability content variants remain — while the original honesty
+// ban stands: no fabricated delivery/sound/browser evidence.
 func TestS5_2EventsPageDiscordEnabled(t *testing.T) {
 	srv := buildF3PageServer(t)
 	srv.SetDiscordEnabled(true)
 	body := f3GetPage(t, srv, "/events", "en")
 
-	if !strings.Contains(body, `href="/notifications"`) {
-		t.Error("Discord-enabled /events must link to /notifications")
-	}
-	// /settings is always present in the sidebar nav, so the disabled-state
-	// CONTENT link is distinguished by its localized text, not the bare href.
-	if strings.Contains(body, "Go to Settings") {
-		t.Error("Discord-enabled /events must not show the disabled-state content (Go to Settings)")
+	if !strings.Contains(body, "data-events-session-note") {
+		t.Error("/events must render the S5-7 session-scoped journal banner")
 	}
 	for _, banned := range []string{"delivered", "delivery status", "sound played", "browser permission"} {
 		if strings.Contains(strings.ToLower(body), banned) {
@@ -463,21 +468,20 @@ func TestS5_2EventsPageDiscordEnabled(t *testing.T) {
 	}
 }
 
-// TestS5_2EventsPageDiscordDisabled: /events shows the neutral/empty
-// C1-compatible state and links to /settings instead.
+// TestS5_2EventsPageDiscordDisabled: since task S5-7 the journal never
+// varies by Discord availability — the Discord-disabled render is
+// byte-identical in its content markers to the enabled one (Discord status
+// now lives on its own /events/discord route).
 func TestS5_2EventsPageDiscordDisabled(t *testing.T) {
 	srv := buildF3PageServer(t)
 	srv.SetDiscordEnabled(false)
 	body := f3GetPage(t, srv, "/events", "en")
 
-	if !strings.Contains(body, `href="/settings"`) {
-		t.Error("Discord-disabled /events must link to /settings")
+	if !strings.Contains(body, "data-events-session-note") {
+		t.Error("Discord-disabled /events must still render the S5-7 session-scoped journal banner")
 	}
 	if strings.Contains(body, `href="/notifications"`) {
-		t.Error("Discord-disabled /events must not show the enabled-state /notifications link")
-	}
-	if !strings.Contains(body, "c1-block") {
-		t.Error("Discord-disabled /events must render its state via the C1 state-block markup")
+		t.Error("/events must no longer render the superseded S5-2 /notifications content link")
 	}
 }
 

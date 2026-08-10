@@ -45,37 +45,10 @@ func (s *Server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, r, "overview.html", data)
 }
 
-// handleEventsPage renders the minimal /events compatibility landing
-// (OD-S5-2-1 item 2): always reachable as one of the seven top-level
-// sections regardless of Discord configuration, but its content honestly
-// varies by Discord availability rather than implementing the future event
-// journal (deferred to S5-7).
-func (s *Server) handleEventsPage(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	refresh := s.refresh
-	discordEnabled := s.discordEnabled
-	debugURL := s.debugURL
-	s.mu.RUnlock()
-
-	data := EventsPageData{
-		Username:       s.username,
-		RefreshMinutes: refresh,
-		Version:        version.Version,
-		DiscordEnabled: discordEnabled,
-		DebugURL:       debugURL,
-	}
-	if !discordEnabled {
-		lang := s.langFromRequest(r)
-		data.DisabledState = StateBlockData{
-			State:        "EMPTY",
-			Variant:      "block",
-			Message:      s.i18n.T(lang, "events.disabled_text"),
-			ActionLabel:  s.i18n.T(lang, "events.link_settings"),
-			ActionTarget: "/settings",
-		}
-	}
-	s.renderPage(w, r, "events.html", data)
-}
+// handleEventsPage moved to handlers_events.go in task S5-7: /events is no
+// longer the minimal S5-2 compatibility landing but the real session-scoped
+// event journal, joined by the /events/browser, /events/sound and
+// /events/discord direct routes registered in server.go.
 
 // handleHelpGettingStarted renders the minimal /help/getting-started
 // compatibility landing (OD-S5-2-1 item 1): orientation to the seven live
