@@ -13,8 +13,8 @@
     <a href="{{.RefreshHref}}" class="btn-secondary text-sm" data-events-refresh>{{ t "events.refresh" }}</a>
 </div>
 
-<div class="c1-block c1-block--strip c1-tier-info mb-4" data-events-session-note>
-    <span class="c1-block-icon" aria-hidden="true">i</span>
+<div class="c1-block c1-block--strip c1-tier-caution mb-4" data-events-session-note>
+    <span class="c1-block-icon" aria-hidden="true">⚑</span>
     <span class="c1-block-body">
         <span class="c1-block-message">{{ t "events.session_note" }}</span>
     </span>
@@ -24,7 +24,7 @@
     <span class="ov-toolbar-label">{{ t "events.filter.label" }}</span>
     {{range .Filters}}
     {{if .Active}}
-    <a href="{{.Href}}" class="btn-primary text-xs" data-ev-filter="{{.Key}}" data-ev-filter-active>{{.Label}}</a>
+    <a href="{{.Href}}" class="btn-primary text-xs" aria-current="true" data-ev-filter="{{.Key}}" data-ev-filter-active>{{.Label}}</a>
     {{else}}
     <a href="{{.Href}}" class="btn-secondary text-xs" data-ev-filter="{{.Key}}">{{.Label}}</a>
     {{end}}
@@ -51,8 +51,8 @@
                     <td class="num whitespace-nowrap">{{.Ago}}</td>
                     <td>{{.GroupLabel}}</td>
                     <td>{{.Label}}</td>
-                    <td>{{if .Streamer}}{{.Streamer}}{{else}}—{{end}}</td>
-                    <td class="text-text-muted">{{if .Detail}}{{.Detail}}{{else}}—{{end}}</td>
+                    <td>{{if .Streamer}}{{.Streamer}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
+                    <td class="text-text-muted">{{if .Detail}}{{.Detail}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</td>
                 </tr>
                 {{end}}
             </tbody>
@@ -65,8 +65,8 @@
         <div class="health-card-label">{{.GroupLabel}}</div>
         <div class="health-card-status"><span class="font-semibold health-card-status-text">{{.Label}}</span></div>
         <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.time" }}</span><span class="num">{{.Ago}}</span></div>
-        {{if .Streamer}}<div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.channel" }}</span>{{.Streamer}}</div>{{end}}
-        {{if .Detail}}<div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.detail" }}</span>{{.Detail}}</div>{{end}}
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.channel" }}</span>{{if .Streamer}}{{.Streamer}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</div>
+        <div class="health-card-row"><span class="health-card-row-label">{{ t "events.col.detail" }}</span>{{if .Detail}}{{.Detail}}{{else}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}</div>
     </div>
     {{end}}
 </div>

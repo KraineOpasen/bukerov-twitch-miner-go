@@ -50,6 +50,7 @@
 <div id="evd-fail" class="c1-block c1-block--inline c1-tier-danger mt-3" role="alert" hidden>
     <span class="c1-block-body">
         <span class="c1-block-message" id="evd-fail-msg"></span>
+        <span class="c1-block-cause num" id="evd-fail-time"></span>
     </span>
     <button type="button" id="evd-retry" class="btn-secondary text-xs">{{ t "events.discord.retry" }}</button>
 </div>
@@ -68,14 +69,20 @@
 <script>
     // S5-7 route 12: gesture-only manual test against the EXISTING
     // POST /api/notifications/test endpoint. `busy` is the in-flight
-    // double-fire guard; failures land in the inline S-FAIL region whose
-    // Retry re-runs the same gesture-driven send.
+    // double-fire guard; failures land in the single inline S-FAIL region
+    // whose Retry re-runs the same gesture-driven send. The S-FAIL cause is
+    // always safe and localized: an HTTP failure carries only the numeric
+    // status code (never the response body), any other failure the static
+    // network cause (never raw exception text); every failure stamps the
+    // current attempt time. Repeated failures overwrite the same region —
+    // nothing stacks — and a success leaves it hidden.
     (function () {
         var btn = document.getElementById('evd-test');
         if (!btn) return; // disabled/config-invalid states render no test control
         var okEl = document.getElementById('evd-result');
         var failEl = document.getElementById('evd-fail');
         var failMsg = document.getElementById('evd-fail-msg');
+        var failTime = document.getElementById('evd-fail-time');
         var retry = document.getElementById('evd-retry');
 
         var busy = false;
@@ -88,15 +95,22 @@
             failEl.hidden = true;
             fetch('/api/notifications/test', { method: 'POST' })
                 .then(function (res) {
-                    if (!res.ok) throw new Error('http ' + res.status);
+                    if (!res.ok) {
+                        var httpErr = new Error('http');
+                        httpErr.httpStatus = res.status;
+                        throw httpErr;
+                    }
                     return res.json();
                 })
                 .then(function (data) {
                     okEl.textContent = t('js.evd.sent', { n: (data && data.sent) || 0 });
                     okEl.hidden = false;
                 })
-                .catch(function () {
-                    failMsg.textContent = t('js.evd.failed');
+                .catch(function (err) {
+                    failMsg.textContent = (err && err.httpStatus)
+                        ? t('js.evd.failed_http', { code: err.httpStatus })
+                        : t('js.evd.failed_network');
+                    failTime.textContent = t('js.evd.failed_at', { time: new Date().toLocaleTimeString(document.documentElement.lang || undefined) });
                     failEl.hidden = false;
                 })
                 .finally(function () {

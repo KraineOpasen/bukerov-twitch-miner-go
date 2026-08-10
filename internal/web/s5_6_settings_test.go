@@ -379,10 +379,12 @@ func TestS5_6PointRuleIdTriggeredNeverEditable(t *testing.T) {
 
 // s5_6MainContent slices a rendered page body down to its <main> content
 // region, excluding the shared chrome (sidebar/nav/topbar). Introduced by
-// task S5-7: the C2 nav's Events group now legitimately carries a "Sound"
-// child label on EVERY page, so the S-NOBACK bans below must be scoped to
-// the category page's own content/form — which is exactly what B4/B5/B9
-// always meant (route 20 exposes no sound/quiet-hours/upload CONTROLS).
+// task S5-7 and used ONLY where the chrome forced it: the C2 nav's Events
+// group legitimately carries a "Sound" child label on EVERY page, so route
+// 20's sound/quiet-hours/upload bans must be scoped to the category page's
+// own content/form — which is exactly what B4/B5/B9 always meant (route 20
+// exposes no sound/quiet-hours/upload CONTROLS). The transport and system
+// bans below need no such carve-out and stay full-body.
 func s5_6MainContent(t *testing.T, body string) string {
 	t.Helper()
 	start := strings.Index(body, `<main class="app-main">`)
@@ -399,13 +401,15 @@ func s5_6MainContent(t *testing.T, body string) string {
 // (Transport) never exposes requestDelay/proxy/client-id/user-agent; route
 // 20 (Events & Notifications) never exposes sound/quiet-hours/upload
 // controls (NotificationConfig has no such fields); route 22 (System) never
-// exposes an updater editor or a LAN-CIDR control. Scoped to each page's
-// own <main> content region (see s5_6MainContent) — the shared chrome is
-// not part of this invariant.
+// exposes an updater editor or a LAN-CIDR control. The transport and system
+// bans hold over the ENTIRE rendered body — nothing in the shared chrome
+// legitimately carries those terms. Only route 20's bans are scoped to its
+// own <main> content region (see s5_6MainContent): the Events nav group's
+// "Sound" child label is legitimate chrome on every page.
 func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
 	srv := buildF3PageServer(t)
 
-	transport := s5_6MainContent(t, f3GetPage(t, srv, "/settings/transport", "en"))
+	transport := f3GetPage(t, srv, "/settings/transport", "en")
 	for _, banned := range []string{"requestDelay", "proxy", "client-id", "clientId", "user-agent", "userAgent"} {
 		if strings.Contains(transport, banned) {
 			t.Errorf("/settings/transport must not expose %q", banned)
@@ -419,7 +423,7 @@ func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
 		}
 	}
 
-	system := s5_6MainContent(t, f3GetPage(t, srv, "/settings/system", "en"))
+	system := f3GetPage(t, srv, "/settings/system", "en")
 	for _, banned := range []string{"updater", "Updater", "CIDR", "cidr"} {
 		if strings.Contains(system, banned) {
 			t.Errorf("/settings/system must not expose %q", banned)

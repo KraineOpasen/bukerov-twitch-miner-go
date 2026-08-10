@@ -990,5 +990,7 @@
   "js.evs.blocked": "Audio is blocked by the browser. Sound stays off; everything else keeps working.",
   "js.evs.played": "Test tone played.",
   "js.evd.sent": "Test sent to {n} channel(s).",
-  "js.evd.failed": "The test could not be sent."
+  "js.evd.failed_http": "The test could not be sent — the server responded with status {code}.",
+  "js.evd.failed_network": "The test could not be sent — network error or no response received.",
+  "js.evd.failed_at": "Attempt failed at {time}."
 }

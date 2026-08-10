@@ -294,6 +294,125 @@ func TestS5_7EventsJournalEmptyState(t *testing.T) {
 	}
 }
 
+// TestS5_7EventsSessionBannerCautionTierAndFlag pins the S-SESS banner's
+// presentation semantics: session-scoped data is a caution-tier state carrying
+// the visible C10 session flag marker (⚑, the drops_claims.html precedent),
+// never a neutral info note.
+func TestS5_7EventsSessionBannerCautionTierAndFlag(t *testing.T) {
+	srv := buildF3PageServer(t)
+	for _, lang := range []string{"en", "ru"} {
+		body := f3GetPage(t, srv, "/events", lang)
+		idx := strings.Index(body, "data-events-session-note")
+		if idx < 0 {
+			t.Fatalf("[%s] /events missing the S-SESS session banner", lang)
+		}
+		// The banner's opening tag precedes the marker attribute; the icon
+		// span follows it.
+		open := strings.LastIndex(body[:idx], "<div")
+		end := strings.Index(body[idx:], "</div>")
+		if open < 0 || end < 0 {
+			t.Fatalf("[%s] could not slice the S-SESS banner block", lang)
+		}
+		banner := body[open : idx+end]
+		if !strings.Contains(banner, "c1-tier-caution") {
+			t.Errorf("[%s] S-SESS banner must use the caution tier (c1-tier-caution)", lang)
+		}
+		if strings.Contains(banner, "c1-tier-info") {
+			t.Errorf("[%s] S-SESS banner must not be a neutral info note (c1-tier-info)", lang)
+		}
+		if !strings.Contains(banner, "⚑") {
+			t.Errorf("[%s] S-SESS banner must carry the visible C10 session flag marker ⚑", lang)
+		}
+	}
+}
+
+// TestS5_7EventsJournalNoDataCells proves a journal row whose event has no
+// streamer or no detail renders the C4 no-data convention — the visible —
+// dash wrapped in the accessible, localized queue.slot.no_data label the C4
+// table and C3 card components already use — in BOTH representations: the
+// desktop table cell and the mobile card row (cards render the row with the
+// marker, never silently omit it). Never a bare unlabeled dash, never a
+// fabricated 0.
+func TestS5_7EventsJournalNoDataCells(t *testing.T) {
+	srv := buildF3PageServer(t)
+	loc := s5_7Loc(t)
+	srv.recentEvents = func(int) []events.Event {
+		return []events.Event{
+			{Time: time.Now().Add(-time.Minute), Type: events.TypePointsEarned, Streamer: "", Detail: "d_present"},
+			{Time: time.Now().Add(-2 * time.Minute), Type: events.TypeRaidJoined, Streamer: "c_present", Detail: ""},
+		}
+	}
+	for _, lang := range []string{"en", "ru"} {
+		body := f3GetPage(t, srv, "/events", lang)
+		want := `<span aria-label="` + html.EscapeString(loc.T(lang, "queue.slot.no_data")) + `">—</span>`
+		// One missing streamer + one missing detail, each in the table AND in
+		// its mobile card.
+		if n := strings.Count(body, want); n != 4 {
+			t.Errorf("[%s] expected exactly 4 accessible no-data markers %q (table + card × streamer + detail), found %d", lang, want, n)
+		}
+		// The bare, unlabeled dash cell must be gone from the table cells.
+		for _, bare := range []string{">—</td>", `<td class="text-text-muted">—</td>`} {
+			if strings.Contains(body, bare) {
+				t.Errorf("[%s] table must not render a bare unlabeled — cell, found %q", lang, bare)
+			}
+		}
+		// The mobile cards keep row parity with the table: every card renders
+		// its Channel and Detail rows even when the value is absent.
+		for _, colKey := range []string{"events.col.channel", "events.col.detail"} {
+			label := html.EscapeString(loc.T(lang, colKey))
+			marker := `<span class="health-card-row-label">` + label + `</span>`
+			if n := strings.Count(body, marker); n != 2 {
+				t.Errorf("[%s] every card must render its %s row (want %q ×2, found %d)", lang, colKey, marker, n)
+			}
+		}
+	}
+}
+
+// TestS5_7EventsFilterAriaCurrent proves exactly the active route-9 group
+// filter carries aria-current="true" — All on the unfiltered view, the
+// selected group on a filtered view — and inactive filters carry none.
+func TestS5_7EventsFilterAriaCurrent(t *testing.T) {
+	srv := buildF3PageServer(t)
+	srv.recentEvents = func(int) []events.Event { return s5_7JournalFixture() }
+
+	cases := []struct {
+		path string
+		want string // filter key expected to be current
+	}{
+		{"/events", "all"},
+		{"/events?group=predictions", "predictions"},
+		{"/events?group=bogus", "all"}, // unknown group falls back to All
+	}
+	for _, tc := range cases {
+		body := f3GetPage(t, srv, tc.path, "en")
+		// Server-rendered pages carry no other aria-current ATTRIBUTE (the
+		// nav sets its own client-side via setAttribute — a JS string, not
+		// the attribute form counted here), so the page-wide attribute count
+		// pins "exactly the active filter, no inactive one".
+		if n := strings.Count(body, `aria-current="`); n != 1 {
+			t.Errorf("%s: expected exactly one aria-current attribute in the rendered page, found %d", tc.path, n)
+		}
+		want := `aria-current="true" data-ev-filter="` + tc.want + `" data-ev-filter-active`
+		if !strings.Contains(body, want) {
+			t.Errorf("%s: the active filter %q must carry aria-current=\"true\" (want marker %q)", tc.path, tc.want, want)
+		}
+	}
+}
+
+// TestS5_7EventsUnknownSubpathNotFound pins the routing honesty regression:
+// an unknown /events/* subpath is not swallowed by any Events handler — it
+// falls through the mux to the "/" catch-all and 404s like any other
+// unregistered path.
+func TestS5_7EventsUnknownSubpathNotFound(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/events/not-a-route", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /events/not-a-route = %d, want 404", rec.Code)
+	}
+}
+
 // TestS5_7EventsJournalManualRefresh proves the journal's only liveness
 // affordance is a same-route manual refresh link that preserves the active
 // group filter.
@@ -571,6 +690,50 @@ func TestS5_7DiscordTestEndpointContract(t *testing.T) {
 	}
 }
 
+// TestS5_7DiscordFailureCauseContract pins the S-FAIL cause semantics of the
+// route-12 test button: an HTTP failure surfaces a localized safe cause
+// carrying ONLY the numeric status code, a network/other failure surfaces the
+// static localized cause, every failure stamps the current attempt time into
+// the single in-place S-FAIL region, and neither the response body nor raw
+// exception text can ever reach the page.
+func TestS5_7DiscordFailureCauseContract(t *testing.T) {
+	src := readEmbeddedTemplate(t, "templates/events_discord.html")
+
+	for _, want := range []string{
+		// HTTP failure: localized cause with the safe numeric status only.
+		"t('js.evd.failed_http', { code: err.httpStatus })",
+		"httpErr.httpStatus = res.status;",
+		// Network/other failure: the static localized cause.
+		"t('js.evd.failed_network')",
+		// Every failure stamps the current attempt time, locale-aware.
+		`id="evd-fail-time"`,
+		"toLocaleTimeString(document.documentElement.lang || undefined)",
+		"t('js.evd.failed_at', { time:",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("events_discord.html missing S-FAIL cause literal %q", want)
+		}
+	}
+
+	// The failure region is a single in-place block (repeated failures update
+	// it, never stack), and success hides it before/after every attempt.
+	if n := strings.Count(src, `id="evd-fail"`); n != 1 {
+		t.Errorf("expected exactly one S-FAIL region, found %d", n)
+	}
+	if !strings.Contains(src, "failEl.hidden = true;") {
+		t.Error("every attempt must clear the S-FAIL region before running (success clears failure)")
+	}
+
+	// The response body and raw exception text must be unreachable: the
+	// script may only read res.status off a failed response, never its body,
+	// and never interpolates the caught error's own text.
+	for _, banned := range []string{"res.text(", "res.statusText", "responseText", "err.message", "String(err", "+ err"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("events_discord.html must never surface response-body/raw-error text — found %q", banned)
+		}
+	}
+}
+
 // TestS5_7DiscordTokenNeverRendered proves the configured bot token never
 // reaches the rendered page in any state, and the template/handler never
 // reference the token field at all.
@@ -595,29 +758,77 @@ func TestS5_7DiscordTokenNeverRendered(t *testing.T) {
 	}
 }
 
+// s5_7DeliveryRegion slices a rendered /events/discord body down to the
+// last-delivery evidence region (the data-evd-delivery C1 block), so the
+// honesty bans below scrutinize the region that would carry a delivery
+// claim — not unrelated page chrome.
+func s5_7DeliveryRegion(t *testing.T, body string) string {
+	t.Helper()
+	idx := strings.Index(body, "data-evd-delivery")
+	if idx < 0 {
+		t.Fatal("/events/discord missing the last-delivery S-UNK region")
+	}
+	end := strings.Index(body[idx:], "</div>")
+	if end < 0 {
+		t.Fatal("could not locate the end of the last-delivery region")
+	}
+	return body[idx : idx+end]
+}
+
 // TestS5_7DiscordDeliveryUnknown proves the "last delivery" evidence is an
 // honest S-UNK — no delivery history backend exists (B3), and
 // upcoming_campaign_notifications explicitly does not satisfy it — so the
-// page must never claim a past delivery happened.
+// delivery region must never positively claim a past delivery happened, in
+// either language, in any letter case. The honest "history is not recorded /
+// unknown" copy is exactly what must remain.
 func TestS5_7DiscordDeliveryUnknown(t *testing.T) {
 	srv := buildF3PageServer(t)
 	srv.SetDiscordEnabled(true)
 	loc := s5_7Loc(t)
 
+	// Positive-delivery claims, matched case-insensitively against the
+	// lowercased delivery region. Chosen so a genuine claim ("Delivered",
+	// "delivery succeeded", "Доставлено", "успешно доставлен...") is caught
+	// while the honest EN copy ("Delivery history is not recorded…") and RU
+	// copy ("История доставки не записывается…") never match: "delivery"
+	// alone is legitimate, "delivered" is not; "доставки"/"доставка"
+	// (history-of-delivery forms) are legitimate, the participle stem
+	// "доставлен" (доставлено/доставлена/доставлены — past-delivery claims)
+	// is not.
+	bannedByLang := map[string][]string{
+		"en": {"delivered", "delivery succeeded", "delivery successful", "delivery ok", "was sent successfully"},
+		"ru": {"доставлен", "успешно"},
+	}
+
 	for _, lang := range []string{"en", "ru"} {
 		body := f3GetPage(t, srv, "/events/discord", lang)
-		if !strings.Contains(body, "data-evd-delivery") {
-			t.Errorf("[%s] /events/discord missing the last-delivery S-UNK region", lang)
+		region := s5_7DeliveryRegion(t, body)
+		if want := loc.T(lang, "events.discord.delivery_unknown"); !strings.Contains(region, want) {
+			t.Errorf("[%s] delivery region missing localized delivery-unknown text %q", lang, want)
 		}
-		if want := loc.T(lang, "events.discord.delivery_unknown"); !strings.Contains(body, want) {
-			t.Errorf("[%s] /events/discord missing localized delivery-unknown text %q", lang, want)
+		lower := strings.ToLower(region)
+		for _, banned := range bannedByLang[lang] {
+			if strings.Contains(lower, strings.ToLower(banned)) {
+				t.Errorf("[%s] delivery region must never claim a past delivery, found %q", lang, banned)
+			}
 		}
 	}
 
-	body := f3GetPage(t, srv, "/events/discord", "en")
-	for _, banned := range []string{"Delivered", "Last delivered", "delivery succeeded"} {
-		if strings.Contains(body, banned) {
-			t.Errorf("/events/discord must never claim a past delivery, found %q", banned)
+	// Route 9 (the journal) has no delivery evidence at all (B3 absent): a
+	// positive past-delivery claim must never appear anywhere on /events, in
+	// either language, in any letter case.
+	journalSrv := buildF3PageServer(t)
+	journalSrv.recentEvents = func(int) []events.Event { return s5_7JournalFixture() }
+	journalBans := map[string][]string{
+		"en": {"delivered"},
+		"ru": {"доставлен", "доставк"},
+	}
+	for _, lang := range []string{"en", "ru"} {
+		lower := strings.ToLower(f3GetPage(t, journalSrv, "/events", lang))
+		for _, banned := range journalBans[lang] {
+			if strings.Contains(lower, strings.ToLower(banned)) {
+				t.Errorf("[%s] /events must carry no delivery evidence (B3 absent), found %q", lang, banned)
+			}
 		}
 	}
 }
@@ -771,7 +982,7 @@ func TestS5_7LocaleKeysPresentAndTranslated(t *testing.T) {
 		"js.evb.ready", "js.evb.blocked", "js.evb.denied", "js.evb.unsupported",
 		"js.evb.test_title", "js.evb.test_body",
 		"js.evs.unknown", "js.evs.unsupported", "js.evs.blocked", "js.evs.played",
-		"js.evd.sent", "js.evd.failed",
+		"js.evd.sent", "js.evd.failed_http", "js.evd.failed_network", "js.evd.failed_at",
 	}
 	for _, k := range keys {
 		en := loc.T(i18n.LangEN, k)
