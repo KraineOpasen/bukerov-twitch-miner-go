@@ -1,0 +1,85 @@
+{{/* /events/sound (task S5-7, route 11): sound status and a gesture-driven
+     WebAudio test tone. Status-only: no backend call, no polling, and NO
+     persisted sound preference — nothing is written to browser storage or
+     anywhere else. Sound is fail-open by design (the visible statement
+     below): a blocked or unavailable audio path never affects mining or
+     any other notification channel. The AudioContext is created ONLY
+     inside the test button's click listener (an explicit user gesture);
+     a blocked/rejected context is reported honestly as blocked, a missing
+     Web Audio API as unsupported. */}}
+{{define "title"}}{{ t "events.sound.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-2">{{ t "events.sound.title" }}</h1>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "events.sound.lead" }}</p>
+
+<div id="evs-status" class="c1-block c1-block--block c1-tier-neutral" data-evs-status="unknown">
+    <span class="c1-block-icon" aria-hidden="true">?</span>
+    <span class="c1-block-body">
+        <span class="c1-block-message" id="evs-status-text">{{ t "events.sound.initial" }}</span>
+    </span>
+</div>
+
+<div class="flex items-center gap-2 mt-4">
+    <button type="button" id="evs-test" class="btn-secondary text-sm">{{ t "events.sound.test" }}</button>
+</div>
+
+<p class="type-small text-text-muted mt-4" style="max-width:72ch" data-evs-failopen>{{ t "events.sound.failopen" }}</p>
+{{end}}
+
+{{define "scripts"}}
+<script>
+    // S5-7 route 11: gesture-only WebAudio test. No preference is ever
+    // persisted; a failure here is informational only (fail-open).
+    (function () {
+        var statusEl = document.getElementById('evs-status');
+        var textEl = document.getElementById('evs-status-text');
+        var btn = document.getElementById('evs-test');
+        if (!statusEl || !textEl || !btn) return;
+
+        var TIERS = ['c1-tier-info', 'c1-tier-caution', 'c1-tier-danger', 'c1-tier-neutral'];
+        function setState(st, tier, key) {
+            statusEl.setAttribute('data-evs-status', st);
+            TIERS.forEach(function (c) { statusEl.classList.remove(c); });
+            statusEl.classList.add(tier);
+            textEl.textContent = t(key);
+        }
+
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) {
+            setState('unsupported', 'c1-tier-neutral', 'js.evs.unsupported');
+            btn.disabled = true;
+            return;
+        }
+        setState('unknown', 'c1-tier-neutral', 'js.evs.unknown');
+
+        // The AudioContext is created ONLY on this explicit user gesture.
+        btn.addEventListener('click', function () {
+            var ctx;
+            try {
+                ctx = new AC();
+            } catch (e) {
+                setState('blocked', 'c1-tier-caution', 'js.evs.blocked');
+                return;
+            }
+            ctx.resume().then(function () {
+                if (ctx.state !== 'running') {
+                    setState('blocked', 'c1-tier-caution', 'js.evs.blocked');
+                    return;
+                }
+                var osc = ctx.createOscillator();
+                var gain = ctx.createGain();
+                gain.gain.value = 0.05;
+                osc.frequency.value = 880;
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.2);
+                setState('played', 'c1-tier-info', 'js.evs.played');
+            }, function () {
+                setState('blocked', 'c1-tier-caution', 'js.evs.blocked');
+            });
+        });
+    })();
+</script>
+{{end}}

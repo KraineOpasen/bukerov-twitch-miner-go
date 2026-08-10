@@ -172,13 +172,18 @@ func TestS5_2LocaleKeysPresentAndTranslated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("i18n.New: %v", err)
 	}
+	// task S5-7 retired the minimal /events landing's own keys
+	// (events.enabled_text / events.link_notifications / events.disabled_text
+	// / events.link_settings / events.pending_note) together with that
+	// landing — the real journal's key set is pinned by
+	// TestS5_7LocaleKeysPresentAndTranslated. events.title survives as the
+	// journal page's heading.
 	keys := []string{
 		"nav.analytics", "nav.events", "nav.system", "nav.help",
 		"a11y.skip_to_content", "a11y.close_menu",
 		"c0.unknown", "c0.session", "c11.unknown", "c11.syncing",
 		"help.title", "help.lead", "help.pending",
-		"events.title", "events.enabled_text", "events.link_notifications",
-		"events.disabled_text", "events.link_settings", "events.pending_note",
+		"events.title",
 	}
 	for _, k := range keys {
 		en := loc.T(i18n.LangEN, k)

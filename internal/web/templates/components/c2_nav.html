@@ -34,7 +34,16 @@
      System (/system/status) already use. Exactly like /health and /logs
      after S5-5, the legacy /settings mega-form keeps rendering directly at
      its own unchanged route — it is simply no longer linked from this nav,
-     superseded here by the ten new category destinations. */}}
+     superseded here by the ten new category destinations.
+
+     task S5-7 makes Events the fifth group, the same shape once more: total
+     parent groups 4 -> 5, total children 19 -> 23. Its four children are
+     the session journal itself (/events) plus the three former deferred
+     routes, now direct-render status pages (/events/browser, /events/sound,
+     /events/discord). The parent link points at the first child (/events),
+     the established "parent href = first child" convention. The top-level
+     section count stays at exactly seven. No child ever carries an event
+     count badge — the journal is session-scoped and the nav never polls. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -65,11 +74,17 @@
                 <span class="c2-nav-label">{{ t "nav.analytics" }}</span>
             </a>
         </li>
-        <li class="c2-nav-item">
-            <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
                 <span class="c2-nav-label">{{ t "nav.events" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/events" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.journal" }}</a></li>
+                <li><a href="/events/browser" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.browser" }}</a></li>
+                <li><a href="/events/sound" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.sound" }}</a></li>
+                <li><a href="/events/discord" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.discord" }}</a></li>
+            </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
             <a href="/settings/streamers" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}" data-nav-parent>

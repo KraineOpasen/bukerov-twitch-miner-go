@@ -377,31 +377,49 @@ func TestS5_6PointRuleIdTriggeredNeverEditable(t *testing.T) {
 // 8. S-NOBACK: fields with no backend counterpart stay absent.
 // ---------------------------------------------------------------------
 
+// s5_6MainContent slices a rendered page body down to its <main> content
+// region, excluding the shared chrome (sidebar/nav/topbar). Introduced by
+// task S5-7: the C2 nav's Events group now legitimately carries a "Sound"
+// child label on EVERY page, so the S-NOBACK bans below must be scoped to
+// the category page's own content/form — which is exactly what B4/B5/B9
+// always meant (route 20 exposes no sound/quiet-hours/upload CONTROLS).
+func s5_6MainContent(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, `<main class="app-main">`)
+	end := strings.Index(body, "</main>")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatalf("could not locate the <main> content region in the rendered page")
+	}
+	return body[start:end]
+}
+
 // TestS5_6SNoBackFieldsAbsent proves every category page omits UI for a
 // field the task brief explicitly scoped out (either genuinely absent from
 // the backend, or deliberately carved into a different route): route 18
 // (Transport) never exposes requestDelay/proxy/client-id/user-agent; route
 // 20 (Events & Notifications) never exposes sound/quiet-hours/upload
 // controls (NotificationConfig has no such fields); route 22 (System) never
-// exposes an updater editor or a LAN-CIDR control.
+// exposes an updater editor or a LAN-CIDR control. Scoped to each page's
+// own <main> content region (see s5_6MainContent) — the shared chrome is
+// not part of this invariant.
 func TestS5_6SNoBackFieldsAbsent(t *testing.T) {
 	srv := buildF3PageServer(t)
 
-	transport := f3GetPage(t, srv, "/settings/transport", "en")
+	transport := s5_6MainContent(t, f3GetPage(t, srv, "/settings/transport", "en"))
 	for _, banned := range []string{"requestDelay", "proxy", "client-id", "clientId", "user-agent", "userAgent"} {
 		if strings.Contains(transport, banned) {
 			t.Errorf("/settings/transport must not expose %q", banned)
 		}
 	}
 
-	events := f3GetPage(t, srv, "/settings/events-notifications", "en")
+	events := s5_6MainContent(t, f3GetPage(t, srv, "/settings/events-notifications", "en"))
 	for _, banned := range []string{"sound", "Sound", "quiet hour", "quietHour", "upload", "Upload"} {
 		if strings.Contains(events, banned) {
 			t.Errorf("/settings/events-notifications must not expose %q (B4/B5/B9, S-NOBACK)", banned)
 		}
 	}
 
-	system := f3GetPage(t, srv, "/settings/system", "en")
+	system := s5_6MainContent(t, f3GetPage(t, srv, "/settings/system", "en"))
 	for _, banned := range []string{"updater", "Updater", "CIDR", "cidr"} {
 		if strings.Contains(system, banned) {
 			t.Errorf("/settings/system must not expose %q", banned)

@@ -151,10 +151,13 @@ func TestS5_2RedirectTargetsRenderDirectly(t *testing.T) {
 // former /system/* compatibility-redirect entries with real direct renders.
 // task S5-6 extended it again with the ten Settings category routes, which
 // replaced their former /settings/* compatibility-redirect entries.
+// task S5-7 extended it once more with the three Events child routes
+// (/events/browser, /events/sound, /events/discord), formerly deferred 404s.
 func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, path := range []string{
 		"/overview", "/events", "/help/getting-started",
+		"/events/browser", "/events/sound", "/events/discord",
 		"/system/status", "/system/diagnostics", "/system/logs",
 		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
 		"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",
@@ -188,13 +191,13 @@ func TestS5_2ExistingLegacyRoutesUnchanged(t *testing.T) {
 // TestS5_3QueueRouteReturns200 and TestS5_3RemainingDeferredRoutesStill404.
 // task S5-4 removed /drops/claims from this list: it is now a real
 // direct-render route (handlers_drops.go) - see s5_4_drops_test.go.
+// task S5-7 removed /events/browser, /events/sound and /events/discord from
+// this list: each is now a real direct-render route (handlers_events.go) -
+// see s5_7_events_test.go.
 func TestS5_2DeferredRoutesRemain404(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 	deferred := []string{
-		"/events/browser",
-		"/events/sound",
-		"/events/discord",
 		"/help/glossary",
 		"/help/troubleshooting",
 		"/help/notifications-audio",
