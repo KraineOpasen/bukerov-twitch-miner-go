@@ -1,0 +1,399 @@
+{{/* /analytics/points (task S5-8, route 7): the canonical points-history
+     page. Direct-render, GET/HEAD only; /analytics itself stays a 404.
+
+     Presentation only. The authoritative data is the EXISTING, unchanged
+     /api/points-history endpoint (handlers_statistics.go) — this page adds
+     no endpoint, no viewmodel and no transport, and its refresh cadence is
+     the existing AnalyticsSettings.Refresh value threaded through
+     RefreshMinutes, reused verbatim.
+
+     Honesty constraints this page is pinned to (s5_8_analytics_test.go):
+       - A CONCRETE streamer is always required. The series is per-streamer
+         and the backend rejects an empty streamer, so there is deliberately
+         no "All streamers" facet — an aggregate option could only be served
+         by inventing a cross-streamer series.
+       - No value is ever invented between two samples, and no gap is filled
+         with a zero. The samples the backend returns are exactly what is
+         drawn ('straight', never a 'smooth' curve, which over sparse data
+         would suggest readings the miner never took), and no sampling-gap
+         threshold is invented.
+       - rawTruncated (the backend row cap) dashes out every KPI rather than
+         showing a figure derived from a window missing its newest rows; a
+         dash with an accessible no-data label, never a fabricated 0.
+       - The chart is never the only representation: C14 pairs it with an
+         announced summary, a data table, and a client-generated CSV.
+
+     The legacy /statistics page keeps rendering directly and unchanged;
+     this page was split along its client seams, not by editing it. */}}
+{{define "title"}}{{ t "analytics.points.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "analytics.points.title" }}</h1>
+    <div id="ap-updated" class="type-small text-text-secondary num"></div>
+</div>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "analytics.points.lead" }}</p>
+
+<div class="card mb-6">
+    <div class="flex flex-wrap items-end gap-5">
+        <div class="flex flex-col gap-1">
+            <label for="ap-streamer" class="type-small text-text-secondary">{{ t "analytics.points.streamer" }}</label>
+            <select id="ap-streamer" class="input-field min-w-[12rem]" {{if not .Streamers}}disabled{{end}}>
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="__none__" disabled selected>{{ t "analytics.points.no_streamers" }}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <span class="type-small text-text-secondary">{{ t "analytics.points.period" }}</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "analytics.points.period" }}">
+                <button type="button" class="stat-range-btn is-active" data-ap-range="24h">{{ t "stat.range.24h" }}</button>
+                <button type="button" class="stat-range-btn" data-ap-range="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="stat-range-btn" data-ap-range="30d">{{ t "stat.range.30d" }}</button>
+            </div>
+        </div>
+        <div class="ml-auto">
+            <a id="ap-export" class="btn-secondary inline-block" href="#" download>{{ t "stat.export" }}</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    {{/* The toggled element is a PLAIN wrapper, never the .c1-block itself:
+         .c1-block sets display:flex and is emitted after .hidden's display:none
+         in the compiled stylesheet, so at equal specificity a block carrying
+         both classes would stay visible. Toggling a bare wrapper keeps the
+         state blocks genuinely mutually exclusive. */}}
+    <div id="ap-stale" class="hidden mb-3" role="status">
+        <div class="c1-block c1-block--strip c1-tier-caution">
+            <span class="c1-block-icon" aria-hidden="true">⏱</span>
+            <span class="c1-block-body"><span class="c1-block-message">{{ t "stat.stale" }}</span></span>
+        </div>
+    </div>
+    <div id="ap-partial" class="hidden mb-3" role="status">
+        <div class="c1-block c1-block--strip c1-tier-caution">
+            <span class="c1-block-icon" aria-hidden="true">◐</span>
+            <span class="c1-block-body"><span class="c1-block-message">{{ t "analytics.points.partial" }}</span></span>
+        </div>
+    </div>
+
+    <div id="ap-loading"><div class="skeleton h-[400px] w-full rounded-lg"></div></div>
+
+    <div id="ap-empty" class="hidden">
+        <div class="c1-block c1-block--block c1-tier-neutral">
+            <span class="c1-block-icon" aria-hidden="true">▢</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.points.empty" }}</span>
+                <span class="c1-block-cause">{{ t "analytics.points.empty_cause" }}</span>
+            </span>
+        </div>
+    </div>
+
+    <div id="ap-error" class="hidden" role="alert">
+        <div class="c1-block c1-block--block c1-tier-danger">
+            <span class="c1-block-icon" aria-hidden="true">⛔</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.points.failed" }}</span>
+                <span class="c1-block-cause" id="ap-error-msg"></span>
+            </span>
+            <button type="button" id="ap-retry" class="btn-secondary text-sm">{{ t "stat.retry" }}</button>
+        </div>
+    </div>
+
+    <div id="ap-content" class="hidden">
+        <div class="kpi-grid">
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.balance" }}</span><span id="ap-kpi-balance" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net_change" }}</span><span id="ap-kpi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="ap-kpi-earned" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="ap-kpi-events" class="stat-value num"></span></div>
+        </div>
+        <p class="type-small text-text-secondary mb-4">{{ t "stat.kpi.note" }}</p>
+
+        {{template "c14.chart" "ap-c14"}}
+
+        <p id="ap-downsampled" class="type-small text-text-secondary hidden mt-2">{{ t "analytics.points.downsampled" }}</p>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+{{template "c14.script" .}}
+<script>
+(function () {
+    // Reuses the EXISTING AnalyticsSettings.Refresh cadence verbatim — no new
+    // polling, SSE, WebSocket or manual-refresh contract is introduced.
+    const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
+    const NO_DATA = {{ t "analytics.no_data" }};
+    const nf = new Intl.NumberFormat();
+
+    const els = {
+        streamer: document.getElementById('ap-streamer'),
+        updated: document.getElementById('ap-updated'),
+        stale: document.getElementById('ap-stale'),
+        partial: document.getElementById('ap-partial'),
+        loading: document.getElementById('ap-loading'),
+        empty: document.getElementById('ap-empty'),
+        error: document.getElementById('ap-error'),
+        errorMsg: document.getElementById('ap-error-msg'),
+        retry: document.getElementById('ap-retry'),
+        content: document.getElementById('ap-content'),
+        downsampled: document.getElementById('ap-downsampled'),
+        export: document.getElementById('ap-export'),
+        csv: document.querySelector('[data-c14-csv]'),
+        rangeBtns: Array.from(document.querySelectorAll('[data-ap-range]')),
+    };
+    if (!els.content) return;
+
+    let chart = null;
+    let currentRange = '24h';
+    let refreshTimer = null;
+    let inFlight = null;
+    let lastData = null;
+
+    function show(state) {
+        els.loading.classList.toggle('hidden', state !== 'loading');
+        els.empty.classList.toggle('hidden', state !== 'empty');
+        els.error.classList.toggle('hidden', state !== 'error');
+        els.content.classList.toggle('hidden', state !== 'content');
+    }
+
+    // A concrete streamer is mandatory — there is no aggregate facet, and the
+    // backend rejects an empty streamer with 400.
+    function selectedStreamer() {
+        const v = els.streamer ? els.streamer.value : '';
+        return (v && v !== '__none__') ? v : '';
+    }
+
+    function apiURL(base) {
+        return base + '?streamer=' + encodeURIComponent(selectedStreamer()) +
+            '&range=' + encodeURIComponent(currentRange);
+    }
+
+    function updateExportLink() { els.export.href = apiURL('/api/points-history/export'); }
+
+    function buildOptions(data) {
+        const P = c14Palette();
+        const series = (data.points || []).map(p => ({ x: p.t, y: p.balance }));
+        const reasons = (data.points || []).map(p => p.reason || '');
+        const annotations = (data.annotations || []).map(a => {
+            const bg = a.color || P.s1;
+            return {
+                x: a.t,
+                borderColor: bg,
+                label: {
+                    borderColor: bg,
+                    style: { color: P.inkDark, background: bg, fontSize: '10px' },
+                    text: a.reason ? a.reason : a.type,
+                    orientation: 'horizontal',
+                },
+            };
+        });
+        return {
+            series: [{ name: t('js.stat.balance'), data: series }],
+            chart: {
+                type: 'area', height: 400, background: 'transparent',
+                foreColor: P.label, fontFamily: 'Inter, sans-serif',
+                toolbar: { show: true, tools: { download: false } },
+                animations: { enabled: !c14ReducedMotion, speed: 300 },
+            },
+            colors: [P.s1],
+            fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.05, stops: [0, 100] } },
+            // 'straight' is deliberate: the samples ARE the data. A smoothed
+            // curve over sparse samples would imply intermediate readings the
+            // miner never took.
+            stroke: { curve: 'straight', width: 2 },
+            dataLabels: { enabled: false },
+            xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+            yaxis: { labels: { formatter: v => nf.format(Math.round(v)) } },
+            grid: { borderColor: P.grid, strokeDashArray: 4 },
+            tooltip: {
+                theme: c14Theme(),
+                x: { format: 'dd MMM yyyy HH:mm' },
+                y: {
+                    formatter: function (val, opts) {
+                        let label = nf.format(val) + ' ' + t('js.stat.points_suffix');
+                        const r = reasons[opts.dataPointIndex];
+                        if (r) label += ' · ' + r;
+                        return label;
+                    },
+                },
+            },
+            annotations: { xaxis: annotations },
+            noData: { text: t('js.stat.no_data') },
+        };
+    }
+
+    function setKPI(id, text, sign) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.classList.remove('pos', 'neg');
+        if (sign) el.classList.add(sign);
+        if (text === '—') { el.setAttribute('aria-label', NO_DATA); } else { el.removeAttribute('aria-label'); }
+    }
+
+    // rawTruncated means the window is missing its NEWEST rows, so the loaded
+    // series' last balance is not the current balance and last-first is not
+    // the period's change. Every tile dashes out — an em dash with a no-data
+    // label, never a 0 that would read as a real measurement.
+    function renderKPIs(data) {
+        if (data.rawTruncated) {
+            ['ap-kpi-balance', 'ap-kpi-net', 'ap-kpi-earned', 'ap-kpi-events'].forEach(id => setKPI(id, '—'));
+            return;
+        }
+        const pts = data.points || [];
+        const first = pts.length ? pts[0].balance : null;
+        const last = pts.length ? pts[pts.length - 1].balance : null;
+        setKPI('ap-kpi-balance', c14NoData(last, v => nf.format(v)) || '—');
+        if (first === null || last === null) {
+            setKPI('ap-kpi-net', '—');
+        } else {
+            const net = last - first;
+            setKPI('ap-kpi-net', (net > 0 ? '+' : '') + nf.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        }
+        let earned = 0, events = 0;
+        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
+        setKPI('ap-kpi-earned', '+' + nf.format(earned), earned > 0 ? 'pos' : '');
+        setKPI('ap-kpi-events', nf.format(events));
+    }
+
+    // The C14 text alternative: what the chart shows, stated in words, plus
+    // the same series as a table and as CSV.
+    //
+    // Timestamps go out as ISO-8601 UTC. The on-screen table renders local
+    // time because that is what the operator is reading against their own
+    // clock, but a CSV is a FILE: it outlives the session, travels between
+    // machines and gets parsed by other tools, so it must not depend on the
+    // reader's locale or timezone — and a raw epoch integer, while
+    // deterministic, is not something a person can check by eye.
+    function tableRows(data) {
+        return (data.points || []).map(p => [p.t, p.balance, p.reason || null]);
+    }
+
+    function isoUTC(t) {
+        const d = new Date(t);
+        return isNaN(d.getTime()) ? null : d.toISOString();
+    }
+
+    function csvRows(data) {
+        return tableRows(data).map(r => [isoUTC(r[0]), r[1], r[2]]);
+    }
+
+    function csvHeader() {
+        return [t('js.analytics.col.time'), t('js.analytics.col.balance'), t('js.analytics.col.reason')];
+    }
+
+    function renderC14(data) {
+        const pts = data.points || [];
+        const header = csvHeader();
+        c14RenderTable('ap-c14', header, tableRows(data).map(r => [
+            c14Cell(r[0], v => new Date(v).toLocaleString(), NO_DATA),
+            c14Cell(r[1], v => nf.format(v), NO_DATA),
+            c14Cell(r[2], null, NO_DATA),
+        ]));
+        const first = pts.length ? pts[0].balance : null;
+        const last = pts.length ? pts[pts.length - 1].balance : null;
+        const summary = t('js.analytics.points.summary')
+            .replace('{n}', nf.format(pts.length))
+            .replace('{streamer}', selectedStreamer())
+            .replace('{range}', currentRange)
+            .replace('{first}', first === null ? NO_DATA : nf.format(first))
+            .replace('{last}', last === null ? NO_DATA : nf.format(last));
+        c14SetSummary('ap-c14', summary);
+    }
+
+    function render(data) {
+        lastData = data;
+        const options = buildOptions(data);
+        if (chart) {
+            chart.updateOptions(options, false, !c14ReducedMotion);
+        } else {
+            chart = new ApexCharts(document.getElementById('ap-c14-chart'), options);
+            chart.render();
+        }
+        renderKPIs(data);
+        renderC14(data);
+    }
+
+    function setUpdated() {
+        els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
+    }
+
+    async function load(isRefresh) {
+        if (!selectedStreamer()) { show('empty'); return; }
+        updateExportLink();
+        if (inFlight) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+        if (!isRefresh && chart === null) show('loading');
+
+        try {
+            const resp = await fetch(apiURL('/api/points-history'), { signal: ctrl.signal });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            inFlight = null;
+            els.stale.classList.add('hidden');
+
+            if (!data.points || data.points.length === 0) {
+                if (chart) { chart.destroy(); chart = null; }
+                els.partial.classList.add('hidden');
+                show('empty');
+                setUpdated();
+                return;
+            }
+
+            show('content');
+            render(data);
+            els.downsampled.classList.toggle('hidden', !data.chartDownsampled);
+            els.partial.classList.toggle('hidden', !data.rawTruncated);
+            setUpdated();
+        } catch (err) {
+            if (ctrl.signal.aborted) return;
+            inFlight = null;
+            // A failed background refresh keeps the last good view and flags it
+            // stale rather than blanking a working page.
+            if (isRefresh && chart) { els.stale.classList.remove('hidden'); return; }
+            els.errorMsg.textContent = String(err.message || err);
+            show('error');
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        if (REFRESH_MS > 0) refreshTimer = setInterval(() => load(true), REFRESH_MS);
+    }
+
+    els.rangeBtns.forEach(btn => btn.addEventListener('click', () => {
+        els.rangeBtns.forEach(b => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        currentRange = btn.dataset.apRange;
+        load(false);
+    }));
+    if (els.streamer) els.streamer.addEventListener('change', () => load(false));
+    els.retry.addEventListener('click', () => load(false));
+
+    if (els.csv) {
+        els.csv.addEventListener('click', () => {
+            if (!lastData) return;
+            c14DownloadCSV(
+                selectedStreamer() + '-points-' + currentRange + '.csv',
+                csvHeader(),
+                csvRows(lastData)
+            );
+        });
+    }
+
+    // Follow a live theme switch by updating the existing instance in place.
+    document.addEventListener('miner:themechange', function () {
+        if (chart && lastData) chart.updateOptions(buildOptions(lastData), false, false);
+    });
+
+    updateExportLink();
+    c14WhenCharts(function () {
+        load(false);
+        scheduleRefresh();
+    }, function () {
+        els.errorMsg.textContent = t('js.stat.chart_lib_failed');
+        show('error');
+    });
+})();
+</script>
+{{end}}

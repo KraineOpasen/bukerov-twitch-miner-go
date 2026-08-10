@@ -842,8 +842,10 @@ func TestS5_6EvidenceHarnessIdempotencyCleanupRegisteredBeforeFirstStop(t *testi
 // collide with their own direct-route registration — see server.go's
 // registration-before-redirect-loop ordering — and panic srv.handler()).
 func TestS5_6RedirectMapNoLongerContainsSettingsRoutes(t *testing.T) {
-	if len(compatibilityRedirects) != 3 {
-		t.Fatalf("len(compatibilityRedirects) = %d, want 3", len(compatibilityRedirects))
+	// task S5-8 removed the last two non-/help entries (/analytics/points and
+	// /analytics/roi), taking the map from 3 down to 1.
+	if len(compatibilityRedirects) != 1 {
+		t.Fatalf("len(compatibilityRedirects) = %d, want 1", len(compatibilityRedirects))
 	}
 	for _, route := range s56CategoryRoutes {
 		if _, ok := compatibilityRedirects[route]; ok {

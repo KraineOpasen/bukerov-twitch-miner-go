@@ -558,8 +558,10 @@ func TestS5_3CCompactPredictionsKPI(t *testing.T) {
 			t.Errorf("predictions KPI missing honest unknown marker %q", unknown)
 		}
 	}
-	if !strings.Contains(body, `href="/statistics"`) {
-		t.Error("predictions KPI must point at the ROI owner (/statistics)")
+	// task S5-8: the ROI owner moved from the legacy /statistics page to the
+	// canonical /analytics/roi route.
+	if !strings.Contains(body, `href="/analytics/roi"`) {
+		t.Error("predictions KPI must point at the ROI owner (/analytics/roi)")
 	}
 }
 

@@ -29,10 +29,15 @@ import (
 // (handlers_settings_categories.go), not a redirect to /settings. Legacy
 // /settings (the mega-form) keeps rendering directly, unchanged — it is
 // simply no longer linked from the C2 nav.
+//
+// task S5-8 removed the last two entries that were not /help: /analytics/points
+// and /analytics/roi are now their own direct-render routes registered in
+// server.go (handlers_analytics_pages.go), not redirects to /statistics.
+// Legacy /statistics keeps rendering directly, byte-for-byte unchanged — it is
+// simply no longer the destination the C2 nav points Analytics at. The map is
+// now down to its final single entry.
 var compatibilityRedirects = map[string]string{
-	"/analytics/points": "/statistics",
-	"/analytics/roi":    "/statistics",
-	"/help":             "/help/getting-started",
+	"/help": "/help/getting-started",
 }
 
 // handleOverviewPage renders the additive /overview compatibility route
