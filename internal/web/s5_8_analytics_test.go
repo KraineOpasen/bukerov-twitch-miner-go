@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -912,9 +913,27 @@ func TestS5_8NetChangeRequiresTwoSamples(t *testing.T) {
 func TestS5_8SummaryNeverAnnouncesOnTimedRefresh(t *testing.T) {
 	c14 := s58ReadTemplate(t, "templates/components/c14_chart.html")
 
-	// The markup must not ship as a live region.
-	if !strings.Contains(c14, `aria-live="off"`) {
-		t.Error("the C14 summary must ship with an explicit aria-live=\"off\"; role=\"status\" alone is implicitly polite")
+	// Asserted on the RENDERED page, not on template text: what reaches the
+	// browser is what decides whether the region speaks. A summary that ships
+	// live would announce on the very first timed refresh.
+	srv := buildF3PageServer(t)
+	for _, tc := range []struct{ route, id string }{
+		{"/analytics/points", "ap-c14-summary"},
+		{"/analytics/roi", "ar-c14-summary"},
+	} {
+		for _, lang := range []string{"en", "ru"} {
+			tag, ok := s58TagWithID(f3GetPage(t, srv, tc.route, lang), tc.id)
+			if !ok {
+				t.Errorf("[%s %s] no C14 summary rendered", lang, tc.route)
+				continue
+			}
+			if !strings.Contains(tag, `aria-live="off"`) {
+				t.Errorf("[%s %s] the C14 summary must render aria-live=\"off\"; role=\"status\" alone is implicitly polite: %s", lang, tc.route, tag)
+			}
+			if !strings.Contains(tag, `role="status"`) {
+				t.Errorf("[%s %s] the C14 summary must keep role=\"status\" so a user-initiated render can still announce: %s", lang, tc.route, tag)
+			}
+		}
 	}
 	if strings.Contains(c14, `aria-live="polite"`) {
 		t.Error("the C14 summary markup must not hardcode aria-live=\"polite\" — the announcement is per-render")
@@ -987,22 +1006,62 @@ func TestS5_8StripsStartHiddenAndArePlainWrappers(t *testing.T) {
 	} {
 		body := f3GetPage(t, srv, route, "en")
 		for _, id := range ids {
-			idx := strings.Index(body, `id="`+id+`"`)
-			if idx < 0 {
+			tag, ok := s58TagWithID(body, id)
+			if !ok {
 				t.Errorf("%s: strip %q not rendered", route, id)
 				continue
 			}
-			start := strings.LastIndex(body[:idx], "<")
-			end := strings.Index(body[idx:], ">")
-			tag := body[start : idx+end+1]
-			if !strings.Contains(tag, "hidden") {
-				t.Errorf("%s: strip %q must ship hidden: %s", route, id, tag)
+			classes := s58ClassSet(tag)
+			// Exact class-token membership, never a substring of the whole
+			// tag: `strings.Contains(tag, "hidden")` would also be satisfied
+			// by an unrelated attribute (data-hidden="false") or by a class
+			// that merely contains the word (not-hidden), so it could pass
+			// over an element that renders perfectly visible.
+			if !classes["hidden"] {
+				t.Errorf("%s: strip %q must ship with the `hidden` CLASS, got class set %v in %s", route, id, s58SortedKeys(classes), tag)
 			}
-			if strings.Contains(tag, "c1-block") {
+			if classes["c1-block"] {
 				t.Errorf("%s: strip %q must be a plain wrapper, not the .c1-block itself: %s", route, id, tag)
 			}
 		}
 	}
+}
+
+// s58TagWithID returns the opening tag carrying id="<id>".
+func s58TagWithID(body, id string) (string, bool) {
+	idx := strings.Index(body, `id="`+id+`"`)
+	if idx < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(body[:idx], "<")
+	end := strings.Index(body[idx:], ">")
+	if start < 0 || end < 0 {
+		return "", false
+	}
+	return body[start : idx+end+1], true
+}
+
+// s58ClassSet parses an opening tag's class attribute into a token set, so
+// membership is checked exactly rather than by substring.
+func s58ClassSet(tag string) map[string]bool {
+	out := map[string]bool{}
+	m := s58ClassAttrRe.FindStringSubmatch(tag)
+	if m == nil {
+		return out
+	}
+	for _, c := range strings.Fields(m[1]) {
+		out[c] = true
+	}
+	return out
+}
+
+func s58SortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestS5_8NewTemplatesUseSemanticTokensOnly pins Q3 MINOR-3. Handoff §5: new
