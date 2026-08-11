@@ -18,7 +18,12 @@
      table's column headers are supplied client-side by the owning page. */}}
 {{define "c14.chart"}}<div class="c14-block" data-c14-block="{{.}}">
     <div id="{{.}}-chart" data-c14-chart role="img" aria-label="{{ t "analytics.c14.chart_label" }}" aria-describedby="{{.}}-summary"></div>
-    <p id="{{.}}-summary" data-c14-summary role="status" aria-live="polite" class="type-small text-text-secondary mt-2">{{ t "analytics.c14.summary_loading" }}</p>
+    {{/* aria-live starts at "off" and is set per render by c14SetSummary:
+         role="status" alone would make this a live region whose implicit
+         "polite" value re-announces the summary on every TIMED REFRESH, which
+         §9/§10 forbid ("timed polls never announce"). The announcement is
+         reinstated for user-initiated renders only. */}}
+    <p id="{{.}}-summary" data-c14-summary role="status" aria-live="off" class="type-small text-text-secondary mt-2">{{ t "analytics.c14.summary_loading" }}</p>
     <details class="mt-3">
         <summary class="type-small text-text-secondary cursor-pointer">{{ t "analytics.c14.table_toggle" }}</summary>
         <div class="c4-table-card mt-2">
@@ -122,11 +127,22 @@
         }).join('');
     }
 
-    // The announced text alternative to the visual. Always set together with
-    // the chart it describes.
-    function c14SetSummary(prefix, text) {
+    // The text alternative to the visual. Always set together with the chart
+    // it describes.
+    //
+    // `announce` is deliberately explicit and never defaulted to true. The
+    // element carries role="status", whose IMPLICIT live value is "polite", so
+    // simply rewriting its text would make a screen reader re-read the same
+    // sentence on every background refresh — §9 "routine SSE/poll refreshes
+    // never announce" and §10 "timed polls ... never announce". An explicit
+    // aria-live is therefore written on every call, BEFORE the text changes,
+    // so the mutation is classified by what the caller actually asked for:
+    // "polite" for a user-initiated render, "off" for a timed refresh.
+    function c14SetSummary(prefix, text, announce) {
         var el = document.getElementById(prefix + '-summary');
-        if (el) el.textContent = text;
+        if (!el) return;
+        el.setAttribute('aria-live', announce ? 'polite' : 'off');
+        el.textContent = text;
     }
 
     // Animation is DISABLED under prefers-reduced-motion, not shortened.

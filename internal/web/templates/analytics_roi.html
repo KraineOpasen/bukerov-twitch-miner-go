@@ -14,10 +14,21 @@
      is a second source of truth that can silently disagree with the miner's
      own ledger.
 
-     The three breakdown tables are exactly the three the summary carries:
-     byStreamer, byStrategy and byOddsBucket. The refresh cadence is the
-     existing AnalyticsSettings.Refresh value threaded through RefreshMinutes,
-     reused verbatim. */}}
+     [INT] — gap Г4 (Stage 4 handoff §17). The Stage 4 report's own wording for
+     the "three tables" was стример/стратегия/исход, and it flagged that
+     composition as an INTERPRETATION rather than confirmed parity. The three
+     tables rendered here are instead exactly the three the authoritative
+     summary actually carries: byStreamer, byStrategy and byOddsBucket. The
+     substitution of the odds-bucket table for an "исход" table is deliberate:
+     ROISummary has no outcome breakdown field, so an исход table could only be
+     produced by re-deriving financial outcomes in the browser — a second
+     source of truth this page forbids. The outcome split is still presented,
+     as the C14 donut plus its data table and CSV, from the summary's own
+     wins/losses/refunds counts. Г4 stays OPEN until the owner confirms this
+     composition; it is not settled by this slice.
+
+     The refresh cadence is the existing AnalyticsSettings.Refresh value
+     threaded through RefreshMinutes, reused verbatim. */}}
 {{define "title"}}{{ t "analytics.roi.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -49,7 +60,9 @@
         </div>
         <div class="flex flex-col gap-1">
             <span class="type-small text-text-secondary">{{ t "analytics.points.period" }}</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
+            {{/* Semantic token, not the `neutral-700` legacy alias — see the
+                 same note on the Points page. */}}
+            <div class="inline-flex rounded-md overflow-hidden border" style="border-color:var(--border-default)" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
                 <button type="button" class="roi-period-btn" data-ar-period="7d">{{ t "stat.range.7d" }}</button>
                 <button type="button" class="roi-period-btn is-active" data-ar-period="30d">{{ t "stat.range.30d" }}</button>
                 <button type="button" class="roi-period-btn" data-ar-period="90d">{{ t "stat.range.90d" }}</button>
@@ -180,6 +193,11 @@
         els.empty.classList.toggle('hidden', state !== 'empty');
         els.error.classList.toggle('hidden', state !== 'error');
         els.content.classList.toggle('hidden', state !== 'content');
+        // The stale strip describes the CONTENT region and goes with it — see
+        // the same note on the Points page.
+        if (state !== 'content') {
+            els.stale.classList.add('hidden');
+        }
     }
 
     function apiURL(base) {
@@ -273,7 +291,9 @@
 
     function csvHeader() { return [t('js.analytics.col.outcome'), t('js.analytics.col.n')]; }
 
-    function renderC14(d) {
+    // `announce` is threaded down from load(): true for a user-initiated
+    // render, false for the timed refresh, which must never speak (§9/§10).
+    function renderC14(d, announce) {
         c14RenderTable('ar-c14', csvHeader(), outcomeRows(d).map(r => [
             c14Cell(r[0], null, NO_DATA),
             c14Cell(r[1], fmtInt, NO_DATA),
@@ -282,10 +302,10 @@
             .replace('{wins}', c14NoData(d.wins, fmtInt) || NO_DATA)
             .replace('{losses}', c14NoData(d.losses, fmtInt) || NO_DATA)
             .replace('{refunds}', c14NoData(d.refunds, fmtInt) || NO_DATA)
-            .replace('{period}', currentPeriod));
+            .replace('{period}', currentPeriod), announce);
     }
 
-    function render(d) {
+    function render(d, announce) {
         lastROI = d;
         setTile('ar-kpi-count', d.count, fmtInt);
         setTile('ar-kpi-winrate', d.winRate, v => v.toFixed(1) + '%');
@@ -296,7 +316,7 @@
         setTile('ar-kpi-avgwin', d.avgWin, fmtSigned, signClass(d.avgWin));
         setTile('ar-kpi-drawdown', d.maxDrawdown, v => (v > 0 ? '-' + fmtInt(v) : '0'), d.maxDrawdown > 0 ? 'neg' : '');
         renderOutcomes(d);
-        renderC14(d);
+        renderC14(d, announce);
         renderBreakdown('ar-by-streamer', d.byStreamer);
         renderBreakdown('ar-by-strategy', d.byStrategy);
         renderBreakdown('ar-by-odds', d.byOddsBucket);
@@ -322,7 +342,7 @@
 
             if (d.empty) { hasData = false; show('empty'); setUpdated(); return; }
             show('content');
-            render(d);
+            render(d, !isRefresh);
             hasData = true;
             setUpdated();
         } catch (err) {
@@ -357,6 +377,8 @@
         });
     }
 
+    // Recolours the donut only. It deliberately does NOT go through render(),
+    // so a theme switch never rewrites — and never re-announces — the summary.
     document.addEventListener('miner:themechange', function () {
         if (lastROI) renderOutcomes(lastROI);
     });

@@ -44,7 +44,10 @@
         </div>
         <div class="flex flex-col gap-1">
             <span class="type-small text-text-secondary">{{ t "analytics.points.period" }}</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "analytics.points.period" }}">
+            {{/* Semantic token, not the `neutral-700` legacy alias: §5 keeps
+                 new templates on semantic utilities only, and the alias set is
+                 deleted in S5-10 once a grep proves zero template references. */}}
+            <div class="inline-flex rounded-md overflow-hidden border" style="border-color:var(--border-default)" role="group" aria-label="{{ t "analytics.points.period" }}">
                 <button type="button" class="stat-range-btn is-active" data-ap-range="24h">{{ t "stat.range.24h" }}</button>
                 <button type="button" class="stat-range-btn" data-ap-range="7d">{{ t "stat.range.7d" }}</button>
                 <button type="button" class="stat-range-btn" data-ap-range="30d">{{ t "stat.range.30d" }}</button>
@@ -153,6 +156,16 @@
         els.empty.classList.toggle('hidden', state !== 'empty');
         els.error.classList.toggle('hidden', state !== 'error');
         els.content.classList.toggle('hidden', state !== 'content');
+        // Both caution strips describe the CONTENT region, and §7 defines them
+        // as sitting above RETAINED content. Once content is off screen they
+        // describe nothing, so they leave with it — otherwise a stale "part of
+        // the data is unavailable" strip ends up captioning a failure block
+        // that is showing no data at all. The content branch re-asserts
+        // `partial` from the fresh payload immediately after calling show().
+        if (state !== 'content') {
+            els.partial.classList.add('hidden');
+            els.stale.classList.add('hidden');
+        }
     }
 
     // A concrete streamer is mandatory — there is no aggregate facet, and the
@@ -242,12 +255,37 @@
         const pts = data.points || [];
         const first = pts.length ? pts[0].balance : null;
         const last = pts.length ? pts[pts.length - 1].balance : null;
+        // Balance is a single observation, so one sample is enough to state it.
         setKPI('ap-kpi-balance', c14NoData(last, v => nf.format(v)) || '—');
-        if (first === null || last === null) {
+
+        // A CHANGE needs two observations. With a single sample last-first is
+        // 0 by construction rather than by measurement, and rendering it would
+        // assert the balance held steady across a window we never observed.
+        if (first === null || last === null || pts.length < 2) {
             setKPI('ap-kpi-net', '—');
         } else {
             const net = last - first;
             setKPI('ap-kpi-net', (net > 0 ? '+' : '') + nf.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        }
+
+        // breakdown carries `omitempty` (analytics/models.go), so its ABSENCE
+        // encodes two different facts: BreakdownFromSamples returns nil when
+        // the raw window holds fewer than two samples (no delta EXISTS to
+        // attribute — earned/events are unknown), and an empty slice when the
+        // window genuinely earned nothing (a real, measured zero). Both reach
+        // the browser as a missing key, so summing `breakdown || []` blindly
+        // reports 0 for both — fabricating a zero in the first case, which is
+        // precisely the false «0» this page forbids.
+        //
+        // The raw series length separates them EXACTLY, with no new backend
+        // field: chartDownsampled is true only when points was thinned, i.e.
+        // raw > points >= 1 and therefore raw >= 2; when it is false, points
+        // IS the raw series and its own length settles it.
+        const rawHasTwoSamples = data.chartDownsampled === true || pts.length >= 2;
+        if (!data.breakdown && !rawHasTwoSamples) {
+            setKPI('ap-kpi-earned', '—');
+            setKPI('ap-kpi-events', '—');
+            return;
         }
         let earned = 0, events = 0;
         for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
@@ -281,7 +319,9 @@
         return [t('js.analytics.col.time'), t('js.analytics.col.balance'), t('js.analytics.col.reason')];
     }
 
-    function renderC14(data) {
+    // `announce` is threaded down from load(): true for a user-initiated
+    // render, false for the timed refresh, which must never speak (§9/§10).
+    function renderC14(data, announce) {
         const pts = data.points || [];
         const header = csvHeader();
         c14RenderTable('ap-c14', header, tableRows(data).map(r => [
@@ -297,10 +337,10 @@
             .replace('{range}', currentRange)
             .replace('{first}', first === null ? NO_DATA : nf.format(first))
             .replace('{last}', last === null ? NO_DATA : nf.format(last));
-        c14SetSummary('ap-c14', summary);
+        c14SetSummary('ap-c14', summary, announce);
     }
 
-    function render(data) {
+    function render(data, announce) {
         lastData = data;
         const options = buildOptions(data);
         if (chart) {
@@ -310,7 +350,7 @@
             chart.render();
         }
         renderKPIs(data);
-        renderC14(data);
+        renderC14(data, announce);
     }
 
     function setUpdated() {
@@ -341,7 +381,7 @@
             }
 
             show('content');
-            render(data);
+            render(data, !isRefresh);
             els.downsampled.classList.toggle('hidden', !data.chartDownsampled);
             els.partial.classList.toggle('hidden', !data.rawTruncated);
             setUpdated();
@@ -382,6 +422,9 @@
     }
 
     // Follow a live theme switch by updating the existing instance in place.
+    // Recolours the existing instance only. It deliberately does NOT go
+    // through render(), so a theme switch never rewrites — and never
+    // re-announces — the summary.
     document.addEventListener('miner:themechange', function () {
         if (chart && lastData) chart.updateOptions(buildOptions(lastData), false, false);
     });

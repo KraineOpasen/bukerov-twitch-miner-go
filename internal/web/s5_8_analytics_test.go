@@ -824,3 +824,229 @@ func TestS5_8LegacyStatisticsStillRendersDirectly(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------
+// 8. Q3 corrective pass — regressions found by independent review.
+//
+// Each test below pins a defect that the pre-existing suite could not see,
+// because its assertions were scoped to functions the defect did not live in.
+// ---------------------------------------------------------------------
+
+// TestS5_8EarnedEventsNeverFabricateZeroWhenBreakdownAbsent pins Q3 MAJOR-1.
+//
+// /api/points-history omits "breakdown" entirely (`json:"breakdown,omitempty"`,
+// analytics/models.go) for TWO different facts: BreakdownFromSamples returns
+// nil when the raw window holds fewer than two samples — no delta EXISTS to
+// attribute — and an empty slice when the window genuinely earned nothing.
+// Both arrive as a missing key, so `for (const share of data.breakdown || [])`
+// produced `earned = 0, events = 0` for both, painting "+0"/"0" (with no
+// no-data label) over an INDETERMINATE window. Reproduced in a browser against
+// a real single-sample payload before the fix.
+//
+// The fix disambiguates the two cases from the payload the page already has,
+// inventing no backend field: chartDownsampled is true only when points was
+// thinned (raw > points >= 1, hence raw >= 2); when it is false, points IS the
+// raw series.
+func TestS5_8EarnedEventsNeverFabricateZeroWhenBreakdownAbsent(t *testing.T) {
+	src := s58ReadTemplate(t, "templates/analytics_points.html")
+	body := s58FuncBody(t, src, "renderKPIs")
+
+	// The absent-breakdown guard must exist, and must be decided by the raw
+	// series length rather than by a falsy test on breakdown alone.
+	if !strings.Contains(body, "chartDownsampled === true") {
+		t.Error("renderKPIs must use chartDownsampled to establish that the raw series held at least two samples")
+	}
+	if !strings.Contains(body, "pts.length >= 2") {
+		t.Error("renderKPIs must fall back to the points length when the series was not downsampled")
+	}
+	if !strings.Contains(body, "!data.breakdown") {
+		t.Error("renderKPIs must branch on breakdown being ABSENT — an omitempty field is missing, not falsy-zero")
+	}
+
+	// The guard must precede the summation, or it cannot prevent anything.
+	guard := strings.Index(body, "!data.breakdown")
+	sum := strings.Index(body, "for (const share of data.breakdown")
+	if guard < 0 || sum < 0 || guard > sum {
+		t.Errorf("the absent-breakdown guard must run BEFORE the breakdown summation (guard=%d, sum=%d)", guard, sum)
+	}
+
+	// An indeterminate window dashes out both derived tiles; setKPI attaches
+	// the accessible no-data label whenever the text is the em dash.
+	for _, want := range []string{`setKPI('ap-kpi-earned', '—')`, `setKPI('ap-kpi-events', '—')`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderKPIs must dash out the derived tile when the window is indeterminate: missing %q", want)
+		}
+	}
+}
+
+// TestS5_8NetChangeRequiresTwoSamples pins the same false-zero class on the
+// net-change tile: with a single sample last-first is 0 by CONSTRUCTION, not by
+// measurement, so reporting it asserts the balance held steady across a window
+// that was never observed.
+func TestS5_8NetChangeRequiresTwoSamples(t *testing.T) {
+	src := s58ReadTemplate(t, "templates/analytics_points.html")
+	body := s58FuncBody(t, src, "renderKPIs")
+
+	if !strings.Contains(body, "pts.length < 2") {
+		t.Error("the net-change tile must dash out below two samples — a change needs two observations")
+	}
+	netGuard := strings.Index(body, "pts.length < 2")
+	netDash := strings.Index(body, `setKPI('ap-kpi-net', '—')`)
+	if netGuard < 0 || netDash < 0 || netGuard > netDash {
+		t.Errorf("the two-sample guard must gate the net tile's dash (guard=%d, dash=%d)", netGuard, netDash)
+	}
+	// Balance is a single observation and stays renderable from one sample.
+	if !strings.Contains(body, "ap-kpi-balance") {
+		t.Error("the balance tile must still render from a single sample — it is one observation, not a delta")
+	}
+}
+
+// TestS5_8SummaryNeverAnnouncesOnTimedRefresh pins Q3 MINOR-1.
+//
+// The C14 summary carries role="status", whose IMPLICIT live value is polite,
+// so rewriting its text on the timed refresh made a screen reader re-read the
+// same sentence every AnalyticsSettings.Refresh minutes. Measured in a browser
+// (page interval compressed): five refreshes produced five announcements of
+// identical text. Handoff §9 "routine SSE/poll refreshes never announce" and
+// §10 "timed polls ... never announce".
+func TestS5_8SummaryNeverAnnouncesOnTimedRefresh(t *testing.T) {
+	c14 := s58ReadTemplate(t, "templates/components/c14_chart.html")
+
+	// The markup must not ship as a live region.
+	if !strings.Contains(c14, `aria-live="off"`) {
+		t.Error("the C14 summary must ship with an explicit aria-live=\"off\"; role=\"status\" alone is implicitly polite")
+	}
+	if strings.Contains(c14, `aria-live="polite"`) {
+		t.Error("the C14 summary markup must not hardcode aria-live=\"polite\" — the announcement is per-render")
+	}
+
+	// The setter decides liveness from its caller, and does so BEFORE the text
+	// mutation, so the mutation is classified by the requested value.
+	body := s58FuncBody(t, c14, "c14SetSummary")
+	if !strings.Contains(body, "announce ? 'polite' : 'off'") {
+		t.Error("c14SetSummary must set aria-live from its announce argument")
+	}
+	setAt := strings.Index(body, "setAttribute('aria-live'")
+	textAt := strings.Index(body, "textContent")
+	if setAt < 0 || textAt < 0 || setAt > textAt {
+		t.Errorf("aria-live must be set BEFORE the text changes (attr=%d, text=%d)", setAt, textAt)
+	}
+
+	// Both pages thread the flag from load(): user-initiated renders announce,
+	// the timed refresh does not.
+	for _, name := range []string{"templates/analytics_points.html", "templates/analytics_roi.html"} {
+		src := s58ReadTemplate(t, name)
+		if !strings.Contains(src, "!isRefresh") {
+			t.Errorf("%s: render() must be told whether this load was user-initiated", name)
+		}
+		if !strings.Contains(src, "function render(") {
+			t.Fatalf("%s: no render() to thread the flag through", name)
+		}
+		if !strings.Contains(s58FuncBody(t, src, "render"), "announce") {
+			t.Errorf("%s: render() must pass the announce flag down to the C14 summary", name)
+		}
+	}
+}
+
+// TestS5_8CautionStripsLeaveWithTheContentTheyDescribe pins Q3 MINOR-2.
+//
+// show() toggled only loading/empty/error/content, so the S-PART and S-STALE
+// strips — which describe the CONTENT region — survived a transition into the
+// failure state. Reproduced in a browser: after a failed load the page showed
+// "Partial data: the selection hit the backend row limit" above a failure block
+// that was displaying no data at all. Handoff §7 defines the S-PART strip as
+// sitting above RETAINED content.
+func TestS5_8CautionStripsLeaveWithTheContentTheyDescribe(t *testing.T) {
+	cases := map[string][]string{
+		"templates/analytics_points.html": {"els.partial.classList.add('hidden')", "els.stale.classList.add('hidden')"},
+		"templates/analytics_roi.html":    {"els.stale.classList.add('hidden')"},
+	}
+	for name, wants := range cases {
+		src := s58ReadTemplate(t, name)
+		body := s58FuncBody(t, src, "show")
+		if !strings.Contains(body, "state !== 'content'") {
+			t.Errorf("%s: show() must clear the content-scoped strips whenever content is not the rendered state", name)
+		}
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: show() must clear %q when leaving the content state", name, want)
+			}
+		}
+	}
+}
+
+// TestS5_8StripsStartHiddenAndArePlainWrappers re-asserts, after the show()
+// change, that the strips are still plain wrappers (never .c1-block carrying
+// .hidden — see TestS5_8HiddenActuallyHides) and still ship hidden. Without
+// this, the MINOR-2 fix could be "satisfied" by an element that never hid.
+func TestS5_8StripsStartHiddenAndArePlainWrappers(t *testing.T) {
+	srv := buildF3PageServer(t)
+	for route, ids := range map[string][]string{
+		"/analytics/points": {"ap-partial", "ap-stale"},
+		"/analytics/roi":    {"ar-stale"},
+	} {
+		body := f3GetPage(t, srv, route, "en")
+		for _, id := range ids {
+			idx := strings.Index(body, `id="`+id+`"`)
+			if idx < 0 {
+				t.Errorf("%s: strip %q not rendered", route, id)
+				continue
+			}
+			start := strings.LastIndex(body[:idx], "<")
+			end := strings.Index(body[idx:], ">")
+			tag := body[start : idx+end+1]
+			if !strings.Contains(tag, "hidden") {
+				t.Errorf("%s: strip %q must ship hidden: %s", route, id, tag)
+			}
+			if strings.Contains(tag, "c1-block") {
+				t.Errorf("%s: strip %q must be a plain wrapper, not the .c1-block itself: %s", route, id, tag)
+			}
+		}
+	}
+}
+
+// TestS5_8NewTemplatesUseSemanticTokensOnly pins Q3 MINOR-3. Handoff §5: new
+// and migrated templates use semantic utilities exclusively, and F1's legacy
+// re-pointed aliases are deleted in S5-10 once a grep proves zero template
+// references. Two fresh `border-neutral-700` references would have made that
+// grep fail.
+func TestS5_8NewTemplatesUseSemanticTokensOnly(t *testing.T) {
+	legacy := regexp.MustCompile(`\b(?:bg|text|border|ring|from|to|via)-(?:neutral|purple|gray|slate|zinc)-\d{2,3}\b`)
+	primitive := regexp.MustCompile(`--prim-[a-z0-9-]+`)
+
+	for _, name := range []string{
+		"templates/analytics_points.html",
+		"templates/analytics_roi.html",
+		"templates/components/c14_chart.html",
+	} {
+		src := s58ReadTemplate(t, name)
+		if m := legacy.FindAllString(src, -1); len(m) > 0 {
+			t.Errorf("%s: uses F1 legacy alias(es) %v — new templates take semantic utilities/tokens only (§5)", name, m)
+		}
+		if m := primitive.FindAllString(src, -1); len(m) > 0 {
+			t.Errorf("%s: references primitive token(s) %v — primitives never appear in templates (§4)", name, m)
+		}
+	}
+}
+
+// TestS5_8ROIMarksG4AsInterpretation pins Q3 MINOR-4. Handoff §17 requires the
+// open gap Г4 (the ROI "three tables" composition) to be marked [INT] in a
+// template comment. This slice ships byStreamer/byStrategy/byOddsBucket rather
+// than the report's стример/стратегия/исход, so the marker is what keeps the
+// substitution visible as an unresolved interpretation instead of silently
+// reading as settled parity.
+func TestS5_8ROIMarksG4AsInterpretation(t *testing.T) {
+	src := s58ReadTemplate(t, "templates/analytics_roi.html")
+	for _, want := range []string{"[INT]", "Г4"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the ROI template comment must carry the %s marker for the open table-composition gap (§17)", want)
+		}
+	}
+	// The marker has to sit in a template comment, not in rendered output.
+	srv := buildF3PageServer(t)
+	for _, lang := range []string{"en", "ru"} {
+		if body := f3GetPage(t, srv, "/analytics/roi", lang); strings.Contains(body, "[INT]") {
+			t.Errorf("[%s] the Г4 marker leaked into the rendered page — it is a template comment", lang)
+		}
+	}
+}
