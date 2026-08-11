@@ -8,9 +8,16 @@ package web
 // browser can be driven over the full evidence matrix:
 //
 //	RU + EN; light + dark + a live theme switch; 1440 / 1100 / 800 / <768;
-//	Points READY / EMPTY / PART / FAIL(+Retry); ROI READY / EMPTY / FAIL(+Retry);
-//	prefers-reduced-motion; table -> cards; keyboard/focus order; the exact
-//	aria-current destination; CSV download; and no horizontal overflow.
+//	Points READY / EMPTY / PART / SPARSE / FAIL(+Retry); ROI READY / EMPTY /
+//	FAIL(+Retry); prefers-reduced-motion; table -> cards; keyboard/focus order;
+//	the exact aria-current destination; CSV download; and no horizontal overflow.
+//
+// s58BrowserScenarios is the standing, named catalogue of what this harness is
+// FOR: each entry pins one behavior that lives inside a page's client IIFE and
+// is therefore unobservable from Go, together with the exact URL that produces
+// it. TestS5_8EvidenceHarness prints the catalogue on startup, and
+// TestS5_8BrowserScenarioCatalogueIsServable keeps it from naming a URL the
+// harness does not serve.
 //
 // It binds 127.0.0.1 only and never talks to Twitch, Discord, or any network.
 // Env-gated: skipped unless MINER_S5_8_HARNESS=1.
@@ -67,7 +74,13 @@ const s58DocumentedTimeout = 1800 * time.Second
 
 // s58HarnessStates are the state names the harness understands on a page's
 // ?state= query string. Anything else (including its absence) is READY.
-var s58HarnessStates = []string{"empty", "part", "fail"}
+//
+// "sparse" serves a SINGLE-sample points payload with no breakdown key — the
+// indeterminate window in which a change and a per-reason total do not exist to
+// be measured. It is a browser-observable state on purpose: whether the page
+// dashes those tiles out or paints a fabricated 0 is a client-IIFE decision, so
+// it cannot be settled by a Go assertion over template text.
+var s58HarnessStates = []string{"empty", "part", "sparse", "fail"}
 
 // s58StateFromReferer recovers the selected harness state from an API
 // request's Referer. Returns "" for READY.
@@ -89,32 +102,83 @@ func s58StateFromReferer(r *http.Request) string {
 	return ""
 }
 
-// s58SeedFixtures records the deterministic points, annotations and settled
-// bets both READY pages render. Values are fixed (no randomness, no wall-clock
-// dependence beyond "now"), so two runs produce the same picture.
+// s58PointSamples is how many samples streamer_a's seeded series holds.
+const s58PointSamples = 140
+
+// s58AnnotationSeed is one deterministic annotation, written at a fixed INDEX
+// inside the points loop rather than after it.
+//
+// RecordAnnotation stamps time.Now() itself and accepts no explicit timestamp,
+// so writing an annotation BETWEEN two RecordPoints calls is the only way to
+// place it inside the series' x-range. Seeding all three after the loop (the
+// pass-2 behavior) put every annotation strictly to the right of the last
+// sample, where ApexCharts clips an xaxis annotation: /api/points-history
+// dutifully returned three annotations and the browser drew none of them. An
+// API-level count is therefore not evidence that an annotation is visible.
+type s58AnnotationSeed struct {
+	afterSample int
+	eventType   string
+	text        string
+	// color is deliberately EMPTY on the first seed. The page resolves an
+	// annotation's ink as `a.color || P.s1`, so an empty colour falls back to
+	// the --chart-series-1 token, which resolves to --prim-night-purple in dark
+	// and --prim-day-purple in light. That contrast against the two hex-pinned
+	// seeds is what lets browser evidence show annotation ink actually
+	// recolouring with the theme rather than being frozen to a stored hex.
+	color string
+}
+
+// s58Annotations spread three markers across the middle of streamer_a's series,
+// well inside both ends, so every one of them lands in the drawn x-range.
+var s58Annotations = []s58AnnotationSeed{
+	{afterSample: 35, eventType: "WATCH_STREAK", text: "+450 - Watch Streak", color: ""},
+	{afterSample: 70, eventType: "WIN", text: "+1200 - Prediction WIN", color: "#39FF88"},
+	{afterSample: 105, eventType: "LOSE", text: "-500 - Prediction LOSE", color: "#FF4D67"},
+}
+
+// s58SeedFixtures is the test-facing adapter over s58Seed: seeding is one
+// operation, so any failed write fails setup outright.
 func s58SeedFixtures(t *testing.T, repo analytics.Repository) {
 	t.Helper()
+	if err := s58Seed(repo); err != nil {
+		t.Fatalf("seed fixtures: %v", err)
+	}
+}
 
+// s58Seed records the deterministic points, annotations and settled bets both
+// READY pages render. Values are fixed (no randomness, no wall-clock dependence
+// beyond "now"), so two runs produce the same picture.
+//
+// Every write is checked. A best-effort write would let a tombstoned streamer,
+// a closed database or a migration drift produce a harness that comes up
+// healthy and serves a chart with silently missing data — and browser evidence
+// captured against it would be worthless without looking worthless.
+func s58Seed(repo analytics.Repository) error {
 	// Points: a rising balance for streamer_a across every earn reason the
 	// breakdown distinguishes, plus a smaller series for streamer_b so the
 	// streamer selector has a real second choice.
 	reasons := []string{"WATCH", "WATCH", "WATCH", "CLAIM", "RAID", "WATCH_STREAK", "PREDICTION"}
 	deltas := []int{10, 10, 10, 50, 250, 450, 1200}
 	balance := 20000
-	for i := 0; i < 140; i++ {
+	for i := 0; i < s58PointSamples; i++ {
 		balance += deltas[i%len(deltas)]
 		if err := repo.RecordPoints("streamer_a", balance, reasons[i%len(reasons)]); err != nil {
-			t.Fatalf("seed points: %v", err)
+			return fmt.Errorf("seed points streamer_a[%d]: %w", i, err)
+		}
+		for _, a := range s58Annotations {
+			if a.afterSample != i {
+				continue
+			}
+			if err := repo.RecordAnnotation("streamer_a", a.eventType, a.text, a.color); err != nil {
+				return fmt.Errorf("seed annotation %s: %w", a.eventType, err)
+			}
 		}
 	}
 	for i := 0; i < 40; i++ {
 		if err := repo.RecordPoints("streamer_b", 5000+i*20, "WATCH"); err != nil {
-			t.Fatalf("seed points: %v", err)
+			return fmt.Errorf("seed points streamer_b[%d]: %w", i, err)
 		}
 	}
-	_ = repo.RecordAnnotation("streamer_a", "WATCH_STREAK", "+450 - Watch Streak", "#B6FF3B")
-	_ = repo.RecordAnnotation("streamer_a", "WIN", "+1200 - Prediction WIN", "#39FF88")
-	_ = repo.RecordAnnotation("streamer_a", "LOSE", "-500 - Prediction LOSE", "#FF4D67")
 
 	// Bets: enough settled outcomes across two streamers, three strategies and
 	// a spread of odds that all three ROI breakdown tables have several rows,
@@ -154,9 +218,10 @@ func s58SeedFixtures(t *testing.T, repo analytics.Repository) {
 			Gained:     b.gained,
 			Odds:       b.odds,
 		}); err != nil {
-			t.Fatalf("seed bet: %v", err)
+			return fmt.Errorf("seed bet %s/%s: %w", b.streamer, b.strategy, err)
 		}
 	}
+	return nil
 }
 
 // s58StateInterceptor wraps the production handler, serving the EMPTY / PART /
@@ -189,6 +254,21 @@ func s58StateInterceptor(next http.Handler) http.Handler {
 			} else {
 				writeJSONOK(w, analytics.ROISummary{Period: "30d", Empty: true})
 			}
+			return
+		case "sparse":
+			if !isPoints {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// One sample, and no breakdown key at all — the shape
+			// /api/points-history really produces for a window holding a single
+			// observation. No change EXISTS across it and nothing is attributable
+			// per reason, so the derived tiles have nothing to report.
+			writeJSONOK(w, analytics.PointsHistory{
+				Streamer: r.URL.Query().Get("streamer"),
+				Range:    "24h",
+				Points:   []analytics.PointSample{{T: time.Now().UnixMilli(), Balance: 20000, Reason: "WATCH"}},
+			})
 			return
 		case "part":
 			if !isPoints {
@@ -239,6 +319,114 @@ func (c *s58Capture) flushWithRawTruncated(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(patched))
 }
 
+// s58BrowserScenario is one NAMED localhost evidence scenario.
+//
+// The Go suite pins what the SERVER answers, what the page RENDERS and what the
+// SEEDED DATA is. None of those can observe a client IIFE actually running: an
+// assertion that the string "toISOString()" appears in a template proves only
+// that the string appears in the template — it passes over a script that never
+// executes, a helper nobody calls, and any behavior the browser really shows.
+// Those behaviors are proven here instead, by driving the listed URL in a real
+// browser on loopback and recording the result.
+type s58BrowserScenario struct {
+	// Name is how the scenario is cited in an evidence write-up.
+	Name string
+	// Route is the page under evidence; State selects the harness variant
+	// ("" is READY).
+	Route, State string
+	// Proves is the behavior the scenario establishes.
+	Proves string
+}
+
+// s58BrowserScenarios is the standing evidence matrix. Every entry names a
+// behavior that lives inside a page's client IIFE and is therefore invisible to
+// the Go suite by construction.
+var s58BrowserScenarios = []s58BrowserScenario{
+	{"points-stale-silent", "/analytics/points", "fail",
+		"a failed TIMED refresh over retained content raises the S-STALE strip with zero live-region announcements"},
+	{"points-part-silent", "/analytics/points", "part",
+		"the S-PART strip re-asserted by a timed poll announces nothing, and every KPI dashes out"},
+	{"points-fail-retry-stamp", "/analytics/points", "fail",
+		"terminal S-FAIL shows cause + Retry + its own failure time, and each Retry failure re-stamps a strictly later datetime"},
+	{"roi-fail-retry-stamp", "/analytics/roi", "fail",
+		"the same terminal S-FAIL contract on ROI, including a re-stamp per failed Retry"},
+	{"points-annotations-recolour", "/analytics/points", "",
+		"at least one xaxis annotation is drawn, and the token-backed one changes ink between light and dark"},
+	{"points-summary-announces-once", "/analytics/points", "",
+		"the C14 summary announces on a user-initiated render and stays silent across timed refreshes"},
+	{"points-strips-leave-with-content", "/analytics/points", "part",
+		"the S-PART strip disappears when the page leaves the content state rather than captioning a failure block"},
+	{"points-sparse-dashes", "/analytics/points", "sparse",
+		"a single-sample window dashes out net change, earned and events instead of painting a fabricated 0"},
+	{"points-empty", "/analytics/points", "empty",
+		"an empty series shows S-EMPTY alone, with no chart and no stale or partial strip"},
+	{"points-csv", "/analytics/points", "",
+		"the CSV is produced in-browser from the already-fetched JSON, with ISO-8601 UTC times and escaped/formula-guarded cells"},
+	{"roi-readonly-get-only", "/analytics/roi", "",
+		"every request the page issues is a GET; no form, no mutation affordance"},
+	{"roi-csv", "/analytics/roi", "",
+		"the outcome CSV is generated client-side from the same summary the tiles read"},
+	{"points-straight-no-interpolation", "/analytics/points", "",
+		"the drawn path has vertices only at real samples — no smoothing, no gap fill, no synthetic zero"},
+	{"reduced-motion", "/analytics/points", "",
+		"prefers-reduced-motion disables chart animation outright rather than shortening it"},
+}
+
+// s58ScenarioURL builds the loopback URL that produces a scenario.
+func (s s58BrowserScenario) s58URL(base string) string {
+	if s.State == "" {
+		return base + s.Route
+	}
+	return base + s.Route + "?state=" + s.State
+}
+
+// TestS5_8BrowserScenarioCatalogueIsServable proves the catalogue can never
+// name a URL the harness does not actually serve: every scenario must target a
+// real route and a state the interceptor understands, and names must be unique
+// so evidence can cite one unambiguously.
+func TestS5_8BrowserScenarioCatalogueIsServable(t *testing.T) {
+	routes := map[string]bool{}
+	for _, r := range s58Routes {
+		routes[r] = true
+	}
+	states := map[string]bool{"": true}
+	for _, s := range s58HarnessStates {
+		states[s] = true
+	}
+
+	seen := map[string]bool{}
+	for _, sc := range s58BrowserScenarios {
+		if sc.Name == "" || sc.Proves == "" {
+			t.Errorf("scenario %+v must carry both a name and the behavior it proves", sc)
+		}
+		if seen[sc.Name] {
+			t.Errorf("duplicate scenario name %q — evidence must cite exactly one scenario", sc.Name)
+		}
+		seen[sc.Name] = true
+		if !routes[sc.Route] {
+			t.Errorf("scenario %q targets %q, which is not an S5-8 route", sc.Name, sc.Route)
+		}
+		if !states[sc.State] {
+			t.Errorf("scenario %q selects state %q, which the harness does not serve", sc.Name, sc.State)
+		}
+	}
+
+	// Every state the harness implements must be exercised by at least one
+	// named scenario, or it is dead code masquerading as evidence capability.
+	for _, state := range s58HarnessStates {
+		used := false
+		for _, sc := range s58BrowserScenarios {
+			if sc.State == state {
+				used = true
+				break
+			}
+		}
+		if !used {
+			t.Errorf("harness state %q is served but no named scenario uses it", state)
+		}
+	}
+}
+
 // TestS5_8EvidenceHarness serves the two Analytics pages for browser evidence.
 func TestS5_8EvidenceHarness(t *testing.T) {
 	if os.Getenv("MINER_S5_8_HARNESS") != "1" {
@@ -271,11 +459,12 @@ func TestS5_8EvidenceHarness(t *testing.T) {
 
 	base := "http://" + handle.Addr.String()
 	t.Logf("S5-8 evidence harness serving on %s", base)
-	t.Logf("  READY: %s/analytics/points   %s/analytics/roi", base, base)
-	t.Logf("  EMPTY: %s/analytics/points?state=empty   %s/analytics/roi?state=empty", base, base)
-	t.Logf("  PART:  %s/analytics/points?state=part", base)
-	t.Logf("  FAIL:  %s/analytics/points?state=fail   %s/analytics/roi?state=fail", base, base)
 	t.Logf("  language: set the %q cookie to en|ru", langCookieName)
+	t.Logf("  named scenarios (%d):", len(s58BrowserScenarios))
+	for _, sc := range s58BrowserScenarios {
+		t.Logf("    %-32s %s", sc.Name, sc.s58URL(base))
+		t.Logf("    %-32s   proves: %s", "", sc.Proves)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -331,6 +520,51 @@ func TestS5_8HarnessDeadlineBeatsDocumentedTimeout(t *testing.T) {
 	}
 }
 
+// s58StubRepo fails one named write path and succeeds on the rest. The
+// Repository interface is embedded as a nil value on purpose: s58Seed must
+// only ever touch the three write methods overridden below, so any other call
+// panics loudly instead of being silently tolerated.
+type s58StubRepo struct {
+	analytics.Repository
+	failOn string
+}
+
+func (r *s58StubRepo) err(path string) error {
+	if r.failOn == path {
+		return fmt.Errorf("stub: %s failed", path)
+	}
+	return nil
+}
+
+func (r *s58StubRepo) RecordPoints(string, int, string) error { return r.err("points") }
+func (r *s58StubRepo) RecordAnnotation(string, string, string, string) error {
+	return r.err("annotation")
+}
+func (r *s58StubRepo) RecordBet(analytics.BetRecord) error { return r.err("bet") }
+
+// TestS5_8SeedPropagatesEveryRepositoryError proves no fixture write is
+// best-effort.
+//
+// The annotation seeds were written as `_ = repo.RecordAnnotation(...)` while
+// the points and bet seeds fatally failed the test. A tombstoned streamer, a
+// closed database or a migration drift therefore produced a harness that came
+// up perfectly healthy and served a points chart with no annotations on it —
+// and the browser evidence run that followed would have reported "annotations
+// render" as unreproducible, or worse, been read as passing.
+//
+// Seeding is one operation: if any write fails, setup fails.
+func TestS5_8SeedPropagatesEveryRepositoryError(t *testing.T) {
+	for _, path := range []string{"points", "annotation", "bet"} {
+		if err := s58Seed(&s58StubRepo{failOn: path}); err == nil {
+			t.Errorf("s58Seed swallowed a %s write failure — a partial fixture must never reach browser evidence", path)
+		}
+	}
+	// The control: nothing fails, so seeding reports success.
+	if err := s58Seed(&s58StubRepo{}); err != nil {
+		t.Errorf("s58Seed on a healthy repository = %v, want nil", err)
+	}
+}
+
 // TestS5_8HarnessRefusesNonLoopbackBind proves the localhost-only guard is
 // real: only loopback hosts are accepted.
 func TestS5_8HarnessRefusesNonLoopbackBind(t *testing.T) {
@@ -360,12 +594,13 @@ func TestS5_8HarnessStateSelection(t *testing.T) {
 	cases := map[string]string{
 		"":                                       "",
 		"http://127.0.0.1:8978/analytics/points": "",
-		"http://127.0.0.1:8978/analytics/points?x=1":         "",
-		"http://127.0.0.1:8978/analytics/points?state=":      "",
-		"http://127.0.0.1:8978/analytics/points?state=bogus": "",
-		"http://127.0.0.1:8978/analytics/points?state=empty": "empty",
-		"http://127.0.0.1:8978/analytics/points?state=part":  "part",
-		"http://127.0.0.1:8978/analytics/roi?state=fail":     "fail",
+		"http://127.0.0.1:8978/analytics/points?x=1":          "",
+		"http://127.0.0.1:8978/analytics/points?state=":       "",
+		"http://127.0.0.1:8978/analytics/points?state=bogus":  "",
+		"http://127.0.0.1:8978/analytics/points?state=empty":  "empty",
+		"http://127.0.0.1:8978/analytics/points?state=part":   "part",
+		"http://127.0.0.1:8978/analytics/points?state=sparse": "sparse",
+		"http://127.0.0.1:8978/analytics/roi?state=fail":      "fail",
 	}
 	for ref, want := range cases {
 		if got := s58StateFromReferer(mk(ref)); got != want {
@@ -437,6 +672,20 @@ func TestS5_8HarnessServesEveryState(t *testing.T) {
 	// PART: the truncation flag the page turns into dashed-out KPIs.
 	if code, body = get(pointsAPI, page("/analytics/points", "part")); code != http.StatusOK || !strings.Contains(body, `"rawTruncated":true`) {
 		t.Errorf("PART points = %d, body=%.200s", code, body)
+	}
+
+	// SPARSE: exactly one sample and NO breakdown key. Both halves matter — a
+	// payload carrying an empty breakdown array would encode "measured nothing"
+	// rather than "nothing is measurable", which is the opposite state.
+	code, body = get(pointsAPI, page("/analytics/points", "sparse"))
+	if code != http.StatusOK {
+		t.Errorf("SPARSE points = %d, want 200", code)
+	}
+	if n := strings.Count(body, `"balance"`); n != 1 {
+		t.Errorf("SPARSE points carries %d samples, want exactly 1: %.200s", n, body)
+	}
+	if strings.Contains(body, `"breakdown"`) {
+		t.Errorf("SPARSE points must omit the breakdown key entirely: %.200s", body)
 	}
 
 	// FAIL.

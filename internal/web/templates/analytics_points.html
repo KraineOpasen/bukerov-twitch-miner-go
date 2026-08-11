@@ -65,13 +65,22 @@
          in the compiled stylesheet, so at equal specificity a block carrying
          both classes would stay visible. Toggling a bare wrapper keeps the
          state blocks genuinely mutually exclusive. */}}
-    <div id="ap-stale" class="hidden mb-3" role="status">
+    {{/* Both strips are PLAIN CONTENT, never live regions. Each is revealed by
+         the TIMED POLL — S-STALE only ever from a failed background refresh,
+         S-PART from every poll that reports the backend row cap — and §9/§10
+         forbid a timed poll from announcing. role="status" would have made them
+         live by IMPLICATION (its implicit aria-live is "polite"), so the reveal
+         itself spoke. aria-live="off" is written EXPLICITLY rather than merely
+         omitting the role, so adding a role later cannot silently give these
+         strips a voice. The information is still reachable: it sits in the
+         document, above the content it describes. */}}
+    <div id="ap-stale" class="hidden mb-3" aria-live="off">
         <div class="c1-block c1-block--strip c1-tier-caution">
             <span class="c1-block-icon" aria-hidden="true">⏱</span>
             <span class="c1-block-body"><span class="c1-block-message">{{ t "stat.stale" }}</span></span>
         </div>
     </div>
-    <div id="ap-partial" class="hidden mb-3" role="status">
+    <div id="ap-partial" class="hidden mb-3" aria-live="off">
         <div class="c1-block c1-block--strip c1-tier-caution">
             <span class="c1-block-icon" aria-hidden="true">◐</span>
             <span class="c1-block-body"><span class="c1-block-message">{{ t "analytics.points.partial" }}</span></span>
@@ -90,12 +99,20 @@
         </div>
     </div>
 
+    {{/* A terminal failure states three things together, inside one alert: what
+         failed, WHEN it failed, and how to try again. The failure time is its
+         own <time> element and is stamped fresh on every terminal failure —
+         it must never be read off #ap-updated, which reports when data last
+         ARRIVED and stays frozen at the last good load. The machine-readable
+         datetime carries millisecond resolution, so a retry that fails inside
+         the same displayed second is still provably a new stamp. */}}
     <div id="ap-error" class="hidden" role="alert">
         <div class="c1-block c1-block--block c1-tier-danger">
             <span class="c1-block-icon" aria-hidden="true">⛔</span>
             <span class="c1-block-body">
                 <span class="c1-block-message">{{ t "analytics.points.failed" }}</span>
                 <span class="c1-block-cause" id="ap-error-msg"></span>
+                <time id="ap-error-time" datetime="" class="type-small text-text-secondary num"></time>
             </span>
             <button type="button" id="ap-retry" class="btn-secondary text-sm">{{ t "stat.retry" }}</button>
         </div>
@@ -136,6 +153,7 @@
         empty: document.getElementById('ap-empty'),
         error: document.getElementById('ap-error'),
         errorMsg: document.getElementById('ap-error-msg'),
+        errorTime: document.getElementById('ap-error-time'),
         retry: document.getElementById('ap-retry'),
         content: document.getElementById('ap-content'),
         downsampled: document.getElementById('ap-downsampled'),
@@ -357,6 +375,21 @@
         els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
     }
 
+    // Stamps the moment THIS terminal failure happened. Called on every path
+    // that shows S-FAIL, so a Retry that fails again re-stamps rather than
+    // leaving the operator reading the first attempt's time. The last-success
+    // clock is deliberately left alone: a failure does not change when data
+    // last arrived, and reusing that value would date the failure to the last
+    // thing that worked.
+    function setFailedAt() {
+        if (!els.errorTime) return;
+        const now = new Date();
+        // Machine-readable to the millisecond; the visible text is the
+        // operator's local clock.
+        els.errorTime.dateTime = now.toISOString();
+        els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+    }
+
     async function load(isRefresh) {
         if (!selectedStreamer()) { show('empty'); return; }
         updateExportLink();
@@ -389,9 +422,12 @@
             if (ctrl.signal.aborted) return;
             inFlight = null;
             // A failed background refresh keeps the last good view and flags it
-            // stale rather than blanking a working page.
+            // stale rather than blanking a working page. That is NOT a terminal
+            // failure: it neither enters S-FAIL nor stamps a failure time, so
+            // the retained content keeps describing itself as merely stale.
             if (isRefresh && chart) { els.stale.classList.remove('hidden'); return; }
             els.errorMsg.textContent = String(err.message || err);
+            setFailedAt();
             show('error');
         }
     }
@@ -435,6 +471,7 @@
         scheduleRefresh();
     }, function () {
         els.errorMsg.textContent = t('js.stat.chart_lib_failed');
+        setFailedAt();
         show('error');
     });
 })();

@@ -27,22 +27,24 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/analytics"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
 )
 
 // s58Routes are the two direct-render routes this slice adds.
 var s58Routes = []string{"/analytics/points", "/analytics/roi"}
-
-// s58Templates maps each route to the page template it renders.
-var s58Templates = map[string]string{
-	"/analytics/points": "templates/analytics_points.html",
-	"/analytics/roi":    "templates/analytics_roi.html",
-}
 
 // s58ReadTemplate reads a page/component template out of the embedded FS.
 // Deliberately templatesFS rather than os.ReadFile: buildF3PageServer calls
@@ -243,24 +245,31 @@ func TestS5_8ExactlyOneAriaCurrentDestination(t *testing.T) {
 //    and a client-generated CSV.
 // ---------------------------------------------------------------------
 
-// TestS5_8C14ComponentExists proves the shared chart component is a real
-// component template (parsed from templates/components/) rather than markup
-// copy-pasted into each page.
-func TestS5_8C14ComponentExists(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/components/c14_chart.html")
-	if !strings.Contains(src, `{{define "c14.chart"}}`) {
-		t.Error("c14_chart.html must define the shared c14.chart component")
-	}
-	// The visual is never the only representation: the component itself
-	// carries the AT summary and the data table.
-	for _, want := range []string{"c14-summary", "c14-table", "c14-csv"} {
-		if !strings.Contains(src, want) {
-			t.Errorf("c14.chart missing required %q hook — a chart must always ship its text alternative", want)
+// TestS5_8C14IsOneSharedComponent proves the chart block is a genuinely shared
+// component rather than markup copy-pasted into each page: the two pages'
+// rendered C14 blocks are byte-identical once each one's own id prefix is
+// normalized away. Copy-paste drifts; a shared component cannot.
+//
+// Asserted on rendered output. The previous version read the component's source
+// and looked for `{{define "c14.chart"}}`, which proves only that the string is
+// in the file — it would pass just as happily if neither page used it.
+func TestS5_8C14IsOneSharedComponent(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	normalized := map[string]string{}
+	for route, prefix := range map[string]string{
+		"/analytics/points": "ap-c14",
+		"/analytics/roi":    "ar-c14",
+	} {
+		block, ok := s58DivSubtreeAt(f3GetPage(t, srv, route, "en"), `data-c14-block="`+prefix+`"`)
+		if !ok {
+			t.Fatalf("%s: no C14 block rendered", route)
 		}
+		normalized[route] = strings.ReplaceAll(block, prefix, "c14")
 	}
-	// Reduced motion disables animation rather than merely shortening it.
-	if !strings.Contains(src, "prefers-reduced-motion") {
-		t.Error("c14.chart must consult prefers-reduced-motion")
+	if normalized["/analytics/points"] != normalized["/analytics/roi"] {
+		t.Errorf("the two pages render DIFFERENT C14 chart hosts — the component is not actually shared:\n points: %s\n roi:    %s",
+			normalized["/analytics/points"], normalized["/analytics/roi"])
 	}
 }
 
@@ -284,85 +293,70 @@ func TestS5_8ChartsPairVisualWithSummaryAndTable(t *testing.T) {
 				t.Errorf("[%s %s] C14 triple mismatch: %d charts, %d summaries, %d tables — every chart needs both",
 					lang, route, nChart, nSummary, nTable)
 			}
-			// The summary is a live region announced to AT, not decorative text.
-			if !strings.Contains(body, `role="status"`) {
-				t.Errorf("[%s %s] C14 summary must be an announced live region", lang, route)
+			// The summary is announceable on a user-initiated render, not
+			// decorative text. Scoped to the summary's own tag: the shared
+			// c17.toast_stack renders role="status" on EVERY page, so a
+			// page-wide search would pass even with the summary's role deleted.
+			block, ok := s58DivSubtreeAt(body, `data-c14-block=`)
+			if !ok {
+				t.Errorf("[%s %s] no C14 block rendered", lang, route)
+				continue
+			}
+			if !strings.Contains(block, `role="status"`) {
+				t.Errorf("[%s %s] the C14 summary must carry role=\"status\": %s", lang, route, block)
 			}
 			// The data table is a real semantic table with a caption.
-			if !strings.Contains(body, `<caption`) {
-				t.Errorf("[%s %s] C14 data table must carry a <caption>", lang, route)
+			if !strings.Contains(block, `<caption`) {
+				t.Errorf("[%s %s] the C14 data table must carry a <caption>", lang, route)
 			}
 		}
 	}
 }
 
-// TestS5_8CSVIsClientGeneratedFromAuthoritativeJSON proves the visible CSV
-// control is generated in the browser from the SAME authoritative JSON the
-// page already fetched — never a new server endpoint, and never a second
-// source of truth. The existing JSON export endpoints stay untouched.
-func TestS5_8CSVIsClientGeneratedFromAuthoritativeJSON(t *testing.T) {
-	// The download itself is built in-browser from an object URL — one shared
-	// implementation, never a server round-trip.
-	c14 := s58ReadTemplate(t, "templates/components/c14_chart.html")
-	if !strings.Contains(c14, "Blob(") || !strings.Contains(c14, "createObjectURL") {
-		t.Error("c14.chart must build the CSV client-side from an in-memory Blob")
-	}
+// TestS5_8CSVAddsNoServerEndpoint proves the CSV affordance is rendered on both
+// pages and that this slice introduced no server-side CSV route: the download
+// is produced in the browser from JSON the page already holds, so there is no
+// second source of truth and no new backend contract.
+//
+// The two pre-existing JSON export endpoints are asserted to still answer,
+// unchanged. What the CSV actually CONTAINS — ISO-8601 UTC timestamps, quote
+// doubling, comma and CR/LF quoting, and the =/+/-/@ formula-injection guard —
+// is client-side behavior and is proven by the named browser scenarios
+// "points-csv" and "roi-csv"; a Go assertion that the string "toISOString()"
+// appears in a template would pass over a script that never runs.
+func TestS5_8CSVAddsNoServerEndpoint(t *testing.T) {
+	srv := buildF3PageServer(t)
+	h := srv.handler()
 
-	for _, name := range []string{"templates/analytics_points.html", "templates/analytics_roi.html"} {
-		src := s58ReadTemplate(t, name)
-		if !strings.Contains(src, "data-c14-csv") {
-			t.Errorf("%s: no CSV control", name)
-		}
-		// The page feeds the shared helper from the JSON it already fetched.
-		if !strings.Contains(src, "c14DownloadCSV(") {
-			t.Errorf("%s: CSV must go through the shared client-side converter", name)
-		}
-		if strings.Contains(src, "export.csv") || strings.Contains(src, "format=csv") {
-			t.Errorf("%s: must not invent a server-side CSV endpoint", name)
+	for _, route := range s58Routes {
+		for _, lang := range []string{"en", "ru"} {
+			if body := f3GetPage(t, srv, route, lang); !strings.Contains(body, "data-c14-csv") {
+				t.Errorf("[%s %s] no CSV control rendered", lang, route)
+			}
 		}
 	}
-}
 
-// TestS5_8CSVTimestampsAreLocaleIndependent proves the Points CSV emits
-// ISO-8601 UTC timestamps rather than the locale-formatted string the
-// on-screen table shows or the raw epoch integer the API returns. A CSV is a
-// file that outlives the session and gets parsed elsewhere, so its timestamps
-// must not depend on the reader's locale or timezone — and must still be
-// human-checkable.
-func TestS5_8CSVTimestampsAreLocaleIndependent(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/analytics_points.html")
-	if !strings.Contains(src, "toISOString()") {
-		t.Error("Points CSV must emit ISO-8601 UTC timestamps")
-	}
-	// The CSV path must go through the ISO conversion, not the raw rows the
-	// visible table renders.
-	if !strings.Contains(src, "csvRows(lastData)") {
-		t.Error("the CSV download must use the ISO-converted rows, not the raw table rows")
-	}
-	if strings.Contains(src, "tableRows(lastData)") {
-		t.Error("the CSV download must not be fed the raw epoch table rows directly")
-	}
-}
-
-// TestS5_8CSVEscapingIsDeterministicAndSafe proves the shared CSV conversion
-// handles the four dangerous cell shapes: embedded commas, embedded double
-// quotes, embedded newlines, and formula-injection prefixes (=, +, -, @)
-// that spreadsheet software would otherwise execute.
-func TestS5_8CSVEscapingIsDeterministicAndSafe(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/components/c14_chart.html")
-	if !strings.Contains(src, "c14CSVCell") {
-		t.Fatal("c14.chart must expose a single shared CSV cell-escaping helper (c14CSVCell)")
-	}
-	for _, want := range []string{
-		`'"'`,     // quote doubling / quoting
-		`\n`,      // newline handling
-		`','`,     // comma handling
-		"'='",     // formula-injection prefix guard
-		"'\\t' +", // neutralizing prefix
-		"\\r",     // CR handling
+	// The existing export contracts still answer exactly as before.
+	for _, path := range []string{
+		"/api/points-history/export?streamer=streamer_a&range=24h",
+		"/api/predictions/roi/export?period=30d",
 	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("c14CSVCell missing handling for %s", want)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, s58GET(path))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200 (the existing export contract must be untouched)", path, rec.Code)
+		}
+	}
+
+	// No new server-side CSV route was invented for the C14 control.
+	for _, path := range []string{
+		"/api/points-history/csv", "/api/predictions/roi/csv",
+		"/analytics/points/export.csv", "/analytics/roi/export.csv",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, s58GET(path))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404 — the CSV is built in the browser, not served", path, rec.Code)
 		}
 	}
 }
@@ -378,11 +372,16 @@ func TestS5_8CSVEscapingIsDeterministicAndSafe(t *testing.T) {
 // this test rejects.
 func TestS5_8PointsRequiresConcreteStreamer(t *testing.T) {
 	srv := buildF3PageServer(t)
-	src := s58ReadTemplate(t, "templates/analytics_points.html")
 
-	if strings.Contains(src, "all_streamers") {
-		t.Error("the Points page must not offer an All-streamers facet — the series is per-streamer")
+	// The backend fact the page is obeying: an empty streamer is rejected, so
+	// an aggregate facet could only ever be served by inventing a
+	// cross-streamer series in the browser.
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, s58GET("/api/points-history?streamer=&range=24h"))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("GET points-history with an empty streamer = %d, want 400 — the no-aggregate rule rests on this", rec.Code)
 	}
+
 	// The fixture roster is non-empty, so the selector must offer only real
 	// streamers: an empty-valued <option> IS the aggregate facet.
 	for _, lang := range []string{"en", "ru"} {
@@ -404,23 +403,54 @@ func TestS5_8PointsRequiresConcreteStreamer(t *testing.T) {
 	}
 }
 
-// TestS5_8PointsInventsNoSamplingSemantics proves the Points page never
-// fabricates data the backend does not provide: no sampling-gap threshold, no
-// synthetic zero-filling, and no claim that the line is smoothed or
-// interpolated. It renders exactly the samples /api/points-history returns.
-func TestS5_8PointsInventsNoSamplingSemantics(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/analytics_points.html")
-	for _, banned := range []string{
-		"interpolat", "GAP_THRESHOLD", "gapThreshold", "fillZero", "zeroFill", "synthetic",
-	} {
-		if strings.Contains(src, banned) {
-			t.Errorf("Points page must not invent sampling semantics — found %q", banned)
-		}
+// TestS5_8PointsSeriesIsExactlyWhatWasRecorded proves the series the page draws
+// is the series the miner actually recorded: every sample the endpoint returns
+// corresponds to a stored observation, with nothing invented between them.
+//
+// Asserted at the served-data seam by comparing the endpoint's response against
+// the repository's own rows. Whether the CHART then smooths, interpolates or
+// zero-fills those samples is client rendering, proven by the named browser
+// scenario "points-straight-no-interpolation".
+//
+// Repeat-safe: compares set membership against the stored rows rather than
+// asserting a row count, so accumulation across -count runs cannot break it.
+func TestS5_8PointsSeriesIsExactlyWhatWasRecorded(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, s58GET("/api/points-history?streamer=streamer_a&range=24h"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET points-history = %d, want 200", rec.Code)
 	}
-	// The straight-line rendering is honest ('straight'), never sold as a
-	// smoothed curve over sparse samples.
-	if strings.Contains(src, "curve: 'smooth'") {
-		t.Error("Points chart must not present a smoothed curve — sparse samples would read as interpolated data")
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode points-history: %v", err)
+	}
+	if len(got.Points) < 2 {
+		t.Fatalf("served series has %d samples, want a real series", len(got.Points))
+	}
+
+	stored, err := srv.analytics.Repository().GetPointSamples("streamer_a", time.Now().Add(-24*time.Hour), time.Now(), maxHistoryRows)
+	if err != nil {
+		t.Fatalf("read stored samples: %v", err)
+	}
+	// Keyed on the (timestamp, balance) PAIR, never on the timestamp alone:
+	// RecordPoints stamps whole milliseconds, so several observations routinely
+	// share one T. A timestamp-keyed map would silently keep the last of them
+	// and report every other real sample as invented.
+	type sample struct {
+		t       int64
+		balance int
+	}
+	recorded := make(map[sample]bool, len(stored))
+	for _, s := range stored {
+		recorded[sample{s.T, s.Balance}] = true
+	}
+	for _, p := range got.Points {
+		if !recorded[sample{p.T, p.Balance}] {
+			t.Errorf("served sample (t=%d, balance=%d) was never recorded — the endpoint invented a point", p.T, p.Balance)
+		}
 	}
 }
 
@@ -461,21 +491,60 @@ func TestS5_8ROIHasEightKPIsAndThreeTables(t *testing.T) {
 	}
 }
 
-// TestS5_8ROIReadsOnlyItsOwnJSONFields proves the ROI page never reconstructs
-// financial outcome data client-side: every figure it shows comes straight
-// from a field of the authoritative /api/predictions/roi response.
-func TestS5_8ROIReadsOnlyItsOwnJSONFields(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/analytics_roi.html")
-	for _, want := range []string{"netProfit", "totalWagered", "winRate", "maxDrawdown", "byStreamer", "byStrategy", "byOddsBucket"} {
-		if !strings.Contains(src, want) {
-			t.Errorf("ROI page does not read authoritative field %q", want)
+// TestS5_8ROISummaryCarriesEveryFigureThePageShows proves the ROI page never
+// NEEDS to reconstruct a financial outcome: every KPI and every breakdown
+// column it presents already exists as a field of the authoritative
+// /api/predictions/roi response, so a second client-side computation — a second
+// source of truth that can silently disagree with the miner's own ledger —
+// would be gratuitous.
+//
+// Asserted against the real response over seeded bets, not against template
+// text: this pins the CONTRACT the page depends on, which is what would
+// actually break if the endpoint ever dropped a field.
+func TestS5_8ROISummaryCarriesEveryFigureThePageShows(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, s58GET("/api/predictions/roi?period=30d"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET predictions/roi = %d, want 200", rec.Code)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode roi summary: %v", err)
+	}
+
+	// The eight KPI tiles and the outcome donut, each a straight field read.
+	for _, field := range []string{
+		"count", "winRate", "netProfit", "roi", "totalWagered", "avgWager", "avgWin", "maxDrawdown",
+		"wins", "losses", "refunds",
+	} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("authoritative ROI summary has no %q — the page would have to reconstruct it", field)
 		}
 	}
-	// Recomputing an outcome from parts is exactly the reconstruction the
-	// owner forbade.
-	for _, banned := range []string{"wins / (wins", "wins/(wins", "* 100 / totalWagered", "netProfit =", "recompute"} {
-		if strings.Contains(src, banned) {
-			t.Errorf("ROI page must never reconstruct financial outcomes — found %q", banned)
+
+	// The three C4 breakdown tables, each with the columns the page renders.
+	for _, field := range []string{"byStreamer", "byStrategy", "byOddsBucket"} {
+		body, ok := raw[field]
+		if !ok {
+			t.Errorf("authoritative ROI summary has no %q breakdown", field)
+			continue
+		}
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(body, &rows); err != nil {
+			t.Errorf("%s is not a list of rows: %v", field, err)
+			continue
+		}
+		if len(rows) == 0 {
+			t.Errorf("%s came back empty — the seeded bets must produce real breakdown rows", field)
+			continue
+		}
+		for _, col := range []string{"key", "count", "netProfit", "roi"} {
+			if _, ok := rows[0][col]; !ok {
+				t.Errorf("%s rows have no %q column, but the page renders it", field, col)
+			}
 		}
 	}
 }
@@ -484,25 +553,43 @@ func TestS5_8ROIReadsOnlyItsOwnJSONFields(t *testing.T) {
 // no bet/skip control, no form, no non-GET fetch, and no reference to any
 // state-changing endpoint. Betting behavior is owned by /settings/predictions,
 // which the page links to instead. Adding a mutation control fails here.
+// Asserted on the RENDERED page (a mutation affordance the browser never
+// receives cannot be used) plus the route's own method contract. That every
+// request the page ISSUES is a GET is client behavior, proven by the named
+// browser scenario "roi-readonly-get-only".
 func TestS5_8ROIIsStrictlyReadOnly(t *testing.T) {
 	srv := buildF3PageServer(t)
-	src := s58ReadTemplate(t, "templates/analytics_roi.html")
-	body := f3GetPage(t, srv, "/analytics/roi", "en")
 
-	for _, banned := range []string{
-		"/api/prediction/bet", "/api/prediction/skip", "/api/settings",
-		"method: 'POST'", `method: "POST"`, "<form", "hx-post", "hx-put", "hx-delete",
-	} {
-		if strings.Contains(src, banned) {
-			t.Errorf("ROI page must be strictly read-only — found mutation affordance %q", banned)
+	for _, lang := range []string{"en", "ru"} {
+		body := f3GetPage(t, srv, "/analytics/roi", lang)
+		own, ok := s58PageOwnRegion(body)
+		if !ok {
+			t.Fatalf("[%s] could not isolate the ROI page's own rendered region", lang)
+		}
+		for _, banned := range []string{
+			"/api/prediction/bet", "/api/prediction/skip",
+			"<form", "hx-post", "hx-put", "hx-delete",
+		} {
+			if strings.Contains(own, banned) {
+				t.Errorf("[%s] ROI page must be strictly read-only — rendered a mutation affordance %q", lang, banned)
+			}
+		}
+		// The read-only stance is stated to the operator, and the owner of the
+		// behavior is linked rather than duplicated. Matched on the page's OWN
+		// anchor, never on the C2 nav's /settings/predictions child, which every
+		// page carries and which would make this assertion vacuous.
+		if !strings.Contains(body, `data-ar-owner-link href="/settings/predictions"`) {
+			t.Errorf("[%s] ROI page must carry its own owner link pointing at /settings/predictions", lang)
 		}
 	}
-	// The read-only stance is stated to the operator, and the owner of the
-	// behavior is linked rather than duplicated. Matched on the page's OWN
-	// anchor, never on the C2 nav's /settings/predictions child, which every
-	// page carries and which would make this assertion vacuous.
-	if !strings.Contains(body, `data-ar-owner-link href="/settings/predictions"`) {
-		t.Error("ROI page must carry its own owner link pointing at /settings/predictions")
+
+	// The route itself refuses every state-changing method.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		srv.handler().ServeHTTP(rec, httptest.NewRequest(method, "/analytics/roi", nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s /analytics/roi = %d, want 405 — route 8 is read-only", method, rec.Code)
+		}
 	}
 }
 
@@ -526,13 +613,15 @@ func TestS5_8BackendContractsUntouched(t *testing.T) {
 		}
 	}
 
-	pointsSrc := s58ReadTemplate(t, "templates/analytics_points.html")
-	if !strings.Contains(pointsSrc, "/api/points-history") {
-		t.Error("Points page must read the existing /api/points-history endpoint")
-	}
-	roiSrc := s58ReadTemplate(t, "templates/analytics_roi.html")
-	if !strings.Contains(roiSrc, "/api/predictions/roi") {
-		t.Error("ROI page must read the existing /api/predictions/roi endpoint")
+	// Each page ships pointing at the existing endpoint — asserted on what the
+	// browser actually receives.
+	for route, endpoint := range map[string]string{
+		"/analytics/points": "/api/points-history",
+		"/analytics/roi":    "/api/predictions/roi",
+	} {
+		if body := f3GetPage(t, srv, route, "en"); !strings.Contains(body, endpoint) {
+			t.Errorf("rendered %s does not reference the existing %s endpoint", route, endpoint)
+		}
 	}
 }
 
@@ -541,28 +630,29 @@ func TestS5_8BackendContractsUntouched(t *testing.T) {
 // ---------------------------------------------------------------------
 
 // TestS5_8FailStatesAreAlertsWithRetry proves each page's failure state is an
-// inline role="alert" (never a toast) and offers an explicit Retry control.
-// Dropping role="alert" is a mutation this test rejects.
+// inline role="alert" carrying an explicit Retry control. Dropping role="alert"
+// is a mutation this test rejects.
+//
+// Scoped to the S-FAIL block itself: a page-wide search for role="alert" would
+// be satisfied by any alert anywhere in the chrome. That failures render inline
+// rather than as a toast is observable behavior, proven by the named browser
+// scenarios "points-fail-retry-stamp" and "roi-fail-retry-stamp".
 func TestS5_8FailStatesAreAlertsWithRetry(t *testing.T) {
 	srv := buildF3PageServer(t)
 
-	for _, route := range s58Routes {
-		src := s58ReadTemplate(t, s58Templates[route])
-		if !strings.Contains(src, `role="alert"`) {
-			t.Errorf("%s: the S-FAIL block must carry role=\"alert\"", route)
-		}
+	for route, r := range s58FailureRegions {
 		for _, lang := range []string{"en", "ru"} {
-			body := f3GetPage(t, srv, route, lang)
-			if !strings.Contains(body, `role="alert"`) {
-				t.Errorf("[%s %s] rendered page has no role=\"alert\" failure region", lang, route)
+			block, ok := s58DivSubtree(f3GetPage(t, srv, route, lang), r.block)
+			if !ok {
+				t.Errorf("[%s %s] rendered page has no S-FAIL block", lang, route)
+				continue
 			}
-			if !strings.Contains(body, "-retry") {
-				t.Errorf("[%s %s] failure state must offer a Retry control", lang, route)
+			if !strings.Contains(block, `role="alert"`) {
+				t.Errorf("[%s %s] the S-FAIL block must carry role=\"alert\": %s", lang, route, block)
 			}
-		}
-		// Failures are inline, never routed through the global toast region.
-		if strings.Contains(src, "showToast") || strings.Contains(src, "minerToast") {
-			t.Errorf("%s: failures must render inline, never as a toast", route)
+			if !strings.Contains(block, `id="`+r.retry+`"`) {
+				t.Errorf("[%s %s] the S-FAIL block must offer a Retry control", lang, route)
+			}
 		}
 	}
 }
@@ -650,82 +740,42 @@ func TestS5_8StateRegionsStartHidden(t *testing.T) {
 	}
 }
 
-// TestS5_8NoFalseZeros proves missing data renders an em dash with an
-// accessible no-data label rather than a fabricated 0 — the same guard C4
-// already applies on the queue roster. Replacing the dash with 0 is a
-// mutation this test rejects.
-func TestS5_8NoFalseZeros(t *testing.T) {
+// TestS5_8NoDataLabelIsLocalizedAndShipped proves the accessible no-data label
+// the em dash carries actually reaches the browser, localized, on both pages —
+// the label is what tells a screen reader that a dash means "not measured"
+// rather than being read as punctuation or, worse, silence.
+//
+// WHICH values dash out is a client-side decision made against a live payload,
+// so it is proven by the named browser scenarios "points-sparse-dashes" (a
+// single-sample window dashes net change, earned and events instead of painting
+// a fabricated 0) and "points-part-silent" (the row cap dashes every KPI).
+func TestS5_8NoDataLabelIsLocalizedAndShipped(t *testing.T) {
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	srv := buildF3PageServer(t)
+
 	for _, route := range s58Routes {
-		src := s58ReadTemplate(t, s58Templates[route])
-		if !strings.Contains(src, "—") {
-			t.Errorf("%s: no em-dash no-data rendering found", route)
-		}
-		if !strings.Contains(src, "no_data") {
-			t.Errorf("%s: the no-data dash must carry an accessible label", route)
-		}
-	}
-	c14 := s58ReadTemplate(t, "templates/components/c14_chart.html")
-	if !strings.Contains(c14, "c14NoData") {
-		t.Fatal("c14.chart must expose a single shared no-data formatter (c14NoData)")
-	}
-	// The formatter must distinguish absent from zero — returning 0 for a
-	// null/undefined input is exactly the false-zero the owner forbade.
-	if !strings.Contains(c14, "== null") && !strings.Contains(c14, "=== null") {
-		t.Error("c14NoData must test for an absent value, not merely a falsy one (0 is a real value)")
-	}
-
-	// c14Cell is what actually PAINTS an absent value, and it is the function a
-	// "just render 0" regression would land in — c14NoData can stay perfectly
-	// correct while its only caller throws the answer away. Assert on the cell
-	// renderer's own body: an absent value must produce the em dash carrying an
-	// accessible no-data label, never a substituted numeral. (This gap was found
-	// by the no-data-dash-becomes-zero mutation probe, which the c14NoData-only
-	// assertions above did not catch.)
-	body := s58FuncBody(t, c14, "c14Cell")
-	if !strings.Contains(body, "—") {
-		t.Error("c14Cell must render an em dash for an absent value")
-	}
-	if !strings.Contains(body, "aria-label") {
-		t.Error("c14Cell's no-data dash must carry an accessible label")
-	}
-	if !strings.Contains(body, "c14NoData(") {
-		t.Error("c14Cell must route through the shared absent-vs-zero formatter")
-	}
-	for _, banned := range []string{"return '0'", `return "0"`, "return 0;"} {
-		if strings.Contains(body, banned) {
-			t.Errorf("c14Cell substitutes a fabricated zero for missing data (%s)", banned)
-		}
-	}
-}
-
-// s58FuncBody extracts one top-level JS function's body from a template, so a
-// behavioral assertion can be scoped to the function that owns the behavior
-// rather than to the whole file (where an unrelated occurrence of the same
-// literal would mask a regression).
-func s58FuncBody(t *testing.T, src, fn string) string {
-	t.Helper()
-	start := strings.Index(src, "function "+fn+"(")
-	if start < 0 {
-		t.Fatalf("function %s not found", fn)
-	}
-	open := strings.Index(src[start:], "{")
-	if open < 0 {
-		t.Fatalf("function %s has no body", fn)
-	}
-	depth, i := 0, start+open
-	for ; i < len(src); i++ {
-		switch src[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return src[start+open : i+1]
+		seen := map[string]string{}
+		for _, lang := range []string{"en", "ru"} {
+			label := loc.T(lang, "analytics.no_data")
+			if label == "" || label == "analytics.no_data" {
+				t.Fatalf("[%s] the shared no-data label is not translated", lang)
 			}
+			body := f3GetPage(t, srv, route, lang)
+			if !strings.Contains(body, label) {
+				t.Errorf("[%s %s] the localized no-data label %q never reaches the browser, so a dash would be unlabelled", lang, route, label)
+			}
+			if !strings.Contains(body, "—") {
+				t.Errorf("[%s %s] the em-dash no-data glyph is not shipped", lang, route)
+			}
+			seen[lang] = label
+		}
+		if seen["en"] == seen["ru"] {
+			t.Errorf("%s: the no-data label is identical in EN and RU (%q) — it is not actually localized", route, seen["en"])
 		}
 	}
-	t.Fatalf("function %s body is unbalanced", fn)
-	return ""
 }
 
 // ---------------------------------------------------------------------
@@ -737,27 +787,29 @@ func s58FuncBody(t *testing.T, src, fn string) string {
 // RefreshMinutes — never a hardcoded cadence, and never a new polling, SSE,
 // WebSocket or manual-refresh contract. Hardcoding a cadence fails here.
 func TestS5_8ReusesExistingRefreshCadence(t *testing.T) {
-	for _, route := range s58Routes {
-		src := s58ReadTemplate(t, s58Templates[route])
-		if !strings.Contains(src, "{{.RefreshMinutes}} * 60 * 1000") {
-			t.Errorf("%s: must reuse the existing RefreshMinutes cadence verbatim", route)
-		}
-		for _, banned := range []string{"EventSource(", "WebSocket(", "hx-trigger=\"every", "/api/miner-status/stream"} {
-			if strings.Contains(src, banned) {
-				t.Errorf("%s: must not introduce a new %q transport", route, banned)
-			}
-		}
-	}
-
 	// The cadence is genuinely data-driven: the fixture's Refresh value must
 	// reach the rendered page. Matched loosely because html/template pads a
-	// numeric substitution with spaces in a JS context.
+	// numeric substitution with spaces in a JS context. A hardcoded cadence
+	// would not track the fixture and fails here.
 	srv := buildF3PageServer(t)
 	cadence := regexp.MustCompile(`REFRESH_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000`)
 	for _, route := range s58Routes {
 		body := f3GetPage(t, srv, route, "en")
 		if !cadence.MatchString(body) {
 			t.Errorf("rendered %s did not carry the fixture's Refresh=5 cadence", route)
+		}
+		// No new polling, streaming or push transport reaches the browser from
+		// the PAGE. Scoped to the page's own region: base.html's chrome has
+		// carried the global miner-status EventSource since long before this
+		// slice, and a page-wide scan would be flagging that instead.
+		own, ok := s58PageOwnRegion(body)
+		if !ok {
+			t.Fatalf("could not isolate %s's own rendered region", route)
+		}
+		for _, banned := range []string{"EventSource(", "WebSocket(", `hx-trigger="every`, "/api/miner-status/stream"} {
+			if strings.Contains(own, banned) {
+				t.Errorf("rendered %s introduces a new %q transport", route, banned)
+			}
 		}
 	}
 }
@@ -833,72 +885,70 @@ func TestS5_8LegacyStatisticsStillRendersDirectly(t *testing.T) {
 // because its assertions were scoped to functions the defect did not live in.
 // ---------------------------------------------------------------------
 
-// TestS5_8EarnedEventsNeverFabricateZeroWhenBreakdownAbsent pins Q3 MAJOR-1.
+// TestS5_8IndeterminateWindowIsDistinguishableFromZero pins the DATA half of
+// Q3 MAJOR-1: the false-zero the Points KPIs must not paint is only avoidable
+// because the payload can tell "nothing is measurable" apart from "we measured
+// nothing", and this proves it still can.
 //
-// /api/points-history omits "breakdown" entirely (`json:"breakdown,omitempty"`,
-// analytics/models.go) for TWO different facts: BreakdownFromSamples returns
-// nil when the raw window holds fewer than two samples — no delta EXISTS to
-// attribute — and an empty slice when the window genuinely earned nothing.
-// Both arrive as a missing key, so `for (const share of data.breakdown || [])`
-// produced `earned = 0, events = 0` for both, painting "+0"/"0" (with no
-// no-data label) over an INDETERMINATE window. Reproduced in a browser against
-// a real single-sample payload before the fix.
+// /api/points-history omits "breakdown" entirely (`json:"breakdown,omitempty"`)
+// for BOTH facts: BreakdownFromSamples returns nil when the raw window holds
+// fewer than two samples — no delta EXISTS to attribute — and an empty slice
+// when the window genuinely earned nothing. The two are separable without any
+// new backend field, from chartDownsampled plus the served series length. If
+// the endpoint ever stopped emitting chartDownsampled, or started sending an
+// empty breakdown array for the indeterminate case, the distinction would
+// collapse and a fabricated 0 would become unavoidable.
 //
-// The fix disambiguates the two cases from the payload the page already has,
-// inventing no backend field: chartDownsampled is true only when points was
-// thinned (raw > points >= 1, hence raw >= 2); when it is false, points IS the
-// raw series.
-func TestS5_8EarnedEventsNeverFabricateZeroWhenBreakdownAbsent(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/analytics_points.html")
-	body := s58FuncBody(t, src, "renderKPIs")
+// Which tiles then dash out is client rendering, proven by the named browser
+// scenario "points-sparse-dashes".
+func TestS5_8IndeterminateWindowIsDistinguishableFromZero(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+	h := s58StateInterceptor(srv.handler())
 
-	// The absent-breakdown guard must exist, and must be decided by the raw
-	// series length rather than by a falsy test on breakdown alone.
-	if !strings.Contains(body, "chartDownsampled === true") {
-		t.Error("renderKPIs must use chartDownsampled to establish that the raw series held at least two samples")
-	}
-	if !strings.Contains(body, "pts.length >= 2") {
-		t.Error("renderKPIs must fall back to the points length when the series was not downsampled")
-	}
-	if !strings.Contains(body, "!data.breakdown") {
-		t.Error("renderKPIs must branch on breakdown being ABSENT — an omitempty field is missing, not falsy-zero")
-	}
-
-	// The guard must precede the summation, or it cannot prevent anything.
-	guard := strings.Index(body, "!data.breakdown")
-	sum := strings.Index(body, "for (const share of data.breakdown")
-	if guard < 0 || sum < 0 || guard > sum {
-		t.Errorf("the absent-breakdown guard must run BEFORE the breakdown summation (guard=%d, sum=%d)", guard, sum)
-	}
-
-	// An indeterminate window dashes out both derived tiles; setKPI attaches
-	// the accessible no-data label whenever the text is the em dash.
-	for _, want := range []string{`setKPI('ap-kpi-earned', '—')`, `setKPI('ap-kpi-events', '—')`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("renderKPIs must dash out the derived tile when the window is indeterminate: missing %q", want)
+	get := func(referer string) map[string]json.RawMessage {
+		t.Helper()
+		req := s58GET("/api/points-history?streamer=streamer_a&range=24h")
+		if referer != "" {
+			req.Header.Set("Referer", referer)
 		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("points-history = %d, want 200", rec.Code)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decode points-history: %v", err)
+		}
+		return raw
 	}
-}
 
-// TestS5_8NetChangeRequiresTwoSamples pins the same false-zero class on the
-// net-change tile: with a single sample last-first is 0 by CONSTRUCTION, not by
-// measurement, so reporting it asserts the balance held steady across a window
-// that was never observed.
-func TestS5_8NetChangeRequiresTwoSamples(t *testing.T) {
-	src := s58ReadTemplate(t, "templates/analytics_points.html")
-	body := s58FuncBody(t, src, "renderKPIs")
+	// The completeness signal the disambiguation rests on is always present.
+	ready := get("")
+	if _, ok := ready["chartDownsampled"]; !ok {
+		t.Error("the payload no longer carries chartDownsampled — an indeterminate window becomes indistinguishable from a measured zero")
+	}
+	if _, ok := ready["rawTruncated"]; !ok {
+		t.Error("the payload no longer carries rawTruncated")
+	}
 
-	if !strings.Contains(body, "pts.length < 2") {
-		t.Error("the net-change tile must dash out below two samples — a change needs two observations")
+	// A single-sample window: breakdown is ABSENT (not an empty array), and the
+	// series is not downsampled, so the page can establish that fewer than two
+	// raw samples existed and nothing is attributable.
+	sparse := get("http://127.0.0.1:8978/analytics/points?state=sparse")
+	if _, ok := sparse["breakdown"]; ok {
+		t.Error("a single-sample window must OMIT breakdown; an empty array would encode a measured zero instead")
 	}
-	netGuard := strings.Index(body, "pts.length < 2")
-	netDash := strings.Index(body, `setKPI('ap-kpi-net', '—')`)
-	if netGuard < 0 || netDash < 0 || netGuard > netDash {
-		t.Errorf("the two-sample guard must gate the net tile's dash (guard=%d, dash=%d)", netGuard, netDash)
+	var points []analytics.PointSample
+	if err := json.Unmarshal(sparse["points"], &points); err != nil {
+		t.Fatalf("decode sparse points: %v", err)
 	}
-	// Balance is a single observation and stays renderable from one sample.
-	if !strings.Contains(body, "ap-kpi-balance") {
-		t.Error("the balance tile must still render from a single sample — it is one observation, not a delta")
+	if len(points) != 1 {
+		t.Errorf("the sparse window served %d samples, want exactly 1", len(points))
+	}
+	if string(sparse["chartDownsampled"]) != "false" {
+		t.Errorf("chartDownsampled = %s on a one-sample window, want false — otherwise the raw series cannot be proven short", sparse["chartDownsampled"])
 	}
 }
 
@@ -911,8 +961,6 @@ func TestS5_8NetChangeRequiresTwoSamples(t *testing.T) {
 // identical text. Handoff §9 "routine SSE/poll refreshes never announce" and
 // §10 "timed polls ... never announce".
 func TestS5_8SummaryNeverAnnouncesOnTimedRefresh(t *testing.T) {
-	c14 := s58ReadTemplate(t, "templates/components/c14_chart.html")
-
 	// Asserted on the RENDERED page, not on template text: what reaches the
 	// browser is what decides whether the region speaks. A summary that ships
 	// live would announce on the very first timed refresh.
@@ -935,64 +983,21 @@ func TestS5_8SummaryNeverAnnouncesOnTimedRefresh(t *testing.T) {
 			}
 		}
 	}
-	if strings.Contains(c14, `aria-live="polite"`) {
-		t.Error("the C14 summary markup must not hardcode aria-live=\"polite\" — the announcement is per-render")
-	}
-
-	// The setter decides liveness from its caller, and does so BEFORE the text
-	// mutation, so the mutation is classified by the requested value.
-	body := s58FuncBody(t, c14, "c14SetSummary")
-	if !strings.Contains(body, "announce ? 'polite' : 'off'") {
-		t.Error("c14SetSummary must set aria-live from its announce argument")
-	}
-	setAt := strings.Index(body, "setAttribute('aria-live'")
-	textAt := strings.Index(body, "textContent")
-	if setAt < 0 || textAt < 0 || setAt > textAt {
-		t.Errorf("aria-live must be set BEFORE the text changes (attr=%d, text=%d)", setAt, textAt)
-	}
-
-	// Both pages thread the flag from load(): user-initiated renders announce,
-	// the timed refresh does not.
-	for _, name := range []string{"templates/analytics_points.html", "templates/analytics_roi.html"} {
-		src := s58ReadTemplate(t, name)
-		if !strings.Contains(src, "!isRefresh") {
-			t.Errorf("%s: render() must be told whether this load was user-initiated", name)
-		}
-		if !strings.Contains(src, "function render(") {
-			t.Fatalf("%s: no render() to thread the flag through", name)
-		}
-		if !strings.Contains(s58FuncBody(t, src, "render"), "announce") {
-			t.Errorf("%s: render() must pass the announce flag down to the C14 summary", name)
-		}
-	}
+	// That the region then goes polite for a USER-initiated render and stays
+	// off across every timed refresh is client behavior — an aria-live value
+	// rewritten per render, which no static read of the shipped markup can
+	// observe. It is proven by the named browser scenario
+	// "points-summary-announces-once".
 }
 
-// TestS5_8CautionStripsLeaveWithTheContentTheyDescribe pins Q3 MINOR-2.
-//
-// show() toggled only loading/empty/error/content, so the S-PART and S-STALE
-// strips — which describe the CONTENT region — survived a transition into the
-// failure state. Reproduced in a browser: after a failed load the page showed
-// "Partial data: the selection hit the backend row limit" above a failure block
-// that was displaying no data at all. Handoff §7 defines the S-PART strip as
-// sitting above RETAINED content.
-func TestS5_8CautionStripsLeaveWithTheContentTheyDescribe(t *testing.T) {
-	cases := map[string][]string{
-		"templates/analytics_points.html": {"els.partial.classList.add('hidden')", "els.stale.classList.add('hidden')"},
-		"templates/analytics_roi.html":    {"els.stale.classList.add('hidden')"},
-	}
-	for name, wants := range cases {
-		src := s58ReadTemplate(t, name)
-		body := s58FuncBody(t, src, "show")
-		if !strings.Contains(body, "state !== 'content'") {
-			t.Errorf("%s: show() must clear the content-scoped strips whenever content is not the rendered state", name)
-		}
-		for _, want := range wants {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: show() must clear %q when leaving the content state", name, want)
-			}
-		}
-	}
-}
+// Q3 MINOR-2 — the S-PART and S-STALE strips leaving with the content region
+// they describe — is a state-transition behavior inside each page's show():
+// after a failed load the page used to show "part of the data is unavailable"
+// above a failure block displaying no data at all. A transition cannot be
+// observed in shipped markup, so it is proven by the named browser scenario
+// "points-strips-leave-with-content". What the Go suite still pins here is the
+// markup those strips must ship as: hidden, plain wrappers, and (see
+// TestS5_8TimedPollStripsAreNeverLiveRegions) never live regions.
 
 // TestS5_8StripsStartHiddenAndArePlainWrappers re-asserts, after the show()
 // change, that the strips are still plain wrappers (never .c1-block carrying
@@ -1108,4 +1113,395 @@ func TestS5_8ROIMarksG4AsInterpretation(t *testing.T) {
 			t.Errorf("[%s] the Г4 marker leaked into the rendered page — it is a template comment", lang)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------
+// 9. Corrective pass 3 — defects the re-Q3 review found in pass 2.
+//
+// Every assertion below is a RENDERED, SERVED or PARSED invariant: what the
+// browser actually receives, what the real handler actually answers, or what
+// the test sources structurally are. Client-IIFE behavior is not asserted from
+// template text here — it is proven by the named localhost browser scenarios
+// catalogued in s5_8_analytics_harness_test.go.
+// ---------------------------------------------------------------------
+
+// s58CautionStrips are the content-scoped caution strips each page can reveal
+// WITHOUT user action: the S-STALE strip is raised only by a failed timed
+// refresh, and S-PART is re-asserted on every timed poll that reports the
+// backend row cap.
+var s58CautionStrips = map[string][]string{
+	"/analytics/points": {"ap-stale", "ap-partial"},
+	"/analytics/roi":    {"ar-stale"},
+}
+
+// s58ImplicitLiveRoles are the ARIA roles that make an element a live region
+// by IMPLICATION — each one carries a non-off implicit aria-live value, so
+// merely revealing the element speaks.
+var s58ImplicitLiveRoles = []string{"status", "alert", "log", "marquee", "timer"}
+
+// TestS5_8TimedPollStripsAreNeverLiveRegions pins corrective-pass-3 defect 1.
+//
+// Both caution strips are revealed by the TIMED POLL, never by a user action:
+// S-STALE only ever appears from a failed background refresh, and S-PART is
+// re-toggled from every poll's rawTruncated. Carrying role="status" made them
+// IMPLICIT live regions (role=status's implicit aria-live is "polite"), so a
+// screen reader announced the strip the moment the poll revealed it — exactly
+// the "timed polls never announce" rule (§9/§10) the C14 summary already obeys.
+//
+// They must therefore be plain content: no implicit live role, and an EXPLICIT
+// aria-live="off" so a later role addition cannot silently make them speak
+// again. Asserted on the rendered tag in both languages, because what reaches
+// the browser is what decides whether the region talks.
+func TestS5_8TimedPollStripsAreNeverLiveRegions(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	for route, ids := range s58CautionStrips {
+		for _, lang := range []string{"en", "ru"} {
+			body := f3GetPage(t, srv, route, lang)
+			for _, id := range ids {
+				tag, ok := s58TagWithID(body, id)
+				if !ok {
+					t.Errorf("[%s %s] caution strip %q not rendered", lang, route, id)
+					continue
+				}
+				for _, role := range s58ImplicitLiveRoles {
+					if strings.Contains(tag, `role="`+role+`"`) {
+						t.Errorf("[%s %s] strip %q carries role=%q, an IMPLICIT live region — the timed poll that reveals it would announce: %s",
+							lang, route, id, role, tag)
+					}
+				}
+				if !strings.Contains(tag, `aria-live="off"`) {
+					t.Errorf("[%s %s] strip %q must render an explicit aria-live=\"off\" so a poll reveal stays silent: %s",
+						lang, route, id, tag)
+				}
+			}
+		}
+	}
+}
+
+// s58FailureRegions maps each page to its S-FAIL block, that block's dedicated
+// failure-time element, its Retry control, its cause element, and the
+// LAST-SUCCESS clock that must never stand in for a failure timestamp.
+var s58FailureRegions = map[string]struct {
+	block, failTime, retry, cause, lastSuccess string
+}{
+	"/analytics/points": {"ap-error", "ap-error-time", "ap-retry", "ap-error-msg", "ap-updated"},
+	"/analytics/roi":    {"ar-error", "ar-error-time", "ar-retry", "ar-error-msg", "ar-updated"},
+}
+
+// TestS5_8TerminalFailureCarriesItsOwnFreshTimestamp pins corrective-pass-3
+// defect 2.
+//
+// A terminal (user-visible) S-FAIL showed a cause and a Retry, but no time at
+// all: the only clock on screen was the LAST-SUCCESS one, which a failure
+// leaves frozen at the last good load. An operator reading "Updated 10:04:11"
+// above a failure block cannot tell whether the failure just happened or has
+// been there for an hour.
+//
+// Each page therefore renders a dedicated failure-time element INSIDE its own
+// role="alert" block, as a <time> carrying a machine-readable datetime so the
+// stamp is provably re-written (millisecond resolution) on each terminal
+// failure rather than reused. The last-success clock stays where it is, OUTSIDE
+// the failure block — it reports a different fact.
+func TestS5_8TerminalFailureCarriesItsOwnFreshTimestamp(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	for route, r := range s58FailureRegions {
+		for _, lang := range []string{"en", "ru"} {
+			body := f3GetPage(t, srv, route, lang)
+
+			block, ok := s58DivSubtree(body, r.block)
+			if !ok {
+				t.Errorf("[%s %s] S-FAIL block %q not rendered", lang, route, r.block)
+				continue
+			}
+			if !strings.Contains(block, `role="alert"`) {
+				t.Errorf("[%s %s] the S-FAIL block must stay a role=\"alert\" region", lang, route)
+			}
+
+			// Cause and Retry keep sharing the alert region with the stamp, so
+			// one announcement carries all three.
+			for _, id := range []string{r.cause, r.retry} {
+				if !strings.Contains(block, `id="`+id+`"`) {
+					t.Errorf("[%s %s] S-FAIL block is missing %q — a failure must state its cause and offer Retry", lang, route, id)
+				}
+			}
+
+			// The failure stamp lives inside the alert block, not beside it.
+			if !strings.Contains(block, `id="`+r.failTime+`"`) {
+				t.Errorf("[%s %s] S-FAIL block has no dedicated failure-time element %q — the page can only be showing the last-success clock",
+					lang, route, r.failTime)
+				continue
+			}
+			tag, ok := s58TagWithID(block, r.failTime)
+			if !ok {
+				t.Errorf("[%s %s] could not isolate %q", lang, route, r.failTime)
+				continue
+			}
+			if !strings.HasPrefix(tag, "<time") {
+				t.Errorf("[%s %s] %q must be a <time> element so the stamp is machine-readable: %s", lang, route, r.failTime, tag)
+			}
+			if !strings.Contains(tag, "datetime=") {
+				t.Errorf("[%s %s] %q must carry a datetime attribute, the millisecond-resolution proof that each terminal failure re-stamps: %s",
+					lang, route, r.failTime, tag)
+			}
+
+			// The last-success clock must NOT be inside the failure block — a
+			// failure that reused it would be reporting the time of the last
+			// thing that WORKED.
+			if strings.Contains(block, `id="`+r.lastSuccess+`"`) {
+				t.Errorf("[%s %s] the last-success clock %q is inside the S-FAIL block — a failure must never present it as its own timestamp",
+					lang, route, r.lastSuccess)
+			}
+			if !strings.Contains(body, `id="`+r.lastSuccess+`"`) {
+				t.Errorf("[%s %s] the last-success clock %q disappeared from the page", lang, route, r.lastSuccess)
+			}
+		}
+	}
+}
+
+// s58DivSubtree returns the full outer HTML of the <div> carrying id="<id>".
+func s58DivSubtree(body, id string) (string, bool) {
+	return s58DivSubtreeAt(body, `id="`+id+`"`)
+}
+
+// s58DivSubtreeAt returns the full outer HTML of the <div> whose opening tag
+// contains marker, found by balancing <div>/</div> from that tag. Used to scope
+// an assertion to one region instead of to the whole page, where an unrelated
+// element elsewhere would satisfy it.
+func s58DivSubtreeAt(body, marker string) (string, bool) {
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(body[:idx], "<")
+	if start < 0 || !strings.HasPrefix(body[start:], "<div") {
+		return "", false
+	}
+	depth, i := 0, start
+	for i < len(body) {
+		next := strings.IndexAny(body[i:], "<")
+		if next < 0 {
+			return "", false
+		}
+		i += next
+		switch {
+		case strings.HasPrefix(body[i:], "<div"):
+			depth++
+			i += len("<div")
+		case strings.HasPrefix(body[i:], "</div>"):
+			depth--
+			i += len("</div>")
+			if depth == 0 {
+				return body[start:i], true
+			}
+		default:
+			i++
+		}
+	}
+	return "", false
+}
+
+// s58PageOwnRegion narrows a rendered page to the part this slice OWNS: the
+// content block plus the page's own {{block "scripts"}} output. It starts at
+// the #main-content anchor and ends where base.html's trailing chrome script
+// begins.
+//
+// Necessary because base.html legitimately ships things a page must not: an
+// hx-post language switcher and the global miner-status EventSource. A
+// page-wide scan for those tokens reports the chrome, on every page, forever —
+// an assertion that can only ever be a false positive is worse than none.
+// The end marker is an IDENTIFIER from base.html's chrome script, not a
+// comment in it: html/template strips JS comments while rendering a <script>,
+// so a comment-based delimiter silently never matches.
+func s58PageOwnRegion(body string) (string, bool) {
+	start := strings.Index(body, `id="main-content"`)
+	// base.html's own trailing nav-activation script.
+	end := strings.Index(body, "SECTION_RULES")
+	if start < 0 || end < 0 || end <= start {
+		return "", false
+	}
+	return body[start:end], true
+}
+
+// s58JSTCallKey matches a client-side t('key') call in a rendered page.
+var s58JSTCallKey = regexp.MustCompile(`\bt\(\s*'([a-zA-Z0-9_.]+)'`)
+
+// TestS5_8RenderedScriptKeysResolveInTheClientCatalog proves every message key
+// the two pages' scripts resolve at runtime actually exists in window.I18N for
+// every supported language.
+//
+// window.I18N is populated from i18n.JSMessages, which carries ONLY "js."-
+// prefixed keys; any other key silently renders as the literal key string in
+// the browser, with no compile-time and no template-render-time signal. This is
+// a rendered + catalog invariant, so it covers whatever keys the pages use —
+// including the failure-stamp label — without naming any of them.
+func TestS5_8RenderedScriptKeysResolveInTheClientCatalog(t *testing.T) {
+	loc, err := i18n.New()
+	if err != nil {
+		t.Fatalf("i18n.New: %v", err)
+	}
+	srv := buildF3PageServer(t)
+
+	for _, route := range s58Routes {
+		body := f3GetPage(t, srv, route, "en")
+		matches := s58JSTCallKey.FindAllStringSubmatch(body, -1)
+		if len(matches) == 0 {
+			t.Fatalf("%s: no client-side t(...) calls found in the rendered page — the pattern is stale", route)
+		}
+		seen := map[string]bool{}
+		for _, m := range matches {
+			seen[m[1]] = true
+		}
+		for key := range seen {
+			if !strings.HasPrefix(key, "js.") {
+				t.Errorf("%s: script resolves t(%q), which is not \"js.\"-prefixed — window.I18N only carries js.* keys, so it renders as the literal key", route, key)
+				continue
+			}
+			for _, lang := range i18n.SupportedLangs() {
+				if _, ok := loc.JSMessages(lang)[key]; !ok {
+					t.Errorf("%s [%s]: client catalog has no %q — the browser would print the raw key", route, lang, key)
+				}
+			}
+		}
+	}
+}
+
+// TestS5_8SeededAnnotationsAreRenderableEvidence pins corrective-pass-3
+// defect 3, at the SERVED-DATA seam: what the real /api/points-history handler
+// hands the chart.
+//
+// The harness seeded its annotations AFTER the whole points loop, so every
+// annotation timestamp sat strictly to the right of the last sample. ApexCharts
+// clips an xaxis annotation outside the series' x-range, so the browser drew
+// none of them — while an API-level "we returned three annotations" check
+// passed happily. Counting the API rows is therefore NOT evidence that an
+// annotation is visible.
+//
+// The invariant: every annotation streamer_a serves falls inside the x-range of
+// the series served alongside it, and at least one is TOKEN-backed (empty
+// colour), so its ink comes from --chart-series-1 and demonstrably recolours
+// with the theme instead of being frozen to a seeded hex.
+//
+// Repeat-safe: database.Open is a process-wide singleton, so streamer_a's rows
+// accumulate across -count runs. Every assertion here is therefore a
+// containment or a "at least one" property, never an exact row count.
+func TestS5_8SeededAnnotationsAreRenderableEvidence(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, s58GET("/api/points-history?streamer=streamer_a&range=24h"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET points-history = %d, want 200", rec.Code)
+	}
+	var got analytics.PointsHistory
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode points-history: %v", err)
+	}
+
+	if len(got.Points) < 2 {
+		t.Fatalf("seeded series has %d samples; the fixture must draw a real chart", len(got.Points))
+	}
+	if len(got.Annotations) == 0 {
+		t.Fatal("seeded fixtures produced no annotations — RecordAnnotation failures are being swallowed")
+	}
+
+	first, last := got.Points[0].T, got.Points[len(got.Points)-1].T
+	for _, a := range got.Annotations {
+		if a.T < first || a.T > last {
+			t.Errorf("annotation %q/%q at t=%d falls outside the served chart x-range [%d, %d] — ApexCharts clips it, so the browser renders nothing",
+				a.Type, a.Reason, a.T, first, last)
+		}
+	}
+
+	tokenBacked := 0
+	for _, a := range got.Annotations {
+		if a.Color == "" {
+			tokenBacked++
+		}
+	}
+	if tokenBacked == 0 {
+		t.Error("every seeded annotation carries a hardcoded colour — at least one must be token-backed (empty colour) so the browser can prove annotation ink recolours from --chart-series-1")
+	}
+}
+
+// s58TemplateSourceReaders is the allow-list of S5-8 tests that may read
+// template SOURCE. Each reads it for a STATIC property of the file — a content
+// hash, a class token, a style token, a comment marker — never to infer what
+// the client script does at runtime.
+var s58TemplateSourceReaders = map[string]string{
+	"s58ReadTemplate":                           "the reader primitive itself; its CALLERS are what this list governs",
+	"TestS5_8LegacyStatisticsUntouched":         "pins two templates to a content hash",
+	"TestS5_8HiddenActuallyHides":               "parses class attributes for exact class-token membership",
+	"TestS5_8NewTemplatesUseSemanticTokensOnly": "lints for legacy alias / primitive style tokens",
+	"TestS5_8ROIMarksG4AsInterpretation":        "checks for the Г4 [INT] template comment",
+}
+
+// TestS5_8TestsPinBehaviorAtRealSeamsNotInTemplateText pins corrective-pass-3
+// defect 4, structurally.
+//
+// An assertion like `strings.Contains(src, "toISOString()")` proves only that a
+// string appears in a file. It passes over a script that never runs, over a
+// helper whose only caller ignores it, and over any behavior the browser
+// actually exhibits — while reading like a behavioral guarantee. Every such
+// assertion is a false witness, and the pass-2 suite was full of them.
+//
+// The rule this enforces: S5-8's Go tests pin what the SERVER answers, what the
+// page RENDERS, and what the SEEDED DATA is. Client-IIFE behavior is proven by
+// the named localhost browser scenarios in the harness file. Reading template
+// source is allowed only for the static-property checks listed above.
+//
+// Enforced over the AST rather than by substring, so the guard cannot match its
+// own text and a rename cannot slip past it.
+func TestS5_8TestsPinBehaviorAtRealSeamsNotInTemplateText(t *testing.T) {
+	fset := token.NewFileSet()
+	for _, name := range []string{"s5_8_analytics_test.go", "s5_8_analytics_harness_test.go"} {
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			// A JS-function-body extractor exists for exactly one purpose:
+			// asserting on client-script implementation text.
+			if fn.Name.Name == "s58FuncBody" {
+				t.Errorf("%s: %s extracts a client JS function body — client-IIFE behavior belongs to named browser evidence, not to a Go substring assertion",
+					name, fn.Name.Name)
+			}
+			if _, allowed := s58TemplateSourceReaders[fn.Name.Name]; allowed {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch f := call.Fun.(type) {
+				case *ast.Ident:
+					if f.Name == "s58ReadTemplate" {
+						t.Errorf("%s: %s reads template source; only the static-property checks %v may. Pin this at the rendered page, the served API, or named browser evidence instead",
+							name, fn.Name.Name, s58SortedKeys(s58AllowedReaderSet()))
+					}
+				case *ast.SelectorExpr:
+					if id, ok := f.X.(*ast.Ident); ok && id.Name == "templatesFS" && f.Sel.Name == "ReadFile" {
+						t.Errorf("%s: %s reads template source directly from templatesFS, bypassing the allow-list", name, fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// s58AllowedReaderSet adapts the allow-list to the shared key-sorting helper.
+func s58AllowedReaderSet() map[string]bool {
+	out := make(map[string]bool, len(s58TemplateSourceReaders))
+	for k := range s58TemplateSourceReaders {
+		out[k] = true
+	}
+	return out
 }

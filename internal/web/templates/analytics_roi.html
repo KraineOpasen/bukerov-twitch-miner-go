@@ -80,7 +80,13 @@
          see the same note on the Points page: .c1-block's display:flex is
          emitted after .hidden's display:none, so a block carrying both would
          never actually hide. */}}
-    <div id="ar-stale" class="hidden mb-3" role="status">
+    {{/* PLAIN CONTENT, never a live region — see the same note on the Points
+         page. The strip is raised only by a failed TIMED refresh, and §9/§10
+         forbid a timed poll from announcing; role="status" made the reveal
+         itself speak, because its implicit aria-live is "polite". The explicit
+         aria-live="off" keeps a later role addition from silently undoing
+         that. */}}
+    <div id="ar-stale" class="hidden mb-3" aria-live="off">
         <div class="c1-block c1-block--strip c1-tier-caution">
             <span class="c1-block-icon" aria-hidden="true">⏱</span>
             <span class="c1-block-body"><span class="c1-block-message">{{ t "stat.stale" }}</span></span>
@@ -99,12 +105,17 @@
         </div>
     </div>
 
+    {{/* Cause + failure time + Retry in one alert — see the same note on the
+         Points page. The stamp is this failure's own; #ar-updated reports when
+         the summary last ARRIVED and must never be presented as the time
+         something failed. */}}
     <div id="ar-error" class="hidden" role="alert">
         <div class="c1-block c1-block--block c1-tier-danger">
             <span class="c1-block-icon" aria-hidden="true">⛔</span>
             <span class="c1-block-body">
                 <span class="c1-block-message">{{ t "analytics.roi.failed" }}</span>
                 <span class="c1-block-cause" id="ar-error-msg"></span>
+                <time id="ar-error-time" datetime="" class="type-small text-text-secondary num"></time>
             </span>
             <button type="button" id="ar-retry" class="btn-secondary text-sm">{{ t "stat.retry" }}</button>
         </div>
@@ -173,6 +184,7 @@
         empty: document.getElementById('ar-empty'),
         error: document.getElementById('ar-error'),
         errorMsg: document.getElementById('ar-error-msg'),
+        errorTime: document.getElementById('ar-error-time'),
         retry: document.getElementById('ar-retry'),
         content: document.getElementById('ar-content'),
         export: document.getElementById('ar-export'),
@@ -326,6 +338,16 @@
         els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
     }
 
+    // Stamps the moment THIS terminal failure happened — see the same note on
+    // the Points page. Re-stamped on every failed Retry; the last-success clock
+    // is never reused for it.
+    function setFailedAt() {
+        if (!els.errorTime) return;
+        const now = new Date();
+        els.errorTime.dateTime = now.toISOString();
+        els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+    }
+
     async function load(isRefresh) {
         updateExportLink();
         if (inFlight) inFlight.abort();
@@ -348,8 +370,11 @@
         } catch (err) {
             if (ctrl.signal.aborted) return;
             inFlight = null;
+            // A failed background refresh over retained content is NOT terminal:
+            // it goes stale, it does not enter S-FAIL, and it stamps nothing.
             if (isRefresh && hasData) { els.stale.classList.remove('hidden'); return; }
             els.errorMsg.textContent = String(err.message || err);
+            setFailedAt();
             show('error');
         }
     }
@@ -389,6 +414,7 @@
         scheduleRefresh();
     }, function () {
         els.errorMsg.textContent = t('js.stat.chart_lib_failed');
+        setFailedAt();
         show('error');
     });
 })();
