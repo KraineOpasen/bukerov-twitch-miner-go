@@ -1,0 +1,187 @@
+{{/* C14 — Chart block (task S5-8, routes 7-8). A chart is never the only
+     representation of its data: this component always renders the visual
+     host TOGETHER with a localized assistive-technology summary (an
+     announced live region) and a real data table, plus a client-side CSV
+     control built from the very same fetched JSON the chart drew. Nothing
+     here fetches, computes or persists anything — the owning page supplies
+     the rows through the shared helpers below.
+
+     Colour comes exclusively from the design tokens (--chart-series-1..6,
+     --chart-grid/--chart-label and the annotation inks); there are no
+     hardcoded hexes, so both themes and a live theme switch are followed by
+     re-reading the tokens on every render. prefers-reduced-motion DISABLES
+     animation outright rather than merely shortening it.
+
+     Input: a single string — the id prefix owning this block (e.g.
+     "ap-c14"), from which every child id is derived. Deliberately a bare
+     string and not a struct: routes 7-8 introduce no new viewmodel, and the
+     table's column headers are supplied client-side by the owning page. */}}
+{{define "c14.chart"}}<div class="c14-block" data-c14-block="{{.}}">
+    <div id="{{.}}-chart" data-c14-chart role="img" aria-label="{{ t "analytics.c14.chart_label" }}" aria-describedby="{{.}}-summary"></div>
+    {{/* aria-live starts at "off" and is set per render by c14SetSummary:
+         role="status" alone would make this a live region whose implicit
+         "polite" value re-announces the summary on every TIMED REFRESH, which
+         §9/§10 forbid ("timed polls never announce"). The announcement is
+         reinstated for user-initiated renders only. */}}
+    <p id="{{.}}-summary" data-c14-summary role="status" aria-live="off" class="type-small text-text-secondary mt-2">{{ t "analytics.c14.summary_loading" }}</p>
+    <details class="mt-3">
+        <summary class="type-small text-text-secondary cursor-pointer">{{ t "analytics.c14.table_toggle" }}</summary>
+        <div class="c4-table-card mt-2">
+            <table class="c4-table" id="{{.}}-table" data-c14-table>
+                <caption class="visually-hidden">{{ t "analytics.c14.table_caption" }}</caption>
+                <thead><tr id="{{.}}-table-head"></tr></thead>
+                <tbody id="{{.}}-table-body"></tbody>
+            </table>
+        </div>
+    </details>
+    <div class="mt-3">
+        <button type="button" id="{{.}}-csv" data-c14-csv class="btn-secondary text-sm">{{ t "analytics.c14.csv" }}</button>
+    </div>
+</div>{{end}}
+
+{{/* c14.script — the shared, page-agnostic helpers every C14 block needs.
+     Included once per page from its {{define "scripts"}} block, ahead of the
+     page's own IIFE. Kept free of any page-specific knowledge: the owning
+     page passes column headers and rows in, and gets escaping, no-data
+     honesty, table rendering, the AT summary and CSV download back. */}}
+{{define "c14.script"}}<script>
+    // Absent-vs-zero. A missing value renders an em dash with an accessible
+    // no-data label; 0 is a REAL measurement and must never be produced to
+    // stand in for "we don't know". Hence the explicit null/undefined and
+    // non-finite tests rather than a falsy check.
+    function c14NoData(v, fmt) {
+        if (v == null) return null;
+        if (typeof v === 'number' && !isFinite(v)) return null;
+        return fmt ? fmt(v) : String(v);
+    }
+
+    // Renders a cell value, substituting the shared no-data dash when the
+    // value is absent. Returns an HTML string; callers pass already-escaped
+    // or numeric content, and free-form text goes through c14Escape.
+    function c14Cell(v, fmt, noDataLabel) {
+        var s = c14NoData(v, fmt);
+        if (s === null) return '<span aria-label="' + c14Escape(noDataLabel) + '">—</span>';
+        return c14Escape(s);
+    }
+
+    function c14Escape(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    // One deterministic CSV cell encoder for every C14 block. Handles the
+    // four dangerous shapes: embedded commas, embedded double quotes,
+    // embedded newlines (LF and CR), and a leading =, +, - or @, which
+    // spreadsheet software would otherwise EVALUATE as a formula. The
+    // formula guard prepends a tab, which Excel and Sheets strip on display
+    // while refusing to treat the cell as an expression.
+    function c14CSVCell(v) {
+        if (v == null) return '';
+        var s = String(v);
+        var first = s.charAt(0);
+        if (first === '=' || first === '+' || first === '-' || first === '@') {
+            s = '\t' + s;
+        }
+        if (s.indexOf('"') >= 0 || s.indexOf(',') >= 0 || s.indexOf('\n') >= 0 || s.indexOf('\r') >= 0) {
+            s = '"' + s.split('"').join('""') + '"';
+        }
+        return s;
+    }
+
+    // header: array of strings; rows: array of arrays. CRLF line endings, the
+    // encoding every spreadsheet reads unambiguously.
+    function c14ToCSV(header, rows) {
+        var out = [header.map(c14CSVCell).join(',')];
+        for (var i = 0; i < rows.length; i++) {
+            out.push(rows[i].map(c14CSVCell).join(','));
+        }
+        return out.join('\r\n');
+    }
+
+    // Client-side download of a CSV built from data the page ALREADY has —
+    // never a second server round-trip, and never a second source of truth.
+    function c14DownloadCSV(filename, header, rows) {
+        var blob = new Blob(['﻿' + c14ToCSV(header, rows)], { type: 'text/csv;charset=utf-8;' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    // Fills a C14 block's data table: headers and rows are supplied by the
+    // owning page, so this stays page-agnostic.
+    function c14RenderTable(prefix, header, rowsHTML) {
+        var head = document.getElementById(prefix + '-table-head');
+        var body = document.getElementById(prefix + '-table-body');
+        if (!head || !body) return;
+        head.innerHTML = header.map(function (h) {
+            return '<th scope="col">' + c14Escape(h) + '</th>';
+        }).join('');
+        body.innerHTML = rowsHTML.map(function (cells) {
+            return '<tr>' + cells.map(function (c) { return '<td>' + c + '</td>'; }).join('') + '</tr>';
+        }).join('');
+    }
+
+    // The text alternative to the visual. Always set together with the chart
+    // it describes.
+    //
+    // `announce` is deliberately explicit and never defaulted to true. The
+    // element carries role="status", whose IMPLICIT live value is "polite", so
+    // simply rewriting its text would make a screen reader re-read the same
+    // sentence on every background refresh — §9 "routine SSE/poll refreshes
+    // never announce" and §10 "timed polls ... never announce". An explicit
+    // aria-live is therefore written on every call, BEFORE the text changes,
+    // so the mutation is classified by what the caller actually asked for:
+    // "polite" for a user-initiated render, "off" for a timed refresh.
+    function c14SetSummary(prefix, text, announce) {
+        var el = document.getElementById(prefix + '-summary');
+        if (!el) return;
+        el.setAttribute('aria-live', announce ? 'polite' : 'off');
+        el.textContent = text;
+    }
+
+    // Animation is DISABLED under prefers-reduced-motion, not shortened.
+    var c14ReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Design tokens re-read on every call, so a live theme switch is followed
+    // without destroying and recreating any chart instance.
+    function c14Palette() {
+        var css = getComputedStyle(document.documentElement);
+        var tok = function (name, fallback) { return (css.getPropertyValue(name).trim() || fallback); };
+        return {
+            s1: tok('--chart-series-1', '#8b7fd1'),
+            s2: tok('--chart-series-2', '#FFE44D'),
+            s3: tok('--chart-series-3', '#FFC83D'),
+            s4: tok('--chart-series-4', '#FF8A3D'),
+            s5: tok('--chart-series-5', '#B6FF3B'),
+            s6: tok('--chart-series-6', '#22D3EE'),
+            grid: tok('--color-chart-grid', '#3a3b47'),
+            label: tok('--color-chart-label', '#9c9aab'),
+            inkDark: tok('--chart-annotation-ink-dark', ''),
+            inkLight: tok('--chart-annotation-ink-light', ''),
+            surface: tok('--color-surface-card', ''),
+            textPrimary: tok('--color-text-primary', ''),
+        };
+    }
+
+    function c14Theme() {
+        return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    }
+
+    // ApexCharts is vendored and loaded deferred; poll briefly rather than
+    // dropping the first render, and report an honest failure if it never
+    // arrives.
+    function c14WhenCharts(cb, onFail) {
+        var start = Date.now();
+        (function check() {
+            if (typeof ApexCharts !== 'undefined') { cb(); return; }
+            if (Date.now() - start < 10000) { setTimeout(check, 50); return; }
+            if (onFail) onFail();
+        })();
+    }
+</script>{{end}}

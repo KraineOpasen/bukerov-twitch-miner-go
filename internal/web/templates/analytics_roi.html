@@ -1,0 +1,440 @@
+{{/* /analytics/roi (task S5-8, route 8): the canonical prediction-ROI page.
+     Direct-render, GET/HEAD only; /analytics itself stays a 404.
+
+     STRICTLY READ-ONLY. This page renders prediction outcomes; it never
+     places, skips, cancels or configures a bet, ships no form and issues no
+     non-GET request. Betting behavior is owned by /settings/predictions,
+     which is linked rather than duplicated here.
+
+     Presentation only. The authoritative data is the EXISTING, unchanged
+     /api/predictions/roi endpoint (handlers_roi.go), whose response is a
+     fully computed analytics.ROISummary. Every figure shown is read straight
+     off a field of that response — financial outcome data is NEVER
+     reconstructed or re-derived in the browser, because a second computation
+     is a second source of truth that can silently disagree with the miner's
+     own ledger.
+
+     [INT] — gap Г4 (Stage 4 handoff §17). The Stage 4 report's own wording for
+     the "three tables" was стример/стратегия/исход, and it flagged that
+     composition as an INTERPRETATION rather than confirmed parity. The three
+     tables rendered here are instead exactly the three the authoritative
+     summary actually carries: byStreamer, byStrategy and byOddsBucket. The
+     substitution of the odds-bucket table for an "исход" table is deliberate:
+     ROISummary has no outcome breakdown field, so an исход table could only be
+     produced by re-deriving financial outcomes in the browser — a second
+     source of truth this page forbids. The outcome split is still presented,
+     as the C14 donut plus its data table and CSV, from the summary's own
+     wins/losses/refunds counts. Г4 stays OPEN until the owner confirms this
+     composition; it is not settled by this slice.
+
+     The refresh cadence is the existing AnalyticsSettings.Refresh value
+     threaded through RefreshMinutes, reused verbatim. */}}
+{{define "title"}}{{ t "analytics.roi.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "analytics.roi.title" }}</h1>
+    <div id="ar-updated" class="type-small text-text-secondary num"></div>
+</div>
+<p class="type-body text-text-secondary mb-2" style="max-width:72ch">{{ t "analytics.roi.lead" }}</p>
+<p class="type-small text-text-secondary mb-6">
+    {{ t "analytics.roi.readonly" }}
+    <a data-ar-owner-link href="/settings/predictions" class="hover:underline">{{ t "analytics.roi.owner_link" }} →</a>
+</p>
+
+<div class="card mb-6">
+    <div class="flex flex-wrap items-end gap-5">
+        <div class="flex flex-col gap-1">
+            <label for="ar-streamer" class="type-small text-text-secondary">{{ t "analytics.points.streamer" }}</label>
+            <select id="ar-streamer" class="input-field min-w-[12rem]">
+                <option value="">{{ t "stat.all_streamers" }}</option>
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <label for="ar-strategy" class="type-small text-text-secondary">{{ t "stat.strategy" }}</label>
+            <select id="ar-strategy" class="input-field min-w-[10rem]">
+                <option value="">{{ t "stat.all_strategies" }}</option>
+                {{range .BetStrategies}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <span class="type-small text-text-secondary">{{ t "analytics.points.period" }}</span>
+            {{/* Semantic token, not the `neutral-700` legacy alias — see the
+                 same note on the Points page. */}}
+            <div class="inline-flex rounded-md overflow-hidden border" style="border-color:var(--border-default)" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
+                <button type="button" class="roi-period-btn" data-ar-period="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="roi-period-btn is-active" data-ar-period="30d">{{ t "stat.range.30d" }}</button>
+                <button type="button" class="roi-period-btn" data-ar-period="90d">{{ t "stat.range.90d" }}</button>
+                <button type="button" class="roi-period-btn" data-ar-period="lifetime">{{ t "stat.range.lifetime" }}</button>
+            </div>
+        </div>
+        <div class="ml-auto">
+            <a id="ar-export" class="btn-secondary inline-block" href="#" download>{{ t "stat.export" }}</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    {{/* The toggled element is a PLAIN wrapper, never the .c1-block itself —
+         see the same note on the Points page: .c1-block's display:flex is
+         emitted after .hidden's display:none, so a block carrying both would
+         never actually hide. */}}
+    {{/* PLAIN CONTENT, never a live region — see the same note on the Points
+         page. The strip is raised only by a failed TIMED refresh, and §9/§10
+         forbid a timed poll from announcing; role="status" made the reveal
+         itself speak, because its implicit aria-live is "polite". The explicit
+         aria-live="off" keeps a later role addition from silently undoing
+         that. */}}
+    <div id="ar-stale" class="hidden mb-3" aria-live="off">
+        <div class="c1-block c1-block--strip c1-tier-caution">
+            <span class="c1-block-icon" aria-hidden="true">⏱</span>
+            <span class="c1-block-body"><span class="c1-block-message">{{ t "stat.stale" }}</span></span>
+        </div>
+    </div>
+
+    <div id="ar-loading"><div class="skeleton h-40 w-full rounded-lg"></div></div>
+
+    <div id="ar-empty" class="hidden">
+        <div class="c1-block c1-block--block c1-tier-neutral">
+            <span class="c1-block-icon" aria-hidden="true">▢</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.roi.empty" }}</span>
+                <span class="c1-block-cause">{{ t "analytics.roi.empty_cause" }}</span>
+            </span>
+        </div>
+    </div>
+
+    {{/* Cause + failure time + Retry in one alert — see the same note on the
+         Points page. The stamp is this failure's own; #ar-updated reports when
+         the summary last ARRIVED and must never be presented as the time
+         something failed.
+
+         SILENT BY DEFAULT, for the same reason as on the Points page: this
+         block is a role="alert" region, so it is implicitly assertive, and a
+         page already sitting in terminal S-FAIL keeps polling — each failed
+         TIMED refresh rewrote the cause and the stamp in here and spoke the
+         same failure again, once per cadence, unasked. showFailure() raises the
+         politeness back to "assertive" BEFORE it touches the block, for the
+         attempts the operator initiated. */}}
+    <div id="ar-error" class="hidden" role="alert" aria-live="off">
+        <div class="c1-block c1-block--block c1-tier-danger">
+            <span class="c1-block-icon" aria-hidden="true">⛔</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.roi.failed" }}</span>
+                <span class="c1-block-cause" id="ar-error-msg"></span>
+                <time id="ar-error-time" datetime="" class="type-small text-text-secondary num"></time>
+            </span>
+            <button type="button" id="ar-retry" class="btn-secondary text-sm">{{ t "stat.retry" }}</button>
+        </div>
+    </div>
+
+    <div id="ar-content" class="hidden">
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.bets" }}</span><span id="ar-kpi-count" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "analytics.roi.kpi.winrate" }}</span><span id="ar-kpi-winrate" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net" }}</span><span id="ar-kpi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "analytics.roi.kpi.roi" }}</span><span id="ar-kpi-roi" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.wagered" }}</span><span id="ar-kpi-wagered" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.avg_wager" }}</span><span id="ar-kpi-avgwager" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.avg_win" }}</span><span id="ar-kpi-avgwin" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.drawdown" }}</span><span id="ar-kpi-drawdown" class="stat-value num"></span></div>
+        </div>
+        <p class="type-small text-text-secondary mb-6">{{ t "stat.roi.wins_note" }}</p>
+
+        {{template "c14.chart" "ar-c14"}}
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+            <div>
+                <h2 class="type-small text-text-primary font-semibold mb-2">{{ t "stat.roi.by_streamer" }}</h2>
+                <div class="c4-table-card"><table class="c4-table" id="ar-by-streamer">
+                    <caption class="visually-hidden">{{ t "stat.roi.by_streamer" }}</caption>
+                    <thead><tr id="ar-by-streamer-head"></tr></thead><tbody id="ar-by-streamer-body"></tbody>
+                </table></div>
+            </div>
+            <div>
+                <h2 class="type-small text-text-primary font-semibold mb-2">{{ t "stat.roi.by_strategy" }}</h2>
+                <div class="c4-table-card"><table class="c4-table" id="ar-by-strategy">
+                    <caption class="visually-hidden">{{ t "stat.roi.by_strategy" }}</caption>
+                    <thead><tr id="ar-by-strategy-head"></tr></thead><tbody id="ar-by-strategy-body"></tbody>
+                </table></div>
+            </div>
+            <div>
+                <h2 class="type-small text-text-primary font-semibold mb-2">{{ t "stat.roi.by_odds" }}</h2>
+                <div class="c4-table-card"><table class="c4-table" id="ar-by-odds">
+                    <caption class="visually-hidden">{{ t "stat.roi.by_odds" }}</caption>
+                    <thead><tr id="ar-by-odds-head"></tr></thead><tbody id="ar-by-odds-body"></tbody>
+                </table></div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+{{template "c14.script" .}}
+<script>
+(function () {
+    // Reuses the EXISTING AnalyticsSettings.Refresh cadence verbatim.
+    const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
+    const NO_DATA = {{ t "analytics.no_data" }};
+    const nf = new Intl.NumberFormat();
+    const fmtInt = v => nf.format(Math.round(v));
+    const fmtSigned = v => (v > 0 ? '+' : '') + nf.format(Math.round(v));
+    const fmtPct = v => (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+
+    const els = {
+        streamer: document.getElementById('ar-streamer'),
+        strategy: document.getElementById('ar-strategy'),
+        updated: document.getElementById('ar-updated'),
+        stale: document.getElementById('ar-stale'),
+        loading: document.getElementById('ar-loading'),
+        empty: document.getElementById('ar-empty'),
+        error: document.getElementById('ar-error'),
+        errorMsg: document.getElementById('ar-error-msg'),
+        errorTime: document.getElementById('ar-error-time'),
+        retry: document.getElementById('ar-retry'),
+        content: document.getElementById('ar-content'),
+        export: document.getElementById('ar-export'),
+        csv: document.querySelector('[data-c14-csv]'),
+        periodBtns: Array.from(document.querySelectorAll('[data-ar-period]')),
+    };
+    if (!els.content) return;
+
+    let currentPeriod = '30d';
+    let refreshTimer = null;
+    let inFlight = null;
+    let hasData = false;
+    let lastROI = null;
+    let donut = null;
+
+    function show(state) {
+        els.loading.classList.toggle('hidden', state !== 'loading');
+        els.empty.classList.toggle('hidden', state !== 'empty');
+        els.error.classList.toggle('hidden', state !== 'error');
+        els.content.classList.toggle('hidden', state !== 'content');
+        // The stale strip describes the CONTENT region and goes with it — see
+        // the same note on the Points page.
+        if (state !== 'content') {
+            els.stale.classList.add('hidden');
+        }
+    }
+
+    function apiURL(base) {
+        const p = new URLSearchParams({
+            streamer: els.streamer.value || '',
+            strategy: els.strategy.value || '',
+            period: currentPeriod,
+        });
+        return base + '?' + p.toString();
+    }
+
+    function updateExportLink() { els.export.href = apiURL('/api/predictions/roi/export'); }
+
+    function signClass(v) { return v > 0 ? 'pos' : (v < 0 ? 'neg' : ''); }
+
+    // Every tile is a straight read of one authoritative field. An absent
+    // field renders the shared no-data dash — never a 0, which would read as
+    // a real measured outcome.
+    function setTile(id, value, fmt, sign) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const text = c14NoData(value, fmt);
+        el.textContent = text === null ? '—' : text;
+        el.classList.remove('pos', 'neg');
+        if (text === null) { el.setAttribute('aria-label', NO_DATA); return; }
+        el.removeAttribute('aria-label');
+        if (sign) el.classList.add(sign);
+    }
+
+    function tableCols() {
+        return [t('js.stat.col.key'), t('js.analytics.col.n'), t('js.stat.col.profit'), t('js.analytics.col.roi')];
+    }
+
+    // Renders one breakdown table straight from its rows; no aggregation and
+    // no derived column is computed here.
+    function renderBreakdown(tableId, rows) {
+        const head = document.getElementById(tableId + '-head');
+        const body = document.getElementById(tableId + '-body');
+        if (!head || !body) return;
+        head.innerHTML = tableCols().map(h => '<th scope="col">' + c14Escape(h) + '</th>').join('');
+        if (!rows || rows.length === 0) {
+            body.innerHTML = '<tr><td colspan="4"><span aria-label="' + c14Escape(NO_DATA) + '">—</span></td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(r =>
+            '<tr>' +
+            '<td>' + c14Cell(r.key, null, NO_DATA) + '</td>' +
+            '<td class="num">' + c14Cell(r.count, fmtInt, NO_DATA) + '</td>' +
+            '<td class="num ' + signClass(r.netProfit) + '">' + c14Cell(r.netProfit, fmtSigned, NO_DATA) + '</td>' +
+            '<td class="num ' + signClass(r.roi) + '">' + c14Cell(r.roi, fmtPct, NO_DATA) + '</td>' +
+            '</tr>'
+        ).join('');
+    }
+
+    // Win/lose/refund split on the shared series tokens; the ring follows the
+    // active theme because the tokens are re-read on every render.
+    function renderOutcomes(d) {
+        const host = document.getElementById('ar-c14-chart');
+        if (!host || typeof ApexCharts === 'undefined') return;
+        const P = c14Palette();
+        const options = {
+            series: [d.wins || 0, d.losses || 0, d.refunds || 0],
+            labels: [t('js.stat.roi.wins'), t('js.stat.roi.losses'), t('js.stat.roi.refunds')],
+            colors: [P.s5, P.s4, P.s6],
+            chart: {
+                type: 'donut', height: 220, background: 'transparent',
+                foreColor: P.label, fontFamily: 'Inter, sans-serif',
+                animations: { enabled: !c14ReducedMotion, speed: 300 },
+            },
+            legend: { position: 'bottom', fontSize: '12px' },
+            dataLabels: { enabled: false },
+            stroke: { colors: [P.surface], width: 2 },
+            plotOptions: { pie: { donut: { size: '70%' } } },
+            tooltip: { theme: c14Theme() },
+        };
+        if (donut) {
+            donut.updateOptions(options, false, !c14ReducedMotion);
+        } else {
+            donut = new ApexCharts(host, options);
+            donut.render();
+        }
+    }
+
+    function outcomeRows(d) {
+        return [
+            [t('js.stat.roi.wins'), d.wins],
+            [t('js.stat.roi.losses'), d.losses],
+            [t('js.stat.roi.refunds'), d.refunds],
+        ];
+    }
+
+    function csvHeader() { return [t('js.analytics.col.outcome'), t('js.analytics.col.n')]; }
+
+    // `announce` is threaded down from load(): true for a user-initiated
+    // render, false for the timed refresh, which must never speak (§9/§10).
+    function renderC14(d, announce) {
+        c14RenderTable('ar-c14', csvHeader(), outcomeRows(d).map(r => [
+            c14Cell(r[0], null, NO_DATA),
+            c14Cell(r[1], fmtInt, NO_DATA),
+        ]));
+        c14SetSummary('ar-c14', t('js.analytics.roi.summary')
+            .replace('{wins}', c14NoData(d.wins, fmtInt) || NO_DATA)
+            .replace('{losses}', c14NoData(d.losses, fmtInt) || NO_DATA)
+            .replace('{refunds}', c14NoData(d.refunds, fmtInt) || NO_DATA)
+            .replace('{period}', currentPeriod), announce);
+    }
+
+    function render(d, announce) {
+        lastROI = d;
+        setTile('ar-kpi-count', d.count, fmtInt);
+        setTile('ar-kpi-winrate', d.winRate, v => v.toFixed(1) + '%');
+        setTile('ar-kpi-net', d.netProfit, fmtSigned, signClass(d.netProfit));
+        setTile('ar-kpi-roi', d.roi, fmtPct, signClass(d.roi));
+        setTile('ar-kpi-wagered', d.totalWagered, fmtInt);
+        setTile('ar-kpi-avgwager', d.avgWager, fmtInt);
+        setTile('ar-kpi-avgwin', d.avgWin, fmtSigned, signClass(d.avgWin));
+        setTile('ar-kpi-drawdown', d.maxDrawdown, v => (v > 0 ? '-' + fmtInt(v) : '0'), d.maxDrawdown > 0 ? 'neg' : '');
+        renderOutcomes(d);
+        renderC14(d, announce);
+        renderBreakdown('ar-by-streamer', d.byStreamer);
+        renderBreakdown('ar-by-strategy', d.byStrategy);
+        renderBreakdown('ar-by-odds', d.byOddsBucket);
+    }
+
+    function setUpdated() {
+        els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
+    }
+
+    // Enters terminal S-FAIL — see the same note on the Points page. Re-stamped
+    // on every failed Retry; the last-success clock is never reused for it.
+    //
+    // `announce` is explicit and never defaulted, exactly like c14SetSummary's.
+    // The block is a role="alert" region (implicitly assertive), so the
+    // politeness is written BEFORE the block is touched: "assertive" for an
+    // attempt the operator initiated, "off" for the timed poll, which §9/§10
+    // forbid from announcing. A silenced poll still refreshes the cause and
+    // advances the stamp — it only stops interrupting.
+    function showFailure(cause, announce) {
+        els.error.setAttribute('aria-live', announce ? 'assertive' : 'off');
+        els.errorMsg.textContent = cause;
+        if (els.errorTime) {
+            const now = new Date();
+            els.errorTime.dateTime = now.toISOString();
+            els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+        }
+        show('error');
+    }
+
+    async function load(isRefresh) {
+        updateExportLink();
+        if (inFlight) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+        if (!isRefresh && !hasData) show('loading');
+
+        try {
+            const resp = await fetch(apiURL('/api/predictions/roi'), { signal: ctrl.signal });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const d = await resp.json();
+            inFlight = null;
+            els.stale.classList.add('hidden');
+
+            if (d.empty) { hasData = false; show('empty'); setUpdated(); return; }
+            show('content');
+            render(d, !isRefresh);
+            hasData = true;
+            setUpdated();
+        } catch (err) {
+            if (ctrl.signal.aborted) return;
+            inFlight = null;
+            // A failed background refresh over retained content is NOT terminal:
+            // it goes stale, it does not enter S-FAIL, and it stamps nothing.
+            if (isRefresh && hasData) { els.stale.classList.remove('hidden'); return; }
+            // Nothing retained, so this IS terminal — but a TIMED poll landing
+            // here re-states the cause and re-stamps the time SILENTLY.
+            showFailure(String(err.message || err), !isRefresh);
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        if (REFRESH_MS > 0) refreshTimer = setInterval(() => load(true), REFRESH_MS);
+    }
+
+    els.periodBtns.forEach(btn => btn.addEventListener('click', () => {
+        els.periodBtns.forEach(b => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        currentPeriod = btn.dataset.arPeriod;
+        load(false);
+    }));
+    els.streamer.addEventListener('change', () => load(false));
+    els.strategy.addEventListener('change', () => load(false));
+    els.retry.addEventListener('click', () => load(false));
+
+    if (els.csv) {
+        els.csv.addEventListener('click', () => {
+            if (!lastROI) return;
+            const name = (els.streamer.value || 'all') + '-roi-' + currentPeriod + '.csv';
+            c14DownloadCSV(name, csvHeader(), outcomeRows(lastROI));
+        });
+    }
+
+    // Recolours the donut only. It deliberately does NOT go through render(),
+    // so a theme switch never rewrites — and never re-announces — the summary.
+    document.addEventListener('miner:themechange', function () {
+        if (lastROI) renderOutcomes(lastROI);
+    });
+
+    updateExportLink();
+    c14WhenCharts(function () {
+        load(false);
+        scheduleRefresh();
+    }, function () {
+        // The chart library never arrived on the INITIAL load — the operator is
+        // waiting on this page right now, so it announces.
+        showFailure(t('js.stat.chart_lib_failed'), true);
+    });
+})();
+</script>
+{{end}}

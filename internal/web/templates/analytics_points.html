@@ -1,0 +1,510 @@
+{{/* /analytics/points (task S5-8, route 7): the canonical points-history
+     page. Direct-render, GET/HEAD only; /analytics itself stays a 404.
+
+     Presentation only. The authoritative data is the EXISTING, unchanged
+     /api/points-history endpoint (handlers_statistics.go) — this page adds
+     no endpoint, no viewmodel and no transport, and its refresh cadence is
+     the existing AnalyticsSettings.Refresh value threaded through
+     RefreshMinutes, reused verbatim.
+
+     Honesty constraints this page is pinned to (s5_8_analytics_test.go):
+       - A CONCRETE streamer is always required. The series is per-streamer
+         and the backend rejects an empty streamer, so there is deliberately
+         no "All streamers" facet — an aggregate option could only be served
+         by inventing a cross-streamer series.
+       - No value is ever invented between two samples, and no gap is filled
+         with a zero. The samples the backend returns are exactly what is
+         drawn ('straight', never a 'smooth' curve, which over sparse data
+         would suggest readings the miner never took), and no sampling-gap
+         threshold is invented.
+       - rawTruncated (the backend row cap) dashes out every KPI rather than
+         showing a figure derived from a window missing its newest rows; a
+         dash with an accessible no-data label, never a fabricated 0.
+       - The chart is never the only representation: C14 pairs it with an
+         announced summary, a data table, and a client-generated CSV.
+
+     The legacy /statistics page keeps rendering directly and unchanged;
+     this page was split along its client seams, not by editing it. */}}
+{{define "title"}}{{ t "analytics.points.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<div class="flex items-center justify-between flex-wrap gap-3 mb-2">
+    <h1 class="type-h1 text-text-primary">{{ t "analytics.points.title" }}</h1>
+    <div id="ap-updated" class="type-small text-text-secondary num"></div>
+</div>
+<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "analytics.points.lead" }}</p>
+
+<div class="card mb-6">
+    <div class="flex flex-wrap items-end gap-5">
+        <div class="flex flex-col gap-1">
+            <label for="ap-streamer" class="type-small text-text-secondary">{{ t "analytics.points.streamer" }}</label>
+            <select id="ap-streamer" class="input-field min-w-[12rem]" {{if not .Streamers}}disabled{{end}}>
+                {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="__none__" disabled selected>{{ t "analytics.points.no_streamers" }}</option>{{end}}
+            </select>
+        </div>
+        <div class="flex flex-col gap-1">
+            <span class="type-small text-text-secondary">{{ t "analytics.points.period" }}</span>
+            {{/* Semantic token, not the `neutral-700` legacy alias: §5 keeps
+                 new templates on semantic utilities only, and the alias set is
+                 deleted in S5-10 once a grep proves zero template references. */}}
+            <div class="inline-flex rounded-md overflow-hidden border" style="border-color:var(--border-default)" role="group" aria-label="{{ t "analytics.points.period" }}">
+                <button type="button" class="stat-range-btn is-active" data-ap-range="24h">{{ t "stat.range.24h" }}</button>
+                <button type="button" class="stat-range-btn" data-ap-range="7d">{{ t "stat.range.7d" }}</button>
+                <button type="button" class="stat-range-btn" data-ap-range="30d">{{ t "stat.range.30d" }}</button>
+            </div>
+        </div>
+        <div class="ml-auto">
+            <a id="ap-export" class="btn-secondary inline-block" href="#" download>{{ t "stat.export" }}</a>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    {{/* The toggled element is a PLAIN wrapper, never the .c1-block itself:
+         .c1-block sets display:flex and is emitted after .hidden's display:none
+         in the compiled stylesheet, so at equal specificity a block carrying
+         both classes would stay visible. Toggling a bare wrapper keeps the
+         state blocks genuinely mutually exclusive. */}}
+    {{/* Both strips are PLAIN CONTENT, never live regions. Each is revealed by
+         the TIMED POLL — S-STALE only ever from a failed background refresh,
+         S-PART from every poll that reports the backend row cap — and §9/§10
+         forbid a timed poll from announcing. role="status" would have made them
+         live by IMPLICATION (its implicit aria-live is "polite"), so the reveal
+         itself spoke. aria-live="off" is written EXPLICITLY rather than merely
+         omitting the role, so adding a role later cannot silently give these
+         strips a voice. The information is still reachable: it sits in the
+         document, above the content it describes. */}}
+    <div id="ap-stale" class="hidden mb-3" aria-live="off">
+        <div class="c1-block c1-block--strip c1-tier-caution">
+            <span class="c1-block-icon" aria-hidden="true">⏱</span>
+            <span class="c1-block-body"><span class="c1-block-message">{{ t "stat.stale" }}</span></span>
+        </div>
+    </div>
+    <div id="ap-partial" class="hidden mb-3" aria-live="off">
+        <div class="c1-block c1-block--strip c1-tier-caution">
+            <span class="c1-block-icon" aria-hidden="true">◐</span>
+            <span class="c1-block-body"><span class="c1-block-message">{{ t "analytics.points.partial" }}</span></span>
+        </div>
+    </div>
+
+    <div id="ap-loading"><div class="skeleton h-[400px] w-full rounded-lg"></div></div>
+
+    <div id="ap-empty" class="hidden">
+        <div class="c1-block c1-block--block c1-tier-neutral">
+            <span class="c1-block-icon" aria-hidden="true">▢</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.points.empty" }}</span>
+                <span class="c1-block-cause">{{ t "analytics.points.empty_cause" }}</span>
+            </span>
+        </div>
+    </div>
+
+    {{/* A terminal failure states three things together, inside one alert: what
+         failed, WHEN it failed, and how to try again. The failure time is its
+         own <time> element and is stamped fresh on every terminal failure —
+         it must never be read off #ap-updated, which reports when data last
+         ARRIVED and stays frozen at the last good load. The machine-readable
+         datetime carries millisecond resolution, so a retry that fails inside
+         the same displayed second is still provably a new stamp.
+
+         SILENT BY DEFAULT. role="alert" is implicitly assertive, so every
+         mutation inside this block is spoken while it is on screen — and a page
+         already sitting in terminal S-FAIL keeps polling, so each failed TIMED
+         refresh re-stamped the time here and interrupted a screen reader with
+         the same failure once per cadence, forever, unasked. §9/§10 forbid a
+         timed poll from announcing. The explicit aria-live="off" overrides the
+         role's implicit assertive; showFailure() raises it back to "assertive"
+         BEFORE it touches anything, for the attempts the operator initiated
+         (first load, Retry, a filter change). Written in the markup and not
+         only from script, so the default survives an edit that touches only the
+         JS — and so a page whose script never runs cannot announce either. */}}
+    <div id="ap-error" class="hidden" role="alert" aria-live="off">
+        <div class="c1-block c1-block--block c1-tier-danger">
+            <span class="c1-block-icon" aria-hidden="true">⛔</span>
+            <span class="c1-block-body">
+                <span class="c1-block-message">{{ t "analytics.points.failed" }}</span>
+                <span class="c1-block-cause" id="ap-error-msg"></span>
+                <time id="ap-error-time" datetime="" class="type-small text-text-secondary num"></time>
+            </span>
+            <button type="button" id="ap-retry" class="btn-secondary text-sm">{{ t "stat.retry" }}</button>
+        </div>
+    </div>
+
+    <div id="ap-content" class="hidden">
+        <div class="kpi-grid">
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.balance" }}</span><span id="ap-kpi-balance" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net_change" }}</span><span id="ap-kpi-net" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="ap-kpi-earned" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="ap-kpi-events" class="stat-value num"></span></div>
+        </div>
+        <p class="type-small text-text-secondary mb-4">{{ t "stat.kpi.note" }}</p>
+
+        {{template "c14.chart" "ap-c14"}}
+
+        <p id="ap-downsampled" class="type-small text-text-secondary hidden mt-2">{{ t "analytics.points.downsampled" }}</p>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+{{template "c14.script" .}}
+<script>
+(function () {
+    // Reuses the EXISTING AnalyticsSettings.Refresh cadence verbatim — no new
+    // polling, SSE, WebSocket or manual-refresh contract is introduced.
+    const REFRESH_MS = {{.RefreshMinutes}} * 60 * 1000;
+    const NO_DATA = {{ t "analytics.no_data" }};
+    const nf = new Intl.NumberFormat();
+
+    const els = {
+        streamer: document.getElementById('ap-streamer'),
+        updated: document.getElementById('ap-updated'),
+        stale: document.getElementById('ap-stale'),
+        partial: document.getElementById('ap-partial'),
+        loading: document.getElementById('ap-loading'),
+        empty: document.getElementById('ap-empty'),
+        error: document.getElementById('ap-error'),
+        errorMsg: document.getElementById('ap-error-msg'),
+        errorTime: document.getElementById('ap-error-time'),
+        retry: document.getElementById('ap-retry'),
+        content: document.getElementById('ap-content'),
+        downsampled: document.getElementById('ap-downsampled'),
+        export: document.getElementById('ap-export'),
+        csv: document.querySelector('[data-c14-csv]'),
+        rangeBtns: Array.from(document.querySelectorAll('[data-ap-range]')),
+    };
+    if (!els.content) return;
+
+    let chart = null;
+    let currentRange = '24h';
+    let refreshTimer = null;
+    let inFlight = null;
+    let lastData = null;
+
+    function show(state) {
+        els.loading.classList.toggle('hidden', state !== 'loading');
+        els.empty.classList.toggle('hidden', state !== 'empty');
+        els.error.classList.toggle('hidden', state !== 'error');
+        els.content.classList.toggle('hidden', state !== 'content');
+        // Both caution strips describe the CONTENT region, and §7 defines them
+        // as sitting above RETAINED content. Once content is off screen they
+        // describe nothing, so they leave with it — otherwise a stale "part of
+        // the data is unavailable" strip ends up captioning a failure block
+        // that is showing no data at all. The content branch re-asserts
+        // `partial` from the fresh payload immediately after calling show().
+        if (state !== 'content') {
+            els.partial.classList.add('hidden');
+            els.stale.classList.add('hidden');
+        }
+    }
+
+    // A concrete streamer is mandatory — there is no aggregate facet, and the
+    // backend rejects an empty streamer with 400.
+    function selectedStreamer() {
+        const v = els.streamer ? els.streamer.value : '';
+        return (v && v !== '__none__') ? v : '';
+    }
+
+    function apiURL(base) {
+        return base + '?streamer=' + encodeURIComponent(selectedStreamer()) +
+            '&range=' + encodeURIComponent(currentRange);
+    }
+
+    function updateExportLink() { els.export.href = apiURL('/api/points-history/export'); }
+
+    function buildOptions(data) {
+        const P = c14Palette();
+        const series = (data.points || []).map(p => ({ x: p.t, y: p.balance }));
+        const reasons = (data.points || []).map(p => p.reason || '');
+        const annotations = (data.annotations || []).map(a => {
+            const bg = a.color || P.s1;
+            return {
+                x: a.t,
+                borderColor: bg,
+                label: {
+                    borderColor: bg,
+                    style: { color: P.inkDark, background: bg, fontSize: '10px' },
+                    text: a.reason ? a.reason : a.type,
+                    orientation: 'horizontal',
+                },
+            };
+        });
+        return {
+            series: [{ name: t('js.stat.balance'), data: series }],
+            chart: {
+                type: 'area', height: 400, background: 'transparent',
+                foreColor: P.label, fontFamily: 'Inter, sans-serif',
+                toolbar: { show: true, tools: { download: false } },
+                animations: { enabled: !c14ReducedMotion, speed: 300 },
+            },
+            colors: [P.s1],
+            fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.05, stops: [0, 100] } },
+            // 'straight' is deliberate: the samples ARE the data. A smoothed
+            // curve over sparse samples would imply intermediate readings the
+            // miner never took.
+            stroke: { curve: 'straight', width: 2 },
+            dataLabels: { enabled: false },
+            xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+            yaxis: { labels: { formatter: v => nf.format(Math.round(v)) } },
+            grid: { borderColor: P.grid, strokeDashArray: 4 },
+            tooltip: {
+                theme: c14Theme(),
+                x: { format: 'dd MMM yyyy HH:mm' },
+                y: {
+                    formatter: function (val, opts) {
+                        let label = nf.format(val) + ' ' + t('js.stat.points_suffix');
+                        const r = reasons[opts.dataPointIndex];
+                        if (r) label += ' · ' + r;
+                        return label;
+                    },
+                },
+            },
+            annotations: { xaxis: annotations },
+            noData: { text: t('js.stat.no_data') },
+        };
+    }
+
+    function setKPI(id, text, sign) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.classList.remove('pos', 'neg');
+        if (sign) el.classList.add(sign);
+        if (text === '—') { el.setAttribute('aria-label', NO_DATA); } else { el.removeAttribute('aria-label'); }
+    }
+
+    // rawTruncated means the window is missing its NEWEST rows, so the loaded
+    // series' last balance is not the current balance and last-first is not
+    // the period's change. Every tile dashes out — an em dash with a no-data
+    // label, never a 0 that would read as a real measurement.
+    function renderKPIs(data) {
+        if (data.rawTruncated) {
+            ['ap-kpi-balance', 'ap-kpi-net', 'ap-kpi-earned', 'ap-kpi-events'].forEach(id => setKPI(id, '—'));
+            return;
+        }
+        const pts = data.points || [];
+        const first = pts.length ? pts[0].balance : null;
+        const last = pts.length ? pts[pts.length - 1].balance : null;
+        // Balance is a single observation, so one sample is enough to state it.
+        setKPI('ap-kpi-balance', c14NoData(last, v => nf.format(v)) || '—');
+
+        // A CHANGE needs two observations. With a single sample last-first is
+        // 0 by construction rather than by measurement, and rendering it would
+        // assert the balance held steady across a window we never observed.
+        if (first === null || last === null || pts.length < 2) {
+            setKPI('ap-kpi-net', '—');
+        } else {
+            const net = last - first;
+            setKPI('ap-kpi-net', (net > 0 ? '+' : '') + nf.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        }
+
+        // breakdown carries `omitempty` (analytics/models.go), so its ABSENCE
+        // encodes two different facts: BreakdownFromSamples returns nil when
+        // the raw window holds fewer than two samples (no delta EXISTS to
+        // attribute — earned/events are unknown), and an empty slice when the
+        // window genuinely earned nothing (a real, measured zero). Both reach
+        // the browser as a missing key, so summing `breakdown || []` blindly
+        // reports 0 for both — fabricating a zero in the first case, which is
+        // precisely the false «0» this page forbids.
+        //
+        // The raw series length separates them EXACTLY, with no new backend
+        // field: chartDownsampled is true only when points was thinned, i.e.
+        // raw > points >= 1 and therefore raw >= 2; when it is false, points
+        // IS the raw series and its own length settles it.
+        const rawHasTwoSamples = data.chartDownsampled === true || pts.length >= 2;
+        if (!data.breakdown && !rawHasTwoSamples) {
+            setKPI('ap-kpi-earned', '—');
+            setKPI('ap-kpi-events', '—');
+            return;
+        }
+        let earned = 0, events = 0;
+        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
+        setKPI('ap-kpi-earned', '+' + nf.format(earned), earned > 0 ? 'pos' : '');
+        setKPI('ap-kpi-events', nf.format(events));
+    }
+
+    // The C14 text alternative: what the chart shows, stated in words, plus
+    // the same series as a table and as CSV.
+    //
+    // Timestamps go out as ISO-8601 UTC. The on-screen table renders local
+    // time because that is what the operator is reading against their own
+    // clock, but a CSV is a FILE: it outlives the session, travels between
+    // machines and gets parsed by other tools, so it must not depend on the
+    // reader's locale or timezone — and a raw epoch integer, while
+    // deterministic, is not something a person can check by eye.
+    function tableRows(data) {
+        return (data.points || []).map(p => [p.t, p.balance, p.reason || null]);
+    }
+
+    function isoUTC(t) {
+        const d = new Date(t);
+        return isNaN(d.getTime()) ? null : d.toISOString();
+    }
+
+    function csvRows(data) {
+        return tableRows(data).map(r => [isoUTC(r[0]), r[1], r[2]]);
+    }
+
+    function csvHeader() {
+        return [t('js.analytics.col.time'), t('js.analytics.col.balance'), t('js.analytics.col.reason')];
+    }
+
+    // `announce` is threaded down from load(): true for a user-initiated
+    // render, false for the timed refresh, which must never speak (§9/§10).
+    function renderC14(data, announce) {
+        const pts = data.points || [];
+        const header = csvHeader();
+        c14RenderTable('ap-c14', header, tableRows(data).map(r => [
+            c14Cell(r[0], v => new Date(v).toLocaleString(), NO_DATA),
+            c14Cell(r[1], v => nf.format(v), NO_DATA),
+            c14Cell(r[2], null, NO_DATA),
+        ]));
+        const first = pts.length ? pts[0].balance : null;
+        const last = pts.length ? pts[pts.length - 1].balance : null;
+        const summary = t('js.analytics.points.summary')
+            .replace('{n}', nf.format(pts.length))
+            .replace('{streamer}', selectedStreamer())
+            .replace('{range}', currentRange)
+            .replace('{first}', first === null ? NO_DATA : nf.format(first))
+            .replace('{last}', last === null ? NO_DATA : nf.format(last));
+        c14SetSummary('ap-c14', summary, announce);
+    }
+
+    function render(data, announce) {
+        lastData = data;
+        const options = buildOptions(data);
+        if (chart) {
+            chart.updateOptions(options, false, !c14ReducedMotion);
+        } else {
+            chart = new ApexCharts(document.getElementById('ap-c14-chart'), options);
+            chart.render();
+        }
+        renderKPIs(data);
+        renderC14(data, announce);
+    }
+
+    function setUpdated() {
+        els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
+    }
+
+    // Enters terminal S-FAIL: states the cause, stamps the moment THIS failure
+    // happened, and reveals the block. Called on every path that shows S-FAIL,
+    // so a Retry that fails again re-stamps rather than leaving the operator
+    // reading the first attempt's time. The last-success clock is deliberately
+    // left alone: a failure does not change when data last arrived, and reusing
+    // that value would date the failure to the last thing that worked.
+    //
+    // `announce` is explicit and never defaulted, exactly like c14SetSummary's:
+    // the block carries role="alert", whose implicit aria-live is "assertive",
+    // so rewriting the cause or the stamp on a page ALREADY in S-FAIL speaks
+    // the same failure again on every refresh cadence. The politeness is
+    // therefore written BEFORE the block is touched, so the mutation is
+    // classified by what the caller actually asked for: "assertive" for an
+    // attempt the operator initiated, "off" for the timed poll (§9/§10, "timed
+    // polls never announce").
+    //
+    // Silence costs the operator nothing that was ever on screen: the cause is
+    // still refreshed and the stamp still advances, so the block keeps telling
+    // the truth about what failed and when. It simply stops interrupting.
+    function showFailure(cause, announce) {
+        els.error.setAttribute('aria-live', announce ? 'assertive' : 'off');
+        els.errorMsg.textContent = cause;
+        if (els.errorTime) {
+            const now = new Date();
+            // Machine-readable to the millisecond; the visible text is the
+            // operator's local clock.
+            els.errorTime.dateTime = now.toISOString();
+            els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+        }
+        show('error');
+    }
+
+    async function load(isRefresh) {
+        if (!selectedStreamer()) { show('empty'); return; }
+        updateExportLink();
+        if (inFlight) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+        if (!isRefresh && chart === null) show('loading');
+
+        try {
+            const resp = await fetch(apiURL('/api/points-history'), { signal: ctrl.signal });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            inFlight = null;
+            els.stale.classList.add('hidden');
+
+            if (!data.points || data.points.length === 0) {
+                if (chart) { chart.destroy(); chart = null; }
+                els.partial.classList.add('hidden');
+                show('empty');
+                setUpdated();
+                return;
+            }
+
+            show('content');
+            render(data, !isRefresh);
+            els.downsampled.classList.toggle('hidden', !data.chartDownsampled);
+            els.partial.classList.toggle('hidden', !data.rawTruncated);
+            setUpdated();
+        } catch (err) {
+            if (ctrl.signal.aborted) return;
+            inFlight = null;
+            // A failed background refresh keeps the last good view and flags it
+            // stale rather than blanking a working page. That is NOT a terminal
+            // failure: it neither enters S-FAIL nor stamps a failure time, so
+            // the retained content keeps describing itself as merely stale.
+            if (isRefresh && chart) { els.stale.classList.remove('hidden'); return; }
+            // With no retained content there is nothing to keep, so this IS
+            // terminal — but a TIMED poll that lands here (the page was already
+            // failing, or was empty) must still not speak: it re-states the
+            // cause and re-stamps the time silently.
+            showFailure(String(err.message || err), !isRefresh);
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        if (REFRESH_MS > 0) refreshTimer = setInterval(() => load(true), REFRESH_MS);
+    }
+
+    els.rangeBtns.forEach(btn => btn.addEventListener('click', () => {
+        els.rangeBtns.forEach(b => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        currentRange = btn.dataset.apRange;
+        load(false);
+    }));
+    if (els.streamer) els.streamer.addEventListener('change', () => load(false));
+    els.retry.addEventListener('click', () => load(false));
+
+    if (els.csv) {
+        els.csv.addEventListener('click', () => {
+            if (!lastData) return;
+            c14DownloadCSV(
+                selectedStreamer() + '-points-' + currentRange + '.csv',
+                csvHeader(),
+                csvRows(lastData)
+            );
+        });
+    }
+
+    // Follow a live theme switch by updating the existing instance in place.
+    // Recolours the existing instance only. It deliberately does NOT go
+    // through render(), so a theme switch never rewrites — and never
+    // re-announces — the summary.
+    document.addEventListener('miner:themechange', function () {
+        if (chart && lastData) chart.updateOptions(buildOptions(lastData), false, false);
+    });
+
+    updateExportLink();
+    c14WhenCharts(function () {
+        load(false);
+        scheduleRefresh();
+    }, function () {
+        // The chart library never arrived on the INITIAL load — the operator is
+        // waiting on this page right now, so it announces.
+        showFailure(t('js.stat.chart_lib_failed'), true);
+    });
+})();
+</script>
+{{end}}

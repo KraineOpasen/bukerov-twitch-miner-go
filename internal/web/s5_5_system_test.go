@@ -726,8 +726,9 @@ func TestS5_5LogsToolbarControlsRemainOnMobile(t *testing.T) {
 
 // TestS5_5RedirectMatrixShrunkTo13 proves compatibilityRedirects lost exactly
 // the three /system/* entries (16 -> 13 at the time of task S5-5; task S5-6
-// later removed the ten /settings/* entries too, so the map now holds 3 —
-// this test's own name is pinned to the S5-5 slice's history and is left
+// later removed the ten /settings/* entries and task S5-8 the last two
+// /analytics/* ones, so the map now holds only /help — this test's own name
+// is pinned to the S5-5 slice's history and is left
 // unchanged), that each of the three routes now renders directly (200, never
 // a 30x), and that the remaining entries still 302 to their unchanged
 // targets. Building the full mux via srv.handler() also means a
@@ -736,8 +737,8 @@ func TestS5_5LogsToolbarControlsRemainOnMobile(t *testing.T) {
 // would catch a S5-6-style regression that left a route in both this map and
 // its own direct-route registration.
 func TestS5_5RedirectMatrixShrunkTo13(t *testing.T) {
-	if len(compatibilityRedirects) != 3 {
-		t.Fatalf("len(compatibilityRedirects) = %d, want 3", len(compatibilityRedirects))
+	if len(compatibilityRedirects) != 1 {
+		t.Fatalf("len(compatibilityRedirects) = %d, want 1", len(compatibilityRedirects))
 	}
 	for _, route := range []string{"/system/status", "/system/diagnostics", "/system/logs"} {
 		if target, ok := compatibilityRedirects[route]; ok {

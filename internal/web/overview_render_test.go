@@ -70,7 +70,7 @@ func TestRenderOverviewTemplates(t *testing.T) {
 		// Predictions: the count comes from Predictions itself, so the compact
 		// figure and the board below can never describe different boards.
 		`data-ov-pred-active="2"`, `data-ov-pred-today="unknown"`,
-		`data-ov-pred-winrate="unknown"`, `href="/statistics"`,
+		`data-ov-pred-winrate="unknown"`, `href="/analytics/roi"`,
 		// Evidence-gated version region.
 		"0.29.0", `href="/system/diagnostics"`,
 		// The full manual board, preserved inside the collapsed disclosure.

@@ -36,10 +36,14 @@ import (
 // now its own direct-render route (handlers_settings_categories.go), not a
 // redirect to /settings. See s5_6_settings_test.go for their 200/no-redirect
 // coverage and the rest of the S5-6 category-page contract.
+//
+// task S5-8 removed /analytics/points and /analytics/roi from this matrix:
+// each is now its own direct-render route (handlers_analytics_pages.go), not
+// a redirect to /statistics. See s5_8_analytics_test.go for their 200/
+// GET-HEAD/no-redirect coverage and the rest of the S5-8 contract. Only the
+// /help entry remains.
 var wantCompatibilityRedirects = map[string]string{
-	"/analytics/points": "/statistics",
-	"/analytics/roi":    "/statistics",
-	"/help":             "/help/getting-started",
+	"/help": "/help/getting-started",
 }
 
 // TestS5_2CompatibilityRedirectsMapMatchesSpec proves the production map
@@ -60,8 +64,8 @@ func TestS5_2RedirectMatrix(t *testing.T) {
 	srv := buildF3PageServer(t)
 	h := srv.handler()
 
-	if len(wantCompatibilityRedirects) != 3 {
-		t.Fatalf("expected exactly 3 compatibility redirects, found %d", len(wantCompatibilityRedirects))
+	if len(wantCompatibilityRedirects) != 1 {
+		t.Fatalf("expected exactly 1 compatibility redirect, found %d", len(wantCompatibilityRedirects))
 	}
 
 	for route, target := range wantCompatibilityRedirects {
@@ -153,11 +157,15 @@ func TestS5_2RedirectTargetsRenderDirectly(t *testing.T) {
 // replaced their former /settings/* compatibility-redirect entries.
 // task S5-7 extended it once more with the three Events child routes
 // (/events/browser, /events/sound, /events/discord), formerly deferred 404s.
+// task S5-8 extended it a final time with the two Analytics routes
+// (/analytics/points, /analytics/roi), which replaced their former
+// /analytics/* compatibility-redirect entries.
 func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, path := range []string{
 		"/overview", "/events", "/help/getting-started",
 		"/events/browser", "/events/sound", "/events/discord",
+		"/analytics/points", "/analytics/roi",
 		"/system/status", "/system/diagnostics", "/system/logs",
 		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
 		"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",

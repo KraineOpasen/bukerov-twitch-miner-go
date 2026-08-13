@@ -333,7 +333,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "health.html", "logs.html", "help.html", "events.html", "events_browser.html", "events_sound.html", "events_discord.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "analytics_points.html", "analytics_roi.html", "health.html", "logs.html", "help.html", "events.html", "events_browser.html", "events_sound.html", "events_discord.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -856,6 +856,17 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/settings/events-notifications", s.handleSettingsEventsNotificationsPage)
 	mux.HandleFunc("/settings/discord", s.handleSettingsDiscordPage)
 	mux.HandleFunc("/settings/system", s.handleSettingsSystemPage)
+
+	// S5-8 Analytics pages (routes 7-8): direct-render routes
+	// (handlers_analytics_pages.go) replacing the two former /analytics/*
+	// compatibility redirects to /statistics — registered before the redirect
+	// loop below (the same ordering S5-4/S5-5/S5-6 used) so these two paths
+	// are never shadowed by, and no longer appear in, compatibilityRedirects.
+	// Legacy /statistics keeps rendering directly, unchanged. /analytics
+	// itself is deliberately not registered: it is not a page, so it keeps
+	// falling through to the "/" catch-all and 404s honestly.
+	mux.HandleFunc("/analytics/points", s.handleAnalyticsPointsPage)
+	mux.HandleFunc("/analytics/roi", s.handleAnalyticsROIPage)
 
 	for route, target := range compatibilityRedirects {
 		mux.HandleFunc(route, redirectCompat(target))

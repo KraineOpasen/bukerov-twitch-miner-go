@@ -43,7 +43,17 @@
      /events/discord). The parent link points at the first child (/events),
      the established "parent href = first child" convention. The top-level
      section count stays at exactly seven. No child ever carries an event
-     count badge — the journal is session-scoped and the nav never polls. */}}
+     count badge — the journal is session-scoped and the nav never polls.
+
+     task S5-8 makes Analytics the sixth and last group, the same shape once
+     more: total parent groups 5 -> 6, total children 23 -> 25. Its two
+     children are the new direct-render canonical pages (/analytics/points,
+     /analytics/roi) replacing the two former /analytics/* compatibility
+     redirects to /statistics, and the parent link points at the first child
+     (/analytics/points). Exactly like /health, /logs and /settings after
+     S5-5/S5-6, the legacy /statistics page keeps rendering directly at its
+     own unchanged route — it is simply no longer linked from this nav. The
+     top-level section count stays at exactly seven. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -68,11 +78,15 @@
                 <li><a href="/drops/past" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.past" }}</a></li>
             </ul>
         </li>
-        <li class="c2-nav-item">
-            <a href="/statistics" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/analytics/points" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
                 <span class="c2-nav-label">{{ t "nav.analytics" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/analytics/points" class="c2-nav-child" data-nav-section="analytics" data-nav-child>{{ t "nav.an.points" }}</a></li>
+                <li><a href="/analytics/roi" class="c2-nav-child" data-nav-section="analytics" data-nav-child>{{ t "nav.an.roi" }}</a></li>
+            </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
             <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}" data-nav-parent>
