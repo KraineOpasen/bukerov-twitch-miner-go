@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -80,11 +81,43 @@ const s58DocumentedTimeout = 1800 * time.Second
 // be measured. It is a browser-observable state on purpose: whether the page
 // dashes those tiles out or paints a fabricated 0 is a client-IIFE decision, so
 // it cannot be settled by a Go assertion over template text.
-var s58HarnessStates = []string{"empty", "part", "sparse", "fail"}
+//
+// "stale" and "partready" are SEQUENCED (see s58SequencedStates): they answer
+// differently on the first call of a page visit than on the ones the timed poll
+// makes, because the states they exist to demonstrate are TRANSITIONS and a
+// single fixed response cannot reach either of them.
+var s58HarnessStates = []string{"empty", "part", "sparse", "fail", "stale", "partready"}
+
+// s58SequencedStates are the states whose answer depends on WHICH call of a
+// page visit is being served. A state that answers the same thing every time
+// can only ever demonstrate a resting state; a transition needs two different
+// answers in a fixed order:
+//
+//	stale     — call 1 succeeds (the page retains content), every later call
+//	            fails. Only a failed refresh OVER RETAINED CONTENT raises
+//	            S-STALE; a state that fails from the start sends the page
+//	            terminal instead, which is a different state entirely.
+//	partready — call 1 reports the backend row cap (S-PART), every later call
+//	            is the real, untruncated payload. Leaving S-PART is the whole
+//	            point, and a permanently truncated state can never leave it.
+var s58SequencedStates = map[string]bool{"stale": true, "partready": true}
 
 // s58StateFromReferer recovers the selected harness state from an API
 // request's Referer. Returns "" for READY.
 func s58StateFromReferer(r *http.Request) string {
+	got := s58RefererQuery(r, "state")
+	for _, s := range s58HarnessStates {
+		if got == s {
+			return s
+		}
+	}
+	return ""
+}
+
+// s58RefererQuery reads one query parameter off an API request's Referer, which
+// same-origin requests carry in full under this app's own
+// "Referrer-Policy: same-origin" header.
+func s58RefererQuery(r *http.Request, key string) string {
 	ref := r.Header.Get("Referer")
 	if ref == "" {
 		return ""
@@ -93,13 +126,28 @@ func s58StateFromReferer(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	got := u.Query().Get("state")
-	for _, s := range s58HarnessStates {
-		if got == s {
-			return s
-		}
-	}
-	return ""
+	return u.Query().Get(key)
+}
+
+// s58Sequencer hands out the call index within one page visit.
+//
+// Deliberately a value OWNED BY ONE INTERCEPTOR rather than a package variable:
+// the Go suite builds several interceptors in one process and go test -count=N
+// runs the same test repeatedly, so a package-level counter would leak a
+// half-consumed sequence from one test into the next and make the second run
+// answer differently from the first. The mutex is not optional either — the
+// harness is served by net/http, which runs every request on its own goroutine.
+type s58Sequencer struct {
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+// next returns 1 for the first call under key, 2 for the second, and so on.
+func (s *s58Sequencer) next(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[key]++
+	return s.calls[key]
 }
 
 // s58PointSamples is how many samples streamer_a's seeded series holds.
@@ -225,10 +273,15 @@ func s58Seed(repo analytics.Repository) error {
 }
 
 // s58StateInterceptor wraps the production handler, serving the EMPTY / PART /
-// FAIL variants of the two JSON endpoints the pages read. READY (and every
-// other request, including every page render) falls through untouched, so the
-// evidence is captured against the real handler chain.
+// SPARSE / FAIL / STALE / PARTREADY variants of the two JSON endpoints the
+// pages read. READY (and every other request, including every page render)
+// falls through untouched, so the evidence is captured against the real handler
+// chain.
+//
+// The sequence counter is created HERE, per interceptor, so it is scoped to one
+// harness rather than to the package.
 func s58StateInterceptor(next http.Handler) http.Handler {
+	seq := &s58Sequencer{calls: map[string]int{}}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := s58StateFromReferer(r)
 		if state == "" {
@@ -242,7 +295,49 @@ func s58StateInterceptor(next http.Handler) http.Handler {
 			return
 		}
 
+		// Sequenced states count their calls per page VISIT. The visit is
+		// identified by the page's own ?seq= value, so navigating again — a new
+		// language, a re-run of the same scenario — restarts the sequence
+		// instead of resuming a half-consumed one.
+		call := 0
+		if s58SequencedStates[state] {
+			kind := "roi"
+			if isPoints {
+				kind = "points"
+			}
+			call = seq.next(state + "|" + kind + "|" + s58RefererQuery(r, "seq"))
+		}
+
 		switch state {
+		case "stale":
+			// A failed TIMED refresh raises S-STALE only over content the page
+			// already has, so call 1 must be a real payload and every call after
+			// it must fail.
+			if !isPoints {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if call == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeInternalError(w, "harness: forced refresh failure")
+			return
+		case "partready":
+			// S-PART first, then the untruncated payload the timed poll gets, so
+			// the strip can be watched LEAVING while the content stays.
+			if !isPoints {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if call == 1 {
+				rec := &s58Capture{ResponseWriter: w}
+				next.ServeHTTP(rec, r)
+				rec.flushWithRawTruncated(w)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
 		case "fail":
 			// S-FAIL: the page must show its inline role="alert" block with a
 			// working Retry, never a toast and never a blank chart.
@@ -342,20 +437,24 @@ type s58BrowserScenario struct {
 // behavior that lives inside a page's client IIFE and is therefore invisible to
 // the Go suite by construction.
 var s58BrowserScenarios = []s58BrowserScenario{
-	{"points-stale-silent", "/analytics/points", "fail",
-		"a failed TIMED refresh over retained content raises the S-STALE strip with zero live-region announcements"},
+	{"points-stale-silent", "/analytics/points", "stale",
+		"a first load retains content, then a failed TIMED refresh raises the S-STALE strip over it with zero live-region announcements, no S-FAIL and no failure stamp"},
 	{"points-part-silent", "/analytics/points", "part",
 		"the S-PART strip re-asserted by a timed poll announces nothing, and every KPI dashes out"},
 	{"points-fail-retry-stamp", "/analytics/points", "fail",
 		"terminal S-FAIL shows cause + Retry + its own failure time, and each Retry failure re-stamps a strictly later datetime"},
 	{"roi-fail-retry-stamp", "/analytics/roi", "fail",
 		"the same terminal S-FAIL contract on ROI, including a re-stamp per failed Retry"},
+	{"points-fail-timed-silent", "/analytics/points", "fail",
+		"a page ALREADY in terminal S-FAIL keeps re-stamping its failure time on every timed poll while announcing nothing, and a user Retry on the same page still announces"},
+	{"roi-fail-timed-silent", "/analytics/roi", "fail",
+		"the same silent-restamp contract on ROI: timed polls advance the stamp without announcing, user Retry announces"},
 	{"points-annotations-recolour", "/analytics/points", "",
 		"at least one xaxis annotation is drawn, and the token-backed one changes ink between light and dark"},
 	{"points-summary-announces-once", "/analytics/points", "",
 		"the C14 summary announces on a user-initiated render and stays silent across timed refreshes"},
-	{"points-strips-leave-with-content", "/analytics/points", "part",
-		"the S-PART strip disappears when the page leaves the content state rather than captioning a failure block"},
+	{"points-strips-leave-with-content", "/analytics/points", "partready",
+		"the S-PART strip is raised by a truncated load and then LEAVES on the untruncated timed poll, while the content and its real KPIs stay and no failure state appears"},
 	{"points-sparse-dashes", "/analytics/points", "sparse",
 		"a single-sample window dashes out net change, earned and events instead of painting a fabricated 0"},
 	{"points-empty", "/analytics/points", "empty",
@@ -372,12 +471,27 @@ var s58BrowserScenarios = []s58BrowserScenario{
 		"prefers-reduced-motion disables chart animation outright rather than shortening it"},
 }
 
-// s58ScenarioURL builds the loopback URL that produces a scenario.
+// s58URL builds the loopback URL that produces a scenario.
 func (s s58BrowserScenario) s58URL(base string) string {
-	if s.State == "" {
-		return base + s.Route
+	return s.s58URLSeq(base, "")
+}
+
+// s58URLSeq builds the loopback URL for one VISIT of a scenario. A sequenced
+// state answers by call index, so a distinct visit id makes each navigation an
+// independent run of the sequence instead of a continuation of the last one.
+func (s s58BrowserScenario) s58URLSeq(base, visit string) string {
+	u := base + s.Route
+	q := url.Values{}
+	if s.State != "" {
+		q.Set("state", s.State)
 	}
-	return base + s.Route + "?state=" + s.State
+	if visit != "" {
+		q.Set("seq", visit)
+	}
+	if len(q) == 0 {
+		return u
+	}
+	return u + "?" + q.Encode()
 }
 
 // TestS5_8BrowserScenarioCatalogueIsServable proves the catalogue can never
@@ -424,6 +538,171 @@ func TestS5_8BrowserScenarioCatalogueIsServable(t *testing.T) {
 		if !used {
 			t.Errorf("harness state %q is served but no named scenario uses it", state)
 		}
+	}
+}
+
+// s58ScenarioByName looks a catalogue entry up, failing the test if evidence
+// cites a scenario that does not exist.
+func s58ScenarioByName(t *testing.T, name string) s58BrowserScenario {
+	t.Helper()
+	for _, sc := range s58BrowserScenarios {
+		if sc.Name == name {
+			return sc
+		}
+	}
+	t.Fatalf("no browser scenario named %q", name)
+	return s58BrowserScenario{}
+}
+
+// TestS5_8SequencedScenariosReallyReachTheirState is the SEMANTIC reachability
+// check the catalogue was missing.
+//
+// TestS5_8BrowserScenarioCatalogueIsServable proves a scenario names a real
+// route and a state the interceptor understands. That is syntax. It says
+// nothing about whether driving that URL can ever produce the state the
+// scenario CLAIMS to prove, and two entries could not:
+//
+//   - points-stale-silent selected "fail", which fails the very first request.
+//     S-STALE is only reachable over RETAINED content — with nothing ever
+//     loaded the page goes terminal instead, so the scenario could only ever
+//     have shown S-FAIL while claiming to show S-STALE.
+//   - points-strips-leave-with-content selected "part", which reports the row
+//     cap on every request. The page can therefore never LEAVE S-PART, which is
+//     precisely the transition the scenario is named for.
+//
+// Both now select a SEQUENCED state, and this test drives the sequence for
+// real: it issues the requests a page visit would issue and asserts what each
+// one answers, so a scenario that silently stops reaching its state fails here
+// rather than in a browser run nobody re-reads.
+func TestS5_8SequencedScenariosReallyReachTheirState(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+	h := s58StateInterceptor(srv.handler())
+
+	// call issues the request the PAGE would issue, carrying the Referer that
+	// selects the scenario's state. visit distinguishes one page visit from the
+	// next, so a sequence always starts from its first step.
+	call := func(sc s58BrowserScenario, visit string) (int, string) {
+		req := s58GET("/api/points-history?streamer=streamer_a&range=24h")
+		req.Header.Set("Referer", "http://127.0.0.1:8978"+sc.s58URLSeq("", visit))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	t.Run("points-stale-silent", func(t *testing.T) {
+		sc := s58ScenarioByName(t, "points-stale-silent")
+
+		// Step 1 — the load that gives the page something to retain. Without a
+		// working first response there is no content to go stale.
+		code, body := call(sc, "visit-1")
+		if code != http.StatusOK || !strings.Contains(body, `"balance"`) {
+			t.Fatalf("first response = %d, body=%.160s; S-STALE needs a SUCCESSFUL first load or the page goes terminal instead", code, body)
+		}
+
+		// Step 2 — the timed refresh that fails over that retained content. This
+		// is the only thing that raises S-STALE.
+		if code, body = call(sc, "visit-1"); code != http.StatusInternalServerError {
+			t.Fatalf("second response = %d, body=%.160s; the timed refresh must FAIL or the strip never appears", code, body)
+		}
+
+		// A fresh page visit restarts the sequence, so the scenario is
+		// repeatable within one harness process instead of being a one-shot.
+		if code, _ = call(sc, "visit-2"); code != http.StatusOK {
+			t.Fatalf("a new page visit started at step %d, not step 1 — the sequence must be scoped per visit", code)
+		}
+	})
+
+	t.Run("points-strips-leave-with-content", func(t *testing.T) {
+		sc := s58ScenarioByName(t, "points-strips-leave-with-content")
+
+		// Step 1 — the truncated load that raises S-PART.
+		code, body := call(sc, "visit-1")
+		if code != http.StatusOK || !strings.Contains(body, `"rawTruncated":true`) {
+			t.Fatalf("first response = %d, body=%.200s; the strip must be RAISED before it can be proven to leave", code, body)
+		}
+
+		// Step 2 — the timed poll that is no longer truncated. The strip must be
+		// able to go while the page STAYS on content: still 200, still carrying
+		// samples, and no longer reporting the cap.
+		code, body = call(sc, "visit-1")
+		if code != http.StatusOK {
+			t.Fatalf("second response = %d — leaving S-PART must not take the page into S-FAIL", code)
+		}
+		if strings.Contains(body, `"rawTruncated":true`) {
+			t.Fatalf("second response still reports the row cap, so the page can never leave S-PART: %.200s", body)
+		}
+		if !strings.Contains(body, `"balance"`) {
+			t.Fatalf("second response carries no samples, so the strip would leave WITH the content instead of on its own: %.200s", body)
+		}
+
+		if code, body = call(sc, "visit-2"); code != http.StatusOK || !strings.Contains(body, `"rawTruncated":true`) {
+			t.Fatalf("a new page visit did not restart at the truncated step: %d %.200s", code, body)
+		}
+	})
+}
+
+// TestS5_8SequencedStateIsScopedToItsInterceptor proves the sequence counter is
+// per-instance, not package state: two harnesses built in the same process do
+// not consume each other's steps, so one test can never leave another mid-way
+// through a sequence (and -count=N stays deterministic).
+func TestS5_8SequencedStateIsScopedToItsInterceptor(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+
+	first := func(h http.Handler) int {
+		req := s58GET("/api/points-history?streamer=streamer_a&range=24h")
+		req.Header.Set("Referer", "http://127.0.0.1:8978/analytics/points?state=stale&seq=shared")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	a := s58StateInterceptor(srv.handler())
+	b := s58StateInterceptor(srv.handler())
+	if code := first(a); code != http.StatusOK {
+		t.Fatalf("interceptor A step 1 = %d, want 200", code)
+	}
+	if code := first(b); code != http.StatusOK {
+		t.Fatalf("interceptor B step 1 = %d, want 200 — B inherited A's position, so the counter is shared state", code)
+	}
+	if code := first(a); code != http.StatusInternalServerError {
+		t.Fatalf("interceptor A step 2 = %d, want 500", code)
+	}
+}
+
+// TestS5_8SequencedStateIsRaceSafe drives one sequenced state concurrently and
+// proves each step is handed out exactly once: the harness is served by
+// net/http, which runs every request on its own goroutine.
+func TestS5_8SequencedStateIsRaceSafe(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+	h := s58StateInterceptor(srv.handler())
+
+	const n = 24
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := s58GET("/api/points-history?streamer=streamer_a&range=24h")
+			req.Header.Set("Referer", "http://127.0.0.1:8978/analytics/points?state=stale&seq=race")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+
+	ok := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Errorf("%d of %d concurrent requests got step 1, want exactly 1 — the counter is not serialized", ok, n)
 	}
 }
 

@@ -108,8 +108,16 @@
     {{/* Cause + failure time + Retry in one alert — see the same note on the
          Points page. The stamp is this failure's own; #ar-updated reports when
          the summary last ARRIVED and must never be presented as the time
-         something failed. */}}
-    <div id="ar-error" class="hidden" role="alert">
+         something failed.
+
+         SILENT BY DEFAULT, for the same reason as on the Points page: this
+         block is a role="alert" region, so it is implicitly assertive, and a
+         page already sitting in terminal S-FAIL keeps polling — each failed
+         TIMED refresh rewrote the cause and the stamp in here and spoke the
+         same failure again, once per cadence, unasked. showFailure() raises the
+         politeness back to "assertive" BEFORE it touches the block, for the
+         attempts the operator initiated. */}}
+    <div id="ar-error" class="hidden" role="alert" aria-live="off">
         <div class="c1-block c1-block--block c1-tier-danger">
             <span class="c1-block-icon" aria-hidden="true">⛔</span>
             <span class="c1-block-body">
@@ -338,14 +346,24 @@
         els.updated.textContent = t('js.stat.updated_prefix') + ' ' + new Date().toLocaleTimeString();
     }
 
-    // Stamps the moment THIS terminal failure happened — see the same note on
-    // the Points page. Re-stamped on every failed Retry; the last-success clock
-    // is never reused for it.
-    function setFailedAt() {
-        if (!els.errorTime) return;
-        const now = new Date();
-        els.errorTime.dateTime = now.toISOString();
-        els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+    // Enters terminal S-FAIL — see the same note on the Points page. Re-stamped
+    // on every failed Retry; the last-success clock is never reused for it.
+    //
+    // `announce` is explicit and never defaulted, exactly like c14SetSummary's.
+    // The block is a role="alert" region (implicitly assertive), so the
+    // politeness is written BEFORE the block is touched: "assertive" for an
+    // attempt the operator initiated, "off" for the timed poll, which §9/§10
+    // forbid from announcing. A silenced poll still refreshes the cause and
+    // advances the stamp — it only stops interrupting.
+    function showFailure(cause, announce) {
+        els.error.setAttribute('aria-live', announce ? 'assertive' : 'off');
+        els.errorMsg.textContent = cause;
+        if (els.errorTime) {
+            const now = new Date();
+            els.errorTime.dateTime = now.toISOString();
+            els.errorTime.textContent = t('js.evd.failed_at', { time: now.toLocaleTimeString() });
+        }
+        show('error');
     }
 
     async function load(isRefresh) {
@@ -373,9 +391,9 @@
             // A failed background refresh over retained content is NOT terminal:
             // it goes stale, it does not enter S-FAIL, and it stamps nothing.
             if (isRefresh && hasData) { els.stale.classList.remove('hidden'); return; }
-            els.errorMsg.textContent = String(err.message || err);
-            setFailedAt();
-            show('error');
+            // Nothing retained, so this IS terminal — but a TIMED poll landing
+            // here re-states the cause and re-stamps the time SILENTLY.
+            showFailure(String(err.message || err), !isRefresh);
         }
     }
 
@@ -413,9 +431,9 @@
         load(false);
         scheduleRefresh();
     }, function () {
-        els.errorMsg.textContent = t('js.stat.chart_lib_failed');
-        setFailedAt();
-        show('error');
+        // The chart library never arrived on the INITIAL load — the operator is
+        // waiting on this page right now, so it announces.
+        showFailure(t('js.stat.chart_lib_failed'), true);
     });
 })();
 </script>

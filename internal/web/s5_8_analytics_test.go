@@ -35,6 +35,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1260,6 +1261,49 @@ func TestS5_8TerminalFailureCarriesItsOwnFreshTimestamp(t *testing.T) {
 	}
 }
 
+// TestS5_8TerminalFailureIsSilentUntilExplicitlyAnnounced pins the STATIC half
+// of the timed-S-FAIL defect.
+//
+// role="alert" carries an implicit aria-live of "assertive", so ANY mutation of
+// the block's contents while it is on screen is spoken. A page already sitting
+// in terminal S-FAIL keeps polling, and every failed poll rewrote the cause and
+// the failure stamp inside that block — so a screen-reader user was interrupted
+// with the same failure once per refresh cadence, forever, without ever having
+// asked for anything. §9/§10: a timed poll never announces.
+//
+// The container is therefore SILENT BY DEFAULT — an explicit aria-live="off"
+// overrides the role's implicit assertive — and the page's own setter raises it
+// to "assertive" for the renders that are allowed to speak (initial load,
+// Retry, any other user-initiated attempt) BEFORE it mutates anything. Written
+// explicitly in the markup rather than only from script, so a page whose script
+// never runs cannot announce either, and so the default cannot be lost by an
+// edit that only touches the JS.
+//
+// The runtime half — that a TIMED poll really passes announce=false while a
+// Retry really passes true — is client-IIFE behavior and is proven by the named
+// browser scenarios, not by reading template text.
+func TestS5_8TerminalFailureIsSilentUntilExplicitlyAnnounced(t *testing.T) {
+	srv := buildF3PageServer(t)
+
+	for route, r := range s58FailureRegions {
+		for _, lang := range []string{"en", "ru"} {
+			body := f3GetPage(t, srv, route, lang)
+			tag, ok := s58TagWithID(body, r.block)
+			if !ok {
+				t.Errorf("[%s %s] S-FAIL block %q not rendered", lang, route, r.block)
+				continue
+			}
+			if !strings.Contains(tag, `role="alert"`) {
+				t.Errorf("[%s %s] %q must stay a role=\"alert\" region: %s", lang, route, r.block, tag)
+			}
+			if !strings.Contains(tag, `aria-live="off"`) {
+				t.Errorf("[%s %s] %q must render an explicit aria-live=\"off\" default; without it role=\"alert\" is implicitly assertive and every failed TIMED poll re-announces the same failure: %s",
+					lang, route, r.block, tag)
+			}
+		}
+	}
+}
+
 // s58DivSubtree returns the full outer HTML of the <div> carrying id="<id>".
 func s58DivSubtree(body, id string) (string, bool) {
 	return s58DivSubtreeAt(body, `id="`+id+`"`)
@@ -1472,29 +1516,103 @@ func TestS5_8TestsPinBehaviorAtRealSeamsNotInTemplateText(t *testing.T) {
 				t.Errorf("%s: %s extracts a client JS function body — client-IIFE behavior belongs to named browser evidence, not to a Go substring assertion",
 					name, fn.Name.Name)
 			}
-			if _, allowed := s58TemplateSourceReaders[fn.Name.Name]; allowed {
-				continue
+		}
+		for _, v := range s58TemplateSourceViolations(file) {
+			t.Errorf("%s: %s %s. Only the static-property checks %v may read template source; pin this at the rendered page, the served API, or named browser evidence instead",
+				name, v.Func, v.Reason, s58SortedKeys(s58AllowedReaderSet()))
+		}
+	}
+}
+
+// s58ReadViolation names one function that reaches template source outside the
+// allow-list, and how.
+type s58ReadViolation struct {
+	Func   string
+	Reason string
+}
+
+// s58TemplateSourceViolations reports every function in file that reads
+// template source without being on the s58TemplateSourceReaders allow-list.
+//
+// Three routes reach those bytes and all three are covered:
+//
+//	s58ReadTemplate        — the package's own reader primitive
+//	templatesFS.ReadFile   — the embedded FS underneath it
+//	os.ReadFile            — the same bytes straight off disk
+//
+// os.ReadFile is judged by its ARGUMENT, allow-list style rather than
+// deny-list: a bare "*.go" literal with no directory is the package's own
+// source and is fine, and everything else — a template path, or any computed
+// expression, which is the shape every wrapper takes — is a read this guard
+// cannot prove is safe, so it is reported. Judging the argument rather than the
+// callee is what makes hiding the read inside a helper useless: the helper is
+// itself a function in this file, so the helper is what gets named.
+//
+// It is a decision over the AST rather than a substring scan, so the guard
+// cannot match its own text and a rename cannot slip past it.
+func s58TemplateSourceViolations(file *ast.File) []s58ReadViolation {
+	var out []s58ReadViolation
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if _, allowed := s58TemplateSourceReaders[fn.Name.Name]; allowed {
+			continue
+		}
+		reported := map[string]bool{}
+		report := func(reason string) {
+			if reported[reason] {
+				return
 			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
+			reported[reason] = true
+			out = append(out, s58ReadViolation{Func: fn.Name.Name, Reason: reason})
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				if f.Name == "s58ReadTemplate" {
+					report("reads template source")
+				}
+			case *ast.SelectorExpr:
+				id, ok := f.X.(*ast.Ident)
 				if !ok {
 					return true
 				}
-				switch f := call.Fun.(type) {
-				case *ast.Ident:
-					if f.Name == "s58ReadTemplate" {
-						t.Errorf("%s: %s reads template source; only the static-property checks %v may. Pin this at the rendered page, the served API, or named browser evidence instead",
-							name, fn.Name.Name, s58SortedKeys(s58AllowedReaderSet()))
-					}
-				case *ast.SelectorExpr:
-					if id, ok := f.X.(*ast.Ident); ok && id.Name == "templatesFS" && f.Sel.Name == "ReadFile" {
-						t.Errorf("%s: %s reads template source directly from templatesFS, bypassing the allow-list", name, fn.Name.Name)
-					}
+				if id.Name == "templatesFS" && f.Sel.Name == "ReadFile" {
+					report("reads template source directly from templatesFS, bypassing the allow-list")
 				}
-				return true
-			})
-		}
+				if id.Name == "os" && f.Sel.Name == "ReadFile" && !s58IsOwnGoSourceArg(call) {
+					report("calls os.ReadFile on a path that is not this package's own Go source, which reads template bytes straight off disk and bypasses the allow-list")
+				}
+			}
+			return true
+		})
 	}
+	return out
+}
+
+// s58IsOwnGoSourceArg reports whether a call's single argument is a literal
+// naming a Go file in this package directory — the only os.ReadFile target
+// these two files have a reason to touch. A path with a directory, a non-Go
+// extension, or any non-literal expression is not one.
+func s58IsOwnGoSourceArg(call *ast.CallExpr) bool {
+	if len(call.Args) != 1 {
+		return false
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	path, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(path, ".go") && !strings.ContainsAny(path, `/\`)
 }
 
 // s58AllowedReaderSet adapts the allow-list to the shared key-sorting helper.
@@ -1504,4 +1622,95 @@ func s58AllowedReaderSet() map[string]bool {
 		out[k] = true
 	}
 	return out
+}
+
+// TestS5_8TemplateSourceGuardHasNoOSReadFileBypass is the focused regression
+// pin for the guard itself.
+//
+// The guard knew two ways to reach template source — s58ReadTemplate and
+// templatesFS.ReadFile — and neither is the only one. os.ReadFile reads the
+// very same bytes off disk and went straight past the allow-list, so the whole
+// policy could be reinstated verbatim by swapping one call. A wrapper made it
+// worse: hide the read behind a helper and even a future name-based check would
+// miss it.
+//
+// Closed narrowly. Inside these two files os.ReadFile may read only the
+// package's OWN Go source — a bare "*.go" literal, no directory — which is what
+// TestS5_8HarnessDeadlineBeatsDocumentedTimeout legitimately does when it
+// checks its own usage comment. Any other path, and any COMPUTED path (a
+// variable, a concatenation, a parameter — the shapes a wrapper uses), is a
+// read the guard cannot prove is not template source, so it is prohibited and
+// the function performing it is named. That deliberately stops at os.ReadFile:
+// this is a policy pin for two files, not a general-purpose file-access
+// analyzer.
+func TestS5_8TemplateSourceGuardHasNoOSReadFileBypass(t *testing.T) {
+	const preamble = "package web\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n"
+
+	cases := []struct {
+		name string
+		src  string
+		want []string // functions the guard must name; empty = must find nothing
+	}{
+		{
+			name: "direct os.ReadFile of template source is caught",
+			src:  "func TestSneaky(t *testing.T) {\n\tb, _ := os.ReadFile(\"templates/analytics_points.html\")\n\t_ = b\n}\n",
+			want: []string{"TestSneaky"},
+		},
+		{
+			name: "a wrapper hiding the read is caught at the wrapper",
+			src: "func s58SneakyRead(name string) []byte {\n\tb, _ := os.ReadFile(\"templates/\" + name)\n\treturn b\n}\n\n" +
+				"func TestViaWrapper(t *testing.T) { _ = s58SneakyRead(\"analytics_roi.html\") }\n",
+			want: []string{"s58SneakyRead"},
+		},
+		{
+			name: "a forwarding helper with a computed path is caught",
+			src:  "func s58Forward(p string) []byte {\n\tb, _ := os.ReadFile(p)\n\treturn b\n}\n",
+			want: []string{"s58Forward"},
+		},
+		{
+			name: "reading the package's own Go source stays allowed",
+			src:  "func TestOwnSource(t *testing.T) {\n\tb, _ := os.ReadFile(\"s5_8_analytics_harness_test.go\")\n\t_ = b\n}\n",
+			want: nil,
+		},
+		{
+			name: "an allow-listed static-property check may read template source",
+			src:  "func TestS5_8HiddenActuallyHides(t *testing.T) { _ = s58ReadTemplate(t, \"analytics_points.html\") }\n",
+			want: nil,
+		},
+		{
+			name: "a non-allow-listed s58ReadTemplate caller is still caught",
+			src:  "func TestSomethingElse(t *testing.T) { _ = s58ReadTemplate(t, \"analytics_points.html\") }\n",
+			want: []string{"TestSomethingElse"},
+		},
+		{
+			name: "the templatesFS bypass is still caught",
+			src:  "func TestViaFS(t *testing.T) {\n\tb, _ := templatesFS.ReadFile(\"analytics_roi.html\")\n\t_ = b\n}\n",
+			want: []string{"TestViaFS"},
+		},
+		{
+			name: "a clean file reports nothing",
+			src:  "func TestClean(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n",
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "fixture_test.go", preamble+tc.src, 0)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			var got []string
+			for _, v := range s58TemplateSourceViolations(file) {
+				got = append(got, v.Func)
+			}
+			sort.Strings(got)
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("guard reported %v, want %v", got, want)
+			}
+		})
+	}
 }
