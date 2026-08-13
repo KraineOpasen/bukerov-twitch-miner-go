@@ -288,8 +288,14 @@ func s58StateInterceptor(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		isPoints := strings.HasPrefix(r.URL.Path, "/api/points-history")
-		isROI := strings.HasPrefix(r.URL.Path, "/api/predictions/roi")
+		// Exact match, not prefix: /api/points-history/export and
+		// /api/predictions/roi/export are real sibling routes (server.go)
+		// that answer a different request. A prefix match would catch them
+		// too and let them silently consume a step of a sequenced state
+		// meant for the page's own fetch (see
+		// TestS5_8ExportSiblingDoesNotAdvanceSequence).
+		isPoints := r.URL.Path == "/api/points-history"
+		isROI := r.URL.Path == "/api/predictions/roi"
 		if !isPoints && !isROI {
 			next.ServeHTTP(w, r)
 			return
@@ -494,6 +500,22 @@ func (s s58BrowserScenario) s58URLSeq(base, visit string) string {
 	return u + "?" + q.Encode()
 }
 
+// s58CatalogueURL builds the URL TestS5_8EvidenceHarness prints for one
+// scenario. A SEQUENCED scenario gets its own name as the visit id — unique
+// and non-empty, since TestS5_8BrowserScenarioCatalogueIsServable already
+// requires every scenario name to be both — so the one link the catalogue
+// documents is isolated from any other visit ever made to it within this
+// harness process, instead of collapsing into the shared, empty-seq
+// sequence line (see TestS5_8CatalogueSequencedURLsCarryUniqueSeq). A
+// non-sequenced scenario answers the same thing on every call, so it has
+// nothing to isolate and keeps the plain URL.
+func (s s58BrowserScenario) s58CatalogueURL(base string) string {
+	if s58SequencedStates[s.State] {
+		return s.s58URLSeq(base, s.Name)
+	}
+	return s.s58URL(base)
+}
+
 // TestS5_8BrowserScenarioCatalogueIsServable proves the catalogue can never
 // name a URL the harness does not actually serve: every scenario must target a
 // real route and a state the interceptor understands, and names must be unique
@@ -538,6 +560,41 @@ func TestS5_8BrowserScenarioCatalogueIsServable(t *testing.T) {
 		if !used {
 			t.Errorf("harness state %q is served but no named scenario uses it", state)
 		}
+	}
+}
+
+// TestS5_8CatalogueSequencedURLsCarryUniqueSeq proves every catalogue URL for
+// a SEQUENCED scenario — the one TestS5_8EvidenceHarness actually prints —
+// carries its own non-empty seq. Without one, a real browser visit to that
+// printed link answers under the SAME sequencer key ("state|kind|", the
+// empty-seq line) as any other visit ever made to it within this harness
+// process, silently consuming a step of the sequence before a human ever
+// sees it.
+func TestS5_8CatalogueSequencedURLsCarryUniqueSeq(t *testing.T) {
+	seen := map[string]string{}
+	sequencedCount := 0
+	for _, sc := range s58BrowserScenarios {
+		if !s58SequencedStates[sc.State] {
+			continue
+		}
+		sequencedCount++
+		raw := sc.s58CatalogueURL("http://127.0.0.1:8978")
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: catalogue URL %q does not parse: %v", sc.Name, raw, err)
+		}
+		seq := u.Query().Get("seq")
+		if seq == "" {
+			t.Errorf("%s: printed catalogue URL %s carries no seq — a real visit collapses into the shared, empty-seq sequence line", sc.Name, raw)
+			continue
+		}
+		if prior, ok := seen[seq]; ok {
+			t.Errorf("%s and %s share seq %q in their catalogue URLs — their visits are not isolated", sc.Name, prior, seq)
+		}
+		seen[seq] = sc.Name
+	}
+	if sequencedCount == 0 {
+		t.Fatal("no sequenced scenario in the catalogue — this test would pass vacuously")
 	}
 }
 
@@ -706,6 +763,84 @@ func TestS5_8SequencedStateIsRaceSafe(t *testing.T) {
 	}
 }
 
+// TestS5_8ExportSiblingDoesNotAdvanceSequence proves /api/points-history/export
+// — a real, registered route (server.go) that shares a path PREFIX with
+// /api/points-history but answers a different request — can never consume a
+// step of a sequenced state meant for the page's own fetch. A prefix match
+// on the interceptor's route check would let it.
+func TestS5_8ExportSiblingDoesNotAdvanceSequence(t *testing.T) {
+	srv := buildF3PageServer(t)
+	s58SeedFixtures(t, srv.analytics.Repository())
+	h := s58StateInterceptor(srv.handler())
+
+	const referer = "http://127.0.0.1:8978/analytics/points?state=stale&seq=export-probe"
+	hitExport := func() {
+		req := s58GET("/api/points-history/export?streamer=streamer_a&range=24h")
+		req.Header.Set("Referer", referer)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	hitReal := func() (int, string) {
+		req := s58GET("/api/points-history?streamer=streamer_a&range=24h")
+		req.Header.Set("Referer", referer)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// Hit the export sibling first, several times over. If the interceptor's
+	// route match still catches it, each of these silently consumes one step
+	// of the "stale" sequence under this same seq id.
+	for i := 0; i < 3; i++ {
+		hitExport()
+	}
+
+	// The PAGE's own first call must still land on step 1 (success) — proving
+	// the export hits above never advanced the counter.
+	code, body := hitReal()
+	if code != http.StatusOK || !strings.Contains(body, `"balance"`) {
+		t.Fatalf("real points-history first call = %d, body=%.160s; export siblings must not consume sequence state", code, body)
+	}
+}
+
+// s58HarnessGeneration is any value >1. s58ReportHarnessRunning publishes it
+// before StatusRunning so the client's firstBoot discriminator
+// ((status.generation || 1) <= 1, base.html) reads false: every provider
+// behind this harness is a deterministic fake already serving on the first
+// request, so there is no real boot sequence for the one-shot
+// reload-on-running to catch up with, and that reload's actual effect — a
+// second document load that can silently consume the NEXT sequenced
+// response before a human ever sees the first (see s58Sequencer) — would
+// make S-STALE read as terminal S-FAIL and leave S-PART unreachable.
+const s58HarnessGeneration = 2
+
+// s58ReportHarnessRunning publishes the running status the evidence harness
+// serves for its whole lifetime. Generation goes out FIRST — mirroring
+// SetGeneration's own contract of preceding the generation's Run — so no
+// subscriber ever observes StatusRunning still paired with generation<=1.
+func s58ReportHarnessRunning(b *StatusBroadcaster) {
+	b.SetGeneration(s58HarnessGeneration)
+	b.SetStatus(StatusRunning, "")
+}
+
+// TestS5_8EvidenceHarnessReportsPastFirstBoot proves s58ReportHarnessRunning
+// — what TestS5_8EvidenceHarness actually calls — leaves the client's
+// firstBoot discriminator false, so base.html's one-shot reload-on-running
+// (design v6 §10 rule 4) never fires against this fixture. Runs
+// unconditionally: it only touches a bare *StatusBroadcaster, never binds a
+// port, so it needs no MINER_S5_8_HARNESS gate.
+func TestS5_8EvidenceHarnessReportsPastFirstBoot(t *testing.T) {
+	b := NewStatusBroadcaster()
+	s58ReportHarnessRunning(b)
+	got := b.GetStatus()
+	if got.Status != StatusRunning {
+		t.Fatalf("status = %q, want %q", got.Status, StatusRunning)
+	}
+	// Mirrors base.html verbatim: const firstBoot = (status.generation || 1) <= 1.
+	if got.Generation <= 1 {
+		t.Fatalf("generation = %d, want >1 — the client reads (generation || 1) <= 1 as firstBoot and reloads the page", got.Generation)
+	}
+}
+
 // TestS5_8EvidenceHarness serves the two Analytics pages for browser evidence.
 func TestS5_8EvidenceHarness(t *testing.T) {
 	if os.Getenv("MINER_S5_8_HARNESS") != "1" {
@@ -721,10 +856,13 @@ func TestS5_8EvidenceHarness(t *testing.T) {
 
 	srv := buildF3PageServer(t)
 	s58SeedFixtures(t, srv.analytics.Repository())
-	// Report "running" so the status overlay never covers the pages: every
+	// Report "running" PAST firstBoot so the status overlay never covers the
+	// pages AND base.html's one-shot reload-on-running never fires: every
 	// provider is a deterministic fake, so there is no startup sequence to
-	// reflect.
-	srv.GetStatusBroadcaster().SetStatus(StatusRunning, "")
+	// reflect, and letting the reload through would silently burn a step of
+	// whatever sequenced state the visited scenario selected before a human
+	// ever saw it (see s58ReportHarnessRunning).
+	s58ReportHarnessRunning(srv.GetStatusBroadcaster())
 
 	handle, err := startS5_6EvidenceHarness(s58StateInterceptor(srv.handler()), addr)
 	if err != nil {
@@ -741,7 +879,7 @@ func TestS5_8EvidenceHarness(t *testing.T) {
 	t.Logf("  language: set the %q cookie to en|ru", langCookieName)
 	t.Logf("  named scenarios (%d):", len(s58BrowserScenarios))
 	for _, sc := range s58BrowserScenarios {
-		t.Logf("    %-32s %s", sc.Name, sc.s58URL(base))
+		t.Logf("    %-32s %s", sc.Name, sc.s58CatalogueURL(base))
 		t.Logf("    %-32s   proves: %s", "", sc.Proves)
 	}
 
