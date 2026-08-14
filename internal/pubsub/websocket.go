@@ -963,13 +963,25 @@ func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn, ge
 			// Read errors on a gorilla connection are permanent (and repeated
 			// reads on a failed connection eventually panic), so this loop
 			// always exits here — exactly once. Classification is by our own
-			// state flags, never by the error's contents: transport failures
-			// aren't CloseErrors, close-code matching is toolchain-fragile,
-			// and both deliberate paths already flag themselves before
-			// closing the conn (Close sets forcedClose; reconnect sets
-			// isReconnecting under mu before Close on the old conn).
+			// state, never by the error's contents: transport failures aren't
+			// CloseErrors, close-code matching is toolchain-fragile, and every
+			// deliberate path already marks itself before closing the conn
+			// (Close sets forcedClose; reconnect sets isReconnecting under mu
+			// before Close on the old conn, then bumps connGen).
+			//
+			// This reader's own generation is the DURABLE discriminator, and
+			// the same one the rest of the client already fences on (see
+			// failConnection, recordPong, pongDeadlineExpired). isReconnecting
+			// alone is not sufficient: it is cleared the moment the
+			// replacement Connect() succeeds, so a superseded reader that is
+			// scheduled even microseconds later reads it as false and
+			// misattributes its dead socket's error to the live generation.
+			// The two together leave no gap — isReconnecting covers the window
+			// from the old conn's Close until connGen is bumped, and the
+			// generation covers everything after, permanently.
 			ws.mu.RLock()
 			forcedClose := ws.forcedClose
+			superseded := gen != ws.connGen
 			reconnecting := ws.isReconnecting
 			delay := ws.readErrorReconnectDelayLocked()
 			ws.mu.RUnlock()
@@ -977,6 +989,13 @@ func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn, ge
 			switch {
 			case forcedClose:
 				// Deliberate shutdown: silent, no reconnect.
+			case superseded:
+				// This reader's generation has already been replaced, so the
+				// socket it owns is one nobody uses any more. Reporting the
+				// error would blame the live generation, and redialing would
+				// tear down a healthy connection.
+				slog.Debug("WebSocket read loop ended on superseded generation",
+					"index", ws.index, "gen", gen)
 			case reconnecting:
 				// Our own reconnect closed the conn under this reader — an
 				// expected artifact, not an error, and the reconnect is
