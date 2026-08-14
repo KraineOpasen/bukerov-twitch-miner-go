@@ -73,20 +73,24 @@ func TestS5_2SevenSectionsDiscordDisabled(t *testing.T) {
 	}
 }
 
-// TestS5_2NavChildDisambiguation pins all SIX group destinations' structure
-// (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task S5-5,
-// extended again by tasks S5-6, S5-7 and S5-8): the System group (one parent,
-// three children — Status/Diagnostics/Logs, task S5-5 having replaced the
-// former Health/Logs pair with direct System routes), the Overview group
-// (one parent, two children — Overview itself/Queue), the Drops group (one
-// parent, four children — Current/Upcoming/Claims/Past), the Settings group
-// (one parent, ten children — the S5-6 category routes replacing the former
-// /settings/* compatibility redirects), the Events group (one parent, four
-// children — task S5-7's Journal/Browser/Sound/Discord direct routes), and
-// the Analytics group (one parent, two children — task S5-8's Points/ROI
-// direct routes, which replaced the last two /analytics/* compatibility
-// redirects), for a combined six parent links (data-nav-parent) and
-// twenty-five children (data-nav-child), each with its own distinct href.
+// TestS5_2NavChildDisambiguation pins all SEVEN group destinations'
+// structure (task Q3 BLOCKER-1, extended by task S5-4, re-targeted by task
+// S5-5, extended again by tasks S5-6, S5-7, S5-8 and S5-9): the System group
+// (one parent, three children — Status/Diagnostics/Logs, task S5-5 having
+// replaced the former Health/Logs pair with direct System routes), the
+// Overview group (one parent, two children — Overview itself/Queue), the
+// Drops group (one parent, four children — Current/Upcoming/Claims/Past),
+// the Settings group (one parent, ten children — the S5-6 category routes
+// replacing the former /settings/* compatibility redirects), the Events
+// group (one parent, four children — task S5-7's Journal/Browser/Sound/
+// Discord direct routes), the Analytics group (one parent, two children —
+// task S5-8's Points/ROI direct routes, which replaced the last two
+// /analytics/* compatibility redirects), and the Help group (one parent,
+// five children — task S5-9's Getting-started/Glossary/Troubleshooting/
+// Notifications & Audio/Diagnostics & Support direct routes, which replaced
+// the former plain, childless Help nav item), for a combined seven parent
+// links (data-nav-parent) and thirty children (data-nav-child), each with
+// its own distinct href.
 func TestS5_2NavChildDisambiguation(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
@@ -94,16 +98,25 @@ func TestS5_2NavChildDisambiguation(t *testing.T) {
 	// Matched with the trailing ">" so the JS source's own string-literal
 	// references to these attribute names (e.g. hasAttribute('data-nav-parent'))
 	// aren't miscounted as HTML occurrences.
-	if n := strings.Count(body, `data-nav-parent>`); n != 6 {
-		t.Errorf("expected exactly six data-nav-parent groups (Overview, Drops, Analytics, Events, Settings, System), found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 7 {
+		t.Errorf("expected exactly seven data-nav-parent groups (Overview, Drops, Analytics, Events, Settings, System, Help), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 25 {
-		t.Errorf("expected exactly twenty-five data-nav-child destinations, found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 30 {
+		t.Errorf("expected exactly thirty data-nav-child destinations, found %d", n)
 	}
 	for _, href := range []string{"/analytics/points", "/analytics/roi"} {
 		want := `href="` + href + `" class="c2-nav-child" data-nav-section="analytics" data-nav-child`
 		if !strings.Contains(body, want) {
 			t.Errorf("Analytics group missing child destination %q", href)
+		}
+	}
+	for _, href := range []string{
+		"/help/getting-started", "/help/glossary", "/help/troubleshooting",
+		"/help/notifications-audio", "/help/diagnostics-support",
+	} {
+		want := `href="` + href + `" class="c2-nav-child" data-nav-section="help" data-nav-child`
+		if !strings.Contains(body, want) {
+			t.Errorf("Help group missing child destination %q", href)
 		}
 	}
 	for _, href := range []string{"/events", "/events/browser", "/events/sound", "/events/discord"} {
@@ -494,8 +507,9 @@ func TestS5_2EventsPageDiscordDisabled(t *testing.T) {
 }
 
 // TestS5_2HelpPageContract: /help/getting-started direct-renders 200, has
-// exactly one h1, links to all seven live section landings, and states
-// honestly that the full Help center arrives later.
+// exactly one h1, links to all seven live section landings, and (task S5-9)
+// links onward to its four now-live Help siblings instead of naming them as
+// still-pending.
 func TestS5_2HelpPageContract(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/help/getting-started", "en")
@@ -508,14 +522,20 @@ func TestS5_2HelpPageContract(t *testing.T) {
 			t.Errorf("Help landing missing link %q", href)
 		}
 	}
-	// Honestly NAMING what's deferred (in the "arrives later" note) is
-	// required, not banned — what must be absent is actual glossary/
-	// troubleshooting/diagnostics CONTENT (definition lists, numbered
-	// procedures, a build/version block), which this minimal landing never
-	// renders in the first place.
-	if !strings.Contains(body, "arrives in a later update") {
-		t.Error("Help landing missing the honest deferred-content note")
+	// task S5-9: the four Help siblings are now real pages, so the landing
+	// links onward to each of them instead of naming them as still pending.
+	for _, href := range []string{`href="/help/glossary"`, `href="/help/troubleshooting"`, `href="/help/notifications-audio"`, `href="/help/diagnostics-support"`} {
+		if !strings.Contains(body, href) {
+			t.Errorf("Help landing missing link onward to sibling %q", href)
+		}
 	}
+	if strings.Contains(body, "arrives in a later update") {
+		t.Error("Help landing still claims its siblings are pending — they are live routes now")
+	}
+	// What must stay absent from THIS minimal landing is actual glossary/
+	// troubleshooting/diagnostics CONTENT (definition lists, numbered
+	// procedures, a build/version block) — that content lives on the
+	// sibling pages this test just proved are linked, not duplicated here.
 	for _, banned := range []string{"<dl", "<ol", "Diagnostic Snapshot"} {
 		if strings.Contains(body, banned) {
 			t.Errorf("Help landing must not render actual glossary/troubleshooting/diagnostics content, found %q", banned)

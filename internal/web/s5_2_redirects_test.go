@@ -157,9 +157,13 @@ func TestS5_2RedirectTargetsRenderDirectly(t *testing.T) {
 // replaced their former /settings/* compatibility-redirect entries.
 // task S5-7 extended it once more with the three Events child routes
 // (/events/browser, /events/sound, /events/discord), formerly deferred 404s.
-// task S5-8 extended it a final time with the two Analytics routes
+// task S5-8 extended it again with the two Analytics routes
 // (/analytics/points, /analytics/roi), which replaced their former
-// /analytics/* compatibility-redirect entries.
+// /analytics/* compatibility-redirect entries. task S5-9 extended it a
+// final time with the four remaining Help routes (/help/glossary,
+// /help/troubleshooting, /help/notifications-audio,
+// /help/diagnostics-support), formerly deferred 404s — completing every
+// route in the design's 30-route page matrix.
 func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, path := range []string{
@@ -170,6 +174,7 @@ func TestS5_2CanonicalDirectRoutes(t *testing.T) {
 		"/settings/streamers", "/settings/rotation", "/settings/drops", "/settings/predictions",
 		"/settings/chat-raids", "/settings/transport", "/settings/analytics-logging",
 		"/settings/events-notifications", "/settings/discord", "/settings/system",
+		"/help/glossary", "/help/troubleshooting", "/help/notifications-audio", "/help/diagnostics-support",
 	} {
 		body := f3GetPage(t, srv, path, "en")
 		if body == "" {
@@ -191,33 +196,22 @@ func TestS5_2ExistingLegacyRoutesUnchanged(t *testing.T) {
 	}
 }
 
-// TestS5_2DeferredRoutesRemain404 proves every route explicitly deferred by
-// task §E (not yet built — no fake placeholder) keeps its honest 404,
+// TestS5_2DeferredRoutesRemain404 proved every route explicitly deferred by
+// task §E (not yet built — no fake placeholder) kept its honest 404,
 // falling through to the existing "/" catch-all exactly like any other
-// unregistered path. S5-3 removed /overview/queue from this list: it is now
+// unregistered path. S5-3 removed /overview/queue from this list: it became
 // a real direct-render route (handlers_queue.go) - see
 // TestS5_3QueueRouteReturns200 and TestS5_3RemainingDeferredRoutesStill404.
-// task S5-4 removed /drops/claims from this list: it is now a real
-// direct-render route (handlers_drops.go) - see s5_4_drops_test.go.
-// task S5-7 removed /events/browser, /events/sound and /events/discord from
-// this list: each is now a real direct-render route (handlers_events.go) -
-// see s5_7_events_test.go.
-func TestS5_2DeferredRoutesRemain404(t *testing.T) {
-	srv := buildF3PageServer(t)
-	h := srv.handler()
-	deferred := []string{
-		"/help/glossary",
-		"/help/troubleshooting",
-		"/help/notifications-audio",
-		"/help/diagnostics-support",
-	}
-	for _, path := range deferred {
-		rec, _ := httpGetBody(t, h, path)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("deferred route %s = %d, want 404 (no placeholder should exist yet)", path, rec.Code)
-		}
-	}
-}
+// task S5-4 removed /drops/claims: it became a real direct-render route
+// (handlers_drops.go) - see s5_4_drops_test.go. task S5-7 removed
+// /events/browser, /events/sound and /events/discord: each became a real
+// direct-render route (handlers_events.go) - see s5_7_events_test.go. task
+// S5-9 removed the last four entries (/help/glossary, /help/troubleshooting,
+// /help/notifications-audio, /help/diagnostics-support) - each is now a real
+// direct-render route (handlers_help.go). With the list empty and every
+// route in the design's 30-route page matrix registered, this test is
+// retired; TestS5_2CanonicalDirectRoutes above covers their 200 render, and
+// s5_9_help_test.go covers their full contract.
 
 // TestS5_2APIAndJSONRoutesUntouched spot-checks that existing JSON/API/POST
 // endpoints still resolve exactly as before — the new compatibility routes

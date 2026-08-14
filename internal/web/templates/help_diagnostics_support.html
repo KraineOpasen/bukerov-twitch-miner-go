@@ -1,0 +1,30 @@
+{{/* /help/diagnostics-support (S5-9, route 30). Static editorial content
+     deep-linking to the canonical /system/diagnostics page (route 24 — the
+     sole owner of canary runs and the Diagnostic Snapshot action) plus its
+     related System pages. This page never builds, requests, links, or
+     mentions any snapshot-generating endpoint of its own — it only points
+     at the existing canonical one. */}}
+{{define "title"}}{{ t "help.diagnostics_support.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "help.diagnostics_support.title" }}</h1>
+<p class="type-reading text-text-secondary mb-6" style="max-width:72ch">{{ t "help.diagnostics_support.lead" }}</p>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.diagnostics_support.snapshot.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.diagnostics_support.snapshot.def" }}</p>
+    <p class="help-prose"><a href="/system/diagnostics">{{ t "help.diagnostics_support.snapshot.link" }}</a></p>
+</article>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.diagnostics_support.status.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.diagnostics_support.status.def" }}</p>
+    <p class="help-prose"><a href="/system/status">{{ t "help.diagnostics_support.status.link" }}</a></p>
+</article>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.diagnostics_support.logs.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.diagnostics_support.logs.def" }}</p>
+    <p class="help-prose"><a href="/system/logs">{{ t "help.diagnostics_support.logs.link" }}</a></p>
+</article>
+{{end}}

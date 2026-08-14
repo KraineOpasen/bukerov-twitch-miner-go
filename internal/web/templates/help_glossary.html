@@ -1,0 +1,29 @@
+{{/* /help/glossary (S5-9, route 27). Mono definition list of machine reason
+     and status codes. Every entry is built in Go by ranging over the SAME
+     package-level dictionaries the rest of the dashboard renders reason/
+     status/event labels from (reasonCodeKeys, rosterStatusKeys,
+     eventTypeKeys, eventJournalGroups — see handlers_help.go's
+     buildHelpGlossaryPageData). This template never hand-types a code,
+     label or its translation key; s5_9_help_test.go's parity test proves
+     the rendered code set exactly matches those dictionaries' key sets. */}}
+{{define "title"}}{{ t "help.glossary.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "help.glossary.title" }}</h1>
+<p class="type-reading text-text-secondary mb-3" style="max-width:72ch">{{ t "help.glossary.lead" }}</p>
+<p class="type-small text-text-muted mb-6" style="max-width:72ch">{{ t "help.glossary.scope_note" }}</p>
+
+{{range .Sections}}
+<section class="help-glossary-section">
+    <h2 class="type-h2 text-text-primary mb-2">{{ t .HeadingKey }}</h2>
+    <dl class="help-glossary-list">
+        {{range .Entries}}
+        <div class="help-glossary-entry">
+            <dt class="type-code text-text-primary">{{.Code}}</dt>
+            <dd class="type-reading text-text-secondary">{{ t .LabelKey }} — {{ t .DefKey }}</dd>
+        </div>
+        {{end}}
+    </dl>
+</section>
+{{end}}
+{{end}}

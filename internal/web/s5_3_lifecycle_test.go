@@ -233,25 +233,25 @@ func TestS5_3LifecycleStaleGatingStatesUnconfirmedNeverToast(t *testing.T) {
 }
 
 // TestS5_3LifecycleStaleGatingDiagnosticsLinkUsesExistingRoute proves the
-// stale-state diagnostics link targets an already-registered, non-deferred
-// route (never a fabricated one, never the deferred /help/troubleshooting).
+// stale-state diagnostics link targets an already-registered route (never a
+// fabricated one): the SAME anchor element must carry both the id and the
+// href, so this can't be satisfied by any other /system/diagnostics link
+// elsewhere on the page (e.g. the Overview version line, or — since task
+// S5-9 — the C2 nav's own Help group, which now legitimately links
+// /help/troubleshooting as one of its five children on every page,
+// including this one; that page-wide link is no longer evidence of a
+// fabricated lifecycle-panel link, so this test only inspects
+// #lc-conn-lost-diag's own anchor, never a page-wide search).
 func TestS5_3LifecycleStaleGatingDiagnosticsLinkUsesExistingRoute(t *testing.T) {
 	srv, _, _ := newOverviewTestServer(t)
 	body := renderDashboardEN(t, srv)
 
-	// The SAME anchor element must carry both the id and the href: two
-	// independent page-wide searches would let any other /system/diagnostics
-	// link on the page (the Overview version line has one) satisfy the route
-	// assertion while #lc-conn-lost-diag itself pointed somewhere else.
 	anchor := lcConnLostDiagRe.FindString(body)
 	if anchor == "" {
 		t.Fatalf("the rendered Overview has no <a ... id=%q ...> diagnostics link; body=%s", "lc-conn-lost-diag", body)
 	}
 	if !strings.Contains(anchor, `href="/system/diagnostics"`) {
 		t.Errorf("#lc-conn-lost-diag must link to the canonical /system/diagnostics route; tag=%s", anchor)
-	}
-	if strings.Contains(body, `href="/help/troubleshooting"`) {
-		t.Error("must not link to the deferred /help/troubleshooting route")
 	}
 
 	// The target route must actually be live (200), not a fabricated path.

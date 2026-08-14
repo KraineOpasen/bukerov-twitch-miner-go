@@ -1,0 +1,39 @@
+{{/* /help/troubleshooting (S5-9, route 28). Static editorial content
+     distinguishing the four data-freshness states — Unknown, Stale,
+     Degraded, Failure — and deep-linking each to the real page where that
+     state is actually observable. No fake/live status is rendered here;
+     this page never converts an unknown value into a healthy/completed
+     claim, and states the invariant explicitly. */}}
+{{define "title"}}{{ t "help.troubleshooting.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "help.troubleshooting.title" }}</h1>
+<p class="type-reading text-text-secondary mb-6 help-prose" style="max-width:72ch">{{ t "help.troubleshooting.lead" }}</p>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.troubleshooting.unknown.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.troubleshooting.unknown.def" }}</p>
+    <p class="help-prose"><a href="/system/status">{{ t "help.troubleshooting.unknown.link" }}</a></p>
+</article>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.troubleshooting.stale.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.troubleshooting.stale.def" }}</p>
+    <p class="help-prose"><a href="/drops/current">{{ t "help.troubleshooting.stale.link" }}</a></p>
+</article>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.troubleshooting.degraded.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.troubleshooting.degraded.def" }}</p>
+    <p class="help-prose"><a href="/system/status">{{ t "help.troubleshooting.degraded.link" }}</a></p>
+</article>
+
+<article class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.troubleshooting.failure.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.troubleshooting.failure.def" }}</p>
+    <p class="help-prose"><a href="/system/logs">{{ t "help.troubleshooting.failure.link" }}</a></p>
+</article>
+
+<p class="type-reading text-text-primary mt-6 mb-3" style="max-width:72ch">{{ t "help.troubleshooting.invariant" }}</p>
+<p class="help-prose"><a href="/system/diagnostics">{{ t "help.troubleshooting.diagnostics_link" }}</a></p>
+{{end}}

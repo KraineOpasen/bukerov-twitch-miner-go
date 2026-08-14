@@ -54,27 +54,21 @@ func TestS5_3QueueRouteReturns200(t *testing.T) {
 	}
 }
 
-// TestS5_3RemainingDeferredRoutesStill404 re-confirms (independently of
+// TestS5_3RemainingDeferredRoutesStill404 re-confirmed (independently of
 // TestS5_2DeferredRoutesRemain404, which S5-3 was told to update by removing
 // exactly /overview/queue) that every OTHER deferred route, including
-// /help/glossary and /help/troubleshooting specifically, is still an honest
-// 404 - S5-3 must not have accidentally widened the route table. task S5-4
-// removed /drops/claims from this list: it is now a real direct-render
-// route (handlers_drops.go) - see s5_4_drops_test.go. task S5-7 removed
-// /events/browser, /events/sound and /events/discord: each is now a real
-// direct-render route (handlers_events.go) - see s5_7_events_test.go.
-func TestS5_3RemainingDeferredRoutesStill404(t *testing.T) {
-	srv := buildF3PageServer(t)
-	h := srv.handler()
-	for _, path := range []string{
-		"/help/glossary", "/help/troubleshooting", "/help/notifications-audio", "/help/diagnostics-support",
-	} {
-		rec, _ := httpGetBody(t, h, path)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("deferred route %s = %d, want 404", path, rec.Code)
-		}
-	}
-}
+// /help/glossary and /help/troubleshooting specifically, was still an
+// honest 404 - S5-3 must not have accidentally widened the route table.
+// task S5-4 removed /drops/claims from this list: it became a real
+// direct-render route (handlers_drops.go) - see s5_4_drops_test.go. task
+// S5-7 removed /events/browser, /events/sound and /events/discord: each
+// became a real direct-render route (handlers_events.go) - see
+// s5_7_events_test.go. task S5-9 removed the last four entries
+// (/help/glossary, /help/troubleshooting, /help/notifications-audio,
+// /help/diagnostics-support): each is now a real direct-render route
+// (handlers_help.go) - see s5_9_help_test.go. With the list empty, this
+// test is retired (mirrors TestS5_2DeferredRoutesRemain404's own S5-9
+// retirement in s5_2_redirects_test.go).
 
 // TestS5_3QueueRouteOneH1AndNoRedirectLoop proves the page has exactly one
 // h1, was never redirected, and does not capture any existing API/JSON path.

@@ -1,0 +1,46 @@
+{{/* /help/notifications-audio (S5-9, route 29). Static editorial content:
+     the browser gesture requirement, the permission-state model (deep
+     links to the live /events/browser and /events/sound status pages,
+     never restating their status here), and the fail-open invariant —
+     reusing the EXISTING events.sound.failopen copy verbatim rather than
+     inventing a second wording for the same guarantee. The diagram below is
+     a static inline SVG (no external asset, no CDN): every stroke uses
+     currentColor so it re-themes with dark/light exactly like every other
+     icon in this codebase (see c2_nav.html). */}}
+{{define "title"}}{{ t "help.notifications_audio.title" }} - Twitch Points Miner{{end}}
+
+{{define "content"}}
+<h1 class="type-h1 text-text-primary mb-3">{{ t "help.notifications_audio.title" }}</h1>
+<p class="type-reading text-text-secondary mb-6" style="max-width:72ch">{{ t "help.notifications_audio.lead" }}</p>
+
+<svg class="help-diagram" viewBox="0 0 360 90" role="img" aria-label="{{ t "help.notifications_audio.svg_caption" }}" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="30" cy="45" r="18"/>
+    <path d="M30 45 L22 37 M30 45 L22 53" stroke-linecap="round"/>
+    <path d="M54 45 H110" stroke-dasharray="4 4"/>
+    <rect x="112" y="20" width="80" height="50" rx="8"/>
+    <path d="M136 38 v14 M156 32 v26 M176 38 v14"/>
+    <path d="M198 45 H254" stroke-dasharray="4 4"/>
+    <path d="M270 30 a16 16 0 0 1 0 30" stroke-linecap="round"/>
+    <path d="M278 22 a26 26 0 0 1 0 46" stroke-linecap="round"/>
+    <rect x="256" y="35" width="10" height="20" rx="2"/>
+</svg>
+<p class="type-small text-text-muted mb-6" style="max-width:72ch">{{ t "help.notifications_audio.svg_caption" }}</p>
+
+<section class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.notifications_audio.gesture.title" }}</h2>
+    <p class="type-reading text-text-secondary" style="max-width:72ch">{{ t "help.notifications_audio.gesture.def" }}</p>
+</section>
+
+<section class="help-state-card">
+    <h2 class="type-h2 text-text-primary mb-1">{{ t "help.notifications_audio.permission.title" }}</h2>
+    <p class="type-reading text-text-secondary mb-2" style="max-width:72ch">{{ t "help.notifications_audio.permission.def" }}</p>
+    <ul class="help-links-list">
+        <li><a href="/events/browser">{{ t "help.notifications_audio.permission.browser_link" }}</a></li>
+        <li><a href="/events/sound">{{ t "help.notifications_audio.permission.sound_link" }}</a></li>
+    </ul>
+</section>
+
+<section class="help-state-card">
+    <p class="type-reading text-text-primary" style="max-width:72ch">{{ t "events.sound.failopen" }}</p>
+</section>
+{{end}}

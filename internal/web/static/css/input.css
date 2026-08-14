@@ -658,6 +658,16 @@
   line-height: 1.125rem;
 }
 
+/* type-reading (S5-9): the "reading" density role (Stage 4 §3 density table
+   - /help/* only) - 15px prose with generous line-height, distinct from the
+   14px type-body used at standard density. */
+@utility type-reading {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: 0.9375rem;
+  line-height: 1.625rem;
+}
+
 @utility motion-fast {
   transition-duration: var(--motion-fast);
   transition-timing-function: var(--motion-easing);
@@ -2272,9 +2282,23 @@
 .c18-dpba { display: flex; align-items: flex-start; gap: 0.5rem; margin-top: 1rem; padding: 0.75rem; background: var(--surface-inset); border-radius: var(--ds-radius-md); color: var(--text-secondary); font-size: 0.82rem; }
 .c18-dpba-icon { flex: none; color: var(--state-neutral); line-height: 1.4; }
 
-/* -- Help getting-started section link list --------------------------------------- */
+/* -- Help section link list (getting-started + cross links elsewhere) -------------- */
 .help-links-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 .help-links-list a { color: var(--link-text); text-decoration: underline; }
+
+/* -- Help reading pages (S5-9): glossary definition list, troubleshooting
+   state cards, notifications diagram wrapper. Reading density only - no new
+   color/token, semantic tokens reused throughout. ---------------------------------- */
+.help-prose a { color: var(--link-text); text-decoration: underline; }
+.help-glossary-section { margin: 0 0 1.5rem; }
+.help-glossary-list { margin: 0; padding: 0; }
+.help-glossary-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border-default); }
+.help-glossary-entry:last-child { border-bottom: none; }
+.help-glossary-entry dt { margin: 0 0 0.15rem; }
+.help-glossary-entry dd { margin: 0; }
+.help-state-card { padding: 1rem 0; border-bottom: 1px solid var(--border-default); }
+.help-state-card:last-child { border-bottom: none; }
+.help-diagram { max-width: 26rem; margin: 1.5rem 0; }
 
 /* -- Responsive layering: drawer <1024px, rail 1024-1279px, sidebar >=1280px.
    The pinned @media (max-width: 900px) block above already covers the
