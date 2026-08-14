@@ -348,10 +348,17 @@ func TestSupersededGenerationReadArtifactIsNotAnError(t *testing.T) {
 		ts.serve(conn)
 	})
 
-	var errCalls atomic.Int64
+	var errCalls, reconnectAdmissions atomic.Int64
 	ws := newTestClient(t, ts.url(), 0)
 	// Set before any loop exists, so the read is ordered by goroutine creation.
 	ws.onError = func(error) { errCalls.Add(1) }
+	// onReconnect fires once per reconnect ADMISSION — after reconnectAfter's
+	// single-flight guard passes, but before the old conn is closed, before the
+	// backoff and before any dial. It is therefore a far earlier and sharper
+	// signal than a dial count: it catches a spurious reconnect that was
+	// admitted even if the redial itself never gets far enough to reach the
+	// server.
+	ws.SetReconnectHandler(func() { reconnectAdmissions.Add(1) })
 
 	if err := ws.Connect(); err != nil {
 		t.Fatalf("Connect (generation 1): %v", err)
@@ -379,12 +386,20 @@ func TestSupersededGenerationReadArtifactIsNotAnError(t *testing.T) {
 	if n := errCalls.Load(); n != 0 {
 		t.Fatalf("superseded reader must not report to onError: got %d call(s), want 0", n)
 	}
+	if n := reconnectAdmissions.Load(); n != 0 {
+		t.Fatalf("superseded reader must not get a reconnect admitted: got %d, want 0", n)
+	}
 
-	// Absence of a redial can only be shown by observing a quiet window (the
-	// same idiom TestDeliberateCloseDoesNotReconnect and TestDoubleTriggerSingleDial
-	// use). This tightens the test rather than relaxing it: a fix that only
-	// silenced the log while still redialing would be caught here.
+	// Absence of an asynchronous action can only be shown by observing a quiet
+	// window (the same idiom TestDeliberateCloseDoesNotReconnect and
+	// TestDoubleTriggerSingleDial use). This tightens the test rather than
+	// relaxing it: an implementation that silenced the log but still reconnected
+	// would be caught here. The admission counter is the primary signal — it
+	// trips before the close/backoff/dial — with the dial count as corroboration.
 	time.Sleep(250 * time.Millisecond)
+	if n := reconnectAdmissions.Load(); n != 0 {
+		t.Fatalf("superseded reader must not get a reconnect admitted: got %d, want 0", n)
+	}
 	if got := ts.dialCount(); got != 2 {
 		t.Fatalf("superseded reader must not redial the live generation: dials = %d, want 2", got)
 	}
@@ -415,9 +430,10 @@ func TestCurrentGenerationReadErrorStillReportsAndReconnects(t *testing.T) {
 		ts.serve(conn)
 	})
 
-	var errCalls atomic.Int64
+	var errCalls, reconnectAdmissions atomic.Int64
 	ws := newTestClient(t, ts.url(), 0)
 	ws.onError = func(error) { errCalls.Add(1) }
+	ws.SetReconnectHandler(func() { reconnectAdmissions.Add(1) })
 
 	if err := ws.Connect(); err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -432,6 +448,11 @@ func TestCurrentGenerationReadErrorStillReportsAndReconnects(t *testing.T) {
 	})
 	if logs := buf.String(); !strings.Contains(logs, "WebSocket read error") {
 		t.Fatalf("a genuine current-generation transport failure must still be reported at ERROR, got:\n%s", logs)
+	}
+	// The same admission seam the superseded guard asserts is absent must be
+	// present here, so neither test can pass by silencing the reconnect path.
+	if n := reconnectAdmissions.Load(); n < 1 {
+		t.Fatalf("a genuine current-generation failure must get a reconnect admitted: got %d, want >= 1", n)
 	}
 }
 
