@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,6 +313,146 @@ func TestReconnectFrameArtifactIsNotAnError(t *testing.T) {
 	}
 	if strings.Contains(logs, "WebSocket read error") {
 		t.Fatalf("the deliberate-reconnect read artifact must not be an ERROR read-error line, got:\n%s", logs)
+	}
+}
+
+// TestSupersededGenerationReadArtifactIsNotAnError pins the durable half of
+// read-error classification. A reader whose connection generation has already
+// been replaced owns a socket nobody uses any more: when that socket finally
+// dies, the error is an artifact of the old generation, never a transport
+// failure of the live one. Classifying it by isReconnecting alone is not
+// enough — that flag is cleared the instant the replacement Connect succeeds,
+// so a superseded reader scheduled even microseconds late reads it as false
+// and blames (and redials) a perfectly healthy connection. This is the
+// lifecycle scheduling race that turned Release run #58 attempt 1 red.
+//
+// The repro needs no timing window: a second Connect() bumps connGen and
+// swaps ws.conn while deliberately leaving the old stop channel open and the
+// old socket unclosed, so generation 1's reader stays parked in ReadMessage
+// in exactly the superseded-but-running state, and the test — not the
+// scheduler — decides when its socket dies.
+func TestSupersededGenerationReadArtifactIsNotAnError(t *testing.T) {
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	kill := make(chan struct{})
+	ts := newWSTestServer(t, func(ts *wsTestServer, conn *websocket.Conn, dial int) {
+		if dial == 1 {
+			go func() {
+				<-kill
+				_ = conn.UnderlyingConn().Close() // abrupt death of the SUPERSEDED socket
+			}()
+		}
+		ts.serve(conn)
+	})
+
+	var errCalls, reconnectAdmissions atomic.Int64
+	ws := newTestClient(t, ts.url(), 0)
+	// Set before any loop exists, so the read is ordered by goroutine creation.
+	ws.onError = func(error) { errCalls.Add(1) }
+	// onReconnect fires once per reconnect ADMISSION — after reconnectAfter's
+	// single-flight guard passes, but before the old conn is closed, before the
+	// backoff and before any dial. It is therefore a far earlier and sharper
+	// signal than a dial count: it catches a spurious reconnect that was
+	// admitted even if the redial itself never gets far enough to reach the
+	// server.
+	ws.SetReconnectHandler(func() { reconnectAdmissions.Add(1) })
+
+	if err := ws.Connect(); err != nil {
+		t.Fatalf("Connect (generation 1): %v", err)
+	}
+	waitUntil(t, "generation 1 to dial", 3*time.Second, func() bool { return ts.dialCount() >= 1 })
+
+	if err := ws.Connect(); err != nil {
+		t.Fatalf("Connect (generation 2): %v", err)
+	}
+	waitUntil(t, "generation 2 to dial", 3*time.Second, func() bool { return ts.dialCount() >= 2 })
+
+	close(kill)
+
+	// Wait on whichever classification the code actually reaches, so the
+	// assertions below report the real symptom instead of a timeout.
+	waitUntil(t, "the superseded reader to classify its read error", 5*time.Second, func() bool {
+		logs := buf.String()
+		return strings.Contains(logs, "WebSocket read error") ||
+			strings.Contains(logs, "WebSocket read loop ended on superseded generation")
+	})
+
+	if logs := buf.String(); strings.Contains(logs, "WebSocket read error") {
+		t.Fatalf("a superseded generation's read error must not be reported as a current-generation transport failure, got:\n%s", logs)
+	}
+	if n := errCalls.Load(); n != 0 {
+		t.Fatalf("superseded reader must not report to onError: got %d call(s), want 0", n)
+	}
+	if n := reconnectAdmissions.Load(); n != 0 {
+		t.Fatalf("superseded reader must not get a reconnect admitted: got %d, want 0", n)
+	}
+
+	// Absence of an asynchronous action can only be shown by observing a quiet
+	// window (the same idiom TestDeliberateCloseDoesNotReconnect and
+	// TestDoubleTriggerSingleDial use). This tightens the test rather than
+	// relaxing it: an implementation that silenced the log but still reconnected
+	// would be caught here. The admission counter is the primary signal — it
+	// trips before the close/backoff/dial — with the dial count as corroboration.
+	time.Sleep(250 * time.Millisecond)
+	if n := reconnectAdmissions.Load(); n != 0 {
+		t.Fatalf("superseded reader must not get a reconnect admitted: got %d, want 0", n)
+	}
+	if got := ts.dialCount(); got != 2 {
+		t.Fatalf("superseded reader must not redial the live generation: dials = %d, want 2", got)
+	}
+	if n := errCalls.Load(); n != 0 {
+		t.Fatalf("superseded reader must not report to onError: got %d call(s), want 0", n)
+	}
+}
+
+// TestCurrentGenerationReadErrorStillReportsAndReconnects is the counterweight
+// to the superseded-generation guard: a read error that genuinely belongs to
+// the CURRENT generation must keep its full ERROR report, its onError callback
+// and its redial. It fails on any over-broad "treat read errors as artifacts"
+// fix, which is exactly what the generation discriminator must not become.
+func TestCurrentGenerationReadErrorStillReportsAndReconnects(t *testing.T) {
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	kill := make(chan struct{})
+	ts := newWSTestServer(t, func(ts *wsTestServer, conn *websocket.Conn, dial int) {
+		if dial == 1 {
+			go func() {
+				<-kill
+				_ = conn.UnderlyingConn().Close()
+			}()
+		}
+		ts.serve(conn)
+	})
+
+	var errCalls, reconnectAdmissions atomic.Int64
+	ws := newTestClient(t, ts.url(), 0)
+	ws.onError = func(error) { errCalls.Add(1) }
+	ws.SetReconnectHandler(func() { reconnectAdmissions.Add(1) })
+
+	if err := ws.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	waitUntil(t, "first dial", 3*time.Second, func() bool { return ts.dialCount() >= 1 })
+
+	close(kill)
+
+	waitUntil(t, "read-error-driven reconnect", 5*time.Second, func() bool { return ts.dialCount() >= 2 })
+	waitUntil(t, "the current-generation failure to reach onError", 3*time.Second, func() bool {
+		return errCalls.Load() >= 1
+	})
+	if logs := buf.String(); !strings.Contains(logs, "WebSocket read error") {
+		t.Fatalf("a genuine current-generation transport failure must still be reported at ERROR, got:\n%s", logs)
+	}
+	// The same admission seam the superseded guard asserts is absent must be
+	// present here, so neither test can pass by silencing the reconnect path.
+	if n := reconnectAdmissions.Load(); n < 1 {
+		t.Fatalf("a genuine current-generation failure must get a reconnect admitted: got %d, want >= 1", n)
 	}
 }
 
