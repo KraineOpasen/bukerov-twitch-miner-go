@@ -10,11 +10,15 @@ package web
 // link-only, no-snapshot-generation contract.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"html"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -275,25 +279,170 @@ func TestS5_9LocaleKeysPresentAndTranslated(t *testing.T) {
 	}
 }
 
-// TestS5_9LocalizationParity proves all five Help pages render fully
-// localized in RU and EN, with no raw i18n key leaking into the output and
-// no untranslated difference between the two languages.
+// s59HelpRouteTitleKeys/s59HelpRouteLeadKeys map each Help route to its own
+// title/lead i18n key — the specific strings TestS5_9LocalizationParity
+// proves are actually rendered, in the actual requested language, on that
+// route's own page.
+var s59HelpRouteTitleKeys = map[string]string{
+	"/help/getting-started":     "help.title",
+	"/help/glossary":            "help.glossary.title",
+	"/help/troubleshooting":     "help.troubleshooting.title",
+	"/help/notifications-audio": "help.notifications_audio.title",
+	"/help/diagnostics-support": "help.diagnostics_support.title",
+}
+
+var s59HelpRouteLeadKeys = map[string]string{
+	"/help/getting-started":     "help.lead",
+	"/help/glossary":            "help.glossary.lead",
+	"/help/troubleshooting":     "help.troubleshooting.lead",
+	"/help/notifications-audio": "help.notifications_audio.lead",
+	"/help/diagnostics-support": "help.diagnostics_support.lead",
+}
+
+// TestS5_9LocalizationParity proves each of the five Help routes renders ITS
+// OWN localized title and lead paragraph, in both EN and RU, scoped to the
+// page's own <main> content (s59MainRegion) — not a whole-page
+// bodies["en"] != bodies["ru"] byte-diff. A whole-page diff is a weak oracle
+// here: the shared C2 nav and base.html chrome already differ by language
+// on every route regardless of whether the Help page's OWN template is
+// correctly localized, so it would stay green even if one route's own
+// content silently fell back to a hardcoded English string inside the RU
+// render. Asserting the route's own expected localized title/lead text is
+// present catches exactly that regression.
 func TestS5_9LocalizationParity(t *testing.T) {
 	srv := buildF3PageServer(t)
+	loc := s5_9Loc(t)
 	rawKey := regexp.MustCompile(`>\s*(help|nav)\.[a-z0-9_.]+\s*<`)
 
 	for _, route := range s59HelpRoutes {
-		bodies := map[string]string{}
+		titleKey, ok := s59HelpRouteTitleKeys[route]
+		if !ok {
+			t.Fatalf("no title key registered for route %q", route)
+		}
+		leadKey, ok := s59HelpRouteLeadKeys[route]
+		if !ok {
+			t.Fatalf("no lead key registered for route %q", route)
+		}
+
 		for _, lang := range []string{"en", "ru"} {
 			body := f3GetPage(t, srv, route, lang)
 			if m := rawKey.FindString(body); m != "" {
 				t.Errorf("[%s %s] raw i18n key leaked into the page: %q", lang, route, strings.TrimSpace(m))
 			}
-			bodies[lang] = body
+
+			main := s59MainRegion(t, body)
+			normLang := i18n.NormalizeLang(lang)
+
+			wantTitle := html.EscapeString(loc.T(normLang, titleKey))
+			if !strings.Contains(main, wantTitle) {
+				t.Errorf("[%s %s] page's own content missing its localized title (key %q, want %q)", lang, route, titleKey, wantTitle)
+			}
+			wantLead := html.EscapeString(loc.T(normLang, leadKey))
+			if !strings.Contains(main, wantLead) {
+				t.Errorf("[%s %s] page's own content missing its localized lead (key %q, want %q)", lang, route, leadKey, wantLead)
+			}
 		}
-		if bodies["en"] == bodies["ru"] {
-			t.Errorf("%s: EN and RU renders are byte-identical — the page is not actually localized", route)
+	}
+}
+
+// ---------------------------------------------------------------------
+// 3b. Producer parity: reasonCodeKeys must match the watch broker's actual
+//     Reason* consts, not just itself.
+// ---------------------------------------------------------------------
+
+// watcherReasonConsts parses internal/watcher/broker.go's AST directly (a
+// relative path off disk — go test's working directory is the package
+// directory, the same relative-parse idiom TestS5_3BuildCardsSingleUsername
+// SnapshotAST already establishes in this package for a same-package file)
+// and returns every exported Reason*-prefixed string constant it declares:
+// name -> its string value. This is the actual producer — the ONLY thing
+// that proves reasonCodeKeys (viewmodels_slots.go) hasn't silently drifted
+// from it (renamed/added/removed const) is reading broker.go itself, not
+// re-deriving expectations from reasonCodeKeys or the rendered glossary.
+func watcherReasonConsts(t *testing.T) map[string]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../watcher/broker.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse ../watcher/broker.go: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
 		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "Reason") || !name.IsExported() {
+					continue
+				}
+				if i >= len(vs.Values) {
+					t.Fatalf("watcher.%s has no explicit value in its ValueSpec — AST guard can't read it (iota?)", name.Name)
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Fatalf("watcher.%s is not a plain string literal const — AST guard can't read its value", name.Name)
+				}
+				val, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("unquote watcher.%s literal %s: %v", name.Name, lit.Value, err)
+				}
+				got[name.Name] = val
+			}
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("found zero exported Reason* consts in ../watcher/broker.go — AST guard is broken, not just empty")
+	}
+	return got
+}
+
+// TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts closes the producer->web gap
+// TestS5_9GlossaryParity cannot close on its own: that test only proves the
+// rendered glossary matches reasonCodeKeys itself (a hand-maintained Go map
+// in viewmodels_slots.go), which could silently drift from
+// internal/watcher/broker.go's actual Reason* consts (a rename, addition or
+// removal there) without failing any existing test. This test reads
+// broker.go's AST directly and asserts reasonCodeKeys' key set is exactly
+// the set of broker.go's exported Reason* const VALUES — so it fails on a
+// synthetic Reason* const added, removed or renamed in broker.go, exactly
+// as much as it fails on reasonCodeKeys itself drifting.
+//
+// This deliberately does NOT extend to rosterStatusKeys or eventTypeKeys:
+// rosterStatusKeys' producer (queueRosterRow / buildCards' StreamerInfo.
+// State) is not a Go const enum this package can parse the same way, and
+// eventTypeKeys is an intentional 10-of-40 subset of events.Type (see
+// TestS5_9GlossaryParity's own doc comment) — forcing full parity there
+// would be wrong, not a fix.
+func TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts(t *testing.T) {
+	producer := watcherReasonConsts(t)
+
+	producerValues := map[string]bool{}
+	for name, val := range producer {
+		if producerValues[val] {
+			t.Errorf("internal/watcher/broker.go declares two Reason* consts with the same value %q (one is %s)", val, name)
+		}
+		producerValues[val] = true
+	}
+
+	for code := range reasonCodeKeys {
+		if !producerValues[code] {
+			t.Errorf("reasonCodeKeys has code %q with no matching exported Reason* const value in internal/watcher/broker.go", code)
+		}
+	}
+	for name, val := range producer {
+		if _, ok := reasonCodeKeys[val]; !ok {
+			t.Errorf("internal/watcher/broker.go declares %s = %q, which reasonCodeKeys does not carry — the glossary/queue reason-code vocabulary is out of sync with the broker", name, val)
+		}
+	}
+	if len(producer) != len(reasonCodeKeys) {
+		t.Errorf("internal/watcher/broker.go declares %d exported Reason* consts, reasonCodeKeys has %d entries — count mismatch even if every individual code matched above", len(producer), len(reasonCodeKeys))
 	}
 }
 
@@ -393,6 +542,48 @@ func s5_9OrderedGlossaryCodesInSection(t *testing.T, body, fromHeadingKeyEN, toH
 	return codes
 }
 
+var s59GlossaryAnchorRe = regexp.MustCompile(`<div class="help-glossary-entry" id="glossary-([^"]+)">`)
+
+// TestS5_9GlossaryEveryCodeHasAStableAnchor proves every rendered glossary
+// code gets its own stable id="glossary-{code}" anchor target (so
+// /help/glossary#code deep links land on the right entry) and that the
+// coverage is exactly one-to-one: no code without an anchor, no anchor
+// without a matching rendered code, no duplicate anchor for the same code.
+func TestS5_9GlossaryEveryCodeHasAStableAnchor(t *testing.T) {
+	srv := buildF3PageServer(t)
+	body := f3GetPage(t, srv, "/help/glossary", "en")
+
+	codes := s59RenderedGlossaryCodes(t, body)
+
+	// s59GlossaryAnchorRe's capture group is already the bare code (the
+	// literal "glossary-" prefix is consumed by the pattern match itself,
+	// not included in the captured group) — it must never be stripped
+	// again here.
+	anchorCounts := map[string]int{}
+	for _, m := range s59GlossaryAnchorRe.FindAllStringSubmatch(body, -1) {
+		anchorCounts[m[1]]++
+	}
+
+	for code := range codes {
+		switch anchorCounts[code] {
+		case 0:
+			t.Errorf("glossary code %q has no #glossary-%s anchor target", code, code)
+		case 1:
+			// exactly right
+		default:
+			t.Errorf("glossary code %q has %d anchor targets, want exactly 1", code, anchorCounts[code])
+		}
+	}
+	for anchorCode := range anchorCounts {
+		if !codes[anchorCode] {
+			t.Errorf("anchor id %q does not correspond to any rendered glossary code", "glossary-"+anchorCode)
+		}
+	}
+	if len(anchorCounts) != len(codes) {
+		t.Errorf("glossary rendered %d codes but %d distinct anchors — one-to-one code<->anchor coverage is broken", len(codes), len(anchorCounts))
+	}
+}
+
 // TestS5_9GlossaryScopeNoteExplainsExclusions proves the glossary explicitly
 // states its scope (queue/roster reason codes and event types only) rather
 // than silently omitting the code families that have no single canonical Go
@@ -418,9 +609,16 @@ func TestS5_9GlossaryScopeNoteExplainsExclusions(t *testing.T) {
 // names all four data-freshness states (Unknown, Stale, Degraded, Failure)
 // with distinct copy, deep-links each to a real owning page, and states the
 // "unknown never becomes healthy" invariant explicitly.
+// TestS5_9TroubleshootingDistinguishesFourStates scopes every assertion to
+// the page's own <main> content (s59MainRegion): /system/status,
+// /drops/current, /system/logs and /system/diagnostics are ALSO the shared
+// C2 nav's System/Drops group hrefs on every page, so an unscoped
+// strings.Contains(body, ...) check would stay green even if
+// help_troubleshooting.html's own deep links were deleted entirely.
 func TestS5_9TroubleshootingDistinguishesFourStates(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/help/troubleshooting", "en")
+	main := s59MainRegion(t, body)
 	loc := s5_9Loc(t)
 
 	stateLinks := map[string]string{
@@ -436,18 +634,18 @@ func TestS5_9TroubleshootingDistinguishesFourStates(t *testing.T) {
 			t.Errorf("state title %q duplicated across states — must be distinct", title)
 		}
 		titlesSeen[title] = true
-		if !strings.Contains(body, title) {
+		if !strings.Contains(main, title) {
 			t.Errorf("troubleshooting page missing the %q state title", state)
 		}
-		if !strings.Contains(body, `href="`+href+`"`) {
-			t.Errorf("troubleshooting page missing the %q state's deep link to %q", state, href)
+		if !strings.Contains(main, `href="`+href+`"`) {
+			t.Errorf("troubleshooting page missing the %q state's own deep link to %q", state, href)
 		}
 	}
-	if !strings.Contains(body, loc.T(i18n.LangEN, "help.troubleshooting.invariant")) {
+	if !strings.Contains(main, loc.T(i18n.LangEN, "help.troubleshooting.invariant")) {
 		t.Error("troubleshooting page missing the unknown-never-becomes-healthy invariant statement")
 	}
-	if !strings.Contains(body, `href="/system/diagnostics"`) {
-		t.Error("troubleshooting page missing its diagnostics-snapshot escalation link")
+	if !strings.Contains(main, `href="/system/diagnostics"`) {
+		t.Error("troubleshooting page missing its own diagnostics-snapshot escalation link")
 	}
 }
 
@@ -474,24 +672,31 @@ func TestS5_9NotificationsAudioReusesExistingFailOpenCopy(t *testing.T) {
 // TestS5_9NotificationsAudioLinksLivePermissionPages proves the page deep-
 // links to the real, live browser/sound status pages rather than restating
 // their status, and carries a static themed (currentColor) inline SVG with
-// no external asset reference.
+// no external asset reference. Scoped to the page's own <main> content
+// (s59MainRegion): /events/browser and /events/sound are ALSO the shared C2
+// nav's Events group hrefs, and base.html's chrome (sidebar hamburger,
+// drawer-close, avatar, theme-toggle icons) already renders several
+// stroke="currentColor" <svg> elements on every page outside <main> — an
+// unscoped check on any of these four assertions would stay green even if
+// this page's own links/diagram were deleted entirely.
 func TestS5_9NotificationsAudioLinksLivePermissionPages(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/help/notifications-audio", "en")
+	main := s59MainRegion(t, body)
 
 	for _, href := range []string{`href="/events/browser"`, `href="/events/sound"`} {
-		if !strings.Contains(body, href) {
-			t.Errorf("notifications-audio page missing link %q", href)
+		if !strings.Contains(main, href) {
+			t.Errorf("notifications-audio page missing its own link %q", href)
 		}
 	}
-	if !strings.Contains(body, "<svg") {
-		t.Error("notifications-audio page missing its themed diagram SVG")
+	if !strings.Contains(main, "<svg") {
+		t.Error("notifications-audio page missing its own themed diagram SVG")
 	}
-	if strings.Contains(body, "http://") || strings.Contains(body, "https://") || strings.Contains(body, "cdn.") {
+	if strings.Contains(main, "http://") || strings.Contains(main, "https://") || strings.Contains(main, "cdn.") {
 		t.Error("notifications-audio page must not reference any external asset/CDN URL")
 	}
-	if !strings.Contains(body, `stroke="currentColor"`) {
-		t.Error("notifications-audio diagram must theme via currentColor, like every other icon in this codebase")
+	if !strings.Contains(main, `stroke="currentColor"`) {
+		t.Error("notifications-audio page's own diagram must theme via currentColor, like every other icon in this codebase")
 	}
 }
 
@@ -501,14 +706,19 @@ func TestS5_9NotificationsAudioLinksLivePermissionPages(t *testing.T) {
 
 // TestS5_9DiagnosticsSupportLinksCanonicalPage proves /help/diagnostics-
 // support deep-links to the canonical /system/diagnostics page (and its
-// System siblings) rather than restating diagnostic content.
+// System siblings) rather than restating diagnostic content. Scoped to the
+// page's own <main> content (s59MainRegion): all three hrefs are ALSO the
+// shared C2 nav's System group hrefs on every page, so an unscoped check
+// would stay green even if this page's own three links were deleted
+// entirely.
 func TestS5_9DiagnosticsSupportLinksCanonicalPage(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/help/diagnostics-support", "en")
+	main := s59MainRegion(t, body)
 
 	for _, href := range []string{`href="/system/diagnostics"`, `href="/system/status"`, `href="/system/logs"`} {
-		if !strings.Contains(body, href) {
-			t.Errorf("diagnostics-support page missing link %q", href)
+		if !strings.Contains(main, href) {
+			t.Errorf("diagnostics-support page missing its own link %q", href)
 		}
 	}
 }

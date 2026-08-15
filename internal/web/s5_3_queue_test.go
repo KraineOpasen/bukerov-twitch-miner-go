@@ -809,8 +809,8 @@ func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
 	}
 	card := body[start : start+end]
 
-	if strings.Contains(card, "<button") || strings.Contains(card, "<select") || strings.Contains(card, "<a ") {
-		t.Errorf("C18 card must contain no buttons/menus/links, got: %s", card)
+	if strings.Contains(card, "<button") || strings.Contains(card, "<select") {
+		t.Errorf("C18 card must contain no buttons/menus, got: %s", card)
 	}
 	if strings.Contains(card, "disabled") {
 		t.Errorf("C18 card must contain no disabled ghost controls, got: %s", card)
@@ -827,8 +827,17 @@ func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
 		}
 	}
 
-	// The troubleshooting link is intentionally omitted (deferred route).
-	if strings.Contains(card, "/help/troubleshooting") {
-		t.Error("C18 must not link to the still-deferred /help/troubleshooting route")
+	// S5-9 built /help/troubleshooting as a real route, so this card now
+	// deep-links to it — the ONLY link the card carries (the five manual
+	// controls above stay unimplemented; this outbound link is not one of
+	// them).
+	if n := strings.Count(card, "<a "); n != 1 {
+		t.Errorf("C18 card must contain exactly one link (the troubleshooting deep link), got %d: %s", n, card)
+	}
+	if !strings.Contains(card, `href="/help/troubleshooting"`) {
+		t.Error("C18 must link to the now-live /help/troubleshooting route")
+	}
+	if !strings.Contains(card, enTR(t)("queue.dpba.troubleshooting_link")) {
+		t.Error("C18 troubleshooting link must carry its localized link text")
 	}
 }

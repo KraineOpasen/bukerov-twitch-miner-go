@@ -524,9 +524,14 @@ func TestS5_2HelpPageContract(t *testing.T) {
 	}
 	// task S5-9: the four Help siblings are now real pages, so the landing
 	// links onward to each of them instead of naming them as still pending.
+	// Scoped to the page's own <main> content (s59MainRegion): the shared
+	// C2 nav's Help group already carries all four of these hrefs on every
+	// page, so an unscoped check would stay green even if help.html's own
+	// "More help" link cards were deleted entirely.
+	main := s59MainRegion(t, body)
 	for _, href := range []string{`href="/help/glossary"`, `href="/help/troubleshooting"`, `href="/help/notifications-audio"`, `href="/help/diagnostics-support"`} {
-		if !strings.Contains(body, href) {
-			t.Errorf("Help landing missing link onward to sibling %q", href)
+		if !strings.Contains(main, href) {
+			t.Errorf("Help landing missing its own link onward to sibling %q", href)
 		}
 	}
 	if strings.Contains(body, "arrives in a later update") {

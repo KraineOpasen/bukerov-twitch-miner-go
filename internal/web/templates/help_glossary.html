@@ -5,7 +5,16 @@
      eventTypeKeys, eventJournalGroups — see handlers_help.go's
      buildHelpGlossaryPageData). This template never hand-types a code,
      label or its translation key; s5_9_help_test.go's parity test proves
-     the rendered code set exactly matches those dictionaries' key sets. */}}
+     the rendered code set exactly matches those dictionaries' key sets, and
+     a separate AST-based test proves reasonCodeKeys itself still matches
+     internal/watcher/broker.go's Reason* consts (see
+     TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts).
+
+     Every entry carries a stable id="glossary-{code}" anchor
+     (TestS5_9GlossaryEveryCodeHasAStableAnchor proves one-to-one coverage)
+     so /help/glossary#code deep links land on the right entry; the
+     .help-glossary-entry scroll-margin-top (input.css) matches this
+     codebase's other in-page anchor targets (see #predictions, #grid). */}}
 {{define "title"}}{{ t "help.glossary.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -18,7 +27,7 @@
     <h2 class="type-h2 text-text-primary mb-2">{{ t .HeadingKey }}</h2>
     <dl class="help-glossary-list">
         {{range .Entries}}
-        <div class="help-glossary-entry">
+        <div class="help-glossary-entry" id="glossary-{{.Code}}">
             <dt class="type-code text-text-primary">{{.Code}}</dt>
             <dd class="type-reading text-text-secondary">{{ t .LabelKey }} — {{ t .DefKey }}</dd>
         </div>

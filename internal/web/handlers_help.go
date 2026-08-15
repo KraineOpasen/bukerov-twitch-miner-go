@@ -19,12 +19,16 @@ package web
 // pre-resolved to one language here), exactly like every other page in this
 // package — see the {{t "..."}} calls in the templates.
 //
-// The four PageData structs below (normally placed in viewmodels.go per
-// this package's usual convention — see the pre-existing HelpPageData
-// there) live here instead: this task's contract scopes its allowed edits
-// to a fixed path list that does not include viewmodels.go, so every new
-// symbol this slice needs is self-contained in this one new file rather
-// than reopening that file for four struct additions.
+// /help/troubleshooting, /help/notifications-audio and /help/diagnostics-
+// support are static editorial pages with no per-request fields beyond the
+// shared page shell, so they reuse the pre-existing HelpPageData
+// (viewmodels.go) directly rather than each declaring an identical
+// five-field struct. Only /help/glossary needs its own type
+// (HelpGlossaryPageData, below): it carries genuinely distinct per-page
+// data (Sections) that HelpPageData has no field for. HelpGlossaryPageData
+// lives here rather than in viewmodels.go because this task's contract
+// scopes its allowed edits to a fixed path list that does not include
+// viewmodels.go.
 import (
 	"net/http"
 	"sort"
@@ -34,10 +38,16 @@ import (
 )
 
 // helpGlossaryEntry is one machine code plus the i18n keys for its localized
-// label and definition. Code is read directly from the same canonical
-// package-level dictionary the rest of the dashboard already renders from —
-// never hand-typed — so this page cannot become a second source of truth for
-// codes it lists. See buildHelpGlossaryPageData.
+// label and definition. Code is read directly from reasonCodeKeys,
+// rosterStatusKeys, eventTypeKeys or eventJournalGroups — the same
+// package-level dictionaries the rest of the dashboard already renders
+// from — never hand-typed. reasonCodeKeys' own values are, in turn, checked
+// against internal/watcher/broker.go's exported Reason* consts by
+// TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts (s5_9_help_test.go), so the
+// glossary's reason-code entries cannot silently drift from the producer
+// that actually assigns them. rosterStatusKeys and eventTypeKeys have no
+// equivalent producer-side guard (see that test's own doc comment for why).
+// See buildHelpGlossaryPageData.
 type helpGlossaryEntry struct {
 	Code     string
 	LabelKey string
@@ -58,38 +68,6 @@ type HelpGlossaryPageData struct {
 	DiscordEnabled bool
 	DebugURL       string
 	Sections       []helpGlossarySection
-}
-
-// HelpTroubleshootingPageData feeds /help/troubleshooting (route 28). Static
-// editorial content — no per-request fields beyond the shared page shell.
-type HelpTroubleshootingPageData struct {
-	Username       string
-	RefreshMinutes int
-	Version        string
-	DiscordEnabled bool
-	DebugURL       string
-}
-
-// HelpNotificationsAudioPageData feeds /help/notifications-audio (route 29).
-// Static editorial content — no per-request fields beyond the shared page
-// shell.
-type HelpNotificationsAudioPageData struct {
-	Username       string
-	RefreshMinutes int
-	Version        string
-	DiscordEnabled bool
-	DebugURL       string
-}
-
-// HelpDiagnosticsSupportPageData feeds /help/diagnostics-support (route 30).
-// Static editorial content — no per-request fields beyond the shared page
-// shell.
-type HelpDiagnosticsSupportPageData struct {
-	Username       string
-	RefreshMinutes int
-	Version        string
-	DiscordEnabled bool
-	DebugURL       string
 }
 
 // handleHelpGlossaryPage renders /help/glossary: a mono definition list
@@ -151,11 +129,17 @@ func (s *Server) handleHelpDiagnosticsSupportPage(w http.ResponseWriter, r *http
 // (handlers_overview.go / handlers_events.go) — the same package-level
 // dictionaries already used to render reason/status/event labels elsewhere —
 // to build the glossary's entries. Keys are sorted for a deterministic
-// render. Nothing here is a second, independently-maintained list of codes:
-// removing or renaming an entry in any of those source dictionaries changes
-// what this page renders on the next build, and s5_9_help_test.go's parity
-// test fails if the rendered code set and a source dictionary's key set ever
-// diverge.
+// render. This page is never a second, independently-maintained list of
+// codes: removing or renaming an entry in any of those four dictionaries
+// changes what this page renders on the next build, and
+// s5_9_help_test.go's TestS5_9GlossaryParity fails if the rendered code set
+// and those dictionaries' key sets ever diverge. That test proves the
+// glossary matches reasonCodeKeys/rosterStatusKeys/eventTypeKeys/
+// eventJournalGroups themselves — it does not, on its own, prove
+// reasonCodeKeys still matches internal/watcher/broker.go's actual Reason*
+// consts. That end-to-end link is what
+// TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts additionally proves, by
+// parsing broker.go's AST directly.
 func (s *Server) buildHelpGlossaryPageData() HelpGlossaryPageData {
 	username, refresh, discordEnabled, debugURL := s.helpPageShell()
 
@@ -210,9 +194,9 @@ func (s *Server) buildHelpGlossaryPageData() HelpGlossaryPageData {
 	}
 }
 
-func (s *Server) buildHelpTroubleshootingPageData() HelpTroubleshootingPageData {
+func (s *Server) buildHelpTroubleshootingPageData() HelpPageData {
 	username, refresh, discordEnabled, debugURL := s.helpPageShell()
-	return HelpTroubleshootingPageData{
+	return HelpPageData{
 		Username:       username,
 		RefreshMinutes: refresh,
 		Version:        version.Version,
@@ -221,9 +205,9 @@ func (s *Server) buildHelpTroubleshootingPageData() HelpTroubleshootingPageData 
 	}
 }
 
-func (s *Server) buildHelpNotificationsAudioPageData() HelpNotificationsAudioPageData {
+func (s *Server) buildHelpNotificationsAudioPageData() HelpPageData {
 	username, refresh, discordEnabled, debugURL := s.helpPageShell()
-	return HelpNotificationsAudioPageData{
+	return HelpPageData{
 		Username:       username,
 		RefreshMinutes: refresh,
 		Version:        version.Version,
@@ -232,9 +216,9 @@ func (s *Server) buildHelpNotificationsAudioPageData() HelpNotificationsAudioPag
 	}
 }
 
-func (s *Server) buildHelpDiagnosticsSupportPageData() HelpDiagnosticsSupportPageData {
+func (s *Server) buildHelpDiagnosticsSupportPageData() HelpPageData {
 	username, refresh, discordEnabled, debugURL := s.helpPageShell()
-	return HelpDiagnosticsSupportPageData{
+	return HelpPageData{
 		Username:       username,
 		RefreshMinutes: refresh,
 		Version:        version.Version,

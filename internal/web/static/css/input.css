@@ -2281,6 +2281,7 @@
 /* -- C18 DPBA passive affordance (queue page only) ---------------------------------- */
 .c18-dpba { display: flex; align-items: flex-start; gap: 0.5rem; margin-top: 1rem; padding: 0.75rem; background: var(--surface-inset); border-radius: var(--ds-radius-md); color: var(--text-secondary); font-size: 0.82rem; }
 .c18-dpba-icon { flex: none; color: var(--state-neutral); line-height: 1.4; }
+.c18-dpba-link { color: var(--link-text); text-decoration: underline; margin-left: 0.25rem; white-space: nowrap; }
 
 /* -- Help section link list (getting-started + cross links elsewhere) -------------- */
 .help-links-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -2292,10 +2293,10 @@
 .help-prose a { color: var(--link-text); text-decoration: underline; }
 .help-glossary-section { margin: 0 0 1.5rem; }
 .help-glossary-list { margin: 0; padding: 0; }
-.help-glossary-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border-default); }
+.help-glossary-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border-default); scroll-margin-top: 0.75rem; }
 .help-glossary-entry:last-child { border-bottom: none; }
 .help-glossary-entry dt { margin: 0 0 0.15rem; }
-.help-glossary-entry dd { margin: 0; }
+.help-glossary-entry dd { margin: 0; max-width: 72ch; }
 .help-state-card { padding: 1rem 0; border-bottom: 1px solid var(--border-default); }
 .help-state-card:last-child { border-bottom: none; }
 .help-diagram { max-width: 26rem; margin: 1.5rem 0; }

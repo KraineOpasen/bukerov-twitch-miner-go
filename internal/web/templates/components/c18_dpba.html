@@ -2,14 +2,12 @@
      instance exists in the whole UI, on /overview/queue. States that the
      five listed manual controls remain deferred pending broker audit - no
      buttons, no menus, no greyed ghosts, no drag handles, no hidden active
-     implementation. The troubleshooting link is intentionally OMITTED
-     (S-NOBACK): /help/troubleshooting remains a deferred 404 route in this
-     slice, and this component must not link to it, nor substitute a
-     different route while labeling it "troubleshooting". S5-9 (the Help
-     section slice) owns wiring that link once /help/troubleshooting is
-     actually built - do not enable it in this or any earlier slice.
+     implementation. S5-9 built /help/troubleshooting as a real route, so
+     this card now deep-links to it (see queue.dpba.troubleshooting_link) -
+     that outbound link is not one of the five deferred manual controls, so
+     linking it does not contradict S-NOBACK.
      No inputs. */}}
 {{define "c18.dpba"}}<div class="c18-dpba" role="note">
     <span class="c18-dpba-icon" aria-hidden="true">‖</span>
-    <span class="c18-dpba-text">{{ t "queue.dpba.text" }}</span>
+    <span class="c18-dpba-text">{{ t "queue.dpba.text" }} <a href="/help/troubleshooting" class="c18-dpba-link">{{ t "queue.dpba.troubleshooting_link" }}</a></span>
 </div>{{end}}
