@@ -177,12 +177,14 @@ func TestS5_2LocaleKeysPresentAndTranslated(t *testing.T) {
 	// / events.link_settings / events.pending_note) together with that
 	// landing — the real journal's key set is pinned by
 	// TestS5_7LocaleKeysPresentAndTranslated. events.title survives as the
-	// journal page's heading.
+	// journal page's heading. task S5-9 similarly retired help.pending (the
+	// "full Help center arrives later" note) now that all four siblings are
+	// live — see TestS5_9LocaleKeysPresentAndTranslated for their key set.
 	keys := []string{
 		"nav.analytics", "nav.events", "nav.system", "nav.help",
 		"a11y.skip_to_content", "a11y.close_menu",
 		"c0.unknown", "c0.session", "c11.unknown", "c11.syncing",
-		"help.title", "help.lead", "help.pending",
+		"help.title", "help.lead",
 		"events.title",
 	}
 	for _, k := range keys {

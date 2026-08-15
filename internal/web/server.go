@@ -333,7 +333,7 @@ func loadTemplates(loc *i18n.Localizer) (map[string]map[string]*template.Templat
 	// MAJOR-2) without changing WatchSlotView's own shape.
 	placeholder["sidebarSlot"] = sidebarSlotData
 
-	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "analytics_points.html", "analytics_roi.html", "health.html", "logs.html", "help.html", "events.html", "events_browser.html", "events_sound.html", "events_discord.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
+	pageList := []string{"overview.html", "dashboard.html", "streamer.html", "settings.html", "notifications.html", "drops.html", "drops_upcoming_page.html", "drops_claims.html", "drops_past_page.html", "statistics.html", "analytics_points.html", "analytics_roi.html", "health.html", "logs.html", "help.html", "help_glossary.html", "help_troubleshooting.html", "help_notifications_audio.html", "help_diagnostics_support.html", "events.html", "events_browser.html", "events_sound.html", "events_discord.html", "queue.html", "system_status.html", "system_diagnostics.html", "settings_streamers.html", "settings_rotation.html", "settings_drops.html", "settings_predictions.html", "settings_chat_raids.html", "settings_transport.html", "settings_analytics_logging.html", "settings_events_notifications.html", "settings_discord.html", "settings_system.html"}
 	pages := make(map[string]map[string]*template.Template, len(pageList))
 	for _, page := range pageList {
 		base, err := template.New(page).Funcs(placeholder).ParseFS(templatesFS,
@@ -807,12 +807,9 @@ func (s *Server) handler() http.Handler {
 	// S5-2 seven-section chrome: additive compatibility routes (handlers_chrome.go).
 	// Direct-render routes reuse/extend the existing rendering pipelines;
 	// every legacy route above keeps rendering directly and is never
-	// redirected. Deferred routes (e.g. /help/glossary) are intentionally NOT
-	// registered here — they fall through to the existing "/" catch-all
-	// (handleDashboard), which 404s any path other than exactly "/", giving
-	// them honest 404 behavior with no new code. /drops/claims was the one
-	// deferred route in this set; task S5-4 registered it above as a real
-	// direct-render route (handlers_drops.go), so it no longer falls through.
+	// redirected. By task S5-9 every route in the design's 30-route page
+	// matrix is registered somewhere in this function — nothing falls
+	// through to the "/" catch-all as an honest 404 anymore.
 	mux.HandleFunc("/overview", s.handleOverviewPage)
 	// S5-3: /overview/queue (handlers_queue.go) — the Overview section's
 	// second page, no longer deferred. Direct-render, GET/HEAD, no new API
@@ -820,6 +817,19 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/overview/queue", s.handleOverviewQueuePage)
 	mux.HandleFunc("/events", s.handleEventsPage)
 	mux.HandleFunc("/help/getting-started", s.handleHelpGettingStarted)
+
+	// S5-9 Help pages (routes 27-30, handlers_help.go): direct-render routes
+	// completing the Help group — /help/getting-started above was the last
+	// of the five to stay a 404-free direct route already; these four were
+	// the last deferred routes in the entire 30-route matrix. Static,
+	// backend-free reading-density pages: no htmx, no polling, no new API
+	// endpoint. /help/glossary is wired to the same canonical dictionaries
+	// (reasonCodeKeys, rosterStatusKeys, eventTypeKeys, eventJournalGroups)
+	// used elsewhere in this package — see handlers_help.go.
+	mux.HandleFunc("/help/glossary", s.handleHelpGlossaryPage)
+	mux.HandleFunc("/help/troubleshooting", s.handleHelpTroubleshootingPage)
+	mux.HandleFunc("/help/notifications-audio", s.handleHelpNotificationsAudioPage)
+	mux.HandleFunc("/help/diagnostics-support", s.handleHelpDiagnosticsSupportPage)
 
 	// S5-7 Events pages (routes 9-12, handlers_events.go): /events is the
 	// real session-scoped journal (superseding the S5-2 minimal landing

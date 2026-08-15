@@ -54,27 +54,21 @@ func TestS5_3QueueRouteReturns200(t *testing.T) {
 	}
 }
 
-// TestS5_3RemainingDeferredRoutesStill404 re-confirms (independently of
+// TestS5_3RemainingDeferredRoutesStill404 re-confirmed (independently of
 // TestS5_2DeferredRoutesRemain404, which S5-3 was told to update by removing
 // exactly /overview/queue) that every OTHER deferred route, including
-// /help/glossary and /help/troubleshooting specifically, is still an honest
-// 404 - S5-3 must not have accidentally widened the route table. task S5-4
-// removed /drops/claims from this list: it is now a real direct-render
-// route (handlers_drops.go) - see s5_4_drops_test.go. task S5-7 removed
-// /events/browser, /events/sound and /events/discord: each is now a real
-// direct-render route (handlers_events.go) - see s5_7_events_test.go.
-func TestS5_3RemainingDeferredRoutesStill404(t *testing.T) {
-	srv := buildF3PageServer(t)
-	h := srv.handler()
-	for _, path := range []string{
-		"/help/glossary", "/help/troubleshooting", "/help/notifications-audio", "/help/diagnostics-support",
-	} {
-		rec, _ := httpGetBody(t, h, path)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("deferred route %s = %d, want 404", path, rec.Code)
-		}
-	}
-}
+// /help/glossary and /help/troubleshooting specifically, was still an
+// honest 404 - S5-3 must not have accidentally widened the route table.
+// task S5-4 removed /drops/claims from this list: it became a real
+// direct-render route (handlers_drops.go) - see s5_4_drops_test.go. task
+// S5-7 removed /events/browser, /events/sound and /events/discord: each
+// became a real direct-render route (handlers_events.go) - see
+// s5_7_events_test.go. task S5-9 removed the last four entries
+// (/help/glossary, /help/troubleshooting, /help/notifications-audio,
+// /help/diagnostics-support): each is now a real direct-render route
+// (handlers_help.go) - see s5_9_help_test.go. With the list empty, this
+// test is retired (mirrors TestS5_2DeferredRoutesRemain404's own S5-9
+// retirement in s5_2_redirects_test.go).
 
 // TestS5_3QueueRouteOneH1AndNoRedirectLoop proves the page has exactly one
 // h1, was never redirected, and does not capture any existing API/JSON path.
@@ -815,8 +809,8 @@ func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
 	}
 	card := body[start : start+end]
 
-	if strings.Contains(card, "<button") || strings.Contains(card, "<select") || strings.Contains(card, "<a ") {
-		t.Errorf("C18 card must contain no buttons/menus/links, got: %s", card)
+	if strings.Contains(card, "<button") || strings.Contains(card, "<select") {
+		t.Errorf("C18 card must contain no buttons/menus, got: %s", card)
 	}
 	if strings.Contains(card, "disabled") {
 		t.Errorf("C18 card must contain no disabled ghost controls, got: %s", card)
@@ -833,8 +827,26 @@ func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
 		}
 	}
 
-	// The troubleshooting link is intentionally omitted (deferred route).
-	if strings.Contains(card, "/help/troubleshooting") {
-		t.Error("C18 must not link to the still-deferred /help/troubleshooting route")
+	// S5-9 built /help/troubleshooting as a real route, so this card now
+	// deep-links to it — the ONLY link the card carries (the five manual
+	// controls above stay unimplemented; this outbound link is not one of
+	// them).
+	if n := strings.Count(card, "<a "); n != 1 {
+		t.Errorf("C18 card must contain exactly one link (the troubleshooting deep link), got %d: %s", n, card)
+	}
+	if !strings.Contains(card, `href="/help/troubleshooting"`) {
+		t.Error("C18 must link to the now-live /help/troubleshooting route")
+	}
+	// Pinned against an independent literal (not re-derived via enTR from the
+	// same key under test) — Q3 MAJOR-1: the old copy ("Learn about slot
+	// reason codes") described reason-code documentation, which is
+	// /help/glossary's job, while this link's href is fixed at
+	// /help/troubleshooting (Stage-4 C18) - a page about queue/slot state
+	// problems (Unknown/Stale/Degraded/Failure), not a reason-code glossary.
+	if !strings.Contains(card, "Troubleshoot queue and slot issues") {
+		t.Error("C18 troubleshooting link must carry its corrected localized link text describing troubleshooting, not reason codes")
+	}
+	if strings.Contains(strings.ToLower(card), "reason code") {
+		t.Error("C18 troubleshooting link text must not describe reason-code documentation - it links to /help/troubleshooting, not the reason-code glossary")
 	}
 }

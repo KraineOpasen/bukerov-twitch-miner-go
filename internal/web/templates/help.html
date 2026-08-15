@@ -1,11 +1,14 @@
-{{/* Minimal /help/getting-started compatibility landing (S5-2, OD-S5-2-1
-     item 1). Orientation to the seven live sections only — no glossary,
-     troubleshooting procedures or diagnostics claims (those arrive in S5-9). */}}
+{{/* /help/getting-started compatibility landing (S5-2, OD-S5-2-1 item 1).
+     Orientation to the seven live sections, plus (S5-9) link-cards to this
+     group's four sibling reading-density pages. Still static editorial
+     content only — no live/backend status, no glossary/troubleshooting/
+     diagnostics CONTENT rendered directly on this page (that lives on its
+     own siblings, linked below). */}}
 {{define "title"}}{{ t "help.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
 <h1 class="type-h1 text-text-primary mb-3">{{ t "help.title" }}</h1>
-<p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "help.lead" }}</p>
+<p class="type-reading text-text-secondary mb-6" style="max-width:72ch">{{ t "help.lead" }}</p>
 
 <ul class="help-links-list">
     <li><a href="/overview">{{ t "nav.overview" }}</a></li>
@@ -17,5 +20,11 @@
     <li><a href="/help/getting-started">{{ t "nav.help" }}</a></li>
 </ul>
 
-<p class="type-small text-text-muted mt-6">{{ t "help.pending" }}</p>
+<h2 class="type-h2 text-text-primary mt-8 mb-3">{{ t "help.more.heading" }}</h2>
+<ul class="help-links-list">
+    <li><a href="/help/glossary">{{ t "nav.help.glossary" }}</a> <span class="type-small text-text-muted">— {{ t "help.card.glossary.desc" }}</span></li>
+    <li><a href="/help/troubleshooting">{{ t "nav.help.troubleshooting" }}</a> <span class="type-small text-text-muted">— {{ t "help.card.troubleshooting.desc" }}</span></li>
+    <li><a href="/help/notifications-audio">{{ t "nav.help.notifications_audio" }}</a> <span class="type-small text-text-muted">— {{ t "help.card.notifications_audio.desc" }}</span></li>
+    <li><a href="/help/diagnostics-support">{{ t "nav.help.diagnostics_support" }}</a> <span class="type-small text-text-muted">— {{ t "help.card.diagnostics_support.desc" }}</span></li>
+</ul>
 {{end}}

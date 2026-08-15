@@ -45,15 +45,26 @@
      section count stays at exactly seven. No child ever carries an event
      count badge — the journal is session-scoped and the nav never polls.
 
-     task S5-8 makes Analytics the sixth and last group, the same shape once
-     more: total parent groups 5 -> 6, total children 23 -> 25. Its two
-     children are the new direct-render canonical pages (/analytics/points,
+     task S5-8 makes Analytics the sixth group, the same shape once more:
+     total parent groups 5 -> 6, total children 23 -> 25. Its two children
+     are the new direct-render canonical pages (/analytics/points,
      /analytics/roi) replacing the two former /analytics/* compatibility
      redirects to /statistics, and the parent link points at the first child
      (/analytics/points). Exactly like /health, /logs and /settings after
      S5-5/S5-6, the legacy /statistics page keeps rendering directly at its
      own unchanged route — it is simply no longer linked from this nav. The
-     top-level section count stays at exactly seven. */}}
+     top-level section count stays at exactly seven.
+
+     task S5-9 makes Help the seventh and final group, the same shape once
+     more: total parent groups 6 -> 7, total children 25 -> 30. Its five
+     children are the direct-render Help routes (/help/getting-started,
+     /help/glossary, /help/troubleshooting, /help/notifications-audio,
+     /help/diagnostics-support), and the parent link points at the first
+     child (/help/getting-started) — the same convention every other group
+     already uses, and the same href the plain Help item already had before
+     this task, so /help's compatibility-redirect target and the group's own
+     parent link stay identical. Every one of the 30 routes in the design's
+     page matrix (§11) is now reachable from this nav. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
@@ -129,11 +140,18 @@
                 <li><a href="/system/logs" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.logs" }}</a></li>
             </ul>
         </li>
-        <li class="c2-nav-item">
-            <a href="/help/getting-started" class="c2-nav-link" data-nav-section="help" aria-label="{{ t "nav.help" }}">
+        <li class="c2-nav-item c2-nav-item--group">
+            <a href="/help/getting-started" class="c2-nav-link" data-nav-section="help" aria-label="{{ t "nav.help" }}" data-nav-parent>
                 <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                 <span class="c2-nav-label">{{ t "nav.help" }}</span>
             </a>
+            <ul class="c2-nav-children">
+                <li><a href="/help/getting-started" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.getting_started" }}</a></li>
+                <li><a href="/help/glossary" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.glossary" }}</a></li>
+                <li><a href="/help/troubleshooting" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.troubleshooting" }}</a></li>
+                <li><a href="/help/notifications-audio" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.notifications_audio" }}</a></li>
+                <li><a href="/help/diagnostics-support" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.diagnostics_support" }}</a></li>
+            </ul>
         </li>
     </ul>
 </nav>{{end}}

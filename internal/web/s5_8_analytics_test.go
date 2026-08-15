@@ -161,15 +161,20 @@ func TestS5_8RedirectMapShrunkToOne(t *testing.T) {
 // (href = first child, the established convention) plus exactly two children
 // with their own distinct hrefs, taking the totals from 5 -> 6 parents and
 // 23 -> 25 children. Removing the parent or either child fails here.
+//
+// task S5-9 made Help a seventh group (see s5_9_help_test.go), taking the
+// totals to 7 parents / 30 children; the counts below were bumped to match
+// so this Analytics-specific test keeps proving Analytics' own five-group
+// shape didn't regress, rather than asserting a now-stale total.
 func TestS5_8NavAnalyticsGroup(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/overview", "en")
 
-	if n := strings.Count(body, `data-nav-parent>`); n != 6 {
-		t.Errorf("expected exactly six data-nav-parent groups (Overview, Drops, Analytics, Events, Settings, System), found %d", n)
+	if n := strings.Count(body, `data-nav-parent>`); n != 7 {
+		t.Errorf("expected exactly seven data-nav-parent groups (Overview, Drops, Analytics, Events, Settings, System, Help), found %d", n)
 	}
-	if n := strings.Count(body, `data-nav-child>`); n != 25 {
-		t.Errorf("expected exactly twenty-five data-nav-child destinations, found %d", n)
+	if n := strings.Count(body, `data-nav-child>`); n != 30 {
+		t.Errorf("expected exactly thirty data-nav-child destinations, found %d", n)
 	}
 	if !strings.Contains(body, `href="/analytics/points" class="c2-nav-link" data-nav-section="analytics"`) {
 		t.Error("Analytics parent link must point at its first child (/analytics/points)")
@@ -838,14 +843,19 @@ func TestS5_8LocalizationParity(t *testing.T) {
 }
 
 // TestS5_8LegacyStatisticsUntouched proves this slice edited neither
-// statistics.html nor help.html: both templates are pinned to their exact
+// statistics.html nor (at S5-8 close) help.html: pinned to their exact
 // pre-S5-8 content hash. Editing statistics.html — explicitly forbidden, since
 // the canonical pages were split along its client seams rather than by
 // modifying it — fails here.
+//
+// task S5-9 removed help.html from this pin: that task is help.html's
+// direct, in-scope owner (it links the page onward to the four new Help
+// siblings S5-9 adds) — see TestS5_2HelpPageContract for help.html's own
+// content contract post-S5-9. statistics.html stays pinned; S5-9 never
+// touches it.
 func TestS5_8LegacyStatisticsUntouched(t *testing.T) {
 	pinned := map[string]string{
 		"templates/statistics.html": "f842e1e335b339ee89eff87a7026c8c610c810a39d97da80a4b9f660882087a3",
-		"templates/help.html":       "0aefd78068f22a6ec716acdf7aa5e77137a8c6dd01b05c6179f40d56bc769830",
 	}
 	for name, want := range pinned {
 		sum := sha256.Sum256([]byte(s58ReadTemplate(t, name)))
