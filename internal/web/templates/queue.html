@@ -1,7 +1,7 @@
 {{define "title"}}{{ t "queue.title" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<h1 class="text-2xl font-bold text-neutral-100 mb-3">{{ t "queue.title" }}</h1>
+<h1 class="text-2xl font-bold text-text-primary mb-3">{{ t "queue.title" }}</h1>
 
 {{/* S5-3 C12 slot header (task Phase 4): same shared component and safe
      evidence as /overview's slot pair - never a third slot, never the
@@ -55,7 +55,7 @@
 {{template "c3.roster_cards" .}}
 </div>
 
-<div id="qr-noresults" class="text-xs text-neutral-400 mt-2" hidden role="status"></div>
+<div id="qr-noresults" class="text-xs text-text-muted mt-2" hidden role="status"></div>
 <span id="qr-sort-announce" class="visually-hidden" aria-live="polite" role="status"></span>
 {{end}}
 

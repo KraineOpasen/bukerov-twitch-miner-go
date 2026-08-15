@@ -1,24 +1,24 @@
 {{define "title"}}{{.Streamer.Name}} - Twitch Points Miner{{end}}
 
 {{define "content"}}
-<a href="/" class="inline-flex items-center gap-2 text-neutral-400 hover:text-purple-500 mb-4 transition-colors">
+<a href="/" class="inline-flex items-center gap-2 text-text-muted hover:text-interactive mb-4 transition-colors">
     ← {{ t "streamer.back" }}
 </a>
 
-<h1 class="text-3xl font-bold text-purple-500 mb-6">{{.Streamer.Name}}</h1>
+<h1 class="text-3xl font-bold text-interactive mb-6">{{.Streamer.Name}}</h1>
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
     <article class="stat-card">
-        <div class="text-3xl font-bold text-purple-500" id="current-points">{{.Streamer.Points}}</div>
-        <div class="text-neutral-400 mt-2">{{ t "streamer.current_points" }}</div>
+        <div class="text-3xl font-bold text-interactive" id="current-points">{{.Streamer.Points}}</div>
+        <div class="text-text-muted mt-2">{{ t "streamer.current_points" }}</div>
     </article>
     <article class="stat-card">
-        <div class="text-3xl font-bold text-purple-500" id="points-gained">{{.PointsGained}}</div>
-        <div class="text-neutral-400 mt-2">{{ t "streamer.points_gained" }} ({{.DaysAgo}}{{ t "streamer.day_short" }})</div>
+        <div class="text-3xl font-bold text-interactive" id="points-gained">{{.PointsGained}}</div>
+        <div class="text-text-muted mt-2">{{ t "streamer.points_gained" }} ({{.DaysAgo}}{{ t "streamer.day_short" }})</div>
     </article>
     <article class="stat-card">
-        <div class="text-3xl font-bold text-purple-500" id="data-points">{{.DataPoints}}</div>
-        <div class="text-neutral-400 mt-2">{{ t "streamer.data_points" }}</div>
+        <div class="text-3xl font-bold text-interactive" id="data-points">{{.DataPoints}}</div>
+        <div class="text-text-muted mt-2">{{ t "streamer.data_points" }}</div>
     </article>
 </div>
 
@@ -27,37 +27,37 @@
         <h3 class="text-lg font-semibold">{{ t "streamer.rewards_heading" }}</h3>
         <button type="button" id="open-rewards-btn" class="btn-secondary">{{ t "streamer.manage_rewards" }}</button>
     </div>
-    <p class="text-neutral-400 text-sm">{{ t "streamer.rewards_desc" }}</p>
+    <p class="text-text-muted text-sm">{{ t "streamer.rewards_desc" }}</p>
 </div>
 
 <dialog id="rewards-modal" class="modal-dialog">
-    <div class="flex items-start justify-between gap-4 px-5 py-4 border-b border-neutral-700">
+    <div class="flex items-start justify-between gap-4 px-5 py-4 border-b border-border-default">
         <div class="min-w-0">
-            <h3 class="text-neutral-100 font-semibold">{{ t "streamer.rewards.modal_title" }} — {{.Streamer.Name}}</h3>
-            <div class="text-xs text-neutral-400">{{ t "streamer.balance" }} <span id="rewards-balance">—</span> {{ t "streamer.points_word" }}</div>
+            <h3 class="text-text-primary font-semibold">{{ t "streamer.rewards.modal_title" }} — {{.Streamer.Name}}</h3>
+            <div class="text-xs text-text-muted">{{ t "streamer.balance" }} <span id="rewards-balance">—</span> {{ t "streamer.points_word" }}</div>
         </div>
-        <button type="button" class="text-neutral-400 hover:text-neutral-100 text-xl leading-none flex-shrink-0" id="rewards-modal-close" aria-label="{{ t "common.close" }}">✕</button>
+        <button type="button" class="text-text-muted hover:text-text-primary text-xl leading-none flex-shrink-0" id="rewards-modal-close" aria-label="{{ t "common.close" }}">✕</button>
     </div>
 
     <div class="px-5 py-4 max-h-[70vh] overflow-y-auto space-y-4">
         <div id="rewards-status" class="hidden text-sm rounded-md px-3 py-2"></div>
 
         <div id="rewards-list" class="space-y-3">
-            <div class="text-neutral-400 text-sm">{{ t "streamer.loading_rewards" }}</div>
+            <div class="text-text-muted text-sm">{{ t "streamer.loading_rewards" }}</div>
         </div>
 
         <details id="auto-redeem-panel" class="details-panel">
             <summary class="text-base">{{ t "streamer.auto.title" }}</summary>
             <div class="details-content space-y-3">
-                <p class="text-neutral-400 text-sm">
+                <p class="text-text-muted text-sm">
                     {{ t "streamer.auto.desc" }}
                 </p>
                 <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" id="auto-enabled" class="w-5 h-5 accent-purple-600">
-                    <span class="text-neutral-100">{{ t "streamer.auto.enable" }}</span>
+                    <input type="checkbox" id="auto-enabled" class="w-5 h-5 accent-control-accent">
+                    <span class="text-text-primary">{{ t "streamer.auto.enable" }}</span>
                 </label>
                 <div class="flex items-center gap-3 flex-wrap">
-                    <label class="text-sm text-neutral-400" for="auto-budget">{{ t "streamer.auto.budget" }}</label>
+                    <label class="text-sm text-text-muted" for="auto-budget">{{ t "streamer.auto.budget" }}</label>
                     <input type="number" id="auto-budget" min="0" max="1000000" step="100" class="input-field w-36" placeholder="5000">
                 </div>
                 <button type="button" id="auto-save" class="btn-primary">{{ t "streamer.auto.save" }}</button>
@@ -70,11 +70,11 @@
     <h3 class="text-lg font-semibold mb-4">{{ t "streamer.date_range" }}</h3>
     <form id="date-filter" class="flex flex-wrap gap-4 items-end">
         <label class="flex flex-col gap-1">
-            <span class="text-sm text-neutral-400">{{ t "streamer.start_date" }}</span>
+            <span class="text-sm text-text-muted">{{ t "streamer.start_date" }}</span>
             <input type="date" id="start-date" name="startDate" class="input-field">
         </label>
         <label class="flex flex-col gap-1">
-            <span class="text-sm text-neutral-400">{{ t "streamer.end_date" }}</span>
+            <span class="text-sm text-text-muted">{{ t "streamer.end_date" }}</span>
             <input type="date" id="end-date" name="endDate" class="input-field">
         </label>
         <button type="submit" class="btn-primary">{{ t "streamer.apply" }}</button>
@@ -85,12 +85,12 @@
     <h3 class="text-lg font-semibold mb-4">{{ t "streamer.chat_log" }}</h3>
     <div class="flex items-center gap-2 mb-4">
         <input type="text" id="chat-search" placeholder="{{ t "streamer.chat_search_ph" }}" autocomplete="off" class="input-field flex-1">
-        <button id="chat-search-clear" class="hidden px-3 py-2 bg-neutral-700 rounded-md text-neutral-100 hover:bg-neutral-400/20">✕</button>
-        <span id="chat-search-info" class="text-xs text-neutral-400"></span>
+        <button id="chat-search-clear" class="hidden px-3 py-2 bg-neutral-700 rounded-md text-text-primary hover:bg-text-muted/20">✕</button>
+        <span id="chat-search-info" class="text-xs text-text-muted"></span>
     </div>
     <div id="chat-log" class="h-96 overflow-y-auto relative">
         <div class="chat-messages flex flex-col gap-1" id="chat-messages"></div>
-        <div class="chat-loading hidden text-center p-4 text-neutral-400" id="chat-loading">{{ t "streamer.loading" }}</div>
+        <div class="chat-loading hidden text-center p-4 text-text-muted" id="chat-loading">{{ t "streamer.loading" }}</div>
     </div>
 </div>
 {{end}}
@@ -407,7 +407,7 @@
     function highlightSearch(text, query) {
         if (!query) return text;
         const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-        return text.replace(regex, '<mark class="bg-purple-600 text-white px-0.5 rounded-sm">$1</mark>');
+        return text.replace(regex, '<mark class="bg-search-highlight-bg text-white px-0.5 rounded-sm">$1</mark>');
     }
     
     function renderChatMessage(msg, searchQuery = '') {
@@ -420,10 +420,10 @@
         }
         
         return `
-            <div class="p-2 bg-neutral-900 rounded text-sm leading-relaxed min-h-[32px]" data-id="${msg.id}">
-                <span class="text-neutral-400/50 text-xs mr-2">${formatChatTimestamp(msg.timestamp)}</span>
+            <div class="p-2 bg-surface-page rounded text-sm leading-relaxed min-h-[32px]" data-id="${msg.id}">
+                <span class="text-text-muted/50 text-xs mr-2">${formatChatTimestamp(msg.timestamp)}</span>
                 <span class="font-bold mr-1" style="color: ${escapeHtml(color)}">${escapeHtml(displayName)}:</span>
-                <span class="text-neutral-100">${messageHtml}</span>
+                <span class="text-text-primary">${messageHtml}</span>
             </div>
         `;
     }
@@ -477,7 +477,7 @@
             const msg = chatState.searchQuery 
                 ? t('js.streamer.no_search_results')
                 : t('js.streamer.no_messages');
-            chatMessages.innerHTML = `<div class="text-neutral-400 text-center py-8">${msg}</div>`;
+            chatMessages.innerHTML = `<div class="text-text-muted text-center py-8">${msg}</div>`;
             return;
         }
         
@@ -569,7 +569,7 @@
         function clearStatus() { statusEl.classList.add('hidden'); statusEl.textContent = ''; }
 
         async function loadRewards() {
-            listEl.innerHTML = '<div class="text-neutral-400 text-sm">{{ t "streamer.loading_rewards" }}</div>';
+            listEl.innerHTML = '<div class="text-text-muted text-sm">{{ t "streamer.loading_rewards" }}</div>';
             try {
                 const res = await fetch(`/api/streamer/${encodeURIComponent(streamerName)}/rewards`);
                 if (!res.ok) throw new Error('request failed');
@@ -582,13 +582,13 @@
                 renderRewards();
             } catch (e) {
                 rewards = [];
-                listEl.innerHTML = '<div class="text-neutral-400 text-sm">' + t('js.streamer.rewards_load_failed') + '</div>';
+                listEl.innerHTML = '<div class="text-text-muted text-sm">' + t('js.streamer.rewards_load_failed') + '</div>';
             }
         }
 
         function renderRewards() {
             if (!rewards.length) {
-                listEl.innerHTML = '<div class="text-neutral-400 text-sm">' + t('js.streamer.no_rewards') + '</div>';
+                listEl.innerHTML = '<div class="text-text-muted text-sm">' + t('js.streamer.no_rewards') + '</div>';
                 return;
             }
             const allow = new Set(autoCfg.rewardIds || []);
@@ -605,8 +605,8 @@
                 ? `<button type="button" class="btn-secondary text-sm" data-redeem="${escapeHtml(r.id)}">${t('js.streamer.redeem')}</button>`
                 : '<button type="button" class="btn-secondary text-sm" style="opacity:0.5;cursor:not-allowed" disabled>' + t('js.streamer.redeem') + '</button>';
             const autoControl = r.requiresInput
-                ? '<span class="text-xs text-neutral-500" title="' + t('js.streamer.manual_only_title') + '">' + t('js.streamer.manual_only') + '</span>'
-                : `<label class="flex items-center gap-1 text-xs text-neutral-400 cursor-pointer"><input type="checkbox" class="w-4 h-4 accent-purple-600" data-auto-id="${escapeHtml(r.id)}" ${autoChecked ? 'checked' : ''}> ${t('js.streamer.auto')}</label>`;
+                ? '<span class="text-xs text-text-faint" title="' + t('js.streamer.manual_only_title') + '">' + t('js.streamer.manual_only') + '</span>'
+                : `<label class="flex items-center gap-1 text-xs text-text-muted cursor-pointer"><input type="checkbox" class="w-4 h-4 accent-control-accent" data-auto-id="${escapeHtml(r.id)}" ${autoChecked ? 'checked' : ''}> ${t('js.streamer.auto')}</label>`;
             const inputField = r.requiresInput
                 ? `<input type="text" class="input-field w-full mb-2" maxlength="500" placeholder="${t('js.streamer.enter_message')}" data-redeem-input="${escapeHtml(r.id)}">`
                 : '';
@@ -616,11 +616,11 @@
                 <div class="flex items-start justify-between gap-3 flex-wrap">
                     <div class="min-w-0">
                         <div class="flex items-center gap-2 flex-wrap">
-                            <span class="text-neutral-100 font-medium">${escapeHtml(r.title)}</span>
+                            <span class="text-text-primary font-medium">${escapeHtml(r.title)}</span>
                             ${pill}${subBadge}
                         </div>
-                        <div class="text-sm text-purple-400 mt-1">${cost} ${t('js.streamer.points_suffix')}${r.requiresInput ? ' · ' + t('js.streamer.requires_message') : ''}</div>
-                        ${r.prompt ? `<div class="text-xs text-neutral-400 mt-1">${escapeHtml(r.prompt)}</div>` : ''}
+                        <div class="text-sm text-interactive-muted mt-1">${cost} ${t('js.streamer.points_suffix')}${r.requiresInput ? ' · ' + t('js.streamer.requires_message') : ''}</div>
+                        ${r.prompt ? `<div class="text-xs text-text-muted mt-1">${escapeHtml(r.prompt)}</div>` : ''}
                     </div>
                     <div class="flex items-center gap-3 flex-shrink-0">
                         ${autoControl}

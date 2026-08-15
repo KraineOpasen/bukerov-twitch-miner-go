@@ -3,7 +3,7 @@
 <div class="lc-panel card" data-lc-announce="{{.Announce}}" tabindex="-1">
     <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
         <div class="flex items-center gap-2">
-            <span class="text-sm font-semibold text-neutral-100">{{ t "lc.title" }}</span>
+            <span class="text-sm font-semibold text-text-primary">{{ t "lc.title" }}</span>
             {{/* Icon + color together, never color alone (D9/health precedent). */}}
             {{$sev := "badge-lc-neutral"}}{{$icon := "↻"}}
             {{if eq .ObservedState "running"}}{{$sev = "badge-lc-running"}}{{$icon = "●"}}
@@ -14,13 +14,13 @@
             {{else if eq .ObservedState "exiting"}}{{$icon = "…"}}
             {{end}}
             <span class="badge {{$sev}}"><span aria-hidden="true">{{$icon}}</span> {{ t (printf "lc.state.%s" .ObservedState) }}</span>
-            {{if .IsTransitioning}}<span class="lc-spinner w-3.5 h-3.5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin" aria-hidden="true"></span>{{end}}
+            {{if .IsTransitioning}}<span class="lc-spinner w-3.5 h-3.5 border-2 border-border-default border-t-interactive rounded-full animate-spin" aria-hidden="true"></span>{{end}}
         </div>
-        <span class="text-xs text-neutral-500">{{ t "lc.generation_label" }} <span class="num">{{.Generation}}</span> &middot; v{{.Version}}</span>
+        <span class="text-xs text-text-faint">{{ t "lc.generation_label" }} <span class="num">{{.Generation}}</span> &middot; v{{.Version}}</span>
     </div>
 
-    <div class="text-xs text-neutral-500 mb-2">
-        {{ t "lc.desired_label" }}: <span class="text-neutral-300">{{ t (printf "lc.state.%s" .DesiredState) }}</span>
+    <div class="text-xs text-text-faint mb-2">
+        {{ t "lc.desired_label" }}: <span class="text-text-secondary">{{ t (printf "lc.state.%s" .DesiredState) }}</span>
         {{if .Override}} &middot; <span class="text-danger">{{ t "lc.env_override" }}</span>{{end}}
     </div>
 
@@ -67,7 +67,7 @@
          one-click peer of it. Their semantics, routes, capability gating and
          disabled rules are unchanged — only their placement is. */}}
     <details class="details-panel mt-2" id="lc-advanced">
-        <summary class="text-xs text-neutral-500 cursor-pointer">{{ t "lc.btn.advanced" }}</summary>
+        <summary class="text-xs text-text-faint cursor-pointer">{{ t "lc.btn.advanced" }}</summary>
         <div class="mt-2 flex items-center gap-2 flex-wrap">
             {{if .ShowRestart}}
             <button type="button" class="btn-secondary text-xs" hx-post="/api/lifecycle/restart" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" hx-confirm="{{ t "lc.confirm.restart" }}" {{if or (not .CanRestart) .InsecureDisabled}}disabled{{end}}>{{ t "lc.btn.restart" }}</button>
@@ -86,7 +86,7 @@
     {{end}}
 
     {{if .UpdateState}}
-    <div class="text-xs text-neutral-500 mt-2">
+    <div class="text-xs text-text-faint mt-2">
         {{if eq .UpdateState "available"}}{{ t "lc.update_available" }}{{else if eq .UpdateState "failed"}}{{ t "lc.update_failed" }}{{else if eq .UpdateState "applied"}}{{ t "lc.update_applied" }}{{end}}
         {{if .UpdateVersion}} <span class="num">{{.UpdateVersion}}</span>{{end}}
     </div>

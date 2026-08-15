@@ -13,17 +13,17 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.eventsnotifications.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.eventsnotifications.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.eventsnotifications.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate data-config-valid="{{.ConfigValid}}">
     <section>
         <h2 class="text-lg font-medium mb-1">{{ t "notif.channels.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "notif.channels.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "notif.channels.desc" }}</p>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.ch.mentions" }}</div><div class="setting-description">{{ t "notif.ch.mentions.desc" }}</div></div>
             <div class="flex items-center gap-2">
-                <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" data-reload-channels title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+                <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" data-reload-channels title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
                 <select class="input-field w-64 channel-select" id="mentions-channel"><option value="">{{ t "notif.select_channel" }}</option></select>
             </div>
         </div>
@@ -49,7 +49,7 @@
         <h2 class="text-lg font-medium mb-1">{{ t "notif.system.title" }}</h2>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.system.enable" }}</div><div class="setting-description">{{ t "notif.system.enable.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="system-enabled">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="system-enabled">
         </div>
     </section>
 
@@ -57,7 +57,7 @@
         <h2 class="text-lg font-medium mb-1">{{ t "notif.drops.title" }}</h2>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.drops.upcoming.enable" }}</div><div class="setting-description">{{ t "notif.drops.upcoming.enable.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="upcoming-drops-enabled">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="upcoming-drops-enabled">
         </div>
     </section>
 
@@ -65,11 +65,11 @@
         <h2 class="text-lg font-medium mb-1">{{ t "notif.mentions.title" }}</h2>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.mentions.enable" }}</div><div class="setting-description">{{ t "notif.mentions.enable.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-enabled">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="mentions-enabled">
         </div>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.mentions.all_chats" }}</div><div class="setting-description">{{ t "notif.mentions.all_chats.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-all-chats">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="mentions-all-chats">
         </div>
         <div class="setting-row flex-col items-start gap-2" id="mentions-streamers-row" hidden>
             <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
@@ -81,11 +81,11 @@
         <h2 class="text-lg font-medium mb-1">{{ t "notif.stream.title" }}</h2>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.stream.online_enable" }}</div><div class="setting-description">{{ t "notif.stream.online_enable.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-enabled">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="online-enabled">
         </div>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.all_streamers" }}</div><div class="setting-description">{{ t "notif.all_streamers.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-all-streamers">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="online-all-streamers">
         </div>
         <div class="setting-row flex-col items-start gap-2" id="online-streamers-row" hidden>
             <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
@@ -93,11 +93,11 @@
         </div>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.stream.offline_enable" }}</div><div class="setting-description">{{ t "notif.stream.offline_enable.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-enabled">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="offline-enabled">
         </div>
         <div class="setting-row">
             <div><div class="setting-label">{{ t "notif.all_streamers" }}</div><div class="setting-description">{{ t "notif.all_streamers.desc" }}</div></div>
-            <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-all-streamers">
+            <input type="checkbox" class="w-5 h-5 accent-control-accent" id="offline-all-streamers">
         </div>
         <div class="setting-row flex-col items-start gap-2" id="offline-streamers-row" hidden>
             <div class="setting-label">{{ t "notif.selected_streamers" }}</div>
@@ -108,12 +108,12 @@
 
 <section class="mt-6">
     <h2 class="text-lg font-medium mb-1">{{ t "notif.points.title" }}</h2>
-    <p class="text-neutral-400 text-sm mb-4">{{ t "notif.points.desc" }}</p>
+    <p class="text-text-muted text-sm mb-4">{{ t "notif.points.desc" }}</p>
     <div class="flex flex-wrap gap-3 items-center mb-4">
         <select id="point-rule-streamer" class="input-field w-52"></select>
         <input type="number" id="point-rule-threshold" placeholder="{{ t "notif.points.threshold_ph" }}" min="1" class="input-field w-48">
-        <label class="flex items-center gap-2 text-neutral-400 text-sm whitespace-nowrap">
-            <input type="checkbox" class="w-4 h-4 accent-purple-600" id="point-rule-delete">
+        <label class="flex items-center gap-2 text-text-muted text-sm whitespace-nowrap">
+            <input type="checkbox" class="w-4 h-4 accent-control-accent" id="point-rule-delete">
             <span>{{ t "notif.points.delete_after" }}</span>
         </label>
         <button type="button" id="add-point-rule-btn" class="btn-secondary">{{ t "notif.points.add_rule" }}</button>
@@ -150,10 +150,10 @@
         container.innerHTML = '';
         streamerUsernames.forEach(function (name) {
             const label = document.createElement('label');
-            label.className = 'flex items-center gap-1 bg-neutral-900 px-2 py-1 rounded border border-neutral-700 text-sm cursor-pointer hover:border-purple-500 transition-colors';
+            label.className = 'flex items-center gap-1 bg-surface-input px-2 py-1 rounded border border-border-default text-sm cursor-pointer hover:border-interactive transition-colors';
             const cb = document.createElement('input');
             cb.type = 'checkbox';
-            cb.className = 'w-4 h-4 accent-purple-600';
+            cb.className = 'w-4 h-4 accent-control-accent';
             cb.value = name;
             cb.checked = (values || []).indexOf(name) !== -1;
             const span = document.createElement('span');
@@ -318,7 +318,7 @@
                 '<td></td>';
             const delBtn = document.createElement('button');
             delBtn.type = 'button';
-            delBtn.className = 'text-neutral-400 hover:text-red-500';
+            delBtn.className = 'text-text-muted hover:text-status-danger';
             delBtn.setAttribute('aria-label', t('js.notif.delete_rule', { streamer: rule.streamer }));
             delBtn.textContent = '✕';
             delBtn.addEventListener('click', async function () {

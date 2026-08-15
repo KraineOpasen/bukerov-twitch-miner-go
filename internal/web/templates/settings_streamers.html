@@ -10,13 +10,13 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.streamers.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.streamers.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.streamers.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
     <section>
         <h2 class="text-lg font-medium mb-1">{{ t "set.streamers.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.streamers.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.streamers.desc" }}</p>
 
         <div class="flex flex-wrap gap-3 mb-4">
             <input type="text" id="new-streamer-input" placeholder="{{ t "set.streamers.input_placeholder" }}" class="input-field flex-1 min-w-0">
@@ -33,26 +33,26 @@
             #followed-import-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
             #followed-list { max-height: 45vh; }
         </style>
-        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-neutral-800 border border-neutral-700 text-neutral-100">
+        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-surface-card border border-border-default text-text-primary">
             <div class="p-5">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="text-lg font-semibold">{{ t "set.followed.title" }}</h3>
-                    <button type="button" data-followed-close class="text-neutral-400 hover:text-neutral-100 text-xl leading-none">&times;</button>
+                    <button type="button" data-followed-close class="text-text-muted hover:text-text-primary text-xl leading-none">&times;</button>
                 </div>
-                <p class="text-neutral-400 text-sm mb-3">{{ t "set.followed.desc" }}</p>
-                <div id="followed-truncated" class="hidden mb-3 text-xs text-amber-500" role="status"></div>
-                <div id="followed-loading" class="py-8 text-center text-neutral-400">{{ t "set.followed.loading" }}</div>
+                <p class="text-text-muted text-sm mb-3">{{ t "set.followed.desc" }}</p>
+                <div id="followed-truncated" class="hidden mb-3 text-xs text-text-caution" role="status"></div>
+                <div id="followed-loading" class="py-8 text-center text-text-muted">{{ t "set.followed.loading" }}</div>
                 <div id="followed-error" class="hidden py-8 text-center">
                     <p class="text-sm mb-3" style="color: var(--color-danger)" id="followed-error-msg"></p>
                     <button type="button" id="followed-retry" class="btn-secondary">{{ t "set.followed.retry" }}</button>
                 </div>
-                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">{{ t "set.followed.empty" }}</div>
+                <div id="followed-empty" class="hidden py-8 text-center text-text-muted">{{ t "set.followed.empty" }}</div>
                 <div id="followed-list-wrap" class="hidden">
-                    <div class="flex items-center justify-between mb-2 text-xs text-neutral-400">
-                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">{{ t "set.followed.select_all" }}</button>
+                    <div class="flex items-center justify-between mb-2 text-xs text-text-muted">
+                        <button type="button" id="followed-select-all" class="hover:text-text-primary underline">{{ t "set.followed.select_all" }}</button>
                         <span id="followed-selected-count">{{ t "set.followed.selected_zero" }}</span>
                     </div>
-                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-neutral-700 rounded-md p-2"></ul>
+                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-border-default rounded-md p-2"></ul>
                 </div>
                 <div class="flex justify-end gap-2 mt-4">
                     <button type="button" data-followed-close class="btn-secondary">{{ t "common.cancel" }}</button>
@@ -64,7 +64,7 @@
 
     <section>
         <h2 class="text-lg font-medium mb-1">{{ t "set.defaults.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.defaults.desc" }}</p>
         <div id="default-settings-container"></div>
     </section>
 </form>
@@ -133,27 +133,27 @@
             <div class="space-y-0">
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.make_predictions')}</div><div class="setting-description">${t('js.set.form.make_predictions.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs(settings.makePredictions)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs(settings.makePredictions)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.follow_raid')}</div><div class="setting-description">${t('js.set.form.follow_raid.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs(settings.followRaid)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs(settings.followRaid)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.claim_drops')}</div><div class="setting-description">${t('js.set.form.claim_drops.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs(settings.claimDrops)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs(settings.claimDrops)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.claim_moments')}</div><div class="setting-description">${t('js.set.form.claim_moments.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs(settings.claimMoments)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs(settings.claimMoments)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.watch_streak')}</div><div class="setting-description">${t('js.set.form.watch_streak.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs(settings.watchStreak)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs(settings.watchStreak)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.community_goals')}</div><div class="setting-description">${t('js.set.form.community_goals.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs(settings.communityGoals)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs(settings.communityGoals)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.max_contribution_percent')}</div><div class="setting-description">${t('js.set.form.max_contribution_percent.desc')}</div></div>
@@ -176,7 +176,7 @@
                         ${preferenceOptions.map(o => `<option value="${o.value}" ${selectValue(settings.preference, '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
                     </select>
                 </div>` : ''}
-                <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
+                <h4 class="text-interactive font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.strategy')}</div><div class="setting-description">${t('js.set.form.strategy.desc')}</div></div>
                     <select class="input-field w-40" data-field="bet.strategy" data-prefix="${prefix}">
@@ -201,7 +201,7 @@
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.stealth_mode')}</div><div class="setting-description">${t('js.set.form.stealth_mode.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs(bet.stealthMode)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs(bet.stealthMode)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.delay')}</div><div class="setting-description">${t('js.set.form.delay.desc')}</div></div>
@@ -244,13 +244,13 @@
         header.className = 'streamer-header';
         header.addEventListener('click', () => toggleStreamerExpand(li));
         header.innerHTML = `
-            <div class="text-neutral-400 text-lg cursor-grab">☰</div>
-            <span class="flex-1 text-neutral-100 font-medium">${streamer.username}</span>
+            <div class="text-text-muted text-lg cursor-grab">☰</div>
+            <span class="flex-1 text-text-primary font-medium">${streamer.username}</span>
             ${hasOverrides ? '<span class="override-badge">' + t('js.set.streamer.custom') + '</span>' : ''}
-            <span class="text-neutral-400 text-xs transition-transform duration-200 expand-icon">▼</span>`;
+            <span class="text-text-muted text-xs transition-transform duration-200 expand-icon">▼</span>`;
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
-        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.className = 'ml-2 px-2 py-1 text-text-muted hover:text-status-danger hover:bg-status-danger/10 rounded transition-colors';
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', function (e) {
             e.stopPropagation();
@@ -260,12 +260,12 @@
         header.appendChild(removeBtn);
 
         const body = document.createElement('div');
-        body.className = 'hidden border-t border-neutral-700 bg-neutral-800 settings-panel';
+        body.className = 'hidden border-t border-border-default bg-surface-card settings-panel';
         body.innerHTML = `
-            <div class="p-4 border-b border-neutral-700">
+            <div class="p-4 border-b border-border-default">
                 <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600 use-override-checkbox" ${hasOverrides ? 'checked' : ''}>
-                    <span class="text-neutral-100">${t('js.set.streamer.use_custom')}</span>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent use-override-checkbox" ${hasOverrides ? 'checked' : ''}>
+                    <span class="text-text-primary">${t('js.set.streamer.use_custom')}</span>
                 </label>
             </div>
             <div class="p-4 settings-content" style="${hasOverrides ? '' : 'display: none;'}">
@@ -362,23 +362,23 @@
             <div class="space-y-0">
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.make_predictions')}</div><div class="setting-description">${t('js.set.form.make_predictions.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="makePredictions" ${checkboxAttrs(settings.makePredictions)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-def-field="makePredictions" ${checkboxAttrs(settings.makePredictions)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.claim_drops')}</div><div class="setting-description">${t('js.set.form.claim_drops.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="claimDrops" ${checkboxAttrs(settings.claimDrops)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-def-field="claimDrops" ${checkboxAttrs(settings.claimDrops)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.claim_moments')}</div><div class="setting-description">${t('js.set.form.claim_moments.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="claimMoments" ${checkboxAttrs(settings.claimMoments)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-def-field="claimMoments" ${checkboxAttrs(settings.claimMoments)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.watch_streak')}</div><div class="setting-description">${t('js.set.form.watch_streak.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="watchStreak" ${checkboxAttrs(settings.watchStreak)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-def-field="watchStreak" ${checkboxAttrs(settings.watchStreak)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.community_goals')}</div><div class="setting-description">${t('js.set.form.community_goals.desc')}</div></div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-def-field="communityGoals" ${checkboxAttrs(settings.communityGoals)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-def-field="communityGoals" ${checkboxAttrs(settings.communityGoals)}>
                 </div>
                 <div class="setting-row">
                     <div><div class="setting-label">${t('js.set.form.max_contribution_percent')}</div><div class="setting-description">${t('js.set.form.max_contribution_percent.desc')}</div></div>
@@ -452,7 +452,7 @@
             els.list.innerHTML = channels.map(c => {
                 const disabled = c.alreadyTracked ? 'disabled' : '';
                 const cls = c.alreadyTracked ? 'opacity-50' : '';
-                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">' + t('js.set.followed.already_tracked') + '</span>' : '';
+                const tag = c.alreadyTracked ? ' <span class="text-xs text-text-faint">' + t('js.set.followed.already_tracked') + '</span>' : '';
                 return '<li class="flex items-center gap-2 ' + cls + '"><input type="checkbox" value="' + escapeHTML(c.login) + '" ' + disabled + ' class="followed-cb"><span class="text-sm">' + escapeHTML(c.displayName) + tag + '</span></li>';
             }).join('');
             els.list.querySelectorAll('.followed-cb').forEach(cb => cb.addEventListener('change', refreshCount));

@@ -1,6 +1,6 @@
 {{define "health_center"}}
 {{if not .Available}}
-<div class="text-neutral-400 text-sm">{{ t "health.unavailable" }}</div>
+<div class="text-text-muted text-sm">{{ t "health.unavailable" }}</div>
 {{else}}
 <div class="health-grid mb-4">
     {{range .Signals}}
@@ -17,7 +17,7 @@
         <div class="health-card-status">
             <span class="health-sev-icon" aria-hidden="true">{{$icon}}</span>
             <span class="num font-semibold health-card-status-text">{{.Status}}</span>
-            {{if .Ago}}<span class="text-neutral-500 text-xs">— {{.Ago}}</span>{{end}}
+            {{if .Ago}}<span class="text-text-faint text-xs">— {{.Ago}}</span>{{end}}
         </div>
         {{if .Stage}}<div class="health-card-row"><span class="health-card-row-label">{{ t "health.card.stage" }}</span>{{.Stage}}</div>{{end}}
         {{if .Detail}}<div class="health-card-row health-card-detail">{{.Detail}}</div>{{end}}
@@ -26,16 +26,16 @@
     {{end}}
 </div>
 
-<div class="text-xs text-neutral-500 mb-4">{{ t "health.active_client_id" }} <span class="text-neutral-300">{{if .ActiveClientID}}{{.ActiveClientID}}{{else}}{{ t "health.unknown" }}{{end}}</span></div>
+<div class="text-xs text-text-faint mb-4">{{ t "health.active_client_id" }} <span class="text-text-secondary">{{if .ActiveClientID}}{{.ActiveClientID}}{{else}}{{ t "health.unknown" }}{{end}}</span></div>
 
-<div class="rounded-lg border border-neutral-800 p-4 mb-3">
-    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">{{ t "health.canary.title" }}</div>
+<div class="rounded-lg border border-surface-card p-4 mb-3">
+    <div class="text-xs uppercase tracking-wide text-text-muted mb-3">{{ t "health.canary.title" }}</div>
 
     <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML">
         <input type="hidden" name="section" value="canary">
         <div class="setting-row">
             <div class="setting-label">{{ t "health.canary.enable" }}</div>
-            <input type="checkbox" name="canaryEnabled" class="w-5 h-5 accent-purple-600" {{if .CanaryEnabled}}checked{{end}}>
+            <input type="checkbox" name="canaryEnabled" class="w-5 h-5 accent-control-accent" {{if .CanaryEnabled}}checked{{end}}>
         </div>
         <div class="setting-row">
             <div>
@@ -56,20 +56,20 @@
             {{if .CanaryConfigured}}
             <button type="button" hx-post="/api/health/canary/run" hx-target="#health-center" hx-swap="innerHTML" class="badge badge-queued">{{ t "health.canary.run_now" }}</button>
             {{else}}
-            <span class="text-xs text-neutral-500">{{ t "health.canary.run_hint" }}</span>
+            <span class="text-xs text-text-faint">{{ t "health.canary.run_hint" }}</span>
             {{end}}
         </div>
     </form>
 </div>
 
-<div class="rounded-lg border border-neutral-800 p-4 mb-3">
-    <div class="text-xs uppercase tracking-wide text-neutral-400 mb-3">{{ t "health.watchdog.title" }}</div>
+<div class="rounded-lg border border-surface-card p-4 mb-3">
+    <div class="text-xs uppercase tracking-wide text-text-muted mb-3">{{ t "health.watchdog.title" }}</div>
 
     <form hx-post="/api/health/settings" hx-target="#health-center" hx-swap="innerHTML">
         <input type="hidden" name="section" value="watchdog">
         <div class="setting-row">
             <div class="setting-label">{{ t "health.watchdog.enable" }}</div>
-            <input type="checkbox" name="watchdogEnabled" class="w-5 h-5 accent-purple-600" {{if .WatchdogEnabled}}checked{{end}}>
+            <input type="checkbox" name="watchdogEnabled" class="w-5 h-5 accent-control-accent" {{if .WatchdogEnabled}}checked{{end}}>
         </div>
         <div class="setting-row">
             <div class="setting-label">{{ t "health.watchdog.stall_delay" }}</div>
@@ -91,7 +91,7 @@
             <div class="setting-label">{{ t "health.watchdog.rearm" }}</div>
             <input type="number" name="watchdogRearmHours" value="{{.WatchdogRearmHours}}" min="1" max="48" class="input-field w-28">
         </div>
-        <div class="text-xs text-neutral-500 pt-2">
+        <div class="text-xs text-text-faint pt-2">
             {{ t "health.watchdog.explain" }}
         </div>
         <div class="pt-3">
@@ -100,6 +100,6 @@
     </form>
 </div>
 
-<p class="text-xs text-neutral-500">{{.Disclaimer}}</p>
+<p class="text-xs text-text-faint">{{.Disclaimer}}</p>
 {{end}}
 {{end}}

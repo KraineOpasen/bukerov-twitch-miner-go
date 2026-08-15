@@ -2,18 +2,18 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.current" }}</h1>
-<p class="text-neutral-400 text-sm mb-4">{{ t "drops.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-4">{{ t "drops.subtitle" }}</p>
 
 <form hx-post="/api/policy/mode" hx-target="#drops-queue" hx-swap="innerHTML"
       class="flex items-center gap-2 text-sm mb-6">
-    <label class="text-neutral-400">{{ t "drops.policy.label" }}</label>
+    <label class="text-text-muted">{{ t "drops.policy.label" }}</label>
     <select name="mode" onchange="this.form.requestSubmit()"
-            class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+            class="bg-surface-input border border-border-default rounded px-2 py-1 text-text-primary">
         {{range .PolicyModes}}
         <option value="{{.}}" {{if eq . $.PolicyMode}}selected{{end}}>{{.}}</option>
         {{end}}
     </select>
-    <span class="text-xs text-neutral-500">{{ t "drops.policy.hint" }}</span>
+    <span class="text-xs text-text-faint">{{ t "drops.policy.hint" }}</span>
 </form>
 
 <!-- Manual "Sync Drops now": forces an immediate campaign resync (cooldown-
@@ -21,7 +21,7 @@
      after the last scheduled sync and shouldn't wait out the interval. -->
 <div class="flex items-center gap-3 mb-6">
     <button type="button" id="drops-sync-now" class="btn-secondary text-sm">{{ t "drops.sync_now" }}</button>
-    <span id="drops-sync-result" class="text-xs text-neutral-500" aria-live="polite"></span>
+    <span id="drops-sync-result" class="text-xs text-text-faint" aria-live="polite"></span>
 </div>
 
 <!--
@@ -36,18 +36,18 @@
     hx-trigger="load, every 30s"
     hx-swap="innerHTML"
 >
-    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.campaigns" }}</div>
+    <div class="animate-pulse text-text-muted">{{ t "drops.loading.campaigns" }}</div>
 </section>
 
 <h2 class="text-xl font-bold mt-10 mb-2">{{ t "drops.discovered.heading" }}</h2>
-<p class="text-neutral-400 text-sm mb-4">{{ t "drops.discovered.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-4">{{ t "drops.discovered.subtitle" }}</p>
 
 <section
     hx-get="/api/discovery"
     hx-trigger="load, every 1m"
     hx-swap="innerHTML"
 >
-    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.discovered" }}</div>
+    <div class="animate-pulse text-text-muted">{{ t "drops.loading.discovered" }}</div>
 </section>
 {{end}}
 

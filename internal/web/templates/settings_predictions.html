@@ -2,13 +2,13 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.predictions.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.predictions.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.predictions.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
     <section class="space-y-0">
         <h2 class="text-lg font-medium mb-1">{{ t "js.set.form.betting_heading" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.defaults.desc" }}</p>
         <div class="setting-row">
             <div>
                 <div class="setting-label">{{ t "js.set.form.strategy" }}</div>
@@ -49,7 +49,7 @@
                 <div class="setting-label">{{ t "js.set.form.stealth_mode" }}</div>
                 <div class="setting-description">{{ t "js.set.form.stealth_mode.desc" }}</div>
             </div>
-            <input type="checkbox" id="betStealthMode" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="betStealthMode" class="w-5 h-5 accent-control-accent">
         </div>
         <div class="setting-row">
             <div>
@@ -73,7 +73,7 @@
 
     <section class="space-y-0">
         <h2 class="text-lg font-medium mb-1">{{ t "set.predrisk.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
         <div class="setting-row">
             <div>
                 <div class="setting-label">{{ t "set.predrisk.max_stake_label" }}</div>
@@ -93,7 +93,7 @@
                 <div class="setting-label">{{ t "set.predrisk.healthgate_label" }}</div>
                 <div class="setting-description">{{ t "set.predrisk.healthgate_desc" }}</div>
             </div>
-            <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-control-accent">
         </div>
     </section>
 
@@ -141,7 +141,7 @@
         const withOverride = (streamers || []).filter(function (s) { return s.settings && s.settings.bet; });
         if (!withOverride.length) {
             const li = document.createElement('li');
-            li.className = 'text-neutral-500 italic';
+            li.className = 'text-text-faint italic';
             li.textContent = t('js.setcat.predictions.overrides_empty');
             list.appendChild(li);
             return;
@@ -150,7 +150,7 @@
             const li = document.createElement('li');
             const a = document.createElement('a');
             a.href = '/settings/streamers';
-            a.className = 'text-neutral-100 hover:text-purple-400 transition-colors';
+            a.className = 'text-text-primary hover:text-interactive-muted transition-colors';
             a.textContent = s.username + ' — ' + t('js.setcat.predictions.overrides_link');
             li.appendChild(a);
             list.appendChild(li);

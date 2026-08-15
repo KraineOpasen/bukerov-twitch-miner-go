@@ -2,7 +2,7 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.claims" }}</h1>
-<p class="text-neutral-400 text-sm mb-4">{{ t "drops.claims.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-4">{{ t "drops.claims.subtitle" }}</p>
 
 <!-- S-SESS: claim-history persistence (B2) does not exist yet — every row on
      this page reflects only the currently-tracked campaign pool this running
@@ -13,14 +13,14 @@
 </div>
 
 {{if .Unavailable}}
-<div class="card text-center text-neutral-400">{{ t "drops.claims.unavailable" }}</div>
+<div class="card text-center text-text-muted">{{ t "drops.claims.unavailable" }}</div>
 {{else if not .Rows}}
-<div class="card text-center text-neutral-400">{{ t "drops.claims.empty" }}</div>
+<div class="card text-center text-text-muted">{{ t "drops.claims.empty" }}</div>
 {{else}}
 <div class="flex flex-wrap items-end gap-3 mb-4 text-sm" id="claims-filters">
     <div>
-        <label for="claims-filter-campaign" class="block text-xs text-neutral-400 mb-1">{{ t "drops.claims.filter.campaign" }}</label>
-        <select id="claims-filter-campaign" class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+        <label for="claims-filter-campaign" class="block text-xs text-text-muted mb-1">{{ t "drops.claims.filter.campaign" }}</label>
+        <select id="claims-filter-campaign" class="bg-surface-input border border-border-default rounded px-2 py-1 text-text-primary">
             <option value="">{{ t "drops.claims.filter.all" }}</option>
             {{range .CampaignOptions}}
             <option value="{{.ID}}">{{.Name}}</option>
@@ -28,8 +28,8 @@
         </select>
     </div>
     <div>
-        <label for="claims-filter-state" class="block text-xs text-neutral-400 mb-1">{{ t "drops.claims.filter.state" }}</label>
-        <select id="claims-filter-state" class="bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-neutral-100">
+        <label for="claims-filter-state" class="block text-xs text-text-muted mb-1">{{ t "drops.claims.filter.state" }}</label>
+        <select id="claims-filter-state" class="bg-surface-input border border-border-default rounded px-2 py-1 text-text-primary">
             <option value="">{{ t "drops.claims.filter.all" }}</option>
             <option value="claimed">{{ t "drops.claims.state.claimed" }}</option>
             <option value="claimable">{{ t "drops.claims.state.claimable" }}</option>
@@ -47,7 +47,7 @@
     <table class="w-full text-sm">
         <caption class="visually-hidden">{{ t "drops.claims.table_caption" }}</caption>
         <thead>
-            <tr class="text-left text-xs text-neutral-400 border-b border-neutral-700">
+            <tr class="text-left text-xs text-text-muted border-b border-border-default">
                 <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.campaign" }}</th>
                 <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.drop" }}</th>
                 <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.claims.col.state" }}</th>
@@ -55,14 +55,14 @@
         </thead>
         <tbody id="claims-table-body">
             {{range .Rows}}
-            <tr class="border-b border-neutral-800 last:border-b-0" data-claim-row data-claim-campaign="{{.CampaignID}}" data-claim-state="{{.State}}">
+            <tr class="border-b border-surface-card last:border-b-0" data-claim-row data-claim-campaign="{{.CampaignID}}" data-claim-state="{{.State}}">
                 <td class="px-4 py-3">
-                    <div class="text-neutral-100">{{.CampaignName}}</div>
-                    {{if .GameName}}<div class="text-xs text-neutral-400">{{.GameName}}</div>{{end}}
+                    <div class="text-text-primary">{{.CampaignName}}</div>
+                    {{if .GameName}}<div class="text-xs text-text-muted">{{.GameName}}</div>{{end}}
                 </td>
                 <td class="px-4 py-3">
-                    <div class="text-neutral-100">{{.DropName}}</div>
-                    {{if .Benefit}}<div class="text-xs text-neutral-400">{{.Benefit}}</div>{{end}}
+                    <div class="text-text-primary">{{.DropName}}</div>
+                    {{if .Benefit}}<div class="text-xs text-text-muted">{{.Benefit}}</div>{{end}}
                 </td>
                 <td class="px-4 py-3">{{template "c10.badge" .Badge}}</td>
             </tr>
@@ -78,20 +78,20 @@
     <li class="card" data-claim-row data-claim-campaign="{{.CampaignID}}" data-claim-state="{{.State}}">
         <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
-                <div class="text-neutral-100 font-medium truncate">{{.CampaignName}}</div>
-                {{if .GameName}}<div class="text-xs text-neutral-400 truncate">{{.GameName}}</div>{{end}}
+                <div class="text-text-primary font-medium truncate">{{.CampaignName}}</div>
+                {{if .GameName}}<div class="text-xs text-text-muted truncate">{{.GameName}}</div>{{end}}
             </div>
             {{template "c10.badge" .Badge}}
         </div>
         <div class="mt-2 text-sm">
-            <div class="text-neutral-100">{{.DropName}}</div>
-            {{if .Benefit}}<div class="text-xs text-neutral-400">{{.Benefit}}</div>{{end}}
+            <div class="text-text-primary">{{.DropName}}</div>
+            {{if .Benefit}}<div class="text-xs text-text-muted">{{.Benefit}}</div>{{end}}
         </div>
     </li>
     {{end}}
 </ul>
 
-<p id="claims-no-match" class="text-neutral-400 text-sm hidden" role="status" aria-live="polite">{{ t "drops.claims.no_match" }}</p>
+<p id="claims-no-match" class="text-text-muted text-sm hidden" role="status" aria-live="polite">{{ t "drops.claims.no_match" }}</p>
 {{end}}
 {{end}}
 

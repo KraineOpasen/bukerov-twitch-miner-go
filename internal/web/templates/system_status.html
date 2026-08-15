@@ -39,7 +39,7 @@
 <div class="health-card">
     <div class="health-card-label">{{ t "system.status.resources.heading" }}</div>
     {{range .Resources.Rows}}
-    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{.Primary}}</span>{{if .Secondary}} <span class="num text-neutral-500">{{.Secondary}}</span>{{end}}</div>
+    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{.Primary}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
     {{end}}
 </div>
 {{end}}

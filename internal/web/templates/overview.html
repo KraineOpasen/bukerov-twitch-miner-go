@@ -12,7 +12,7 @@
      #overview-live so the 30s innerHTML swap never destroys the role="status"
      node mid-announcement. */}}
 <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
-    <h1 class="text-2xl font-bold text-neutral-100">{{ t "nav.overview" }}</h1>
+    <h1 class="text-2xl font-bold text-text-primary">{{ t "nav.overview" }}</h1>
     {{/* Text + icon, never colour alone. The __ovDelta clock re-evaluates
          every second (monotonic via performance.now(), anchored to #ov-meta's
          data-generated inside the swapped partial) but only WRITES here — and

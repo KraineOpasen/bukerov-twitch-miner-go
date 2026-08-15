@@ -7,11 +7,11 @@
         {{if .DebugURL}}<a href="{{.DebugURL}}" target="_blank" rel="noopener" class="btn-secondary text-sm">{{ t "logs.debug_snapshot" }}</a>{{end}}
     </div>
 </div>
-<p class="text-neutral-400 text-sm mb-2">{{ t "logs.description" }}</p>
+<p class="text-text-muted text-sm mb-2">{{ t "logs.description" }}</p>
 <!-- S5-5: this page is the miner's raw technical journal, not a curated
      product-event feed; the redacted support-bundle download moved to sole
      ownership by /system/diagnostics (see handlers_system.go). -->
-<p class="text-neutral-500 text-xs mb-6">{{ t "logs.journal_note" }} <a href="/events">/events</a>.</p>
+<p class="text-text-faint text-xs mb-6">{{ t "logs.journal_note" }} <a href="/events">/events</a>.</p>
 
 <div class="logs-toolbar" role="toolbar" aria-label="{{ t "logs.filter.toolbar_aria" }}">
     <div class="logs-toolbar-group">
@@ -45,14 +45,14 @@
         <input type="search" id="logs-filter-search" class="input-field logs-search-input" placeholder="{{ t "logs.filter.search_ph" }}" aria-label="{{ t "logs.filter.search_ph" }}">
     </div>
 
-    <label class="logs-toolbar-group text-sm text-neutral-300">
-        <input type="checkbox" id="logs-filter-reconnect" class="w-4 h-4 accent-purple-600" checked>
+    <label class="logs-toolbar-group text-sm text-text-secondary">
+        <input type="checkbox" id="logs-filter-reconnect" class="w-4 h-4 accent-control-accent" checked>
         {{ t "logs.filter.reconnect" }}
     </label>
 
     <div class="logs-toolbar-group">
         <button type="button" id="logs-copy-btn" class="btn-secondary text-sm">{{ t "logs.copy_visible" }}</button>
-        <span id="logs-copy-status" class="text-xs text-neutral-500" role="status"></span>
+        <span id="logs-copy-status" class="text-xs text-text-faint" role="status"></span>
     </div>
 
     <!-- Purely visual: rewrites on every keystroke and every 10s poll, so it

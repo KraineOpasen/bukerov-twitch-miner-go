@@ -851,16 +851,28 @@ func TestS5_8LocalizationParity(t *testing.T) {
 // task S5-9 removed help.html from this pin: that task is help.html's
 // direct, in-scope owner (it links the page onward to the four new Help
 // siblings S5-9 adds) — see TestS5_2HelpPageContract for help.html's own
-// content contract post-S5-9. statistics.html stays pinned; S5-9 never
-// touches it.
+// content contract post-S5-9. statistics.html stayed pinned through S5-9;
+// S5-9 never touched it.
+//
+// S5-10 is a second, narrow, explicitly-scoped exception: the design-doc
+// handoff (§15/§16) requires every legacy neutral-/purple-/amber-/green-/
+// emerald-/red- scale alias deleted once a grep proves zero template
+// references, and statistics.html was one of 39 files still carrying them.
+// S5-10 re-pins to the post-migration hash below, having changed only
+// Tailwind color-utility class names (legacy scale -> semantic token, e.g.
+// `text-neutral-400` -> `text-text-muted`) — zero DOM structure, JS
+// behavior, routes, layout, copy, or i18n changes; see the S5-10 PR
+// description for the full before/after census. This does not reopen
+// statistics.html to arbitrary edits: the guard still fails on anything
+// beyond that one deliberate, documented pass.
 func TestS5_8LegacyStatisticsUntouched(t *testing.T) {
 	pinned := map[string]string{
-		"templates/statistics.html": "f842e1e335b339ee89eff87a7026c8c610c810a39d97da80a4b9f660882087a3",
+		"templates/statistics.html": "ca3c7cb6d9ce8fb77a6b559d4cb01e6471c3a5f8695a3c88a66ab7282aa2d542",
 	}
 	for name, want := range pinned {
 		sum := sha256.Sum256([]byte(s58ReadTemplate(t, name)))
 		if got := hex.EncodeToString(sum[:]); got != want {
-			t.Errorf("%s was modified (sha256 %s, want %s) — S5-8 must leave it byte-identical", name, got, want)
+			t.Errorf("%s was modified (sha256 %s, want %s) — pinned to the S5-10 semantic-token-migration baseline; no further undocumented change is allowed", name, got, want)
 		}
 	}
 }

@@ -2,12 +2,12 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.past" }}</h1>
-<p class="text-neutral-400 text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
 
 <!-- Load-only: the durable catalog only changes when a full sync runs
      (elsewhere), so there is nothing to gain by polling this on an interval —
      same behavior as the former inline tab. -->
 <section id="drops-past" hx-get="/api/drops/past" hx-trigger="load" hx-swap="innerHTML">
-    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.past" }}</div>
+    <div class="animate-pulse text-text-muted">{{ t "drops.loading.past" }}</div>
 </section>
 {{end}}

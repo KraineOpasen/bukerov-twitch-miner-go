@@ -36,10 +36,10 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.system.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.system.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.system.subtitle" }}</p>
 
 <section id="health-center" hx-get="/api/health" hx-trigger="load, every 15s" hx-swap="innerHTML">
-    <div class="animate-pulse text-neutral-400">{{ t "health.loading" }}</div>
+    <div class="animate-pulse text-text-muted">{{ t "health.loading" }}</div>
 </section>
 
 {{template "c7.savebar" .}}
