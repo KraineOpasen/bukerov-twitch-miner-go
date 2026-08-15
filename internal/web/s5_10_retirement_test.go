@@ -70,9 +70,13 @@ func s5_10AllTemplateFiles(t *testing.T) []string {
 // visible once the property-prefix assumption was dropped — see
 // s5_10LegacyAliasRe's doc comment) must be gone — literal zero, no
 // exceptions. The one holdout an earlier pass left (streamer.html's
-// bg-neutral-700 search-clear button) is migrated to the
-// --surface-control-muted semantic token (S5-10 corrective pass); there is
-// no longer a whitelist for this test to consult.
+// search-clear button, previously styled with the legacy neutral-700
+// background alias) is migrated to the --surface-control-muted semantic
+// token (S5-10 corrective pass); there is no longer a whitelist for this
+// test to consult. (Deliberately not spelling the full Tailwind class name
+// here — Tailwind's content scanner treats this file as a candidate
+// source too, and the literal string previously produced a dead utility
+// rule in the compiled app.css.)
 func TestS5_10ZeroLegacyAliasReferencesInTemplates(t *testing.T) {
 	for _, name := range s5_10AllTemplateFiles(t) {
 		src := s5_10TemplateCommentRe.ReplaceAllString(readEmbeddedTemplate(t, name), "")
