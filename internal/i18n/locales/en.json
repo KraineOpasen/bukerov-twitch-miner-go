@@ -956,7 +956,7 @@
   "queue.col.points": "Points",
   "queue.col.points_today": "Today",
   "queue.dpba.text": "Manual control (favorites, slot switching, harvest, overrides, queue reordering) is deferred pending broker audit.",
-  "queue.dpba.troubleshooting_link": "Learn about slot reason codes",
+  "queue.dpba.troubleshooting_link": "Troubleshoot queue and slot issues",
   "queue.toolbar.label": "Roster filter and sort controls",
   "queue.filter.label": "Filter streamers",
   "queue.filter.placeholder": "Filter by name…",

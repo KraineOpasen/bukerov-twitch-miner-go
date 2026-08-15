@@ -956,7 +956,7 @@
   "queue.col.points": "Баллы",
   "queue.col.points_today": "Сегодня",
   "queue.dpba.text": "Ручное управление (избранное, переключение слота, harvest, переопределения, перестановка очереди) отложено до аудита брокера.",
-  "queue.dpba.troubleshooting_link": "Узнать о кодах причин слотов",
+  "queue.dpba.troubleshooting_link": "Устранение неполадок очереди и слотов",
   "queue.toolbar.label": "Фильтры и сортировка ростера",
   "queue.filter.label": "Фильтр по стримерам",
   "queue.filter.placeholder": "Фильтр по имени…",

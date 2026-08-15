@@ -16,6 +16,7 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -346,59 +347,72 @@ func TestS5_9LocalizationParity(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// 3b. Producer parity: reasonCodeKeys must match the watch broker's actual
+// 3b. Producer parity: reasonCodeKeys must match package watcher's actual
 //     Reason* consts, not just itself.
 // ---------------------------------------------------------------------
 
-// watcherReasonConsts parses internal/watcher/broker.go's AST directly (a
-// relative path off disk — go test's working directory is the package
-// directory, the same relative-parse idiom TestS5_3BuildCardsSingleUsername
-// SnapshotAST already establishes in this package for a same-package file)
-// and returns every exported Reason*-prefixed string constant it declares:
-// name -> its string value. This is the actual producer — the ONLY thing
-// that proves reasonCodeKeys (viewmodels_slots.go) hasn't silently drifted
-// from it (renamed/added/removed const) is reading broker.go itself, not
+// watcherReasonConsts parses every non-test .go file in internal/watcher's
+// AST directly (relative paths off disk — go test's working directory is
+// the package directory, the same relative-parse idiom
+// TestS5_3BuildCardsSingleUsernameSnapshotAST already establishes in this
+// package for a same-package file) and returns every exported
+// Reason*-prefixed string constant declared anywhere in the package: name ->
+// its string value. This is the actual producer — the ONLY thing that
+// proves reasonCodeKeys (viewmodels_slots.go) hasn't silently drifted from
+// it (a Reason* const renamed, added or removed in ANY production file in
+// package watcher, not just broker.go) is reading the whole package, not
 // re-deriving expectations from reasonCodeKeys or the rendered glossary.
 func watcherReasonConsts(t *testing.T) map[string]string {
 	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "../watcher/broker.go", nil, 0)
+	entries, err := os.ReadDir("../watcher")
 	if err != nil {
-		t.Fatalf("parse ../watcher/broker.go: %v", err)
+		t.Fatalf("read dir ../watcher: %v", err)
 	}
 
+	fset := token.NewFileSet()
 	got := map[string]string{}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		path := "../watcher/" + name
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "Reason") || !name.IsExported() {
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
 					continue
 				}
-				if i >= len(vs.Values) {
-					t.Fatalf("watcher.%s has no explicit value in its ValueSpec — AST guard can't read it (iota?)", name.Name)
+				for i, ident := range vs.Names {
+					if !strings.HasPrefix(ident.Name, "Reason") || !ident.IsExported() {
+						continue
+					}
+					if i >= len(vs.Values) {
+						t.Fatalf("watcher.%s has no explicit value in its ValueSpec — AST guard can't read it (iota?)", ident.Name)
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatalf("watcher.%s is not a plain string literal const — AST guard can't read its value", ident.Name)
+					}
+					val, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("unquote watcher.%s literal %s: %v", ident.Name, lit.Value, err)
+					}
+					got[ident.Name] = val
 				}
-				lit, ok := vs.Values[i].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					t.Fatalf("watcher.%s is not a plain string literal const — AST guard can't read its value", name.Name)
-				}
-				val, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					t.Fatalf("unquote watcher.%s literal %s: %v", name.Name, lit.Value, err)
-				}
-				got[name.Name] = val
 			}
 		}
 	}
 	if len(got) == 0 {
-		t.Fatal("found zero exported Reason* consts in ../watcher/broker.go — AST guard is broken, not just empty")
+		t.Fatal("found zero exported Reason* consts in package watcher — AST guard is broken, not just empty")
 	}
 	return got
 }
@@ -406,13 +420,19 @@ func watcherReasonConsts(t *testing.T) map[string]string {
 // TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts closes the producer->web gap
 // TestS5_9GlossaryParity cannot close on its own: that test only proves the
 // rendered glossary matches reasonCodeKeys itself (a hand-maintained Go map
-// in viewmodels_slots.go), which could silently drift from
-// internal/watcher/broker.go's actual Reason* consts (a rename, addition or
-// removal there) without failing any existing test. This test reads
-// broker.go's AST directly and asserts reasonCodeKeys' key set is exactly
-// the set of broker.go's exported Reason* const VALUES — so it fails on a
-// synthetic Reason* const added, removed or renamed in broker.go, exactly
-// as much as it fails on reasonCodeKeys itself drifting.
+// in viewmodels_slots.go), which could silently drift from package
+// watcher's actual Reason* consts (a rename, addition or removal in ANY
+// production file in the package — not just broker.go, historically the
+// only file that declared any) without failing any existing test. This
+// test reads every non-test file in package watcher's AST directly (see
+// watcherReasonConsts) and asserts reasonCodeKeys' key set is exactly the
+// set of the package's exported Reason* const VALUES — so it fails on a
+// synthetic Reason* const added, removed or renamed anywhere in the
+// package, exactly as much as it fails on reasonCodeKeys itself drifting.
+// The name keeps its original "WatcherBrokerConsts" spelling: it is
+// referenced verbatim from doc comments in internal/web/handlers_help.go
+// and internal/web/templates/help_glossary.html, both outside this fix's
+// allowed paths.
 //
 // This deliberately does NOT extend to rosterStatusKeys or eventTypeKeys:
 // rosterStatusKeys' producer (queueRosterRow / buildCards' StreamerInfo.
@@ -426,23 +446,23 @@ func TestS5_9ReasonCodeKeysMatchWatcherBrokerConsts(t *testing.T) {
 	producerValues := map[string]bool{}
 	for name, val := range producer {
 		if producerValues[val] {
-			t.Errorf("internal/watcher/broker.go declares two Reason* consts with the same value %q (one is %s)", val, name)
+			t.Errorf("package watcher declares two Reason* consts with the same value %q (one is %s)", val, name)
 		}
 		producerValues[val] = true
 	}
 
 	for code := range reasonCodeKeys {
 		if !producerValues[code] {
-			t.Errorf("reasonCodeKeys has code %q with no matching exported Reason* const value in internal/watcher/broker.go", code)
+			t.Errorf("reasonCodeKeys has code %q with no matching exported Reason* const value in package watcher", code)
 		}
 	}
 	for name, val := range producer {
 		if _, ok := reasonCodeKeys[val]; !ok {
-			t.Errorf("internal/watcher/broker.go declares %s = %q, which reasonCodeKeys does not carry — the glossary/queue reason-code vocabulary is out of sync with the broker", name, val)
+			t.Errorf("package watcher declares %s = %q, which reasonCodeKeys does not carry — the glossary/queue reason-code vocabulary is out of sync with the watcher package", name, val)
 		}
 	}
 	if len(producer) != len(reasonCodeKeys) {
-		t.Errorf("internal/watcher/broker.go declares %d exported Reason* consts, reasonCodeKeys has %d entries — count mismatch even if every individual code matched above", len(producer), len(reasonCodeKeys))
+		t.Errorf("package watcher declares %d exported Reason* consts, reasonCodeKeys has %d entries — count mismatch even if every individual code matched above", len(producer), len(reasonCodeKeys))
 	}
 }
 

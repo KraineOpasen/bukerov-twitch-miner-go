@@ -837,7 +837,16 @@ func TestS5_3DPBAFiveControlsAbsentNoButtonsNoMenus(t *testing.T) {
 	if !strings.Contains(card, `href="/help/troubleshooting"`) {
 		t.Error("C18 must link to the now-live /help/troubleshooting route")
 	}
-	if !strings.Contains(card, enTR(t)("queue.dpba.troubleshooting_link")) {
-		t.Error("C18 troubleshooting link must carry its localized link text")
+	// Pinned against an independent literal (not re-derived via enTR from the
+	// same key under test) — Q3 MAJOR-1: the old copy ("Learn about slot
+	// reason codes") described reason-code documentation, which is
+	// /help/glossary's job, while this link's href is fixed at
+	// /help/troubleshooting (Stage-4 C18) - a page about queue/slot state
+	// problems (Unknown/Stale/Degraded/Failure), not a reason-code glossary.
+	if !strings.Contains(card, "Troubleshoot queue and slot issues") {
+		t.Error("C18 troubleshooting link must carry its corrected localized link text describing troubleshooting, not reason codes")
+	}
+	if strings.Contains(strings.ToLower(card), "reason code") {
+		t.Error("C18 troubleshooting link text must not describe reason-code documentation - it links to /help/troubleshooting, not the reason-code glossary")
 	}
 }
