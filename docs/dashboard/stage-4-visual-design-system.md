@@ -621,15 +621,34 @@ for real (fixture-backed `httptest` server + Playwright, all 30 canonical routes
   floor regardless of size). Same treatment already applied to `--text-faint` in the prior pass, for the same
   reason: no palette value between the failing primitive and `--text-muted` clears AA against every consumer.
   Clears 6.23:1 dark / 5.66:1 light.
-- **The startup-overlay heading (`#status-title`) and its sibling verification-URI link** — the only two
+- **The startup-overlay heading (`#status-title`) and its sibling verification-URI link** — the two
   `text-interactive` consumers sitting directly on the overlay's `--surface-card` box with no background of
   their own — move to `--interactive-muted` (an existing "secondary-weight accent" token already used for
   link/hover roles elsewhere). The old pairing measured 4.43:1 dark against `--surface-card`, failing AA; the
   new one clears 6.23:1 dark / 5.38:1 light. (Other `text-interactive` instances inside the same overlay sit on
-  their own `bg-surface-page` box and already cleared AA — left untouched.)
+  their own `bg-surface-page` box and already cleared AA — left untouched.) An independent Spec review of this
+  pass then caught a third, structurally-identical consumer this addendum's first draft missed: the
+  non-blocking `#lifecycle-auth-banner`'s own verification-URI link (`updateAuthBanner`, shown at
+  generation>1), which sits on a translucent `color-mix(..., var(--status-warning) 12%, transparent)` fill
+  composited over the page background rather than `--surface-card` — a different pairing the surface-card
+  measurement never covered. A real-browser pixel sample of the actual composited fill measured the same
+  purple text at 3.95:1 dark against it — also failing AA. `--interactive-muted` was tried there first, since
+  the markup is nearly identical to the overlay's link; a second pixel sample caught that it fixes dark
+  (5.55:1) but regresses light (5.10:1, already passing → 4.09:1, now failing) — its light value is *lighter*
+  than plain `--interactive`, which helps against a dark fill and actively hurts against this lighter,
+  warm-tinted one. `--link-text` (dark: a separate, even-lighter primitive; light: identical to plain
+  `--interactive`) clears both without that trade-off — 7.62:1 dark / 5.10:1 light, light unchanged from the
+  original passing value — and is arguably the more semantically correct token for an actual hyperlink besides.
+  Two structurally-similar elements needing two different token choices, because they sit on two genuinely
+  different backgrounds: a reminder that even a fix that looks obviously identical still needs its own
+  measurement, not just pattern-matching against a fix that already worked elsewhere.
 - **`contentinfo` landmark**: `base.html` never had one, despite §9 requiring it since Stage 4. A `<footer>`
   now sits as a sibling of `.app-shell` (not nested inside `<main>`/`<aside>`/`<nav>`, so it keeps its implicit
-  landmark role without a redundant explicit `role` attribute), present on all 30 routes.
+  landmark role without a redundant explicit `role` attribute), present on all 30 routes. Left deliberately
+  empty of visible text: an independent Standards review of this pass's first draft correctly flagged that
+  restating the brand name and version here duplicated the sidebar footer's own content verbatim, visible on
+  screen simultaneously at normal desktop width — the landmark's job is structural, not a second copy of
+  existing chrome.
 - **Unscoped `<th>` cells**: `partials/discovery_list.html` (5 cells) and `partials/drops_past.html` (3 cells)
   now carry `scope="col"`, matching every other table in the app.
 - **Bonus, same-file fix**: `discovery_list.html`'s table had no `overflow-x` wrapper, so its content was
@@ -653,8 +672,20 @@ effective background is the card's own fill and the actual rendered contrast is 
 compliant. No code changed for this item; introducing a color override here would have been an unrequested,
 unjustified visual change chasing a non-bug.
 
-**Independent review (Standards + Spec, two parallel sub-agents) of this corrective pass**: zero BLOCKER/MAJOR
-on either axis.
+**Independent review (Standards + Spec, two parallel sub-agents) of this corrective pass.** Zero hard
+standards violations; zero missing/wrongly-implemented spec requirements. Both axes surfaced real, since-fixed
+issues rather than rubber-stamping: Standards caught the footer-content duplication and a `5.38`/`5.37`
+inconsistency between this addendum and `input.css`'s own comment (now `5.38` in both, matching the live
+measurement) and an indentation nit in `discovery_list.html` now matching `drops_past.html`'s pattern; Spec
+independently caught the `#lifecycle-auth-banner` verification-link gap described above. Spec also flagged the
+`discovery_list.html` `overflow-x-auto` wrapper as beyond the four named WCAG items and two named a11y
+items — correctly: it's a fix for a bug this pass's own regression sweep found, not one of the six completed
+audit verdicts this pass was scoped to close, kept because it lives in an allowed-path file, mirrors
+`drops_past.html`'s own existing pattern, and "desktop/mobile 30/30 still PASS" is itself part of this pass's
+acceptance bar. Acting on the `#lifecycle-auth-banner` finding then took two attempts of its own — the first
+fix (reusing `--interactive-muted`, by analogy to the overlay's identical-looking link) measured clean on dark
+but was caught regressing light before it shipped, exactly by re-measuring rather than trusting the analogy;
+see the corrected token choice above.
 
 ## 17. Verification debts and open owner decisions
 

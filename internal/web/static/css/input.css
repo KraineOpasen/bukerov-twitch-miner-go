@@ -208,7 +208,7 @@
   --interactive-muted: var(--prim-night-purple-400); /* S5-10 addendum: secondary-weight accent (link/hover states, active-data emphasis) */
   --search-highlight-bg: var(--prim-night-purple-600); /* S5-10 addendum: search-match <mark> background */
   --control-accent: var(--prim-night-purple-600); /* S5-10 addendum: native checkbox/radio accent-color — same legacy hue as search-highlight-bg, distinct role */
-  --interactive-solid: var(--prim-night-purple-700); /* S5-10a corrective pass: white text-on-accent measured 4.33:1 against the original purple-600 fill (fails AA); purple-700 (already carried by the hover pair below) clears 5.37:1. Zero new hue. */
+  --interactive-solid: var(--prim-night-purple-700); /* S5-10a corrective pass: white text-on-accent measured 4.33:1 against the original purple-600 fill (fails AA); purple-700 (already carried by the hover pair below) clears 5.38:1 (measured live, see design-doc addendum). Zero new hue. */
   --interactive-solid-hover: color-mix(in srgb, var(--prim-night-purple-700) 82%, black); /* darkened further than the new resting fill so hover stays visually distinct; still clears AA (darkening only increases contrast against white) */
 
   /* status */

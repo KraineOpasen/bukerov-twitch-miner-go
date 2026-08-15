@@ -142,9 +142,12 @@
         </div>
     </div>
 
-    <footer class="app-footer px-4 py-3 mt-2 border-t border-border-default text-xs text-text-muted text-center">
-        Twitch Drops Miner{{if .Version}} · <span class="num">{{.Version}}</span>{{end}}
-    </footer>
+    <!-- Structural contentinfo landmark only (S5-10a): brand name, version and
+         username are already surfaced once each, in the sidebar footer above —
+         repeating them here would just duplicate that content on every
+         breakpoint where both are visible at once, rather than add anything a
+         screen-reader user doesn't already have. -->
+    <footer class="app-footer py-3 mt-2 border-t border-border-default"></footer>
 
     {{template "c17.toast_stack" .}}
 
@@ -434,7 +437,7 @@
                 authBanner.classList.remove('hidden');
                 if (status.auth) {
                     authBanner.innerHTML = `
-                        <p>${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-interactive font-medium">${status.auth.verificationUri}</a></p>
+                        <p>${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-link-text font-medium">${status.auth.verificationUri}</a></p>
                         <p>${t('js.overlay.enter_code')}</p>
                         <div class="num text-xl font-bold text-interactive bg-surface-page px-4 py-2 rounded-lg my-2 tracking-widest select-all">${status.auth.userCode}</div>
                         <p class="text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>

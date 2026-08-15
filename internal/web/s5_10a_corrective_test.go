@@ -75,12 +75,28 @@ func TestS5_10aTextPlaceholderClearsAABothThemes(t *testing.T) {
 
 // TestS5_10aStatusOverlayUsesAASafeAccentDark guards the dark-theme fix for
 // text-interactive (--interactive) over --surface-card, previously 4.43:1 —
-// the startup-overlay heading (#status-title) and its sibling verification-
+// the startup-overlay heading (#status-title) and its sibling verification
 // link both sit directly on the overlay's --surface-card box with no own
 // background, so both shared the identical failing pairing and both move to
 // --interactive-muted (an existing "secondary-weight accent" token, already
 // used elsewhere for link/hover roles), which clears 6.23:1 dark / 5.38:1
 // light.
+//
+// A second, structurally similar verification-URI link lives in the
+// non-blocking #lifecycle-auth-banner (updateAuthBanner, shown at
+// generation>1) — but its background is a DIFFERENT, translucent
+// status-warning tint composited over the page background, not
+// --surface-card. --interactive-muted was tried there first since the
+// markup looks identical; a real-browser pixel sample of the actual
+// composited fill caught that it does fix dark (3.95:1 -> 5.55:1) but
+// REGRESSES light (5.10:1, already passing -> 4.09:1, now failing) —
+// --interactive-muted's light value is lighter than plain --interactive's,
+// which helps against a dark fill and hurts against a light one. --link-text
+// (dark: a separate, even-lighter primitive; light: identical to plain
+// --interactive) clears both without that trade-off: 7.62:1 dark / 5.10:1
+// light (light unchanged from the original passing value). Different
+// backgrounds genuinely need different tokens here — same markup shape does
+// not imply the same fix.
 func TestS5_10aStatusOverlayUsesAASafeAccentDark(t *testing.T) {
 	base := readEmbeddedTemplate(t, "templates/base.html")
 
@@ -89,6 +105,12 @@ func TestS5_10aStatusOverlayUsesAASafeAccentDark(t *testing.T) {
 	}
 	if !strings.Contains(base, `target="_blank" class="text-interactive-muted font-medium">${status.auth.verificationUri}`) {
 		t.Error("the status-overlay verification-URI link shares status-title's exact failing pairing (same surface-card box, no own background) and must get the same fix")
+	}
+	if !strings.Contains(base, `target="_blank" class="text-link-text font-medium">${status.auth.verificationUri}`) {
+		t.Error("the lifecycle-auth-banner verification-URI link must use text-link-text — text-interactive-muted passes dark (5.55:1) but fails light (4.09:1) against this element's actual composited background; text-link-text clears both (7.62:1 / 5.10:1)")
+	}
+	if strings.Contains(base, `class="text-interactive font-medium">${status.auth.verificationUri}`) {
+		t.Error("a verification-URI link still uses the AA-failing plain text-interactive class")
 	}
 }
 
@@ -117,6 +139,15 @@ func TestS5_10aContentinfoLandmarkPresent(t *testing.T) {
 	mainCloseIdx := strings.LastIndex(base[:shellCloseIdx], "</main>")
 	if mainCloseIdx == -1 || footerIdx < mainCloseIdx {
 		t.Error("the <footer> must appear after </main> closes, not nested inside it")
+	}
+
+	footerCloseIdx := strings.Index(base[footerIdx:], "</footer>")
+	if footerCloseIdx == -1 {
+		t.Fatal("<footer> is never closed")
+	}
+	footerContent := base[footerIdx : footerIdx+footerCloseIdx+len("</footer>")]
+	if strings.Contains(footerContent, "Twitch Drops Miner") {
+		t.Error("the new landmark footer must not repeat the sidebar footer's brand name — the sidebar already shows it (and, at normal desktop width, both would be visible on screen at once)")
 	}
 }
 
