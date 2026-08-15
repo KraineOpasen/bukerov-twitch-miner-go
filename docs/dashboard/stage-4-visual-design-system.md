@@ -594,9 +594,10 @@ semantic equivalent in §4's token tables: each requires a new **role-based** se
 expansion. Every addition preserves its retired alias's exact primitive value (zero rendered-pixel change) and
 introduces **zero new hues**. This is standing authorization, not a one-time exception — S5-10 owns the final
 migration and retirement pass end-to-end, including any single-consumer holdout the census surfaces only after
-an earlier pass believed it was done (e.g. `--text-faint`/`--text-placeholder`/`--text-caution`/
-`--interactive-muted`/`--search-highlight-bg`/`--control-accent` for the checkbox-accent/search-highlight/
-caution-text/placeholder-glyph roles; `--surface-control-muted` for the muted-control-surface role shared by
+an earlier pass believed it was done (e.g., respectively, `--text-faint`/`--text-placeholder`/`--text-caution`/
+`--interactive-muted`/`--search-highlight-bg`/`--control-accent` for the captions-hints/placeholder-glyph/
+caution-text/secondary-accent/search-highlight/checkbox-accent roles; `--surface-control-muted` for the
+muted-control-surface role shared by
 streamer.html's search-clear button and input.css's own progress-track/status-pill component fills). Where
 exact legacy-value preservation and §9/§18's AA acceptance conflict — a legacy value that never cleared AA in
 the first place — §9/§18 governs: S5-10 is the final AA pass, not merely a renaming pass, so a documented,

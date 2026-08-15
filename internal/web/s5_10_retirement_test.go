@@ -125,7 +125,7 @@ var s5_10DeletedAliases = []string{
 }
 
 // TestS5_10DeletedLegacyAliasesDoNotReturn guards input.css itself: none of
-// the 49 alias definitions S5-10 deleted may be redefined — including
+// the 50 alias definitions S5-10 deleted may be redefined — including
 // neutral-700 (both the --scale-neutral-700/--color-neutral-700 pair and
 // the internal input.css @utility rules that used to consume the bare
 // Tailwind neutral-700 class), the final holdout retired by the S5-10
