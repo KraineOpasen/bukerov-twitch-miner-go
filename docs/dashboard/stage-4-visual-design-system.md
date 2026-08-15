@@ -588,6 +588,20 @@ Two deep modules, then route-by-route migration; the dashboard is fully function
 
 One PR-sized change per slice, each under its own task contract; per-slice review checklist = §18 scoped to touched routes.
 
+**S5-10 semantic-vocabulary addendum (owner-approved).** S5-10's final legacy-alias census — re-derived
+independently rather than trusted from an earlier count — found single-consumer holdouts with no existing
+semantic equivalent in §4's token tables: each requires a new **role-based** semantic token, not a palette
+expansion. Every addition preserves its retired alias's exact primitive value (zero rendered-pixel change) and
+introduces **zero new hues**. This is standing authorization, not a one-time exception — S5-10 owns the final
+migration and retirement pass end-to-end, including any single-consumer holdout the census surfaces only after
+an earlier pass believed it was done (e.g. `--text-faint`/`--text-placeholder`/`--text-caution`/
+`--interactive-muted`/`--search-highlight-bg`/`--control-accent` for the checkbox-accent/search-highlight/
+caution-text/placeholder-glyph roles; `--surface-control-muted` for the muted-control-surface role shared by
+streamer.html's search-clear button and input.css's own progress-track/status-pill component fills). Where
+exact legacy-value preservation and §9/§18's AA acceptance conflict — a legacy value that never cleared AA in
+the first place — §9/§18 governs: S5-10 is the final AA pass, not merely a renaming pass, so a documented,
+role-correct value change (still zero new hues) is in scope when needed to clear 4.5:1 normal-text contrast.
+
 ## 17. Verification debts and open owner decisions
 
 - **Debt 1**: tablet/mobile responsive behavior is *target*, not confirmed parity — verify via `webapp-testing` in S5-10 (and per-slice for transformed tables).

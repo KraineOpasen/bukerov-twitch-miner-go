@@ -64,40 +64,21 @@ func s5_10AllTemplateFiles(t *testing.T) []string {
 	return names
 }
 
-// s5_10LegacyAliasExceptions are the only (path, exact match) pairs allowed
-// to survive the sweep: consumers the S5-10 census found with no
-// role-correct semantic token in the committed vocabulary and no owner
-// decision to add one. Exactly one today — see the S5-10 PR description and
-// the surviving --scale-neutral-700 definition in input.css.
-var s5_10LegacyAliasExceptions = map[string][]string{
-	"templates/streamer.html": {"bg-neutral-700"},
-}
-
 // TestS5_10ZeroLegacyAliasReferencesInTemplates pins §15/§18: migrated and
 // new templates take semantic utilities exclusively. Every legacy alias
-// reference found by the S5-10 census (513+ across 39 files, several only
+// reference found by the S5-10 census (575+ across 39 files, several only
 // visible once the property-prefix assumption was dropped — see
-// s5_10LegacyAliasRe's doc comment) must be gone, except the one documented,
-// owner-visible exception.
+// s5_10LegacyAliasRe's doc comment) must be gone — literal zero, no
+// exceptions. The one holdout an earlier pass left (streamer.html's
+// bg-neutral-700 search-clear button) is migrated to the
+// --surface-control-muted semantic token (S5-10 corrective pass); there is
+// no longer a whitelist for this test to consult.
 func TestS5_10ZeroLegacyAliasReferencesInTemplates(t *testing.T) {
 	for _, name := range s5_10AllTemplateFiles(t) {
 		src := s5_10TemplateCommentRe.ReplaceAllString(readEmbeddedTemplate(t, name), "")
 		matches := s5_10LegacyAliasRe.FindAllString(src, -1)
-		if len(matches) == 0 {
-			continue
-		}
-		allowed := s5_10LegacyAliasExceptions[name]
 		for _, m := range matches {
-			ok := false
-			for _, a := range allowed {
-				if strings.Contains(a, m) {
-					ok = true
-					break
-				}
-			}
-			if !ok {
-				t.Errorf("%s: legacy alias reference %q survives S5-10 retirement (want semantic token, or a documented exception)", name, m)
-			}
+			t.Errorf("%s: legacy alias reference %q survives S5-10 retirement (want a semantic token — zero exceptions remain)", name, m)
 		}
 	}
 }
@@ -122,8 +103,9 @@ func TestS5_10ZeroPrimitiveReferencesInTemplates(t *testing.T) {
 // catch.
 var s5_10DeletedAliases = []string{
 	"--scale-neutral-950", "--scale-neutral-900", "--scale-neutral-800",
-	"--scale-neutral-600", "--scale-neutral-500", "--scale-neutral-400",
-	"--scale-neutral-300", "--scale-neutral-200", "--scale-neutral-100",
+	"--scale-neutral-700", "--scale-neutral-600", "--scale-neutral-500",
+	"--scale-neutral-400", "--scale-neutral-300", "--scale-neutral-200",
+	"--scale-neutral-100",
 	"--scale-purple-700", "--scale-purple-600", "--scale-purple-500",
 	"--scale-purple-400", "--scale-purple-300",
 	"--scale-amber-700", "--scale-amber-600", "--scale-amber-500",
@@ -131,8 +113,9 @@ var s5_10DeletedAliases = []string{
 	"--scale-emerald-600", "--scale-emerald-500",
 	"--scale-red-700", "--scale-red-600", "--scale-red-500",
 	"--color-neutral-950", "--color-neutral-900", "--color-neutral-800",
-	"--color-neutral-600", "--color-neutral-500", "--color-neutral-400",
-	"--color-neutral-300", "--color-neutral-200", "--color-neutral-100",
+	"--color-neutral-700", "--color-neutral-600", "--color-neutral-500",
+	"--color-neutral-400", "--color-neutral-300", "--color-neutral-200",
+	"--color-neutral-100",
 	"--color-purple-700", "--color-purple-600", "--color-purple-500",
 	"--color-purple-400", "--color-purple-300",
 	"--color-amber-700", "--color-amber-600", "--color-amber-500",
@@ -142,10 +125,12 @@ var s5_10DeletedAliases = []string{
 }
 
 // TestS5_10DeletedLegacyAliasesDoNotReturn guards input.css itself: none of
-// the 47 alias definitions S5-10 deleted may be redefined, and the one
-// deliberately-kept exception (neutral-700, see
-// s5_10LegacyAliasExceptions) must still be present — proving this test
-// distinguishes "reintroduced" from "never should have been deleted".
+// the 49 alias definitions S5-10 deleted may be redefined — including
+// neutral-700 (both the --scale-neutral-700/--color-neutral-700 pair and
+// the internal input.css @utility rules that used to consume the bare
+// Tailwind neutral-700 class), the final holdout retired by the S5-10
+// corrective pass. There is no longer a deliberately-kept exception: every
+// legacy alias this slice ever defined is gone.
 func TestS5_10DeletedLegacyAliasesDoNotReturn(t *testing.T) {
 	css, err := staticFS.ReadFile("static/css/input.css")
 	if err != nil {
@@ -155,11 +140,6 @@ func TestS5_10DeletedLegacyAliasesDoNotReturn(t *testing.T) {
 	for _, name := range s5_10DeletedAliases {
 		if strings.Contains(src, name+":") {
 			t.Errorf("input.css: deleted legacy alias %q was reintroduced", name)
-		}
-	}
-	for _, kept := range []string{"--scale-neutral-700:", "--color-neutral-700:"} {
-		if !strings.Contains(src, kept) {
-			t.Errorf("input.css: %q must survive — streamer.html's flagged bg-neutral-700 still depends on it", kept)
 		}
 	}
 }

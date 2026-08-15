@@ -35,13 +35,13 @@
    Tailwind mapping — `@theme inline` re-points sidebar/online/offline/
      streamer/event/success/danger/text/text-dim plus the surface-, text-,
      border-, status-, interactive-, chart- prefixed semantic names at the
-     semantic layer. S5-10 retired the neutral-/purple-/amber-/green-/
-     emerald-/red-numbered legacy aliases this originally covered, once a
-     grep proved templates carried zero remaining references to them (§15)
-     — templates now name semantic roles directly (`bg-surface-card`,
-     `text-text-muted`, …). `--color-neutral-700` alone survives, kept for
-     a single flagged legacy consumer (see the scale-indirection comment
-     below). Fonts stay in a plain (non-themed) `@theme` block.
+     semantic layer. S5-10 retired every neutral-/purple-/amber-/green-/
+     emerald-/red-numbered legacy alias, including the final neutral-700
+     holdout (S5-10 corrective pass, §15/§18), once a grep proved templates
+     carried zero remaining references to any of them — templates now name
+     semantic roles directly (`bg-surface-card`, `text-text-muted`,
+     `bg-surface-control-muted`, …). Fonts stay in a plain (non-themed)
+     `@theme` block.
    ===================================================================== */
 
 /* ---------- Layer A: primitives ---------- */
@@ -179,6 +179,7 @@
   --surface-card: var(--prim-night-card);
   --surface-elevated: var(--prim-night-card);
   --surface-input: var(--prim-night-page);
+  --surface-control-muted: var(--border-default); /* S5-10 corrective addendum: muted secondary control surface (streamer.html search-clear button) — the final single-consumer holdout the retirement census found with no pre-existing semantic role; preserves the exact value the retired neutral-700 alias already carried (--border-default), zero rendered-pixel change, zero new hue */
 
   /* text */
   --text-primary: var(--prim-night-text-100);
@@ -189,7 +190,7 @@
      for legacy consumers with no pre-existing semantic equivalent. Each
      resolves to the exact primitive its legacy alias already carried — zero
      new hues, zero rendered-value change. */
-  --text-faint: var(--prim-night-500);      /* captions/timestamps/hints below --text-muted's weight */
+  --text-faint: var(--text-muted); /* S5-10 corrective pass: aliased to --text-muted for WCAG AA — the original value (--prim-night-500) measured 2.9:1 (vs card) / 3.23:1 (vs page), failing normal-text AA's 4.5:1 floor; no existing palette value between --prim-night-500 and --prim-night-text-400 clears AA against every surface token, so the smallest role-correct fix reuses --text-muted's value rather than inventing a new gray. Role note: no longer visually distinct from --text-muted (was "below --text-muted's weight") — see docs/dashboard/stage-4-visual-design-system.md's S5-10 addendum. */
   --text-placeholder: var(--prim-night-600); /* fallback glyph in empty art boxes (campaign/game art) */
   --text-caution: var(--prim-night-amber-500); /* muted inline caution note (stale/partial/restart/truncation) — deliberately distinct from the brighter --status-warning */
   --text-heading: var(--prim-night-200); /* S5-10 addendum: card-title emphasis text (internal-CSS-only consumer, e.g. .s-title) */
@@ -283,14 +284,6 @@
   --rw-net: var(--prim-night-violet);
   --rw-disk: var(--prim-night-blue);
 
-  /* Tailwind scale indirection (see @theme inline below). S5-10 retirement:
-     every legacy alias except neutral-700 is grep-verified at zero template
-     references and deleted (§15). neutral-700 stays defined solely for
-     streamer.html:88's bg-neutral-700 (a button fill using the border tone,
-     not a border consumer) — flagged as an unresolved single consumer
-     rather than force-mapped; see the S5-10 PR description. */
-  --scale-neutral-700: var(--border-default);
-
   /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
   --surface-overlay: rgb(0 0 0 / .55);
   --surface-inset: var(--prim-night-950);
@@ -318,6 +311,7 @@
   --surface-card: var(--prim-day-card);
   --surface-elevated: var(--prim-day-card);
   --surface-input: var(--prim-day-page);
+  --surface-control-muted: var(--border-default); /* S5-10 corrective addendum — see dark-theme block */
 
   /* text */
   --text-primary: var(--prim-day-text-100);
@@ -329,7 +323,7 @@
      --prim-day-amber-500 primitive exists, so the legacy alias already
      resolved to --status-warning in light theme only); this preserves that
      exact pre-existing behavior rather than introducing a new value. */
-  --text-faint: var(--prim-day-500);
+  --text-faint: var(--text-muted); /* S5-10 corrective pass: WCAG AA fix — see dark-theme block (original --prim-day-500 measured 4.52:1 vs card / 4.09:1 vs page, failing against page background) */
   --text-placeholder: var(--prim-day-600);
   --text-caution: var(--status-warning);
   --text-heading: var(--prim-day-200); /* S5-10 addendum */
@@ -416,8 +410,6 @@
   --rw-net: var(--prim-day-watching);
   --rw-disk: var(--prim-day-blue);
 
-  --scale-neutral-700: var(--border-default); /* see dark-theme block: sole surviving legacy alias, streamer.html:88 */
-
   /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
   --surface-overlay: rgb(0 0 0 / .35);
   --surface-inset: var(--prim-day-950);
@@ -489,10 +481,8 @@
    every `data-theme` change — no Tailwind rebuild needed to re-theme. */
 @theme inline {
   /* S5-10 retirement: every legacy neutral-/purple-/amber-/green-/emerald-/
-     red- alias except neutral-700 deleted here (grep-verified zero template
-     references, §15). neutral-700 kept — see the dark-theme scale block. */
-  --color-neutral-700: var(--scale-neutral-700);
-
+     red- alias deleted here (grep-verified zero template references, §15),
+     including the final neutral-700 holdout (S5-10 corrective pass). */
   --color-sidebar: var(--surface-sidebar);
   --color-online: var(--focus-ring);
   --color-offline: var(--border-default);
@@ -509,6 +499,7 @@
   --color-surface-card: var(--surface-card);
   --color-surface-elevated: var(--surface-elevated);
   --color-surface-input: var(--surface-input);
+  --color-surface-control-muted: var(--surface-control-muted);
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
@@ -660,19 +651,19 @@
 }
 
 @utility btn-secondary {
-  @apply bg-neutral-800 border border-neutral-700 text-neutral-100 hover:border-purple-500 hover:text-purple-400 px-4 py-2 rounded-md font-medium transition-colors;
+  @apply bg-neutral-800 border border-border-default text-neutral-100 hover:border-purple-500 hover:text-purple-400 px-4 py-2 rounded-md font-medium transition-colors;
 }
 
 @utility card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6;
+  @apply bg-neutral-800 border border-border-default rounded-lg p-6;
 }
 
 @utility input-field {
-  @apply bg-neutral-900 border border-neutral-700 rounded-md px-3 py-2 text-neutral-100 focus:outline-none focus:border-purple-500;
+  @apply bg-neutral-900 border border-border-default rounded-md px-3 py-2 text-neutral-100 focus:outline-none focus:border-purple-500;
 }
 
 @utility section-title {
-  @apply text-xl font-semibold text-neutral-100 pb-2 mb-4 border-b border-neutral-700;
+  @apply text-xl font-semibold text-neutral-100 pb-2 mb-4 border-b border-border-default;
 }
 
 @utility subsection-title {
@@ -680,7 +671,7 @@
 }
 
 @utility setting-row {
-  @apply flex items-center justify-between py-3 border-b border-neutral-700 last:border-b-0;
+  @apply flex items-center justify-between py-3 border-b border-border-default last:border-b-0;
 }
 
 @utility setting-label {
@@ -696,7 +687,7 @@
 }
 
 @utility streamer-card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-purple-500 hover:-translate-y-0.5;
+  @apply bg-neutral-800 border border-border-default rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-purple-500 hover:-translate-y-0.5;
 }
 
 @utility streamer-card-live {
@@ -704,15 +695,15 @@
 }
 
 @utility stat-card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 text-center;
+  @apply bg-neutral-800 border border-border-default rounded-lg p-6 text-center;
 }
 
 @utility chart-container {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 mt-6;
+  @apply bg-neutral-800 border border-border-default rounded-lg p-6 mt-6;
 }
 
 @utility details-panel {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg overflow-hidden;
+  @apply bg-neutral-800 border border-border-default rounded-lg overflow-hidden;
 }
 
 @utility details-content {
@@ -736,7 +727,7 @@
 }
 
 @utility progress-track {
-  @apply h-2 w-full bg-neutral-700 rounded-full overflow-hidden;
+  @apply h-2 w-full bg-surface-control-muted rounded-full overflow-hidden;
 }
 
 @utility progress-fill {
@@ -752,7 +743,7 @@
 }
 
 @utility mini-progress-track {
-  @apply h-1 w-full bg-neutral-700 rounded-full overflow-hidden;
+  @apply h-1 w-full bg-surface-control-muted rounded-full overflow-hidden;
 }
 
 @utility status-pill {
@@ -764,11 +755,11 @@
 }
 
 @utility status-pill-claimed {
-  @apply bg-neutral-700 text-neutral-300;
+  @apply bg-surface-control-muted text-neutral-300;
 }
 
 @utility priority-item {
-  @apply flex items-center gap-3 p-3 bg-neutral-900 border border-neutral-700 rounded-md mb-2 cursor-grab;
+  @apply flex items-center gap-3 p-3 bg-neutral-900 border border-border-default rounded-md mb-2 cursor-grab;
 }
 
 @utility priority-item-dragging {
@@ -776,7 +767,7 @@
 }
 
 @utility streamer-item {
-  @apply bg-neutral-900 border border-neutral-700 rounded-lg mb-2 overflow-hidden;
+  @apply bg-neutral-900 border border-border-default rounded-lg mb-2 overflow-hidden;
 }
 
 @utility streamer-item-dragging {
@@ -788,7 +779,7 @@
 }
 
 @utility modal-dialog {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-0 w-[92vw] max-w-lg text-neutral-100 shadow-xl;
+  @apply bg-neutral-800 border border-border-default rounded-lg p-0 w-[92vw] max-w-lg text-neutral-100 shadow-xl;
 }
 
 /* Custom component styles that need selectors */
@@ -801,7 +792,7 @@
 }
 
 .details-panel[open] summary {
-  @apply border-b border-neutral-700;
+  @apply border-b border-border-default;
 }
 
 /* C6/C7/C8 — S5-6 settings category dirty-boundary sticky save bar and
