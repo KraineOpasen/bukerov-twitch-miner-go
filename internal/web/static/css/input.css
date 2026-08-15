@@ -191,7 +191,7 @@
      resolves to the exact primitive its legacy alias already carried — zero
      new hues, zero rendered-value change. */
   --text-faint: var(--text-muted); /* S5-10 corrective pass: aliased to --text-muted for WCAG AA — the original value (--prim-night-500) measured 2.9:1 (vs card) / 3.23:1 (vs page), failing normal-text AA's 4.5:1 floor; no existing palette value between --prim-night-500 and --prim-night-text-400 clears AA against every surface token, so the smallest role-correct fix reuses --text-muted's value rather than inventing a new gray. Role note: no longer visually distinct from --text-muted (was "below --text-muted's weight") — see docs/dashboard/stage-4-visual-design-system.md's S5-10 addendum. */
-  --text-placeholder: var(--prim-night-600); /* fallback glyph in empty art boxes (campaign/game art) */
+  --text-placeholder: var(--text-muted); /* S5-10a corrective pass: WCAG AA fix — the original --prim-night-600 measured 1.99:1 against --surface-page (fails both the 4.5:1 normal-text floor and the 3:1 large-text floor its text-2xl consumers would otherwise need, and a text-lg consumer needs the full 4.5:1 floor anyway); no existing palette value between --prim-night-600 and --text-muted's value clears AA against every actual consumer, so the smallest role-correct fix reuses --text-muted's value (6.23:1) rather than inventing a new gray — the same treatment already applied to --text-faint above. Fallback glyph in empty art boxes (campaign/game art). */
   --text-caution: var(--prim-night-amber-500); /* muted inline caution note (stale/partial/restart/truncation) — deliberately distinct from the brighter --status-warning */
   --text-heading: var(--prim-night-200); /* S5-10 addendum: card-title emphasis text (internal-CSS-only consumer, e.g. .s-title) */
 
@@ -208,8 +208,8 @@
   --interactive-muted: var(--prim-night-purple-400); /* S5-10 addendum: secondary-weight accent (link/hover states, active-data emphasis) */
   --search-highlight-bg: var(--prim-night-purple-600); /* S5-10 addendum: search-match <mark> background */
   --control-accent: var(--prim-night-purple-600); /* S5-10 addendum: native checkbox/radio accent-color — same legacy hue as search-highlight-bg, distinct role */
-  --interactive-solid: var(--prim-night-purple-600); /* S5-10 addendum: solid active/pressed button fill (tab is-active, primary CTA) — third role sharing this hue */
-  --interactive-solid-hover: var(--prim-night-purple-700); /* S5-10 addendum: hover-darken pair for --interactive-solid */
+  --interactive-solid: var(--prim-night-purple-700); /* S5-10a corrective pass: white text-on-accent measured 4.33:1 against the original purple-600 fill (fails AA); purple-700 (already carried by the hover pair below) clears 5.37:1. Zero new hue. */
+  --interactive-solid-hover: color-mix(in srgb, var(--prim-night-purple-700) 82%, black); /* darkened further than the new resting fill so hover stays visually distinct; still clears AA (darkening only increases contrast against white) */
 
   /* status */
   --status-success: var(--prim-night-status-success);
@@ -324,7 +324,7 @@
      resolved to --status-warning in light theme only); this preserves that
      exact pre-existing behavior rather than introducing a new value. */
   --text-faint: var(--text-muted); /* S5-10 corrective pass: WCAG AA fix — see dark-theme block (original --prim-day-500 measured 4.52:1 vs card / 4.09:1 vs page, failing against page background) */
-  --text-placeholder: var(--prim-day-600);
+  --text-placeholder: var(--text-muted); /* S5-10a corrective pass: WCAG AA fix — see dark-theme block (original --prim-day-600 measured 2.98:1 against --surface-page, failing both thresholds a real consumer needs); clears 5.66:1 */
   --text-caution: var(--status-warning);
   --text-heading: var(--prim-day-200); /* S5-10 addendum */
 

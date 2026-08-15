@@ -9,14 +9,15 @@
 </div>
 {{else}}
 <div class="card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
     <table class="w-full text-sm">
         <thead>
             <tr class="text-left text-xs text-text-muted border-b border-border-default">
-                <th class="px-4 py-3 font-medium">{{ t "drops.discovery.col.channel" }}</th>
-                <th class="px-4 py-3 font-medium">{{ t "drops.discovery.col.game" }}</th>
-                <th class="px-4 py-3 font-medium text-right">{{ t "drops.discovery.col.viewers" }}</th>
-                <th class="px-4 py-3 font-medium">{{ t "drops.discovery.col.drops" }}</th>
-                <th class="px-4 py-3 font-medium text-right">{{ t "drops.discovery.col.status" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.discovery.col.channel" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.discovery.col.game" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium text-right">{{ t "drops.discovery.col.viewers" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium">{{ t "drops.discovery.col.drops" }}</th>
+                <th scope="col" class="px-4 py-3 font-medium text-right">{{ t "drops.discovery.col.status" }}</th>
             </tr>
         </thead>
         <tbody>
@@ -44,6 +45,7 @@
             {{end}}
         </tbody>
     </table>
+    </div>
 </div>
 {{end}}
 {{end}}

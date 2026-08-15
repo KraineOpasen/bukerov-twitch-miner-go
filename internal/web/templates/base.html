@@ -69,7 +69,7 @@
 
     <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-surface-page/95 flex items-center justify-center z-[1000]">
         <div class="bg-surface-card border border-border-default rounded-xl p-8 max-w-md w-[90%] text-center">
-            <h2 id="status-title" class="text-interactive text-xl font-semibold mb-4">{{ t "js.overlay.initializing" }}</h2>
+            <h2 id="status-title" class="text-interactive-muted text-xl font-semibold mb-4">{{ t "js.overlay.initializing" }}</h2>
             <div class="w-12 h-12 border-4 border-border-default border-t-interactive rounded-full animate-spin mx-auto my-6" id="status-spinner"></div>
             <div id="status-content"></div>
             <p class="text-text-muted mt-2 text-sm" id="status-message"></p>
@@ -141,6 +141,10 @@
         </main>
         </div>
     </div>
+
+    <footer class="app-footer px-4 py-3 mt-2 border-t border-border-default text-xs text-text-muted text-center">
+        Twitch Drops Miner{{if .Version}} · <span class="num">{{.Version}}</span>{{end}}
+    </footer>
 
     {{template "c17.toast_stack" .}}
 
@@ -500,7 +504,7 @@
                         spinner.style.display = 'none';
                         if (status.auth) {
                             content.innerHTML = `
-                                <p class="text-text-muted">${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-interactive font-medium">${status.auth.verificationUri}</a></p>
+                                <p class="text-text-muted">${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-interactive-muted font-medium">${status.auth.verificationUri}</a></p>
                                 <p class="text-text-muted mt-2">${t('js.overlay.enter_code')}</p>
                                 <div class="num text-3xl font-bold text-interactive bg-surface-page px-6 py-4 rounded-lg my-4 tracking-widest select-all">${status.auth.userCode}</div>
                                 <p class="text-text-muted text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>

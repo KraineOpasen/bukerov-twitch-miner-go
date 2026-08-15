@@ -603,6 +603,59 @@ exact legacy-value preservation and §9/§18's AA acceptance conflict — a lega
 the first place — §9/§18 governs: S5-10 is the final AA pass, not merely a renaming pass, so a documented,
 role-correct value change (still zero new hues) is in scope when needed to clear 4.5:1 normal-text contrast.
 
+**S5-10a final corrective addendum (owner-approved).** The §16 slice table's own S5-10 scope note bundled
+"delete legacy aliases + `dashboard.html`" together with the full §9/§18 AA/keyboard/RU-EN audit; the first S5-10
+pass completed only the deletion half and explicitly deferred the audit. A follow-up pass then ran that audit
+for real (fixture-backed `httptest` server + Playwright, all 30 canonical routes, both themes, both languages,
+1440px + 375px) and found four genuine gaps, closed here:
+
+- **`--interactive-solid` (dark)** now resolves through `--prim-night-purple-700` (the existing hover primitive,
+  zero new hue) instead of `--prim-night-purple-600` — white text-on-accent over the old fill measured 4.33:1
+  against every consumer sharing this token (`.lang-btn.is-active`, `.theme-btn[aria-pressed]`,
+  `.stat-range-btn.is-active`, `.roi-period-btn.is-active`, `.btn-bet`), failing AA. Clears 5.38:1. The hover
+  pair (`--interactive-solid-hover`) is now derived via `color-mix(in srgb, var(--prim-night-purple-700) 82%,
+  black)` rather than reusing the same primitive outright, so resting and hover stay visually distinct.
+- **`--text-placeholder`** (both themes) now aliases `--text-muted` — the original primitives measured 1.99:1
+  dark / 2.98:1 light against `--surface-page`, failing AA for every actual consumer (the empty-art fallback
+  glyph renders at both `text-2xl`, needing the 3:1 large-text floor, and `text-lg`, which needs the full 4.5:1
+  floor regardless of size). Same treatment already applied to `--text-faint` in the prior pass, for the same
+  reason: no palette value between the failing primitive and `--text-muted` clears AA against every consumer.
+  Clears 6.23:1 dark / 5.66:1 light.
+- **The startup-overlay heading (`#status-title`) and its sibling verification-URI link** — the only two
+  `text-interactive` consumers sitting directly on the overlay's `--surface-card` box with no background of
+  their own — move to `--interactive-muted` (an existing "secondary-weight accent" token already used for
+  link/hover roles elsewhere). The old pairing measured 4.43:1 dark against `--surface-card`, failing AA; the
+  new one clears 6.23:1 dark / 5.38:1 light. (Other `text-interactive` instances inside the same overlay sit on
+  their own `bg-surface-page` box and already cleared AA — left untouched.)
+- **`contentinfo` landmark**: `base.html` never had one, despite §9 requiring it since Stage 4. A `<footer>`
+  now sits as a sibling of `.app-shell` (not nested inside `<main>`/`<aside>`/`<nav>`, so it keeps its implicit
+  landmark role without a redundant explicit `role` attribute), present on all 30 routes.
+- **Unscoped `<th>` cells**: `partials/discovery_list.html` (5 cells) and `partials/drops_past.html` (3 cells)
+  now carry `scope="col"`, matching every other table in the app.
+- **Bonus, same-file fix**: `discovery_list.html`'s table had no `overflow-x` wrapper, so its content was
+  silently clipped (not scrollable) by the card's own `overflow-hidden` on narrow viewports. Wrapped in
+  `overflow-x-auto`, matching the pattern `drops_past.html`'s own nested table already uses.
+- **Reduced motion**: the prior pass's live check was inconclusive (the animated elements it tried weren't
+  present in the fixture render at check time). Re-verified live against a real server with elements
+  deterministically kept in the DOM (the sidebar skeleton's `hx-get` intercepted rather than raced): every
+  checked element (`#now-watching .skeleton`, `.lang-btn`, `.theme-btn`, `.app-sidebar`) collapses
+  `animation`/`transition` duration to `0.01ms` under `prefers-reduced-motion: reduce` and shows its real
+  duration under no preference — conclusive PASS.
+
+**One reported "failure" turned out to be a measurement-tool bug, not a real gap — left unchanged, not
+"fixed".** The prior pass's own audit reported `/drops/current`'s SAFE policy-status pill (green text,
+`handlers_policy.go:49`, background set to `transparent` inline) at 2.06:1 light, tracing the effective
+background past the campaign card's real, opaque background (an `oklch()`-declared Tailwind default) to
+`<body>`'s `--surface-page` — the exact class of bug the same pass already caught and excluded once, for a
+`bg-purple-600` button on `/events`. Re-measured with a color resolver that goes through the browser's own
+canvas color parser (so `oklch()`/`color-mix()` values can never be mis-treated as transparent), the real
+effective background is the card's own fill and the actual rendered contrast is 6.64:1 in both themes — already
+compliant. No code changed for this item; introducing a color override here would have been an unrequested,
+unjustified visual change chasing a non-bug.
+
+**Independent review (Standards + Spec, two parallel sub-agents) of this corrective pass**: zero BLOCKER/MAJOR
+on either axis.
+
 ## 17. Verification debts and open owner decisions
 
 - **Debt 1**: tablet/mobile responsive behavior is *target*, not confirmed parity — verify via `webapp-testing` in S5-10 (and per-slice for transformed tables).
