@@ -2676,13 +2676,16 @@ def host_os_details(repo_root):
 # local patches, and the original v3 change-set left that stale five-level list
 # standing in all three skills policies. Prose alone could not stop that
 # regressing, so it is checked here.
-AUTHORITY_CHAIN_DOCS = (
-    "CLAUDE.md",
-    "docs/agents/agent-orchestration.md",
-    "docs/agents/mattpocock-skills-policy.md",
-    "docs/agents/anthropic-skills-policy.md",
-    "docs/agents/project-skills-policy.md",
-    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+# Documents that must all restate the SAME four-level authority chain. Derived from the provider
+# registry rather than hand-listed: every vendored provider's policy states the chain for the skills
+# it installs, so a provider added to MANIFESTS without its policy being checked would be a silent
+# hole -- which is exactly what happened when four providers were added and this tuple was left at
+# its original two. Deriving it means the hole cannot reopen.
+AUTHORITY_CHAIN_DOCS = tuple(
+    ["CLAUDE.md", "docs/agents/agent-orchestration.md"]
+    + sorted(os.path.relpath(entry["policy"], REPO_ROOT) for entry in MANIFESTS)
+    + ["docs/agents/project-skills-policy.md",
+       "docs/adr/0002-governance-v3-skill-native-orchestration.md"]
 )
 
 # Enumeration fragments that only occur in a five-level chain. Deliberately

@@ -2037,9 +2037,10 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
+      "locally_modified": true,
       "patch_ids": [
-        "ce-mode-normalize"
+        "ce-mode-normalize",
+        "ce-no-permission-bypass"
       ],
       "scripts_audited": true,
       "audit_ref": null,
@@ -2151,9 +2152,11 @@
           "upstream_blob_sha": "56da4154a48dea4ed6d5b24e4dea9892bc4c8b14",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "56da4154a48dea4ed6d5b24e4dea9892bc4c8b14",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "a0d572bdc8aed2b7cbddd4f2d06726ee0c09fc8e",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-permission-bypass"
+          ]
         },
         {
           "path": ".claude/skills/ce-optimize/references/usage-guide.md",
