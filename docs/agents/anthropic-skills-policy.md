@@ -95,7 +95,12 @@ license.
 
 14 patch ids touch `skill-creator-anthropic` (across `SKILL.md` and 6 scripts/HTML files), 3 touch
 `frontend-design` (all in `SKILL.md`), and 6 touch `webapp-testing` (across `SKILL.md`, `with_server.py`, two
-examples, and the new local test file). Full ledger, one row per patch id per file:
+examples, and the new local test file). One further id, `anthropic-mode-normalize`, spans both script-bearing
+skills: it records the `100755` → `100644` mode normalization described under "Installation model" above. That
+normalization was always applied and always documented in prose, but had no id, so two content-unmodified
+files recorded a real change to the vendored artifact with an empty `patch_ids`. It now has one, and
+`provider-vendored-modes` fails closed on any undocumented mode difference in either direction. Full ledger,
+one row per patch id per file:
 `docs/agents/anthropic-skills-patches.md`. No patch translates or stylistically rewrites upstream text — every
 change narrows a capability (background execution, auto-open, CDN/network fetch, tracker-mutation-shaped
 writes into a git repo, shell-metachar execution, invocation scope) to match this project's governance model,
@@ -155,7 +160,9 @@ for a locally patched file or the local-origin test file, it's the only hash pin
 closes a gap the original design otherwise had: before `vendored_blob_sha` existed, a patched or local-origin
 file had no content-level integrity check at all — only "was it marked as modified" was verified, not "does it
 still say what the ledger says it says." Now `scripts/validate-agent-governance.py`'s
-`anthropic-file-hashes-verified-locally` check fails closed on ANY on-disk edit to ANY vendored file (patched,
+`provider-file-hashes` check (formerly `anthropic-file-hashes-verified-locally`, generalized when the
+validator's provider registry was made generic — same logic, now applied to every file-level provider) fails
+closed on ANY on-disk edit to ANY vendored file (patched,
 audited, or local-origin) that isn't accompanied by a deliberate `vendored_blob_sha` bump in the manifest —
 which is exactly the re-audit forcing function: you cannot silently edit `with_server.py` (or any other
 already-reviewed script) and have the validator stay green.

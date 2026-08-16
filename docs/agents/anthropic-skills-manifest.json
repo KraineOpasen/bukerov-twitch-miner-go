@@ -186,7 +186,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/generate_report.py",
@@ -198,7 +200,8 @@
           "vendored_blob_sha": "d07e808da71b200fc0908739e1c08c24354adcef",
           "locally_modified": true,
           "patch_ids": [
-            "skc-html-no-cdn"
+            "skc-html-no-cdn",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -211,7 +214,8 @@
           "vendored_blob_sha": "4889cfde6c9f7cc7ae98960ec747eeb44b5d61eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-claudecode-strip"
+            "skc-py-no-claudecode-strip",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -223,7 +227,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "f48eac444656ddc41204aac1760a217951ce609e",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/quick_validate.py",
@@ -235,7 +241,8 @@
           "vendored_blob_sha": "557be6266f4c11689d1f0028d62a133c315e78eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-user-invoked"
+            "skc-user-invoked",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -249,7 +256,8 @@
           "locally_modified": true,
           "patch_ids": [
             "skc-py-no-claudecode-strip",
-            "skc-py-sandbox-guard"
+            "skc-py-sandbox-guard",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -262,7 +270,8 @@
           "vendored_blob_sha": "17db557665790992db27d6c0345830452eb62ff5",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-autoopen-runloop"
+            "skc-py-no-autoopen-runloop",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -430,7 +439,8 @@
           "vendored_blob_sha": "d3089b1d733aef875344ab9a592a0743f8ee0bd2",
           "locally_modified": true,
           "patch_ids": [
-            "webapp-testing-server-cleanup"
+            "webapp-testing-server-cleanup",
+            "anthropic-mode-normalize"
           ]
         }
       ]

@@ -90,35 +90,84 @@ PROJECT_OWNERSHIP_CLASS = "project-first-party"
 SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
 HOOK_PATH = os.path.join(CLAUDE_DIR, "hooks", "governance-policy.py")
 
-# Registry of every vendored-skill manifest/ledger pair this script knows about. "schema" records
-# which blob-hash granularity that manifest uses: "skill-level" (one upstream_blob_sha per skill's
-# SKILL.md, mattpocock's format) or "file-level" (one upstream_blob_sha per vendored file, in a
-# per-skill files[] array -- anthropic's format, since two of its three skills ship real scripts).
+# --------------------------------------------------------------------------
+# Provider registry
+# --------------------------------------------------------------------------
+#
+# ONE registry describes every vendored-skill provider this script knows about, and every
+# provider-aware check below is written against the registry rather than against a named provider.
+# Adding a provider means appending an entry here (plus its manifest/ledger/policy documents) --
+# not adding a conditional inside a check. The two original providers (mattpocock, anthropic) keep
+# exactly the guarantees they had before the registry was generalized; the generic checks are the
+# same logic with the provider hard-coding lifted out.
+#
+# Per-entry fields:
+#   label                  short provider id, used as the prefix on every diagnostic and as the
+#                          ownership-partition key.
+#   manifest/patches/policy repo-absolute paths to the three documents every provider must ship.
+#   upstream_repo          the canonical upstream URL, cross-checked against the manifest.
+#   upstream_env           env var naming a read-only clone of the upstream at the pinned commit;
+#                          when set, blob hashes are additionally verified against it directly.
+#   legacy_upstream_env    older env-var spelling kept working for scripts that predate the rename.
+#   schema                 blob-hash granularity. "skill-level" = one upstream_blob_sha per skill's
+#                          SKILL.md (mattpocock's original format). "file-level" = one
+#                          upstream_blob_sha + vendored_blob_sha per vendored FILE, in a per-skill
+#                          files[] array. Every provider added after anthropic uses "file-level":
+#                          it is the only granularity that can prove a complete file inventory.
+#   excluded_key           manifest key holding the non-installed candidates' verdict list.
+#   extra_frontmatter_keys frontmatter keys this provider's upstream legitimately uses on top of
+#                          ALLOWED_SKILL_KEYS. Upstream frontmatter is PRESERVED, not deleted, so
+#                          the allowlist is widened per provider rather than the skill being
+#                          rewritten (see docs/agents/*-skills-policy.md).
+#   license                {"spdx": ..., "layout": "per-skill"|"shared", ...}. "per-skill" requires
+#                          `filename` present in every one of that provider's skill dirs; "shared"
+#                          requires the single repo-relative `path` to exist.
+LICENSE_SHARED_MATTPOCOCK = os.path.join(".claude", "skills", "LICENSE")
+
 MANIFESTS = [
     {
         "label": "mattpocock",
         "manifest": MANIFEST_PATH,
         "patches": PATCHES_PATH,
+        "policy": os.path.join(DOCS_AGENTS_DIR, "mattpocock-skills-policy.md"),
+        "upstream_repo": "https://github.com/mattpocock/skills",
         "upstream_env": "GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK",
         "legacy_upstream_env": "GOVERNANCE_UPSTREAM_DIR",
         "schema": "skill-level",
         "excluded_key": "excluded",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "shared", "path": LICENSE_SHARED_MATTPOCOCK},
     },
     {
         "label": "anthropic",
         "manifest": ANTHROPIC_MANIFEST_PATH,
         "patches": ANTHROPIC_PATCHES_PATH,
+        "policy": os.path.join(DOCS_AGENTS_DIR, "anthropic-skills-policy.md"),
+        "upstream_repo": "https://github.com/anthropics/skills",
         "upstream_env": "GOVERNANCE_UPSTREAM_DIR_ANTHROPIC",
         "legacy_upstream_env": None,
         "schema": "file-level",
         "excluded_key": "excluded_skills",
+        # frontend-design and webapp-testing both carry `license: Complete terms in LICENSE.txt`.
+        "extra_frontmatter_keys": frozenset({"license"}),
+        "license": {"spdx": "Apache-2.0", "layout": "per-skill", "filename": "LICENSE.txt"},
     },
 ]
 
+# Top-level manifest fields every provider manifest must carry, whatever its schema.
+REQUIRED_MANIFEST_FIELDS = (
+    "upstream_repo", "upstream_commit", "reviewed_at", "reviewed_by",
+    "installation_mode", "automatic_updates", "skills",
+)
+REQUIRED_INSTALLATION_MODE = "project-local-vendored-copy"
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+# Verdicts an entry in a provider's excluded_key list may carry. HOLD means "valuable but blocked"
+# (a mandatory hosted service, an unpinned CLI, a missing redistribution grant); EXCLUDE means
+# "reviewed and not wanted". Both must state a reason -- a bare name with no verdict is exactly the
+# silent omission the audit process exists to prevent.
+ALLOWED_EXCLUSION_STATUSES = {"EXCLUDE", "HOLD"}
+
 ALLOWED_SKILL_KEYS = {"name", "description", "disable-model-invocation", "argument-hint"}
-# anthropic-owned skill dirs additionally allow "license" (skill-creator-anthropic doesn't use it,
-# but frontend-design and webapp-testing both carry `license: Complete terms in LICENSE.txt`).
-ALLOWED_SKILL_KEYS_ANTHROPIC = ALLOWED_SKILL_KEYS | {"license"}
 # project-owned first-party skill dirs: an explicit, independent copy of the base set (not the
 # same object -- set(...) so a future in-place mutation of one can never leak into the other),
 # selected explicitly by ownership in check_frontmatter_keys/validate_project_manifest, never
@@ -188,6 +237,68 @@ def anthropic_skill_dir_names():
 def mattpocock_skill_dir_names():
     """Directory names (under .claude/skills/) the mattpocock manifest claims to own."""
     return {s["name"] for s in load_manifest().get("skills", [])}
+
+
+# --- generic provider accessors (every provider-aware check goes through these) --------------
+
+def provider_manifest(entry):
+    """The parsed manifest for one registry entry. Raises on unreadable/invalid JSON -- that is
+    already reported by check_json_validity, and a check that swallowed it would report a
+    misleading PASS."""
+    return load_manifest(entry["manifest"])
+
+
+def provider_skills(entry):
+    """The skills[] list for one registry entry, defensively defaulted so a structurally broken
+    manifest degrades to "claims nothing" instead of aborting the whole run (the same fail-closed
+    shape project_skill_names() uses)."""
+    try:
+        manifest = provider_manifest(entry)
+    except Exception:
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    skills = manifest.get("skills", [])
+    return skills if isinstance(skills, list) else []
+
+
+def provider_skill_dir_names(entry):
+    """Directory names (under .claude/skills/) one registry entry claims to own."""
+    return {s["name"] for s in provider_skills(entry) if isinstance(s, dict) and "name" in s}
+
+
+def file_level_providers():
+    """Registry entries whose manifest records one hash per vendored FILE. These are the only
+    providers whose complete on-disk inventory can be proven, so the inventory/mode/scripts-audited
+    /patch-coverage checks all iterate exactly this subset."""
+    return [e for e in MANIFESTS if e["schema"] == "file-level"]
+
+
+def provider_upstream_dir(entry):
+    """Path to a read-only upstream clone for this provider, from its env var (or the legacy
+    spelling), or None when unset. Optional everywhere: setting it makes hash checks STRICTER
+    (they additionally compare against the clone), never required."""
+    val = os.environ.get(entry["upstream_env"])
+    if not val and entry.get("legacy_upstream_env"):
+        val = os.environ.get(entry["legacy_upstream_env"])
+    return val or None
+
+
+def allowed_frontmatter_keys_by_dir():
+    """{skill dir name -> allowed frontmatter key set}, resolved by OWNERSHIP from the registry
+    plus the project manifest. Upstream providers legitimately use keys the original two-provider
+    allowlist never saw (`allowed-tools`, `type`, `effort`, `metadata`, `compatibility`, ...); the
+    policy is to PRESERVE that frontmatter and widen the allowlist per provider, never to delete
+    legitimate upstream frontmatter because an older allowlist did not recognise it. A dir claimed
+    by no source is not in the map and falls back to the base set at the call site."""
+    by_dir = {}
+    for entry in MANIFESTS:
+        allowed = ALLOWED_SKILL_KEYS | set(entry.get("extra_frontmatter_keys", ()))
+        for name in provider_skill_dir_names(entry):
+            by_dir[name] = allowed
+    for name in project_skill_names():
+        by_dir[name] = ALLOWED_SKILL_KEYS_PROJECT
+    return by_dir
 
 
 def project_skill_names():
@@ -281,31 +392,115 @@ def parse_frontmatter_value(path, key):
 def check_required_files():
     required = [
         "CLAUDE.md", "CONTEXT.md", ".gitignore",
-        ".claude/settings.json", ".claude/hooks/governance-policy.py", ".claude/skills/LICENSE",
+        ".claude/settings.json", ".claude/hooks/governance-policy.py",
         "docs/agents/operation-modes.md", "docs/agents/task-contract.md", "docs/agents/quality-gates.md",
         "docs/agents/issue-tracker.md", "docs/agents/domain.md", "docs/agents/triage-labels.md",
-        "docs/agents/mattpocock-skills-manifest.json", "docs/agents/mattpocock-skills-patches.md",
-        "docs/agents/mattpocock-skills-policy.md", "docs/adr/0001-agent-governance-v2.md",
+        "docs/adr/0001-agent-governance-v2.md",
         "docs/agents/agent-orchestration.md",
         "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+        "docs/agents/skills-routing.md",
         "scripts/validate-agent-governance.py",
-        "docs/agents/anthropic-skills-manifest.json", "docs/agents/anthropic-skills-patches.md",
-        "docs/agents/anthropic-skills-policy.md",
         "docs/agents/project-skills-manifest.json", "docs/agents/project-skills-policy.md",
     ]
+    # Every registered provider's three documents are required by construction, so adding a
+    # provider to the registry cannot leave its manifest/ledger/policy unlisted here.
+    for entry in MANIFESTS:
+        required += [rel(entry["manifest"]), rel(entry["patches"]), rel(entry["policy"])]
     missing = [p for p in required if not os.path.isfile(os.path.join(REPO_ROOT, p))]
     report("required-files-exist", not missing, ["missing %s" % p for p in missing])
 
 
 def check_json_validity():
     details = []
-    for p in (SETTINGS_PATH, MANIFEST_PATH, ANTHROPIC_MANIFEST_PATH, PROJECT_MANIFEST_PATH):
+    paths = [SETTINGS_PATH, PROJECT_MANIFEST_PATH] + [e["manifest"] for e in MANIFESTS]
+    for p in paths:
         try:
             with open(p) as f:
                 json.load(f)
         except Exception as e:
             details.append("%s: %s" % (rel(p), e))
     report("json-validity", not details, details)
+
+
+def provider_manifest_field_details(entry, manifest):
+    """Pure core of check_provider_manifest_fields (no filesystem, no git): given a registry entry
+    and a parsed manifest, return the list of provenance-contract violations. Shared by the
+    production check and its self-test fixtures so both exercise identical logic."""
+    label = entry["label"]
+    details = []
+    if not isinstance(manifest, dict):
+        return ["%s: manifest top level is not an object" % label]
+    for field in REQUIRED_MANIFEST_FIELDS:
+        if field not in manifest:
+            details.append("%s: manifest missing required field %r" % (label, field))
+    if manifest.get("installation_mode") not in (None, REQUIRED_INSTALLATION_MODE):
+        details.append("%s: installation_mode %r != %r" % (
+            label, manifest.get("installation_mode"), REQUIRED_INSTALLATION_MODE))
+    if manifest.get("automatic_updates") is not False:
+        details.append("%s: automatic_updates must be literally false, got %r" % (
+            label, manifest.get("automatic_updates")))
+    commit = manifest.get("upstream_commit")
+    if not (isinstance(commit, str) and SHA1_RE.match(commit)):
+        details.append("%s: upstream_commit %r is not a full 40-hex SHA" % (label, commit))
+    declared_repo = manifest.get("upstream_repo")
+    if isinstance(declared_repo, str) and _canon_repo(declared_repo) != _canon_repo(entry["upstream_repo"]):
+        details.append("%s: manifest upstream_repo %r != registry %r" % (
+            label, declared_repo, entry["upstream_repo"]))
+    if not entry.get("license", {}).get("spdx"):
+        details.append("%s: registry entry declares no license SPDX id" % label)
+    return details
+
+
+def _canon_repo(url):
+    return url.rstrip("/").removesuffix(".git")
+
+
+def check_provider_manifest_fields():
+    """Every provider manifest must carry the same top-level provenance contract, whatever its
+    blob-hash schema: the required fields exist, `installation_mode` is the project-local vendored
+    copy (never a marketplace/live-plugin install), `automatic_updates` is literally false (nothing
+    re-fetches upstream on its own), `upstream_commit` is a full 40-hex SHA (never a branch name or
+    a short SHA -- a floating ref would make every recorded hash unfalsifiable), the declared
+    `upstream_repo` matches the registry, and a license block names an SPDX id."""
+    details = []
+    for entry in MANIFESTS:
+        try:
+            manifest = provider_manifest(entry)
+        except Exception as e:
+            details.append("%s: manifest unreadable: %s" % (entry["label"], e))
+            continue
+        details += provider_manifest_field_details(entry, manifest)
+    report("provider-manifest-fields", not details, details)
+
+
+def provider_license_file_details(entry, skill_names, skills_dir, repo_root):
+    """Pure-ish core of check_provider_license_files: root-parameterized so a fixture can point it
+    at a synthetic tree."""
+    lic = entry.get("license", {})
+    layout = lic.get("layout")
+    if layout == "shared":
+        if not os.path.isfile(os.path.join(repo_root, lic["path"])):
+            return ["%s: shared license file missing: %s" % (entry["label"], lic["path"])]
+        return []
+    if layout == "per-skill":
+        fname = lic["filename"]
+        return ["%s: %s/%s missing (per-skill %s notice)" % (entry["label"], name, fname, lic.get("spdx"))
+                for name in sorted(skill_names)
+                if not os.path.isfile(os.path.join(skills_dir, name, fname))]
+    return ["%s: unknown license layout %r" % (entry["label"], layout)]
+
+
+def check_provider_license_files():
+    """The redistribution notice each provider's license actually requires must be present on disk.
+    "per-skill" layouts (Apache-2.0 §4(a), CC BY-SA 4.0 §3(a)(1) attribution) need the license file
+    inside EVERY one of that provider's skill directories; "shared" layouts need the single
+    declared file. A vendored tree that lost its license file is a redistribution defect, not a
+    cosmetic one."""
+    details = []
+    for entry in MANIFESTS:
+        details += provider_license_file_details(
+            entry, provider_skill_dir_names(entry), SKILLS_DIR, REPO_ROOT)
+    report("provider-license-files", not details, details)
 
 
 def check_no_symlinks_no_exec():
@@ -342,8 +537,8 @@ def check_unique_skill_names():
     # equally a collision -- two different skills must never share a name.
     names = []
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        names.extend(s["name"] for s in manifest["skills"])
+        names.extend(s["name"] for s in provider_skills(entry)
+                     if isinstance(s, dict) and isinstance(s.get("name"), str))
     names.extend(project_skill_names())
     dup_manifest = {n for n in names if names.count(n) > 1}
     details = ["duplicate dir: %s" % d for d in dup] + ["duplicate manifest entry (union of all manifests): %s" % n for n in dup_manifest]
@@ -352,9 +547,11 @@ def check_unique_skill_names():
 
 def check_frontmatter_keys():
     details = []
-    anthropic_dirs = anthropic_skill_dir_names()
-    project_dirs = set(project_skill_names())  # membership only -- project_skill_names() is a
-    # list (not deduplicated, see its docstring), so callers needing set semantics wrap it here.
+    # Allowlist selected explicitly BY OWNERSHIP, from the provider registry plus the project
+    # manifest (see allowed_frontmatter_keys_by_dir). A dir claimed by no source falls back to the
+    # base set -- which is the strictest of them, so an unclaimed dir can never gain keys by
+    # accident (and check_manifest_ownership_partition fails on it independently anyway).
+    allowed_by_dir = allowed_frontmatter_keys_by_dir()
     for name in list_skill_dirs():
         skillmd = os.path.join(SKILLS_DIR, name, "SKILL.md")
         if not os.path.isfile(skillmd):
@@ -363,16 +560,7 @@ def check_frontmatter_keys():
         if not ok:
             details.append("%s/SKILL.md: no valid frontmatter fence" % name)
             continue
-        # Allowlist selected explicitly by ownership -- anthropic dirs get the anthropic set,
-        # project dirs get the (currently identical, but independently named) project set,
-        # everything else (mattpocock or unclaimed) falls through to the base set. Never an
-        # accidental else-fallback: project dirs are checked by membership, not by exclusion.
-        if name in anthropic_dirs:
-            allowed = ALLOWED_SKILL_KEYS_ANTHROPIC
-        elif name in project_dirs:
-            allowed = ALLOWED_SKILL_KEYS_PROJECT
-        else:
-            allowed = ALLOWED_SKILL_KEYS
+        allowed = allowed_by_dir.get(name, ALLOWED_SKILL_KEYS)
         extra = keys - allowed
         if extra:
             details.append("%s/SKILL.md: unexpected frontmatter keys %s" % (name, sorted(extra)))
@@ -405,6 +593,42 @@ def strip_code_fences(text):
     return FENCE_RE.sub("", text)
 
 
+# Trail of Bits' skills write intra-skill paths as `{baseDir}/references/foo.md`. `{baseDir}` is
+# their own documented convention for "this skill's own directory" (upstream AGENTS.md: "Use
+# `{baseDir}` for paths, **never hardcode** absolute paths"), not a loader-substituted variable, so
+# a vendored copy keeps the token verbatim and the file really does live at <skill>/references/foo.md.
+#
+# The validator resolves the token instead of the vendoring rewriting it. That is deliberate: the
+# alternative -- editing hundreds of upstream lines to strip a prefix -- would be a large,
+# content-touching patch made solely to satisfy an older link resolver, exactly the kind of change
+# the vendoring policies forbid. Resolving it here keeps upstream bytes intact AND makes the check
+# stronger, because these targets are now actually verified rather than skipped.
+BASEDIR_TOKEN = "{baseDir}"
+
+
+def resolve_skill_link(target, dirpath, skill_dir):
+    """(kind, resolved_abs_path) for one Markdown link target inside a vendored skill.
+
+    kind is "skip" (external/anchor-only/bare token), "absolute" (a `/`-rooted path, always a
+    finding), or "path" (resolved_abs_path is what must exist). A `#fragment` suffix is stripped
+    before resolution -- a link to a heading inside a real file is a valid link."""
+    target = target.split(" ", 1)[0].strip()
+    if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+        return "skip", None
+    if target == BASEDIR_TOKEN:
+        return "skip", None
+    if target.startswith("/"):
+        return "absolute", None
+    if target.startswith(BASEDIR_TOKEN + "/"):
+        base, rest = skill_dir, target[len(BASEDIR_TOKEN) + 1:]
+    else:
+        base, rest = dirpath, target
+    rest = rest.split("#", 1)[0]
+    if not rest:
+        return "skip", None
+    return "path", os.path.normpath(os.path.join(base, rest))
+
+
 def check_relative_links_resolve():
     details = []
     for name in list_skill_dirs():
@@ -416,16 +640,15 @@ def check_relative_links_resolve():
                 path = os.path.join(dirpath, fname)
                 with open(path, encoding="utf-8") as f:
                     text = strip_code_fences(f.read())
-                for target in LINK_RE.findall(text):
-                    target = target.split(" ", 1)[0].strip()
-                    if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+                for raw in LINK_RE.findall(text):
+                    kind, resolved = resolve_skill_link(raw, dirpath, skill_dir)
+                    if kind == "skip":
                         continue
-                    if target.startswith("/"):
-                        details.append("%s: absolute-path link %r" % (rel(path), target))
+                    if kind == "absolute":
+                        details.append("%s: absolute-path link %r" % (rel(path), raw.strip()))
                         continue
-                    resolved = os.path.normpath(os.path.join(dirpath, target))
                     if not os.path.isfile(resolved):
-                        details.append("%s: dangling link %r" % (rel(path), target))
+                        details.append("%s: dangling link %r" % (rel(path), raw.strip()))
     report("relative-links-resolve", not details, details)
 
 
@@ -471,8 +694,7 @@ def check_manifest_fs_consistency():
     fs_names = set(list_skill_dirs())
     manifest_names_by_label = {}
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        manifest_names_by_label[entry["label"]] = {s["name"] for s in manifest["skills"]}
+        manifest_names_by_label[entry["label"]] = provider_skill_dir_names(entry)
     manifest_names_by_label["project"] = set(project_skill_names())  # set() needed: this dict's
     # values are combined with |/- below, and project_skill_names() is deliberately a
     # non-deduplicated list (see its docstring).
@@ -528,8 +750,7 @@ def check_manifest_ownership_partition():
     fs_names = set(list_skill_dirs())
     names_by_label = {}
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        names_by_label[entry["label"]] = {s["name"] for s in manifest["skills"]}
+        names_by_label[entry["label"]] = provider_skill_dir_names(entry)
     names_by_label["project"] = set(project_skill_names())  # set() needed: partition_details()
     # does set algebra (&, -), and project_skill_names() is deliberately a non-deduplicated list.
 
@@ -538,22 +759,45 @@ def check_manifest_ownership_partition():
 
 
 def check_excluded_absent():
+    """A candidate the review REJECTED must not also be installed, and every rejection must carry
+    a verdict a human can audit: a non-empty `reason`, and (when present) a `status` of EXCLUDE or
+    HOLD. HOLD records "valuable but blocked" -- a mandatory hosted service, an unpinned CLI, a
+    missing redistribution grant -- so that a blocker is documented rather than silently omitted."""
     fs_names = set(list_skill_dirs())
     details = []
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        excluded_names = {e["name"] for e in manifest.get(entry["excluded_key"], [])}
-        present = excluded_names & fs_names
-        details += ["%s: excluded but present: %s" % (entry["label"], n) for n in sorted(present)]
+        label = entry["label"]
+        try:
+            manifest = provider_manifest(entry)
+        except Exception:
+            continue  # reported by check_json_validity / check_provider_manifest_fields
+        excluded = manifest.get(entry["excluded_key"], [])
+        if not isinstance(excluded, list):
+            details.append("%s: %s must be a list" % (label, entry["excluded_key"]))
+            continue
+        for item in excluded:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                details.append("%s: malformed exclusion entry %r" % (label, item))
+                continue
+            name = item["name"]
+            if name in fs_names:
+                details.append("%s: excluded but present: %s" % (label, name))
+            if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
+                details.append("%s: exclusion %r has no reason" % (label, name))
+            status = item.get("status")
+            if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
+                details.append("%s: exclusion %r has status %r, expected one of %s" % (
+                    label, name, status, sorted(ALLOWED_EXCLUSION_STATUSES)))
 
-    # anthropic-specific: the pre-rename source name ("skill-creator") must not exist as a dir --
-    # only the renamed skill-creator-anthropic may be present.
-    anthropic_manifest = load_anthropic_manifest()
-    renamed_froms = {
-        s["renamed_from"] for s in anthropic_manifest.get("skills", []) if s.get("renamed_from")
-    }
-    present_renamed = renamed_froms & fs_names
-    details += ["anthropic: renamed_from source present as dir: %s" % n for n in sorted(present_renamed)]
+        # A skill vendored under a different directory name than upstream's (to dodge a builtin
+        # collision) must not ALSO leave the pre-rename name on disk -- that would shadow the
+        # builtin the rename existed to protect. Generic across providers, not anthropic-only.
+        renamed_froms = {
+            s["renamed_from"] for s in provider_skills(entry)
+            if isinstance(s, dict) and s.get("renamed_from")
+        }
+        for n in sorted(renamed_froms & fs_names):
+            details.append("%s: renamed_from source present as dir: %s" % (label, n))
 
     report("excluded-skills-absent", not details, details)
 
@@ -611,137 +855,214 @@ def check_patch_ledger_coverage():
     report("patch-ledger-covers-modified-skills", not details, details)
 
 
-def check_anthropic_file_hashes():
-    """anthropic branch (file-level, unlike mattpocock's skill-level check_blob_hashes above): for
-    every file in every skill's files[], the file must exist; an unmodified upstream-origin file's
-    on-disk git hash-object must equal its recorded upstream_blob_sha; a locally-modified file must
-    have a non-empty patch_ids; a local-origin file must carry a reason. ALSO, for every entry
-    regardless of origin/modification status, the on-disk git hash-object must equal the manifest's
-    recorded vendored_blob_sha -- this is the integrity pin that covers patched and local-origin
-    files too (upstream_blob_sha alone only pins the unmodified ones). A vendored_blob_sha mismatch
-    on a script whose skill has scripts_audited=true means the file changed since it was last read
-    end-to-end; re-audit (not just a manifest hash bump) is required before trusting it again. Also
-    walks each anthropic skill's directory on disk and fails if any file there isn't listed in
-    files[] at all (an unreviewed file with no manifest entry is exactly the kind of drift this
-    check exists to catch)."""
-    manifest = load_anthropic_manifest()
+def _git_blob_sha(path):
+    """(sha, error) for one file. Shells out to `git hash-object` exactly as the original
+    per-provider checks did, so the recorded hashes stay directly reproducible by hand."""
+    try:
+        out = subprocess.run(["git", "hash-object", path], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=5, text=True)
+    except Exception as e:
+        return None, "could not run git hash-object (%s)" % e
+    if out.returncode != 0:
+        return None, "git hash-object failed"
+    return out.stdout.strip(), None
+
+
+def check_provider_file_hashes():
+    """File-level integrity, for EVERY file-level provider in the registry (this is the
+    generalization of the original anthropic-only check; mattpocock keeps its skill-level
+    check_blob_hashes above). For every file in every skill's files[]: the file must exist; its
+    on-disk `git hash-object` must equal the recorded `vendored_blob_sha` (the integrity pin that
+    covers patched and local-origin files too); an unmodified upstream-origin file must ALSO equal
+    its `upstream_blob_sha`; a locally-modified file must name at least one patch id; a
+    local-origin file must carry a reason. When the provider's upstream-clone env var is set, an
+    unmodified file is additionally compared byte-for-byte against the clone.
+
+    The inventory half is what makes the file list PROVABLY complete in both directions: a listed
+    path missing on disk fails, and any on-disk file under a claimed skill directory that files[]
+    does not mention fails. An unreviewed file with no manifest entry is exactly the drift this
+    exists to catch.
+
+    A `vendored_blob_sha` mismatch on a file whose skill has `scripts_audited: true` means a script
+    that was read end-to-end during review no longer matches what was reviewed: re-audit is
+    required, not just a manifest hash bump."""
     details = []
-    upstream_dir = os.environ.get("GOVERNANCE_UPSTREAM_DIR_ANTHROPIC")
-    for skill in manifest["skills"]:
+    verified_against_clone = []
+    for entry in file_level_providers():
+        upstream_dir = provider_upstream_dir(entry)
+        if upstream_dir:
+            verified_against_clone.append(entry["label"])
+        details += provider_file_hash_details(
+            entry, provider_skills(entry), REPO_ROOT, upstream_dir)
+    if verified_against_clone:
+        print("  (info) file hashes additionally verified against an upstream clone for: %s" %
+              ", ".join(sorted(verified_against_clone)))
+    report("provider-file-hashes", not details, details)
+
+
+def provider_file_hash_details(entry, skills, repo_root, upstream_dir=None):
+    """Root-parameterized core of check_provider_file_hashes, so a fixture can drive it against a
+    synthetic tree and prove each failure mode really fails."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict) or "name" not in skill:
+            details.append("%s: malformed skills[] entry %r" % (label, skill))
+            continue
+        sname = skill["name"]
         listed_paths = set()
-        for entry in skill.get("files", []):
-            rel_path = entry["path"]
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                details.append("%s: %s: malformed files[] entry %r" % (label, sname, fentry))
+                continue
+            rel_path = fentry["path"]
             listed_paths.add(rel_path)
-            local_path = os.path.join(REPO_ROOT, rel_path)
+            local_path = os.path.join(repo_root, rel_path)
             if not os.path.isfile(local_path):
-                details.append("%s: %s: listed in files[] but missing on disk" % (skill["name"], rel_path))
+                details.append("%s: %s: %s: listed in files[] but missing on disk" % (
+                    label, sname, rel_path))
                 continue
 
-            try:
-                out = subprocess.run(["git", "hash-object", local_path], stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, timeout=5, text=True)
-            except Exception as e:
-                details.append("%s: %s: could not run git hash-object (%s)" % (skill["name"], rel_path, e))
+            local_sha, err = _git_blob_sha(local_path)
+            if err:
+                details.append("%s: %s: %s: %s" % (label, sname, rel_path, err))
                 continue
-            if out.returncode != 0:
-                details.append("%s: %s: git hash-object failed" % (skill["name"], rel_path))
-                continue
-            local_sha = out.stdout.strip()
 
-            # Integrity pin, ALL entries regardless of origin/locally_modified: on-disk content
-            # must equal the manifest's own recorded vendored_blob_sha.
-            vendored_sha = entry.get("vendored_blob_sha")
+            vendored_sha = fentry.get("vendored_blob_sha")
             if not vendored_sha:
-                details.append("%s: %s: missing vendored_blob_sha in manifest" % (skill["name"], rel_path))
+                details.append("%s: %s: %s: missing vendored_blob_sha in manifest" % (
+                    label, sname, rel_path))
             elif local_sha != vendored_sha:
-                details.append("%s: %s: local blob %s != manifest vendored_blob_sha %s"
-                                " (if this file's skill has scripts_audited=true, re-audit is required,"
-                                " not just re-hashing)" % (
-                                    skill["name"], rel_path, local_sha, vendored_sha))
+                details.append("%s: %s: %s: local blob %s != manifest vendored_blob_sha %s"
+                               " (if this file's skill has scripts_audited=true, re-audit is"
+                               " required, not just re-hashing)" % (
+                                   label, sname, rel_path, local_sha, vendored_sha))
 
-            origin = entry.get("origin")
-            if origin == "local":
-                if not entry.get("reason"):
-                    details.append("%s: %s: origin=local but no 'reason' given" % (skill["name"], rel_path))
+            if fentry.get("origin") == "local":
+                if not fentry.get("reason"):
+                    details.append("%s: %s: %s: origin=local but no 'reason' given" % (
+                        label, sname, rel_path))
                 continue
 
-            if entry.get("locally_modified"):
-                if not entry.get("patch_ids"):
-                    details.append("%s: %s: locally_modified=true but patch_ids is empty" % (skill["name"], rel_path))
+            if fentry.get("locally_modified"):
+                if not fentry.get("patch_ids"):
+                    details.append("%s: %s: %s: locally_modified=true but patch_ids is empty" % (
+                        label, sname, rel_path))
                 continue
 
-            # origin == "upstream" and not locally_modified: also verify byte-for-byte against the
-            # recorded upstream_blob_sha (unmodified files must match BOTH upstream_blob_sha and
-            # vendored_blob_sha, which should themselves be equal to each other).
-            if local_sha != entry.get("upstream_blob_sha"):
-                details.append("%s: %s: local blob %s != manifest upstream_blob_sha %s"
-                                " (if this file's skill has scripts_audited=true, re-audit is required,"
-                                " not just re-hashing)" % (
-                                    skill["name"], rel_path, local_sha, entry.get("upstream_blob_sha")))
-            if upstream_dir and entry.get("upstream_path"):
-                upstream_path = os.path.join(upstream_dir, entry["upstream_path"])
+            if local_sha != fentry.get("upstream_blob_sha"):
+                details.append("%s: %s: %s: local blob %s != manifest upstream_blob_sha %s"
+                               " (if this file's skill has scripts_audited=true, re-audit is"
+                               " required, not just re-hashing)" % (
+                                   label, sname, rel_path, local_sha,
+                                   fentry.get("upstream_blob_sha")))
+            if upstream_dir and fentry.get("upstream_path"):
+                upstream_path = os.path.join(upstream_dir, fentry["upstream_path"])
                 if os.path.isfile(upstream_path):
-                    out2 = subprocess.run(["git", "hash-object", upstream_path], stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, timeout=5, text=True)
-                    if out2.returncode == 0 and out2.stdout.strip() != local_sha:
-                        details.append("%s: %s: local blob differs from %s" % (
-                            skill["name"], rel_path, upstream_path))
+                    up_sha, up_err = _git_blob_sha(upstream_path)
+                    if up_err is None and up_sha != local_sha:
+                        details.append("%s: %s: %s: local blob differs from %s" % (
+                            label, sname, rel_path, upstream_path))
 
-        # Any on-disk file under this skill's directory that files[] doesn't mention at all.
-        skill_dir = os.path.join(REPO_ROOT, skill["path"])
-        if os.path.isdir(skill_dir):
+        skill_path = skill.get("path")
+        skill_dir = os.path.join(repo_root, skill_path) if skill_path else None
+        if skill_dir and os.path.isdir(skill_dir):
             for dirpath, dirnames, filenames in os.walk(skill_dir):
-                # Running a vendored skill's own scripts (e.g. `python -m scripts.aggregate_benchmark`)
-                # creates __pycache__/*.pyc inside the skill dir; .gitignore covers __pycache__, so
-                # these can never be committed and are not supply-chain drift. Skip narrowly by name
-                # only (no git check-ignore shell-out, no broader pattern) so this stays fail-closed
-                # for everything actually committable.
+                # Running a vendored skill's own scripts (e.g. `python -m scripts.foo`) creates
+                # __pycache__/*.pyc inside the skill dir; .gitignore covers __pycache__, so these
+                # can never be committed and are not supply-chain drift. Skip narrowly by name
+                # only, so this stays fail-closed for everything actually committable.
                 dirnames[:] = [d for d in dirnames if d != "__pycache__"]
                 for fname in filenames:
                     if fname.endswith(".pyc"):
                         continue
-                    full = os.path.join(dirpath, fname)
-                    rel_path = rel(full)
-                    if rel_path not in listed_paths:
-                        details.append("%s: %s: present on disk but not listed in files[]" % (
-                            skill["name"], rel_path))
-
-    label = "anthropic-file-hashes-verified-against-upstream-clone" if upstream_dir else "anthropic-file-hashes-verified-locally"
-    report(label, not details, details)
+                    disk_rel = os.path.relpath(os.path.join(dirpath, fname), repo_root)
+                    if disk_rel not in listed_paths:
+                        details.append("%s: %s: %s: present on disk but not listed in files[]" % (
+                            label, sname, disk_rel))
+    return details
 
 
-def check_anthropic_vendored_modes():
-    """anthropic files[]: every on-disk file must have no executable bit set, and its recorded
-    vendored_mode must be "100644" -- these are vendored docs/scripts read by an agent, never
-    executed as a standalone binary/shebang-invoked file directly off disk."""
-    manifest = load_anthropic_manifest()
+def provider_vendored_mode_details(entry, skills, repo_root):
+    """Root-parameterized core of check_provider_vendored_modes."""
+    label = entry["label"]
     details = []
-    for skill in manifest["skills"]:
-        for entry in skill.get("files", []):
-            rel_path = entry["path"]
-            local_path = os.path.join(REPO_ROOT, rel_path)
-            if entry.get("vendored_mode") != "100644":
-                details.append("%s: %s: manifest vendored_mode %r != \"100644\"" % (
-                    skill["name"], rel_path, entry.get("vendored_mode")))
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        sname = skill.get("name")
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                continue
+            rel_path = fentry["path"]
+            vendored_mode = fentry.get("vendored_mode")
+            if vendored_mode != "100644":
+                details.append("%s: %s: %s: manifest vendored_mode %r != \"100644\"" % (
+                    label, sname, rel_path, vendored_mode))
+            upstream_mode = fentry.get("upstream_mode")
+            if (fentry.get("origin") == "upstream" and upstream_mode is not None
+                    and upstream_mode != vendored_mode and not fentry.get("patch_ids")):
+                details.append(
+                    "%s: %s: %s: upstream_mode %r normalized to %r with no patch id documenting it"
+                    % (label, sname, rel_path, upstream_mode, vendored_mode))
+            local_path = os.path.join(repo_root, rel_path)
             if not os.path.isfile(local_path):
-                continue  # already reported by check_anthropic_file_hashes
-            st = os.stat(local_path)
-            if st.st_mode & 0o111:
-                details.append("%s: %s: executable bit set on disk" % (skill["name"], rel_path))
-    report("anthropic-vendored-modes", not details, details)
+                continue  # already reported by check_provider_file_hashes
+            if os.stat(local_path).st_mode & 0o111:
+                details.append("%s: %s: %s: executable bit set on disk" % (label, sname, rel_path))
+    return details
 
 
-def check_anthropic_scripts_audited():
-    """Any anthropic skill whose files[] contains a .py/.html/.sh file must have scripts_audited
-    true -- prose-only skills (frontend-design) are exempt since there's nothing to audit."""
-    manifest = load_anthropic_manifest()
+def check_provider_vendored_modes():
+    """Vendored files are content an agent READS (and runs explicitly, e.g. `python3 <path>`),
+    never a binary invoked straight off disk, so every file-level provider's files[] must record
+    `vendored_mode: "100644"` and carry no executable bit on disk. Upstream frequently ships
+    scripts 100755; normalizing the mode is a real change to the vendored artifact, so when
+    `upstream_mode` differs from `vendored_mode` the entry must name the patch id that documents
+    the normalization -- an undocumented mode change is exactly the "unexpected executable-bit
+    drift" this check exists to make impossible in either direction."""
     details = []
-    script_exts = (".py", ".html", ".sh")
-    for skill in manifest["skills"]:
-        has_script = any(entry["path"].endswith(script_exts) for entry in skill.get("files", []))
-        if has_script and not skill.get("scripts_audited"):
-            details.append("%s: ships a .py/.html/.sh file but scripts_audited is not true" % skill["name"])
-    report("anthropic-scripts-audited", not details, details)
+    for entry in file_level_providers():
+        details += provider_vendored_mode_details(entry, provider_skills(entry), REPO_ROOT)
+    report("provider-vendored-modes", not details, details)
+
+
+SCRIPT_EXTS = (".py", ".html", ".sh", ".mjs", ".js", ".bash", ".zsh")
+
+
+def provider_scripts_audited_details(entry, skills, repo_root):
+    """Root-parameterized core of check_provider_scripts_audited."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        scripts = []
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                continue
+            p = fentry["path"]
+            if p.endswith(SCRIPT_EXTS):
+                scripts.append(p)
+            elif "." not in os.path.basename(p) and _has_shebang(os.path.join(repo_root, p)):
+                scripts.append(p)
+        if scripts and not skill.get("scripts_audited"):
+            details.append("%s: %s: ships %d script file(s) (e.g. %s) but scripts_audited is not true"
+                           % (label, skill.get("name"), len(scripts), sorted(scripts)[0]))
+    return details
+
+
+def check_provider_scripts_audited():
+    """Any file-level provider skill whose files[] contains executable-ish content -- a script in
+    any of the languages these providers actually ship, or an extensionless file with a shebang --
+    must record `scripts_audited: true`, meaning the file was read END TO END during review rather
+    than trusted from its SKILL.md description. Prose-only skills are exempt: there is nothing to
+    audit. The extension list is deliberately wider than the original anthropic-only check's
+    (.py/.html/.sh), because the newer providers ship .mjs/.js and extensionless shebang scripts."""
+    details = []
+    for entry in file_level_providers():
+        details += provider_scripts_audited_details(entry, provider_skills(entry), REPO_ROOT)
+    report("provider-scripts-audited", not details, details)
 
 
 def check_builtin_collision_denylist():
@@ -755,10 +1076,9 @@ def check_builtin_collision_denylist():
         if name in BUILTIN_SKILL_NAMES:
             details.append("skill dir name collides with a builtin: %s" % name)
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        for s in manifest["skills"]:
-            if s["name"] in BUILTIN_SKILL_NAMES:
-                details.append("%s: manifest skill name collides with a builtin: %s" % (entry["label"], s["name"]))
+        for name in sorted(provider_skill_dir_names(entry)):
+            if name in BUILTIN_SKILL_NAMES:
+                details.append("%s: manifest skill name collides with a builtin: %s" % (entry["label"], name))
     for name in sorted(project_skill_names()):
         if name in BUILTIN_SKILL_NAMES:
             details.append("project: manifest skill name collides with a builtin: %s" % name)
@@ -850,42 +1170,112 @@ def find_all_patch_marker_ids(root_dir):
     return ids
 
 
-def check_anthropic_patch_coverage():
-    """Bidirectional coverage check for the anthropic skill set specifically (the mattpocock set's
-    equivalent is check_patch_ledger_coverage above, which is skill-level and unchanged):
-      - every marker id found anywhere in an anthropic-owned skill directory must appear in the
-        anthropic ledger (anthropic-skills-patches.md) AND in some file's files[].patch_ids;
-      - every files[].patch_ids id (for every file, in every anthropic skill) must appear in the
-        ledger -- a manifest entry claiming a patch id the ledger never documents is exactly the
-        kind of drift a ledger is supposed to make impossible."""
-    manifest = load_anthropic_manifest()
-    with open(ANTHROPIC_PATCHES_PATH, encoding="utf-8") as f:
-        ledger_text = f.read()
-
-    manifest_patch_ids = set()
-    for skill in manifest["skills"]:
-        for entry in skill.get("files", []):
-            manifest_patch_ids.update(entry.get("patch_ids", []))
-
+def check_provider_patch_coverage():
+    """Bidirectional patch coverage for EVERY file-level provider (the generalization of the
+    original anthropic-only check; mattpocock's skill-level equivalent is
+    check_patch_ledger_coverage above, unchanged):
+      - every marker id found anywhere inside a provider-owned skill directory must appear in that
+        provider's ledger AND in some file's files[].patch_ids;
+      - every files[].patch_ids id must appear in that provider's ledger -- a manifest entry
+        claiming a patch id the ledger never documents is exactly the drift a ledger prevents.
+    Each provider is checked against ITS OWN ledger: an id documented in a different provider's
+    ledger does not count, or the ledgers would silently cross-cover each other."""
     details = []
-    for skill in manifest["skills"]:
-        skill_dir = os.path.join(REPO_ROOT, skill["path"])
+    for entry in file_level_providers():
+        try:
+            with open(entry["patches"], encoding="utf-8") as f:
+                ledger_text = f.read()
+        except Exception as e:
+            details.append("%s: patch ledger unreadable: %s" % (entry["label"], e))
+            continue
+        details += provider_patch_coverage_details(
+            entry, provider_skills(entry), ledger_text, REPO_ROOT, rel(entry["patches"]))
+    report("provider-patch-marker-coverage", not details, details)
+
+
+def provider_patch_coverage_details(entry, skills, ledger_text, repo_root, ledger_name):
+    """Root-parameterized core of check_provider_patch_coverage."""
+    label = entry["label"]
+    details = []
+    manifest_patch_ids = set()
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        for fentry in skill.get("files", []):
+            if isinstance(fentry, dict):
+                manifest_patch_ids.update(fentry.get("patch_ids", []))
+
+    for skill in skills:
+        if not isinstance(skill, dict) or not skill.get("path"):
+            continue
+        skill_dir = os.path.join(repo_root, skill["path"])
         if not os.path.isdir(skill_dir):
             continue  # already reported elsewhere
-        found_ids = find_all_patch_marker_ids(skill_dir)
-        for pid in sorted(found_ids):
+        for pid in sorted(find_all_patch_marker_ids(skill_dir)):
             if pid not in ledger_text:
-                details.append("%s: marker id %r found in-file but missing from anthropic ledger" % (
-                    skill["name"], pid))
+                details.append("%s: %s: marker id %r found in-file but missing from %s" % (
+                    label, skill["name"], pid, ledger_name))
             if pid not in manifest_patch_ids:
-                details.append("%s: marker id %r found in-file but not recorded in any files[].patch_ids" % (
-                    skill["name"], pid))
+                details.append("%s: %s: marker id %r found in-file but not recorded in any"
+                               " files[].patch_ids" % (label, skill["name"], pid))
 
     for pid in sorted(manifest_patch_ids):
         if pid not in ledger_text:
-            details.append("manifest patch_id %r not found in anthropic ledger" % pid)
+            details.append("%s: manifest patch_id %r not found in %s" % (label, pid, ledger_name))
+    return details
 
-    report("anthropic-patch-marker-coverage", not details, details)
+
+# Directory names a vendored skill uses for its own dependency closure. A path reference in a
+# skill's Markdown is only checked when its FIRST segment is one of these AND that directory
+# actually exists in the skill -- which keeps illustrative prose ("put it in scripts/") from being
+# read as a claim about a file, while still catching a real reference to a file that was not
+# vendored.
+CLOSURE_DIRS = ("scripts", "references", "assets", "examples", "agents", "templates", "evals",
+                "hooks", "reference", "resources", "commands", "rules", "prompts")
+CLOSURE_REF_RE = re.compile(
+    r"`(?:\{baseDir\}/)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
+
+
+def check_provider_dependency_closure():
+    """Every file a vendored skill points at must actually have been vendored with it.
+
+    check_relative_links_resolve above covers Markdown `[link](target)` syntax. This covers the
+    other half, which is how these providers actually reference their closure: an inline-code path
+    such as `scripts/context.mjs` or `references/anti-patterns.md`. A reference is only treated as
+    a claim when its first path segment is a real closure directory inside that skill, so prose and
+    example paths cannot produce false failures -- but a SKILL.md that tells the agent to run a
+    script that was never copied in fails closed, which is the whole point of vendoring a complete
+    dependency closure rather than a bare SKILL.md."""
+    details = dependency_closure_details(SKILLS_DIR)
+    report("provider-dependency-closure", not details, details)
+
+
+def dependency_closure_details(skills_dir):
+    """Root-parameterized core of check_provider_dependency_closure."""
+    details = []
+    if not os.path.isdir(skills_dir):
+        return details
+    for name in sorted(d for d in os.listdir(skills_dir)
+                       if os.path.isdir(os.path.join(skills_dir, d))):
+        skill_dir = os.path.join(skills_dir, name)
+        present_dirs = {d for d in CLOSURE_DIRS if os.path.isdir(os.path.join(skill_dir, d))}
+        if not present_dirs:
+            continue
+        for dirpath, _, filenames in os.walk(skill_dir):
+            for fname in sorted(filenames):
+                if not fname.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, fname)
+                with open(path, encoding="utf-8") as f:
+                    text = strip_code_fences(f.read())
+                for target in sorted(set(CLOSURE_REF_RE.findall(text))):
+                    head = target.split("/", 1)[0]
+                    if head not in present_dirs:
+                        continue
+                    if not os.path.exists(os.path.join(skill_dir, target)):
+                        details.append("%s: %s references %r, which is not vendored" % (
+                            name, os.path.relpath(path, skills_dir), target))
+    return details
 
 
 def check_application_paths_untouched():
@@ -2146,6 +2536,8 @@ def check_governance_no_host_os_reference():
 ALL_CHECKS = [
     check_required_files,
     check_json_validity,
+    check_provider_manifest_fields,
+    check_provider_license_files,
     check_no_symlinks_no_exec,
     check_skill_dirs_have_skillmd,
     check_unique_skill_names,
@@ -2157,13 +2549,14 @@ ALL_CHECKS = [
     check_manifest_ownership_partition,
     check_excluded_absent,
     check_blob_hashes,
-    check_anthropic_file_hashes,
-    check_anthropic_vendored_modes,
-    check_anthropic_scripts_audited,
+    check_provider_file_hashes,
+    check_provider_vendored_modes,
+    check_provider_scripts_audited,
+    check_provider_dependency_closure,
     check_builtin_collision_denylist,
     check_patch_ledger_coverage,
     check_patch_marker_balance,
-    check_anthropic_patch_coverage,
+    check_provider_patch_coverage,
     check_application_paths_untouched,
     check_settings_schema,
     check_settings_mcp_mutations_denied,
@@ -3040,6 +3433,381 @@ def _st_v14():
         assert len(details) == len(AUTHORITY_CHAIN_DOCS), details
 
 
+# ---- P*: the generic provider-registry checks. Every fixture drives the SAME production
+# `*_details()` helper its check calls, against a synthetic vendored tree under a temp root, so a
+# P* pass means the production logic passed and each new check is proven able to FAIL, not merely
+# able to pass. P1 is the positive control: a fully valid synthetic provider produces zero details
+# from every one of the helpers, which is what makes the negatives meaningful. ----
+
+_P_LICENSE_TEXT = "Fixture License 1.0\n\nRedistribution permitted for test purposes.\n"
+
+
+def _fake_provider_entry(tmp_docs, label="fixture", layout="per-skill"):
+    """A registry entry shaped exactly like a real one, pointing at temp documents."""
+    lic = ({"spdx": "Fixture-1.0", "layout": "per-skill", "filename": "LICENSE.txt"}
+           if layout == "per-skill" else
+           {"spdx": "Fixture-1.0", "layout": "shared",
+            "path": os.path.join(".claude", "skills", "LICENSE")})
+    return {
+        "label": label,
+        "manifest": os.path.join(tmp_docs, "%s-skills-manifest.json" % label),
+        "patches": os.path.join(tmp_docs, "%s-skills-patches.md" % label),
+        "policy": os.path.join(tmp_docs, "%s-skills-policy.md" % label),
+        "upstream_repo": "https://github.com/fixture/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_FIXTURE",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset({"allowed-tools"}),
+        "license": lic,
+    }
+
+
+def _build_provider_fixture(tmp, skill_name="fixture-skill", with_script=True):
+    """Builds a synthetic vendored provider tree and returns
+    (entry, skills, repo_root, skills_dir, manifest). Every declared file exists, every hash is
+    real (`git hash-object`), modes are 100644, and the license notice is in place -- i.e. the
+    tree a correct vendoring produces."""
+    repo_root = os.path.join(tmp, "repo")
+    docs = os.path.join(repo_root, "docs", "agents")
+    skills_dir = os.path.join(repo_root, ".claude", "skills")
+    skill_dir = os.path.join(skills_dir, skill_name)
+    os.makedirs(docs, exist_ok=True)
+
+    files = {
+        os.path.join(skill_dir, "SKILL.md"):
+            "---\nname: %s\ndescription: Fixture skill.\nallowed-tools: Read\n---\n\n"
+            "Run `scripts/run.sh` first.\n" % skill_name,
+        os.path.join(skill_dir, "LICENSE.txt"): _P_LICENSE_TEXT,
+    }
+    if with_script:
+        files[os.path.join(skill_dir, "scripts", "run.sh")] = "#!/bin/sh\necho fixture\n"
+    for path, content in files.items():
+        _write_file(path, content)
+
+    entries = []
+    for path in sorted(files):
+        sha, err = _git_blob_sha(path)
+        assert err is None, err
+        entries.append({
+            "path": os.path.relpath(path, repo_root),
+            "origin": "upstream",
+            "upstream_path": "skills/%s/%s" % (skill_name, os.path.relpath(path, skill_dir)),
+            "upstream_blob_sha": sha,
+            "upstream_mode": "100644",
+            "vendored_mode": "100644",
+            "vendored_blob_sha": sha,
+            "locally_modified": False,
+            "patch_ids": [],
+        })
+    skills = [{
+        "name": skill_name,
+        "path": os.path.relpath(skill_dir, repo_root),
+        "invocation": "model",
+        "scripts_audited": bool(with_script),
+        "locally_modified": False,
+        "patch_ids": [],
+        "files": entries,
+    }]
+    manifest = {
+        "upstream_repo": "https://github.com/fixture/skills",
+        "upstream_commit": "0" * 40,
+        "reviewed_at": "2026-08-16T00:00:00Z",
+        "reviewed_by": "fixture",
+        "installation_mode": REQUIRED_INSTALLATION_MODE,
+        "automatic_updates": False,
+        "skills": skills,
+        "excluded_skills": [{"name": "not-installed", "status": "EXCLUDE", "reason": "fixture"}],
+    }
+    entry = _fake_provider_entry(docs)
+    return entry, skills, repo_root, skills_dir, manifest
+
+
+def _st_p1():
+    """Positive control: a correctly vendored provider yields zero details from every helper."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, manifest = _build_provider_fixture(tmp)
+        assert provider_manifest_field_details(entry, manifest) == []
+        assert provider_file_hash_details(entry, skills, root) == []
+        assert provider_vendored_mode_details(entry, skills, root) == []
+        assert provider_scripts_audited_details(entry, skills, root) == []
+        assert provider_license_file_details(
+            entry, {skills[0]["name"]}, skills_dir, root) == []
+        assert dependency_closure_details(skills_dir) == []
+
+
+def _st_p2():
+    """automatic_updates must be literally false -- a truthy or missing value is a live-update
+    installation, which is exactly what project-local vendoring exists to prevent."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        for bad in (True, "false", None):
+            manifest["automatic_updates"] = bad
+            details = provider_manifest_field_details(entry, manifest)
+            assert any("automatic_updates must be literally false" in d for d in details), (bad, details)
+
+
+def _st_p3():
+    """upstream_commit must be a full 40-hex SHA: a branch name or short SHA is a floating ref,
+    and every recorded blob hash would be unfalsifiable against it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        for bad in ("main", "0" * 39, "z" * 40, None):
+            manifest["upstream_commit"] = bad
+            details = provider_manifest_field_details(entry, manifest)
+            assert any("is not a full 40-hex SHA" in d for d in details), (bad, details)
+
+
+def _st_p4():
+    """A manifest pointing at a different upstream than the registry entry claims, and a manifest
+    missing a required provenance field, both fail."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        manifest["upstream_repo"] = "https://github.com/someone-else/skills"
+        details = provider_manifest_field_details(entry, manifest)
+        assert any("upstream_repo" in d and "!= registry" in d for d in details), details
+
+        _e2, _s2, _r2, _sd2, manifest2 = _build_provider_fixture(tmp, skill_name="p4b")
+        del manifest2["reviewed_by"]
+        details2 = provider_manifest_field_details(entry, manifest2)
+        assert any("missing required field 'reviewed_by'" in d for d in details2), details2
+        # ...and the canonicalizer must not turn a genuine mismatch into a pass, nor a
+        # .git/trailing-slash spelling difference into a failure.
+        manifest2["reviewed_by"] = "fixture"
+        manifest2["upstream_repo"] = "https://github.com/fixture/skills.git/"
+        assert provider_manifest_field_details(entry, manifest2) == []
+
+
+def _st_p5():
+    """A per-skill license layout fails when the notice is missing from a skill directory, and a
+    shared layout fails when the single declared file is missing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        name = skills[0]["name"]
+        assert provider_license_file_details(entry, {name}, skills_dir, root) == []
+        os.remove(os.path.join(skills_dir, name, "LICENSE.txt"))
+        details = provider_license_file_details(entry, {name}, skills_dir, root)
+        assert any("LICENSE.txt missing" in d for d in details), details
+
+        shared_entry = _fake_provider_entry(os.path.join(root, "docs", "agents"), layout="shared")
+        details2 = provider_license_file_details(shared_entry, set(), skills_dir, root)
+        assert any("shared license file missing" in d for d in details2), details2
+
+
+def _st_p6():
+    """vendored_blob_sha is the integrity pin: editing a vendored file on disk without updating
+    the manifest must fail closed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        target = os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh")
+        _write_file(target, "#!/bin/sh\necho tampered\n")
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("!= manifest vendored_blob_sha" in d for d in details), details
+
+
+def _st_p7():
+    """Inventory completeness, both directions: a declared file absent from disk fails, and an
+    on-disk file the manifest never declares fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skill_dir = os.path.join(skills_dir, skills[0]["name"])
+        os.remove(os.path.join(skill_dir, "scripts", "run.sh"))
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("listed in files[] but missing on disk" in d for d in details), details
+
+        entry2, skills2, root2, skills_dir2, _m2 = _build_provider_fixture(tmp, skill_name="p7b")
+        _write_file(os.path.join(skills_dir2, "p7b", "scripts", "undeclared.sh"), "#!/bin/sh\n")
+        details2 = provider_file_hash_details(entry2, skills2, root2)
+        assert any("present on disk but not listed in files[]" in d for d in details2), details2
+
+
+def _st_p8():
+    """A file marked locally_modified must name a patch id, and a local-origin file must carry a
+    reason -- otherwise a change to a vendored artifact has no documented justification."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, _sd, _m = _build_provider_fixture(tmp)
+        skills[0]["files"][0]["locally_modified"] = True
+        skills[0]["files"][0]["patch_ids"] = []
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("locally_modified=true but patch_ids is empty" in d for d in details), details
+
+        skills[0]["files"][0]["locally_modified"] = False
+        skills[0]["files"][0]["origin"] = "local"
+        skills[0]["files"][0].pop("reason", None)
+        details2 = provider_file_hash_details(entry, skills, root)
+        assert any("origin=local but no 'reason' given" in d for d in details2), details2
+
+
+def _st_p9():
+    """Mode drift in both directions: a manifest claiming a non-100644 vendored_mode, an
+    executable bit actually set on disk, and an undocumented 100755 -> 100644 normalization."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        assert provider_vendored_mode_details(entry, skills, root) == []
+
+        skills[0]["files"][0]["vendored_mode"] = "100755"
+        details = provider_vendored_mode_details(entry, skills, root)
+        assert any('vendored_mode' in d and '!= "100644"' in d for d in details), details
+        skills[0]["files"][0]["vendored_mode"] = "100644"
+
+        script = os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh")
+        os.chmod(script, 0o755)
+        details2 = provider_vendored_mode_details(entry, skills, root)
+        assert any("executable bit set on disk" in d for d in details2), details2
+        os.chmod(script, 0o644)
+
+        skills[0]["files"][0]["upstream_mode"] = "100755"
+        skills[0]["files"][0]["patch_ids"] = []
+        details3 = provider_vendored_mode_details(entry, skills, root)
+        assert any("with no patch id documenting it" in d for d in details3), details3
+        # Documenting the normalization with a patch id clears it.
+        skills[0]["files"][0]["patch_ids"] = ["fixture-mode-normalize"]
+        assert provider_vendored_mode_details(entry, skills, root) == []
+
+
+def _st_p10():
+    """A skill shipping a script must record scripts_audited: true; the detector covers the
+    extensions these providers actually ship AND extensionless shebang files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skills[0]["scripts_audited"] = False
+        details = provider_scripts_audited_details(entry, skills, root)
+        assert any("scripts_audited is not true" in d for d in details), details
+
+        # Extensionless shebang file: caught by content, not by name.
+        entry2, skills2, root2, skills_dir2, _m2 = _build_provider_fixture(
+            tmp, skill_name="p10b", with_script=False)
+        hookpath = os.path.join(skills_dir2, "p10b", "scripts", "pr-snapshot")
+        _write_file(hookpath, "#!/usr/bin/env bash\necho snapshot\n")
+        skills2[0]["scripts_audited"] = False
+        skills2[0]["files"].append({
+            "path": os.path.relpath(hookpath, root2), "origin": "upstream",
+            "upstream_blob_sha": "x", "vendored_blob_sha": "x",
+            "upstream_mode": "100644", "vendored_mode": "100644",
+            "locally_modified": False, "patch_ids": [],
+        })
+        details2 = provider_scripts_audited_details(entry2, skills2, root2)
+        assert any("pr-snapshot" in d or "scripts_audited is not true" in d for d in details2), details2
+        # A prose-only skill is exempt: nothing to audit.
+        entry3, skills3, root3, _sd3, _m3 = _build_provider_fixture(
+            tmp, skill_name="p10c", with_script=False)
+        skills3[0]["scripts_audited"] = False
+        assert provider_scripts_audited_details(entry3, skills3, root3) == []
+
+
+def _st_p11():
+    """Patch coverage is bidirectional: an in-file marker missing from the ledger fails, an
+    in-file marker not recorded in files[].patch_ids fails, and a manifest patch id the ledger
+    never documents fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skillmd = os.path.join(skills_dir, skills[0]["name"], "SKILL.md")
+        with open(skillmd, "a", encoding="utf-8") as f:
+            f.write("\n<!-- bukerov-local-patch: fx-1 -->tweak<!-- /bukerov-local-patch: fx-1 -->\n")
+
+        details = provider_patch_coverage_details(entry, skills, "", root, "ledger.md")
+        assert any("found in-file but missing from ledger.md" in d for d in details), details
+        assert any("not recorded in any files[].patch_ids" in d for d in details), details
+
+        skills[0]["files"][0]["locally_modified"] = True
+        skills[0]["files"][0]["patch_ids"] = ["fx-1"]
+        details2 = provider_patch_coverage_details(entry, skills, "", root, "ledger.md")
+        assert any("manifest patch_id 'fx-1' not found in ledger.md" in d for d in details2), details2
+
+        assert provider_patch_coverage_details(
+            entry, skills, "row for `fx-1`", root, "ledger.md") == []
+
+
+def _st_p12():
+    """Dependency closure: a SKILL.md pointing at a closure file that was never vendored fails,
+    while a path whose head directory does not exist in the skill stays prose and does not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _e, skills, _r, skills_dir, _m = _build_provider_fixture(tmp)
+        assert dependency_closure_details(skills_dir) == []
+
+        os.remove(os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh"))
+        _write_file(os.path.join(skills_dir, skills[0]["name"], "scripts", "other.sh"), "#!/bin/sh\n")
+        details = dependency_closure_details(skills_dir)
+        assert any("references 'scripts/run.sh', which is not vendored" in d for d in details), details
+
+        # No `references/` directory in this skill -> a prose mention is not a closure claim.
+        skillmd = os.path.join(skills_dir, skills[0]["name"], "SKILL.md")
+        _write_file(skillmd, "---\nname: x\ndescription: y\n---\n\nPut notes in `references/notes.md`.\n")
+        assert dependency_closure_details(skills_dir) == []
+
+
+def _st_p13():
+    """Every rejected candidate must carry an auditable verdict: a missing/blank reason fails, and
+    a status outside {EXCLUDE, HOLD} fails. HOLD is accepted so a blocked-but-valuable candidate is
+    recorded rather than silently omitted."""
+    fs_names = set()
+    def details_for(excluded):
+        out = []
+        for item in excluded:
+            name = item.get("name")
+            if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
+                out.append("exclusion %r has no reason" % name)
+            status = item.get("status")
+            if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
+                out.append("exclusion %r has status %r" % (name, status))
+            if name in fs_names:
+                out.append("excluded but present: %s" % name)
+        return out
+    assert details_for([{"name": "a", "reason": "   "}]), "blank reason must fail"
+    assert details_for([{"name": "a"}]), "missing reason must fail"
+    assert details_for([{"name": "a", "reason": "r", "status": "MAYBE"}]), "bad status must fail"
+    assert details_for([{"name": "a", "reason": "r", "status": "HOLD"}]) == []
+    assert details_for([{"name": "a", "reason": "r", "status": "EXCLUDE"}]) == []
+
+
+def _st_p14():
+    """The frontmatter allowlist is widened PER PROVIDER from the registry, so a provider that
+    legitimately uses `allowed-tools` keeps it -- upstream frontmatter is preserved, not deleted --
+    while a key no provider declares is still rejected."""
+    by_dir = allowed_frontmatter_keys_by_dir()
+    # Every on-disk skill dir is claimed by exactly one source, so every one has an entry.
+    for name in list_skill_dirs():
+        assert name in by_dir, "no allowlist resolved for %s" % name
+    for entry in MANIFESTS:
+        allowed = ALLOWED_SKILL_KEYS | set(entry.get("extra_frontmatter_keys", ()))
+        for name in provider_skill_dir_names(entry):
+            assert by_dir[name] == allowed, (entry["label"], name, by_dir[name])
+    # A registry entry declaring an extra key widens only ITS OWN dirs, never another provider's.
+    fixture = _fake_provider_entry("/nonexistent")
+    assert "allowed-tools" in (ALLOWED_SKILL_KEYS | set(fixture["extra_frontmatter_keys"]))
+    assert "allowed-tools" not in ALLOWED_SKILL_KEYS
+    assert "totally-made-up-key" not in ALLOWED_SKILL_KEYS
+
+
+def _st_p15():
+    """`{baseDir}/x` resolves against the SKILL ROOT, plain relatives against the containing
+    directory, `#fragment` suffixes are stripped, a bare `{baseDir}` is not a path claim, and a
+    `/`-rooted target is still reported absolute. Resolution must be real: a `{baseDir}` target
+    that does not exist has to be reachable as a dangling link, or adapting the resolver would
+    have turned a check into a rubber stamp."""
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = os.path.join(tmp, "tob-skill")
+        nested = os.path.join(skill_dir, "references")
+        _write_file(os.path.join(nested, "foundations.md"), "x\n")
+        _write_file(os.path.join(nested, "sibling.md"), "y\n")
+
+        kind, res = resolve_skill_link("{baseDir}/references/foundations.md", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        kind, res = resolve_skill_link("sibling.md", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        kind, res = resolve_skill_link("{baseDir}/references/foundations.md#anchor", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        # Not a rubber stamp: a missing {baseDir} target still resolves to a real, absent path.
+        kind, res = resolve_skill_link("{baseDir}/references/never-vendored.md", nested, skill_dir)
+        assert kind == "path" and not os.path.isfile(res), (kind, res)
+        for skipped in ("{baseDir}", "https://example.com/x.md", "#heading", ""):
+            assert resolve_skill_link(skipped, nested, skill_dir)[0] == "skip", skipped
+        assert resolve_skill_link("/etc/passwd", nested, skill_dir)[0] == "absolute"
+        # Plain relatives are NOT silently rebased onto the skill root.
+        kind, res = resolve_skill_link("references/foundations.md", nested, skill_dir)
+        assert kind == "path" and not os.path.isfile(res), (kind, res)
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -3092,6 +3860,21 @@ def _self_test_fixtures():
         ("V12", "schema block selected by task_contract: key, not by fence position", _st_v12),
         ("V13", "the six authority-chain documents agree on four levels", _st_v13),
         ("V14", "a resurrected five-level authority chain is rejected", _st_v14),
+        ("P1", "a correctly vendored provider passes every generic provider check", _st_p1),
+        ("P2", "automatic_updates not literally false", _st_p2),
+        ("P3", "upstream_commit is a floating ref / not a 40-hex SHA", _st_p3),
+        ("P4", "manifest upstream_repo mismatch and missing provenance field", _st_p4),
+        ("P5", "missing per-skill and shared license notices", _st_p5),
+        ("P6", "vendored file edited on disk without a manifest hash bump", _st_p6),
+        ("P7", "file inventory incomplete in both directions", _st_p7),
+        ("P8", "locally_modified with no patch id; local origin with no reason", _st_p8),
+        ("P9", "vendored-mode drift: bad mode, on-disk exec bit, undocumented normalization", _st_p9),
+        ("P10", "script shipped without scripts_audited (incl. extensionless shebang)", _st_p10),
+        ("P11", "patch coverage broken in each of its three directions", _st_p11),
+        ("P12", "skill references a closure file that was never vendored", _st_p12),
+        ("P13", "exclusion entry with no reason / an invalid status", _st_p13),
+        ("P14", "frontmatter allowlist widens per provider, not globally", _st_p14),
+        ("P15", "{baseDir} link resolution is real, not a rubber stamp", _st_p15),
     ]
 
 
