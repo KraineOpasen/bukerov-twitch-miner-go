@@ -18,7 +18,7 @@ Show this to the user, then immediately proceed to Step 2. The user reads and th
 
 ### 2. Spawn sub-agents
 
-Spawn 3+ sub-agents in parallel using the Agent tool, respecting the active task contract's agent cap.
+Spawn 3+ sub-agents in parallel, respecting the active task contract's agent cap.
 <!-- bukerov-local-patch: design-it-twice-cap -->
 If the cap is smaller than 3, reduce the number of agents to fit it rather than exceeding the cap.
 <!-- /bukerov-local-patch: design-it-twice-cap -->

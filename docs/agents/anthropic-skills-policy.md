@@ -13,7 +13,10 @@ never share a skill name (see `scripts/validate-agent-governance.py`'s `manifest
 ## Upstream
 
 - Repo: `https://github.com/anthropics/skills`
-- Reviewed commit: `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`
+- Reviewed commit: `f6656c1256d5a8adfa37db9110046ef20bac644c` (refreshed from `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`;
+  the full selected subtree — all three vendored skills' complete directory trees, including every `.py`/`.html`/
+  `.sh` file — was re-audited and found byte-identical between the two commits, so this was a provenance-only
+  pin bump with zero content or patch changes)
 - Reviewed tree SHAs (per vendored skill directory): `skill-creator`
   `3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6`, `frontend-design` `0d5b74a14bdf3ebcd64f352d06376a2ef05ed296`,
   `webapp-testing` `5ffb7dc66b9fd4c25c3e400a4c00da99a349b714`
