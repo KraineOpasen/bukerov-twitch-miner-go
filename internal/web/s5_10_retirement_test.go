@@ -12,12 +12,17 @@ package web
 // s5_10LegacyAliasRe deliberately matches on the bare color-tier name with
 // no property-prefix assumption (unlike earlier slices' narrower `(?:bg|
 // text|border|...)-` patterns) — this repo's own S5-10 census caught real
-// legacy references those prefix lists missed entirely (`accent-purple-600`
-// on native checkbox inputs, `border-t-purple-500` on spinner elements).
-// A prefix-anchored regex would have silently let both classes back in.
+// legacy references those prefix lists missed entirely: the `accent-`
+// property on native checkbox inputs (purple-600) and the `border-t-`
+// property on spinner elements (purple-500). A prefix-anchored regex would
+// have silently let both classes back in. (Deliberately not spelling either
+// full Tailwind class name contiguously here — see the doc comment on
+// TestS5_10ZeroLegacyAliasReferencesInTemplates for why: this file is
+// itself a Tailwind content-scan candidate source.)
 
 import (
 	"io/fs"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -98,6 +103,46 @@ func TestS5_10ZeroPrimitiveReferencesInTemplates(t *testing.T) {
 	}
 }
 
+// s5_10CSSCommentRe strips /* ... */ CSS comments before scanning input.css
+// for legacy Tailwind class usage: this file's own comments narrate S5-10's
+// history in prose (naming retired tiers to explain what changed) and must
+// not be confused with a LIVE @apply/plain-CSS reference — a comment can't
+// de-theme anything, only a real consumer can (Mechanism 1).
+var s5_10CSSCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+
+// s5_10PrimitiveTokenNameRe strips input.css's own Layer-A primitive custom
+// property names (e.g. --prim-night-purple-700) before the legacy-alias
+// scan below: a primitive's name and its var() references legitimately
+// embed a hue-tier substring ("purple-700") that is a fragment of a custom
+// property identifier, not a Tailwind utility class — s5_10LegacyAliasRe
+// cannot otherwise tell the two apart, since \b matches identically on
+// either side of the hyphen joining "night" and "purple-700".
+var s5_10PrimitiveTokenNameRe = regexp.MustCompile(`--prim-[a-zA-Z0-9-]+`)
+
+// TestS5_10ZeroLegacyAliasReferencesInInputCSS pins the corrective-pass
+// finding behind Mechanism 1. TestS5_10ZeroLegacyAliasReferencesInTemplates
+// only ever swept templates, and TestS5_10DeletedLegacyAliasesDoNotReturn
+// (below) only ever checked for alias *definitions* (a "name:" pattern)
+// reappearing — neither could catch a retired class surviving as a *live
+// consumer* inside input.css's own @utility/@apply rules and plain-CSS
+// overrides (`.card`, `.btn-secondary`, `.progress-fill-claimed`, …), which
+// is exactly how internal rules silently fell back to Tailwind's builtin
+// palette instead of the semantic layer in one theme, deleting the alias
+// out from under them. This is the "zero retired class/custom-property
+// references in input.css" proof the corrective pass required — not merely
+// zero template references or zero alias definitions.
+func TestS5_10ZeroLegacyAliasReferencesInInputCSS(t *testing.T) {
+	css, err := staticFS.ReadFile("static/css/input.css")
+	if err != nil {
+		t.Fatalf("read input.css: %v", err)
+	}
+	src := s5_10CSSCommentRe.ReplaceAllString(string(css), "")
+	src = s5_10PrimitiveTokenNameRe.ReplaceAllString(src, "")
+	for _, m := range s5_10LegacyAliasRe.FindAllString(src, -1) {
+		t.Errorf("input.css: legacy alias reference %q survives outside a comment/primitive name — a live @apply or plain-CSS rule still consumes a retired Tailwind class instead of its semantic token", m)
+	}
+}
+
 // s5_10DeletedAliases are the legacy custom-property names S5-10 removed
 // from input.css once their last template reference was migrated. Every one
 // of these definitions reappearing (in either the Tailwind scale-indirection
@@ -145,6 +190,57 @@ func TestS5_10DeletedLegacyAliasesDoNotReturn(t *testing.T) {
 		if strings.Contains(src, name+":") {
 			t.Errorf("input.css: deleted legacy alias %q was reintroduced", name)
 		}
+	}
+}
+
+// s5_10PrefixedLegacyClassRe matches the scanner-DANGEROUS shape: one of
+// Tailwind's actual color-accepting property prefixes (bg, text, border
+// and its side variants, accent, ring, divide, placeholder, decoration,
+// outline, shadow, the gradient stops, fill, stroke, caret, selection,
+// marker) immediately followed by one of S5-10's retired hue-tier names,
+// forming a literal, contiguous Tailwind class name its content scanner
+// can pick up as a real candidate — the exact mechanism that produced dead
+// `.bg-neutral-700{}`, `.accent-purple-600{}`, `.border-t-purple-500{}`,
+// and `.bg-purple-600{}` rules in the compiled app.css from prose alone,
+// with zero template ever applying any of them (see
+// TestS5_10ZeroLegacyAliasReferencesInTemplates). Unlike s5_10LegacyAliasRe
+// above (deliberately prefix-agnostic, because a template can only ever
+// contain a real Tailwind class), this list is deliberately closed to
+// Tailwind's own finite set of color-utility prefixes: prose also contains
+// CSS custom-property names built from the SAME hue-tier vocabulary
+// (`--prim-night-purple-700`, `--color-neutral-800`) whose prefix
+// (`prim-night-`, `color-`) is not a real Tailwind utility prefix and so
+// can never generate anything — an open prefix match would flag those as
+// false positives. A BARE mention of a hue-tier name with no adjacent
+// prefix (e.g. "the neutral-800 family") is not a valid Tailwind candidate
+// either, and is the sanctioned, scanner-safe way to name one in prose —
+// see this doc's own "Legacy compatibility rules" line.
+var s5_10PrefixedLegacyClassRe = regexp.MustCompile(`\b(?:bg|text|border(?:-[tblrxsey])?|accent|ring(?:-offset)?|divide|placeholder|decoration|outline|shadow|from|via|to|fill|stroke|caret|selection|marker)-(?:neutral-(?:100|200|300|400|500|600|700|800|900|950)|purple-(?:300|400|500|600|700)|amber-(?:500|600|700)|green-(?:500|600)|emerald-(?:500|600)|red-(?:500|600|700))\b`)
+
+// TestS5_10DesignDocWordingIsScannerSafe pins Mechanism 2 at its second
+// proven source. docs/dashboard/stage-4-visual-design-system.md is a
+// Tailwind content-scan candidate source exactly like any tracked file in
+// this repo — Tailwind's default auto content detection scans the whole
+// tracked tree, not just @source's explicit "../../../templates" (see
+// input.css's own @import) — so prose here that spells out a retired,
+// zero-live-usage Tailwind class by its full prefixed name regenerates a
+// dead utility rule just as surely as the test-file comment that first
+// caused this. This test does not invoke the Tailwind CLI (no such
+// dependency belongs in a unit test); it pins the textual precondition
+// that prevents the dead rule, verified against a real build during the
+// corrective pass (two identical, byte-for-byte regenerations). Two dead
+// `neutral-700`-tier rules still survive that build, traced to a
+// pre-existing comment in s5_8_analytics_test.go:1098/863 — a file outside
+// this pass's allowed paths, left alone rather than fixed under this
+// contract.
+func TestS5_10DesignDocWordingIsScannerSafe(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/dashboard/stage-4-visual-design-system.md")
+	if err != nil {
+		t.Fatalf("read design doc: %v", err)
+	}
+	src := string(doc)
+	for _, m := range s5_10PrefixedLegacyClassRe.FindAllString(src, -1) {
+		t.Errorf("stage-4-visual-design-system.md: %q is a scanner-sensitive literal Tailwind class name for a retired, zero-live-usage tier — reword to name the prefix and tier separately (see the file's own \"Legacy compatibility rules\" line for the sanctioned form)", m)
 	}
 }
 

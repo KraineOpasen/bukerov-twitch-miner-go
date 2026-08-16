@@ -646,28 +646,37 @@
 @utility shadow-1 { box-shadow: var(--shadow-1); }
 @utility shadow-2 { box-shadow: var(--shadow-2); }
 
+/* btn-primary/override-badge (solid brand-purple fills) and live-badge/
+   avoid-badge/prefer-badge (solid status fills) pair a --*-solid/--status-*
+   background with the matching --text-on-* token via plain CSS rather than
+   @apply: those on-* tokens intentionally aren't exposed through @theme
+   inline (no template consumes them as a class — see the S5-10 addendum),
+   so they're consumed directly here, the same way this file already
+   consumes --interactive-solid/--interactive-solid-hover. */
 @utility btn-primary {
-  @apply bg-purple-600 text-white hover:bg-purple-700 px-4 py-2 rounded-md font-medium transition-colors;
+  @apply px-4 py-2 rounded-md font-medium transition-colors;
+  background-color: var(--interactive-solid);
+  color: var(--text-on-accent);
 }
 
 @utility btn-secondary {
-  @apply bg-neutral-800 border border-border-default text-neutral-100 hover:border-purple-500 hover:text-purple-400 px-4 py-2 rounded-md font-medium transition-colors;
+  @apply bg-surface-card border border-border-default text-text-primary hover:border-interactive hover:text-interactive-muted px-4 py-2 rounded-md font-medium transition-colors;
 }
 
 @utility card {
-  @apply bg-neutral-800 border border-border-default rounded-lg p-6;
+  @apply bg-surface-card border border-border-default rounded-lg p-6;
 }
 
 @utility input-field {
-  @apply bg-neutral-900 border border-border-default rounded-md px-3 py-2 text-neutral-100 focus:outline-none focus:border-purple-500;
+  @apply bg-surface-input border border-border-default rounded-md px-3 py-2 text-text-primary focus:outline-none focus:border-interactive;
 }
 
 @utility section-title {
-  @apply text-xl font-semibold text-neutral-100 pb-2 mb-4 border-b border-border-default;
+  @apply text-xl font-semibold text-text-primary pb-2 mb-4 border-b border-border-default;
 }
 
 @utility subsection-title {
-  @apply text-sm font-medium text-neutral-400 uppercase tracking-wide my-3;
+  @apply text-sm font-medium text-text-muted uppercase tracking-wide my-3;
 }
 
 @utility setting-row {
@@ -675,35 +684,37 @@
 }
 
 @utility setting-label {
-  @apply text-neutral-100 font-medium;
+  @apply text-text-primary font-medium;
 }
 
 @utility setting-description {
-  @apply text-neutral-400 text-xs mt-1;
+  @apply text-text-muted text-xs mt-1;
 }
 
 @utility live-badge {
-  @apply bg-red-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-danger);
+  color: var(--text-on-danger);
 }
 
 @utility streamer-card {
-  @apply bg-neutral-800 border border-border-default rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-purple-500 hover:-translate-y-0.5;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-interactive hover:-translate-y-0.5;
 }
 
 @utility streamer-card-live {
-  @apply border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)];
+  @apply border-status-danger shadow-[0_0_10px_rgba(239,68,68,0.3)];
 }
 
 @utility stat-card {
-  @apply bg-neutral-800 border border-border-default rounded-lg p-6 text-center;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 text-center;
 }
 
 @utility chart-container {
-  @apply bg-neutral-800 border border-border-default rounded-lg p-6 mt-6;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 mt-6;
 }
 
 @utility details-panel {
-  @apply bg-neutral-800 border border-border-default rounded-lg overflow-hidden;
+  @apply bg-surface-card border border-border-default rounded-lg overflow-hidden;
 }
 
 @utility details-content {
@@ -711,19 +722,29 @@
 }
 
 @utility override-badge {
-  @apply bg-purple-600 text-white text-[0.65rem] px-2 py-0.5 rounded uppercase;
+  @apply text-[0.65rem] px-2 py-0.5 rounded uppercase;
+  background-color: var(--interactive-solid);
+  color: var(--text-on-accent);
 }
 
+/* drop-exclusive-badge keeps a literal white foreground: unlike the
+   purple/success/danger solid-fill family above, no --text-on-warning
+   token exists (the S5-10a AA audit never flagged this pairing), so
+   inventing one here would be scope creep beyond the retired-class fix. */
 @utility drop-exclusive-badge {
-  @apply bg-amber-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply bg-status-warning text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
 }
 
 @utility prefer-badge {
-  @apply bg-emerald-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-success);
+  color: var(--text-on-success);
 }
 
 @utility avoid-badge {
-  @apply bg-red-700 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-danger);
+  color: var(--text-on-danger);
 }
 
 @utility progress-track {
@@ -731,15 +752,19 @@
 }
 
 @utility progress-fill {
-  @apply h-full bg-purple-500 rounded-full transition-all duration-300;
+  @apply h-full bg-interactive rounded-full transition-all duration-300;
 }
 
 @utility progress-fill-minute {
-  @apply h-full bg-purple-400 rounded-full transition-all duration-300;
+  @apply h-full bg-interactive-muted rounded-full transition-all duration-300;
 }
 
+/* progress-fill-claimed/status-pill-claimed's mid-gray borrows
+   --border-strong: this file already reuses border tokens for neutral
+   progress-track fills elsewhere (see .bar below), and no separate
+   "500-tier" semantic token exists symmetrically in both themes. */
 @utility progress-fill-claimed {
-  @apply h-full bg-neutral-500 rounded-full;
+  @apply h-full bg-border-strong rounded-full;
 }
 
 @utility mini-progress-track {
@@ -751,35 +776,35 @@
 }
 
 @utility status-pill-progress {
-  @apply bg-purple-600/20 text-purple-300;
+  @apply bg-interactive/20 text-interactive-muted;
 }
 
 @utility status-pill-claimed {
-  @apply bg-surface-control-muted text-neutral-300;
+  @apply bg-surface-control-muted text-text-secondary;
 }
 
 @utility priority-item {
-  @apply flex items-center gap-3 p-3 bg-neutral-900 border border-border-default rounded-md mb-2 cursor-grab;
+  @apply flex items-center gap-3 p-3 bg-surface-input border border-border-default rounded-md mb-2 cursor-grab;
 }
 
 @utility priority-item-dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 @utility streamer-item {
-  @apply bg-neutral-900 border border-border-default rounded-lg mb-2 overflow-hidden;
+  @apply bg-surface-input border border-border-default rounded-lg mb-2 overflow-hidden;
 }
 
 @utility streamer-item-dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 @utility streamer-header {
-  @apply flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-purple-500/10;
+  @apply flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-interactive/10;
 }
 
 @utility modal-dialog {
-  @apply bg-neutral-800 border border-border-default rounded-lg p-0 w-[92vw] max-w-lg text-neutral-100 shadow-xl;
+  @apply bg-surface-card border border-border-default rounded-lg p-0 w-[92vw] max-w-lg text-text-primary shadow-xl;
 }
 
 /* Custom component styles that need selectors */
@@ -787,8 +812,12 @@
   background-color: rgba(0, 0, 0, 0.7);
 }
 
+.btn-primary:hover {
+  background-color: var(--interactive-solid-hover);
+}
+
 .details-panel summary {
-  @apply px-4 py-3 cursor-pointer font-medium text-neutral-100 hover:bg-purple-500/10 transition-colors;
+  @apply px-4 py-3 cursor-pointer font-medium text-text-primary hover:bg-interactive/10 transition-colors;
 }
 
 .details-panel[open] summary {
@@ -891,15 +920,15 @@
 }
 
 .streamer-card.is-live {
-  @apply border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)];
+  @apply border-status-danger shadow-[0_0_10px_rgba(239,68,68,0.3)];
 }
 
 .priority-item.dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 .streamer-item.dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 /* =====================================================================

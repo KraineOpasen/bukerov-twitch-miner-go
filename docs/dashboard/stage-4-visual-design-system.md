@@ -136,7 +136,7 @@ Extend the **existing** `@theme inline` block in `input.css` — no config file,
 | motion | `.motion-fast/base/slow` presets + global reduced-motion override | interactive elements |
 | breakpoints | Tailwind defaults `md` 768 / `lg` 1024 / `xl` 1280 | `xl:` sidebar, `lg:` rail, `<lg` drawer |
 
-**Legacy compatibility rules** [AD]: F1's re-pointed legacy names (`bg-neutral-800`-style aliases) stay valid throughout migration and are deleted **only in S5-10** after a grep proves zero template references. New/migrated templates use semantic utilities exclusively; primitives never appear in templates; both palettes must define every token (build-time grep check for unpaired tokens).
+**Legacy compatibility rules** [AD]: F1's re-pointed legacy names (the retired `neutral`/`purple`/`amber`/`green`/`emerald`/`red` numbered-shade aliases, `bg`/`text`/`border`-prefixed) stay valid throughout migration and are deleted **only in S5-10** after a grep proves zero template references. New/migrated templates use semantic utilities exclusively; primitives never appear in templates; both palettes must define every token (build-time grep check for unpaired tokens).
 
 
 ## 6. Component inventory C0–C18
@@ -666,7 +666,7 @@ for real (fixture-backed `httptest` server + Playwright, all 30 canonical routes
 `handlers_policy.go:49`, background set to `transparent` inline) at 2.06:1 light, tracing the effective
 background past the campaign card's real, opaque background (an `oklch()`-declared Tailwind default) to
 `<body>`'s `--surface-page` — the exact class of bug the same pass already caught and excluded once, for a
-`bg-purple-600` button on `/events`. Re-measured with a color resolver that goes through the browser's own
+raw, un-tokenized `bg` button on `/events` using the same purple-600 shade. Re-measured with a color resolver that goes through the browser's own
 canvas color parser (so `oklch()`/`color-mix()` values can never be mis-treated as transparent), the real
 effective background is the card's own fill and the actual rendered contrast is 6.64:1 in both themes — already
 compliant. No code changed for this item; introducing a color override here would have been an unrequested,
