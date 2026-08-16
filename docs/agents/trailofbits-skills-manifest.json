@@ -106,8 +106,12 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-no-plugin-workflow",
+        "tob-plugin-agents-relocated"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -130,9 +134,11 @@
           "upstream_blob_sha": "0c636031fc56264ec7201c2813fbc154485fd74f",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "0c636031fc56264ec7201c2813fbc154485fd74f",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "d70fb53a6c81d2af2c27b2c972ee1b8296bb1c11",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
         },
         {
           "path": ".claude/skills/audit-context-building/agents/function-analyzer.md",
@@ -141,8 +147,8 @@
           "upstream_blob_sha": "fc7c5408c704ab777a67dd4444cb5c49efc41bbf",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "fc7c5408c704ab777a67dd4444cb5c49efc41bbf",
-          "locally_modified": false,
+          "vendored_blob_sha": "97225752f49b33998dd74a8e277b6edbd7820af1",
+          "locally_modified": true,
           "patch_ids": [
             "tob-plugin-agents-relocated"
           ],
@@ -166,9 +172,11 @@
           "upstream_blob_sha": "edabd5ddabdaf4690b8b86cdd95f4142956cb640",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "edabd5ddabdaf4690b8b86cdd95f4142956cb640",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "8013f884a1e6875dd8165b091612dd76ca9fe2a3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
         },
         {
           "path": ".claude/skills/audit-context-building/resources/DOMAIN_NOTES.md",
@@ -201,8 +209,11 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-mode-normalize",
+        "tob-no-plugin-workflow"
+      ],
       "scripts_audited": true,
       "audit_ref": null,
       "files": [
@@ -225,9 +236,11 @@
           "upstream_blob_sha": "79856ae812a9c6bedbbf0cb410aa474e1091f701",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "79856ae812a9c6bedbbf0cb410aa474e1091f701",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "9f9d4a40c7a9dc11348ac13f6fd85298ec49587f",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
         },
         {
           "path": ".claude/skills/codeql/assets/trail-of-bits-mark.svg",
@@ -675,8 +688,12 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer",
+        "tob-no-tree-mutation",
+        "tob-plugin-agents-relocated"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -699,9 +716,11 @@
           "upstream_blob_sha": "3755d4773d231cd13b7bfd1ecd6ad243150480bd",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "3755d4773d231cd13b7bfd1ecd6ad243150480bd",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "04eba55a1ce32b1c18bce032225e47429efe4395",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
         },
         {
           "path": ".claude/skills/differential-review/adversarial.md",
@@ -721,8 +740,8 @@
           "upstream_blob_sha": "b7c1dbace7a07650d504e6d9765b6de193a844f0",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "b7c1dbace7a07650d504e6d9765b6de193a844f0",
-          "locally_modified": false,
+          "vendored_blob_sha": "b8299a487b99b097262a34df14a60846e2136f42",
+          "locally_modified": true,
           "patch_ids": [
             "tob-plugin-agents-relocated"
           ],
@@ -746,9 +765,11 @@
           "upstream_blob_sha": "71d9dc0babf1417ee79ec8d5214ea690d0c2fe6b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "71d9dc0babf1417ee79ec8d5214ea690d0c2fe6b",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "118f67b1187ab96bf88b89977b7a133a478c2bc1",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-tree-mutation"
+          ]
         },
         {
           "path": ".claude/skills/differential-review/patterns.md",
@@ -757,9 +778,11 @@
           "upstream_blob_sha": "71078a725d986c90d014cceff0cc54414ad3b1a1",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "71078a725d986c90d014cceff0cc54414ad3b1a1",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "f6bcff6e0e3f20d2bf2f3a1b1378610674e75ba3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
         },
         {
           "path": ".claude/skills/differential-review/reporting.md",
@@ -768,9 +791,11 @@
           "upstream_blob_sha": "cb5e37b4eab89c429bf6f968d3e3482adaa39faa",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "cb5e37b4eab89c429bf6f968d3e3482adaa39faa",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "dd19aa615a34e3578bca72bc2529a46c9cb814dc",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
         }
       ]
     },
@@ -818,9 +843,7 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "750d280f353036717918dfddd00abc9cd1e30e88",
           "locally_modified": false,
-          "patch_ids": [
-            "tob-plugin-agents-relocated"
-          ],
+          "patch_ids": [],
           "relocated_from_plugin_root": true
         },
         {
@@ -832,9 +855,7 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "e08550fbfdbd0bb9c707e7797a10937cfebc74db",
           "locally_modified": false,
-          "patch_ids": [
-            "tob-plugin-agents-relocated"
-          ],
+          "patch_ids": [],
           "relocated_from_plugin_root": true
         },
         {
@@ -846,9 +867,7 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "1f62da7af046a548f7d4a5070904bced3be3b6a6",
           "locally_modified": false,
-          "patch_ids": [
-            "tob-plugin-agents-relocated"
-          ],
+          "patch_ids": [],
           "relocated_from_plugin_root": true
         },
         {
@@ -937,8 +956,10 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -961,9 +982,11 @@
           "upstream_blob_sha": "3953f756b8c0c59479eeb94ac9649c7be34fd600",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "3953f756b8c0c59479eeb94ac9649c7be34fd600",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "fc1e9797b5a501291a6e344a82d3fbbc26aa42d3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
         },
         {
           "path": ".claude/skills/genotoxic/assets/trail-of-bits-mark.svg",
@@ -1005,9 +1028,11 @@
           "upstream_blob_sha": "c9f54dc58a554e3755cac4a26a7dd66440bfc9f7",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "c9f54dc58a554e3755cac4a26a7dd66440bfc9f7",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "53f4c707bd109386c438707a3ac1771132125695",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
         }
       ]
     },
@@ -1423,8 +1448,11 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-mode-normalize",
+        "tob-no-plugin-workflow"
+      ],
       "scripts_audited": true,
       "audit_ref": null,
       "files": [
@@ -1447,9 +1475,11 @@
           "upstream_blob_sha": "94c1b610b0f1e757ca73d06386df7c5655d246cf",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "94c1b610b0f1e757ca73d06386df7c5655d246cf",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "1d357edaee27171db14c19321a4054ed8f496543",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
         },
         {
           "path": ".claude/skills/semgrep/assets/trail-of-bits-mark.svg",
@@ -1609,8 +1639,11 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-plugin-agents-relocated"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -1644,8 +1677,8 @@
           "upstream_blob_sha": "218af31e6b9e4011fa601d5a75b40338f30bb10b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "218af31e6b9e4011fa601d5a75b40338f30bb10b",
-          "locally_modified": false,
+          "vendored_blob_sha": "38d19acf515e75a72e3b9a72724142976734bf4f",
+          "locally_modified": true,
           "patch_ids": [
             "tob-plugin-agents-relocated"
           ],
@@ -1823,9 +1856,11 @@
           "upstream_blob_sha": "682d30cdbef48935112e0db64c1bce3f4dd8f405",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "682d30cdbef48935112e0db64c1bce3f4dd8f405",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "d26cfe345bb4eec579cc5c808cdaac86b700095a",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
         },
         {
           "path": ".claude/skills/sharp-edges/references/language-specific.md",
@@ -1847,8 +1882,12 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-no-plugin-workflow",
+        "tob-plugin-agents-relocated"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -1871,9 +1910,11 @@
           "upstream_blob_sha": "b10d8a081c39dd8f89bdc0559da3074f367ec869",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "b10d8a081c39dd8f89bdc0559da3074f367ec869",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "d74529fee74ff84161ed9c8efb456071b4579b32",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
         },
         {
           "path": ".claude/skills/spec-to-code-compliance/agents/spec-compliance-checker.md",
@@ -1882,8 +1923,8 @@
           "upstream_blob_sha": "ebe9a616521c6571d698ed7182977b82712567a9",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ebe9a616521c6571d698ed7182977b82712567a9",
-          "locally_modified": false,
+          "vendored_blob_sha": "75397b90e8ecc4812d9299991bdf3f413695a515",
+          "locally_modified": true,
           "patch_ids": [
             "tob-plugin-agents-relocated"
           ],
@@ -1907,9 +1948,11 @@
           "upstream_blob_sha": "6740d7d661b8c3c68f38bdb1352fc3eceaa28058",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6740d7d661b8c3c68f38bdb1352fc3eceaa28058",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "2f42c25ca7cb046a2fff267616e47ac6d8ef7632",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
         },
         {
           "path": ".claude/skills/spec-to-code-compliance/resources/DIVERGENCE_RUBRIC.md",
@@ -2424,8 +2467,11 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": false,
-      "patch_ids": [],
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer",
+        "tob-no-plugin-workflow"
+      ],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -2448,9 +2494,12 @@
           "upstream_blob_sha": "8f58f54b1883110f1a38a51c9360d4b9d1b195a8",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "8f58f54b1883110f1a38a51c9360d4b9d1b195a8",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "5311f1d1df1b03b64c710059233473400fc65e49",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer",
+            "tob-no-plugin-workflow"
+          ]
         },
         {
           "path": ".claude/skills/variant-analysis/assets/trail-of-bits-mark.svg",
