@@ -259,8 +259,9 @@ without scanning.
 Run the script against the plan Step 3 already wrote. One Bash call; there is no subagent in
 this step, and no second copy of the ruleset list to compose here.
 
+<!-- bukerov-local-patch: tob-exec-bit-interpreter — the bare `{baseDir}/scripts/*.sh` invocation in the block below is prefixed with `bash`: vendored files are mode 100644 (no executable bit anywhere under .claude/skills/**), so executing the script directly would fail with EACCES. Semantics are unchanged. -->
 ```bash
-{baseDir}/scripts/run-scans.sh \
+bash "{baseDir}/scripts/run-scans.sh" \
   --target "$TARGET" \
   --output-dir "$OUTPUT_DIR" \
   --mode run-all \

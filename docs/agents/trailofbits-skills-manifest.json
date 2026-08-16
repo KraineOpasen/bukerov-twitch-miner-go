@@ -211,6 +211,7 @@
       "classification": "VENDORED_VERBATIM",
       "locally_modified": true,
       "patch_ids": [
+        "tob-exec-bit-interpreter",
         "tob-mode-normalize",
         "tob-no-plugin-workflow"
       ],
@@ -236,9 +237,10 @@
           "upstream_blob_sha": "79856ae812a9c6bedbbf0cb410aa474e1091f701",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "9f9d4a40c7a9dc11348ac13f6fd85298ec49587f",
+          "vendored_blob_sha": "8886128ce8df5199635baa5138cad795bc3f52da",
           "locally_modified": true,
           "patch_ids": [
+            "tob-exec-bit-interpreter",
             "tob-no-plugin-workflow"
           ]
         },
@@ -293,9 +295,11 @@
           "upstream_blob_sha": "9f168e0bae5c3318282cfd6e7b1d554dc985ab2c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "9f168e0bae5c3318282cfd6e7b1d554dc985ab2c",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "ba7255f0c79b438b26613921fa6b4b37a04372d5",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
         },
         {
           "path": ".claude/skills/codeql/references/language-details.md",
@@ -359,9 +363,11 @@
           "upstream_blob_sha": "17e3a3acfabe7521e47378b46003d40cf83c24d6",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "17e3a3acfabe7521e47378b46003d40cf83c24d6",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "ffd6eb6b0ede8eeb93e8887d50e8f63342f2f850",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
         },
         {
           "path": ".claude/skills/codeql/references/sarif-processing.md",
@@ -583,9 +589,11 @@
           "upstream_blob_sha": "b83d3d229d92f7f114e425898d5f9b3435af5810",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "b83d3d229d92f7f114e425898d5f9b3435af5810",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "c866aeda7111dfbeb08d07b2fcb1a94ad6ced187",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
         },
         {
           "path": ".claude/skills/codeql/workflows/run-analysis.md",
@@ -594,9 +602,11 @@
           "upstream_blob_sha": "534e81411044cc475b7fa6c52472d08b863ddd16",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "534e81411044cc475b7fa6c52472d08b863ddd16",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "19bca42f97657e9cdc56047de52f4af9bd7463fc",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
         }
       ]
     },
@@ -1450,6 +1460,7 @@
       "classification": "VENDORED_VERBATIM",
       "locally_modified": true,
       "patch_ids": [
+        "tob-exec-bit-interpreter",
         "tob-mode-normalize",
         "tob-no-plugin-workflow"
       ],
@@ -1556,9 +1567,11 @@
           "upstream_blob_sha": "5e58565006ae8e8afdc67abe1c616f660264329c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5e58565006ae8e8afdc67abe1c616f660264329c",
-          "locally_modified": false,
-          "patch_ids": []
+          "vendored_blob_sha": "dac97630d4166a63639cf4f1e7f7c58c67abfc52",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
         }
       ]
     },

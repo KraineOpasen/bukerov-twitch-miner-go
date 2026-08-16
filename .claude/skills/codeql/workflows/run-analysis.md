@@ -38,6 +38,7 @@ their prompt, show it as chosen rather than asking again.
 candidates through `codeql resolve database` so a marker file left behind by a failed
 build cannot be selected as though it were a database.
 
+<!-- bukerov-local-patch: tob-exec-bit-interpreter — the bare `{baseDir}/scripts/*.sh` invocation in the block below is prefixed with `bash`: vendored files are mode 100644 (no executable bit anywhere under .claude/skills/**), so executing the script directly would fail with EACCES. Semantics are unchanged. -->
 ```bash
 # Discovery and selection must share a block: an array built in an earlier Bash call is
 # gone by this one, and an empty FOUND_DBS reads as "no database" for a project that has
@@ -48,7 +49,7 @@ if [ -z "${DB_NAME:-}" ]; then
   # exit status, so exit 2 ("codeql not on this shell's PATH" — a fresh shell each block,
   # so the preflight's PATH does not carry) would arrive here as an empty list and be
   # reported as "No CodeQL database found" for a project that has several.
-  if ! DB_LIST=$("{baseDir}/scripts/find_databases.sh" "${OUTPUT_DIR:-.}" .); then
+  if ! DB_LIST=$(bash "{baseDir}/scripts/find_databases.sh" "${OUTPUT_DIR:-.}" .); then
     echo "ERROR: database discovery failed — see the message above" >&2
     exit 1
   fi

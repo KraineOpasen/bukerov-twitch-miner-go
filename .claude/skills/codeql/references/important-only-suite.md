@@ -85,6 +85,7 @@ result, and `test_generation_scripts.py` fails if this block and the script disa
 
 The suite is generated from the installed packs, not copied from the template above:
 
+<!-- bukerov-local-patch: tob-exec-bit-interpreter — the bare `{baseDir}/scripts/*.sh` invocation in the block below is prefixed with `bash`: vendored files are mode 100644 (no executable bit anywhere under .claude/skills/**), so executing the script directly would fail with EACCES. Semantics are unchanged. -->
 ```bash
 # `set -e` and the trailing script call are both load-bearing: an assignment placed last
 # would overwrite the script's exit status, and the run would proceed to analysis with no
@@ -93,7 +94,7 @@ set -euo pipefail
 SUITE_FILE="$OUTPUT_DIR/raw/important-only.qls"
 CODEQL_LANG="${CODEQL_LANG:-}" OUTPUT_DIR="${OUTPUT_DIR:-}" \
   INSTALLED_THIRD_PARTY_PACKS="${INSTALLED_THIRD_PARTY_PACKS:-}" \
-  {baseDir}/scripts/generate_suite.sh important-only
+  bash "{baseDir}/scripts/generate_suite.sh" important-only
 ```
 
 `codeql database analyze` accepts a suite that resolves to zero queries. It writes an empty

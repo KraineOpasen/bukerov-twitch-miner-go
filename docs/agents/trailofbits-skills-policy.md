@@ -589,16 +589,19 @@ directories, and no patch id in this set is shared with another provider's ledge
   misread from the presence of `semgrep`, `codeql` and `trailmark` in the skill list. Installing the skill
   installs the methodology, not the tool. Anyone invoking one of these skills on a machine without the
   corresponding CLI will get an install instruction, not an analysis.
-- **Three shell scripts are invoked by bare path in prose but carry no executable bit.**
-  `codeql/SKILL.md:107` and two of its workflow documents call `"{baseDir}/scripts/find_databases.sh" ...`
-  directly, `references/run-all-suite.md` and `references/important-only-suite.md` call
-  `{baseDir}/scripts/generate_suite.sh <mode>`, and `semgrep/workflows/scan-workflow.md:263` calls
-  `{baseDir}/scripts/run-scans.sh`. Under the `100644` mode normalization those invocations fail with a
-  permission error; run them as `bash <path> ...` instead. The upstream prose was deliberately left
-  unpatched — editing six call sites across two skills to satisfy a local file-mode policy is a larger,
-  more invasive change than documenting the substitution, and the mode invariant
-  (`no-symlinks-no-exec-under-claude`) is not negotiable. This is a genuine friction point, not a
-  theoretical one.
+- **Three shell scripts were invoked by bare path and carry no executable bit — now patched, not
+  documented around.** `codeql/SKILL.md:107` and two of its workflow documents called
+  `"{baseDir}/scripts/find_databases.sh" ...` directly, `references/run-all-suite.md` and
+  `references/important-only-suite.md` called `{baseDir}/scripts/generate_suite.sh <mode>`, and
+  `semgrep/workflows/scan-workflow.md:263` called `{baseDir}/scripts/run-scans.sh`. Under the `100644`
+  mode normalization every one of those fails with `EACCES`. An earlier draft of this policy left them
+  unpatched and told the reader to substitute `bash <path>` by hand; that was the wrong call. A skill
+  that fails on first use is a **concrete project incompatibility** — patch ground (c) — and six `bash `
+  prefixes are a far smaller cost than a footnote every future invoker has to remember. All six call
+  sites now read `bash "{baseDir}/scripts/<name>.sh"`, under `tob-exec-bit-interpreter`. Semantics are
+  unchanged, and the mode invariant (`no-symlinks-no-exec-under-claude`) stays absolute.
+  Note the scope: `uv run {baseDir}/scripts/*.py` invocations elsewhere in the set were **not** touched —
+  `uv run` is already an explicit interpreter and needs no executable bit.
 - **`{baseDir}` is not substituted by anything.** No loader expands it; the validator resolves it for link
   checking only. An agent reading a vendored file must understand `{baseDir}` as "the directory this skill
   lives in" and construct the real path itself. That is upstream's own convention and this vendoring did

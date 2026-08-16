@@ -45,6 +45,7 @@ result, and `test_generation_scripts.py` fails if this block and the script disa
 
 ## Generation Script
 
+<!-- bukerov-local-patch: tob-exec-bit-interpreter — the bare `{baseDir}/scripts/*.sh` invocation in the block below is prefixed with `bash`: vendored files are mode 100644 (no executable bit anywhere under .claude/skills/**), so executing the script directly would fail with EACCES. Semantics are unchanged. -->
 ```bash
 # `set -e` and the trailing script call are both load-bearing: an assignment placed last
 # would overwrite the script's exit status, and the run would proceed to analysis with no
@@ -53,7 +54,7 @@ set -euo pipefail
 SUITE_FILE="$OUTPUT_DIR/raw/run-all.qls"
 CODEQL_LANG="${CODEQL_LANG:-}" OUTPUT_DIR="${OUTPUT_DIR:-}" \
   INSTALLED_THIRD_PARTY_PACKS="${INSTALLED_THIRD_PARTY_PACKS:-}" \
-  {baseDir}/scripts/generate_suite.sh run-all
+  bash "{baseDir}/scripts/generate_suite.sh" run-all
 ```
 
 Run-all imports whole upstream suites. A typo in `$CODEQL_LANG` gives a suite that resolves

@@ -62,6 +62,27 @@ here are adaptations of BY-SA material and are themselves CC BY-SA 4.0, not GPL-
 | semgrep | `plugins/static-analysis/skills/semgrep/scripts/run-scans.sh` | `dbca10799e7c62946658f1c8691d25a748eb80ca` | File mode normalized `100755` → `100644`. Content unchanged; `upstream_blob_sha` still matches on disk. Note this is the one shell script in the set that reaches the network at runtime (`git clone --depth 1` of twelve third-party rule repositories, after the skill's Step 3 approval gate) — that behaviour is upstream's and is **not** patched; it is documented in the policy's "Supply-chain assumptions". | Same rule, same reasoning. Invoked by bare path from `workflows/scan-workflow.md`; run it as `bash <path>`. | `tob-mode-normalize` |
 | 22 skills (all except `vulnerability-triage-brocards`) | `plugins/<plugin>/skills/<skill>/agents/openai.yaml` | `1d437b6dfffe6d157d6744ea946a9c9620578c2a` (identical in all 22) | **File excluded from the vendored copy** — not modified, not present. In every one of the 22 skills this file is the sole occupant of the skill's own `agents/` directory, so the directory is absent too. Its content is four lines of Codex marketplace interface metadata: `interface: icon_small / icon_large` both pointing at `assets/trail-of-bits-mark.svg`, and `brand_color: "#D83A34"`. The referenced SVG **is** vendored, unmodified, in all 22 directories. `vulnerability-triage-brocards` ships no `agents/` directory upstream and so has nothing to exclude. | Two independent reasons. First, it is not an agent definition and carries nothing an agent reads: it is interface chrome for a different marketplace, and the real Claude Code subagent definitions live at plugin root (relocated separately — see the four `tob-plugin-agents-relocated` rows). Second, `openai.yaml` is a forbidden vendored filename in this repository (`FORBIDDEN_VENDOR_NAMES` in `scripts/validate-agent-governance.py`, checked by `forbidden-vendor-files-absent`), alongside `.github`, `.claude-plugin`, `package.json` and `package-lock.json`. A deleted file can carry no in-file marker, so this ledger row is the whole notice — which is why it appears here despite having no patch id. | n/a — file exclusion, no patch id |
 
+| codeql | `plugins/static-analysis/skills/codeql/SKILL.md` | `see manifest` | `$("{baseDir}/scripts/find_databases.sh" ...)` → `$(bash "{baseDir}/scripts/find_databases.sh" ...)` (line 107). | Vendored files are mode `100644`; executing the script by bare path fails with `EACCES`. Concrete project incompatibility (patch ground (c)) — the skill would fail on first use. | `tob-exec-bit-interpreter` |
+| codeql | `plugins/static-analysis/skills/codeql/references/important-only-suite.md` | `see manifest` | `{baseDir}/scripts/generate_suite.sh important-only` → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
+| codeql | `plugins/static-analysis/skills/codeql/references/run-all-suite.md` | `see manifest` | `{baseDir}/scripts/generate_suite.sh run-all` → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
+| codeql | `plugins/static-analysis/skills/codeql/workflows/create-data-extensions.md` | `see manifest` | `find_databases.sh` bare invocation → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
+| codeql | `plugins/static-analysis/skills/codeql/workflows/run-analysis.md` | `see manifest` | `find_databases.sh` bare invocation → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
+| semgrep | `plugins/static-analysis/skills/semgrep/workflows/scan-workflow.md` | `see manifest` | `{baseDir}/scripts/run-scans.sh` → prefixed with `bash` (line 263). | Same. | `tob-exec-bit-interpreter` |
+
+## `tob-exec-bit-interpreter` — why this is a patch and not a documented workaround
+
+An earlier draft left these six call sites alone and recorded a "run them as `bash <path>` instead"
+note under Known limitations. That was reconsidered. Under the `100644` mode normalization the
+invocations do not merely look wrong, they fail with `EACCES` the first time a user reaches them, and
+the fix is six added words with no change in meaning. Documenting a broken invocation puts the cost on
+every future invoker; patching it pays the cost once, here, in the open. Each change carries a
+standalone marker placed immediately above its fenced block (a marker inside the fence would appear as
+literal text in the code sample the reader is meant to copy).
+
+Deliberately NOT included in this patch: the many `uv run {baseDir}/scripts/*.py` invocations across
+`diagramming-code`, `graph-evolution`, `semgrep`, `supply-chain-risk-auditor` and `codeql`. `uv run`
+is already an explicit interpreter, so those work unchanged at mode `100644` and were left untouched.
+
 ## Not patched, deliberately
 
 Recorded so nobody looks for a ledger row that does not exist, and so a future re-vendor does not "fix"

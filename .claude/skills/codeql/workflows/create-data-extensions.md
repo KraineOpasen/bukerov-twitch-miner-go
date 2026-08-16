@@ -58,6 +58,7 @@ a run killed mid-build leaves one behind. Selecting it here makes `list-sources.
 "no missing models identified" early exit reports coverage as adequate for a database that was
 never finalized.
 
+<!-- bukerov-local-patch: tob-exec-bit-interpreter — the bare `{baseDir}/scripts/*.sh` invocation in the block below is prefixed with `bash`: vendored files are mode 100644 (no executable bit anywhere under .claude/skills/**), so executing the script directly would fail with EACCES. Semantics are unchanged. -->
 ```bash
 if [ -z "$DB_NAME" ]; then
   # Discovery and selection share a block: an array built in an earlier Bash call is gone by
@@ -65,7 +66,7 @@ if [ -z "$DB_NAME" ]; then
   # Command substitution, not `done < <(...)`: a process substitution discards the script's
   # exit status, so exit 2 ("codeql not on this shell's PATH") would arrive as an empty list
   # and be reported below as "No CodeQL database found".
-  if ! DB_LIST=$("{baseDir}/scripts/find_databases.sh" "${OUTPUT_DIR:-.}" .); then
+  if ! DB_LIST=$(bash "{baseDir}/scripts/find_databases.sh" "${OUTPUT_DIR:-.}" .); then
     echo "ERROR: database discovery failed — see the message above" >&2
     exit 1
   fi
