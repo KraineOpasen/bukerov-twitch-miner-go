@@ -20,7 +20,11 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["ask-matt-setup-pointer", "wizard-user-invoked", "wait-what-domain-vocab"]
+      "patch_ids": [
+        "ask-matt-setup-pointer",
+        "wizard-user-invoked",
+        "wait-what-domain-vocab"
+      ]
     },
     {
       "name": "code-review",
@@ -32,7 +36,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["code-review-read-only"]
+      "patch_ids": [
+        "code-review-read-only"
+      ]
     },
     {
       "name": "codebase-design",
@@ -43,7 +49,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["design-it-twice-cap"]
+      "patch_ids": [
+        "design-it-twice-cap"
+      ]
     },
     {
       "name": "diagnosing-bugs",
@@ -55,7 +63,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["diagnosing-bugs-commit-note"]
+      "patch_ids": [
+        "diagnosing-bugs-commit-note"
+      ]
     },
     {
       "name": "domain-modeling",
@@ -111,7 +121,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["handoff-scratch-redact"]
+      "patch_ids": [
+        "handoff-scratch-redact"
+      ]
     },
     {
       "name": "implement",
@@ -122,7 +134,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["implement-commit-envelope"]
+      "patch_ids": [
+        "implement-commit-envelope"
+      ]
     },
     {
       "name": "improve-codebase-architecture",
@@ -134,7 +148,10 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["architecture-selfcontained-html", "architecture-no-autoopen"]
+      "patch_ids": [
+        "architecture-selfcontained-html",
+        "architecture-no-autoopen"
+      ]
     },
     {
       "name": "prototype",
@@ -146,7 +163,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["prototype-disposable"]
+      "patch_ids": [
+        "prototype-disposable"
+      ]
     },
     {
       "name": "research",
@@ -157,7 +176,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["research-read-only"]
+      "patch_ids": [
+        "research-read-only"
+      ]
     },
     {
       "name": "resolving-merge-conflicts",
@@ -168,7 +189,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["merge-conflicts-read-only"]
+      "patch_ids": [
+        "merge-conflicts-read-only"
+      ]
     },
     {
       "name": "tdd",
@@ -180,7 +203,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
       "locally_modified": true,
-      "patch_ids": ["tdd-seam-preagreed"]
+      "patch_ids": [
+        "tdd-seam-preagreed"
+      ]
     },
     {
       "name": "teach",
@@ -191,7 +216,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["teach-workspace"]
+      "patch_ids": [
+        "teach-workspace"
+      ]
     },
     {
       "name": "to-spec",
@@ -203,7 +230,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["to-spec-local-first"]
+      "patch_ids": [
+        "to-spec-local-first"
+      ]
     },
     {
       "name": "to-tickets",
@@ -215,7 +244,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["to-tickets-local-first"]
+      "patch_ids": [
+        "to-tickets-local-first"
+      ]
     },
     {
       "name": "triage",
@@ -227,7 +258,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["triage-read-only-default"]
+      "patch_ids": [
+        "triage-read-only-default"
+      ]
     },
     {
       "name": "wait-what",
@@ -239,7 +272,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["wait-what-domain-vocab"],
+      "patch_ids": [
+        "wait-what-domain-vocab"
+      ],
       "notes": "Newly promoted upstream in this refresh; added after separate explicit owner authorization (was excluded pending review). Already user-invoked upstream (disable-model-invocation: true) -- kept as-is. Read-only, grants no new capability."
     },
     {
@@ -252,7 +287,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["wayfinder-local-default"]
+      "patch_ids": [
+        "wayfinder-local-default"
+      ]
     },
     {
       "name": "wizard",
@@ -264,7 +301,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["wizard-governance-gate"],
+      "patch_ids": [
+        "wizard-governance-gate"
+      ],
       "notes": "Newly promoted upstream in this refresh; added after separate explicit owner authorization (was excluded pending review). Moved from model- to user-invoked (disable-model-invocation: true). Ships a sibling script, template.sh (upstream_blob_sha/vendored_blob_sha both fdc2a72...e5b28ab -- see files list); template.sh itself is unpatched (byte-identical to upstream) because it is only ever run by the human, never the agent -- the governance gate lives in SKILL.md.",
       "files": [
         {
@@ -287,7 +326,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,
-      "patch_ids": ["writing-for-agents-user-invoked"],
+      "patch_ids": [
+        "writing-for-agents-user-invoked"
+      ],
       "notes": "Replaces writing-great-skills, which upstream deleted between ed37663c and 068b6e0c (not a rename -- different name, different file structure, fully rewritten content; git's rename detector did not match the two). Re-reviewed from scratch and vendored under its new name after separate explicit owner authorization. Moved from model- to user-invoked (disable-model-invocation: true); the old writing-great-skills was already user-invoked, so this preserves that posture rather than broadening it. Ships a sibling reference file, SKILL-MECHANICS.md (unpatched, byte-identical to upstream).",
       "files": [
         {
@@ -305,107 +346,128 @@
     {
       "name": "setup-matt-pocock-skills",
       "category": "engineering",
-      "reason": "Only promoted skill that edits the project's root CLAUDE.md; its one-time setup function (issue tracker, triage labels, domain doc layout) is performed deterministically by this governance task instead — see docs/agents/issue-tracker.md, docs/agents/domain.md, docs/agents/triage-labels.md."
+      "reason": "Only promoted skill that edits the project's root CLAUDE.md; its one-time setup function (issue tracker, triage labels, domain doc layout) is performed deterministically by this governance task instead — see docs/agents/issue-tracker.md, docs/agents/domain.md, docs/agents/triage-labels.md.",
+      "status": "EXCLUDE"
     },
     {
       "name": "design-an-interface",
       "category": "deprecated",
-      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored codebase-design skill's Design-It-Twice pattern (DESIGN-IT-TWICE.md)."
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored codebase-design skill's Design-It-Twice pattern (DESIGN-IT-TWICE.md).",
+      "status": "EXCLUDE"
     },
     {
       "name": "qa",
       "category": "deprecated",
-      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored triage skill's issue-tracker workflow."
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored triage skill's issue-tracker workflow.",
+      "status": "EXCLUDE"
     },
     {
       "name": "request-refactor-plan",
       "category": "deprecated",
-      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored to-tickets/wayfinder flow."
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored to-tickets/wayfinder flow.",
+      "status": "EXCLUDE"
     },
     {
       "name": "ubiquitous-language",
       "category": "deprecated",
-      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored domain-modeling skill."
+      "reason": "Upstream-deprecated (not in plugin.json skills[]); superseded by the vendored domain-modeling skill.",
+      "status": "EXCLUDE"
     },
     {
       "name": "batch-grill-me",
       "category": "in-progress",
-      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project."
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "claude-handoff",
       "category": "in-progress",
-      "reason": "Upstream in-progress skill, not in plugin.json skills[]; overlaps with the vendored handoff skill, which is the reviewed/patched one this project uses."
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; overlaps with the vendored handoff skill, which is the reviewed/patched one this project uses.",
+      "status": "EXCLUDE"
     },
     {
       "name": "loop-me",
       "category": "in-progress",
-      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project."
+      "reason": "Upstream in-progress skill, not in plugin.json skills[]; not stable enough to vendor into this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "setup-ts-deep-modules",
       "category": "in-progress",
-      "reason": "Upstream in-progress skill for TypeScript repos (dependency-cruiser wiring); this project is Go, and it is not in plugin.json skills[]."
+      "reason": "Upstream in-progress skill for TypeScript repos (dependency-cruiser wiring); this project is Go, and it is not in plugin.json skills[].",
+      "status": "EXCLUDE"
     },
     {
       "name": "to-questionnaire",
       "category": "newly-promoted-not-installed",
-      "reason": "Promoted to skills/productivity/to-questionnaire in the 068b6e0c refresh (moved out of skills/in-progress/, now in plugin.json skills[]). Explicitly excluded by owner decision in this refresh's inventory amendment, alongside setup-matt-pocock-skills -- see the corresponding note in ask-matt's vendored precondition block, which tells the router not to suggest either."
+      "reason": "Promoted to skills/productivity/to-questionnaire in the 068b6e0c refresh (moved out of skills/in-progress/, now in plugin.json skills[]). Explicitly excluded by owner decision in this refresh's inventory amendment, alongside setup-matt-pocock-skills -- see the corresponding note in ask-matt's vendored precondition block, which tells the router not to suggest either. RE-EVALUATED under Governance v3 (task audited-skills-stack-v3): the v3 re-evaluation lane recommended INSTALL, and that recommendation is deliberately NOT taken. The exclusion rests on an explicit OWNER decision (authority level 1), not on a Governance-v2 orchestration rule, and ADR-0002 changed orchestration, not owner decisions -- so there is nothing here for v3 to re-open. Installing it would additionally contradict the vendored ask-matt router patch, which tells the router not to suggest this skill. Reversible at any time by an explicit owner instruction.",
+      "status": "EXCLUDE"
     },
     {
       "name": "writing-great-skills",
       "category": "removed-upstream",
-      "reason": "Deleted upstream between ed37663c and 068b6e0c (skills/productivity/writing-great-skills/{SKILL.md,GLOSSARY.md} both removed, not renamed -- git's rename detector did not match them to any new file). Was installed and vendored through the previous review; this project now vendors its unrelated upstream replacement, writing-for-agents, under a fresh review instead -- see the writing-for-agents skills[] entry above and its manifest notes."
+      "reason": "Deleted upstream between ed37663c and 068b6e0c (skills/productivity/writing-great-skills/{SKILL.md,GLOSSARY.md} both removed, not renamed -- git's rename detector did not match them to any new file). Was installed and vendored through the previous review; this project now vendors its unrelated upstream replacement, writing-for-agents, under a fresh review instead -- see the writing-for-agents skills[] entry above and its manifest notes.",
+      "status": "EXCLUDE"
     },
     {
       "name": "writing-beats",
       "category": "in-progress",
-      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "writing-fragments",
       "category": "in-progress",
-      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "writing-shape",
       "category": "in-progress",
-      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project."
+      "reason": "Upstream in-progress prose-writing skill, not in plugin.json skills[]; not engineering tooling for this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "git-guardrails-claude-code",
       "category": "misc",
-      "reason": "Not in plugin.json skills[]. This project already has a project-specific PreToolUse hook (.claude/hooks/governance-policy.py) covering equivalent and additional ground; installing a second, unreviewed git-safety skill risks duplicate or conflicting hook logic."
+      "reason": "Not in plugin.json skills[]. This project already has a project-specific PreToolUse hook (.claude/hooks/governance-policy.py) covering equivalent and additional ground; installing a second, unreviewed git-safety skill risks duplicate or conflicting hook logic.",
+      "status": "EXCLUDE"
     },
     {
       "name": "migrate-to-shoehorn",
       "category": "misc",
-      "reason": "Not in plugin.json skills[]; TypeScript-specific test-migration tooling, not applicable to this Go project."
+      "reason": "Not in plugin.json skills[]; TypeScript-specific test-migration tooling, not applicable to this Go project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "scaffold-exercises",
       "category": "misc",
-      "reason": "Not in plugin.json skills[]; course/exercise scaffolding, not applicable to this project."
+      "reason": "Not in plugin.json skills[]; course/exercise scaffolding, not applicable to this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "setup-pre-commit",
       "category": "misc",
-      "reason": "Not in plugin.json skills[]; assumes Husky/npm/lint-staged tooling not used in this Go project (which uses golangci-lint via `make lint`)."
+      "reason": "Not in plugin.json skills[]; assumes Husky/npm/lint-staged tooling not used in this Go project (which uses golangci-lint via `make lint`).",
+      "status": "EXCLUDE"
     },
     {
       "name": "edit-article",
       "category": "personal",
-      "reason": "Not in plugin.json skills[]; the skill author's personal article-editing workflow, not general engineering tooling."
+      "reason": "Not in plugin.json skills[]; the skill author's personal article-editing workflow, not general engineering tooling.",
+      "status": "EXCLUDE"
     },
     {
       "name": "obsidian-vault",
       "category": "personal",
-      "reason": "Not in plugin.json skills[]; the skill author's personal Obsidian note-taking integration, not applicable to this project."
+      "reason": "Not in plugin.json skills[]; the skill author's personal Obsidian note-taking integration, not applicable to this project.",
+      "status": "EXCLUDE"
     },
     {
       "name": "agents/openai.yaml (all skills)",
       "category": "metadata",
-      "reason": "Every promoted skill ships an agents/openai.yaml sidecar with Codex-specific agent metadata. Claude Code does not read this file, so it was not vendored for any skill (including the 21 installed above) — see docs/agents/mattpocock-skills-policy.md."
+      "reason": "Every promoted skill ships an agents/openai.yaml sidecar with Codex-specific agent metadata. Claude Code does not read this file, so it was not vendored for any skill (including the 23 installed above) — see docs/agents/mattpocock-skills-policy.md.",
+      "status": "EXCLUDE"
     }
   ]
 }

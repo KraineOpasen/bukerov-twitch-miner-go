@@ -168,6 +168,32 @@ auditable review boundary.
 
 ## Known limitations
 
+- **This is the only provider still on the skill-level manifest schema, so 17 vendored files carry no recorded
+  blob hash.** The other five providers (`anthropic`, `compound-engineering`, `trailofbits`, `awesome-copilot`,
+  `builderio`) record an `upstream_blob_sha`/`vendored_blob_sha` pair per **file**; this manifest records one
+  pair per **skill**, against that skill's `SKILL.md`. Of the 42 files in the 23 vendored directories, 23 are
+  those `SKILL.md`s and two more are pinned individually through a per-skill `files[]` array
+  (`wizard/template.sh`, `writing-for-agents/SKILL-MECHANICS.md`). The remaining 17 have no hash anywhere in
+  the manifest (paths relative to `.claude/skills/`): `ask-matt/PHASE-BOUNDARIES.md`;
+  `codebase-design/DEEPENING.md`, `codebase-design/DESIGN-IT-TWICE.md`;
+  `diagnosing-bugs/scripts/hitl-loop.template.sh`; `domain-modeling/ADR-FORMAT.md`,
+  `domain-modeling/CONTEXT-FORMAT.md`; `improve-codebase-architecture/HTML-REPORT.md`; `prototype/LOGIC.md`,
+  `prototype/UI.md`; `tdd/mocking.md`, `tdd/tests.md`; `teach/GLOSSARY-FORMAT.md`,
+  `teach/LEARNING-RECORD-FORMAT.md`, `teach/MISSION-FORMAT.md`, `teach/RESOURCES-FORMAT.md`;
+  `triage/AGENT-BRIEF.md`, `triage/OUT-OF-SCOPE.md`. Four of them are locally patched —
+  `DESIGN-IT-TWICE.md` (`design-it-twice-cap`), `HTML-REPORT.md` (`architecture-selfcontained-html`),
+  `LOGIC.md` and `UI.md` (both `prototype-disposable`) — and one is a bundled shell script
+  (`diagnosing-bugs/scripts/hitl-loop.template.sh`). **What that means:** `provider-file-hashes`, the
+  fail-closed check that catches any on-disk edit to a vendored file and any on-disk file no manifest entry
+  claims, runs over the file-level providers only. An edit to one of these 17 files — or a new file dropped
+  into a mattpocock skill directory — would not be caught by it. This set's own `blob-hash-verified-locally`
+  check covers `SKILL.md` alone, and only for the four skills that are not locally modified
+  (`domain-modeling`, `grill-me`, `grill-with-docs`, `grilling`). What still applies to every file here is the
+  tree-wide half of the validator: `patch-marker-balance`, `no-symlinks-no-exec-under-claude` and
+  `no-hidden-unicode` walk the whole of `.claude/skills/`, and `relative-links-resolve` walks every `.md` in
+  it. **The fix is to migrate this manifest to the file-level schema**, which is a reviewed change of its own
+  through the update procedure above and its own Draft PR (see "Dedicated Draft PR requirement") — not
+  something to fold into an unrelated edit.
 - The hook/permission layer (`.claude/hooks/governance-policy.py`, `.claude/settings.json`) is a mechanical
   backstop, not a substitute for reading a skill before vendoring it — a sufficiently subtle instruction could
   still shape agent *reasoning* even where it can't force a blocked tool call.

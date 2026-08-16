@@ -180,22 +180,39 @@ fixes, or its own handoff pattern — that is workflow, and workflow belongs to 
 concrete project incompatibility, a broken dependency, license/provenance necessity, or a genuine
 authority/integrity boundary.
 
-Vendored third-party skills (Matt Pocock's `mattpocock/skills`, reviewed and audited) live in
-`.claude/skills/**`. See `docs/agents/mattpocock-skills-policy.md` (policy, update/rollback procedure),
-`docs/agents/mattpocock-skills-manifest.json` (installed set, classification), and
-`docs/agents/mattpocock-skills-patches.md` (every local patch, by skill).
+**Which skill to use for which work: `docs/agents/skills-routing.md`.** That document is the routing
+map — installed skills by lane (bug/root cause, architecture, implementation, concurrency, security,
+testing, PR/CI, durable knowledge, Dashboard design, Dashboard implementation, browser/a11y QA) — and
+it records the stack's known gaps rather than implying it is complete.
 
-A second, independent vendored set covers three skills from `anthropics/skills` (also reviewed and
-audited): `skill-creator-anthropic` (renamed from upstream's `skill-creator`; explicit-invocation-only —
-use `/skill-creator-anthropic`, a plain "create a skill" request routes to the built-in instead),
-`frontend-design`, and `webapp-testing`. See `docs/agents/anthropic-skills-policy.md` (policy,
-update/rollback procedure), `docs/agents/anthropic-skills-manifest.json` (installed set, file-level
-classification), and `docs/agents/anthropic-skills-patches.md` (every local patch, by file).
+Vendored third-party skills live in `.claude/skills/**`, one project-local pinned copy per provider —
+never a marketplace install, never a floating branch. Every provider ships the same three documents
+under `docs/agents/`: `<provider>-skills-policy.md` (policy, update/rollback), `-manifest.json`
+(installed set, exact upstream pin, per-file blob hashes, and an `EXCLUDE`/`HOLD` verdict with a
+reason for every reviewed-but-not-installed candidate), and `-patches.md` (every local patch, by
+file). `scripts/validate-agent-governance.py` drives all of them from one provider registry:
 
-A third ownership class covers project-owned first-party skills: content authored directly in this
+| Provider | Prefix | Skills | Licence |
+| --- | --- | --: | --- |
+| `mattpocock/skills` | `mattpocock-` | 23 | MIT |
+| `anthropics/skills` | `anthropic-` | 3 | Apache-2.0 |
+| `EveryInc/compound-engineering-plugin` | `compound-engineering-` | 22 | MIT |
+| `trailofbits/skills` | `trailofbits-` | 23 | CC BY-SA 4.0 |
+| `github/awesome-copilot` | `awesome-copilot-` | 5 | MIT |
+| `BuilderIO/skills` | `builderio-` | 5 | MIT |
+
+`skill-creator-anthropic` is renamed from upstream's `skill-creator` and is explicit-invocation-only —
+use `/skill-creator-anthropic`; a plain "create a skill" request routes to the built-in instead.
+`BuilderIO/builder-agent-skills` was audited and **nothing was vendored from it**: at its reviewed pin
+the repository carries no root licence, and the tree's only licence file is an MIT `hallmark/LICENSE`
+held by "Hallmark contributors" — which by directory convention plausibly covers `hallmark/` alone, a
+weaker provenance footing than the repository-level grant every installed provider stands on (see
+`docs/agents/builderio-skills-policy.md`).
+
+A further ownership class covers project-owned first-party skills: content authored directly in this
 repo rather than vendored from an upstream source. It is governed by
 `docs/agents/project-skills-policy.md`, tracked in `docs/agents/project-skills-manifest.json`, and
-validated by `scripts/validate-agent-governance.py` alongside the two vendored sets above. The
+validated by `scripts/validate-agent-governance.py` alongside the six vendored provider sets above. The
 manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
 Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
 authority: mechanical authority to change tracked files always comes from an active task contract,
@@ -217,3 +234,11 @@ See `docs/agents/triage-labels.md`.
 ##### Domain docs
 
 Single-context layout: `CONTEXT.md` at the repo root, ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+
+## Next product stage: Dashboard Stage 1
+
+The next main product stage is **Dashboard Stage 1** — actual web-interface implementation work, built
+on the already-approved dashboard sources `docs/dashboard/stage-3-wireframes-and-interactions.md` and
+`docs/dashboard/stage-4-visual-design-system.md`. Those two documents are canonical: do not edit them
+as a side effect of other work. Stage 1 touches `internal/web/**` and needs its own task contract.
+`docs/agents/skills-routing.md` records the suggested route through the installed skills.

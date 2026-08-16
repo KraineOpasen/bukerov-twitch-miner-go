@@ -1,0 +1,316 @@
+{
+  "upstream_repo": "https://github.com/BuilderIO/skills",
+  "upstream_commit": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+  "upstream_tree": {
+    "agent-watchdog": "016143fa2a8f50acd62eb00b0e5b3e211a48cc39",
+    "efficient-frontier": "b532256b9a1eca03c7925582baf419c9ab14cc71",
+    "plan-arbiter": "4ccb0322db17cd2a375fcfc906dbbdbc2f6920ea",
+    "plow-ahead": "3fa79c34fe2ef7798c9be61147fb00c2b990b188",
+    "read-the-damn-docs": "bdcaa95189bb3fad84fccb0e71ae02336e7ba85d"
+  },
+  "upstream_current_head": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+  "drift": "none",
+  "reviewed_at": "2026-08-16T00:00:00Z",
+  "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3): candidate skills read in full with their complete dependency closures; every bundled script read end to end.",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "license": {
+    "spdx": "MIT",
+    "per_skill_license_file": "LICENSE",
+    "copyright_notice": "Copyright (c) 2026 Builder.io",
+    "notes": "MIT requires the copyright and permission notice to accompany all copies, so the upstream root LICENSE is copied verbatim into every vendored skill directory."
+  },
+  "notes": "5 of upstream's 13 skills are vendored. The three visual-* skills are HELD, not excluded: each hard-requires Builder.io's hosted MCP server for its deliverable, which this project does not have. They become installable if a local-files mode appears upstream or the connector is provisioned.",
+  "skills": [
+    {
+      "name": "agent-watchdog",
+      "path": ".claude/skills/agent-watchdog",
+      "upstream_path": "skills/agent-watchdog",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/agent-watchdog/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for BuilderIO/skills (Copyright (c) 2026 Builder.io), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/agent-watchdog/README.md",
+          "origin": "upstream",
+          "upstream_path": "skills/agent-watchdog/README.md",
+          "upstream_blob_sha": "01c4eac2a7db85c47efce3bec0a6d2c358a7bb10",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "01c4eac2a7db85c47efce3bec0a6d2c358a7bb10",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/agent-watchdog/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/agent-watchdog/SKILL.md",
+          "upstream_blob_sha": "bd0c6af97b1ca5e4dfb2e4a989140c4fd4da82ad",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bd0c6af97b1ca5e4dfb2e4a989140c4fd4da82ad",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "efficient-frontier",
+      "path": ".claude/skills/efficient-frontier",
+      "upstream_path": "skills/efficient-frontier",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/efficient-frontier/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for BuilderIO/skills (Copyright (c) 2026 Builder.io), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/efficient-frontier/README.md",
+          "origin": "upstream",
+          "upstream_path": "skills/efficient-frontier/README.md",
+          "upstream_blob_sha": "85ee9bb7b4408dd25d9881c170e4df949be4876c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "85ee9bb7b4408dd25d9881c170e4df949be4876c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/efficient-frontier/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/efficient-frontier/SKILL.md",
+          "upstream_blob_sha": "d8b35a0581e286570e55ae74212562bb12167ba3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d8b35a0581e286570e55ae74212562bb12167ba3",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "plan-arbiter",
+      "path": ".claude/skills/plan-arbiter",
+      "upstream_path": "skills/plan-arbiter",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/plan-arbiter/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for BuilderIO/skills (Copyright (c) 2026 Builder.io), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/plan-arbiter/README.md",
+          "origin": "upstream",
+          "upstream_path": "skills/plan-arbiter/README.md",
+          "upstream_blob_sha": "f6b482f1cd4e977f3b825867c77401387cba0040",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f6b482f1cd4e977f3b825867c77401387cba0040",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/plan-arbiter/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/plan-arbiter/SKILL.md",
+          "upstream_blob_sha": "b3d5941ddf6c0f3a241a93938c6c8ab771561ac0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b3d5941ddf6c0f3a241a93938c6c8ab771561ac0",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "plow-ahead",
+      "path": ".claude/skills/plow-ahead",
+      "upstream_path": "skills/plow-ahead",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/plow-ahead/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for BuilderIO/skills (Copyright (c) 2026 Builder.io), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/plow-ahead/README.md",
+          "origin": "upstream",
+          "upstream_path": "skills/plow-ahead/README.md",
+          "upstream_blob_sha": "3b98e9eb5000f746f4d3b0b4c967a542a88c5756",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b98e9eb5000f746f4d3b0b4c967a542a88c5756",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/plow-ahead/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/plow-ahead/SKILL.md",
+          "upstream_blob_sha": "e401a76a2c2f922c9b6ef92dc47c97e23f4ff0a1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e401a76a2c2f922c9b6ef92dc47c97e23f4ff0a1",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "read-the-damn-docs",
+      "path": ".claude/skills/read-the-damn-docs",
+      "upstream_path": "skills/read-the-damn-docs",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/read-the-damn-docs/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dafdc4ad5ab52b93ffa5f677f33a45ad2944365e",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for BuilderIO/skills (Copyright (c) 2026 Builder.io), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/read-the-damn-docs/README.md",
+          "origin": "upstream",
+          "upstream_path": "skills/read-the-damn-docs/README.md",
+          "upstream_blob_sha": "681b6743a0054fa59d95ae4a66446aad316aa0a8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "681b6743a0054fa59d95ae4a66446aad316aa0a8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/read-the-damn-docs/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/read-the-damn-docs/SKILL.md",
+          "upstream_blob_sha": "395d86cff7e874dc5fbb16843080304dc43556ab",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "395d86cff7e874dc5fbb16843080304dc43556ab",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    }
+  ],
+  "excluded_skills": [
+    {
+      "name": "adding-a-skill",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Repo-internal tooling for BuilderIO/skills itself, with a BROKEN DEPENDENCY CLOSURE at this pin and no applicability to a Go project. Its frontmatter scopes it explicitly: 'Use in the BuilderIO/skills repo whenever adding, updating, publishing, documenting, validating, or wiring a public skill.' Nine of its file references point at `../agent-native/framework/**` — a sibling private repo that is absent from the clone (packages/core/src/cli/skills.ts, packages/skills/src/built-in-apps.ts, src/index.ts, src/index.spec.ts, src/sync-with-core.spec.ts, packages/skills/dist/cli.js). Worse, its validation step hardcodes a foreign absolute path from a specific developer's laptop: SKILL.md:51 `python3 /Users/steve/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/<skill-name>`. It also duplicates the role of the already-installed skill-creator-anthropic and the Claude Code builtin skill-creator."
+    },
+    {
+      "name": "efficient-fable",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "TRUE DUPLICATE of efficient-frontier, which I recommend installing. efficient-frontier's own frontmatter says 'Apply the same orchestration as `/efficient-fable` to any high-cost frontier model' — same five-step delegation pattern, same handoff-packet fields, same stop conditions, same four Common Scenarios (research/coding/testing/debugging), same vet-before-trusting review loop. The only differences are branding to one specific model ('Reserve Fable for...', trigger is 'when running Claude Fable') and an added Claims section asserting 'up to 3-5x more cost-efficient and 2-4x faster' plus 'Good launch copy' — marketing, not methodology. Installing both would put two near-identical descriptions in the trigger space and make skill selection ambiguous for no capability gain."
+    },
+    {
+      "name": "quick-recap",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "No material capability for any lane in the selection rule — it is purely a response-formatting convention (end every response with a 🟢/🟡/🔴 status line under 100 characters). It contributes nothing to Go architecture, Twitch mechanisms, persistence, testing, security, documentation, GitHub workflows, dashboard design, browser QA, or durable knowledge. Independently, its 'Installer Behavior' section instructs the agent to mutate governed files — 'When installing this skill, prefer adding the managed `AGENTS.md` / `CLAUDE.md` block unless the user opts out' — which collides head-on with the standing rule that no agent message can authorize changing CLAUDE.md, and with the authority chain in which a skill (level 3) may never widen what it may touch. Excluding is cleaner than patching a skill whose remaining content is a four-rule emoji convention."
+    },
+    {
+      "name": "rewind",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Irrelevant platform and no capability-lane match. It is a retrieval front end for Clips Rewind local screen-recording memory and requires, per its own First-Run Setup, 'the signed Clips Desktop app on macOS plus a local agent connection' — this environment is Linux (Platform: linux, Linux 6.18.5), so the hard prerequisite can never be satisfied here. Every operation is a Screen Memory MCP tool (screen_memory_status, screen_memory_search_chapters, screen_memory_recent_context, screen_memory_frame_at, screen_memory_contact_sheet) with no local-files or offline mode whatsoever, and connection setup requires the unpinned `npx -y @agent-native/core@latest skills add rewind --client <client> --scope user --yes`. It also directs the agent to open a vendor download URL (https://clips.agent-native.com/download). Recalling what a developer saw on screen serves none of the listed lanes."
+    },
+    {
+      "name": "stay-within-limits",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Matches no capability lane in the selection rule: it is agent-billing-budget infrastructure (pause work when the 5-hour or weekly usage window hits 95%), not a project capability for Go, Twitch, persistence, testing, security, docs, GitHub, dashboard, QA, or durable knowledge. Its wake-prompt/handoff-packet guidance duplicates ground already held by the installed `handoff` skill and by efficient-frontier's handoff packets. Independently it carries a supply-chain concern: the only concrete usage mechanism it names is `npx -y ccusage@latest blocks --active --json` (skills/stay-within-limits/SKILL.md:30) — an unpinned third-party CLI auto-accepted with `-y`, executed on a recurring loop between every wave of work. The abstract alternative ('the host's usage/budget tool') is not a tool this environment exposes, so in practice the unpinned CLI is the skill. If the owner later wants budget throttling for long orchestrations, this becomes HOLD, unblocked by pinning ccusage to an exact version."
+    },
+    {
+      "name": "visual-edit",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "BLOCKER (mandatory hosted MCP + an entry point that does not exist outside Builder's own monorepo). The single documented entry action is `pnpm action open-visual-edit '{...}'` — a workspace script of the private agent-native repo, not anything a consumer of this vendored skill can run; the fallback path (connect-localhost, create-design, add-localhost-screens, navigate) is likewise all hosted Design MCP tools. The bridge requires the unpinned `npx @agent-native/core@latest design connect --url http://localhost:5173 --root . --json` and `AGENT_NATIVE_BRIDGE_TOKEN=\"<token>\" npx @agent-native/core@latest design connect --url http://localhost:5173 --root . --daemon`, and the SKILL.md itself warns the alternate install path 'installs exported instructions only, with no MCP connector registration'. TO UNBLOCK: pin @agent-native/core, obtain the hosted Design connector, and publish a consumer-runnable equivalent of `pnpm action open-visual-edit`. FIT CAVEAT: the read-only half (URL-backed iframes of a running localhost app at several routes/viewports) would work against the Go dashboard, but the entire source-writeback half is React/JSX-specific — 'Use compiler/debug provenance ... to lo"
+    },
+    {
+      "name": "visual-plan",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "BLOCKER (mandatory hosted MCP): the skill's own hard rule is 'The deliverable is ALWAYS a structured Agent-Native Plan, not a chat-only plan' and 'If the tools are still missing after discovery, do NOT fall back to inline output' (references/connection.md) — every authoring verb (get-plan-blocks, create-visual-plan, create-ui-plan, update-visual-plan, get-plan-feedback) is a tool on the hosted connector `https://plan.agent-native.com/mcp`. The documented offline escape, Local-Files Privacy Mode, is NOT MCP-free: it still requires an unpinned CLI for the block catalog and every preview/validate step. Exact command lines: `npx @agent-native/core@latest plan blocks --out plan-blocks.md`; `npx @agent-native/core@latest plan local check --dir <plan-dir>`; `npx @agent-native/core@latest plan local serve --dir <plan-dir> --kind <plan|recap> --open`; `npx @agent-native/core@latest plan local verify --dir <plan-dir> --kind <plan|recap>`; and setup `npx @agent-native/core@latest skills add visual-plans`. Even in local mode the served URL 'opens the hosted Plan UI but reads from the localhost bridge', so plan.agent-native.com must be reachable to render. TO UNBLOCK: pin @agent-native/core to "
+    },
+    {
+      "name": "visual-recap",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "BLOCKER (mandatory hosted MCP): identical to visual-plan and stated even more absolutely — 'The deliverable is ALWAYS a published Agent-Native Plan, created with `create-visual-recap` on the Plan MCP connector — NEVER inline chat content' and 'an inline summary is not a degraded recap, it is the thing a recap replaces.' Local-files mode again routes through unpinned CLI: `npx @agent-native/core@latest plan blocks --out plan-blocks.md`, `npx @agent-native/core@latest plan local check --dir <plan-dir>`, `npx @agent-native/core@latest plan local serve --dir <plan-dir> --kind recap --open`, `npx @agent-native/core@latest plan local verify --dir <plan-dir> --kind recap`. TO UNBLOCK: same as visual-plan (pin the CLI, accept the hosted connector or run a loopback Plan app). Its methodology is genuinely strong and distinct from the installed `code-review` — mechanically deriving data-model / api-endpoint / file-tree / split-diff blocks from a real diff, under an explicit Grounding Rule ('true by construction only if derived from the actual changed lines... A confidently wrong recap is dangerous in a review context'), plus a Security section forbidding secret transcription that mirrors this"
+    }
+  ]
+}

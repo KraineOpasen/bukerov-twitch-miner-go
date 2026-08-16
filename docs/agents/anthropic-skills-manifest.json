@@ -186,7 +186,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/generate_report.py",
@@ -198,7 +200,8 @@
           "vendored_blob_sha": "d07e808da71b200fc0908739e1c08c24354adcef",
           "locally_modified": true,
           "patch_ids": [
-            "skc-html-no-cdn"
+            "skc-html-no-cdn",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -211,7 +214,8 @@
           "vendored_blob_sha": "4889cfde6c9f7cc7ae98960ec747eeb44b5d61eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-claudecode-strip"
+            "skc-py-no-claudecode-strip",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -223,7 +227,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "f48eac444656ddc41204aac1760a217951ce609e",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/quick_validate.py",
@@ -235,7 +241,8 @@
           "vendored_blob_sha": "557be6266f4c11689d1f0028d62a133c315e78eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-user-invoked"
+            "skc-user-invoked",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -249,7 +256,8 @@
           "locally_modified": true,
           "patch_ids": [
             "skc-py-no-claudecode-strip",
-            "skc-py-sandbox-guard"
+            "skc-py-sandbox-guard",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -262,7 +270,8 @@
           "vendored_blob_sha": "17db557665790992db27d6c0345830452eb62ff5",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-autoopen-runloop"
+            "skc-py-no-autoopen-runloop",
+            "anthropic-mode-normalize"
           ]
         },
         {
@@ -430,7 +439,8 @@
           "vendored_blob_sha": "d3089b1d733aef875344ab9a592a0743f8ee0bd2",
           "locally_modified": true,
           "patch_ids": [
-            "webapp-testing-server-cleanup"
+            "webapp-testing-server-cleanup",
+            "anthropic-mode-normalize"
           ]
         }
       ]
@@ -440,72 +450,86 @@
     {
       "name": "algorithmic-art",
       "upstream_path": "skills/algorithmic-art",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "brand-guidelines",
       "upstream_path": "skills/brand-guidelines",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "canvas-design",
       "upstream_path": "skills/canvas-design",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "claude-api",
       "upstream_path": "skills/claude-api",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "doc-coauthoring",
       "upstream_path": "skills/doc-coauthoring",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract. RE-EVALUATED under Governance v3: materially in scope (a three-stage documentation co-authoring methodology), but HELD rather than installed -- the Claude Code environment already provides a builtin `doc-coauthoring` skill, so a vendored copy would collide by name and would need a rename to be installable. Revisit if the builtin is withdrawn or a rename is wanted.",
+      "status": "HOLD"
     },
     {
       "name": "docx",
       "upstream_path": "skills/docx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/docx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/docx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "internal-comms",
       "upstream_path": "skills/internal-comms",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "mcp-builder",
       "upstream_path": "skills/mcp-builder",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "pdf",
       "upstream_path": "skills/pdf",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pdf): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pdf): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "pptx",
       "upstream_path": "skills/pptx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pptx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pptx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "slack-gif-creator",
       "upstream_path": "skills/slack-gif-creator",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "theme-factory",
       "upstream_path": "skills/theme-factory",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "web-artifacts-builder",
       "upstream_path": "skills/web-artifacts-builder",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "xlsx",
       "upstream_path": "skills/xlsx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/xlsx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/xlsx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     }
   ],
   "excluded_upstream_paths": [
