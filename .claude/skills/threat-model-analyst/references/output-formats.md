@@ -382,7 +382,6 @@ Sort by severity **within** each tier, then by CVSS descending.
 ```markdown
 ### FIND-01: Missing Authentication on API
 
-<!-- bukerov-local-patch: ghac-generated-output-links — links below point at documents this skill GENERATES in the target repo (0-assessment.md, 2-stride-analysis.md, ...), not at files vendored with the skill; rendered as code spans so they read as the required output syntax instead of resolving to nothing. -->
 | Attribute | Value |
 |-----------|-------|
 | SDL Bugbar Severity | Critical |
@@ -394,7 +393,7 @@ Sort by severity **within** each tier, then by CVSS descending.
 | Remediation Effort | Medium |
 | Mitigation Type | Standard Mitigation |
 | Component | API Gateway |
-| Related Threats | `[T01.S](2-stride-analysis.md#api-gateway)`, `[T01.R](2-stride-analysis.md#api-gateway)` |
+| Related Threats | [T01.S](2-stride-analysis.md#api-gateway), [T01.R](2-stride-analysis.md#api-gateway) |
 
 #### Description
 
@@ -417,12 +416,11 @@ Send an unauthenticated GET request to `/api/v1/resources` — should return 401
 
 > **⛔ CRITICAL: Related Threats MUST be hyperlinks, NOT plain text. The model consistently outputs plain text like `T-02, T-17` — this is WRONG. Each threat ID must link to the specific component section in stride analysis.**
 
-<!-- bukerov-local-patch: ghac-generated-output-links — links below point at documents this skill GENERATES in the target repo (0-assessment.md, 2-stride-analysis.md, ...), not at files vendored with the skill; rendered as code spans so they read as the required output syntax instead of resolving to nothing. -->
-- Individual links per threat ID: ``[T01.S](2-stride-analysis.md#component-name)``
+- Individual links per threat ID: `[T01.S](2-stride-analysis.md#component-name)`
 - **WRONG**: `T-02, T-17, T-23` (plain text, no links)
-- **WRONG**: ``[T08.S, T08.T](2-stride-analysis.md)`` (grouped, no anchor)
-- **CORRECT**: ``[T08.S](2-stride-analysis.md#redis-state-store)`, `[T08.T](2-stride-analysis.md#redis-state-store)``
-- Every `| **Related Threats** |` cell must contain ONLY ``[Txx.Y](2-stride-analysis.md#anchor)`` format links separated by commas
+- **WRONG**: `[T08.S, T08.T](2-stride-analysis.md)` (grouped, no anchor)
+- **CORRECT**: `[T08.S](2-stride-analysis.md#redis-state-store), [T08.T](2-stride-analysis.md#redis-state-store)`
+- Every `| **Related Threats** |` cell must contain ONLY `[Txx.Y](2-stride-analysis.md#anchor)` format links separated by commas
 
 ### Post-Write Checks
 
@@ -485,16 +483,15 @@ The Report Files table MUST list `0-assessment.md` (this file) as the FIRST row,
 ```markdown
 ## Report Files
 
-<!-- bukerov-local-patch: ghac-generated-output-links — links below point at documents this skill GENERATES in the target repo (0-assessment.md, 2-stride-analysis.md, ...), not at files vendored with the skill; rendered as code spans so they read as the required output syntax instead of resolving to nothing. -->
 | File | Description |
 |------|-------------|
-| `[0-assessment.md](0-assessment.md)` | This document — executive summary, risk rating, action plan, metadata |
-| `[0.1-architecture.md](0.1-architecture.md)` | Architecture overview, components, scenarios, tech stack |
-| `[1-threatmodel.md](1-threatmodel.md)` | Threat model DFD diagram with element, flow, and boundary tables |
-| `[1.1-threatmodel.mmd](1.1-threatmodel.mmd)` | Pure Mermaid DFD source file |
-| `[1.2-threatmodel-summary.mmd](1.2-threatmodel-summary.mmd)` | Summary DFD (only if generated) |
-| `[2-stride-analysis.md](2-stride-analysis.md)` | Full STRIDE-A analysis for all components |
-| `[3-findings.md](3-findings.md)` | Prioritized security findings with remediation |
+| [0-assessment.md](0-assessment.md) | This document — executive summary, risk rating, action plan, metadata |
+| [0.1-architecture.md](0.1-architecture.md) | Architecture overview, components, scenarios, tech stack |
+| [1-threatmodel.md](1-threatmodel.md) | Threat model DFD diagram with element, flow, and boundary tables |
+| [1.1-threatmodel.mmd](1.1-threatmodel.mmd) | Pure Mermaid DFD source file |
+| [1.2-threatmodel-summary.mmd](1.2-threatmodel-summary.mmd) | Summary DFD (only if generated) |
+| [2-stride-analysis.md](2-stride-analysis.md) | Full STRIDE-A analysis for all components |
+| [3-findings.md](3-findings.md) | Prioritized security findings with remediation |
 ```
 
 ⚠️ **`0-assessment.md` MUST be the first row.** The model consistently lists `0.1-architecture.md` first — that is WRONG. This file IS the front page of the report and lists itself first.

@@ -650,13 +650,40 @@ FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"(`+)(?:(?!\1)[^\n])*?\1")
 
 
+FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
 def strip_fenced_blocks(text):
     """Drop ONLY fenced code blocks, keeping inline code spans intact.
+
+    Line-based and fence-length aware, following CommonMark: a fence is closed only by a fence of
+    the SAME character that is at least as long as the opener. The previous regex form
+    (```` ```.*?``` ```` with DOTALL) could not express that, so a document containing a nested
+    four-backtick fence -- the standard way to show a fenced block inside a fenced block, and
+    exactly what these skills do when documenting their own output format -- had its fences paired
+    wrongly. Everything after the mis-pair fell outside any recognised fence, and prose that merely
+    QUOTED a Markdown link was then checked as if it were a real link. That produced phantom
+    "dangling link" findings whose only cheap fix was editing correct upstream prose, which is the
+    pressure the vendoring policies exist to remove.
 
     Used by the dependency-closure check, which deliberately reads backticked paths
     (`scripts/context.mjs`) as closure claims -- stripping inline code there would blind it.
     Link checking wants the stronger strip_code_fences() below."""
-    return FENCE_RE.sub("", text)
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = FENCE_LINE_RE.match(line)
+        if fence is None:
+            # An opening backtick fence may not carry a backtick in its info string (CommonMark);
+            # that rule is what keeps a line like ``a `b` `` from being read as a fence opener.
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+                continue
+            out.append(line)
+        else:
+            if (m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence)
+                    and not m.group(2).strip()):
+                fence = None
+    return "\n".join(out)
 
 
 def strip_code_fences(text):
@@ -669,7 +696,7 @@ def strip_code_fences(text):
     referencing a file that has to exist. Without this, every such quotation is a false "dangling
     link" -- and the pressure that creates is to edit correct upstream prose to satisfy the
     checker, which the vendoring policies exist to prevent."""
-    return INLINE_CODE_RE.sub("", FENCE_RE.sub("", text))
+    return INLINE_CODE_RE.sub("", strip_fenced_blocks(text))
 
 
 # Trail of Bits' skills write intra-skill paths as `{baseDir}/references/foo.md`. `{baseDir}` is
@@ -3957,6 +3984,58 @@ def _st_p15():
         assert kind == "path" and not os.path.isfile(res), (kind, res)
 
 
+def _st_p16():
+    """Fence pairing is CommonMark-correct: a fence closes only on the SAME character at LEAST as
+    long as the opener. The nested four-backtick case is the one that matters -- it is how these
+    skills document a fenced block inside a fenced block, and getting it wrong let everything after
+    the mis-pair escape the stripper and be checked as live Markdown. Also asserts the stripper does
+    not over-reach: text after a properly closed fence is still returned, inline spans survive
+    strip_fenced_blocks (the closure check needs them), and both are gone from strip_code_fences."""
+    nested = "\n".join([
+        "before",
+        "````markdown",
+        "| [0-assessment.md](0-assessment.md) | generated |",
+        "```language",
+        "inner",
+        "```",
+        "````",
+        "after [real](target.md)",
+    ])
+    stripped = strip_fenced_blocks(nested)
+    assert "0-assessment.md" not in stripped, stripped
+    assert "inner" not in stripped, stripped
+    assert "before" in stripped and "after [real](target.md)" in stripped, stripped
+
+    # A three-backtick fence must NOT be closed by a longer run belonging to an outer block.
+    assert strip_fenced_blocks("```\na\n```\nkept") .strip().endswith("kept")
+    # Tilde fences work on their own...
+    assert "hidden" not in strip_fenced_blocks("~~~\nhidden\n~~~\nkept")
+    assert "kept" in strip_fenced_blocks("~~~\nhidden\n~~~\nkept")
+    # ...and a fence is NOT closed by a fence of the OTHER character. A `~~~` inside a ``` block is
+    # block content, so everything up to the real ``` closer stays stripped and only `kept` returns.
+    mixed = strip_fenced_blocks("```\nhidden\n~~~\nstill-hidden\n```\nkept")
+    assert "still-hidden" not in mixed, mixed
+    assert "hidden" not in mixed, mixed
+    assert "kept" in mixed, mixed
+    # An info string containing a backtick is not a fence opener (CommonMark). Without this rule a
+    # prose line that merely starts with three backticks and then quotes something would open a
+    # fence that never closes, swallowing the rest of the document.
+    unopened = strip_fenced_blocks("```js `foo`\nkept\nalso-kept")
+    assert "kept" in unopened and "also-kept" in unopened, unopened
+
+    # A CLOSING fence carries nothing after it. A same-length run followed by text is block
+    # content, so the block continues to the real closer -- otherwise a code sample containing
+    # ``` mid-line would end the block early and leak the rest of it into the checked text.
+    trailing = strip_fenced_blocks("```\nhidden\n``` trailing\nstill-hidden\n```\nkept")
+    assert "still-hidden" not in trailing, trailing
+    assert "kept" in trailing, trailing
+
+    # Division of labour between the two strippers.
+    doc = "see `scripts/run.sh` here"
+    assert "scripts/run.sh" in strip_fenced_blocks(doc), "closure check must still see inline paths"
+    assert "scripts/run.sh" not in strip_code_fences(doc), "link check must not see inline code"
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -4024,6 +4103,7 @@ def _self_test_fixtures():
         ("P13", "exclusion entry with no reason / an invalid status", _st_p13),
         ("P14", "frontmatter allowlist widens per provider, not globally", _st_p14),
         ("P15", "{baseDir} link resolution is real, not a rubber stamp", _st_p15),
+        ("P16", "fence pairing handles nested/longer fences; strippers divide labour", _st_p16),
     ]
 
 

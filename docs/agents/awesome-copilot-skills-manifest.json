@@ -239,10 +239,8 @@
       "renamed_from": null,
       "invocation": "model",
       "classification": "VENDORED_VERBATIM",
-      "locally_modified": true,
-      "patch_ids": [
-        "ghac-generated-output-links"
-      ],
+      "locally_modified": false,
+      "patch_ids": [],
       "scripts_audited": null,
       "audit_ref": null,
       "files": [
@@ -320,11 +318,9 @@
           "upstream_blob_sha": "7c14d81c13f27fe7f3205ab714dd8fb2eeb0d8aa",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "21c8563fbabea8c828e0eefcdcd831130a578088",
-          "locally_modified": true,
-          "patch_ids": [
-            "ghac-generated-output-links"
-          ]
+          "vendored_blob_sha": "7c14d81c13f27fe7f3205ab714dd8fb2eeb0d8aa",
+          "locally_modified": false,
+          "patch_ids": []
         },
         {
           "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-architecture.md",
