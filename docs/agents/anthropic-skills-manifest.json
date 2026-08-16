@@ -1,15 +1,15 @@
 {
   "upstream_repo": "https://github.com/anthropics/skills",
-  "upstream_commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "upstream_commit": "f6656c1256d5a8adfa37db9110046ef20bac644c",
   "upstream_tree": {
     "skill-creator": "3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6",
     "frontend-design": "0d5b74a14bdf3ebcd64f352d06376a2ef05ed296",
     "webapp-testing": "5ffb7dc66b9fd4c25c3e400a4c00da99a349b714"
   },
-  "upstream_current_head": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "upstream_current_head": "f6656c1256d5a8adfa37db9110046ef20bac644c",
   "drift": "none",
-  "reviewed_at": "2026-07-27T04:53:34Z",
-  "reviewed_by": "Claude Code Governance v2 task (Anthropic skills vendoring, single production writer)",
+  "reviewed_at": "2026-08-16T00:00:00Z",
+  "reviewed_by": "Claude Code Governance v2 task (skills refresh, single production writer) — re-review confirmed the full selected subtree (skill-creator, frontend-design, webapp-testing directory trees, including every .py/.html/.sh file) is byte-identical between b29e7cf6 and f6656c12; no content changed, provenance only updated.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
   "license": {
