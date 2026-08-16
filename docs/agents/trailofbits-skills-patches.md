@@ -9,8 +9,10 @@ Each change is marked in the vendored file itself with `<!-- bukerov-local-patch
 that both appear in this set: the **paired wrapping** form
 `<!-- bukerov-local-patch: <id> --> … <!-- /bukerov-local-patch: <id> -->` around the changed text, and the
 **self-closing single-line** form `<!-- bukerov-local-patch: <id> — <note> -->` placed immediately above or
-in place of what changed. Every file in this set is Markdown, so the Python `# bukerov-local-patch:` form
-used in other providers' ledgers does not appear here. Two ids carry no in-file marker at all, for reasons
+in place of what changed. Every *marked* file in this set is Markdown, so the Python
+`# bukerov-local-patch:` form used in other providers' ledgers does not appear here — the only non-Markdown
+files touched are the three shell scripts, whose change is a mode and carries no marker. Two ids therefore
+carry no in-file marker at all, for reasons
 stated in their rows: `tob-mode-normalize` (a file mode cannot hold a comment) and the `openai.yaml`
 exclusion (a deleted file cannot hold one either).
 

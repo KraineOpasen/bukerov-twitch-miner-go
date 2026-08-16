@@ -29,7 +29,7 @@ installed provider covers. Its subagent topologies were preserved deliberately (
 - Reviewed tree SHAs: one per vendored skill directory, all 23 recorded in the manifest's `upstream_tree`
   map rather than duplicated here — a 23-entry hash table is a copy-drift hazard in prose, and the
   validator reads the manifest, not this document.
-- Corpus size at the pin: **41 plugins containing 78 skill directories**, of which **23** are installed
+- Corpus size at the pin: **40 plugins containing 78 skill directories**, of which **23** are installed
   here.
 
 The structural fact that shaped everything below: upstream does not ship skills as skills. It ships
@@ -209,7 +209,8 @@ The arithmetic, stated plainly because it does not close to a single number with
   which is precisely why it is held.
 - That leaves **31 upstream skill directories not itemised individually.** They are whole plugins outside
   the reviewed slice: `building-secure-contracts` (11 chain-specific skills — Algorand, Cairo, Cosmos,
-  Solana, Substrate, TON scanners plus audit-prep, code-maturity, guidelines and workflow advisors),
+  Solana, Substrate, TON scanners, plus `audit-prep-assistant`, `code-maturity-assessor`,
+  `guidelines-advisor`, `secure-workflow-guide` and `token-integration-analyzer`),
   `c-review`, `rust-review`, `constant-time-analysis`, `zeroize-audit`, `dwarf-expert`,
   `dimensional-analysis`, `writing-lean-proofs`, `yara-rule-authoring`, `firebase-apk-scanner`,
   `burpsuite-project-parser`, `modern-python`, `devcontainer-setup`, `gh-cli`, `git-cleanup`,
@@ -297,7 +298,7 @@ reached when the model judges the request matches its description, and the heavi
 Frontmatter across the set is `name` + `description`, with two additions registered in the validator's
 `extra_frontmatter_keys` for this provider:
 
-- **`allowed-tools`** on 15 of the 23. This key *narrows* a skill's tool surface, so it is preserved rather
+- **`allowed-tools`** on 14 of the 23. This key *narrows* a skill's tool surface, so it is preserved rather
   than stripped. Three of the trailmark family write it as a YAML list (`- Bash`) rather than a space-
   separated string; both forms are upstream's and both are kept. One value was edited:
   `spec-to-code-compliance` dropped `Workflow` from its list, because a project-local skill install has no
@@ -594,7 +595,7 @@ directories, and no patch id in this set is shared with another provider's ledge
   `{baseDir}/scripts/generate_suite.sh <mode>`, and `semgrep/workflows/scan-workflow.md:263` calls
   `{baseDir}/scripts/run-scans.sh`. Under the `100644` mode normalization those invocations fail with a
   permission error; run them as `bash <path> ...` instead. The upstream prose was deliberately left
-  unpatched — editing five call sites across two skills to satisfy a local file-mode policy is a larger,
+  unpatched — editing six call sites across two skills to satisfy a local file-mode policy is a larger,
   more invasive change than documenting the substitution, and the mode invariant
   (`no-symlinks-no-exec-under-claude`) is not negotiable. This is a genuine friction point, not a
   theoretical one.
@@ -609,8 +610,10 @@ directories, and no patch id in this set is shared with another provider's ledge
   name. What the relocation preserves is the **definition** — the file is present, complete and reachable,
   so the orchestrating skill can pass its content into a `Task` subagent prompt. That is the difference
   between the topology being documented and it being auto-wired, and only the former is true here.
-- **`excluded_skills[]` itemises 25 candidates, not all 55 non-installed skills.** The other 31 are whole
-  plugins ruled out by subject matter before any per-skill read (listed under "Excluded / Held"). A useful
+- **`excluded_skills[]` itemises 25 candidates, not all 55 non-installed skills.** Twenty-four of the 25
+  are among those 55 (the twenty-fifth, `insecure-defaults`, is a plugin with no skill directory); the
+  other 31 are whole plugins ruled out by subject matter before any per-skill read (listed under
+  "Excluded / Held"). A useful
   skill hiding inside `modern-python` or `gh-cli` would have been missed. Step 3 of the update procedure
   exists for that reason.
 - **`differential-review/patterns.md` still points at `building-secure-contracts/development-guidelines`.**
@@ -639,13 +642,13 @@ behavior) — see that document rather than duplicating the version pin here; re
 either changes.
 
 Three provider-specific notes. First, this upstream targets **two** agent platforms: the vendored bodies
-are written for Claude Code, but each skill also shipped Codex marketplace metadata (`agents/openai.yaml`,
-dropped) and upstream's `AGENTS.md` addresses both. A future upstream may introduce further
+are written for Claude Code, but 22 of the 23 also shipped Codex marketplace metadata
+(`agents/openai.yaml`, dropped) and upstream's `AGENTS.md` addresses both. A future upstream may introduce further
 platform-specific files inside skill directories; the `forbidden-vendor-files-absent` check catches the
 known names, and anything new fails the frontmatter or manifest checks rather than being silently
 accepted. Second, this provider's `extra_frontmatter_keys` allowlist is `{allowed-tools, type}` — widening
 it is a reviewed decision, not a fix. Third, the whole set is written against a **plugin** runtime that
 this install does not provide: `Workflow`, `${CLAUDE_PLUGIN_ROOT}` and `/<plugin>:<command>` slash commands
-all appear in upstream text. The five occurrences that mattered are patched
+all appear in upstream text. The five files where that mattered are patched
 (`tob-no-plugin-workflow`); if a future upstream leans harder on that runtime, the right response may be to
 stop vendoring the affected skill rather than to grow the patch set.
