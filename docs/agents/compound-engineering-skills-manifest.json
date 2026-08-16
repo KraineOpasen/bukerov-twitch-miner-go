@@ -896,7 +896,7 @@
           "upstream_blob_sha": "4eed52f4278eacf42f6573b6d80bed95260c6cba",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "58aabff5030d429fff37e34e64d9f0270deb2720",
+          "vendored_blob_sha": "bdbeb3c2aa7ddeb4b93a846309323a8e650ef800",
           "locally_modified": true,
           "patch_ids": [
             "ce-draft-pr-only",

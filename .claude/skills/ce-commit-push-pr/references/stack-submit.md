@@ -48,7 +48,10 @@ git add <next-files> && git commit -m "<next-message>" -- <next-files>
 
 For committed work whose existing commit boundaries already match the plan, create or reuse one branch at each planned commit tip and adopt them bottom-to-top with `gh stack init --base "<base>" "<bottom-branch>" "<next-branch>" ...`. Reuse the original feature branch only when its unchanged tip is one of those planned tips. If unpublished commits need rearrangement, keep a recovery branch at the original tip before rewriting. After construction, run `gh stack view --json`; verify the reported order matches the plan and the top layer contains the complete original change set before submit.
 
-## Submit (ready / non-draft)
+<!-- bukerov-local-patch: ce-draft-pr-only — heading was "Submit (ready / non-draft)". The `--open`
+flag was removed from this section's submit command, so it can no longer produce a ready PR and the
+old title named an outcome the section does not reach. Marking a PR ready for review is owner-only. -->
+## Submit (draft)
 
 Before submit, resolve the ordinary `pr_teaching_archive` / `archive:on|off` gate. If archival is on, stop with a residual before `gh stack submit`; do not create an explainer commit after submission or silently disable requested archival. The user can rerun with `archive:off` to use the safe post-submit description path until stack archival has a manager-aware route.
 

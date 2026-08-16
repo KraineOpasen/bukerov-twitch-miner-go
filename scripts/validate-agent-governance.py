@@ -15,12 +15,13 @@ Stdlib only, no network access, deterministic. Exits 0 if every check passes,
 1 if any check fails. Diagnostics print as `[FAIL] check-name: detail` /
 `[PASS] check-name` lines.
 
-This script covers TWO independently vendored, non-overlapping skill sets, each with its own
-manifest/ledger pair (see the MANIFESTS registry below):
-  - mattpocock/skills  -> docs/agents/mattpocock-skills-manifest.json / -patches.md (skill-level:
-    one upstream_blob_sha per skill's SKILL.md).
-  - anthropics/skills  -> docs/agents/anthropic-skills-manifest.json / -patches.md (file-level:
-    one upstream_blob_sha per vendored file, since two of its three skills ship real scripts).
+This script covers every independently vendored skill provider through ONE registry (MANIFESTS,
+below). Each entry names that provider's manifest/ledger/policy trio and its `schema`, which selects
+the blob-hash granularity: "skill-level" (one upstream_blob_sha per skill's SKILL.md -- mattpocock's
+original format) or "file-level" (one upstream_blob_sha plus vendored_blob_sha per vendored FILE).
+Every provider added after anthropic uses "file-level": it is the only granularity that can prove a
+complete file inventory in both directions. Adding a provider means appending a registry entry, not
+adding a conditional inside a check -- the provider-aware checks all iterate the registry.
 
 Usage:
     python3 scripts/validate-agent-governance.py
@@ -46,17 +47,19 @@ Usage:
         fixture failure, 0 otherwise. Independent of --self-test-hook and of the default run.
 
 Env vars (all optional, all make specific checks stricter, never required):
-    GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK  path to a read-only clone of mattpocock/skills; when set,
-                                        the mattpocock blob-hash check verifies against it directly.
-    GOVERNANCE_UPSTREAM_DIR             legacy fallback for the above, kept for compatibility with
-                                        scripts/CI that pre-date the anthropic skill set.
-    GOVERNANCE_UPSTREAM_DIR_ANTHROPIC   path to a read-only clone of anthropics/skills; when set,
-                                        the anthropic (file-level) blob-hash check verifies against
-                                        it directly, for every file in every skill's files[].
+    GOVERNANCE_UPSTREAM_DIR_<LABEL>     path to a read-only clone of that provider's upstream at
+                                        the pinned commit; when set, that provider's blob-hash check
+                                        additionally verifies each unmodified file byte-for-byte
+                                        against the clone instead of only against the recorded hash.
+                                        <LABEL> is the registry label upper-cased with '-' -> '_':
+                                        _MATTPOCOCK, _ANTHROPIC, _COMPOUND_ENGINEERING,
+                                        _TRAILOFBITS, _AWESOME_COPILOT, _BUILDERIO.
+    GOVERNANCE_UPSTREAM_DIR             legacy fallback for _MATTPOCOCK only, kept for compatibility
+                                        with scripts/CI that pre-date the multi-provider registry.
     GOVERNANCE_BASE_SHA                 a git ref; when set, the "application paths untouched"
                                         check diffs against it instead of the working tree.
 
-A blob-hash mismatch on a file whose skill has `scripts_audited: true` in the anthropic manifest
+A blob-hash mismatch on a file whose skill has `scripts_audited: true` in ANY provider's manifest
 means more than "content drifted": it means a script that was read end-to-end during the last
 review no longer matches what was reviewed, so re-audit (not just re-hash) is required before
 trusting it again.
@@ -490,9 +493,22 @@ def provider_manifest_field_details(entry, manifest):
     for field in REQUIRED_MANIFEST_FIELDS:
         if field not in manifest:
             details.append("%s: manifest missing required field %r" % (label, field))
-    if manifest.get("installation_mode") not in (None, REQUIRED_INSTALLATION_MODE):
+    # Note the `in ("installation_mode", ...)` presence check above only proves the KEY exists.
+    # An explicit `"installation_mode": null` would satisfy that and then slip through a
+    # `not in (None, REQUIRED)` value check -- so a manifest could declare no installation mode at
+    # all and pass both halves. Compare against the required value directly.
+    if manifest.get("installation_mode") != REQUIRED_INSTALLATION_MODE:
         details.append("%s: installation_mode %r != %r" % (
             label, manifest.get("installation_mode"), REQUIRED_INSTALLATION_MODE))
+    # The excluded list is the audit trail for every reviewed-but-rejected candidate. A missing or
+    # misspelled key would otherwise degrade silently to "this provider rejected nothing", which
+    # reads as a complete audit rather than an absent one.
+    if entry["excluded_key"] not in manifest:
+        details.append("%s: manifest has no %r key -- rejected candidates would go unrecorded" % (
+            label, entry["excluded_key"]))
+    elif not isinstance(manifest[entry["excluded_key"]], list):
+        details.append("%s: %s must be a list, got %s" % (
+            label, entry["excluded_key"], type(manifest[entry["excluded_key"]]).__name__))
     if manifest.get("automatic_updates") is not False:
         details.append("%s: automatic_updates must be literally false, got %r" % (
             label, manifest.get("automatic_updates")))
@@ -641,7 +657,6 @@ def check_frontmatter_keys():
 
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 # Inline code spans. Deliberately single-line: a span is matched only within one line, so an odd
 # number of backticks on some line (upstream really does write things like `](` as a code span)
 # cannot swallow the rest of the file and expose unrelated text as if it were prose. Multi-line
@@ -3759,6 +3774,24 @@ def _st_p2():
             manifest["automatic_updates"] = bad
             details = provider_manifest_field_details(entry, manifest)
             assert any("automatic_updates must be literally false" in d for d in details), (bad, details)
+        manifest["automatic_updates"] = False
+
+        # An explicit null installation_mode must NOT slip through: the presence check sees the key,
+        # so only a direct value comparison catches it.
+        manifest["installation_mode"] = None
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("installation_mode None" in x for x in d), d
+        manifest["installation_mode"] = REQUIRED_INSTALLATION_MODE
+
+        # A missing or non-list excluded list must fail, not degrade to "rejected nothing".
+        saved = manifest.pop(entry["excluded_key"])
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("would go unrecorded" in x for x in d), d
+        manifest[entry["excluded_key"]] = {"not": "a list"}
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("must be a list" in x for x in d), d
+        manifest[entry["excluded_key"]] = saved
+        assert provider_manifest_field_details(entry, manifest) == []
 
 
 def _st_p3():
