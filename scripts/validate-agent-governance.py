@@ -1683,7 +1683,13 @@ STALE_V2_ORCHESTRATION_PHRASES = (
     "max_concurrency is required",
     "max_concurrency must be set",
     "must set a max_concurrency",
-    "respect the task contract's agent_cap",
+    # NOT listed: "respect the task contract's agent_cap". That phrasing lives
+    # only in vendored skill bodies and patch-ledger rows, and the governance
+    # surface deliberately excludes .claude/skills/** (integrity-pinned upstream
+    # text) while the ledger rows legitimately quote it. A needle for it would
+    # be unreachable in the one place it occurs and wrong in the other; those
+    # texts are handled by the re-reading rule in agent-orchestration.md
+    # instead, not by this scan.
 )
 
 # The host operating system of a machine that happens to run the miner's
@@ -1702,11 +1708,6 @@ V3_REQUIRED_DOCS = (
     "docs/agents/agent-orchestration.md",
     "docs/adr/0002-governance-v3-skill-native-orchestration.md",
 )
-
-
-def _as_report(details):
-    """(ok, details) for report(), from a `*_details()` helper's return value."""
-    return (not details, details)
 
 
 def governance_surface_paths(repo_root):
@@ -1818,7 +1819,8 @@ def governance_v3_docs_details(repo_root):
 
 def check_governance_v3_docs():
     """The v3 docs exist and CLAUDE.md declares v3, not v2."""
-    report("governance-v3-docs", *_as_report(governance_v3_docs_details(REPO_ROOT)))
+    details = governance_v3_docs_details(REPO_ROOT)
+    report("governance-v3-docs", not details, details)
 
 
 def stale_orchestration_details(repo_root):
@@ -1830,7 +1832,8 @@ def stale_orchestration_details(repo_root):
 
 def check_governance_v3_no_stale_orchestration():
     """No Governance-v2 orchestration mandates left in the governance surface."""
-    report("governance-v3-no-stale-orchestration", *_as_report(stale_orchestration_details(REPO_ROOT)))
+    details = stale_orchestration_details(REPO_ROOT)
+    report("governance-v3-no-stale-orchestration", not details, details)
 
 
 RESOURCE_CEILING_FIELDS = ("agent_cap", "max_concurrency")
@@ -1839,9 +1842,22 @@ _YAML_FENCE_RE = re.compile(r"```ya?ml\n(.*?)```", re.DOTALL)
 
 
 def _extract_yaml_schema_block(text):
-    """The contents of task-contract.md's ```yaml schema fence, or None."""
-    m = _YAML_FENCE_RE.search(text)
-    return m.group(1) if m else None
+    """The contents of task-contract.md's `task_contract:` yaml fence, or None.
+
+    Selected by the `task_contract:` key rather than by position: taking the
+    FIRST yaml fence would silently rebind this whole check to an unrelated
+    example if one were ever added above the schema, and every field lookup
+    below would then pass against the wrong block while still reporting PASS.
+    Falls back to the first fence only when no fence declares the key, so a
+    renamed root still produces a real diagnostic instead of "no schema block".
+    """
+    blocks = _YAML_FENCE_RE.findall(text)
+    if not blocks:
+        return None
+    for block in blocks:
+        if re.search(r"^\s*task_contract\s*:", block, re.MULTILINE):
+            return block
+    return blocks[0]
 
 
 def _schema_field_line(schema_block, field):
@@ -1877,7 +1893,10 @@ def _field_note_bullet(text, field):
     for line in lines[start + 1:]:
         if line.startswith("## "):
             break
-        if line.lstrip().startswith("- "):
+        if line.startswith("- "):
+            # Only a TOP-LEVEL dash opens a new bullet; an indented "- " is a
+            # sub-bullet and stays part of the logical bullet above it, which
+            # would otherwise be truncated mid-definition.
             if current is not None:
                 bullets.append(current)
             current = [line]
@@ -1972,14 +1991,23 @@ def contract_schema_details(text):
     # v3 has no such field at any strength, so its presence anywhere in the
     # schema document is a regression -- checked structurally (required-field
     # sentence, yaml keys) and then document-wide.
+    single_writer_details = []
     for line in text.splitlines():
         low = normalize_prose_line(line)
         if "except" in low and "authorized_by" in low and "single_writer" in low:
-            details.append("single_writer must not be a required contract field: %s" % _safe(line.strip()))
+            single_writer_details.append(
+                "single_writer must not be a required contract field: %s" % _safe(line.strip())
+            )
     if _schema_field_line(schema_block, "single_writer") is not None:
-        details.append("single_writer must not appear as a key in the yaml schema block")
-    if "single_writer" in lowered:
-        details.append("single_writer must not appear in the v3 contract schema document at all")
+        single_writer_details.append("single_writer must not appear as a key in the yaml schema block")
+    if "single_writer" in lowered and not single_writer_details:
+        # The two checks above are the specific, actionable diagnoses; the
+        # document-wide sweep is the catch-all beneath them. Reported only when
+        # neither fired, so one regression yields one finding, not three.
+        single_writer_details.append(
+            "single_writer must not appear in the v3 contract schema document at all"
+        )
+    details.extend(single_writer_details)
 
     return details
 
@@ -2019,19 +2047,26 @@ def host_os_tracked_file_details(repo_root):
     return [_safe(line) for line in out.stdout.splitlines() if line.strip()]
 
 
-def check_governance_no_host_os_reference():
-    """No host-OS name anywhere in the tree (ADR-0002 section 8).
+def host_os_details(repo_root):
+    """Return [] if no host-OS name appears anywhere in the tree, else the hits.
 
     Two complementary scans, both of which must be clean and neither of which
     grants an exemption to any file:
 
-      - the pure governance-surface scan, which works without git and is what
-        the offline fixtures exercise;
+      - the pure governance-surface scan, which works without git;
       - a repo-wide tracked-file scan, which additionally covers the vendored
         skill bodies, Dockerfile, SPECIFICATIONS.md and this script itself.
+
+    Both live here rather than in the check, so the fixture runs this exact
+    function instead of restating the pair.
     """
-    details = scan_governance_surface(REPO_ROOT, (FORBIDDEN_HOST_OS_TOKEN,))
-    details += host_os_tracked_file_details(REPO_ROOT)
+    return (scan_governance_surface(repo_root, (FORBIDDEN_HOST_OS_TOKEN,))
+            + host_os_tracked_file_details(repo_root))
+
+
+def check_governance_no_host_os_reference():
+    """No host-OS name anywhere in the tree (ADR-0002 section 8)."""
+    details = host_os_details(REPO_ROOT)
     report("governance-no-host-os-reference", not details, details)
 
 
@@ -2075,10 +2110,12 @@ ALL_CHECKS = [
 # Most fixtures build their own tree under tempfile.TemporaryDirectory; none ever WRITES to this
 # repo, makes a network call, or sleeps. A MINORITY are the exception to "synthetic tree"
 # specifically, not to "never writes": they READ real files from this repo to check facts about the
-# actual repo state -- read-only, like every other check this script performs. As of this writing
-# that set is G11/G12 (the vendored and project manifests), N21 (a full ALL_CHECKS run), and V3-V6
-# (each Governance-v3 invariant against the real documents) -- but treat `_self_test_fixtures()` as
-# the authority rather than this sentence, since fixtures get added.
+# actual repo state -- read-only, like every other check this script performs. Some of those also
+# shell out to git (`hash-object`, `grep`) against the real tree, exactly as the corresponding
+# production checks do, so a handful of fixtures depend on git and on a clean working tree. Rather
+# than enumerate the set here -- the previous enumeration is precisely what went stale -- read it
+# off the code: a real-repo fixture is one whose body references REPO_ROOT or a real manifest path.
+# `_self_test_fixtures()` is the authority for what exists.
 #
 # Three families by id prefix: G* positive/structural, N* negative (one per distinct violation class
 # named in project-skills-policy.md's schema), V* the Governance-v3 prose checks. Exact id ranges are
@@ -2738,8 +2775,7 @@ def _st_v3():
 
 def _st_v4():
     """The real repo names no host operating system, on the surface or in any tracked file."""
-    hits = scan_governance_surface(REPO_ROOT, (FORBIDDEN_HOST_OS_TOKEN,))
-    hits += host_os_tracked_file_details(REPO_ROOT)
+    hits = host_os_details(REPO_ROOT)
     assert not hits, hits
 
 
@@ -2869,6 +2905,30 @@ def _st_v11():
         assert "0002-governance-v3-skill-native-orchestration.md:1:" in hits[0], hits
 
 
+def _st_v12():
+    """The schema block is selected by its `task_contract:` key, not by position.
+
+    Guards the failure mode where an example yaml fence added ABOVE the schema
+    would silently rebind every field lookup in contract_schema_details to the
+    wrong block -- which reports PASS while validating nothing.
+    """
+    real = _real_contract_text()
+    schema = _extract_yaml_schema_block(real)
+    assert schema is not None and "task_contract:" in schema, schema
+
+    decoy = (
+        "# Task contract\n\n"
+        "An example of what a contract is NOT:\n\n"
+        "```yaml\n"
+        "some_other_example:\n"
+        "  agent_cap: <int>   # mandatory\n"
+        "```\n\n"
+    ) + real
+    assert _extract_yaml_schema_block(decoy) == schema, "decoy fence was selected"
+    # The decoyed document must still validate exactly as the real one does.
+    assert contract_schema_details(decoy) == contract_schema_details(real)
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -2918,6 +2978,7 @@ def _self_test_fixtures():
         ("V9", "mandatory resource caps detected through Markdown markup; optional ones are not", _st_v9),
         ("V10", "surface scan catches a hard-wrapped phrase exactly once", _st_v10),
         ("V11", "host-OS token rejected with no document exempt", _st_v11),
+        ("V12", "schema block selected by task_contract: key, not by fence position", _st_v12),
     ]
 
 

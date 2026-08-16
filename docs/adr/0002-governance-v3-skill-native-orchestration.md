@@ -135,9 +135,8 @@ task concern, raised only when the owner explicitly asks for runtime work; a hos
 never part of coding governance.
 
 The acceptance condition is mechanical and absolute: the forbidden token occurs **zero** times across all
-tracked files. No document — not this ADR, not the validator that enforces it — is exempt. The validator
-therefore assembles the token from fragments at import time rather than embedding it as a literal, so that the
-enforcement code cannot become the last surviving occurrence of the thing it forbids.
+tracked files. No document is exempt — not this ADR, and not the enforcement code itself, which must therefore
+avoid becoming the last surviving occurrence of the thing it forbids.
 
 ## Consequences
 
