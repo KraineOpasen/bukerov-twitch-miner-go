@@ -1683,13 +1683,13 @@ STALE_V2_ORCHESTRATION_PHRASES = (
     "max_concurrency is required",
     "max_concurrency must be set",
     "must set a max_concurrency",
-    # NOT listed: "respect the task contract's agent_cap". That phrasing lives
-    # only in vendored skill bodies and patch-ledger rows, and the governance
-    # surface deliberately excludes .claude/skills/** (integrity-pinned upstream
-    # text) while the ledger rows legitimately quote it. A needle for it would
-    # be unreachable in the one place it occurs and wrong in the other; those
-    # texts are handled by the re-reading rule in agent-orchestration.md
-    # instead, not by this scan.
+    # NOT listed: "respect the task contract's agent_cap". Every occurrence of
+    # that phrasing is legitimate. In vendored skill bodies it is upstream text
+    # this scan cannot reach anyway (the surface excludes .claude/skills/**); in
+    # the patch ledgers and in agent-orchestration.md / task-contract.md /
+    # ADR-0002 it is QUOTED, precisely in order to state the v3 re-reading rule
+    # for it. Needling it would fail the check against the documents that fix
+    # the problem. Those texts are governed by that re-reading rule, not here.
 )
 
 # The host operating system of a machine that happens to run the miner's
@@ -1848,16 +1848,16 @@ def _extract_yaml_schema_block(text):
     FIRST yaml fence would silently rebind this whole check to an unrelated
     example if one were ever added above the schema, and every field lookup
     below would then pass against the wrong block while still reporting PASS.
-    Falls back to the first fence only when no fence declares the key, so a
-    renamed root still produces a real diagnostic instead of "no schema block".
+
+    Returns None -- never a positional guess -- when no fence declares the key.
+    Falling back to the first fence would reopen exactly the hole this function
+    closes; None instead surfaces "no ```yaml schema block found", which is a
+    real, actionable diagnostic.
     """
-    blocks = _YAML_FENCE_RE.findall(text)
-    if not blocks:
-        return None
-    for block in blocks:
+    for block in _YAML_FENCE_RE.findall(text):
         if re.search(r"^\s*task_contract\s*:", block, re.MULTILINE):
             return block
-    return blocks[0]
+    return None
 
 
 def _schema_field_line(schema_block, field):
@@ -1895,8 +1895,11 @@ def _field_note_bullet(text, field):
             break
         if line.startswith("- "):
             # Only a TOP-LEVEL dash opens a new bullet; an indented "- " is a
-            # sub-bullet and stays part of the logical bullet above it, which
-            # would otherwise be truncated mid-definition.
+            # sub-bullet and stays part of the logical bullet above it (handled
+            # by the else-branch), which would otherwise be truncated
+            # mid-definition. An indented sub-bullet with no open parent -- one
+            # separated from it by a blank line -- has no bullet to belong to
+            # and is skipped rather than promoted to a top-level definition.
             if current is not None:
                 bullets.append(current)
             current = [line]
@@ -2059,9 +2062,79 @@ def host_os_details(repo_root):
 
     Both live here rather than in the check, so the fixture runs this exact
     function instead of restating the pair.
+
+    Their coverage overlaps on CLAUDE.md and docs/**, so results are merged
+    order-preservingly and de-duplicated: one offending line is one finding,
+    not two.
     """
-    return (scan_governance_surface(repo_root, (FORBIDDEN_HOST_OS_TOKEN,))
-            + host_os_tracked_file_details(repo_root))
+    merged = (scan_governance_surface(repo_root, (FORBIDDEN_HOST_OS_TOKEN,))
+              + host_os_tracked_file_details(repo_root))
+    seen = set()
+    deduped = []
+    for hit in merged:
+        # The two scans format hits differently ("path:line: needle" vs git
+        # grep's "path:line:content"), so key on the path:line prefix they share.
+        key = ":".join(hit.split(":", 2)[:2])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+    return deduped
+
+
+# --- ADR-0002 §1: the four-level authority chain, restated in six documents ---
+#
+# agent-orchestration.md is canonical; the other five restate it. Governance v2's
+# chain had a FIFTH tier ("unpatched upstream skill defaults") sitting below the
+# local patches, and the original v3 change-set left that stale five-level list
+# standing in all three skills policies. Prose alone could not stop that
+# regressing, so it is checked here.
+AUTHORITY_CHAIN_DOCS = (
+    "CLAUDE.md",
+    "docs/agents/agent-orchestration.md",
+    "docs/agents/mattpocock-skills-policy.md",
+    "docs/agents/anthropic-skills-policy.md",
+    "docs/agents/project-skills-policy.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+# Enumeration fragments that only occur in a five-level chain. Deliberately
+# matched with their list marker attached: ADR-0002 legitimately NAMES the
+# retired fifth tier in past tense when recording what v3 dropped, and must
+# stay able to.
+FIFTH_LEVEL_ENUMERATIONS = (
+    "(4) unpatched upstream skill defaults",
+    "4. unpatched upstream skill defaults",
+    "(5) generic model behavior",
+    "5. generic model behavior",
+)
+
+
+def authority_chain_details(repo_root):
+    """Return [] if all six documents state the same four-level chain, else reasons."""
+    details = []
+    for relpath in AUTHORITY_CHAIN_DOCS:
+        abs_path = os.path.join(repo_root, relpath)
+        if not os.path.isfile(abs_path):
+            details.append("missing authority-chain document: %s" % relpath)
+            continue
+        with io.open(abs_path, encoding="utf-8") as f:
+            text = f.read()
+        # Joined before normalizing: these documents hard-wrap, and "exactly four
+        # levels" is split across a line break in both vendoring policies.
+        flat = normalize_prose_line(text.replace("\n", " "))
+        if "four levels" not in flat:
+            details.append("%s: must state that the authority chain has exactly four levels" % relpath)
+        for phrase in FIFTH_LEVEL_ENUMERATIONS:
+            if phrase in flat:
+                details.append("%s: five-level authority chain survives: %s" % (relpath, _safe(phrase)))
+    return details
+
+
+def check_governance_v3_authority_chain():
+    """One four-level authority chain, restated consistently and with no fifth tier."""
+    details = authority_chain_details(REPO_ROOT)
+    report("governance-v3-authority-chain", not details, details)
 
 
 def check_governance_no_host_os_reference():
@@ -2100,6 +2173,7 @@ ALL_CHECKS = [
     check_governance_v3_docs,
     check_governance_v3_no_stale_orchestration,
     check_governance_v3_contract_schema,
+    check_governance_v3_authority_chain,
     check_governance_no_host_os_reference,
 ]
 
@@ -2112,10 +2186,12 @@ ALL_CHECKS = [
 # specifically, not to "never writes": they READ real files from this repo to check facts about the
 # actual repo state -- read-only, like every other check this script performs. Some of those also
 # shell out to git (`hash-object`, `grep`) against the real tree, exactly as the corresponding
-# production checks do, so a handful of fixtures depend on git and on a clean working tree. Rather
-# than enumerate the set here -- the previous enumeration is precisely what went stale -- read it
-# off the code: a real-repo fixture is one whose body references REPO_ROOT or a real manifest path.
-# `_self_test_fixtures()` is the authority for what exists.
+# production checks do, so a handful of fixtures depend on git and on a clean working tree.
+#
+# This comment deliberately does NOT enumerate which fixtures those are. Two successive attempts to
+# do so both went stale -- once by naming a pair that had grown to seven, once by giving a heuristic
+# that was already wrong for fixtures reaching the repo through a helper. `_self_test_fixtures()` is
+# the authority for what exists, and each fixture's own docstring says what it reads.
 #
 # Three families by id prefix: G* positive/structural, N* negative (one per distinct violation class
 # named in project-skills-policy.md's schema), V* the Governance-v3 prose checks. Exact id ranges are
@@ -2929,6 +3005,41 @@ def _st_v12():
     assert contract_schema_details(decoy) == contract_schema_details(real)
 
 
+def _st_v13():
+    """The real repo's six authority-chain documents agree on four levels."""
+    details = authority_chain_details(REPO_ROOT)
+    assert not details, details
+
+
+def _st_v14():
+    """REGRESSION: a resurrected five-level chain must be rejected.
+
+    The fixture text is the Governance-v2 chain the three skills policies still
+    carried at 6d28ef8 -- the actual Defect 3 regression, not an invented one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath),
+                        "The authority chain has exactly four levels.\n")
+        stale = os.path.join(tmp, "docs", "agents", "mattpocock-skills-policy.md")
+        _write_file(stale,
+                    "Authority chain: (1) the active task contract, (2) `CLAUDE.md` +\n"
+                    "`.claude/rules/*.md`, (3) these vendored skills (as patched),\n"
+                    "(4) unpatched upstream skill defaults, (5) generic model behavior.\n")
+        details = authority_chain_details(tmp)
+        assert any("five-level authority chain survives" in d for d in details), details
+        assert any("mattpocock-skills-policy.md" in d for d in details), details
+        # Only the tampered document is faulted.
+        assert not any("anthropic-skills-policy.md" in d for d in details), details
+
+    # A document that simply omits the four-level statement is also caught.
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath), "no chain stated here\n")
+        details = authority_chain_details(tmp)
+        assert len(details) == len(AUTHORITY_CHAIN_DOCS), details
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -2979,6 +3090,8 @@ def _self_test_fixtures():
         ("V10", "surface scan catches a hard-wrapped phrase exactly once", _st_v10),
         ("V11", "host-OS token rejected with no document exempt", _st_v11),
         ("V12", "schema block selected by task_contract: key, not by fence position", _st_v12),
+        ("V13", "the six authority-chain documents agree on four levels", _st_v13),
+        ("V14", "a resurrected five-level authority chain is rejected", _st_v14),
     ]
 
 
