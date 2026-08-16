@@ -8,9 +8,11 @@ paths:
 # GitHub / governance conventions
 
 - Default mode is READ_ONLY (see `docs/agents/operation-modes.md`); tracker and GitHub mutations require an
-  explicit task contract (see `docs/agents/task-contract.md`).
+  explicit task contract (see `docs/agents/task-contract.md`). A contract is an authority envelope, not an
+  orchestration recipe — see `docs/agents/agent-orchestration.md`.
 - Never merge, mark ready-for-review, release/tag, deploy, trigger/rerun a workflow, or touch GitHub
-  settings/secrets — those need a direct, separate user command and are never executed autonomously.
+  settings/secrets — those need a direct, separate user command and are never executed autonomously. The
+  owner performs merges. This binds every agent at every delegation depth.
 - `.claude/hooks/governance-policy.py` and `.claude/settings.json` are the mechanical enforcement layer; do not
   edit them to work around a permission — if a rule seems wrong, say so and let the user change it outside
   Claude Code.

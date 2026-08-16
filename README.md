@@ -1274,7 +1274,7 @@ panel.
   default so the built-in self-update can replace `/twitch-miner-go` and
   existing root-owned data volumes keep working. To run non-root, set the
   user in your runtime (docker `--user 65532:65532`, compose `user:`, or the
-  app's user/group setting in the TrueNAS SCALE / unraid UI) **and** `chown`
+  app's user/group setting in your container platform's UI) **and** `chown`
   the mounted `config/`, `cookies/`, `logs/`, `database/` directories to that
   UID on the host. Note: as non-root the self-updater cannot replace the
   root-owned binary — it will refuse gracefully and keep running; update by
@@ -1284,18 +1284,18 @@ panel.
   probes the dashboard's `/api/status`, attaching Basic Auth credentials from
   the environment when set, and reports healthy when analytics is disabled.
 
-### Deploying via TrueNAS SCALE Apps (and similar app catalogs)
+### Deploying via a NAS / home-server app catalog
 
-When installed through an app catalog (TrueNAS SCALE Apps, unraid Community
-Applications, etc.), the port the dashboard is actually reachable on is
+When installed through a container app catalog rather than plain `docker run`,
+the port the dashboard is actually reachable on is
 decided by the **app's network settings in the platform UI**, not by this
 repository's Dockerfile. If the app publishes the port on the host IP, the
 dashboard is visible to your whole local network — review the app's network
 configuration, and set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` in the app's
 environment variables (the container refuses to start without them unless
 you explicitly opt out). That network boundary is infrastructure you control
-on the NAS side; the miner's fail-closed startup check is the code-side
-safety net.
+on your platform's side; the miner's fail-closed startup check is the
+code-side safety net.
 
 ---
 

@@ -78,39 +78,51 @@ Key packages (see `SPECIFICATIONS.md` § Module Structure for the full breakdown
 - New DB schema changes should add a migration under the appropriate module in `internal/database`/`internal/analytics`/`internal/notifications` and bump that module's version in `schema_versions`, not touch other modules' versions.
 - Version string is injected at build time via `-ldflags -X .../internal/version.Version=...` (see `Makefile`/`Dockerfile`) — don't hardcode versions elsewhere.
 
-## Claude Code Governance (v2)
+## Claude Code Governance (v3)
 
 Repo identity: `KraineOpasen/bukerov-twitch-miner-go`, default branch `main`. Verify this exact repo/branch
 before any GitHub-facing action — see "GitHub verification" below.
 
-### Policy precedence
+### Authority and workflow are separate
+
+**Owner controls authority. Skills control engineering workflow. Agents inherit authority; they do not create
+or expand it.**
+
+- **Authority** — what a session may touch, mutate, and publish — comes from the owner's task contract, then
+  this file and `.claude/rules/*.md`. Each layer may narrow; none may widen.
+- **Workflow** — which agents run, in what order, writing what — belongs to the invoked audited skill's own
+  documented methodology.
+
+Full semantics: `docs/agents/agent-orchestration.md`.
+
+#### Authority chain (narrowing only)
 
 1. An explicit task contract (`docs/agents/task-contract.md`) for the current session.
-2. This file + `.claude/rules/*.md`.
-3. Vendored project skills (`.claude/skills/**`, with local patches).
-4. Upstream skill defaults (unpatched vendored content).
-5. Generic model behavior.
+2. This file + `.claude/rules/*.md` — repository safety and integrity invariants only.
+3. Skill instructions (`.claude/skills/**`) — may narrow their own scope, never widen authority.
+4. Generic model behavior.
 
-A task contract can **never** authorize merge, auto-merge, release/tag, deploy, or production access — those
-always require a separate, direct user command, and even then are not executed autonomously under this policy.
+A task contract can **never** authorize merge, auto-merge, release/tag, or deploy — those always require a
+separate, direct user command, and even then are not executed autonomously under this policy.
 
 ### Default mode: READ_ONLY
 
-No contract → `READ_ONLY`. See `docs/agents/operation-modes.md` (modes, transitions, expiry triggers),
-`docs/agents/task-contract.md` (schema, mandatory re-check points), `docs/agents/quality-gates.md` (Q0–Q3).
+No contract → `READ_ONLY`. See `docs/agents/operation-modes.md` (capability ceilings, transitions),
+`docs/agents/task-contract.md` (authority envelope, mandatory re-check points),
+`docs/agents/quality-gates.md` (Q0–Q3 and the repair model).
 
 ### Non-delegable prohibitions
 
-No contract, and no vendored skill, may authorize:
+No contract, and no skill, may authorize:
 
-- Marking a PR ready for review, or merge/auto-merge.
-- Release, tag, or deploy — including to production or TrueNAS.
+- Marking a PR ready for review, or merge/auto-merge. **The owner performs merges.**
+- Release, tag, or deploy to any runtime environment.
 - Triggering or rerunning a GitHub Actions workflow.
 - Changing GitHub repo settings or secrets.
 - Force push, or any direct push to `main`/`master`.
 
 These require a separate, explicit, direct user command outside this policy — and even then this policy does
-not execute them autonomously.
+not execute them autonomously. They bind every agent at every delegation depth.
 
 ### GitHub verification
 
@@ -118,14 +130,28 @@ Before any GitHub-facing action, verify: exact repo (`KraineOpasen/bukerov-twitc
 base SHA, current HEAD SHA, PR state, and CI state. Don't assume a previous turn's verification still holds —
 re-check at the points listed in `docs/agents/task-contract.md`.
 
-### Agent orchestration
+### Orchestration: skill-native by default
 
-- One production writer per task; every other agent is read-only (research, review, planning).
-- Keep an explicit role ledger when multiple agents are involved — who is writing, who is reviewing.
-- No recursive subagent spawning; respect the task contract's `agent_cap`.
-- Reviewer/analysis agents never write to tracked files or push.
-- Background subagents run only inside a live session — never claim work continued or completed after the
-  session that spawned them ended.
+Invoking an audited skill authorizes the agent topology that skill documents — its lanes, reviewers, critics,
+verifiers, repair loops, and writers — with no separate prompt-level permission and no agent roster in the
+prompt. A contract may set `orchestration: main_context_only` to opt out; absent that field, `skill_native`
+applies.
+
+Every child agent inherits the same authority envelope and may narrow it, never widen it. Multiple writers
+are allowed when the orchestrating skill partitions ownership deterministically, avoids simultaneous
+conflicting edits, and reconciles before the final gates — the invariant is **no uncontrolled competing
+writes**, not "one writer".
+
+Background subagents run only inside a live session — never claim work continued or completed after the
+session that spawned them ended.
+
+### Failure handling
+
+Ordinary development feedback — red tests, build errors, review findings, surviving mutants — is diagnosed
+and repaired inside the same active task. A failure is never reported as a pass, and tests are never weakened
+to reach green. Publication requires the task's final gates to actually pass. `READ_ONLY` is for integrity and
+authority failures (drift, unexpected dirty state, acting outside authority, unprovable state, a repair
+strategy exhausted without a valid final gate) — see `docs/agents/quality-gates.md`.
 
 ### Secrets
 
@@ -139,6 +165,12 @@ cite exact evidence (timestamps, log lines) for any claim, and never assert a de
 direct evidence it did.
 
 ### Skills
+
+Audited skills are used as close to their authors' intent as practical: **minimal local patching**. A skill is
+not patched merely because it uses subagents, several writers, reviewers/critics, parallel analysis, iterative
+fixes, or its own handoff pattern — that is workflow, and workflow belongs to the skill. Patch only for
+concrete project incompatibility, a broken dependency, license/provenance necessity, or a genuine
+authority/integrity boundary.
 
 Vendored third-party skills (Matt Pocock's `mattpocock/skills`, reviewed and audited) live in
 `.claude/skills/**`. See `docs/agents/mattpocock-skills-policy.md` (policy, update/rollback procedure),
@@ -159,8 +191,8 @@ validated by `scripts/validate-agent-governance.py` alongside the two vendored s
 manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
 Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
 authority: mechanical authority to change tracked files always comes from an active task contract,
-`.claude/settings.json`, and hooks, never from manifest metadata alone. This does not change
-Governance v2 precedence.
+`.claude/settings.json`, and hooks, never from manifest metadata alone. This does not change the
+Governance v3 authority chain.
 
 #### Agent skills
 

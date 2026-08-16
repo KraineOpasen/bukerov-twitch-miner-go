@@ -1,7 +1,14 @@
 # ADR-0001: Agent governance v2
 
-- **Status**: Accepted
+- **Status**: Superseded in part by
+  [ADR-0002](0002-governance-v3-skill-native-orchestration.md) (2026-08-16)
 - **Date**: 2026-07-26
+
+> **Note.** ADR-0002 supersedes this ADR's *orchestration* and *failure-handling* decisions (one production
+> writer, role ledger, `agent_cap`/`max_concurrency`, no recursive spawning, reviewers always read-only, and
+> "a failed quality gate expires the contract"). Its *authority* decisions — operation modes, the task
+> contract, quality gates, mechanical enforcement, and vendored-skill discipline — remain in force. The v2
+> wording below is preserved verbatim as the historical record.
 
 ## Context
 
@@ -44,7 +51,7 @@ Adopt governance v2:
 
 ## Links
 
-- `CLAUDE.md` — `## Claude Code Governance (v2)` section
+- `CLAUDE.md` — the governance section, retitled `## Claude Code Governance (v3)` by ADR-0002
 - `docs/agents/operation-modes.md`, `task-contract.md`, `quality-gates.md`
 - `docs/agents/mattpocock-skills-policy.md`, `mattpocock-skills-manifest.json`, `mattpocock-skills-patches.md`
 - `.claude/settings.json`, `.claude/hooks/governance-policy.py`

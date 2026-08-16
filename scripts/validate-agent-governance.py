@@ -267,6 +267,8 @@ def check_required_files():
         "docs/agents/issue-tracker.md", "docs/agents/domain.md", "docs/agents/triage-labels.md",
         "docs/agents/mattpocock-skills-manifest.json", "docs/agents/mattpocock-skills-patches.md",
         "docs/agents/mattpocock-skills-policy.md", "docs/adr/0001-agent-governance-v2.md",
+        "docs/agents/agent-orchestration.md",
+        "docs/adr/0002-governance-v3-skill-native-orchestration.md",
         "scripts/validate-agent-governance.py",
         "docs/agents/anthropic-skills-manifest.json", "docs/agents/anthropic-skills-patches.md",
         "docs/agents/anthropic-skills-policy.md",
@@ -1568,6 +1570,191 @@ def check_project_manifest():
     report("project-manifest-valid", not details, details)
 
 
+# --------------------------------------------------------------------------
+# Governance v3 consistency (ADR-0002)
+# --------------------------------------------------------------------------
+#
+# These checks keep the prose governance layer mechanically consistent with
+# Governance v3 (docs/adr/0002-governance-v3-skill-native-orchestration.md).
+# They are deterministic, stdlib-only, and never touch the network — same
+# contract as every other check in this file.
+#
+# GOVERNANCE_SURFACE is the set of tracked text this repository's governance
+# owns. It deliberately EXCLUDES:
+#   - .claude/skills/**     vendored upstream bodies, integrity-pinned by blob
+#                           SHA; their content is governed by the vendoring
+#                           policies + patch ledgers, not by these checks.
+#   - .claude/hooks/**      the mechanical enforcement layer, edit-denied.
+#   - Dockerfile, SPECIFICATIONS.md
+#                           deployment/protocol reference text, not governance.
+# A file is scanned only if it exists; the set is a fixed list plus two
+# directory walks, so the check is stable regardless of repo state.
+
+GOVERNANCE_SURFACE_FILES = ("CLAUDE.md", "CONTEXT.md", "README.md")
+GOVERNANCE_SURFACE_DIRS = (
+    os.path.join(".claude", "rules"),
+    os.path.join("docs", "agents"),
+    os.path.join("docs", "adr"),
+)
+
+# ADRs are the historical-decision layer: ADR-0001 preserves the Governance v2
+# wording verbatim, and ADR-0002 must name the v2 mandates it removes in order
+# to record the decision at all. Both are exempt from the stale-language scan;
+# policy documents are not.
+V2_LANGUAGE_EXEMPT = (
+    "docs/adr/0001-agent-governance-v2.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+# ADR-0002 section 8 records the decision to strip the host-OS name from
+# governance vocabulary, which requires naming it once. Nothing else may.
+HOST_OS_EXEMPT = ("docs/adr/0002-governance-v3-skill-native-orchestration.md",)
+
+# Normative Governance-v2 orchestration wording that v3 removed. Matched
+# case-insensitively as substrings. Deliberately phrase-level, not the bare
+# string "v2": describing what v2 did (in ADR-0002, in the vendoring policies'
+# migration notes) is legitimate and must stay possible.
+STALE_V2_ORCHESTRATION_PHRASES = (
+    "single_writer",
+    "one production writer",
+    "role ledger",
+    "no recursive subagent spawning",
+    "claude code governance (v2)",
+    "governance v2 precedence",
+)
+
+# The host operating system of a machine that happens to run the miner's
+# container is not a governance concept (ADR-0002 §8).
+FORBIDDEN_HOST_OS_TOKEN = "truenas"
+
+V3_REQUIRED_DOCS = (
+    "docs/agents/agent-orchestration.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+
+def governance_surface_paths(repo_root):
+    """Repo-relative, sorted list of the governance text this repo owns.
+
+    Pure: takes the root as an argument so self-test fixtures can point it at
+    a synthetic tree. Missing files/dirs are skipped, not errors.
+    """
+    paths = []
+    for name in GOVERNANCE_SURFACE_FILES:
+        if os.path.isfile(os.path.join(repo_root, name)):
+            paths.append(name)
+    for subdir in GOVERNANCE_SURFACE_DIRS:
+        abs_dir = os.path.join(repo_root, subdir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(abs_dir):
+            for filename in sorted(filenames):
+                if not filename.endswith(".md"):
+                    continue
+                abs_path = os.path.join(dirpath, filename)
+                paths.append(os.path.relpath(abs_path, repo_root).replace(os.sep, "/"))
+    return sorted(set(paths))
+
+
+def scan_governance_surface(repo_root, needles, exempt=()):
+    """Return ["<relpath>:<lineno>: <needle>", ...] for case-insensitive hits.
+
+    `needles` is an iterable of lowercase substrings. `exempt` is an iterable
+    of repo-relative paths to skip entirely.
+    """
+    exempt_set = set(exempt)
+    hits = []
+    for relpath in governance_surface_paths(repo_root):
+        if relpath in exempt_set:
+            continue
+        try:
+            with io.open(os.path.join(repo_root, relpath), encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except Exception as e:
+            hits.append("%s: unreadable: %s" % (relpath, _safe(str(e))))
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            lowered = line.lower()
+            for needle in needles:
+                if needle in lowered:
+                    hits.append("%s:%d: %s" % (relpath, lineno, _safe(needle)))
+    return hits
+
+
+def check_governance_v3_docs():
+    """The v3 docs exist and CLAUDE.md declares v3, not v2."""
+    details = []
+    for relpath in V3_REQUIRED_DOCS:
+        if not os.path.isfile(os.path.join(REPO_ROOT, relpath)):
+            details.append("missing required Governance v3 doc: %s" % relpath)
+
+    claude_md = os.path.join(REPO_ROOT, "CLAUDE.md")
+    if not os.path.isfile(claude_md):
+        details.append("CLAUDE.md missing")
+    else:
+        with io.open(claude_md, encoding="utf-8") as f:
+            text = f.read()
+        if "## Claude Code Governance (v3)" not in text:
+            details.append("CLAUDE.md must declare the heading '## Claude Code Governance (v3)'")
+        if "docs/agents/agent-orchestration.md" not in text:
+            details.append("CLAUDE.md must point at docs/agents/agent-orchestration.md")
+
+    report("governance-v3-docs", not details, details)
+
+
+def check_governance_v3_no_stale_orchestration():
+    """No Governance-v2 orchestration mandates left in the governance surface."""
+    details = scan_governance_surface(
+        REPO_ROOT, STALE_V2_ORCHESTRATION_PHRASES, exempt=V2_LANGUAGE_EXEMPT
+    )
+    report("governance-v3-no-stale-orchestration", not details, details)
+
+
+def check_governance_v3_contract_schema():
+    """task-contract.md is a v3 authority envelope, not a v2 orchestration recipe."""
+    details = []
+    path = os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md")
+    if not os.path.isfile(path):
+        report("governance-v3-contract-schema", False, ["docs/agents/task-contract.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    lowered = text.lower()
+
+    if "orchestration: skill_native | main_context_only" not in lowered:
+        details.append("schema must offer 'orchestration: skill_native | main_context_only'")
+    if "absent => skill_native" not in lowered:
+        details.append("schema must state that an absent 'orchestration' field means skill_native")
+
+    # agent_cap / max_concurrency may survive only as explicitly optional
+    # resource ceilings, never as mandatory orchestration policy.
+    for field in ("agent_cap", "max_concurrency"):
+        if field in lowered and "optional" not in lowered:
+            details.append("%s appears but the doc never marks it optional" % field)
+
+    # The v2 required-field sentence listed single_writer; v3 must not.
+    for line in text.splitlines():
+        low = line.lower()
+        if "except" in low and "authorized_by" in low and "single_writer" in low:
+            details.append("single_writer must not be a required contract field: %s" % _safe(line.strip()))
+
+    report("governance-v3-contract-schema", not details, details)
+
+
+def check_governance_no_host_os_reference():
+    """No host-OS name as governance vocabulary (ADR-0002 section 8).
+
+    Scoped to the governance surface. Vendored skill bodies under
+    .claude/skills/** are integrity-pinned and out of scope here; so are
+    Dockerfile and SPECIFICATIONS.md, which are deployment/protocol reference
+    text rather than governance.
+    """
+    details = scan_governance_surface(
+        REPO_ROOT, (FORBIDDEN_HOST_OS_TOKEN,), exempt=HOST_OS_EXEMPT
+    )
+    report("governance-no-host-os-reference", not details, details)
+
+
 ALL_CHECKS = [
     check_required_files,
     check_json_validity,
@@ -1595,6 +1782,10 @@ ALL_CHECKS = [
     check_rules_frontmatter_and_uniqueness,
     check_hidden_unicode,
     check_project_manifest,
+    check_governance_v3_docs,
+    check_governance_v3_no_stale_orchestration,
+    check_governance_v3_contract_schema,
+    check_governance_no_host_os_reference,
 ]
 
 
@@ -2081,8 +2272,14 @@ def _st_n21():
         finally:
             PROJECT_MANIFEST_PATH = saved_path
             RESULTS = saved_results
-    assert len(results) == 26, "expected exactly 26 labeled results, got %d: %r" % (
-        len(results), [r[0] for r in results])
+    # Every registered check must report exactly once, even when a manifest is
+    # malformed. Pinned to len(ALL_CHECKS) rather than a literal so adding a
+    # check doesn't require editing this fixture -- duplicates and silent
+    # non-reporters are still caught by the name-uniqueness assert below.
+    names = [r[0] for r in results]
+    assert len(results) == len(ALL_CHECKS), "expected %d labeled results, got %d: %r" % (
+        len(ALL_CHECKS), len(results), names)
+    assert len(set(names)) == len(names), "duplicate check labels: %r" % (names,)
     failing = [name for name, ok, _ in results if not ok]
     assert failing, "expected at least one failing check, got none"
     assert "project-manifest-valid" in failing, failing
@@ -2198,6 +2395,86 @@ def _st_n24():
         assert not any("skill directory must not be a symlink" in d for d in details2), details2
 
 
+def _st_v1():
+    """governance_surface_paths picks up the fixed files + .md under the walked dirs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "x\n")
+        _write_file(os.path.join(tmp, "README.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "rules", "go-code.md"), "x\n")
+        # Not governance surface: skill bodies, hooks, non-markdown, absent CONTEXT.md.
+        _write_file(os.path.join(tmp, ".claude", "skills", "s", "SKILL.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "hooks", "h.py"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "manifest.json"), "{}\n")
+        _write_file(os.path.join(tmp, "Dockerfile"), "x\n")
+        got = governance_surface_paths(tmp)
+        expected = [
+            ".claude/rules/go-code.md",
+            "CLAUDE.md",
+            "README.md",
+            "docs/adr/0001.md",
+            "docs/agents/task-contract.md",
+        ]
+        assert got == sorted(expected), got
+
+
+def _st_v2():
+    """scan_governance_surface reports file:line hits and honours the exempt list."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "ok\nOne Production Writer per task\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001-agent-governance-v2.md"),
+                    "one production writer\n")
+        hits = scan_governance_surface(tmp, ("one production writer",))
+        assert any(h.startswith("CLAUDE.md:2:") for h in hits), hits
+        assert any("0001-agent-governance-v2.md" in h for h in hits), hits
+
+        exempt_hits = scan_governance_surface(
+            tmp, ("one production writer",), exempt=("docs/adr/0001-agent-governance-v2.md",)
+        )
+        assert len(exempt_hits) == 1, exempt_hits
+        assert exempt_hits[0].startswith("CLAUDE.md:2:"), exempt_hits
+
+
+def _st_v3():
+    """The real repo's governance surface is free of stale v2 orchestration mandates."""
+    hits = scan_governance_surface(
+        REPO_ROOT, STALE_V2_ORCHESTRATION_PHRASES, exempt=V2_LANGUAGE_EXEMPT
+    )
+    assert not hits, hits
+
+
+def _st_v4():
+    """The real repo's governance surface names no host operating system."""
+    hits = scan_governance_surface(
+        REPO_ROOT, (FORBIDDEN_HOST_OS_TOKEN,), exempt=HOST_OS_EXEMPT
+    )
+    assert not hits, hits
+
+
+def _st_v5():
+    """Governance v3 required docs exist and CLAUDE.md declares v3."""
+    for relpath in V3_REQUIRED_DOCS:
+        assert os.path.isfile(os.path.join(REPO_ROOT, relpath)), relpath
+    with io.open(os.path.join(REPO_ROOT, "CLAUDE.md"), encoding="utf-8") as f:
+        text = f.read()
+    assert "## Claude Code Governance (v3)" in text
+    assert "## Claude Code Governance (v2)" not in text
+    assert "docs/agents/agent-orchestration.md" in text
+
+
+def _st_v6():
+    """task-contract.md carries the v3 orchestration field and no required single_writer."""
+    with io.open(os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md"), encoding="utf-8") as f:
+        text = f.read()
+    lowered = text.lower()
+    assert "orchestration: skill_native | main_context_only" in lowered
+    assert "absent => skill_native" in lowered
+    assert "single_writer" not in lowered, "single_writer must be gone from the v3 schema"
+    for field in ("agent_cap", "max_concurrency"):
+        assert field in lowered and "optional" in lowered, field
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -2236,6 +2513,12 @@ def _self_test_fixtures():
         ("N22", "eval_evidence.path is a working-tree symlink", _st_n22),
         ("N23", "eval_evidence.path is a git-index symlink (tracked-mode check)", _st_n23),
         ("N24", "symlinked skill root, standalone validate_project_manifest", _st_n24),
+        ("V1", "governance_surface_paths selects exactly the owned governance text", _st_v1),
+        ("V2", "scan_governance_surface reports file:line hits and honours exemptions", _st_v2),
+        ("V3", "repo governance surface has no stale v2 orchestration mandates", _st_v3),
+        ("V4", "repo governance surface names no host operating system", _st_v4),
+        ("V5", "Governance v3 docs exist and CLAUDE.md declares v3", _st_v5),
+        ("V6", "task-contract.md is a v3 authority envelope", _st_v6),
     ]
 
 
