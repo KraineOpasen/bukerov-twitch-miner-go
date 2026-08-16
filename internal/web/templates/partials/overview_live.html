@@ -100,7 +100,7 @@
         <span class="type-small text-text-secondary">
             {{ t "ov.pred.active" }}
             {{if ne .PredictionsState "unavailable"}}
-            <span class="num text-neutral-100" data-ov-pred-active="{{len .Predictions}}">{{len .Predictions}}</span>
+            <span class="num text-text-primary" data-ov-pred-active="{{len .Predictions}}">{{len .Predictions}}</span>
             {{else}}
             <span class="num" data-ov-pred-active="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
             {{end}}
@@ -129,7 +129,7 @@
      written from the absence of a signal in either place. */}}
 {{if .Version}}
 <p class="type-small text-text-secondary mb-4" data-ov-version>
-    <span class="num text-neutral-100">v{{.Version}}</span>
+    <span class="num text-text-primary">v{{.Version}}</span>
     · <a href="/system/diagnostics" class="hover:underline">{{ t "system.diagnostics.heading" }} →</a>
 </p>
 {{end}}
@@ -170,7 +170,7 @@
     <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
             <a href="/streamer/{{.Streamer}}" class="s-name text-sm hover:underline">{{.Streamer}}</a>
-            <div class="text-neutral-100 text-sm font-medium truncate" title="{{.Title}}">{{.Title}}</div>
+            <div class="text-text-primary text-sm font-medium truncate" title="{{.Title}}">{{.Title}}</div>
         </div>
         <div class="text-right flex-shrink-0">
             {{if .Locked}}
@@ -185,16 +185,16 @@
         {{range .Outcomes}}
         <div class="pred-outcome {{if .Chosen}}chosen{{end}} {{if .Selectable}}selectable{{end}}"
              {{if .Selectable}}role="radio" aria-checked="false" tabindex="0" data-outcome-id="{{.ID}}" data-outcome-title="{{.Title}}"{{end}}>
-            <span class="text-sm text-neutral-100 truncate flex items-center gap-1">
+            <span class="text-sm text-text-primary truncate flex items-center gap-1">
                 {{if .Chosen}}<span class="text-online" title="{{ t "pred.chosen_outcome" }}">◆</span>{{end}}{{.Title}}
             </span>
-            <span class="num text-xs text-neutral-300">{{.Percent}}%{{if .Odds}} · {{.Odds}}{{end}}</span>
+            <span class="num text-xs text-text-secondary">{{.Percent}}%{{if .Odds}} · {{.Odds}}{{end}}</span>
             <div class="pred-obar"><span style="width: {{.Percent}}%"></span></div>
         </div>
         {{end}}
     </div>
 
-    <div class="flex items-center justify-between mt-2 text-xs text-neutral-400">
+    <div class="flex items-center justify-between mt-2 text-xs text-text-muted">
         <span>{{if .PoolLabel}}<span class="num">{{.PoolLabel}}</span> {{ t "pred.pts_pool" }}{{end}}</span>
         {{if and .BetPlaced .BetAmount}}<span class="num badge {{if .ManualBet}}badge-watching{{else if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">{{ t "pred.bet" }} {{.BetAmount}}</span>{{end}}
     </div>
@@ -207,11 +207,11 @@
     <div class="pred-status" data-bet-status>
         {{if .ManualBet}}
         <span class="badge badge-watching">{{ t "pred.manual_bet" }}</span>
-        <span class="text-xs text-neutral-300"><span class="num">{{.BetAmount}}</span>{{if .BetOutcomeTitle}} {{ t "pred.on" }} <span class="text-neutral-100">{{.BetOutcomeTitle}}</span>{{end}}</span>
+        <span class="text-xs text-text-secondary"><span class="num">{{.BetAmount}}</span>{{if .BetOutcomeTitle}} {{ t "pred.on" }} <span class="text-text-primary">{{.BetOutcomeTitle}}</span>{{end}}</span>
         <span class="badge badge-disabled" title="{{ t "pred.autobet_locked_title" }}">{{ t "pred.autobet_locked" }}</span>
         {{else}}
         <span class="badge {{if .BetConfirmed}}badge-prefer{{else}}badge-queued{{end}}">{{ t "pred.autobet_placed" }}</span>
-        {{if .BetOutcomeTitle}}<span class="text-xs text-neutral-300">{{ t "pred.on" }} <span class="text-neutral-100">{{.BetOutcomeTitle}}</span></span>{{end}}
+        {{if .BetOutcomeTitle}}<span class="text-xs text-text-secondary">{{ t "pred.on" }} <span class="text-text-primary">{{.BetOutcomeTitle}}</span></span>{{end}}
         {{end}}
     </div>
 
@@ -229,7 +229,7 @@
             </div>
         </div>
         <div class="pred-manual-foot">
-            <span class="text-xs text-neutral-400">{{ t "pred.available" }} <span class="num">{{.BalanceLabel}}</span></span>
+            <span class="text-xs text-text-muted">{{ t "pred.available" }} <span class="num">{{.BalanceLabel}}</span></span>
             <button type="button" class="btn-bet" data-place disabled>{{ t "pred.place_bet" }}</button>
         </div>
         <div class="pred-confirm" data-confirm hidden>
@@ -242,7 +242,7 @@
         <div class="pred-manual-controls">
             <label class="pred-skip">
                 <input type="checkbox" data-skip {{if .AutoBetSkipped}}checked{{end}}>
-                <span class="text-xs text-neutral-400">{{ t "pred.dont_autobet" }}</span>
+                <span class="text-xs text-text-muted">{{ t "pred.dont_autobet" }}</span>
             </label>
         </div>
         <div class="pred-msg pred-msg-error" data-live-error role="alert" hidden></div>

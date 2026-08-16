@@ -136,7 +136,7 @@ Extend the **existing** `@theme inline` block in `input.css` — no config file,
 | motion | `.motion-fast/base/slow` presets + global reduced-motion override | interactive elements |
 | breakpoints | Tailwind defaults `md` 768 / `lg` 1024 / `xl` 1280 | `xl:` sidebar, `lg:` rail, `<lg` drawer |
 
-**Legacy compatibility rules** [AD]: F1's re-pointed legacy names (`bg-neutral-800`-style aliases) stay valid throughout migration and are deleted **only in S5-10** after a grep proves zero template references. New/migrated templates use semantic utilities exclusively; primitives never appear in templates; both palettes must define every token (build-time grep check for unpaired tokens).
+**Legacy compatibility rules** [AD]: F1's re-pointed legacy names (the retired `neutral`/`purple`/`amber`/`green`/`emerald`/`red` numbered-shade aliases, `bg`/`text`/`border`-prefixed) stay valid throughout migration and are deleted **only in S5-10** after a grep proves zero template references. New/migrated templates use semantic utilities exclusively; primitives never appear in templates; both palettes must define every token (build-time grep check for unpaired tokens).
 
 
 ## 6. Component inventory C0–C18
@@ -587,6 +587,105 @@ Two deep modules, then route-by-route migration; the dashboard is fully function
 | S5-10 | Retirement & audit: delete legacy aliases + `dashboard.html`; WCAG AA tooling pass both themes; keyboard walk of all 30 routes; RU/EN copy review | all | the only slice allowed to delete |
 
 One PR-sized change per slice, each under its own task contract; per-slice review checklist = §18 scoped to touched routes.
+
+**S5-10 semantic-vocabulary addendum (owner-approved).** S5-10's final legacy-alias census — re-derived
+independently rather than trusted from an earlier count — found single-consumer holdouts with no existing
+semantic equivalent in §4's token tables: each requires a new **role-based** semantic token, not a palette
+expansion. Every addition preserves its retired alias's exact primitive value (zero rendered-pixel change) and
+introduces **zero new hues**. This is standing authorization, not a one-time exception — S5-10 owns the final
+migration and retirement pass end-to-end, including any single-consumer holdout the census surfaces only after
+an earlier pass believed it was done (e.g., respectively, `--text-faint`/`--text-placeholder`/`--text-caution`/
+`--interactive-muted`/`--search-highlight-bg`/`--control-accent` for the captions-hints/placeholder-glyph/
+caution-text/secondary-accent/search-highlight/checkbox-accent roles; `--surface-control-muted` for the
+muted-control-surface role shared by
+streamer.html's search-clear button and input.css's own progress-track/status-pill component fills). Where
+exact legacy-value preservation and §9/§18's AA acceptance conflict — a legacy value that never cleared AA in
+the first place — §9/§18 governs: S5-10 is the final AA pass, not merely a renaming pass, so a documented,
+role-correct value change (still zero new hues) is in scope when needed to clear 4.5:1 normal-text contrast.
+
+**S5-10a final corrective addendum (owner-approved).** The §16 slice table's own S5-10 scope note bundled
+"delete legacy aliases + `dashboard.html`" together with the full §9/§18 AA/keyboard/RU-EN audit; the first S5-10
+pass completed only the deletion half and explicitly deferred the audit. A follow-up pass then ran that audit
+for real (fixture-backed `httptest` server + Playwright, all 30 canonical routes, both themes, both languages,
+1440px + 375px) and found four genuine gaps, closed here:
+
+- **`--interactive-solid` (dark)** now resolves through `--prim-night-purple-700` (the existing hover primitive,
+  zero new hue) instead of `--prim-night-purple-600` — white text-on-accent over the old fill measured 4.33:1
+  against every consumer sharing this token (`.lang-btn.is-active`, `.theme-btn[aria-pressed]`,
+  `.stat-range-btn.is-active`, `.roi-period-btn.is-active`, `.btn-bet`), failing AA. Clears 5.38:1. The hover
+  pair (`--interactive-solid-hover`) is now derived via `color-mix(in srgb, var(--prim-night-purple-700) 82%,
+  black)` rather than reusing the same primitive outright, so resting and hover stay visually distinct.
+- **`--text-placeholder`** (both themes) now aliases `--text-muted` — the original primitives measured 1.99:1
+  dark / 2.98:1 light against `--surface-page`, failing AA for every actual consumer (the empty-art fallback
+  glyph renders at both `text-2xl`, needing the 3:1 large-text floor, and `text-lg`, which needs the full 4.5:1
+  floor regardless of size). Same treatment already applied to `--text-faint` in the prior pass, for the same
+  reason: no palette value between the failing primitive and `--text-muted` clears AA against every consumer.
+  Clears 6.23:1 dark / 5.66:1 light.
+- **The startup-overlay heading (`#status-title`) and its sibling verification-URI link** — the two
+  `text-interactive` consumers sitting directly on the overlay's `--surface-card` box with no background of
+  their own — move to `--interactive-muted` (an existing "secondary-weight accent" token already used for
+  link/hover roles elsewhere). The old pairing measured 4.43:1 dark against `--surface-card`, failing AA; the
+  new one clears 6.23:1 dark / 5.38:1 light. (Other `text-interactive` instances inside the same overlay sit on
+  their own `bg-surface-page` box and already cleared AA — left untouched.) An independent Spec review of this
+  pass then caught a third, structurally-identical consumer this addendum's first draft missed: the
+  non-blocking `#lifecycle-auth-banner`'s own verification-URI link (`updateAuthBanner`, shown at
+  generation>1), which sits on a translucent `color-mix(..., var(--status-warning) 12%, transparent)` fill
+  composited over the page background rather than `--surface-card` — a different pairing the surface-card
+  measurement never covered. A real-browser pixel sample of the actual composited fill measured the same
+  purple text at 3.95:1 dark against it — also failing AA. `--interactive-muted` was tried there first, since
+  the markup is nearly identical to the overlay's link; a second pixel sample caught that it fixes dark
+  (5.55:1) but regresses light (5.10:1, already passing → 4.09:1, now failing) — its light value is *lighter*
+  than plain `--interactive`, which helps against a dark fill and actively hurts against this lighter,
+  warm-tinted one. `--link-text` (dark: a separate, even-lighter primitive; light: identical to plain
+  `--interactive`) clears both without that trade-off — 7.62:1 dark / 5.10:1 light, light unchanged from the
+  original passing value — and is arguably the more semantically correct token for an actual hyperlink besides.
+  Two structurally-similar elements needing two different token choices, because they sit on two genuinely
+  different backgrounds: a reminder that even a fix that looks obviously identical still needs its own
+  measurement, not just pattern-matching against a fix that already worked elsewhere.
+- **`contentinfo` landmark**: `base.html` never had one, despite §9 requiring it since Stage 4. A `<footer>`
+  now sits as a sibling of `.app-shell` (not nested inside `<main>`/`<aside>`/`<nav>`, so it keeps its implicit
+  landmark role without a redundant explicit `role` attribute), present on all 30 routes. Left deliberately
+  empty of visible text: an independent Standards review of this pass's first draft correctly flagged that
+  restating the brand name and version here duplicated the sidebar footer's own content verbatim, visible on
+  screen simultaneously at normal desktop width — the landmark's job is structural, not a second copy of
+  existing chrome.
+- **Unscoped `<th>` cells**: `partials/discovery_list.html` (5 cells) and `partials/drops_past.html` (3 cells)
+  now carry `scope="col"`, matching every other table in the app.
+- **Bonus, same-file fix**: `discovery_list.html`'s table had no `overflow-x` wrapper, so its content was
+  silently clipped (not scrollable) by the card's own `overflow-hidden` on narrow viewports. Wrapped in
+  `overflow-x-auto`, matching the pattern `drops_past.html`'s own nested table already uses.
+- **Reduced motion**: the prior pass's live check was inconclusive (the animated elements it tried weren't
+  present in the fixture render at check time). Re-verified live against a real server with elements
+  deterministically kept in the DOM (the sidebar skeleton's `hx-get` intercepted rather than raced): every
+  checked element (`#now-watching .skeleton`, `.lang-btn`, `.theme-btn`, `.app-sidebar`) collapses
+  `animation`/`transition` duration to `0.01ms` under `prefers-reduced-motion: reduce` and shows its real
+  duration under no preference — conclusive PASS.
+
+**One reported "failure" turned out to be a measurement-tool bug, not a real gap — left unchanged, not
+"fixed".** The prior pass's own audit reported `/drops/current`'s SAFE policy-status pill (green text,
+`handlers_policy.go:49`, background set to `transparent` inline) at 2.06:1 light, tracing the effective
+background past the campaign card's real, opaque background (an `oklch()`-declared Tailwind default) to
+`<body>`'s `--surface-page` — the exact class of bug the same pass already caught and excluded once, for a
+raw, un-tokenized `bg` button on `/events` using the same purple-600 shade. Re-measured with a color resolver that goes through the browser's own
+canvas color parser (so `oklch()`/`color-mix()` values can never be mis-treated as transparent), the real
+effective background is the card's own fill and the actual rendered contrast is 6.64:1 in both themes — already
+compliant. No code changed for this item; introducing a color override here would have been an unrequested,
+unjustified visual change chasing a non-bug.
+
+**Independent review (Standards + Spec, two parallel sub-agents) of this corrective pass.** Zero hard
+standards violations; zero missing/wrongly-implemented spec requirements. Both axes surfaced real, since-fixed
+issues rather than rubber-stamping: Standards caught the footer-content duplication and a `5.38`/`5.37`
+inconsistency between this addendum and `input.css`'s own comment (now `5.38` in both, matching the live
+measurement) and an indentation nit in `discovery_list.html` now matching `drops_past.html`'s pattern; Spec
+independently caught the `#lifecycle-auth-banner` verification-link gap described above. Spec also flagged the
+`discovery_list.html` `overflow-x-auto` wrapper as beyond the four named WCAG items and two named a11y
+items — correctly: it's a fix for a bug this pass's own regression sweep found, not one of the six completed
+audit verdicts this pass was scoped to close, kept because it lives in an allowed-path file, mirrors
+`drops_past.html`'s own existing pattern, and "desktop/mobile 30/30 still PASS" is itself part of this pass's
+acceptance bar. Acting on the `#lifecycle-auth-banner` finding then took two attempts of its own — the first
+fix (reusing `--interactive-muted`, by analogy to the overlay's identical-looking link) measured clean on dark
+but was caught regressing light before it shipped, exactly by re-measuring rather than trusting the analogy;
+see the corrected token choice above.
 
 ## 17. Verification debts and open owner decisions
 

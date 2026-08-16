@@ -555,7 +555,7 @@ func TestF3DropsPolicyEndsInSurfaced(t *testing.T) {
 func TestF3DropsEndsInHumanizedClientSide(t *testing.T) {
 	srv := buildF3PageServer(t)
 	apiDrops := f3GetPage(t, srv, "/api/drops", "en")
-	if !strings.Contains(apiDrops, `class="text-neutral-500 js-ends-in" data-ends-in="30h0m0s"`) {
+	if !strings.Contains(apiDrops, `class="text-text-faint js-ends-in" data-ends-in="30h0m0s"`) {
 		t.Error("drops queue missing the raw data-ends-in fallback attribute/value")
 	}
 
@@ -600,10 +600,10 @@ func TestF3StatisticsAccessibilityTweaks(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/statistics", "en")
 
-	if strings.Contains(body, `id="stat-updated" class="text-xs text-neutral-400 num" aria-live`) {
+	if strings.Contains(body, `id="stat-updated" class="text-xs text-text-muted num" aria-live`) {
 		t.Error("#stat-updated must not carry aria-live anymore")
 	}
-	if strings.Contains(body, `id="roi-updated" class="text-xs text-neutral-400 num" aria-live`) {
+	if strings.Contains(body, `id="roi-updated" class="text-xs text-text-muted num" aria-live`) {
 		t.Error("#roi-updated must not carry aria-live anymore")
 	}
 	if !strings.Contains(body, `id="stat-updated"`) || !strings.Contains(body, `id="roi-updated"`) {

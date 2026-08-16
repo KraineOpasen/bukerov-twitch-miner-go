@@ -27,21 +27,21 @@
      index through this component.
 
      Inputs: DropCampaignView. */}}
-{{define "c13.campaign_card"}}<div class="flex-shrink-0 w-16 h-[5.5rem] rounded-md overflow-hidden bg-neutral-900 border border-neutral-700 flex items-center justify-center">
+{{define "c13.campaign_card"}}<div class="flex-shrink-0 w-16 h-[5.5rem] rounded-md overflow-hidden bg-surface-page border border-border-default flex items-center justify-center">
     {{if .BoxArtURL}}
     <img src="{{.BoxArtURL}}" alt="{{.GameName}}" class="w-full h-full object-cover" loading="lazy"
          onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-    <div class="w-full h-full items-center justify-center text-neutral-600 text-2xl" style="display:none;">🎮</div>
+    <div class="w-full h-full items-center justify-center text-text-placeholder text-2xl" style="display:none;">🎮</div>
     {{else}}
-    <div class="w-full h-full flex items-center justify-center text-neutral-600 text-2xl">🎮</div>
+    <div class="w-full h-full flex items-center justify-center text-text-placeholder text-2xl">🎮</div>
     {{end}}
 </div>
 
 <div class="flex-1 min-w-0">
     <div class="flex items-start justify-between gap-2 flex-wrap">
         <div class="min-w-0">
-            <h3 class="text-neutral-100 font-semibold truncate">{{.Name}}</h3>
-            {{if .GameName}}<div class="text-xs text-neutral-400 truncate">{{.GameName}}</div>{{end}}
+            <h3 class="text-text-primary font-semibold truncate">{{.Name}}</h3>
+            {{if .GameName}}<div class="text-xs text-text-muted truncate">{{.GameName}}</div>{{end}}
         </div>
         <div class="flex items-center gap-1.5 flex-shrink-0">
             {{if .ChannelRestricted}}
@@ -63,15 +63,15 @@
     </div>
 
     {{if .DropName}}
-    <div class="text-sm text-neutral-300 mt-2 truncate" title="{{.DropName}}">
-        {{if .Claimed}}{{ t "drops.reward_label" }}{{else}}{{ t "drops.current_drop_label" }}{{end}}<span class="text-neutral-100">{{.DropName}}</span>
+    <div class="text-sm text-text-secondary mt-2 truncate" title="{{.DropName}}">
+        {{if .Claimed}}{{ t "drops.reward_label" }}{{else}}{{ t "drops.current_drop_label" }}{{end}}<span class="text-text-primary">{{.DropName}}</span>
     </div>
     {{end}}
 
     <div class="mt-3">
         <div class="flex items-end justify-between mb-1">
-            <span class="text-xs text-neutral-400">{{ t "drops.progress.campaign" }}</span>
-            <span class="num text-xl font-bold leading-none {{if .Claimed}}text-neutral-300{{else}}text-purple-400{{end}}">{{.OverallPercent}}%</span>
+            <span class="text-xs text-text-muted">{{ t "drops.progress.campaign" }}</span>
+            <span class="num text-xl font-bold leading-none {{if .Claimed}}text-text-secondary{{else}}text-interactive-muted{{end}}">{{.OverallPercent}}%</span>
         </div>
         <div class="progress-track">
             <div class="{{if .Claimed}}progress-fill-claimed{{else}}progress-fill{{end}}" style="width: {{.OverallPercent}}%"></div>
@@ -81,7 +81,7 @@
     {{if or .HasMinuteProgress .MinuteProgress.Mode}}
     <div class="mt-3">
         {{if .HasMinuteProgress}}
-        <div class="flex justify-between text-xs text-neutral-400 mb-1">
+        <div class="flex justify-between text-xs text-text-muted mb-1">
             <span>{{.MinutesWatched}}/{{.MinutesRequired}} {{ t "drops.min_watched_suffix" }}</span>
             <span>{{.MinutesRemaining}} {{ t "drops.min_remaining_suffix" }}</span>
         </div>
@@ -96,7 +96,7 @@
     <div class="mt-3 text-xs" style="border-top: 1px solid var(--color-border-default); padding-top: 0.5rem;">
         <span class="status-pill" style="color: {{.BadgeColor}}; border: 1px solid currentColor; background: transparent;">{{.Label}}</span>
         {{range .Lines}}
-        <div class="text-neutral-400 mt-1">{{.}}</div>
+        <div class="text-text-muted mt-1">{{.}}</div>
         {{end}}
     </div>
     {{end}}
@@ -107,16 +107,16 @@
     <div class="mt-3 text-xs" style="border-top: 1px solid var(--color-border-default); padding-top: 0.5rem;">
         <div class="flex items-center gap-2 flex-wrap">
             <span class="status-pill" style="color: {{.StatusColor}}; border: 1px solid currentColor; background: transparent;">{{.StatusLabel}}</span>
-            {{if .Excluded}}<span class="text-neutral-500">{{.ExcludeReason}}</span>
-            {{else}}<span class="text-neutral-400">{{ t "drops.policy.score" }} {{.Total}}</span>{{end}}
-            {{if and .TimeUntilEnd (ne .TimeUntilEnd "0s")}}<span class="text-neutral-500 js-ends-in" data-ends-in="{{.TimeUntilEnd}}">{{ t "drops.policy.ends_in" }} {{.TimeUntilEnd}}</span>{{end}}
+            {{if .Excluded}}<span class="text-text-faint">{{.ExcludeReason}}</span>
+            {{else}}<span class="text-text-muted">{{ t "drops.policy.score" }} {{.Total}}</span>{{end}}
+            {{if and .TimeUntilEnd (ne .TimeUntilEnd "0s")}}<span class="text-text-faint js-ends-in" data-ends-in="{{.TimeUntilEnd}}">{{ t "drops.policy.ends_in" }} {{.TimeUntilEnd}}</span>{{end}}
         </div>
         {{if .Factors}}
         <details class="mt-1">
-            <summary class="text-purple-400 cursor-pointer">{{ t "drops.policy.why_score" }}</summary>
-            <div class="mt-1 font-mono text-neutral-400">
+            <summary class="text-interactive-muted cursor-pointer">{{ t "drops.policy.why_score" }}</summary>
+            <div class="mt-1 font-mono text-text-muted">
                 {{range .Factors}}<div>{{printf "%+d" .Points}} {{.Label}}</div>{{end}}
-                <div class="text-neutral-300">{{ t "drops.policy.total" }} {{.Total}}</div>
+                <div class="text-text-secondary">{{ t "drops.policy.total" }} {{.Total}}</div>
             </div>
         </details>
         {{end}}
@@ -124,7 +124,7 @@
     {{end}}
 
     {{if .Drops}}
-    <div class="text-xs text-purple-400 mt-3">{{ t "drops.view_all" }} {{len .Drops}} {{ t "drops.view_all_suffix" }} →</div>
+    <div class="text-xs text-interactive-muted mt-3">{{ t "drops.view_all" }} {{len .Drops}} {{ t "drops.view_all_suffix" }} →</div>
     {{end}}
 
     {{if .Chip.AgeLabel}}

@@ -410,9 +410,9 @@ func TestOnAccentTokensFixSolidAccentButtons(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		".lang-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }",
-		`.theme-btn[aria-pressed="true"] { background: var(--color-purple-600); color: var(--text-on-accent); }`,
-		".stat-range-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }",
+		".lang-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }",
+		`.theme-btn[aria-pressed="true"] { background: var(--interactive-solid); color: var(--text-on-accent); }`,
+		".stat-range-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }",
 	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("input.css missing expected AA-safe rule: %q", want)
@@ -435,7 +435,7 @@ func TestOnAccentTokensFixSolidAccentButtons(t *testing.T) {
 	if strings.Contains(css, "color:#fff") || strings.Contains(css, "color: #fff") {
 		t.Error("input.css must not hardcode color:#fff on .roi-period-btn.is-active — use var(--text-on-accent)")
 	}
-	if !strings.Contains(css, ".roi-period-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }") {
+	if !strings.Contains(css, ".roi-period-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }") {
 		t.Error("input.css .roi-period-btn.is-active must use var(--text-on-accent)")
 	}
 	if strings.Contains(css, "#8b7fd11f") {

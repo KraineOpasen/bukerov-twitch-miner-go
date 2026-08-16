@@ -2,14 +2,14 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "set.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "set.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "set.subtitle" }}</p>
 <div id="settings-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-form" class="space-y-4">
     <details id="streamers" class="details-panel">
         <summary class="text-lg">{{ t "set.streamers.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.streamers.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.streamers.desc" }}</p>
 
             <div class="flex gap-3 mb-4">
                 <input type="text" id="new-streamer-input" placeholder="{{ t "set.streamers.input_placeholder" }}" class="input-field flex-1">
@@ -28,28 +28,28 @@
             #followed-import-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
             #followed-list { max-height: 45vh; }
         </style>
-        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-neutral-800 border border-neutral-700 text-neutral-100">
+        <dialog id="followed-import-modal" class="rounded-lg p-0 bg-surface-card border border-border-default text-text-primary">
             <div class="p-5">
                 <div class="flex items-center justify-between mb-3">
                     <h3 class="text-lg font-semibold">{{ t "set.followed.title" }}</h3>
-                    <button type="button" data-followed-close class="text-neutral-400 hover:text-neutral-100 text-xl leading-none">&times;</button>
+                    <button type="button" data-followed-close class="text-text-muted hover:text-text-primary text-xl leading-none">&times;</button>
                 </div>
-                <p class="text-neutral-400 text-sm mb-3">{{ t "set.followed.desc" }}</p>
+                <p class="text-text-muted text-sm mb-3">{{ t "set.followed.desc" }}</p>
 
-                <div id="followed-truncated" class="hidden mb-3 text-xs text-amber-500" role="status"></div>
-                <div id="followed-loading" class="py-8 text-center text-neutral-400">{{ t "set.followed.loading" }}</div>
+                <div id="followed-truncated" class="hidden mb-3 text-xs text-text-caution" role="status"></div>
+                <div id="followed-loading" class="py-8 text-center text-text-muted">{{ t "set.followed.loading" }}</div>
                 <div id="followed-error" class="hidden py-8 text-center">
                     <p class="text-sm mb-3" style="color: var(--color-danger)" id="followed-error-msg"></p>
                     <button type="button" id="followed-retry" class="btn-secondary">{{ t "set.followed.retry" }}</button>
                 </div>
-                <div id="followed-empty" class="hidden py-8 text-center text-neutral-400">{{ t "set.followed.empty" }}</div>
+                <div id="followed-empty" class="hidden py-8 text-center text-text-muted">{{ t "set.followed.empty" }}</div>
 
                 <div id="followed-list-wrap" class="hidden">
-                    <div class="flex items-center justify-between mb-2 text-xs text-neutral-400">
-                        <button type="button" id="followed-select-all" class="hover:text-neutral-100 underline">{{ t "set.followed.select_all" }}</button>
+                    <div class="flex items-center justify-between mb-2 text-xs text-text-muted">
+                        <button type="button" id="followed-select-all" class="hover:text-text-primary underline">{{ t "set.followed.select_all" }}</button>
                         <span id="followed-selected-count">{{ t "set.followed.selected_zero" }}</span>
                     </div>
-                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-neutral-700 rounded-md p-2"></ul>
+                    <ul id="followed-list" class="overflow-y-auto space-y-1 border border-border-default rounded-md p-2"></ul>
                 </div>
 
                 <div class="flex justify-end gap-2 mt-4">
@@ -63,19 +63,19 @@
     <details id="preferences" class="details-panel">
         <summary class="text-lg">{{ t "set.preferences.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.preferences.desc_pre" }}<span class="text-neutral-100">{{ t "set.preferences.desc_path" }}</span>{{ t "set.preferences.desc_post" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.preferences.desc_pre" }}<span class="text-text-primary">{{ t "set.preferences.desc_path" }}</span>{{ t "set.preferences.desc_post" }}</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
+                <div class="bg-surface-page border border-border-default rounded-lg p-4">
                     <div class="flex items-center gap-2 mb-3">
                         <span class="prefer-badge">{{ t "card.prefer" }}</span>
-                        <span class="text-neutral-100 font-medium">{{ t "set.preferences.preferred_label" }}</span>
+                        <span class="text-text-primary font-medium">{{ t "set.preferences.preferred_label" }}</span>
                     </div>
                     <ul id="preferred-list" class="space-y-1 text-sm"></ul>
                 </div>
-                <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4">
+                <div class="bg-surface-page border border-border-default rounded-lg p-4">
                     <div class="flex items-center gap-2 mb-3">
                         <span class="avoid-badge">{{ t "card.avoid" }}</span>
-                        <span class="text-neutral-100 font-medium">{{ t "set.preferences.avoided_label" }}</span>
+                        <span class="text-text-primary font-medium">{{ t "set.preferences.avoided_label" }}</span>
                     </div>
                     <ul id="avoided-list" class="space-y-1 text-sm"></ul>
                 </div>
@@ -86,7 +86,7 @@
     <details id="defaults" class="details-panel">
         <summary class="text-lg">{{ t "set.defaults.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.defaults.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.defaults.desc" }}</p>
             <div id="default-settings-container"></div>
         </div>
     </details>
@@ -94,7 +94,7 @@
     <details id="priority" class="details-panel">
         <summary class="text-lg">{{ t "set.priority.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.priority.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.priority.desc" }}</p>
             <ul class="space-y-2" id="priority-list">
             </ul>
         </div>
@@ -143,7 +143,7 @@
     <details id="directory-discovery" class="details-panel">
         <summary class="text-lg">{{ t "set.directory.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-neutral-100">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-text-primary">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
 
             <div class="flex gap-3 mb-4">
                 <input type="text" id="new-directory-game-input" placeholder="{{ t "set.directory.input_placeholder" }}" class="input-field flex-1">
@@ -171,7 +171,7 @@
                     <div class="setting-label">{{ t "set.directory.prefer_tracked_label" }}</div>
                     <div class="setting-description">{{ t "set.directory.prefer_tracked_desc" }}</div>
                 </div>
-                <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-control-accent">
             </div>
 
             <div class="setting-row mt-4">
@@ -179,7 +179,7 @@
                     <div class="setting-label">{{ t "set.directory.prefer_subscribed_label" }}</div>
                     <div class="setting-description">{{ t "set.directory.prefer_subscribed_desc" }}</div>
                 </div>
-                <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-control-accent">
             </div>
         </div>
     </details>
@@ -272,7 +272,7 @@
     <details id="prediction-risk" class="details-panel">
         <summary class="text-lg">{{ t "set.predrisk.title" }}</summary>
         <div class="details-content space-y-0">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.predrisk.desc" }}</p>
 
             <div class="setting-row">
                 <div>
@@ -295,7 +295,7 @@
                     <div class="setting-label">{{ t "set.predrisk.healthgate_label" }}</div>
                     <div class="setting-description">{{ t "set.predrisk.healthgate_desc" }}</div>
                 </div>
-                <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="predictionRiskHealthGate" class="w-5 h-5 accent-control-accent">
             </div>
         </div>
     </details>
@@ -334,10 +334,10 @@
                     <div class="setting-label">{{ t "set.logger.colored_label" }}</div>
                     <div class="setting-description">{{ t "set.logger.colored_desc" }}</div>
                 </div>
-                <input type="checkbox" id="colored" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="colored" class="w-5 h-5 accent-control-accent">
             </div>
 
-            <p class="setting-description text-amber-500 mt-1">{{ t "set.logger.restart_note" }}</p>
+            <p class="setting-description text-text-caution mt-1">{{ t "set.logger.restart_note" }}</p>
         </div>
     </details>
 
@@ -365,7 +365,7 @@
                     <div class="setting-label">{{ t "set.analytics.chatlogs_label" }}</div>
                     <div class="setting-description">{{ t "set.analytics.chatlogs_desc" }}</div>
                 </div>
-                <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-control-accent">
             </div>
         </div>
     </details>
@@ -373,14 +373,14 @@
     <details id="discord-settings" class="details-panel">
         <summary class="text-lg">{{ t "set.discord.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "set.discord.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "set.discord.desc" }}</p>
 
             <div class="setting-row">
                 <div>
                     <div class="setting-label">{{ t "set.discord.enable_label" }}</div>
                     <div class="setting-description">{{ t "set.discord.enable_desc" }}</div>
                 </div>
-                <input type="checkbox" id="discordEnabled" class="w-5 h-5 accent-purple-600">
+                <input type="checkbox" id="discordEnabled" class="w-5 h-5 accent-control-accent">
             </div>
 
             <div class="setting-row">
@@ -399,20 +399,20 @@
                 <input type="text" class="input-field w-52" id="discordGuildId" placeholder="123456789012345678">
             </div>
 
-            <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4 mt-4">
-                <div class="text-neutral-100 font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
-                <ol class="text-neutral-400 text-sm space-y-1 list-decimal pl-5">
-                    <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.portal" }}</a></li>
-                    <li>{{ t "set.discord.s2_pre" }}<strong class="text-neutral-100">New Application</strong>{{ t "set.discord.s2_post" }}</li>
-                    <li>{{ t "set.discord.s3_pre" }}<strong class="text-neutral-100">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-neutral-100">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
-                    <li>{{ t "set.discord.s4_pre" }}<strong class="text-neutral-100">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
-                    <li>{{ t "set.discord.s5_pre" }}<strong class="text-neutral-100">OAuth2 → URL Generator</strong></li>
-                    <li>{{ t "set.discord.s6_pre" }}<strong class="text-neutral-100">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-neutral-100">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-neutral-100">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
+            <div class="bg-surface-page border border-border-default rounded-lg p-4 mt-4">
+                <div class="text-text-primary font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
+                <ol class="text-text-muted text-sm space-y-1 list-decimal pl-5">
+                    <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-interactive hover:underline">{{ t "set.discord.portal" }}</a></li>
+                    <li>{{ t "set.discord.s2_pre" }}<strong class="text-text-primary">New Application</strong>{{ t "set.discord.s2_post" }}</li>
+                    <li>{{ t "set.discord.s3_pre" }}<strong class="text-text-primary">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-text-primary">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
+                    <li>{{ t "set.discord.s4_pre" }}<strong class="text-text-primary">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
+                    <li>{{ t "set.discord.s5_pre" }}<strong class="text-text-primary">OAuth2 → URL Generator</strong></li>
+                    <li>{{ t "set.discord.s6_pre" }}<strong class="text-text-primary">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-text-primary">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-text-primary">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
                     <li>{{ t "set.discord.s7" }}</li>
                 </ol>
-                <div class="text-neutral-100 font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
-                <p class="text-neutral-400 text-sm">
-                    {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
+                <div class="text-text-primary font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
+                <p class="text-text-muted text-sm">
+                    {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-interactive hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
                 </p>
             </div>
         </div>
@@ -502,7 +502,7 @@
             els.list.innerHTML = channels.map(c => {
                 const disabled = c.alreadyTracked ? 'disabled' : '';
                 const cls = c.alreadyTracked ? 'opacity-50' : '';
-                const tag = c.alreadyTracked ? ' <span class="text-xs text-neutral-500">' + t('js.set.followed.already_tracked') + '</span>' : '';
+                const tag = c.alreadyTracked ? ' <span class="text-xs text-text-faint">' + t('js.set.followed.already_tracked') + '</span>' : '';
                 return '<li class="flex items-center gap-2 ' + cls + '">' +
                     '<input type="checkbox" value="' + escapeHTML(c.login) + '" ' + disabled + ' class="followed-cb">' +
                     '<span class="text-sm">' + escapeHTML(c.displayName) + tag + '</span>' +
@@ -628,7 +628,7 @@
             li.className = 'priority-item';
             li.draggable = true;
             li.dataset.priority = p;
-            li.innerHTML = `<span class="text-neutral-400 text-lg cursor-grab">☰</span> <span class="text-neutral-100">${priorityLabels[p] || p}</span>`;
+            li.innerHTML = `<span class="text-text-muted text-lg cursor-grab">☰</span> <span class="text-text-primary">${priorityLabels[p] || p}</span>`;
             priorityList.appendChild(li);
         });
         setupPriorityDragAndDrop();
@@ -692,12 +692,12 @@
         header.className = 'streamer-header';
 
         const name = document.createElement('span');
-        name.className = 'flex-1 text-neutral-100 font-medium';
+        name.className = 'flex-1 text-text-primary font-medium';
         name.textContent = game;
 
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
-        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.className = 'ml-2 px-2 py-1 text-text-muted hover:text-status-danger hover:bg-status-danger/10 rounded transition-colors';
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', () => {
             li.remove();
@@ -750,7 +750,7 @@
             setMsg(t('js.set.gameid.err_empty'), 'text-red-400');
             return;
         }
-        setMsg('…', 'text-neutral-400');
+        setMsg('…', 'text-text-muted');
         try {
             const resp = await fetch('/api/settings/resolve-game-id', {
                 method: 'POST',
@@ -767,11 +767,11 @@
                 return;
             }
             result.textContent = '';
-            result.className = 'mt-2 text-sm text-neutral-300';
+            result.className = 'mt-2 text-sm text-text-secondary';
             const label = document.createElement('span');
             label.textContent = t('js.set.gameid.result') + ' ';
             const code = document.createElement('code');
-            code.className = 'text-neutral-100 font-mono select-all';
+            code.className = 'text-text-primary font-mono select-all';
             code.textContent = data.gameId;
             result.appendChild(label);
             result.appendChild(code);
@@ -798,16 +798,16 @@
 
         const emptyItem = (text) => {
             const li = document.createElement('li');
-            li.className = 'text-neutral-500 italic';
+            li.className = 'text-text-faint italic';
             li.textContent = text;
             return li;
         };
         const nameItem = (name) => {
             const li = document.createElement('li');
-            li.className = 'text-neutral-100';
+            li.className = 'text-text-primary';
             const a = document.createElement('a');
             a.href = '/streamer/' + encodeURIComponent(name);
-            a.className = 'hover:text-purple-400 transition-colors';
+            a.className = 'hover:text-interactive-muted transition-colors';
             a.textContent = name;
             li.appendChild(a);
             return li;
@@ -852,18 +852,18 @@
         
         li.innerHTML = `
             <div class="streamer-header" onclick="toggleStreamerExpand(this.parentElement)">
-                <div class="text-neutral-400 text-lg cursor-grab">☰</div>
-                <span class="flex-1 text-neutral-100 font-medium">${streamer.username}</span>
+                <div class="text-text-muted text-lg cursor-grab">☰</div>
+                <span class="flex-1 text-text-primary font-medium">${streamer.username}</span>
                 ${hasOverrides ? '<span class="override-badge">' + t('js.set.streamer.custom') + '</span>' : ''}
-                <span class="text-neutral-400 text-xs transition-transform duration-200 expand-icon">▼</span>
-                <button type="button" class="ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors" onclick="event.stopPropagation(); removeStreamer('${streamer.username}')">✕</button>
+                <span class="text-text-muted text-xs transition-transform duration-200 expand-icon">▼</span>
+                <button type="button" class="ml-2 px-2 py-1 text-text-muted hover:text-status-danger hover:bg-status-danger/10 rounded transition-colors" onclick="event.stopPropagation(); removeStreamer('${streamer.username}')">✕</button>
             </div>
-            <div class="hidden border-t border-neutral-700 bg-neutral-800 settings-panel">
-                <div class="p-4 border-b border-neutral-700">
+            <div class="hidden border-t border-border-default bg-surface-card settings-panel">
+                <div class="p-4 border-b border-border-default">
                     <label class="flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" class="w-5 h-5 accent-purple-600 use-override-checkbox" ${hasOverrides ? 'checked' : ''} 
+                        <input type="checkbox" class="w-5 h-5 accent-control-accent use-override-checkbox" ${hasOverrides ? 'checked' : ''} 
                                onchange="toggleOverride(this, '${streamer.username}')">
-                        <span class="text-neutral-100">${t('js.set.streamer.use_custom')}</span>
+                        <span class="text-text-primary">${t('js.set.streamer.use_custom')}</span>
                     </label>
                 </div>
                 <div class="p-4 settings-content" style="${hasOverrides ? '' : 'display: none;'}">
@@ -889,42 +889,42 @@
                         <div class="setting-label">${t('js.set.form.make_predictions')}</div>
                         <div class="setting-description">${t('js.set.form.make_predictions.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs('makePredictions', settings.makePredictions)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="makePredictions" data-prefix="${prefix}" ${checkboxAttrs('makePredictions', settings.makePredictions)}>
                 </div>
                 <div class="setting-row">
                     <div>
                         <div class="setting-label">${t('js.set.form.follow_raid')}</div>
                         <div class="setting-description">${t('js.set.form.follow_raid.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs('followRaid', settings.followRaid)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="followRaid" data-prefix="${prefix}" ${checkboxAttrs('followRaid', settings.followRaid)}>
                 </div>
                 <div class="setting-row">
                     <div>
                         <div class="setting-label">${t('js.set.form.claim_drops')}</div>
                         <div class="setting-description">${t('js.set.form.claim_drops.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs('claimDrops', settings.claimDrops)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="claimDrops" data-prefix="${prefix}" ${checkboxAttrs('claimDrops', settings.claimDrops)}>
                 </div>
                 <div class="setting-row">
                     <div>
                         <div class="setting-label">${t('js.set.form.claim_moments')}</div>
                         <div class="setting-description">${t('js.set.form.claim_moments.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs('claimMoments', settings.claimMoments)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="claimMoments" data-prefix="${prefix}" ${checkboxAttrs('claimMoments', settings.claimMoments)}>
                 </div>
                 <div class="setting-row">
                     <div>
                         <div class="setting-label">${t('js.set.form.watch_streak')}</div>
                         <div class="setting-description">${t('js.set.form.watch_streak.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs('watchStreak', settings.watchStreak)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="watchStreak" data-prefix="${prefix}" ${checkboxAttrs('watchStreak', settings.watchStreak)}>
                 </div>
                 <div class="setting-row">
                     <div>
                         <div class="setting-label">${t('js.set.form.community_goals')}</div>
                         <div class="setting-description">${t('js.set.form.community_goals.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs('communityGoals', settings.communityGoals)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="communityGoals" data-prefix="${prefix}" ${checkboxAttrs('communityGoals', settings.communityGoals)}>
                 </div>
                 <div class="setting-row">
                     <div>
@@ -961,7 +961,7 @@
                 </div>
                 ` : ''}
 
-                <h4 class="text-purple-500 font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
+                <h4 class="text-interactive font-medium mt-6 mb-4 text-sm">${t('js.set.form.betting_heading')}</h4>
                 
                 <div class="setting-row">
                     <div>
@@ -1005,7 +1005,7 @@
                         <div class="setting-label">${t('js.set.form.stealth_mode')}</div>
                         <div class="setting-description">${t('js.set.form.stealth_mode.desc')}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs('stealthMode', bet.stealthMode)}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" data-field="bet.stealthMode" data-prefix="${prefix}" ${checkboxAttrs('stealthMode', bet.stealthMode)}>
                 </div>
                 <div class="setting-row">
                     <div>

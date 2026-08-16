@@ -64,15 +64,15 @@
         };
     </script>
 </head>
-<body class="min-h-screen bg-neutral-900 text-neutral-100">
+<body class="min-h-screen bg-surface-page text-text-primary">
     <a href="#main-content" class="skip-link">{{ t "a11y.skip_to_content" }}</a>
 
-    <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-neutral-900/95 flex items-center justify-center z-[1000]">
-        <div class="bg-neutral-800 border border-neutral-700 rounded-xl p-8 max-w-md w-[90%] text-center">
-            <h2 id="status-title" class="text-purple-500 text-xl font-semibold mb-4">{{ t "js.overlay.initializing" }}</h2>
-            <div class="w-12 h-12 border-4 border-neutral-700 border-t-purple-500 rounded-full animate-spin mx-auto my-6" id="status-spinner"></div>
+    <div id="status-overlay" class="status-overlay hidden fixed inset-0 bg-surface-page/95 flex items-center justify-center z-[1000]">
+        <div class="bg-surface-card border border-border-default rounded-xl p-8 max-w-md w-[90%] text-center">
+            <h2 id="status-title" class="text-interactive-muted text-xl font-semibold mb-4">{{ t "js.overlay.initializing" }}</h2>
+            <div class="w-12 h-12 border-4 border-border-default border-t-interactive rounded-full animate-spin mx-auto my-6" id="status-spinner"></div>
             <div id="status-content"></div>
-            <p class="text-neutral-400 mt-2 text-sm" id="status-message"></p>
+            <p class="text-text-muted mt-2 text-sm" id="status-message"></p>
         </div>
     </div>
 
@@ -86,7 +86,7 @@
             <button type="button" class="chrome-drawer-close" data-drawer-close aria-label="{{ t "a11y.close_menu" }}">
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
-            <a href="/" class="sidebar-brand-row flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-neutral-100">
+            <a href="/" class="sidebar-brand-row flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-text-primary">
                 <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="31" height="52" class="shrink-0" style="height:52px;width:auto;object-fit:contain">
                 <span class="sidebar-brand">
                     <span class="sidebar-brand-title">Twitch Drops Miner</span>
@@ -98,11 +98,11 @@
 
             <div class="now-watching" id="now-watching"
                  hx-get="/api/now-watching" hx-trigger="load, every 30s" hx-swap="innerHTML">
-                <div class="text-xs uppercase tracking-wide text-neutral-400 mb-2">{{ t "sidebar.now_watching" }}</div>
+                <div class="text-xs uppercase tracking-wide text-text-muted mb-2">{{ t "sidebar.now_watching" }}</div>
                 <div class="skeleton h-16"></div>
             </div>
 
-            <div class="sidebar-footer px-4 py-3 border-t border-neutral-700 text-xs text-neutral-400 flex items-center justify-between">
+            <div class="sidebar-footer px-4 py-3 border-t border-border-default text-xs text-text-muted flex items-center justify-between">
                 <span class="inline-flex items-center gap-1.5">
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
                     {{.Username}}
@@ -114,7 +114,7 @@
         <div class="app-main-col">
         <header class="app-topbar">
             <div class="flex items-center justify-end mb-3">{{block "topbar_widgets" .}}{{end}}
-                <div class="inline-flex rounded-md overflow-hidden border border-neutral-700 mr-2"
+                <div class="inline-flex rounded-md overflow-hidden border border-border-default mr-2"
                      role="group" aria-label="{{ t "a11y.theme" }}" id="theme-toggle">
                     <button type="button" class="theme-btn" data-theme-value="light" aria-pressed="false" aria-label="{{ t "theme.light" }}" title="{{ t "theme.light" }}">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -126,7 +126,7 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                     </button>
                 </div>
-                <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "a11y.language" }}">
+                <div class="inline-flex rounded-md overflow-hidden border border-border-default" role="group" aria-label="{{ t "a11y.language" }}">
                     <button type="button" class="lang-btn{{if eq lang "ru"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"ru"}' hx-swap="none" aria-pressed="{{if eq lang "ru"}}true{{else}}false{{end}}">RU</button>
                     <button type="button" class="lang-btn{{if eq lang "en"}} is-active{{end}}" hx-post="/api/lang" hx-vals='{"lang":"en"}' hx-swap="none" aria-pressed="{{if eq lang "en"}}true{{else}}false{{end}}">EN</button>
                 </div>
@@ -141,6 +141,13 @@
         </main>
         </div>
     </div>
+
+    <!-- Structural contentinfo landmark only (S5-10a): brand name, version and
+         username are already surfaced once each, in the sidebar footer above —
+         repeating them here would just duplicate that content on every
+         breakpoint where both are visible at once, rather than add anything a
+         screen-reader user doesn't already have. -->
+    <footer class="app-footer py-3 mt-2 border-t border-border-default"></footer>
 
     {{template "c17.toast_stack" .}}
 
@@ -430,9 +437,9 @@
                 authBanner.classList.remove('hidden');
                 if (status.auth) {
                     authBanner.innerHTML = `
-                        <p>${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-purple-500 font-medium">${status.auth.verificationUri}</a></p>
+                        <p>${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-link-text font-medium">${status.auth.verificationUri}</a></p>
                         <p>${t('js.overlay.enter_code')}</p>
-                        <div class="num text-xl font-bold text-purple-500 bg-neutral-900 px-4 py-2 rounded-lg my-2 tracking-widest select-all">${status.auth.userCode}</div>
+                        <div class="num text-xl font-bold text-interactive bg-surface-page px-4 py-2 rounded-lg my-2 tracking-widest select-all">${status.auth.userCode}</div>
                         <p class="text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>
                     `;
                 } else {
@@ -500,17 +507,17 @@
                         spinner.style.display = 'none';
                         if (status.auth) {
                             content.innerHTML = `
-                                <p class="text-neutral-400">${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-purple-500 font-medium">${status.auth.verificationUri}</a></p>
-                                <p class="text-neutral-400 mt-2">${t('js.overlay.enter_code')}</p>
-                                <div class="num text-3xl font-bold text-purple-500 bg-neutral-900 px-6 py-4 rounded-lg my-4 tracking-widest select-all">${status.auth.userCode}</div>
-                                <p class="text-neutral-400 text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>
+                                <p class="text-text-muted">${t('js.overlay.open')} <a href="${status.auth.verificationUri}" target="_blank" class="text-interactive-muted font-medium">${status.auth.verificationUri}</a></p>
+                                <p class="text-text-muted mt-2">${t('js.overlay.enter_code')}</p>
+                                <div class="num text-3xl font-bold text-interactive bg-surface-page px-6 py-4 rounded-lg my-4 tracking-widest select-all">${status.auth.userCode}</div>
+                                <p class="text-text-muted text-sm">${t('js.overlay.code_expires', {minutes: Math.floor(status.auth.expiresIn / 60)})}</p>
                             `;
                         }
                         message.textContent = t('js.overlay.waiting_auth');
                         break;
                     case 'loading_streamers':
                         title.textContent = t('js.overlay.loading_streamers');
-                        content.innerHTML = status.streamerInfo ? `<p class="text-neutral-400">${t('js.overlay.loading')} <strong class="text-neutral-100">${status.streamerInfo}</strong></p>` : '';
+                        content.innerHTML = status.streamerInfo ? `<p class="text-text-muted">${t('js.overlay.loading')} <strong class="text-text-primary">${status.streamerInfo}</strong></p>` : '';
                         message.textContent = status.message || t('js.overlay.please_wait');
                         spinner.style.display = 'block';
                         break;

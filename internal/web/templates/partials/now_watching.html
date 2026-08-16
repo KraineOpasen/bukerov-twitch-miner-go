@@ -1,11 +1,11 @@
 {{define "now_watching"}}
 <div class="flex items-center justify-between mb-2">
-    <div class="text-xs uppercase tracking-wide text-neutral-400">{{ t "sidebar.now_watching" }}</div>
+    <div class="text-xs uppercase tracking-wide text-text-muted">{{ t "sidebar.now_watching" }}</div>
     {{if .Stale}}<span class="stale-pill">{{ t "now.stale" }}</span>{{end}}
 </div>
 
 {{if not .Slots}}
-<div class="text-xs text-neutral-400 mb-1">{{ t "now.nothing_watching" }}</div>
+<div class="text-xs text-text-muted mb-1">{{ t "now.nothing_watching" }}</div>
 {{end}}
 {{/* Q3 MAJOR-2 correction: occupied slots now render through the exact same
      c12.slot component as the empty padding below (and /overview and
@@ -29,7 +29,7 @@
 {{end}}
 
 {{if .QueuedNames}}
-<div class="text-[0.7rem] uppercase tracking-wide text-neutral-500 mt-2 mb-1">{{ t "now.in_queue" }}</div>
+<div class="text-[0.7rem] uppercase tracking-wide text-text-faint mt-2 mb-1">{{ t "now.in_queue" }}</div>
 <div class="flex flex-wrap gap-1">
     {{range .QueuedNames}}
     <span class="badge badge-queued"><span class="watch-dot queue"></span>{{.}}</span>
@@ -38,9 +38,9 @@
 {{end}}
 
 {{if .HasNextRotation}}
-<div class="text-xs text-neutral-400 mt-3 flex items-center justify-between">
+<div class="text-xs text-text-muted mt-3 flex items-center justify-between">
     <span>{{ t "now.next_rotation" }}</span>
-    <span class="num text-neutral-100" data-countdown-to="{{.NextRotationUnix}}">--:--</span>
+    <span class="num text-text-primary" data-countdown-to="{{.NextRotationUnix}}">--:--</span>
 </div>
 {{end}}
 {{end}}

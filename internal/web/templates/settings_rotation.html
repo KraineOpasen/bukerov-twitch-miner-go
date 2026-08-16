@@ -2,13 +2,13 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.rotation.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.rotation.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.rotation.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
     <section>
         <h2 class="text-lg font-medium mb-1">{{ t "set.priority.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.priority.desc" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.priority.desc" }}</p>
         <ul class="space-y-2" id="priority-list"></ul>
     </section>
 
@@ -80,7 +80,7 @@
             li.className = 'priority-item';
             li.draggable = true;
             li.dataset.priority = p;
-            li.innerHTML = `<span class="text-neutral-400 text-lg cursor-grab">☰</span> <span class="text-neutral-100">${priorityLabels[p] || p}</span>`;
+            li.innerHTML = `<span class="text-text-muted text-lg cursor-grab">☰</span> <span class="text-text-primary">${priorityLabels[p] || p}</span>`;
             list.appendChild(li);
         });
         setupPriorityDragAndDrop();

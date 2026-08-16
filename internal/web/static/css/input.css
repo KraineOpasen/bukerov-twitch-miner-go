@@ -32,12 +32,16 @@
      palette. Resolution happens through the normal CSS cascade, so any
      var() chain (however many hops) re-resolves automatically whenever
      `data-theme` flips — no page reload needed.
-   Tailwind mapping — `@theme inline` re-points every existing Tailwind
-     color name (neutral/purple/amber/green/red/sidebar/online/offline/
-     streamer/event/success/danger/text/text-dim) plus new surface-,
-     text-, border-, status-, chart- prefixed names at the semantic layer, so
-     `bg-neutral-800`-style classes stay theme-aware with zero template
-     churn. Fonts stay in a plain (non-themed) `@theme` block.
+   Tailwind mapping — `@theme inline` re-points sidebar/online/offline/
+     streamer/event/success/danger/text/text-dim plus the surface-, text-,
+     border-, status-, interactive-, chart- prefixed semantic names at the
+     semantic layer. S5-10 retired every neutral-/purple-/amber-/green-/
+     emerald-/red-numbered legacy alias, including the final neutral-700
+     holdout (S5-10 corrective pass, §15/§18), once a grep proved templates
+     carried zero remaining references to any of them — templates now name
+     semantic roles directly (`bg-surface-card`, `text-text-muted`,
+     `bg-surface-control-muted`, …). Fonts stay in a plain (non-themed)
+     `@theme` block.
    ===================================================================== */
 
 /* ---------- Layer A: primitives ---------- */
@@ -175,11 +179,21 @@
   --surface-card: var(--prim-night-card);
   --surface-elevated: var(--prim-night-card);
   --surface-input: var(--prim-night-page);
+  --surface-control-muted: var(--border-default); /* S5-10 corrective addendum: muted secondary control surface (streamer.html search-clear button) — the final single-consumer holdout the retirement census found with no pre-existing semantic role; preserves the exact value the retired neutral-700 alias already carried (--border-default), zero rendered-pixel change, zero new hue */
 
   /* text */
   --text-primary: var(--prim-night-text-100);
   --text-secondary: var(--prim-night-text-300);
   --text-muted: var(--prim-night-text-400);
+
+  /* S5-10 addendum (final semantic-token retirement gap): role-based tokens
+     for legacy consumers with no pre-existing semantic equivalent. Each
+     resolves to the exact primitive its legacy alias already carried — zero
+     new hues, zero rendered-value change. */
+  --text-faint: var(--text-muted); /* S5-10 corrective pass: aliased to --text-muted for WCAG AA — the original value (--prim-night-500) measured 2.9:1 (vs card) / 3.23:1 (vs page), failing normal-text AA's 4.5:1 floor; no existing palette value between --prim-night-500 and --prim-night-text-400 clears AA against every surface token, so the smallest role-correct fix reuses --text-muted's value rather than inventing a new gray. Role note: no longer visually distinct from --text-muted (was "below --text-muted's weight") — see docs/dashboard/stage-4-visual-design-system.md's S5-10 addendum. */
+  --text-placeholder: var(--text-muted); /* S5-10a corrective pass: WCAG AA fix — the original --prim-night-600 measured 1.99:1 against --surface-page (fails both the 4.5:1 normal-text floor and the 3:1 large-text floor its text-2xl consumers would otherwise need, and a text-lg consumer needs the full 4.5:1 floor anyway); no existing palette value between --prim-night-600 and --text-muted's value clears AA against every actual consumer, so the smallest role-correct fix reuses --text-muted's value (6.23:1) rather than inventing a new gray — the same treatment already applied to --text-faint above. Fallback glyph in empty art boxes (campaign/game art). */
+  --text-caution: var(--prim-night-amber-500); /* muted inline caution note (stale/partial/restart/truncation) — deliberately distinct from the brighter --status-warning */
+  --text-heading: var(--prim-night-200); /* S5-10 addendum: card-title emphasis text (internal-CSS-only consumer, e.g. .s-title) */
 
   /* borders */
   --border-default: var(--prim-night-border);
@@ -191,6 +205,11 @@
   --interactive: var(--prim-night-purple);
   --focus-ring: var(--prim-night-purple);
   --link-text: var(--prim-night-link);
+  --interactive-muted: var(--prim-night-purple-400); /* S5-10 addendum: secondary-weight accent (link/hover states, active-data emphasis) */
+  --search-highlight-bg: var(--prim-night-purple-600); /* S5-10 addendum: search-match <mark> background */
+  --control-accent: var(--prim-night-purple-600); /* S5-10 addendum: native checkbox/radio accent-color — same legacy hue as search-highlight-bg, distinct role */
+  --interactive-solid: var(--prim-night-purple-700); /* S5-10a corrective pass: white text-on-accent measured 4.33:1 against the original purple-600 fill (fails AA); purple-700 (already carried by the hover pair below) clears 5.38:1 (measured live, see design-doc addendum). Zero new hue. */
+  --interactive-solid-hover: color-mix(in srgb, var(--prim-night-purple-700) 82%, black); /* darkened further than the new resting fill so hover stays visually distinct; still clears AA (darkening only increases contrast against white) */
 
   /* status */
   --status-success: var(--prim-night-status-success);
@@ -265,37 +284,6 @@
   --rw-net: var(--prim-night-violet);
   --rw-disk: var(--prim-night-blue);
 
-  /* Tailwind scale indirection (see @theme inline below) */
-  --scale-neutral-950: var(--prim-night-950);
-  --scale-neutral-900: var(--surface-page);
-  --scale-neutral-800: var(--surface-card);
-  --scale-neutral-700: var(--border-default);
-  --scale-neutral-600: var(--prim-night-600);
-  --scale-neutral-500: var(--prim-night-500);
-  --scale-neutral-400: var(--text-muted);
-  --scale-neutral-300: var(--text-secondary);
-  --scale-neutral-200: var(--prim-night-200);
-  --scale-neutral-100: var(--text-primary);
-
-  --scale-purple-700: var(--prim-night-purple-700);
-  --scale-purple-600: var(--prim-night-purple-600);
-  --scale-purple-500: var(--interactive);
-  --scale-purple-400: var(--prim-night-purple-400);
-  --scale-purple-300: var(--link-text);
-
-  --scale-amber-700: var(--prim-night-amber-700);
-  --scale-amber-600: var(--event-hue);
-  --scale-amber-500: var(--prim-night-amber-500);
-
-  --scale-green-600: var(--status-success);
-  --scale-green-500: var(--status-success);
-  --scale-emerald-600: var(--status-success);
-  --scale-emerald-500: var(--prim-night-emerald-500);
-
-  --scale-red-700: var(--prim-night-red-700);
-  --scale-red-600: var(--status-danger);
-  --scale-red-500: var(--status-danger);
-
   /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
   --surface-overlay: rgb(0 0 0 / .55);
   --surface-inset: var(--prim-night-950);
@@ -323,11 +311,22 @@
   --surface-card: var(--prim-day-card);
   --surface-elevated: var(--prim-day-card);
   --surface-input: var(--prim-day-page);
+  --surface-control-muted: var(--border-default); /* S5-10 corrective addendum — see dark-theme block */
 
   /* text */
   --text-primary: var(--prim-day-text-100);
   --text-secondary: var(--prim-day-text-300);
   --text-muted: var(--prim-day-text-400);
+
+  /* S5-10 addendum — see dark-theme block for rationale. --text-caution
+     matches amber-500's existing light-mode fallback (no separate
+     --prim-day-amber-500 primitive exists, so the legacy alias already
+     resolved to --status-warning in light theme only); this preserves that
+     exact pre-existing behavior rather than introducing a new value. */
+  --text-faint: var(--text-muted); /* S5-10 corrective pass: WCAG AA fix — see dark-theme block (original --prim-day-500 measured 4.52:1 vs card / 4.09:1 vs page, failing against page background) */
+  --text-placeholder: var(--text-muted); /* S5-10a corrective pass: WCAG AA fix — see dark-theme block (original --prim-day-600 measured 2.98:1 against --surface-page, failing both thresholds a real consumer needs); clears 5.66:1 */
+  --text-caution: var(--status-warning);
+  --text-heading: var(--prim-day-200); /* S5-10 addendum */
 
   /* borders */
   --border-default: var(--prim-day-border);
@@ -339,6 +338,11 @@
   --interactive: var(--prim-day-purple);
   --focus-ring: var(--prim-day-purple);
   --link-text: var(--prim-day-purple);
+  --interactive-muted: var(--prim-day-purple-400); /* S5-10 addendum */
+  --search-highlight-bg: var(--interactive); /* S5-10 addendum: matches purple-600's existing light-mode fallback (no separate --prim-day-purple-600 primitive) */
+  --control-accent: var(--interactive); /* S5-10 addendum: same light-mode fallback as search-highlight-bg */
+  --interactive-solid: var(--interactive); /* S5-10 addendum: same light-mode fallback as search-highlight-bg/control-accent */
+  --interactive-solid-hover: var(--prim-day-purple-700); /* S5-10 addendum */
 
   /* status */
   --status-success: var(--prim-day-status-success);
@@ -405,36 +409,6 @@
   --rw-mem: var(--prim-day-amber-rw);
   --rw-net: var(--prim-day-watching);
   --rw-disk: var(--prim-day-blue);
-
-  --scale-neutral-950: var(--prim-day-950);
-  --scale-neutral-900: var(--surface-page);
-  --scale-neutral-800: var(--surface-card);
-  --scale-neutral-700: var(--border-default);
-  --scale-neutral-600: var(--prim-day-600);
-  --scale-neutral-500: var(--prim-day-500);
-  --scale-neutral-400: var(--text-muted);
-  --scale-neutral-300: var(--text-secondary);
-  --scale-neutral-200: var(--prim-day-200);
-  --scale-neutral-100: var(--text-primary);
-
-  --scale-purple-700: var(--prim-day-purple-700);
-  --scale-purple-600: var(--interactive);
-  --scale-purple-500: var(--interactive);
-  --scale-purple-400: var(--prim-day-purple-400);
-  --scale-purple-300: var(--interactive);
-
-  --scale-amber-700: var(--event-hue);
-  --scale-amber-600: var(--event-hue);
-  --scale-amber-500: var(--status-warning);
-
-  --scale-green-600: var(--status-success);
-  --scale-green-500: var(--status-success);
-  --scale-emerald-600: var(--status-success);
-  --scale-emerald-500: var(--status-success);
-
-  --scale-red-700: var(--status-danger);
-  --scale-red-600: var(--status-danger);
-  --scale-red-500: var(--status-danger);
 
   /* ---------- Layer E: theme-aware additions (Stage 5 S5-1) ---------- */
   --surface-overlay: rgb(0 0 0 / .35);
@@ -506,36 +480,9 @@
    status- prefixed utilities) resolves through a runtime var() chain that re-evaluates on
    every `data-theme` change — no Tailwind rebuild needed to re-theme. */
 @theme inline {
-  --color-neutral-950: var(--scale-neutral-950);
-  --color-neutral-900: var(--scale-neutral-900);
-  --color-neutral-800: var(--scale-neutral-800);
-  --color-neutral-700: var(--scale-neutral-700);
-  --color-neutral-600: var(--scale-neutral-600);
-  --color-neutral-500: var(--scale-neutral-500);
-  --color-neutral-400: var(--scale-neutral-400);
-  --color-neutral-300: var(--scale-neutral-300);
-  --color-neutral-200: var(--scale-neutral-200);
-  --color-neutral-100: var(--scale-neutral-100);
-
-  --color-purple-700: var(--scale-purple-700);
-  --color-purple-600: var(--scale-purple-600);
-  --color-purple-500: var(--scale-purple-500);
-  --color-purple-400: var(--scale-purple-400);
-  --color-purple-300: var(--scale-purple-300);
-
-  --color-amber-700: var(--scale-amber-700);
-  --color-amber-600: var(--scale-amber-600);
-  --color-amber-500: var(--scale-amber-500);
-
-  --color-green-600: var(--scale-green-600);
-  --color-green-500: var(--scale-green-500);
-  --color-emerald-600: var(--scale-emerald-600);
-  --color-emerald-500: var(--scale-emerald-500);
-
-  --color-red-700: var(--scale-red-700);
-  --color-red-600: var(--scale-red-600);
-  --color-red-500: var(--scale-red-500);
-
+  /* S5-10 retirement: every legacy neutral-/purple-/amber-/green-/emerald-/
+     red- alias deleted here (grep-verified zero template references, §15),
+     including the final neutral-700 holdout (S5-10 corrective pass). */
   --color-sidebar: var(--surface-sidebar);
   --color-online: var(--focus-ring);
   --color-offline: var(--border-default);
@@ -552,16 +499,23 @@
   --color-surface-card: var(--surface-card);
   --color-surface-elevated: var(--surface-elevated);
   --color-surface-input: var(--surface-input);
+  --color-surface-control-muted: var(--surface-control-muted);
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-text-placeholder: var(--text-placeholder);
+  --color-text-caution: var(--text-caution);
   --color-border-default: var(--border-default);
   --color-border-strong: var(--border-strong);
   --color-brand-orange: var(--brand-orange);
   --color-brand-purple: var(--brand-purple);
   --color-interactive: var(--interactive);
+  --color-interactive-muted: var(--interactive-muted);
   --color-focus-ring: var(--focus-ring);
   --color-link-text: var(--link-text);
+  --color-search-highlight-bg: var(--search-highlight-bg);
+  --color-control-accent: var(--control-accent);
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-danger: var(--status-danger);
@@ -692,64 +646,75 @@
 @utility shadow-1 { box-shadow: var(--shadow-1); }
 @utility shadow-2 { box-shadow: var(--shadow-2); }
 
+/* btn-primary/override-badge (solid brand-purple fills) and live-badge/
+   avoid-badge/prefer-badge (solid status fills) pair a --*-solid/--status-*
+   background with the matching --text-on-* token via plain CSS rather than
+   @apply: those on-* tokens intentionally aren't exposed through @theme
+   inline (no template consumes them as a class — see the S5-10 addendum),
+   so they're consumed directly here, the same way this file already
+   consumes --interactive-solid/--interactive-solid-hover. */
 @utility btn-primary {
-  @apply bg-purple-600 text-white hover:bg-purple-700 px-4 py-2 rounded-md font-medium transition-colors;
+  @apply px-4 py-2 rounded-md font-medium transition-colors;
+  background-color: var(--interactive-solid);
+  color: var(--text-on-accent);
 }
 
 @utility btn-secondary {
-  @apply bg-neutral-800 border border-neutral-700 text-neutral-100 hover:border-purple-500 hover:text-purple-400 px-4 py-2 rounded-md font-medium transition-colors;
+  @apply bg-surface-card border border-border-default text-text-primary hover:border-interactive hover:text-interactive-muted px-4 py-2 rounded-md font-medium transition-colors;
 }
 
 @utility card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6;
+  @apply bg-surface-card border border-border-default rounded-lg p-6;
 }
 
 @utility input-field {
-  @apply bg-neutral-900 border border-neutral-700 rounded-md px-3 py-2 text-neutral-100 focus:outline-none focus:border-purple-500;
+  @apply bg-surface-input border border-border-default rounded-md px-3 py-2 text-text-primary focus:outline-none focus:border-interactive;
 }
 
 @utility section-title {
-  @apply text-xl font-semibold text-neutral-100 pb-2 mb-4 border-b border-neutral-700;
+  @apply text-xl font-semibold text-text-primary pb-2 mb-4 border-b border-border-default;
 }
 
 @utility subsection-title {
-  @apply text-sm font-medium text-neutral-400 uppercase tracking-wide my-3;
+  @apply text-sm font-medium text-text-muted uppercase tracking-wide my-3;
 }
 
 @utility setting-row {
-  @apply flex items-center justify-between py-3 border-b border-neutral-700 last:border-b-0;
+  @apply flex items-center justify-between py-3 border-b border-border-default last:border-b-0;
 }
 
 @utility setting-label {
-  @apply text-neutral-100 font-medium;
+  @apply text-text-primary font-medium;
 }
 
 @utility setting-description {
-  @apply text-neutral-400 text-xs mt-1;
+  @apply text-text-muted text-xs mt-1;
 }
 
 @utility live-badge {
-  @apply bg-red-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-danger);
+  color: var(--text-on-danger);
 }
 
 @utility streamer-card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-purple-500 hover:-translate-y-0.5;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 cursor-pointer transition-all duration-200 hover:border-interactive hover:-translate-y-0.5;
 }
 
 @utility streamer-card-live {
-  @apply border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)];
+  @apply border-status-danger shadow-[0_0_10px_rgba(239,68,68,0.3)];
 }
 
 @utility stat-card {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 text-center;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 text-center;
 }
 
 @utility chart-container {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-6 mt-6;
+  @apply bg-surface-card border border-border-default rounded-lg p-6 mt-6;
 }
 
 @utility details-panel {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg overflow-hidden;
+  @apply bg-surface-card border border-border-default rounded-lg overflow-hidden;
 }
 
 @utility details-content {
@@ -757,39 +722,53 @@
 }
 
 @utility override-badge {
-  @apply bg-purple-600 text-white text-[0.65rem] px-2 py-0.5 rounded uppercase;
+  @apply text-[0.65rem] px-2 py-0.5 rounded uppercase;
+  background-color: var(--interactive-solid);
+  color: var(--text-on-accent);
 }
 
+/* drop-exclusive-badge keeps a literal white foreground: unlike the
+   purple/success/danger solid-fill family above, no --text-on-warning
+   token exists (the S5-10a AA audit never flagged this pairing), so
+   inventing one here would be scope creep beyond the retired-class fix. */
 @utility drop-exclusive-badge {
-  @apply bg-amber-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply bg-status-warning text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
 }
 
 @utility prefer-badge {
-  @apply bg-emerald-600 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-success);
+  color: var(--text-on-success);
 }
 
 @utility avoid-badge {
-  @apply bg-red-700 text-white text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  @apply text-[0.65rem] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide;
+  background-color: var(--status-danger);
+  color: var(--text-on-danger);
 }
 
 @utility progress-track {
-  @apply h-2 w-full bg-neutral-700 rounded-full overflow-hidden;
+  @apply h-2 w-full bg-surface-control-muted rounded-full overflow-hidden;
 }
 
 @utility progress-fill {
-  @apply h-full bg-purple-500 rounded-full transition-all duration-300;
+  @apply h-full bg-interactive rounded-full transition-all duration-300;
 }
 
 @utility progress-fill-minute {
-  @apply h-full bg-purple-400 rounded-full transition-all duration-300;
+  @apply h-full bg-interactive-muted rounded-full transition-all duration-300;
 }
 
+/* progress-fill-claimed/status-pill-claimed's mid-gray borrows
+   --border-strong: this file already reuses border tokens for neutral
+   progress-track fills elsewhere (see .bar below), and no separate
+   "500-tier" semantic token exists symmetrically in both themes. */
 @utility progress-fill-claimed {
-  @apply h-full bg-neutral-500 rounded-full;
+  @apply h-full bg-border-strong rounded-full;
 }
 
 @utility mini-progress-track {
-  @apply h-1 w-full bg-neutral-700 rounded-full overflow-hidden;
+  @apply h-1 w-full bg-surface-control-muted rounded-full overflow-hidden;
 }
 
 @utility status-pill {
@@ -797,35 +776,35 @@
 }
 
 @utility status-pill-progress {
-  @apply bg-purple-600/20 text-purple-300;
+  @apply bg-interactive/20 text-interactive-muted;
 }
 
 @utility status-pill-claimed {
-  @apply bg-neutral-700 text-neutral-300;
+  @apply bg-surface-control-muted text-text-secondary;
 }
 
 @utility priority-item {
-  @apply flex items-center gap-3 p-3 bg-neutral-900 border border-neutral-700 rounded-md mb-2 cursor-grab;
+  @apply flex items-center gap-3 p-3 bg-surface-input border border-border-default rounded-md mb-2 cursor-grab;
 }
 
 @utility priority-item-dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 @utility streamer-item {
-  @apply bg-neutral-900 border border-neutral-700 rounded-lg mb-2 overflow-hidden;
+  @apply bg-surface-input border border-border-default rounded-lg mb-2 overflow-hidden;
 }
 
 @utility streamer-item-dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 @utility streamer-header {
-  @apply flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-purple-500/10;
+  @apply flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-interactive/10;
 }
 
 @utility modal-dialog {
-  @apply bg-neutral-800 border border-neutral-700 rounded-lg p-0 w-[92vw] max-w-lg text-neutral-100 shadow-xl;
+  @apply bg-surface-card border border-border-default rounded-lg p-0 w-[92vw] max-w-lg text-text-primary shadow-xl;
 }
 
 /* Custom component styles that need selectors */
@@ -833,12 +812,16 @@
   background-color: rgba(0, 0, 0, 0.7);
 }
 
+.btn-primary:hover {
+  background-color: var(--interactive-solid-hover);
+}
+
 .details-panel summary {
-  @apply px-4 py-3 cursor-pointer font-medium text-neutral-100 hover:bg-purple-500/10 transition-colors;
+  @apply px-4 py-3 cursor-pointer font-medium text-text-primary hover:bg-interactive/10 transition-colors;
 }
 
 .details-panel[open] summary {
-  @apply border-b border-neutral-700;
+  @apply border-b border-border-default;
 }
 
 /* C6/C7/C8 — S5-6 settings category dirty-boundary sticky save bar and
@@ -937,15 +920,15 @@
 }
 
 .streamer-card.is-live {
-  @apply border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)];
+  @apply border-status-danger shadow-[0_0_10px_rgba(239,68,68,0.3)];
 }
 
 .priority-item.dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 .streamer-item.dragging {
-  @apply opacity-50 border-purple-500;
+  @apply opacity-50 border-interactive;
 }
 
 /* =====================================================================
@@ -972,7 +955,7 @@
   align-self: start;
   height: 100vh;
   background: var(--color-sidebar);
-  border-right: 1px solid var(--color-neutral-700);
+  border-right: 1px solid var(--border-default);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1020,11 +1003,11 @@
 
 .now-watching {
   margin-top: auto;
-  border-top: 1px solid var(--color-neutral-700);
+  border-top: 1px solid var(--border-default);
   padding: 0.75rem;
 }
 .watch-slot {
-  border: 1px solid var(--color-neutral-700);
+  border: 1px solid var(--border-default);
   border-radius: 0.5rem;
   padding: 0.55rem 0.65rem;
   margin-bottom: 0.5rem;
@@ -1050,7 +1033,7 @@
 
 .s-card {
   position: relative;
-  background: var(--color-neutral-800);
+  background: var(--surface-card);
   border: 1px solid var(--color-offline);
   border-radius: 0.75rem;
   padding: 1rem;
@@ -1058,7 +1041,7 @@
   cursor: pointer;
   outline: none;
 }
-.s-card:hover { transform: translateY(-2px); border-color: var(--color-purple-400); }
+.s-card:hover { transform: translateY(-2px); border-color: var(--interactive-muted); }
 .s-card:focus-visible { box-shadow: 0 0 0 2px var(--color-online); border-color: var(--color-online); }
 .s-card.state-online, .s-card.state-watching, .s-card.state-queued { border-color: var(--color-online); }
 /* .s-card.state-watching's box-shadow/background are set once, below (the
@@ -1073,7 +1056,7 @@
 .s-card.unconfirmed { border-style: dashed; }
 
 .s-name { color: var(--color-streamer); font-weight: 600; }
-.s-points { color: var(--color-neutral-100); }
+.s-points { color: var(--text-primary); }
 
 .badge {
   display: inline-flex;
@@ -1087,7 +1070,7 @@
   border-radius: 0.3rem;
   line-height: 1.4;
 }
-.badge-offline { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--color-neutral-400); }
+.badge-offline { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--text-muted); }
 .badge-disabled { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
 .badge-prefer { background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--color-success); }
 .badge-avoid { background: color-mix(in srgb, var(--color-danger) 18%, transparent); color: var(--color-danger); }
@@ -1104,11 +1087,11 @@
    running uses success; every state also carries a glyph (see the panel
    partial), never color alone. */
 .badge-lc-running { background: color-mix(in srgb, var(--status-success) 18%, transparent); color: var(--status-success); }
-.badge-lc-neutral { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--color-neutral-300); }
+.badge-lc-neutral { background: color-mix(in srgb, var(--color-offline) 50%, transparent); color: var(--text-secondary); }
 .badge-lc-warning { background: color-mix(in srgb, var(--status-warning) 18%, transparent); color: var(--status-warning); }
 .badge-lc-danger { background: color-mix(in srgb, var(--status-danger) 18%, transparent); color: var(--status-danger); }
 
-.bar { height: 6px; width: 100%; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
+.bar { height: 6px; width: 100%; background: var(--border-default); border-radius: 999px; overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 999px; }
 /* .bar-drop/.bar-streak/.bar-goal > span backgrounds are set once, above (in
    the base-shell block moved from base.html, as two-stop gradients) — those
@@ -1119,11 +1102,11 @@
 .qa-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 0.4rem;
-  border: 1px solid var(--color-neutral-700);
-  color: var(--color-neutral-300); background: color-mix(in srgb, var(--surface-page) 60%, transparent);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary); background: color-mix(in srgb, var(--surface-page) 60%, transparent);
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.qa-btn:hover { color: var(--color-neutral-100); border-color: var(--color-purple-400); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
+.qa-btn:hover { color: var(--text-primary); border-color: var(--interactive-muted); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
 .qa-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 .qa-btn.is-on { color: var(--color-online); border-color: var(--color-online); }
 .qa-btn.is-danger { color: var(--color-danger); border-color: var(--color-danger); }
@@ -1131,8 +1114,8 @@
 .ticker {
   position: relative;
   overflow: hidden;
-  background: var(--color-neutral-800);
-  border: 1px solid var(--color-neutral-700);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
   border-radius: 0.6rem;
   padding: 0.4rem 0;
   white-space: nowrap;
@@ -1146,7 +1129,7 @@
 }
 .ticker:hover .ticker-track { animation-play-state: paused; }
 .ticker-item { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
-.ticker-sep { color: var(--color-neutral-600); }
+.ticker-sep { color: var(--text-placeholder); }
 @keyframes ticker-scroll {
   from { transform: translateX(0); }
   to { transform: translateX(-100%); }
@@ -1154,8 +1137,8 @@
 
 .pred-board { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
 .pred-card {
-  background: var(--color-neutral-800);
-  border: 1px solid var(--color-neutral-700);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
   border-left: 3px solid var(--color-event);
   border-radius: 0.6rem;
   padding: 0.75rem 0.85rem;
@@ -1163,14 +1146,14 @@
 .pred-card.is-locked { border-left-color: var(--color-danger); }
 .pred-outcome { display: grid; grid-template-columns: 1fr auto; gap: 0.25rem 0.75rem; align-items: center; margin-top: 0.4rem; }
 .pred-outcome.chosen { background: color-mix(in srgb, var(--interactive) 10%, transparent); border-radius: 0.35rem; padding: 0.15rem 0.35rem; }
-.pred-obar { height: 5px; grid-column: 1 / -1; background: var(--color-neutral-700); border-radius: 999px; overflow: hidden; }
+.pred-obar { height: 5px; grid-column: 1 / -1; background: var(--border-default); border-radius: 999px; overflow: hidden; }
 .pred-obar > span { display: block; height: 100%; border-radius: 999px; background: var(--color-online); }
 .pred-empty, .board-empty {
-  border: 1px dashed var(--color-neutral-700);
+  border: 1px dashed var(--border-default);
   border-radius: 0.6rem;
   padding: 1.25rem;
   text-align: center;
-  color: var(--color-neutral-400);
+  color: var(--text-muted);
   font-size: 0.9rem;
 }
 
@@ -1185,7 +1168,7 @@
 }
 
 .skeleton {
-  background: linear-gradient(90deg, color-mix(in srgb, var(--color-neutral-700) 35%, transparent) 25%, color-mix(in srgb, var(--color-neutral-600) 55%, transparent) 37%, color-mix(in srgb, var(--color-neutral-700) 35%, transparent) 63%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--border-default) 35%, transparent) 25%, color-mix(in srgb, var(--text-placeholder) 55%, transparent) 37%, color-mix(in srgb, var(--border-default) 35%, transparent) 63%);
   background-size: 400% 100%;
   animation: skeleton-shimmer 1.4s ease infinite;
   border-radius: 0.4rem;
@@ -1197,7 +1180,7 @@
 
 .drawer-row {
   display: flex; justify-content: space-between; gap: 1rem;
-  padding: 0.4rem 0; border-bottom: 1px solid var(--color-neutral-700);
+  padding: 0.4rem 0; border-bottom: 1px solid var(--border-default);
   font-size: 0.85rem;
 }
 .drawer-row:last-child { border-bottom: 0; }
@@ -1206,15 +1189,15 @@
   padding: 0.5rem 0.95rem;
   font-size: 0.85rem;
   font-weight: 500;
-  color: var(--color-neutral-300);
-  background: var(--color-neutral-800);
-  border-right: 1px solid var(--color-neutral-700);
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border-right: 1px solid var(--border-default);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 .stat-range-btn:last-child { border-right: 0; }
-.stat-range-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
-.stat-range-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
+.stat-range-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--text-primary); }
+.stat-range-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }
 .stat-range-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
 
 /* Respect reduced-motion: no marquee, no transforms, static shimmer. */
@@ -1248,19 +1231,19 @@
 .pred-outcome.selectable:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 .pred-outcome.picked { background: color-mix(in srgb, var(--interactive) 16%, transparent); box-shadow: inset 0 0 0 1px var(--color-online); }
 
-.pred-manual { margin-top: 0.6rem; border-top: 1px solid var(--color-neutral-700); padding-top: 0.55rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.pred-manual { margin-top: 0.6rem; border-top: 1px solid var(--border-default); padding-top: 0.55rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .pred-manual-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-.pred-amount { width: 6.5rem; background: var(--color-neutral-900); border: 1px solid var(--color-neutral-700); border-radius: 0.4rem; padding: 0.3rem 0.5rem; color: var(--color-neutral-100); font-size: 0.85rem; }
+.pred-amount { width: 6.5rem; background: var(--surface-input); border: 1px solid var(--border-default); border-radius: 0.4rem; padding: 0.3rem 0.5rem; color: var(--text-primary); font-size: 0.85rem; }
 .pred-amount:focus { outline: none; border-color: var(--color-online); }
 .pred-amount:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 .pred-fills { display: flex; gap: 0.3rem; }
-.pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--color-neutral-700); color: var(--color-neutral-300); background: color-mix(in srgb, var(--surface-page) 60%, transparent); transition: border-color 0.12s, color 0.12s; }
-.pred-chip:hover { border-color: var(--color-purple-400); color: var(--color-neutral-100); }
+.pred-chip { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 0.35rem; border: 1px solid var(--border-default); color: var(--text-secondary); background: color-mix(in srgb, var(--surface-page) 60%, transparent); transition: border-color 0.12s, color 0.12s; }
+.pred-chip:hover { border-color: var(--interactive-muted); color: var(--text-primary); }
 .pred-chip:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
 .pred-manual-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-.btn-bet { font-size: 0.75rem; font-weight: 600; padding: 0.32rem 0.75rem; border-radius: 0.4rem; background: var(--color-purple-600); color: var(--text-on-accent); border: 1px solid transparent; transition: background 0.12s; }
-.btn-bet:hover:not(:disabled) { background: var(--color-purple-700); }
+.btn-bet { font-size: 0.75rem; font-weight: 600; padding: 0.32rem 0.75rem; border-radius: 0.4rem; background: var(--interactive-solid); color: var(--text-on-accent); border: 1px solid transparent; transition: background 0.12s; }
+.btn-bet:hover:not(:disabled) { background: var(--interactive-solid-hover); }
 .btn-bet:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-bet:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
@@ -1268,14 +1251,14 @@
 .pred-confirm-actions { display: flex; gap: 0.35rem; }
 .btn-bet-go { font-size: 0.72rem; font-weight: 600; padding: 0.28rem 0.6rem; border-radius: 0.35rem; background: var(--color-success); color: var(--text-on-success); border: none; cursor: pointer; }
 .btn-bet-go:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-bet-cancel { font-size: 0.72rem; padding: 0.28rem 0.55rem; border-radius: 0.35rem; background: transparent; color: var(--color-neutral-300); border: 1px solid var(--color-neutral-700); cursor: pointer; }
+.btn-bet-cancel { font-size: 0.72rem; padding: 0.28rem 0.55rem; border-radius: 0.35rem; background: transparent; color: var(--text-secondary); border: 1px solid var(--border-default); cursor: pointer; }
 .btn-bet-go:focus-visible, .btn-bet-cancel:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
 .pred-skip { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
 .pred-skip input { accent-color: var(--color-online); }
 
-.pred-status { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-neutral-700); }
-.pred-link { font-size: 0.72rem; color: var(--color-purple-300); text-decoration: underline; background: none; border: none; cursor: pointer; }
+.pred-status { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border-default); }
+.pred-link { font-size: 0.72rem; color: var(--link-text); text-decoration: underline; background: none; border: none; cursor: pointer; }
 .pred-link:focus-visible { outline: 2px solid var(--color-online); outline-offset: 1px; }
 
 .pred-msg { font-size: 0.75rem; margin-top: 0.4rem; border-radius: 0.35rem; padding: 0.3rem 0.5rem; }
@@ -1302,12 +1285,12 @@
   padding: 0.5rem 0.75rem;
   margin: 0.1rem 0.5rem;
   border-radius: 0.5rem;
-  color: var(--color-neutral-300);
+  color: var(--text-secondary);
   font-size: 0.9rem;
   font-weight: 500;
   transition: background 0.15s, color 0.15s;
 }
-.sidebar-link svg { width: 18px; height: 18px; flex: none; color: var(--color-neutral-400); transition: color 0.15s; }
+.sidebar-link svg { width: 18px; height: 18px; flex: none; color: var(--text-muted); transition: color 0.15s; }
 .sidebar-link:hover { background: linear-gradient(90deg, color-mix(in srgb, var(--ui-watching) 16%, transparent), color-mix(in srgb, var(--ui-online) 8%, transparent)); color: var(--text-primary); }
 .sidebar-link:hover svg { color: var(--ui-online); }
 .sidebar-link.is-active {
@@ -1336,7 +1319,7 @@
         top: 0.6rem;
         left: 0.6rem;
         z-index: 70;
-        background: var(--color-neutral-800);
+        background: var(--surface-card);
     }
     .app-main { padding: 3.25rem 1rem 1rem; }
 }
@@ -1362,15 +1345,15 @@
     font-size: 0.75rem;
     font-weight: 600;
     letter-spacing: 0.02em;
-    color: var(--color-neutral-300);
-    background: var(--color-neutral-800);
-    border-right: 1px solid var(--color-neutral-700);
+    color: var(--text-secondary);
+    background: var(--surface-card);
+    border-right: 1px solid var(--border-default);
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease;
 }
 .lang-btn:last-child { border-right: 0; }
-.lang-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
-.lang-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
+.lang-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--text-primary); }
+.lang-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }
 .lang-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
 @media (prefers-reduced-motion: reduce) { .lang-btn { transition: none; } }
 
@@ -1382,16 +1365,16 @@
     align-items: center;
     justify-content: center;
     padding: 0.25rem 0.5rem;
-    color: var(--color-neutral-300);
-    background: var(--color-neutral-800);
-    border-right: 1px solid var(--color-neutral-700);
+    color: var(--text-secondary);
+    background: var(--surface-card);
+    border-right: 1px solid var(--border-default);
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease;
 }
 .theme-btn:last-child { border-right: 0; }
 .theme-btn svg { width: 14px; height: 14px; display: block; }
-.theme-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--color-neutral-100); }
-.theme-btn[aria-pressed="true"] { background: var(--color-purple-600); color: var(--text-on-accent); }
+.theme-btn:hover { background: color-mix(in srgb, var(--interactive) 12%, transparent); color: var(--text-primary); }
+.theme-btn[aria-pressed="true"] { background: var(--interactive-solid); color: var(--text-on-accent); }
 .theme-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
 @media (prefers-reduced-motion: reduce) { .theme-btn { transition: none; } }
 
@@ -1461,10 +1444,10 @@
     align-items: center;
     min-width: 0;
     padding: 0.4rem 0.6rem 0.45rem;
-    border: 1px solid var(--color-neutral-700);
+    border: 1px solid var(--border-default);
     border-top: 2px solid var(--rw-accent);
     border-radius: 0.6rem;
-    background: var(--color-neutral-800);
+    background: var(--surface-card);
     box-shadow:
         inset 0 1px 0 color-mix(in srgb, var(--text-primary) 3%, transparent),
         inset 0 14px 22px -18px var(--rw-accent);
@@ -1474,16 +1457,16 @@
 .rw-label {
     grid-area: label; min-width: 0;
     font-size: 0.6rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
-    color: var(--color-neutral-400);
+    color: var(--text-muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .rw-values { grid-area: values; display: flex; align-items: baseline; gap: 0.35rem; min-width: 0; }
-.rw-primary { font-size: 1.02rem; font-weight: 700; line-height: 1.15; color: var(--color-neutral-100); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.rw-sub { font-size: 0.62rem; color: var(--color-neutral-400); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rw-primary { font-size: 1.02rem; font-weight: 700; line-height: 1.15; color: var(--text-primary); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rw-sub { font-size: 0.62rem; color: var(--text-muted); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rw-spark { grid-area: spark; display: flex; align-items: flex-end; gap: 1px; height: 16px; margin-top: 0.15rem; overflow: hidden; }
 .rw-spark > i { flex: 1 1 0; min-width: 0; height: 100%; background: var(--rw-accent); opacity: 0.55; border-radius: 1px; transform: scaleY(0); transform-origin: bottom; transition: transform 0.3s ease; }
 .rw-card.rw-na { opacity: 0.72; }
-.rw-card.rw-na .rw-primary { color: var(--color-neutral-500); }
+.rw-card.rw-na .rw-primary { color: var(--text-faint); }
 .rw-strip.is-stale { opacity: 0.7; filter: saturate(0.75); }
 @media (max-width: 860px) {
     .rw-strip { margin-right: 0.5rem; flex: 1 1 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1503,7 +1486,7 @@
     border-color: var(--ui-watching);
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--ui-watching) 12%, transparent), color-mix(in srgb, var(--ui-watching) 2%, transparent) 46%, transparent 72%),
-        var(--color-neutral-800);
+        var(--surface-card);
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-watching) 45%, transparent), 0 0 18px color-mix(in srgb, var(--ui-watching) 22%, transparent);
 }
 .s-card.state-watching:hover { border-color: var(--ui-watching); }
@@ -1511,16 +1494,16 @@
     border-color: color-mix(in srgb, var(--ui-online) 55%, transparent);
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--ui-online) 7%, transparent), transparent 55%),
-        var(--color-neutral-800);
+        var(--surface-card);
     box-shadow: 0 0 10px color-mix(in srgb, var(--ui-online) 8%, transparent);
 }
-.s-card.state-offline { background: var(--color-neutral-800); }
+.s-card.state-offline { background: var(--surface-card); }
 
 .s-title {
     margin-top: 0.5rem;
     font-size: 0.78rem;
     line-height: 1.35;
-    color: var(--color-neutral-200);
+    color: var(--text-heading);
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
@@ -1820,9 +1803,9 @@
    position/overflow addendum) are each merged into one declaration.
    ===================================================================== */
 .roi-period-btn {
-  color: var(--color-neutral-300);
-  background: var(--color-neutral-800);
-  border-right: 1px solid var(--color-neutral-700);
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border-right: 1px solid var(--border-default);
   cursor: pointer;
   padding: 0.5rem 0.95rem;
   font-size: 0.85rem;
@@ -1830,8 +1813,8 @@
   transition: background 0.15s, color 0.15s;
 }
 .roi-period-btn:last-child { border-right: 0; }
-.roi-period-btn:hover { color: var(--color-neutral-100); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
-.roi-period-btn.is-active { background: var(--color-purple-600); color: var(--text-on-accent); }
+.roi-period-btn:hover { color: var(--text-primary); background: color-mix(in srgb, var(--interactive) 12%, transparent); }
+.roi-period-btn.is-active { background: var(--interactive-solid); color: var(--text-on-accent); }
 .roi-period-btn:focus-visible { outline: 2px solid var(--color-online); outline-offset: -2px; }
 
 /* KPI tiles get a soft top accent (::before) so the summary row reads as
@@ -1842,8 +1825,8 @@
   flex-direction: column;
   gap: 0.25rem;
   border-radius: var(--radius-lg);
-  border: 1px solid var(--color-neutral-700);
-  background: var(--color-neutral-800);
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
   padding: 0.85rem 1rem;
   position: relative;
   overflow: hidden;
@@ -1855,15 +1838,15 @@
   height: 2px;
   background: linear-gradient(90deg, var(--ui-watching), var(--ui-online), transparent);
 }
-.stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-neutral-400); }
-.stat-value { font-size: 1.35rem; font-weight: 600; color: var(--color-neutral-100); }
+.stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.stat-value { font-size: 1.35rem; font-weight: 600; color: var(--text-primary); }
 .stat-value.pos { color: var(--ui-roi-pos); }
 .stat-value.neg { color: var(--ui-roi-neg); }
 
 .roi-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
-.roi-table th, .roi-table td { text-align: right; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--color-neutral-700); }
+.roi-table th, .roi-table td { text-align: right; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border-default); }
 .roi-table th:first-child, .roi-table td:first-child { text-align: left; }
-.roi-table th { color: var(--color-neutral-400); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.roi-table th { color: var(--text-muted); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .roi-table td.pos { color: var(--ui-roi-pos); }
 .roi-table td.neg { color: var(--ui-roi-neg); }
 
@@ -1873,23 +1856,23 @@
 .breakdown-legend { display: flex; flex-direction: column; gap: 0.45rem; font-size: 0.85rem; }
 .breakdown-row { display: flex; align-items: center; gap: 0.55rem; }
 .breakdown-dot { width: 0.65rem; height: 0.65rem; border-radius: 999px; flex: none; }
-.breakdown-name { color: var(--color-neutral-300); min-width: 6.5rem; }
-.breakdown-val { margin-left: auto; color: var(--color-neutral-100); }
-.breakdown-count { color: var(--color-neutral-500); font-size: 0.75rem; }
+.breakdown-name { color: var(--text-secondary); min-width: 6.5rem; }
+.breakdown-val { margin-left: auto; color: var(--text-primary); }
+.breakdown-count { color: var(--text-faint); font-size: 0.75rem; }
 
-.bet-summary { margin-top: 1.25rem; border-top: 1px solid var(--color-neutral-700); padding-top: 1rem; }
+.bet-summary { margin-top: 1.25rem; border-top: 1px solid var(--border-default); padding-top: 1rem; }
 .bet-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.75rem; }
 .bet-stat {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
   border-radius: var(--radius-lg);
-  border: 1px solid var(--color-neutral-700);
-  background: var(--color-neutral-800);
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
   padding: 0.6rem 0.75rem;
 }
-.bet-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-neutral-400); }
-.bet-val { font-size: 1.1rem; font-weight: 600; color: var(--color-neutral-100); }
+.bet-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.bet-val { font-size: 1.1rem; font-weight: 600; color: var(--text-primary); }
 .bet-val.pos { color: var(--ui-roi-pos); }
 .bet-val.neg { color: var(--ui-roi-neg); }
 
@@ -2324,7 +2307,7 @@
     top: 0.6rem;
     left: 0.6rem;
     z-index: 70;
-    background: var(--color-neutral-800);
+    background: var(--surface-card);
   }
   .app-main { padding: 3.25rem 1.5rem 2rem; }
   .chrome-drawer-close {

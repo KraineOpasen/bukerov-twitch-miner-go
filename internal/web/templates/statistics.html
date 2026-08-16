@@ -3,21 +3,21 @@
 {{define "content"}}
 <div class="flex items-center justify-between flex-wrap gap-3 mb-2">
     <h1 class="text-3xl font-bold">{{ t "stat.title" }}</h1>
-    <div id="stat-updated" class="text-xs text-neutral-400 num"></div>
+    <div id="stat-updated" class="text-xs text-text-muted num"></div>
 </div>
-<p class="text-neutral-400 text-sm mb-6">{{ t "stat.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "stat.subtitle" }}</p>
 
 <div class="card mb-6">
     <div class="flex flex-wrap items-end gap-5">
         <div class="flex flex-col gap-1">
-            <label for="stat-streamer" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.streamer" }}</label>
+            <label for="stat-streamer" class="text-xs uppercase tracking-wide text-text-muted">{{ t "stat.streamer" }}</label>
             <select id="stat-streamer" class="input-field min-w-[12rem]" {{if not .Streamers}}disabled{{end}}>
                 {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{else}}<option value="">{{ t "stat.no_streamers" }}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <span class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.period" }}</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.period" }}">
+            <span class="text-xs uppercase tracking-wide text-text-muted">{{ t "stat.period" }}</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-border-default" role="group" aria-label="{{ t "stat.period" }}">
                 <button type="button" class="stat-range-btn is-active" data-range="24h">{{ t "stat.range.24h" }}</button>
                 <button type="button" class="stat-range-btn" data-range="7d">{{ t "stat.range.7d" }}</button>
                 <button type="button" class="stat-range-btn" data-range="30d">{{ t "stat.range.30d" }}</button>
@@ -30,21 +30,21 @@
 </div>
 
 <div class="card">
-    <div id="stat-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.stale" }}</div>
-    <div id="stat-partial" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.partial" }}</div>
+    <div id="stat-stale" class="hidden mb-3 text-xs text-text-caution" role="status">⚠ {{ t "stat.stale" }}</div>
+    <div id="stat-partial" class="hidden mb-3 text-xs text-text-caution" role="status">⚠ {{ t "stat.partial" }}</div>
 
     <div id="stat-loading">
         <div class="skeleton h-[400px] w-full rounded-lg"></div>
     </div>
 
-    <div id="stat-empty" class="hidden text-center py-24 text-neutral-400">
-        <p class="text-lg font-medium text-neutral-300 mb-1">{{ t "stat.empty.title" }}</p>
+    <div id="stat-empty" class="hidden text-center py-24 text-text-muted">
+        <p class="text-lg font-medium text-text-secondary mb-1">{{ t "stat.empty.title" }}</p>
         <p class="text-sm">{{ t "stat.empty.desc" }}</p>
     </div>
 
     <div id="stat-error" class="hidden text-center py-24">
         <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">{{ t "stat.error.title" }}</p>
-        <p class="text-sm text-neutral-400 mb-4" id="stat-error-msg"></p>
+        <p class="text-sm text-text-muted mb-4" id="stat-error-msg"></p>
         <button type="button" id="stat-retry" class="btn-secondary">{{ t "stat.retry" }}</button>
     </div>
 
@@ -55,15 +55,15 @@
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="kpi-earned" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="kpi-events" class="stat-value num"></span></div>
         </div>
-        <p class="text-xs text-neutral-500 mb-4">{{ t "stat.kpi.note" }}</p>
+        <p class="text-xs text-text-faint mb-4">{{ t "stat.kpi.note" }}</p>
         <div id="stat-chart"></div>
-        <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">{{ t "stat.truncated" }}</p>
+        <p id="stat-truncated" class="hidden text-xs text-text-faint mt-2">{{ t "stat.truncated" }}</p>
 
         <div id="stat-breakdown" class="breakdown-grid hidden">
             <div id="stat-donut" role="img" aria-label="{{ t "stat.breakdown.title" }}"></div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.breakdown.title" }}</h3>
-                <p class="text-xs text-neutral-500 mb-3">{{ t "stat.breakdown.subtitle" }}</p>
+                <h3 class="text-sm font-semibold text-text-secondary mb-2">{{ t "stat.breakdown.title" }}</h3>
+                <p class="text-xs text-text-faint mb-3">{{ t "stat.breakdown.subtitle" }}</p>
                 <div id="stat-breakdown-legend" class="breakdown-legend"></div>
             </div>
         </div>
@@ -73,15 +73,15 @@
              and net result. Same streamer/window as the series above; consistent
              with (never contradicting) the ROI section further down. -->
         <div id="stat-bet-summary" class="bet-summary hidden">
-            <h3 class="text-sm font-semibold text-neutral-300 mb-1">{{ t "stat.bet.title" }}</h3>
-            <p class="text-xs text-neutral-500 mb-3">{{ t "stat.bet.subtitle" }}</p>
+            <h3 class="text-sm font-semibold text-text-secondary mb-1">{{ t "stat.bet.title" }}</h3>
+            <p class="text-xs text-text-faint mb-3">{{ t "stat.bet.subtitle" }}</p>
             <div class="bet-summary-grid">
                 <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.won" }}</span><span id="bet-won" class="bet-val num"></span></div>
                 <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.staked" }}</span><span id="bet-staked" class="bet-val num"></span></div>
                 <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.refunded" }}</span><span id="bet-refunded" class="bet-val num"></span></div>
                 <div class="bet-stat"><span class="bet-label">{{ t "stat.bet.net" }}</span><span id="bet-net" class="bet-val num"></span></div>
             </div>
-            <p id="bet-counts" class="text-xs text-neutral-500 mt-2 num"></p>
+            <p id="bet-counts" class="text-xs text-text-faint mt-2 num"></p>
         </div>
     </div>
 </div>
@@ -89,29 +89,29 @@
 <!-- ===================== Prediction ROI ===================== -->
 <div class="flex items-center justify-between flex-wrap gap-3 mt-10 mb-2">
     <h2 class="text-2xl font-bold">{{ t "stat.roi.title" }}</h2>
-    <div id="roi-updated" class="text-xs text-neutral-400 num"></div>
+    <div id="roi-updated" class="text-xs text-text-muted num"></div>
 </div>
-<p class="text-neutral-400 text-sm mb-6">{{ t "stat.roi.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "stat.roi.subtitle" }}</p>
 
 <div class="card mb-6">
     <div class="flex flex-wrap items-end gap-5">
         <div class="flex flex-col gap-1">
-            <label for="roi-streamer" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.streamer" }}</label>
+            <label for="roi-streamer" class="text-xs uppercase tracking-wide text-text-muted">{{ t "stat.streamer" }}</label>
             <select id="roi-streamer" class="input-field min-w-[12rem]">
                 <option value="">{{ t "stat.all_streamers" }}</option>
                 {{range .Streamers}}<option value="{{.}}">{{.}}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <label for="roi-strategy" class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.strategy" }}</label>
+            <label for="roi-strategy" class="text-xs uppercase tracking-wide text-text-muted">{{ t "stat.strategy" }}</label>
             <select id="roi-strategy" class="input-field min-w-[10rem]">
                 <option value="">{{ t "stat.all_strategies" }}</option>
                 {{range .BetStrategies}}<option value="{{.}}">{{.}}</option>{{end}}
             </select>
         </div>
         <div class="flex flex-col gap-1">
-            <span class="text-xs uppercase tracking-wide text-neutral-400">{{ t "stat.period" }}</span>
-            <div class="inline-flex rounded-md overflow-hidden border border-neutral-700" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
+            <span class="text-xs uppercase tracking-wide text-text-muted">{{ t "stat.period" }}</span>
+            <div class="inline-flex rounded-md overflow-hidden border border-border-default" role="group" aria-label="{{ t "stat.roi.period_aria" }}">
                 <button type="button" class="roi-period-btn" data-period="7d">{{ t "stat.range.7d" }}</button>
                 <button type="button" class="roi-period-btn is-active" data-period="30d">{{ t "stat.range.30d" }}</button>
                 <button type="button" class="roi-period-btn" data-period="90d">{{ t "stat.range.90d" }}</button>
@@ -125,20 +125,20 @@
 </div>
 
 <div class="card">
-    <div id="roi-stale" class="hidden mb-3 text-xs text-amber-500" role="status">⚠ {{ t "stat.stale" }}</div>
+    <div id="roi-stale" class="hidden mb-3 text-xs text-text-caution" role="status">⚠ {{ t "stat.stale" }}</div>
 
     <div id="roi-loading">
         <div class="skeleton h-40 w-full rounded-lg"></div>
     </div>
 
-    <div id="roi-empty" class="hidden text-center py-16 text-neutral-400">
-        <p class="text-lg font-medium text-neutral-300 mb-1">{{ t "stat.roi.empty.title" }}</p>
+    <div id="roi-empty" class="hidden text-center py-16 text-text-muted">
+        <p class="text-lg font-medium text-text-secondary mb-1">{{ t "stat.roi.empty.title" }}</p>
         <p class="text-sm">{{ t "stat.roi.empty.desc" }}</p>
     </div>
 
     <div id="roi-error" class="hidden text-center py-16">
         <p class="text-lg font-medium mb-1" style="color: var(--color-danger)">{{ t "stat.error.title" }}</p>
-        <p class="text-sm text-neutral-400 mb-4" id="roi-error-msg"></p>
+        <p class="text-sm text-text-muted mb-4" id="roi-error-msg"></p>
         <button type="button" id="roi-retry" class="btn-secondary">{{ t "stat.retry" }}</button>
     </div>
 
@@ -156,7 +156,7 @@
         </div>
         <div class="roi-outcomes-grid">
             <div class="roi-donut-wrap"><div id="roi-donut" role="img" aria-label="{{ t "stat.roi.outcomes" }}"></div></div>
-            <p class="text-xs text-neutral-500">
+            <p class="text-xs text-text-faint">
                 <span id="roi-wins" class="num"></span> {{ t "stat.roi.wins" }} ·
                 <span id="roi-losses" class="num"></span> {{ t "stat.roi.losses" }} ·
                 <span id="roi-refunds" class="num"></span> {{ t "stat.roi.refunds" }}
@@ -166,15 +166,15 @@
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_streamer" }}</h3>
+                <h3 class="text-sm font-semibold text-text-secondary mb-2">{{ t "stat.roi.by_streamer" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-streamer"></table></div>
             </div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_strategy" }}</h3>
+                <h3 class="text-sm font-semibold text-text-secondary mb-2">{{ t "stat.roi.by_strategy" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-strategy"></table></div>
             </div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.roi.by_odds" }}</h3>
+                <h3 class="text-sm font-semibold text-text-secondary mb-2">{{ t "stat.roi.by_odds" }}</h3>
                 <div class="overflow-x-auto"><table class="roi-table" id="roi-by-odds"></table></div>
             </div>
         </div>
@@ -687,7 +687,7 @@
     function renderTable(tableId, rows) {
         const table = document.getElementById(tableId);
         if (!rows || rows.length === 0) {
-            table.innerHTML = '<tbody><tr><td class="text-neutral-500">—</td></tr></tbody>';
+            table.innerHTML = '<tbody><tr><td class="text-text-faint">—</td></tr></tbody>';
             return;
         }
         let html = '<thead><tr><th scope="col">' + t('js.stat.col.key') + '</th><th scope="col">N</th><th scope="col">' + t('js.stat.col.profit') + '</th><th scope="col">ROI</th></tr></thead><tbody>';

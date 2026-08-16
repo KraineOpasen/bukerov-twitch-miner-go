@@ -2,7 +2,7 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "drops.title" }} · {{ t "drops.tab.upcoming" }}</h1>
-<p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
 
 <!--
     Re-reads the backend snapshot every minute so a new campaign surfaced by a
@@ -12,6 +12,6 @@
     a Twitch sync. Same endpoint and cadence the former inline tab used.
 -->
 <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load, every 1m" hx-swap="innerHTML">
-    <div class="animate-pulse text-neutral-400">{{ t "drops.loading.upcoming" }}</div>
+    <div class="animate-pulse text-text-muted">{{ t "drops.loading.upcoming" }}</div>
 </section>
 {{end}}

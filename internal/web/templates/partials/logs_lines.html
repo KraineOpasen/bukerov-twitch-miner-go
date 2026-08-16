@@ -1,8 +1,8 @@
 {{define "logs_lines"}}
 {{if not .FileLogging}}
-<div class="text-neutral-400 text-sm py-8 text-center">{{ t "logs.disabled" }}</div>
+<div class="text-text-muted text-sm py-8 text-center">{{ t "logs.disabled" }}</div>
 {{else if not .Lines}}
-<div class="text-neutral-400 text-sm py-8 text-center">{{ t "logs.empty" }}</div>
+<div class="text-text-muted text-sm py-8 text-center">{{ t "logs.empty" }}</div>
 {{else}}
 {{range .Lines}}<span class="log-line {{.Class}}"><span class="log-emoji" aria-hidden="true">{{.Emoji}}</span><span class="log-text">{{.Text}}</span></span>
 {{end}}

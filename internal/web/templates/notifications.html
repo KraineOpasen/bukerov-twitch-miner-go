@@ -2,15 +2,15 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "notif.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "notif.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "notif.subtitle" }}</p>
 
 {{if not .ConfigValid}}
-<article class="card border-red-500 bg-red-500/10 mb-6" role="alert">
+<article class="card border-status-danger bg-status-danger/10 mb-6" role="alert">
     <div class="flex items-center gap-2 mb-2">
-        <span class="text-red-500 font-semibold">⚠️ {{ t "notif.config_error" }}</span>
+        <span class="text-status-danger font-semibold">⚠️ {{ t "notif.config_error" }}</span>
     </div>
-    <p class="text-neutral-400 mb-2">{{.ConfigError}}</p>
-    <p><a href="/settings" class="text-purple-500 hover:underline">{{ t "notif.go_to_settings" }}</a>{{ t "notif.config_error_post" }}</p>
+    <p class="text-text-muted mb-2">{{.ConfigError}}</p>
+    <p><a href="/settings" class="text-interactive hover:underline">{{ t "notif.go_to_settings" }}</a>{{ t "notif.config_error_post" }}</p>
 </article>
 {{end}}
 
@@ -18,7 +18,7 @@
     <details id="notif-channels" class="details-panel">
         <summary class="text-lg">{{ t "notif.channels.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.channels.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.channels.desc" }}</p>
             
             <div class="setting-row">
                 <div>
@@ -26,7 +26,7 @@
                     <div class="setting-description">{{ t "notif.ch.mentions.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -35,7 +35,7 @@
                     <select class="input-field w-64 channel-select" id="mentions-channel" {{if not .ConfigValid}}disabled{{end}}>
                         <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
-                    <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
+                    <div class="channel-loading w-5 h-5 border-2 border-border-default border-t-interactive rounded-full animate-spin hidden"></div>
                 </div>
             </div>
             
@@ -45,7 +45,7 @@
                     <div class="setting-description">{{ t "notif.ch.points.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -54,7 +54,7 @@
                     <select class="input-field w-64 channel-select" id="points-channel" {{if not .ConfigValid}}disabled{{end}}>
                         <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
-                    <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
+                    <div class="channel-loading w-5 h-5 border-2 border-border-default border-t-interactive rounded-full animate-spin hidden"></div>
                 </div>
             </div>
             
@@ -64,7 +64,7 @@
                     <div class="setting-description">{{ t "notif.ch.online.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -73,7 +73,7 @@
                     <select class="input-field w-64 channel-select" id="online-channel" {{if not .ConfigValid}}disabled{{end}}>
                         <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
-                    <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
+                    <div class="channel-loading w-5 h-5 border-2 border-border-default border-t-interactive rounded-full animate-spin hidden"></div>
                 </div>
             </div>
             
@@ -83,7 +83,7 @@
                     <div class="setting-description">{{ t "notif.ch.offline.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -92,7 +92,7 @@
                     <select class="input-field w-64 channel-select" id="offline-channel" {{if not .ConfigValid}}disabled{{end}}>
                         <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
-                    <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
+                    <div class="channel-loading w-5 h-5 border-2 border-border-default border-t-interactive rounded-full animate-spin hidden"></div>
                 </div>
             </div>
 
@@ -102,7 +102,7 @@
                     <div class="setting-description">{{ t "notif.ch.system.desc" }}</div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" class="channel-reload-btn p-2 border border-neutral-700 rounded hover:border-purple-500 hover:text-purple-400 transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
+                    <button type="button" class="channel-reload-btn p-2 border border-border-default rounded hover:border-interactive hover:text-interactive-muted transition-colors" onclick="reloadChannels()" title="{{ t "notif.reload_channels" }}" aria-label="{{ t "notif.reload_channels" }}" {{if not .ConfigValid}}disabled{{end}}>
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M23 4v6h-6M1 20v-6h6"/>
                             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -111,7 +111,7 @@
                     <select class="input-field w-64 channel-select" id="system-channel" {{if not .ConfigValid}}disabled{{end}}>
                         <option value="">{{ t "notif.select_channel" }}</option>
                     </select>
-                    <div class="channel-loading w-5 h-5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin hidden"></div>
+                    <div class="channel-loading w-5 h-5 border-2 border-border-default border-t-interactive rounded-full animate-spin hidden"></div>
                 </div>
             </div>
         </div>
@@ -120,14 +120,14 @@
     <details id="notif-system" class="details-panel">
         <summary class="text-lg">{{ t "notif.system.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.system.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.system.desc" }}</p>
 
             <div class="setting-row">
                 <div>
                     <div class="setting-label">{{ t "notif.system.enable" }}</div>
                     <div class="setting-description">{{ t "notif.system.enable.desc" }}</div>
                 </div>
-                <input type="checkbox" class="w-5 h-5 accent-purple-600" id="system-enabled" {{if not .ConfigValid}}disabled{{end}}>
+                <input type="checkbox" class="w-5 h-5 accent-control-accent" id="system-enabled" {{if not .ConfigValid}}disabled{{end}}>
             </div>
         </div>
     </details>
@@ -135,14 +135,14 @@
     <details id="notif-drops" class="details-panel">
         <summary class="text-lg">{{ t "notif.drops.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.drops.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.drops.desc" }}</p>
 
             <div class="setting-row">
                 <div>
                     <div class="setting-label">{{ t "notif.drops.upcoming.enable" }}</div>
                     <div class="setting-description">{{ t "notif.drops.upcoming.enable.desc" }}</div>
                 </div>
-                <input type="checkbox" class="w-5 h-5 accent-purple-600" id="upcoming-drops-enabled" {{if not .ConfigValid}}disabled{{end}}>
+                <input type="checkbox" class="w-5 h-5 accent-control-accent" id="upcoming-drops-enabled" {{if not .ConfigValid}}disabled{{end}}>
             </div>
         </div>
     </details>
@@ -150,14 +150,14 @@
     <details id="notif-mentions" class="details-panel">
         <summary class="text-lg">{{ t "notif.mentions.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.mentions.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.mentions.desc" }}</p>
             
             <div class="setting-row">
                 <div>
                     <div class="setting-label">{{ t "notif.mentions.enable" }}</div>
                     <div class="setting-description">{{ t "notif.mentions.enable.desc" }}</div>
                 </div>
-                <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-enabled" {{if not .ConfigValid}}disabled{{end}}>
+                <input type="checkbox" class="w-5 h-5 accent-control-accent" id="mentions-enabled" {{if not .ConfigValid}}disabled{{end}}>
             </div>
             
             <div class="setting-row">
@@ -165,7 +165,7 @@
                     <div class="setting-label">{{ t "notif.mentions.all_chats" }}</div>
                     <div class="setting-description">{{ t "notif.mentions.all_chats.desc" }}</div>
                 </div>
-                <input type="checkbox" class="w-5 h-5 accent-purple-600" id="mentions-all-chats" {{if not .ConfigValid}}disabled{{end}}>
+                <input type="checkbox" class="w-5 h-5 accent-control-accent" id="mentions-all-chats" {{if not .ConfigValid}}disabled{{end}}>
             </div>
             
             <div class="setting-row flex-col items-start gap-2 hidden" id="mentions-streamers-row">
@@ -175,8 +175,8 @@
                 </div>
                 <div class="flex flex-wrap gap-2 mt-2" id="mentions-streamers">
                     {{range .Streamers}}
-                    <label class="flex items-center gap-1 bg-neutral-900 px-2 py-1 rounded border border-neutral-700 text-sm cursor-pointer hover:border-purple-500 transition-colors">
-                        <input type="checkbox" class="w-4 h-4 accent-purple-600" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
+                    <label class="flex items-center gap-1 bg-surface-input px-2 py-1 rounded border border-border-default text-sm cursor-pointer hover:border-interactive transition-colors">
+                        <input type="checkbox" class="w-4 h-4 accent-control-accent" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
                         <span>{{.}}</span>
                     </label>
                     {{end}}
@@ -188,7 +188,7 @@
     <details id="notif-points" class="details-panel">
         <summary class="text-lg">{{ t "notif.points.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.points.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.points.desc" }}</p>
             
             <div class="flex flex-wrap gap-3 items-center mb-4">
                 <select id="point-rule-streamer" class="input-field w-52" {{if not .ConfigValid}}disabled{{end}}>
@@ -197,8 +197,8 @@
                     {{end}}
                 </select>
                 <input type="number" id="point-rule-threshold" placeholder="{{ t "notif.points.threshold_ph" }}" min="1" class="input-field w-48" {{if not .ConfigValid}}disabled{{end}}>
-                <label class="flex items-center gap-2 text-neutral-400 text-sm whitespace-nowrap">
-                    <input type="checkbox" class="w-4 h-4 accent-purple-600" id="point-rule-delete" {{if not .ConfigValid}}disabled{{end}}>
+                <label class="flex items-center gap-2 text-text-muted text-sm whitespace-nowrap">
+                    <input type="checkbox" class="w-4 h-4 accent-control-accent" id="point-rule-delete" {{if not .ConfigValid}}disabled{{end}}>
                     <span>{{ t "notif.points.delete_after" }}</span>
                 </label>
                 <button type="button" id="add-point-rule-btn" class="btn-secondary" {{if not .ConfigValid}}disabled{{end}}>{{ t "notif.points.add_rule" }}</button>
@@ -227,24 +227,24 @@
     <details id="notif-stream-status" class="details-panel">
         <summary class="text-lg">{{ t "notif.stream.title" }}</summary>
         <div class="details-content">
-            <p class="text-neutral-400 text-sm mb-4">{{ t "notif.stream.desc" }}</p>
+            <p class="text-text-muted text-sm mb-4">{{ t "notif.stream.desc" }}</p>
             
-            <div class="bg-neutral-900 rounded-lg p-4 mb-4">
+            <div class="bg-surface-page rounded-lg p-4 mb-4">
                 <div class="setting-row border-b-0">
                     <div>
                         <div class="setting-label">{{ t "notif.stream.online_enable" }}</div>
                         <div class="setting-description">{{ t "notif.stream.online_enable.desc" }}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-enabled" {{if not .ConfigValid}}disabled{{end}}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" id="online-enabled" {{if not .ConfigValid}}disabled{{end}}>
                 </div>
                 
-                <div id="online-options" class="hidden mt-3 pl-4 border-l-2 border-purple-500/30 space-y-3">
+                <div id="online-options" class="hidden mt-3 pl-4 border-l-2 border-interactive/30 space-y-3">
                     <div class="setting-row border-b-0 py-2">
                         <div>
                             <div class="setting-label">{{ t "notif.all_streamers" }}</div>
                             <div class="setting-description">{{ t "notif.all_streamers.desc" }}</div>
                         </div>
-                        <input type="checkbox" class="w-5 h-5 accent-purple-600" id="online-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
+                        <input type="checkbox" class="w-5 h-5 accent-control-accent" id="online-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
                     </div>
                     
                     <div class="hidden py-2" id="online-streamers-row">
@@ -254,8 +254,8 @@
                         </div>
                         <div class="flex flex-wrap gap-2" id="online-streamers">
                             {{range .Streamers}}
-                            <label class="flex items-center gap-1 bg-neutral-800 px-2 py-1 rounded border border-neutral-700 text-sm cursor-pointer hover:border-purple-500 transition-colors">
-                                <input type="checkbox" class="w-4 h-4 accent-purple-600" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
+                            <label class="flex items-center gap-1 bg-surface-card px-2 py-1 rounded border border-border-default text-sm cursor-pointer hover:border-interactive transition-colors">
+                                <input type="checkbox" class="w-4 h-4 accent-control-accent" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
                                 <span>{{.}}</span>
                             </label>
                             {{end}}
@@ -264,22 +264,22 @@
                 </div>
             </div>
             
-            <div class="bg-neutral-900 rounded-lg p-4">
+            <div class="bg-surface-page rounded-lg p-4">
                 <div class="setting-row border-b-0">
                     <div>
                         <div class="setting-label">{{ t "notif.stream.offline_enable" }}</div>
                         <div class="setting-description">{{ t "notif.stream.offline_enable.desc" }}</div>
                     </div>
-                    <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-enabled" {{if not .ConfigValid}}disabled{{end}}>
+                    <input type="checkbox" class="w-5 h-5 accent-control-accent" id="offline-enabled" {{if not .ConfigValid}}disabled{{end}}>
                 </div>
                 
-                <div id="offline-options" class="hidden mt-3 pl-4 border-l-2 border-purple-500/30 space-y-3">
+                <div id="offline-options" class="hidden mt-3 pl-4 border-l-2 border-interactive/30 space-y-3">
                     <div class="setting-row border-b-0 py-2">
                         <div>
                             <div class="setting-label">{{ t "notif.all_streamers" }}</div>
                             <div class="setting-description">{{ t "notif.all_streamers.desc" }}</div>
                         </div>
-                        <input type="checkbox" class="w-5 h-5 accent-purple-600" id="offline-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
+                        <input type="checkbox" class="w-5 h-5 accent-control-accent" id="offline-all-streamers" {{if not .ConfigValid}}disabled{{end}}>
                     </div>
                     
                     <div class="hidden py-2" id="offline-streamers-row">
@@ -289,8 +289,8 @@
                         </div>
                         <div class="flex flex-wrap gap-2" id="offline-streamers">
                             {{range .Streamers}}
-                            <label class="flex items-center gap-1 bg-neutral-800 px-2 py-1 rounded border border-neutral-700 text-sm cursor-pointer hover:border-purple-500 transition-colors">
-                                <input type="checkbox" class="w-4 h-4 accent-purple-600" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
+                            <label class="flex items-center gap-1 bg-surface-card px-2 py-1 rounded border border-border-default text-sm cursor-pointer hover:border-interactive transition-colors">
+                                <input type="checkbox" class="w-4 h-4 accent-control-accent" value="{{.}}" {{if not $.ConfigValid}}disabled{{end}}>
                                 <span>{{.}}</span>
                             </label>
                             {{end}}
@@ -503,7 +503,7 @@
         tbody.innerHTML = '';
 
         if (pointRules.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-neutral-400 py-4">' + t('js.notif.no_rules') + '</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-text-muted py-4">' + t('js.notif.no_rules') + '</td></tr>';
             return;
         }
 
@@ -513,8 +513,8 @@
                 <td>${rule.streamer}</td>
                 <td>${formatNumber(rule.threshold)}</td>
                 <td>${rule.deleteOnTrigger ? t('js.notif.yes') : t('js.notif.no')}</td>
-                <td class="${rule.triggered ? 'text-green-500' : 'text-neutral-400'}">${rule.triggered ? t('js.notif.triggered') : t('js.notif.waiting')}</td>
-                <td><button class="px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors" onclick="deletePointRule(${rule.id})" aria-label="${t('js.notif.delete_rule', { streamer: rule.streamer })}">✕</button></td>
+                <td class="${rule.triggered ? 'text-status-success' : 'text-text-muted'}">${rule.triggered ? t('js.notif.triggered') : t('js.notif.waiting')}</td>
+                <td><button class="px-2 py-1 text-text-muted hover:text-status-danger hover:bg-status-danger/10 rounded transition-colors" onclick="deletePointRule(${rule.id})" aria-label="${t('js.notif.delete_rule', { streamer: rule.streamer })}">✕</button></td>
             `;
             tbody.appendChild(tr);
         });

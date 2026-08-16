@@ -151,7 +151,7 @@ func TestF4cPanelDisabledAttributeFollowsCapabilities(t *testing.T) {
 	if !strings.Contains(body, `hx-post="/api/lifecycle/pause" hx-target="#lifecycle-panel" hx-swap="innerHTML" hx-disabled-elt="this" hx-sync="#lifecycle-panel:replace" disabled>`) {
 		t.Errorf("pause button must carry disabled while CanPause is false; body=%s", body)
 	}
-	if !strings.Contains(body, `class="lc-spinner w-3.5 h-3.5 border-2 border-neutral-700 border-t-purple-500 rounded-full animate-spin"`) {
+	if !strings.Contains(body, `class="lc-spinner w-3.5 h-3.5 border-2 border-border-default border-t-interactive rounded-full animate-spin"`) {
 		t.Error("transitioning panel must show the spinner")
 	}
 }

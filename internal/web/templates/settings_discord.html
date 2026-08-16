@@ -2,7 +2,7 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.discord.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.discord.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.discord.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form" data-c6-form novalidate>
@@ -11,7 +11,7 @@
             <div class="setting-label">{{ t "set.discord.enable_label" }}</div>
             <div class="setting-description">{{ t "set.discord.enable_desc" }}</div>
         </div>
-        <input type="checkbox" class="w-5 h-5 accent-purple-600" id="discordEnabled">
+        <input type="checkbox" class="w-5 h-5 accent-control-accent" id="discordEnabled">
     </div>
     <div class="setting-row">
         <div>
@@ -28,20 +28,20 @@
         <input type="text" class="input-field w-52" id="discordGuildId" placeholder="123456789012345678">
     </div>
 
-    <div class="bg-neutral-900 border border-neutral-700 rounded-lg p-4 mt-4">
-        <div class="text-neutral-100 font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
-        <ol class="text-neutral-400 text-sm space-y-1 list-decimal pl-5">
-            <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.portal" }}</a></li>
-            <li>{{ t "set.discord.s2_pre" }}<strong class="text-neutral-100">New Application</strong>{{ t "set.discord.s2_post" }}</li>
-            <li>{{ t "set.discord.s3_pre" }}<strong class="text-neutral-100">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-neutral-100">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
-            <li>{{ t "set.discord.s4_pre" }}<strong class="text-neutral-100">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
-            <li>{{ t "set.discord.s5_pre" }}<strong class="text-neutral-100">OAuth2 → URL Generator</strong></li>
-            <li>{{ t "set.discord.s6_pre" }}<strong class="text-neutral-100">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-neutral-100">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-neutral-100">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
+    <div class="bg-surface-page border border-border-default rounded-lg p-4 mt-4">
+        <div class="text-text-primary font-medium mb-3">{{ t "set.discord.howto_bot" }}</div>
+        <ol class="text-text-muted text-sm space-y-1 list-decimal pl-5">
+            <li>{{ t "set.discord.s1_pre" }}<a href="https://discord.com/developers/applications" target="_blank" class="text-interactive hover:underline">{{ t "set.discord.portal" }}</a></li>
+            <li>{{ t "set.discord.s2_pre" }}<strong class="text-text-primary">New Application</strong>{{ t "set.discord.s2_post" }}</li>
+            <li>{{ t "set.discord.s3_pre" }}<strong class="text-text-primary">Bot</strong>{{ t "set.discord.s3_mid" }}<strong class="text-text-primary">Reset Token</strong>{{ t "set.discord.s3_post" }}</li>
+            <li>{{ t "set.discord.s4_pre" }}<strong class="text-text-primary">Message Content Intent</strong>{{ t "set.discord.s4_post" }}</li>
+            <li>{{ t "set.discord.s5_pre" }}<strong class="text-text-primary">OAuth2 → URL Generator</strong></li>
+            <li>{{ t "set.discord.s6_pre" }}<strong class="text-text-primary">bot</strong>{{ t "set.discord.s6_mid" }}<strong class="text-text-primary">Send Messages</strong>{{ t "set.discord.s6_and" }}<strong class="text-text-primary">Read Message History</strong>{{ t "set.discord.s6_post" }}</li>
             <li>{{ t "set.discord.s7" }}</li>
         </ol>
-        <div class="text-neutral-100 font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
-        <p class="text-neutral-400 text-sm">
-            {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-purple-500 hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
+        <div class="text-text-primary font-medium mt-4 mb-2">{{ t "set.discord.howto_guild" }}</div>
+        <p class="text-text-muted text-sm">
+            {{ t "set.discord.guide_pre" }}<a href="https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID" target="_blank" class="text-interactive hover:underline">{{ t "set.discord.guide_link" }}</a>{{ t "set.discord.guide_post" }}
         </p>
     </div>
 </form>

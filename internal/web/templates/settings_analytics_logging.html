@@ -2,7 +2,7 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.analyticslogging.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.analyticslogging.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.analyticslogging.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
@@ -37,9 +37,9 @@
                 <div class="setting-label">{{ t "set.logger.colored_label" }}</div>
                 <div class="setting-description">{{ t "set.logger.colored_desc" }}</div>
             </div>
-            <input type="checkbox" id="colored" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="colored" class="w-5 h-5 accent-control-accent">
         </div>
-        <p class="setting-description text-amber-500 mt-1">{{ t "set.logger.restart_note" }}</p>
+        <p class="setting-description text-text-caution mt-1">{{ t "set.logger.restart_note" }}</p>
     </section>
 
     <section class="space-y-0">
@@ -63,7 +63,7 @@
                 <div class="setting-label">{{ t "set.analytics.chatlogs_label" }}</div>
                 <div class="setting-description">{{ t "set.analytics.chatlogs_desc" }}</div>
             </div>
-            <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="enableChatLogs" class="w-5 h-5 accent-control-accent">
         </div>
     </section>
 </form>

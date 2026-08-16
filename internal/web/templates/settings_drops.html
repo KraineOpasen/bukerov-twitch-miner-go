@@ -2,7 +2,7 @@
 
 {{define "content"}}
 <h1 class="text-3xl font-bold mb-2">{{ t "setcat.drops.title" }}</h1>
-<p class="text-neutral-400 text-sm mb-6">{{ t "setcat.drops.subtitle" }}</p>
+<p class="text-text-muted text-sm mb-6">{{ t "setcat.drops.subtitle" }}</p>
 <div id="settings-cat-load-error" class="c1-inline-fail" role="alert" hidden></div>
 
 <form id="settings-cat-form" class="c6-form space-y-6" data-c6-form novalidate>
@@ -60,7 +60,7 @@
 
     <section>
         <h2 class="text-lg font-medium mb-1">{{ t "set.directory.title" }}</h2>
-        <p class="text-neutral-400 text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-neutral-100">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
+        <p class="text-text-muted text-sm mb-4">{{ t "set.directory.desc_pre" }}<span class="text-text-primary">World of Tanks</span>{{ t "set.directory.desc_post" }}</p>
 
         <div class="flex gap-3 mb-4">
             <input type="text" id="new-directory-game-input" placeholder="{{ t "set.directory.input_placeholder" }}" class="input-field flex-1 min-w-0">
@@ -86,14 +86,14 @@
                 <div class="setting-label">{{ t "set.directory.prefer_tracked_label" }}</div>
                 <div class="setting-description">{{ t "set.directory.prefer_tracked_desc" }}</div>
             </div>
-            <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="discoveryPreferTracked" class="w-5 h-5 accent-control-accent">
         </div>
         <div class="setting-row mt-4">
             <div>
                 <div class="setting-label">{{ t "set.directory.prefer_subscribed_label" }}</div>
                 <div class="setting-description">{{ t "set.directory.prefer_subscribed_desc" }}</div>
             </div>
-            <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-purple-600">
+            <input type="checkbox" id="discoveryPreferSubscribed" class="w-5 h-5 accent-control-accent">
         </div>
     </section>
 </form>
@@ -117,11 +117,11 @@
         const header = document.createElement('div');
         header.className = 'streamer-header';
         const name = document.createElement('span');
-        name.className = 'flex-1 text-neutral-100 font-medium';
+        name.className = 'flex-1 text-text-primary font-medium';
         name.textContent = game;
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
-        removeBtn.className = 'ml-2 px-2 py-1 text-neutral-400 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors';
+        removeBtn.className = 'ml-2 px-2 py-1 text-text-muted hover:text-status-danger hover:bg-status-danger/10 rounded transition-colors';
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', function () {
             li.remove();
@@ -162,7 +162,7 @@
         const setMsg = (text, cls) => { result.textContent = text; result.className = 'mt-2 text-sm ' + cls; };
         const name = input.value.trim();
         if (!name) { setMsg(t('js.set.gameid.err_empty'), 'text-red-400'); return; }
-        setMsg('…', 'text-neutral-400');
+        setMsg('…', 'text-text-muted');
         try {
             const resp = await fetch('/api/settings/resolve-game-id', {
                 method: 'POST',
@@ -173,11 +173,11 @@
             const data = await resp.json();
             if (!data.found) { setMsg(t('js.set.gameid.err_notfound'), 'text-red-400'); return; }
             result.textContent = '';
-            result.className = 'mt-2 text-sm text-neutral-300';
+            result.className = 'mt-2 text-sm text-text-secondary';
             const label = document.createElement('span');
             label.textContent = t('js.set.gameid.result') + ' ';
             const code = document.createElement('code');
-            code.className = 'text-neutral-100 font-mono select-all';
+            code.className = 'text-text-primary font-mono select-all';
             code.textContent = data.gameId;
             result.appendChild(label);
             result.appendChild(code);
