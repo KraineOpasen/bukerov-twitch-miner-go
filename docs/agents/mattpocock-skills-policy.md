@@ -11,14 +11,23 @@ what's installed, why, how it's patched, and how to update it. See also
 ## Upstream
 
 - Repo: `https://github.com/mattpocock/skills`
-- Reviewed commit: `ed37663cc5fbef691ddfecd080dff42f7e7e350d`
-- Reviewed tree: `04b0fcb78e3de7c58744fcba2528354cc64ab988`
+- Reviewed commit: `068b6e0c62393147daf03530149cdce209c93da8` (refreshed from `ed37663cc5fbef691ddfecd080dff42f7e7e350d`)
+- Reviewed tree: `717d7f0ef7363b35c967d43629f3b71d4ec3ba77` (was `04b0fcb78e3de7c58744fcba2528354cc64ab988`)
 - Current upstream HEAD at review time: same SHA (**drift: none**)
-- `package.json` version: `1.1.0` (released)
-- `.claude-plugin/plugin.json` version: `1.2.0` — **pre-bumped ahead of `package.json`** by 9 pending
-  changesets not yet released as of the reviewed commit. This manifest records `1.1.0` (the released version)
-  as `upstream_version`; the `1.2.0` figure is a maintainer pre-bump, not a published release. Treat this as a
-  known, documented drift — not a discrepancy to "fix."
+- `package.json` version: `1.2.3`
+- `.claude-plugin/plugin.json` version: `1.2.3` — matches `package.json` in this refresh; the pre-bump drift
+  noted at the previous review (`1.2.0` plugin.json vs. `1.1.0` released) has resolved itself upstream.
+- Between the previously reviewed commit and this one, upstream **deleted**
+  `skills/productivity/writing-great-skills` (one of this project's then-21 installed skills) and replaced it
+  with an unrelated new skill, `skills/productivity/writing-for-agents` (different name, different file
+  structure, fully rewritten content — not a rename upstream's own history tracks as one). This project now
+  vendors `writing-for-agents` under a fresh review in its place; see `mattpocock-skills-manifest.json`'s
+  `excluded[]` entry for `writing-great-skills` and the `writing-for-agents` skill entry.
+- This refresh also newly promoted three skills that weren't previously part of the reviewed set:
+  `skills/engineering/wizard` (moved from `skills/in-progress/`), `skills/productivity/to-questionnaire`
+  (moved from `skills/in-progress/`), and `skills/productivity/wait-what` (new). `wizard` and `wait-what` were
+  added to this project's installed set after a separate explicit owner authorization; `to-questionnaire`
+  remains excluded by owner decision — see "Excluded" below.
 
 ## Installation model
 
@@ -28,45 +37,53 @@ minimally patched (see below). `automatic_updates: false` — nothing about this
 re-syncs from upstream on its own. A human (or an explicitly-contracted agent task) must re-run the review
 process to pick up a new upstream commit.
 
-## Installed: 21 skills
+## Installed: 23 skills
 
-16 of upstream's 17 promoted `skills/engineering/*` skills, plus all 5 `skills/productivity/*` skills
-(`.claude-plugin/plugin.json`'s `skills[]` array is upstream's source of truth for "promoted"; it lists exactly
-22 entries). See `mattpocock-skills-manifest.json` for the full per-skill list with classification and
-invocation mode.
+17 of upstream's 18 promoted `skills/engineering/*` skills, plus 6 of upstream's 7 promoted
+`skills/productivity/*` skills (`.claude-plugin/plugin.json`'s `skills[]` array is upstream's source of truth
+for "promoted"; it lists exactly 25 entries as of this refresh). See `mattpocock-skills-manifest.json` for the
+full per-skill list with classification and invocation mode.
 
 ## Excluded
 
-- **`setup-matt-pocock-skills`** — the one promoted skill excluded from vendoring. It's the only skill that
-  edits this project's root `CLAUDE.md`; installing it would give a third-party skill standing permission to
-  rewrite this project's own governance document. Its setup function (issue tracker config, triage label
-  vocabulary, domain-doc layout) was instead performed deterministically by this governance task — see
-  `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, `docs/agents/triage-labels.md`.
-- **19 non-promoted skills** under `skills/deprecated/`, `skills/in-progress/`, `skills/misc/`, and
+- **`setup-matt-pocock-skills`** — the one promoted `engineering` skill excluded from vendoring. It's the only
+  skill that edits this project's root `CLAUDE.md`; installing it would give a third-party skill standing
+  permission to rewrite this project's own governance document. Its setup function (issue tracker config,
+  triage label vocabulary, domain-doc layout) was instead performed deterministically by this governance task —
+  see `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, `docs/agents/triage-labels.md`.
+- **`to-questionnaire`** — the one promoted `productivity` skill excluded from vendoring. Newly promoted
+  upstream in this refresh (moved out of `skills/in-progress/`); excluded by explicit owner decision alongside
+  `setup-matt-pocock-skills` rather than a content-safety finding — `ask-matt`'s vendored precondition note
+  (see `ask-matt-setup-pointer` in the patch ledger) tells the router not to suggest either.
+- **Non-promoted skills** under `skills/deprecated/`, `skills/in-progress/`, `skills/misc/`, and
   `skills/personal/` — none are in `plugin.json`'s `skills[]`, so none were ever part of the "promoted" set this
   project reviews. Full list with reasons in `mattpocock-skills-manifest.json`'s `excluded[]`.
 - **`agents/openai.yaml`** — every promoted skill ships this sidecar (Codex-specific agent metadata). Claude
-  Code does not read it, so it was not copied for any of the 21 installed skills. This is dead weight relative
+  Code does not read it, so it was not copied for any of the 23 installed skills. This is dead weight relative
   to this project's runtime, not a security exclusion.
 
 ## Invocation modes
 
-- **User-invoked** (`disable-model-invocation: true`, 13 of the 21): `ask-matt`, `grill-with-docs`, `implement`,
+- **User-invoked** (`disable-model-invocation: true`, 15 of the 23): `ask-matt`, `grill-with-docs`, `implement`,
   `improve-codebase-architecture`, `to-spec`, `to-tickets`, `triage`, `wayfinder`, `grill-me`, `handoff`,
-  `teach`, `writing-great-skills`, and `resolving-merge-conflicts` (moved from model- to user-invoked by a
-  local patch — see below).
-- **Model-invoked** (8 of the 21): `code-review`, `codebase-design`, `diagnosing-bugs`, `domain-modeling`,
+  `teach`, `resolving-merge-conflicts` (moved from model- to user-invoked by a local patch — see below),
+  `writing-for-agents` (also moved by a local patch; already user-invoked upstream in the skill it replaces,
+  `writing-great-skills`), `wizard` (moved from model- to user-invoked by a local patch), and `wait-what`
+  (already user-invoked upstream, kept as-is).
+- **Model-invoked** (8 of the 23): `code-review`, `codebase-design`, `diagnosing-bugs`, `domain-modeling`,
   `grilling`, `prototype`, `research`, `tdd`.
 
 ## Local patches
 
-16 skills carry a minimal, marked local patch (17 patch-ids counting `resolving-merge-conflicts`'s frontmatter
-change separately from its body change); 5 skills (`domain-modeling`, `grill-me`, `grill-with-docs`, `grilling`,
-`writing-great-skills`) are unmodified. Every patched block is wrapped in
-`<!-- bukerov-local-patch: <id> --> ... <!-- /bukerov-local-patch: <id> -->` comments so a diff against the
-upstream blob SHA shows exactly what changed and why. Full ledger: `docs/agents/mattpocock-skills-patches.md`.
-No patch translates or stylistically rewrites upstream text — every change narrows a capability (commit, push,
-tracker mutation, network fetch, auto-open, agent count) to match this project's governance model.
+19 skills carry a minimal, marked local patch (21 patch-ids counting `resolving-merge-conflicts`'s frontmatter
+change separately from its body change, and `wait-what-domain-vocab` once for each of the two files it touches);
+4 skills (`domain-modeling`, `grill-me`, `grill-with-docs`, `grilling`) are unmodified. Every patched block is
+wrapped in `<!-- bukerov-local-patch: <id> --> ... <!-- /bukerov-local-patch: <id> -->` comments so a diff
+against the upstream blob SHA shows exactly what changed and why. Full ledger:
+`docs/agents/mattpocock-skills-patches.md`. No patch translates or stylistically rewrites upstream text — every
+change narrows a capability (commit, push, tracker mutation, network fetch, auto-open, agent count, wizard-
+generated script authority) to match this project's governance model, or corrects a router's (`ask-matt`'s)
+description of another vendored skill's actual invocation mode.
 
 ## Governance precedence
 
