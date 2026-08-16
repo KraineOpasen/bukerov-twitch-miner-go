@@ -1,0 +1,3627 @@
+{
+  "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
+  "upstream_commit": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
+  "upstream_version": "3.22.0",
+  "upstream_tree": {
+    "ce-babysit-pr": "eef0d57c1c3863575a506eaa19b9bc58c526cc80",
+    "ce-brainstorm": "c4573060ec038a135429b8fe507bd9d0dc3c7144",
+    "ce-code-review": "f873e7fd8bcfba4e9c1b4da037d41e689ae0c015",
+    "ce-commit": "3a43bff81a76d887849474e3d5f6a0e257ae3932",
+    "ce-commit-push-pr": "fae458bc90cf1f28720ffd5adce2bd3c65c405f7",
+    "ce-compound": "d072651f9382a0156f15622691b5e1542a123d5d",
+    "ce-compound-refresh": "2bc5f92b9493b227d45da298c67fac75ba7f8c76",
+    "ce-debug": "757086f881fd3ea7a726f9b89760e669dcec818f",
+    "ce-doc-review": "6b13372b650881c4d466f9d536e0a44598c22c64",
+    "ce-explain": "b788204ada086c17205556d340f69dbdcf10d6fd",
+    "ce-handoff": "d5b1ee1e54571bfbdccef8c7c09025f0fd7c0945",
+    "ce-ideate": "90ded46f4268fa10605e07887efe6123f4322e4e",
+    "ce-optimize": "d85eae083d8abfb9b572a46ee97ec90f4c9b0897",
+    "ce-plan": "439226a10b3e8ae02b53a850475a7c022580d41f",
+    "ce-pov": "d4db4d49cfd92f0f96a85c5446d6452de7ac01a4",
+    "ce-prototype": "3b54d65f4f3bada99ef5602eedd20adf47259c64",
+    "ce-resolve-pr-feedback": "67f696863cdd1a67f3adfdac2657363d926bc09b",
+    "ce-setup": "45d96a6ef56c76b258b8e9d201f57d9fa4279f81",
+    "ce-simplify-code": "cedfb5c8230688c680bba0481e56ede8bd115c59",
+    "ce-strategy": "ae9a402f5a9c30bddfa2e224ba84494addb38ff8",
+    "ce-work": "79d8f2b7c063c49167cec10095c9b0d224b45edf",
+    "ce-worktree": "7b1caeddd4ae8beee629c65da2d097ff05900606"
+  },
+  "upstream_current_head": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
+  "drift": "none",
+  "reviewed_at": "2026-08-16T00:00:00Z",
+  "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3). All 33 upstream skills under skills/ plus the repo-local .agents/skills/ce-skill-work were read with their complete dependency closures; every bundled script was read end to end.",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "license": {
+    "spdx": "MIT",
+    "per_skill_license_file": "LICENSE",
+    "copyright_notice": "Copyright (c) 2025 Every",
+    "notes": "MIT requires the copyright and permission notice to accompany all copies, so the upstream root LICENSE is copied verbatim into every vendored skill directory (origin=local, with a reason) rather than relying on a single shared notice."
+  },
+  "notes": "22 of upstream's 33 skills are vendored; 10 are excluded and 2 are held (see excluded_skills[]). Upstream deliberately DUPLICATES shared components into each owning skill rather than factoring them out, and pins the duplicates with byte-parity tests, so each vendored skill directory is self-contained: there is no shared runtime tree to install alongside it. Verified at this pin: no skill references a sibling skill's files and no skill uses ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_SKILL_DIR}. Every bundled script is located via an inline SKILL_DIR anchor and invoked through an explicit interpreter, so normalizing file modes to 100644 breaks no invocation.",
+  "skills": [
+    {
+      "name": "ce-babysit-pr",
+      "path": ".claude/skills/ce-babysit-pr",
+      "upstream_path": "skills/ce-babysit-pr",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-merge-authority",
+        "ce-no-workflow-rerun"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-babysit-pr/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/SKILL.md",
+          "upstream_blob_sha": "0dafb50966d048c4c64bcde4f041388ca634b20b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3f75cd9420c26b718395363643a780a1c89afa4f",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority",
+            "ce-no-workflow-rerun"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/stack-commands.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/stack-commands.md",
+          "upstream_blob_sha": "686ded46c1df841f5e5876ed85c98778a5b598b9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eacd278ce3a5f4b8bc002a936647b74b7187b1b2",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/watch-loop.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/watch-loop.md",
+          "upstream_blob_sha": "457a63b3b82c05e2c356f4f1ec08b8fd62f2c4c2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "22c0beeb3b84ea649bd73f4db7723fcbae0eaed1",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/scripts/pr-snapshot",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/scripts/pr-snapshot",
+          "upstream_blob_sha": "622e9d41515f53cef36463b0a9339f57b5ffc4db",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "622e9d41515f53cef36463b0a9339f57b5ffc4db",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-brainstorm",
+      "path": ".claude/skills/ce-brainstorm",
+      "upstream_path": "skills/ce-brainstorm",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [
+        "ce-mode-normalize"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-brainstorm/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/SKILL.md",
+          "upstream_blob_sha": "ee5dcb4aa04c1fe2f44273a77c0f2adfcb056bf8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ee5dcb4aa04c1fe2f44273a77c0f2adfcb056bf8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/agents/slack-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/agents/slack-researcher.md",
+          "upstream_blob_sha": "fa9b1671614da5899816ff969a81e70c94a2fd95",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fa9b1671614da5899816ff969a81e70c94a2fd95",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/blindspot-pass.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/blindspot-pass.md",
+          "upstream_blob_sha": "fb23ff6705faf795a835cb4634ee3ba42810a4eb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fb23ff6705faf795a835cb4634ee3ba42810a4eb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/brainstorm-sections.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/brainstorm-sections.md",
+          "upstream_blob_sha": "ee1f521624a911bfd9bc5a00e0777118e6d96f8b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ee1f521624a911bfd9bc5a00e0777118e6d96f8b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/handoff.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/handoff.md",
+          "upstream_blob_sha": "133e9c58d09c80ba2db8043f2ad70953ac9f0e4c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "133e9c58d09c80ba2db8043f2ad70953ac9f0e4c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/html-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/html-rendering.md",
+          "upstream_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/markdown-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/markdown-rendering.md",
+          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/model-tiers.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/model-tiers.md",
+          "upstream_blob_sha": "2f6efd4b2ace69ad1cf3cbf913e11513baff6e16",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2f6efd4b2ace69ad1cf3cbf913e11513baff6e16",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/product-pressure-test.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/product-pressure-test.md",
+          "upstream_blob_sha": "05ad604ec94bd95902c46d80fc274a969af18539",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "05ad604ec94bd95902c46d80fc274a969af18539",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/reasoning-elevation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/reasoning-elevation.md",
+          "upstream_blob_sha": "d9a3e19b0d0e0f3a3f02db31f8c55369089627c6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d9a3e19b0d0e0f3a3f02db31f8c55369089627c6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/settled-decisions.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/settled-decisions.md",
+          "upstream_blob_sha": "1293c224e338f7ccec283ec5ff9964707be41055",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1293c224e338f7ccec283ec5ff9964707be41055",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/synthesis-summary.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/synthesis-summary.md",
+          "upstream_blob_sha": "a481f4784c56132383f38d01180a286dcedb47b3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a481f4784c56132383f38d01180a286dcedb47b3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/universal-brainstorming.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/universal-brainstorming.md",
+          "upstream_blob_sha": "05cdb870fbf020a873c13768a04c68cd8c7a00fa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "05cdb870fbf020a873c13768a04c68cd8c7a00fa",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/verdict-routing.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/verdict-routing.md",
+          "upstream_blob_sha": "23115738e915add5e0f6e0ef35355d7b2c08e086",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "23115738e915add5e0f6e0ef35355d7b2c08e086",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/visual-probes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/visual-probes.md",
+          "upstream_blob_sha": "1dad8f31a37ccc094f750c51daffa282341c2b65",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1dad8f31a37ccc094f750c51daffa282341c2b65",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/scripts/elevation-dispatch.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/scripts/elevation-dispatch.sh",
+          "upstream_blob_sha": "6a9d59b9c121a0edbf4cb769d035aceb00a0e3d9",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a9d59b9c121a0edbf4cb769d035aceb00a0e3d9",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/scripts/light-webserver.js",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/scripts/light-webserver.js",
+          "upstream_blob_sha": "97b81b002cccd2ec6f25436886e0a5fc09cc652f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "97b81b002cccd2ec6f25436886e0a5fc09cc652f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-code-review",
+      "path": ".claude/skills/ce-code-review",
+      "upstream_path": "skills/ce-code-review",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-permission-bypass"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-code-review/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-code-review/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/SKILL.md",
+          "upstream_blob_sha": "09e1038cf3fdea60b3b08865ea975784e3e80549",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "09e1038cf3fdea60b3b08865ea975784e3e80549",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/action-class-rubric.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/action-class-rubric.md",
+          "upstream_blob_sha": "bbdc5d7cd2de4679e91bc90c76c4e036bbaebc71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bbdc5d7cd2de4679e91bc90c76c4e036bbaebc71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/cross-model-eval.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/cross-model-eval.md",
+          "upstream_blob_sha": "5d0ff94da5fe8aaa2ac72cfdc68fb8c5e80dd876",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5d0ff94da5fe8aaa2ac72cfdc68fb8c5e80dd876",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/cross-model-review.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/cross-model-review.md",
+          "upstream_blob_sha": "717a0f2d1d261fc1e61317bf080c9012c08a0d55",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "717a0f2d1d261fc1e61317bf080c9012c08a0d55",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/diff-scope.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/diff-scope.md",
+          "upstream_blob_sha": "11c33cf5591c2a6585c556a645be97c1de5c9e4e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "11c33cf5591c2a6585c556a645be97c1de5c9e4e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/dispatch-reviewers.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/dispatch-reviewers.md",
+          "upstream_blob_sha": "6827b48e719b10946455d6f35332a9a12a92ba85",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6827b48e719b10946455d6f35332a9a12a92ba85",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/findings-schema.json",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/findings-schema.json",
+          "upstream_blob_sha": "ef5c4099bac6516ba808f00f62080a6e9fb306cb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ef5c4099bac6516ba808f00f62080a6e9fb306cb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/finish-review.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/finish-review.md",
+          "upstream_blob_sha": "5f594e2939ffd04886b3500dc661638b07706c13",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5f594e2939ffd04886b3500dc661638b07706c13",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/persona-catalog.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/persona-catalog.md",
+          "upstream_blob_sha": "ec2ed0cca0f43cbd33487ef30793b50128428dab",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ec2ed0cca0f43cbd33487ef30793b50128428dab",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/adversarial-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/adversarial-reviewer.md",
+          "upstream_blob_sha": "a65cbb986c1089f96686d1b68408428a270f1576",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a65cbb986c1089f96686d1b68408428a270f1576",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/agent-native-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/agent-native-reviewer.md",
+          "upstream_blob_sha": "dbbec500b6fb0ffc55cc6751d8d6eb158186a3c7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dbbec500b6fb0ffc55cc6751d8d6eb158186a3c7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/api-contract-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/api-contract-reviewer.md",
+          "upstream_blob_sha": "2e6d268e5d4e8fc22942c89b9d76c9234688d9c0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2e6d268e5d4e8fc22942c89b9d76c9234688d9c0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/correctness-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/correctness-reviewer.md",
+          "upstream_blob_sha": "3b248c047927e1e373907fc9173d45d0a6f5b57f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b248c047927e1e373907fc9173d45d0a6f5b57f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/data-migration-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/data-migration-reviewer.md",
+          "upstream_blob_sha": "4a65d1f8e8cf550a180bc2a648979c34b87e27dc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4a65d1f8e8cf550a180bc2a648979c34b87e27dc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/deployment-verification-agent.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/deployment-verification-agent.md",
+          "upstream_blob_sha": "91bb1497dab4b1f5ebbc27ae30920e628563b7bc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "91bb1497dab4b1f5ebbc27ae30920e628563b7bc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/julik-frontend-races-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/julik-frontend-races-reviewer.md",
+          "upstream_blob_sha": "5b6a31e1405101bf6db49036409bb76d2791ff15",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5b6a31e1405101bf6db49036409bb76d2791ff15",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/learnings-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/learnings-researcher.md",
+          "upstream_blob_sha": "fd6752a31d9f98313d19353940488270db95f427",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fd6752a31d9f98313d19353940488270db95f427",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/maintainability-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/maintainability-reviewer.md",
+          "upstream_blob_sha": "49500d4aca865ce48bfbcc09bc3ff54772cf09a0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "49500d4aca865ce48bfbcc09bc3ff54772cf09a0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/performance-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/performance-reviewer.md",
+          "upstream_blob_sha": "a1d533524031a5f7a9dfeaf63daac2f0da99b0d7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a1d533524031a5f7a9dfeaf63daac2f0da99b0d7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/previous-comments-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/previous-comments-reviewer.md",
+          "upstream_blob_sha": "12023aca5944d2b7fd6fe193dd6dacd70a1b8368",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "12023aca5944d2b7fd6fe193dd6dacd70a1b8368",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/project-standards-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/project-standards-reviewer.md",
+          "upstream_blob_sha": "bbb2ee2608edda68a5b3c7cc502013821a34e669",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bbb2ee2608edda68a5b3c7cc502013821a34e669",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/reliability-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/reliability-reviewer.md",
+          "upstream_blob_sha": "a0ebc64709ad01324ed6697eb23d6ba334f360ba",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a0ebc64709ad01324ed6697eb23d6ba334f360ba",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/security-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/security-reviewer.md",
+          "upstream_blob_sha": "7a20b2ae09c9261be60024948ae7b7496e8b8293",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7a20b2ae09c9261be60024948ae7b7496e8b8293",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/swift-ios-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/swift-ios-reviewer.md",
+          "upstream_blob_sha": "55216509f57a3475c0fea55ddf2e6b7f8b6f2c52",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "55216509f57a3475c0fea55ddf2e6b7f8b6f2c52",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/personas/testing-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/personas/testing-reviewer.md",
+          "upstream_blob_sha": "f2d9e29f3b82eb90a6f0f2d0e35d754271c38f36",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f2d9e29f3b82eb90a6f0f2d0e35d754271c38f36",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/review-output-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/review-output-template.md",
+          "upstream_blob_sha": "ac774710360fc99ce7ab1d88d9712ca908ed1c61",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ac774710360fc99ce7ab1d88d9712ca908ed1c61",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/subagent-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/subagent-template.md",
+          "upstream_blob_sha": "2220d58229d087f07c81b4f47a1c029356c9d669",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2220d58229d087f07c81b4f47a1c029356c9d669",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/validator-batch-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/validator-batch-template.md",
+          "upstream_blob_sha": "4612ffeef5fbbf8ff92a991d90c659ae09848fa5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4612ffeef5fbbf8ff92a991d90c659ae09848fa5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/validator-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/validator-template.md",
+          "upstream_blob_sha": "89f486234e8fe5013886bdb9b696b2cb3621f594",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89f486234e8fe5013886bdb9b696b2cb3621f594",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/scripts/cross-model-adversarial-review.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/scripts/cross-model-adversarial-review.sh",
+          "upstream_blob_sha": "14b105f1cae8831c20f158876ba63923fa469470",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "72836e0186fac607c1aa5ebaa93fa1425f6d0615",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-mode-normalize",
+            "ce-no-permission-bypass"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-code-review/scripts/findings-mechanics.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/scripts/findings-mechanics.py",
+          "upstream_blob_sha": "f02bc7880b09d6ddc8681ca373181b827341fee9",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f02bc7880b09d6ddc8681ca373181b827341fee9",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-code-review/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-code-review/scripts/review-scope.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/scripts/review-scope.py",
+          "upstream_blob_sha": "1382f94c056dbc026c42f3f58b36f7ae764926b2",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1382f94c056dbc026c42f3f58b36f7ae764926b2",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-commit",
+      "path": ".claude/skills/ce-commit",
+      "upstream_path": "skills/ce-commit",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-commit/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-commit/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit/SKILL.md",
+          "upstream_blob_sha": "ee482d720dbd1b4bf17b00dbce142b4f7816d3d7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ee482d720dbd1b4bf17b00dbce142b4f7816d3d7",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-commit-push-pr",
+      "path": ".claude/skills/ce-commit-push-pr",
+      "upstream_path": "skills/ce-commit-push-pr",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-draft-pr-only",
+        "ce-no-merge-authority"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-commit-push-pr/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/SKILL.md",
+          "upstream_blob_sha": "cec82a932d96b7f1cfbb2b6a57c680506cd1a7d2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8ea53a37eaa4ed6a412e5fceaf684617f5acf3f2",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-draft-pr-only",
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/branch-creation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/branch-creation.md",
+          "upstream_blob_sha": "d727e34e4a025dee09e76472e37430b1744443cd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d727e34e4a025dee09e76472e37430b1744443cd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/gh-stack-cli.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/gh-stack-cli.md",
+          "upstream_blob_sha": "4d4f94460cda55ef88207baeb41a097b819147b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "50367dcf01c0ee68f05203def051cc2e9c058a5b",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-draft-pr-only"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/pr-description-writing.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/pr-description-writing.md",
+          "upstream_blob_sha": "94ef0cc78552ea3d9f480061d703bb12a9471a8a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "94ef0cc78552ea3d9f480061d703bb12a9471a8a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/stack-submit.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/stack-submit.md",
+          "upstream_blob_sha": "4eed52f4278eacf42f6573b6d80bed95260c6cba",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "58aabff5030d429fff37e34e64d9f0270deb2720",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-draft-pr-only",
+            "ce-no-merge-authority"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-compound",
+      "path": ".claude/skills/ce-compound",
+      "upstream_path": "skills/ce-compound",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-governance-file-writes"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-compound/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-compound/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/SKILL.md",
+          "upstream_blob_sha": "6fa3babfb21315a0c3c37661908897d6a479ce3a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e17fc904d2f42f16a8f3a2e2447f4fb73b4a59f8",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-governance-file-writes"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-compound/assets/resolution-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/assets/resolution-template.md",
+          "upstream_blob_sha": "a4c0f759215f69c558439531c75bb369d4e31a88",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a4c0f759215f69c558439531c75bb369d4e31a88",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/best-practices-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/best-practices-researcher.md",
+          "upstream_blob_sha": "2d023d8a93dc53bef243dd2bdee7bdf74514fafc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2d023d8a93dc53bef243dd2bdee7bdf74514fafc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/data-integrity-guardian.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/data-integrity-guardian.md",
+          "upstream_blob_sha": "c47ca12c8232e1c5a87db7d37d124c42f343fea7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c47ca12c8232e1c5a87db7d37d124c42f343fea7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/framework-docs-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/framework-docs-researcher.md",
+          "upstream_blob_sha": "474b4f18a94e28aa9a4c7e1b28f8f4242ad2abc4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "474b4f18a94e28aa9a4c7e1b28f8f4242ad2abc4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/pattern-recognition-specialist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/pattern-recognition-specialist.md",
+          "upstream_blob_sha": "9cb72cb83b19d025037dac0c1f6c3414996ee9fd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9cb72cb83b19d025037dac0c1f6c3414996ee9fd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/performance-oracle.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/performance-oracle.md",
+          "upstream_blob_sha": "8862a000a8afcac4b2c1bcca98ff0d52c2d1b079",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8862a000a8afcac4b2c1bcca98ff0d52c2d1b079",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/security-sentinel.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/security-sentinel.md",
+          "upstream_blob_sha": "17651f3eb9d43ad32da80136b3241615884ba111",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "17651f3eb9d43ad32da80136b3241615884ba111",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/agents/session-historian.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/agents/session-historian.md",
+          "upstream_blob_sha": "a097e7a789ca0f734a25c1c054358f7ad03bb18f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a097e7a789ca0f734a25c1c054358f7ad03bb18f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/concepts-vocabulary.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/concepts-vocabulary.md",
+          "upstream_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/grounding-validation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/grounding-validation.md",
+          "upstream_blob_sha": "62c0d70cc9575835d9783bd977da9f8357b48d0c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "62c0d70cc9575835d9783bd977da9f8357b48d0c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/schema.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/schema.yaml",
+          "upstream_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/yaml-schema.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/yaml-schema.md",
+          "upstream_blob_sha": "485c4b51c21e879409e1fa286bce9b2a588cc922",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "485c4b51c21e879409e1fa286bce9b2a588cc922",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/session-history/discover-sessions.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/session-history/discover-sessions.sh",
+          "upstream_blob_sha": "cfc06ed997d8b29ec45e5c78bbfb5d7ff42c9729",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cfc06ed997d8b29ec45e5c78bbfb5d7ff42c9729",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/session-history/extract-errors.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/session-history/extract-errors.py",
+          "upstream_blob_sha": "e2599cb362b8577016d8c7303c85162218fadd02",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e2599cb362b8577016d8c7303c85162218fadd02",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/session-history/extract-metadata.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/session-history/extract-metadata.py",
+          "upstream_blob_sha": "483021040b709bf89919d6206993c11ca0a74e02",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "483021040b709bf89919d6206993c11ca0a74e02",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/session-history/extract-skeleton.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/session-history/extract-skeleton.py",
+          "upstream_blob_sha": "386a3d0ed330237424c765e746c0a841722792bf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "386a3d0ed330237424c765e746c0a841722792bf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/validate-doc-claims.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/validate-doc-claims.py",
+          "upstream_blob_sha": "2f624bb70dbde464dad49bd29a53089daa689cb1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2f624bb70dbde464dad49bd29a53089daa689cb1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/scripts/validate-frontmatter.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/scripts/validate-frontmatter.py",
+          "upstream_blob_sha": "8a8cf00019f2e66c69550726a3a4331c78be2904",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8a8cf00019f2e66c69550726a3a4331c78be2904",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-compound-refresh",
+      "path": ".claude/skills/ce-compound-refresh",
+      "upstream_path": "skills/ce-compound-refresh",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-direct-main-push",
+        "ce-no-governance-file-writes"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-compound-refresh/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/SKILL.md",
+          "upstream_blob_sha": "b0c717e9afc60e09833bd0f3cb62f3f0ff09b30c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6ecabb57b6beb2943615b291228c659acb693405",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-direct-main-push",
+            "ce-no-governance-file-writes"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/assets/resolution-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/assets/resolution-template.md",
+          "upstream_blob_sha": "a4c0f759215f69c558439531c75bb369d4e31a88",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a4c0f759215f69c558439531c75bb369d4e31a88",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/concepts-vocabulary.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/concepts-vocabulary.md",
+          "upstream_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/per-action-flows.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/per-action-flows.md",
+          "upstream_blob_sha": "64ae0131a674de9d25e5d108c5a696d46e932461",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "64ae0131a674de9d25e5d108c5a696d46e932461",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/schema.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/schema.yaml",
+          "upstream_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/yaml-schema.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/yaml-schema.md",
+          "upstream_blob_sha": "485c4b51c21e879409e1fa286bce9b2a588cc922",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "485c4b51c21e879409e1fa286bce9b2a588cc922",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/scripts/validate-doc-claims.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/scripts/validate-doc-claims.py",
+          "upstream_blob_sha": "2f624bb70dbde464dad49bd29a53089daa689cb1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2f624bb70dbde464dad49bd29a53089daa689cb1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/scripts/validate-frontmatter.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/scripts/validate-frontmatter.py",
+          "upstream_blob_sha": "8a8cf00019f2e66c69550726a3a4331c78be2904",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8a8cf00019f2e66c69550726a3a4331c78be2904",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-debug",
+      "path": ".claude/skills/ce-debug",
+      "upstream_path": "skills/ce-debug",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-no-direct-main-push"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-debug/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-debug/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/SKILL.md",
+          "upstream_blob_sha": "076f823586bc7c509a0fc111cdd2bf2a9b56402a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "076f823586bc7c509a0fc111cdd2bf2a9b56402a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/anti-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/anti-patterns.md",
+          "upstream_blob_sha": "7ca84906255c6a193ddad17c4e3c2ba6f9e057f9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7ca84906255c6a193ddad17c4e3c2ba6f9e057f9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/defense-in-depth.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/defense-in-depth.md",
+          "upstream_blob_sha": "eb52c30a07c7930e2bb4184925d0077298f348b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eb52c30a07c7930e2bb4184925d0077298f348b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/investigation-techniques.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/investigation-techniques.md",
+          "upstream_blob_sha": "da7b2ffaa894f3cea8ffdb8316081f813b2cd7d5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "da7b2ffaa894f3cea8ffdb8316081f813b2cd7d5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/pipeline-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/pipeline-mode.md",
+          "upstream_blob_sha": "6a48aa849c378281de8155df3ef12353c568b07a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e3a2d3c42f006dbe683cf8ef07abf274a1bdd501",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-direct-main-push"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/post-fix-handoff.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/post-fix-handoff.md",
+          "upstream_blob_sha": "68403111e16c7740d6e7ea016449631ae33da330",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "68403111e16c7740d6e7ea016449631ae33da330",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-doc-review",
+      "path": ".claude/skills/ce-doc-review",
+      "upstream_path": "skills/ce-doc-review",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-permission-bypass"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-doc-review/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/SKILL.md",
+          "upstream_blob_sha": "e0f260dfcb2696be439f4df7bbf5484c7144ea01",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0f260dfcb2696be439f4df7bbf5484c7144ea01",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/bulk-preview.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/bulk-preview.md",
+          "upstream_blob_sha": "708e20815a1627105d4126cea9b3b5c87ab2ef0d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "708e20815a1627105d4126cea9b3b5c87ab2ef0d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/cross-model-eval.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/cross-model-eval.md",
+          "upstream_blob_sha": "a7f04e30579603b17a4b0ba09d518d58b4267460",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a7f04e30579603b17a4b0ba09d518d58b4267460",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/cross-model-review.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/cross-model-review.md",
+          "upstream_blob_sha": "69ac6d20a328984fb31de71b5308724a410673cd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "69ac6d20a328984fb31de71b5308724a410673cd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/decision-primer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/decision-primer.md",
+          "upstream_blob_sha": "fc425fda3812a646521b721bdd7a18c64815d318",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fc425fda3812a646521b721bdd7a18c64815d318",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/findings-schema.json",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/findings-schema.json",
+          "upstream_blob_sha": "37a138fe57349c6e05e06fe7bfe9dcdfccf8de6a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "37a138fe57349c6e05e06fe7bfe9dcdfccf8de6a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/open-questions-defer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/open-questions-defer.md",
+          "upstream_blob_sha": "3dc470fb41aa65271e40d47883ff2fd70b7873a5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3dc470fb41aa65271e40d47883ff2fd70b7873a5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/adversarial-document-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/adversarial-document-reviewer.md",
+          "upstream_blob_sha": "190b1a778995adf4875abe4d4b25d486d24cec8c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "190b1a778995adf4875abe4d4b25d486d24cec8c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/coherence-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/coherence-reviewer.md",
+          "upstream_blob_sha": "ac0a930ec0f6f4c272b577f4713cf8b1ac52b003",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ac0a930ec0f6f4c272b577f4713cf8b1ac52b003",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/design-lens-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/design-lens-reviewer.md",
+          "upstream_blob_sha": "f5b697c34f864b64e868e80b90afae5096242b69",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f5b697c34f864b64e868e80b90afae5096242b69",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/feasibility-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/feasibility-reviewer.md",
+          "upstream_blob_sha": "0d7a03a2b5a0488007c50a7002c0f42d3cd7e3c0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0d7a03a2b5a0488007c50a7002c0f42d3cd7e3c0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/product-lens-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/product-lens-reviewer.md",
+          "upstream_blob_sha": "a14480006a07c92634650cb410a9b74bf94a205b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a14480006a07c92634650cb410a9b74bf94a205b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/scope-guardian-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/scope-guardian-reviewer.md",
+          "upstream_blob_sha": "58afd863128fe5570146ff1566ec27b00e93ec6a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "58afd863128fe5570146ff1566ec27b00e93ec6a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/security-lens-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/security-lens-reviewer.md",
+          "upstream_blob_sha": "15e19d629d5507814e0580d2c2043be36f632614",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "15e19d629d5507814e0580d2c2043be36f632614",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/personas/whole-doc-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/personas/whole-doc-reviewer.md",
+          "upstream_blob_sha": "4653926c81cf9c8b5dde7e682d60490f22adbc12",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4653926c81cf9c8b5dde7e682d60490f22adbc12",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/rendering-floor.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/rendering-floor.md",
+          "upstream_blob_sha": "13e58b716b66080d2ad97efc277e792257425c36",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "13e58b716b66080d2ad97efc277e792257425c36",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/review-output-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/review-output-template.md",
+          "upstream_blob_sha": "329df9169367cda441596da0e1e8fcaaf9f9c18b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "329df9169367cda441596da0e1e8fcaaf9f9c18b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/subagent-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/subagent-template.md",
+          "upstream_blob_sha": "eed4dfc1864cc6fb9ff0f17ea44805df3f42a2b9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eed4dfc1864cc6fb9ff0f17ea44805df3f42a2b9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/synthesis-and-presentation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/synthesis-and-presentation.md",
+          "upstream_blob_sha": "fabb0978ed626719c4b2c96941acbfe19db6d7ef",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fabb0978ed626719c4b2c96941acbfe19db6d7ef",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/walkthrough.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/walkthrough.md",
+          "upstream_blob_sha": "a2c022451b5dddf672b6dee163f4d18bc2ec82b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a2c022451b5dddf672b6dee163f4d18bc2ec82b5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/scripts/cross-model-doc-review.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/scripts/cross-model-doc-review.sh",
+          "upstream_blob_sha": "c21d432e276aba3c1ed755493c8d4ecf0934697e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0187242dde17f185a288b1c65d9d3ed148ce629a",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-mode-normalize",
+            "ce-no-permission-bypass"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-explain",
+      "path": ".claude/skills/ce-explain",
+      "upstream_path": "skills/ce-explain",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-explain/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-explain/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/SKILL.md",
+          "upstream_blob_sha": "fc7bf63ad815d7c2588ce59d9ba305842b15e0e7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fc7bf63ad815d7c2588ce59d9ba305842b15e0e7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/agents/work-recap-scout.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/agents/work-recap-scout.md",
+          "upstream_blob_sha": "68654840339d9371c88fdaf6f6dd961f340896db",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "68654840339d9371c88fdaf6f6dd961f340896db",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/check-in.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/check-in.md",
+          "upstream_blob_sha": "4379b4c087816702f2af9935ed0b45c10b26c719",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4379b4c087816702f2af9935ed0b45c10b26c719",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/destinations.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/destinations.md",
+          "upstream_blob_sha": "506976c6290cc09ddbc7d5b13a349359ff44d0bc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "506976c6290cc09ddbc7d5b13a349359ff44d0bc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/explainer-html.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/explainer-html.md",
+          "upstream_blob_sha": "96a3e36965f72c9d15ab40a24f9962c608df6977",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "96a3e36965f72c9d15ab40a24f9962c608df6977",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/explainer-markdown.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/explainer-markdown.md",
+          "upstream_blob_sha": "2a017441a54b2d1dd8e21a788a64ba43db053641",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2a017441a54b2d1dd8e21a788a64ba43db053641",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/intake.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/intake.md",
+          "upstream_blob_sha": "ae12ad8742888044570eb071997a448786e3d2a8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ae12ad8742888044570eb071997a448786e3d2a8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-handoff",
+      "path": ".claude/skills/ce-handoff",
+      "upstream_path": "skills/ce-handoff",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-handoff/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-handoff/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-handoff/SKILL.md",
+          "upstream_blob_sha": "1305acb1e3e54ded4dab5b37419e07f7f1405e7f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1305acb1e3e54ded4dab5b37419e07f7f1405e7f",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-ideate",
+      "path": ".claude/skills/ce-ideate",
+      "upstream_path": "skills/ce-ideate",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-ideate/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-ideate/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/SKILL.md",
+          "upstream_blob_sha": "7eeca4941d533bfa4c5d92efe4188067712d84fa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7eeca4941d533bfa4c5d92efe4188067712d84fa",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/agents/issue-intelligence-analyst.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/agents/issue-intelligence-analyst.md",
+          "upstream_blob_sha": "3220635087417d22baafb619e4ab1b8d635613a8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3220635087417d22baafb619e4ab1b8d635613a8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/agents/learnings-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/agents/learnings-researcher.md",
+          "upstream_blob_sha": "5a218cc5a00aad61fadc2fc030b888fcf6224169",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5a218cc5a00aad61fadc2fc030b888fcf6224169",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/agents/slack-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/agents/slack-researcher.md",
+          "upstream_blob_sha": "0929748bb01593440228b6bcfa06d8ca052367c2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0929748bb01593440228b6bcfa06d8ca052367c2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/agents/web-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/agents/web-researcher.md",
+          "upstream_blob_sha": "2bc8d9d377a9f0340833a80e984a67363ae07bf2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2bc8d9d377a9f0340833a80e984a67363ae07bf2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/divergent-ideation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/divergent-ideation.md",
+          "upstream_blob_sha": "69a56d14f9945d3dd6746048d5823567209d2aee",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "69a56d14f9945d3dd6746048d5823567209d2aee",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/html-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/html-rendering.md",
+          "upstream_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/ideation-sections.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/ideation-sections.md",
+          "upstream_blob_sha": "34a7bb2fe583f8981d9d9e84c8dfdf6ef728bd6a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "34a7bb2fe583f8981d9d9e84c8dfdf6ef728bd6a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/issue-intelligence.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/issue-intelligence.md",
+          "upstream_blob_sha": "cf1c914416cb657b1fcfa38051cff5b666bbfd36",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cf1c914416cb657b1fcfa38051cff5b666bbfd36",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/markdown-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/markdown-rendering.md",
+          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/post-ideation-workflow.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/post-ideation-workflow.md",
+          "upstream_blob_sha": "2010aa24800043e99286d2c33180b24599f9ea10",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2010aa24800043e99286d2c33180b24599f9ea10",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/universal-ideation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/universal-ideation.md",
+          "upstream_blob_sha": "9943500039904195fb6d773ca79d72c0fc0f9b41",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9943500039904195fb6d773ca79d72c0fc0f9b41",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/user-research-artifacts.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/user-research-artifacts.md",
+          "upstream_blob_sha": "8c84b3723077100ad150e878eba1c7ac9ae0af82",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8c84b3723077100ad150e878eba1c7ac9ae0af82",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/web-research-cache.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/web-research-cache.md",
+          "upstream_blob_sha": "ed07a30fef60271d36cbc108f694ff25a60ca460",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ed07a30fef60271d36cbc108f694ff25a60ca460",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-optimize",
+      "path": ".claude/skills/ce-optimize",
+      "upstream_path": "skills/ce-optimize",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [
+        "ce-mode-normalize"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-optimize/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-optimize/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/SKILL.md",
+          "upstream_blob_sha": "d286dcc6f7a8d9d782e6c5f3a0d5edae0b1afbdb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d286dcc6f7a8d9d782e6c5f3a0d5edae0b1afbdb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/agents/learnings-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/agents/learnings-researcher.md",
+          "upstream_blob_sha": "bc50f7039f211eb41d29f81107e4ee6b8b9929b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bc50f7039f211eb41d29f81107e4ee6b8b9929b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/agents/repo-research-analyst.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/agents/repo-research-analyst.md",
+          "upstream_blob_sha": "503ad626e610f4ad3c72296e8862c498296f91f1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "503ad626e610f4ad3c72296e8862c498296f91f1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/example-hard-spec.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/example-hard-spec.yaml",
+          "upstream_blob_sha": "765d62422fdc0adbee9b6e7de990b9dc8774157a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "765d62422fdc0adbee9b6e7de990b9dc8774157a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/example-judge-spec.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/example-judge-spec.yaml",
+          "upstream_blob_sha": "8d325a32f4708f1520c60b61b40907eee8c740b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8d325a32f4708f1520c60b61b40907eee8c740b5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/experiment-log-schema.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/experiment-log-schema.yaml",
+          "upstream_blob_sha": "28c3bb25465843047e46470767f63e6e5430d02b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "28c3bb25465843047e46470767f63e6e5430d02b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/experiment-prompt-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/experiment-prompt-template.md",
+          "upstream_blob_sha": "9326542ddbde825f2ce39d99cbd8f1edfe503a73",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9326542ddbde825f2ce39d99cbd8f1edfe503a73",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/judge-prompt-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/judge-prompt-template.md",
+          "upstream_blob_sha": "3e345267c90923000bda180b47e797cd00f4edf8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3e345267c90923000bda180b47e797cd00f4edf8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/optimize-spec-schema.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/optimize-spec-schema.yaml",
+          "upstream_blob_sha": "56da4154a48dea4ed6d5b24e4dea9892bc4c8b14",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "56da4154a48dea4ed6d5b24e4dea9892bc4c8b14",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/usage-guide.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/usage-guide.md",
+          "upstream_blob_sha": "1947479f8482956f6a9c2cceaf21834cae5db03f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1947479f8482956f6a9c2cceaf21834cae5db03f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/scripts/experiment-worktree.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/scripts/experiment-worktree.sh",
+          "upstream_blob_sha": "402b1b510004571977e755f6ace763fcf9d44668",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "402b1b510004571977e755f6ace763fcf9d44668",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-optimize/scripts/measure.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/scripts/measure.sh",
+          "upstream_blob_sha": "b66465ce924e2cf348cdbac06d8b04c87a588745",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b66465ce924e2cf348cdbac06d8b04c87a588745",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-optimize/scripts/parallel-probe.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/scripts/parallel-probe.sh",
+          "upstream_blob_sha": "6fe225911e1d4e0a4743eab47876e399ef12e1a8",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6fe225911e1d4e0a4743eab47876e399ef12e1a8",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-plan",
+      "path": ".claude/skills/ce-plan",
+      "upstream_path": "skills/ce-plan",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [
+        "ce-mode-normalize"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-plan/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-plan/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/SKILL.md",
+          "upstream_blob_sha": "1df387be49315ab9cf26d1d07088f659ed2255e8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1df387be49315ab9cf26d1d07088f659ed2255e8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/agent-native-planning-strategist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/agent-native-planning-strategist.md",
+          "upstream_blob_sha": "b41e8a27154594574c5ebf69add414d94fd57fd6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b41e8a27154594574c5ebf69add414d94fd57fd6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/architecture-strategist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/architecture-strategist.md",
+          "upstream_blob_sha": "0a2c40a752df1a181aea44524e4d0334a7e7f5d4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0a2c40a752df1a181aea44524e4d0334a7e7f5d4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/best-practices-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/best-practices-researcher.md",
+          "upstream_blob_sha": "7348ad4aaf9e125cc5f2f51d5c4680944d27be97",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7348ad4aaf9e125cc5f2f51d5c4680944d27be97",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/data-integrity-guardian.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/data-integrity-guardian.md",
+          "upstream_blob_sha": "f06fcc81475e9f58b49d60a31c55bc42e390ee48",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f06fcc81475e9f58b49d60a31c55bc42e390ee48",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/data-migration-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/data-migration-reviewer.md",
+          "upstream_blob_sha": "430e5404b3d0fc6d266af6176add683cd28c5296",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "430e5404b3d0fc6d266af6176add683cd28c5296",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/deployment-verification-agent.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/deployment-verification-agent.md",
+          "upstream_blob_sha": "98f5b8bcbd90dc6e854d5588037b6d01f6fd41a9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "98f5b8bcbd90dc6e854d5588037b6d01f6fd41a9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/framework-docs-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/framework-docs-researcher.md",
+          "upstream_blob_sha": "04f1eedae3af9d6e7c0c1f6282147a940e7c7711",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "04f1eedae3af9d6e7c0c1f6282147a940e7c7711",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/git-history-analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/git-history-analyzer.md",
+          "upstream_blob_sha": "af18fef86bc8bf8ecdc9b104e6791d93973a18db",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "af18fef86bc8bf8ecdc9b104e6791d93973a18db",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/learnings-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/learnings-researcher.md",
+          "upstream_blob_sha": "024e8fb21296b953448a8020a5642f920013241e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "024e8fb21296b953448a8020a5642f920013241e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/pattern-recognition-specialist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/pattern-recognition-specialist.md",
+          "upstream_blob_sha": "78fdfb9efbb954d1e2a67a438b4fbef823c4518c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "78fdfb9efbb954d1e2a67a438b4fbef823c4518c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/performance-oracle.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/performance-oracle.md",
+          "upstream_blob_sha": "831a22eadca7bf357466b90c32c9768dd891c0b1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "831a22eadca7bf357466b90c32c9768dd891c0b1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/repo-research-analyst.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/repo-research-analyst.md",
+          "upstream_blob_sha": "062a07c9a1f46fac5a0e084e354f5797f7c3809f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "062a07c9a1f46fac5a0e084e354f5797f7c3809f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/security-sentinel.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/security-sentinel.md",
+          "upstream_blob_sha": "5169167beecdb129f90a6f2903afee0113677d11",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5169167beecdb129f90a6f2903afee0113677d11",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/slack-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/slack-researcher.md",
+          "upstream_blob_sha": "0f40b54873da5822b895f7dc73463a1e7a40ba79",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0f40b54873da5822b895f7dc73463a1e7a40ba79",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/spec-flow-analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/spec-flow-analyzer.md",
+          "upstream_blob_sha": "2b6941301ebb016613eca6642fee5a38f8f0a23e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2b6941301ebb016613eca6642fee5a38f8f0a23e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/agents/web-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/agents/web-researcher.md",
+          "upstream_blob_sha": "dd809f8eb7f9932291f75b0fd8157c62cd07d018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dd809f8eb7f9932291f75b0fd8157c62cd07d018",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/approach-altitude.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/approach-altitude.md",
+          "upstream_blob_sha": "57568cc3193beb9a6c86481ef513c364c07fe4b8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "57568cc3193beb9a6c86481ef513c364c07fe4b8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/deepening-workflow.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/deepening-workflow.md",
+          "upstream_blob_sha": "d4b7f0a84d05b418fdc98b33cc4330e369a76482",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d4b7f0a84d05b418fdc98b33cc4330e369a76482",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/html-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/html-rendering.md",
+          "upstream_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "610d39455eb74b15739547db8309560e1cfd6bbf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/markdown-rendering.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/markdown-rendering.md",
+          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/plan-handoff.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/plan-handoff.md",
+          "upstream_blob_sha": "2eb8f5c48797a96ef0aa103f5a1be2db94a6e88e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2eb8f5c48797a96ef0aa103f5a1be2db94a6e88e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/plan-sections.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/plan-sections.md",
+          "upstream_blob_sha": "758cd81fef9282c8dd9e9647effd2aab7b1b9ce6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "758cd81fef9282c8dd9e9647effd2aab7b1b9ce6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/reasoning-elevation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/reasoning-elevation.md",
+          "upstream_blob_sha": "d9a3e19b0d0e0f3a3f02db31f8c55369089627c6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d9a3e19b0d0e0f3a3f02db31f8c55369089627c6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/settled-decisions.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/settled-decisions.md",
+          "upstream_blob_sha": "1293c224e338f7ccec283ec5ff9964707be41055",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1293c224e338f7ccec283ec5ff9964707be41055",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/synthesis-summary.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/synthesis-summary.md",
+          "upstream_blob_sha": "b07a7749ebc5ab92d1e1c02f6cff56bdcd985c00",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b07a7749ebc5ab92d1e1c02f6cff56bdcd985c00",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/universal-planning.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/universal-planning.md",
+          "upstream_blob_sha": "2c7e47028e5b7ab41794ea48b06d8930805e9fa6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2c7e47028e5b7ab41794ea48b06d8930805e9fa6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/scripts/elevation-dispatch.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/scripts/elevation-dispatch.sh",
+          "upstream_blob_sha": "6a9d59b9c121a0edbf4cb769d035aceb00a0e3d9",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a9d59b9c121a0edbf4cb769d035aceb00a0e3d9",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-plan/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-pov",
+      "path": ".claude/skills/ce-pov",
+      "upstream_path": "skills/ce-pov",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-permission-bypass"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-pov/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-pov/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/SKILL.md",
+          "upstream_blob_sha": "35991ffd3102915247f41ee071d91ad51b3f6033",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "35991ffd3102915247f41ee071d91ad51b3f6033",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/agents/external-evidence-researcher.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/agents/external-evidence-researcher.md",
+          "upstream_blob_sha": "bce4fe701d438606df7de980ee59e9dfb1b5c90f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bce4fe701d438606df7de980ee59e9dfb1b5c90f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/agents/pov-peer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/agents/pov-peer.md",
+          "upstream_blob_sha": "768acec92e671564949aa7050869bd4b18ba09ec",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "768acec92e671564949aa7050869bd4b18ba09ec",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/agents/precedent-activity-scout.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/agents/precedent-activity-scout.md",
+          "upstream_blob_sha": "2f63ad117ae0c7fb53cf4889afd4c0ee9c22645f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2f63ad117ae0c7fb53cf4889afd4c0ee9c22645f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/agents/project-grounding-scout.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/agents/project-grounding-scout.md",
+          "upstream_blob_sha": "8f15f061c67544531583f993b562520d9a62486b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8f15f061c67544531583f993b562520d9a62486b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/boundaries.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/boundaries.md",
+          "upstream_blob_sha": "bf0cc5c6e521198739fcfb1371220690a7f775af",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bf0cc5c6e521198739fcfb1371220690a7f775af",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/cross-model-panel.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/cross-model-panel.md",
+          "upstream_blob_sha": "3997ac4bfb417db1ff85bdd3c8d05aab4d89dc5d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3997ac4bfb417db1ff85bdd3c8d05aab4d89dc5d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/intake.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/intake.md",
+          "upstream_blob_sha": "0a37b47747d453623042d2feb5e65e46fafced1e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0a37b47747d453623042d2feb5e65e46fafced1e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/invocation.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/invocation.md",
+          "upstream_blob_sha": "75cfa48a35fcf248f533142f207d2291ca5d3c79",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "75cfa48a35fcf248f533142f207d2291ca5d3c79",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/method.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/method.md",
+          "upstream_blob_sha": "da716839d23843b1c0e1f6f07846aef404e76474",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "da716839d23843b1c0e1f6f07846aef404e76474",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/pov-schema.json",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/pov-schema.json",
+          "upstream_blob_sha": "1fcf62674c59059a6ca2f4719846487f38d0753d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1fcf62674c59059a6ca2f4719846487f38d0753d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/report.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/report.md",
+          "upstream_blob_sha": "4b4ee948c12b9ab25b45f550ea550570211186f1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4b4ee948c12b9ab25b45f550ea550570211186f1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/scripts/cross-model-pov.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/scripts/cross-model-pov.sh",
+          "upstream_blob_sha": "541a37ac2dd7175a22e0ed6a9841120b606a781d",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ac8b6fe858673f770edb96f54725921cb3243432",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-mode-normalize",
+            "ce-no-permission-bypass"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-pov/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-prototype",
+      "path": ".claude/skills/ce-prototype",
+      "upstream_path": "skills/ce-prototype",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-prototype/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-prototype/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/SKILL.md",
+          "upstream_blob_sha": "56211e487b89618268b44117119a3d92d7684835",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "56211e487b89618268b44117119a3d92d7684835",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/references/craft-floor.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/references/craft-floor.md",
+          "upstream_blob_sha": "e5bc5da5dbced0b8f94d1ee11b452a93d66dbba9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e5bc5da5dbced0b8f94d1ee11b452a93d66dbba9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/references/preview.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/references/preview.md",
+          "upstream_blob_sha": "fb6d622e52941989fb244d994877515277daba97",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fb6d622e52941989fb244d994877515277daba97",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/references/write-back.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/references/write-back.md",
+          "upstream_blob_sha": "179672fd7de1ea0c0d80654aa745b5dc1aaef6ad",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "179672fd7de1ea0c0d80654aa745b5dc1aaef6ad",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/scripts/light-webserver.js",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/scripts/light-webserver.js",
+          "upstream_blob_sha": "97b81b002cccd2ec6f25436886e0a5fc09cc652f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "97b81b002cccd2ec6f25436886e0a5fc09cc652f",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-resolve-pr-feedback",
+      "path": ".claude/skills/ce-resolve-pr-feedback",
+      "upstream_path": "skills/ce-resolve-pr-feedback",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [
+        "ce-mode-normalize"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/SKILL.md",
+          "upstream_blob_sha": "e1b37c2f391331a11090e652671875416958d5eb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e1b37c2f391331a11090e652671875416958d5eb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/references/agents/pr-comment-resolver.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/references/agents/pr-comment-resolver.md",
+          "upstream_blob_sha": "492f0a85f61957956c4a5734241234d7f2a06f81",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "492f0a85f61957956c4a5734241234d7f2a06f81",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/references/evaluation-rubric.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/references/evaluation-rubric.md",
+          "upstream_blob_sha": "6d6cad02531dc4a2a29a50a52762d78a98b97a0c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6d6cad02531dc4a2a29a50a52762d78a98b97a0c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/references/full-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/references/full-mode.md",
+          "upstream_blob_sha": "d7b2dc12dcaba2debe6923946533ea8caa30c3e3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d7b2dc12dcaba2debe6923946533ea8caa30c3e3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/references/targeted-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/references/targeted-mode.md",
+          "upstream_blob_sha": "ec35431c600fdb5bb429265d054769486ee1e286",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ec35431c600fdb5bb429265d054769486ee1e286",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/scripts/get-pr-comments",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/scripts/get-pr-comments",
+          "upstream_blob_sha": "c1c80854cca2eb84e9857a7be0ba3e7100d20116",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c1c80854cca2eb84e9857a7be0ba3e7100d20116",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/scripts/get-thread-for-comment",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/scripts/get-thread-for-comment",
+          "upstream_blob_sha": "a0e2eae242116fee01b3de8a8428adf1429979d4",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a0e2eae242116fee01b3de8a8428adf1429979d4",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/scripts/reply-to-pr-thread",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/scripts/reply-to-pr-thread",
+          "upstream_blob_sha": "18390e778e150500832692b0d60841cbcb9a11c4",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "18390e778e150500832692b0d60841cbcb9a11c4",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/scripts/resolve-pr-thread",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/scripts/resolve-pr-thread",
+          "upstream_blob_sha": "0e40002c63bf22f1ef0606e24cdf6ef1b43a4c33",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0e40002c63bf22f1ef0606e24cdf6ef1b43a4c33",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-setup",
+      "path": ".claude/skills/ce-setup",
+      "upstream_path": "skills/ce-setup",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [
+        "ce-mode-normalize"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-setup/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-setup/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-setup/SKILL.md",
+          "upstream_blob_sha": "d29413086edc4e71a79667376f0a0c69d400aacc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d29413086edc4e71a79667376f0a0c69d400aacc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-setup/references/config-template.yaml",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-setup/references/config-template.yaml",
+          "upstream_blob_sha": "9353b48f232cd7e90eeec4472f8aae046af211a7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9353b48f232cd7e90eeec4472f8aae046af211a7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-setup/scripts/check-health",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-setup/scripts/check-health",
+          "upstream_blob_sha": "cba4de9ecc0ec4889aff8941e2d8688426389bf7",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cba4de9ecc0ec4889aff8941e2d8688426389bf7",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ce-simplify-code",
+      "path": ".claude/skills/ce-simplify-code",
+      "upstream_path": "skills/ce-simplify-code",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-simplify-code/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-simplify-code/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-simplify-code/SKILL.md",
+          "upstream_blob_sha": "2e9ca504e68c91744298d16580655cdc070f6f28",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2e9ca504e68c91744298d16580655cdc070f6f28",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-simplify-code/references/personas/code-quality-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-simplify-code/references/personas/code-quality-reviewer.md",
+          "upstream_blob_sha": "e0879860795d87cb918c661e3939fa31f1cb4329",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0879860795d87cb918c661e3939fa31f1cb4329",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-simplify-code/references/personas/code-reuse-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-simplify-code/references/personas/code-reuse-reviewer.md",
+          "upstream_blob_sha": "1189e4e1670bab44863195c79ac22060a40ca394",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1189e4e1670bab44863195c79ac22060a40ca394",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-simplify-code/references/personas/efficiency-reviewer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-simplify-code/references/personas/efficiency-reviewer.md",
+          "upstream_blob_sha": "7198c106b04aa23cb0e776cc0bb758d40c339efe",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7198c106b04aa23cb0e776cc0bb758d40c339efe",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-simplify-code/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-simplify-code/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-strategy",
+      "path": ".claude/skills/ce-strategy",
+      "upstream_path": "skills/ce-strategy",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-strategy/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-strategy/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-strategy/SKILL.md",
+          "upstream_blob_sha": "1ea6e1d875d9a30f25459eec384d06d08476eaa7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1ea6e1d875d9a30f25459eec384d06d08476eaa7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-strategy/references/interview.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-strategy/references/interview.md",
+          "upstream_blob_sha": "4cb5d5b3c6cbd724ab18b302e641245432804e43",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4cb5d5b3c6cbd724ab18b302e641245432804e43",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-strategy/references/strategy-template.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-strategy/references/strategy-template.md",
+          "upstream_blob_sha": "ad38ccdf8f3eb6c770093299e41b31334e277424",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ad38ccdf8f3eb6c770093299e41b31334e277424",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-work",
+      "path": ".claude/skills/ce-work",
+      "upstream_path": "skills/ce-work",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ce-mode-normalize",
+        "ce-no-permission-bypass"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-work/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-work/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/SKILL.md",
+          "upstream_blob_sha": "d9b69edc911776b73fdef7a5679b2fbda2b69cba",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "283c43074366ca6ffe2c72bc9735b72e38617661",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-permission-bypass"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-work/references/agents/figma-design-sync.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/agents/figma-design-sync.md",
+          "upstream_blob_sha": "9a41179137eca65f0b723f8020369bdc6fd7873e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9a41179137eca65f0b723f8020369bdc6fd7873e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/agents/implementation-worker.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/agents/implementation-worker.md",
+          "upstream_blob_sha": "0d2706b678a539e88b3055b21bd91d51038a7bd2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0d2706b678a539e88b3055b21bd91d51038a7bd2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/cross-model-execution.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/cross-model-execution.md",
+          "upstream_blob_sha": "05d3442710233977450f0e647bb639b5bc5de22c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "05d3442710233977450f0e647bb639b5bc5de22c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/cross-model-work-eval.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/cross-model-work-eval.md",
+          "upstream_blob_sha": "c9dc3a92652650ee9a62828da0b4db6c85989059",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c9dc3a92652650ee9a62828da0b4db6c85989059",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/execution-engines.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/execution-engines.md",
+          "upstream_blob_sha": "15c99f06c1504b04557e89bf54bdfdb61f48a52f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "15c99f06c1504b04557e89bf54bdfdb61f48a52f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/implementation-loop.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/implementation-loop.md",
+          "upstream_blob_sha": "9a9fbba4fadab27b7c4e6c1f4139fde988d42f67",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9a9fbba4fadab27b7c4e6c1f4139fde988d42f67",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/implementation-result-schema.json",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/implementation-result-schema.json",
+          "upstream_blob_sha": "28dd7a76762c18e0a5d1abca3d29119a69d28961",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "28dd7a76762c18e0a5d1abca3d29119a69d28961",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/non-code-execution.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/non-code-execution.md",
+          "upstream_blob_sha": "52b7593fff49c3a91629e047ba414ba8faad65dd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "52b7593fff49c3a91629e047ba414ba8faad65dd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/review-findings-followup.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/review-findings-followup.md",
+          "upstream_blob_sha": "d30ca98849c2e9c68ea7d8dd609b8658221eebe2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d30ca98849c2e9c68ea7d8dd609b8658221eebe2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/shipping-workflow.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/shipping-workflow.md",
+          "upstream_blob_sha": "3bd6753fe1c6a2f1abfdf9e7602cbc32b9565f56",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3bd6753fe1c6a2f1abfdf9e7602cbc32b9565f56",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/tracker-defer.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/tracker-defer.md",
+          "upstream_blob_sha": "0fc80cd240794a26e72f4552c86881ea45987505",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0fc80cd240794a26e72f4552c86881ea45987505",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/context.mjs",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/context.mjs",
+          "upstream_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e0d7dae5b98d6feadb29c6f94ef37d65ff57d386",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/cross-model-work.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/cross-model-work.sh",
+          "upstream_blob_sha": "92420343677706b52b25ecbc81265d9245d5499d",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61a46bdefb71b09cec2781f4fff0d690837b319b",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-mode-normalize",
+            "ce-no-permission-bypass"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/peer-job-runner.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/peer-job-runner.py",
+          "upstream_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41234ae6d4cbbd6dca0dca37c87df37b344f439e",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit-workspace.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit-workspace.py",
+          "upstream_blob_sha": "07f35f4e03414a49d2381f17402347c3cf55b0d0",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "07f35f4e03414a49d2381f17402347c3cf55b0d0",
+          "locally_modified": false,
+          "patch_ids": [
+            "ce-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_ignored.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_ignored.py",
+          "upstream_blob_sha": "7fcfeaa34e15255b8564cc0d4ec8c5c7a53ec778",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7fcfeaa34e15255b8564cc0d4ec8c5c7a53ec778",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_integration.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_integration.py",
+          "upstream_blob_sha": "e61e4a7d0ddd1b5e794cd753bd6fa128902fa5b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e61e4a7d0ddd1b5e794cd753bd6fa128902fa5b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_jobs.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_jobs.py",
+          "upstream_blob_sha": "7a2fa76954aa28bbf275fc98a9c97fb9f214c094",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7a2fa76954aa28bbf275fc98a9c97fb9f214c094",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_lifecycle.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_lifecycle.py",
+          "upstream_blob_sha": "c34942d1f71587f9345333d066d5e63bcbb5a2ce",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c34942d1f71587f9345333d066d5e63bcbb5a2ce",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_state.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_state.py",
+          "upstream_blob_sha": "8728888b6c891d07e11a9919d051620d36e1b350",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8728888b6c891d07e11a9919d051620d36e1b350",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/scripts/unit_workspace_transaction.py",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/scripts/unit_workspace_transaction.py",
+          "upstream_blob_sha": "0f54d0b7864ced3b81d85d7744f202d56b2fa514",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0f54d0b7864ced3b81d85d7744f202d56b2fa514",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "ce-worktree",
+      "path": ".claude/skills/ce-worktree",
+      "upstream_path": "skills/ce-worktree",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/ce-worktree/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "959dd283c510cfac6fd912555f99b14613ee9018",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for EveryInc/compound-engineering-plugin, copied verbatim from the upstream repository root into each vendored skill directory so every vendored tree carries its own MIT copyright and permission notice (MIT requires the notice to accompany all copies)."
+        },
+        {
+          "path": ".claude/skills/ce-worktree/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-worktree/SKILL.md",
+          "upstream_blob_sha": "76c5180ee8d2db51793c18c7d4727bb187fda8d4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "76c5180ee8d2db51793c18c7d4727bb187fda8d4",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    }
+  ],
+  "excluded_skills": [
+    {
+      "name": "ce-dogfood",
+      "status": "HOLD",
+      "upstream_path": "skills/ce-dogfood",
+      "reason": "Genuinely valuable and NOT a duplicate of the installed `webapp-testing`: it is diff-scoped (branch vs trunk), maps journeys as Mermaid flowcharts before deriving a matrix, walks each flow as a named persona to find \"paper cuts\", auto-fixes small breakages WITH a regression test and a commit, and finalizes a durable report from references/dogfood-report-template.md. Blocked on a hard external CLI: \"`agent-browser` installed ... If not installed, stop ... This workflow cannot function without it\" (SKILL.md lines 23-29), and the skill explicitly forbids the alternative this repo already has: \"Do not use Chrome MCP tools (`mcp__claude-in-chrome__*`), any browser MCP integration, or other built-in browser-control tools\" (line 16). agent-browser is absent in this environment and ce-setup's own install string is unpinned (`npm install -g agent-browser`) plus a second `agent-browser install` br"
+    },
+    {
+      "name": "ce-polish",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-polish",
+      "reason": "Read SKILL.md, all four scripts, and the references. The skill's differentiating half is framework dev-server detection, and it has no Go path at all: scripts/detect-project-type.sh matches exactly {rails, next, vite, nuxt, astro, remix, sveltekit, procfile} and emits `unknown` for a Go repo, which SKILL.md's routing table sends to \"Ask the user how to start the project\"; scripts/resolve-port.sh probes next/vite/nuxt/astro configs, config/puma.rb, Procfile.dev, docker-compose.yml, package.json and .env files, none of which carry this project's dashboard port (it lives in config/config.json), so it falls to the default `3000`; scripts/resolve-package-manager.sh returns `__NO_PACKAGE_JSON__`. Eight of eleven references are per-framework recipes for frameworks this repo does not use. What remains after removing the inapplicable half is Phase 2 — a ten-line \"user browses, says what's off, yo"
+    },
+    {
+      "name": "ce-product-pulse",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-product-pulse",
+      "reason": "Generates time-windowed product-usage reports from configured product-analytics, tracing, and payments providers. Its required config presupposes infrastructure this project does not have and will not have: `pulse_analytics_source` (posthog | mixpanel | custom), `pulse_tracing_source` (sentry | datadog | custom), `pulse_payments_source` (stripe | custom), plus `pulse_primary_event` / `pulse_value_event` naming events emitted by a hosted product with real users. This is a single static binary a user runs on their own machine against their own Twitch account — there is no telemetry pipeline, no user base, no payments, and the skill states it is \"strictly about user experience and system performance\" for such a product and explicitly \"Does not report 'what shipped.'\" The local SQLite DB cannot substitute: `pulse_db_enabled` is an optional supplement, and routing still requires the analytics"
+    },
+    {
+      "name": "ce-promote",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-promote",
+      "reason": "Drafts launch/marketing copy — X posts, LinkedIn posts, email campaigns, blog intros, demo scripts — for a shipped feature. No lane in the owner's selection rule covers promotional or social copy, and there is no plausible use for a GPL-3.0 self-hosted Twitch points miner distributed as a single binary. Its enhanced path is bound to Spiral, Every's own hosted writing product (references/spiral-cli.md: `npx @every-env/spiral-cli@latest setup --pairing-code <code>`, device-code login against app.writewithspiral.com). The skill is honest that Spiral is optional and Path B drafts directly, but Path B is generic copywriting advice, not a project capability. The only marginally relevant output — a one-line changelog blurb — does not justify the skill."
+    },
+    {
+      "name": "ce-proof",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-proof",
+      "reason": "A client for Proof (https://www.proofeditor.ai), Every's hosted collaborative markdown editor. Its purpose is to upload local repository markdown — \"a brainstorm, a unified plan, a learning, a draft\" — to a third-party service and hand back a tokenized share URL. No lane in the selection rule covers hosted document publishing, and the mechanism is a real data-egress surface for a repo whose domain is Twitch OAuth device-code auth, persisted cookies, and Discord webhooks: `POST https://www.proofeditor.ai/share/markdown` needs no authentication, and the resulting doc is \"ownerless until a signed-in Every user claims the doc\", reachable by anyone holding the token. It also notes that emptying a doc \"does **not** scrub comment marks\", so content wipe is not privacy cleanup. Irrelevant hosted service with no plausible use here."
+    },
+    {
+      "name": "ce-retune",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-retune",
+      "reason": "Two independent disqualifiers. (1) Its Phase 0 gate is a hard refusal that this repo cannot satisfy: it demands \"A run archive or a harness that produces one\", \"A build selector — the harness can point a run at a specific source checkout of the corpus\", and \"A repeatable task the corpus actually executes end to end\", and instructs \"If any is missing, **stop and say so**\". This project has no skill-corpus benchmark harness, no per-run tool-call archive, and no A/B build selector, so every invocation terminates at Phase 0. (2) Even fully unblocked, its mutation target is wrong for this checkout: it audits and cuts prose across `./skills` (`references/cut-passes.md`: \"one agent owns one skill directory and applies the class everywhere inside it\"), which here is `.claude/skills/**` — vendored third-party bytes the repo holds at minimal local patching under three separate provider policies. A"
+    },
+    {
+      "name": "ce-riffrec-feedback-analysis",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-riffrec-feedback-analysis",
+      "reason": "The consumption side of Riffrec (github.com/kieranklaassen/riffrec), a screen+voice+event capture tool whose `riffrec-*.zip` bundles are the intended input. This project has no user-feedback capture pipeline. Beyond relevance, the analyzer has two hard blockers verified in scripts/analyze_riffrec_zip.py: it shells out to `ffmpeg`/`ffprobe` for chunking and frame extraction (line 368 returns `\"ffmpeg is not installed; cannot chunk media\"`, and neither binary is present here), and transcription uploads the user's recorded media to a third-party paid API — line 317 posts to `\"https://api.openai.com/v1/audio/transcriptions\"` with `Authorization: Bearer {api_key}` from `OPENAI_API_KEY`, defaulting to model `gpt-4o-mini-transcribe`. It also \"Always continue[s] into the `ce-brainstorm` skill\" on the extensive path. Irrelevant tooling plus an out-of-scope provider dependency."
+    },
+    {
+      "name": "ce-skill-work",
+      "status": "EXCLUDE",
+      "upstream_path": ".agents/skills/ce-skill-work",
+      "reason": "Read SKILL.md and all five references in full. This is upstream's own maintainer skill for authoring/editing/reviewing files under THEIR skills/** tree, not a general capability. Three disqualifiers: (1) BROKEN CLOSURE when vendored — SKILL.md line 18 names `docs/solutions/skill-design/portable-agent-skill-authoring.md` as 'the authority' and that 26KB file lives OUTSIDE the skill dir; references/new-skill.md additionally requires `docs/skills/<name>.md`, `docs/skills/README.md`, root `README.md` and `tests/release-metadata.test.ts`, none of which exist here. (2) Hardcoded upstream toolchain — `bun test`, `bun run test`, `bun run release:validate`, `rg under tests/`, upstream PR numbers (#1397, #1311/#1313) cited as normative precedent. (3) references/evaluate.md routes validation to the `skill-creator` skill BY NAME, which is a Claude Code BUILTIN in this environment and also collides w"
+    },
+    {
+      "name": "ce-sweep",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-sweep",
+      "reason": "Irrelevant platforms plus a genuine integrity problem. Two of its three sources are Slack (references/sources/slack.md, needs a Slack read+reaction tool) and email (references/sources/email.md, self-labelled \"EXPERIMENTAL\"); neither exists for this single-owner Go repo, and there is no customer-feedback pipeline to sweep. The remaining github-issues source would apply ack/close-out labels — a tracker mutation our governance keeps read-only by default — to a low-traffic tracker, which does not justify a lease-based state engine, plan reconciliation, and a media pipeline. Independently, scripts/context.mjs is engineered to override harness and system-prompt constraints from tool output: its own comments say \"tool-result content in the working turn outranks a system-prompt default\" and \"this text is positioned to outrank skill prose,\" and its AUTONOMY_DIRECTIVE_CHECK instructs the agent tha"
+    },
+    {
+      "name": "ce-test-browser",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-test-browser",
+      "reason": "True duplicate of the already-installed anthropics `webapp-testing` — same capability (drive and verify a local web app in a browser, capture screenshots and console logs), and webapp-testing is already tuned for this repo (\"Local targets only\", \"Not a replacement for go test\"). Worse, the two actively conflict: ce-test-browser SKILL.md:22 states \"Never install or substitute standalone Playwright, Puppeteer, a separately configured browser extension or MCP,\" which is precisely what webapp-testing is. Its own preferred fallback driver, the `agent-browser` CLI, is not installed and its install command lives in ce-setup (a different skill). It is also concretely incompatible with this repo: the route table (SKILL.md:53-63) is entirely Rails/Next.js with nothing for Go html/template; port detection (SKILL.md:75-86) reads package.json and .env, neither of which exists here, so it falls back t"
+    },
+    {
+      "name": "ce-test-xcode",
+      "status": "EXCLUDE",
+      "upstream_path": "skills/ce-test-xcode",
+      "reason": "Builds and tests iOS apps on the macOS Simulator through the XcodeBuildMCP MCP server. Every step is Apple-platform-specific — `discover_projs`, `list_schemes`, `boot_simulator`, `build_ios_sim_app`, `install_app_on_simulator`, `launch_app_on_simulator`, `capture_sim_logs`, and a SwiftUI `AttributedString` tap limitation with an `xcrun simctl openurl` workaround. Its stated prerequisites are \"Xcode installed with command-line tools\", \"XcodeBuildMCP MCP server connected\", and \"At least one iOS Simulator available\", and it hard-stops otherwise: \"Do NOT proceed until XcodeBuildMCP is confirmed working.\" This is a Linux Go project with no Apple surface; `xcodebuild` is absent. Irrelevant platform, no plausible use."
+    },
+    {
+      "name": "lfg",
+      "status": "HOLD",
+      "upstream_path": "skills/lfg",
+      "reason": "A genuinely strong autonomous plan->implement->simplify->review->fix->commit->push->PR->watch-CI pipeline with careful structured gates, and — checked line by line and by grep — it contains no merge, no auto-merge, no ready-for-review, no force push, and no workflow trigger of its own; step 10 states explicitly that pipeline mode \"stopped at 'CI decided,' not 'merged'\". It is blocked on two things. (1) Dependency closure: the entire body is \"invoke skill X\" for ce-plan, ce-work, ce-simplify-code, ce-code-review, ce-test-browser, ce-commit-push-pr, ce-babysit-pr, plus ce-debug / ce-resolve-pr-feedback / ce-explain / ce-handoff via the references — none are in this slice, and if they are not vendored at the same pin LFG dies at step 1. (2) Its step-9 handoff target ce-babysit-pr is described upstream as driving a PR \"toward merge-ready\", so the owner needs that skill's own audit to land th"
+    }
+  ],
+  "excluded_upstream_paths": [
+    ".claude-plugin/",
+    "plugin.json",
+    ".agents/plugins/marketplace.json",
+    ".github/",
+    "src/",
+    "tests/",
+    "scripts/",
+    "package.json",
+    "bun.lock",
+    "tsconfig.json",
+    "assets/",
+    "docs/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONCEPTS.md",
+    "GEMINI.md",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "PRIVACY.md",
+    ".compound-engineering/",
+    ".claude/",
+    ".agy/",
+    ".cline/",
+    ".codex-plugin/",
+    ".cursor-plugin/",
+    ".devin-plugin/",
+    ".grok-plugin/",
+    ".kimi-plugin/",
+    ".omp-plugin/",
+    ".opencode/",
+    ".pi/"
+  ]
+}

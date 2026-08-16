@@ -1,0 +1,664 @@
+{
+  "upstream_repo": "https://github.com/github/awesome-copilot",
+  "upstream_commit": "a80885b76044550770f60f360f8a0e5ae3524a31",
+  "upstream_tree": {
+    "github-actions-efficiency": "a9041cbe0a768c8c11c26c2524e3a780035988f5",
+    "github-actions-hardening": "25d75a622f5f8c034be5b25bf6585850d6f7fcd7",
+    "harness-engineering": "7135eb67252e4d77c70f388b6cdcbaaa684d3dc7",
+    "threat-model-analyst": "4c51abac7859b9529f721ae5043fffc2f9812b5a",
+    "web-design-reviewer": "eded2bc5a7d38261501a76b2e4913b703cc547ec"
+  },
+  "upstream_current_head": "a80885b76044550770f60f360f8a0e5ae3524a31",
+  "drift": "none",
+  "reviewed_at": "2026-08-16T00:00:00Z",
+  "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3): candidate skills read in full with their complete dependency closures; every bundled script read end to end.",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "license": {
+    "spdx": "MIT",
+    "per_skill_license_file": "LICENSE",
+    "copyright_notice": "Copyright GitHub, Inc.",
+    "notes": "MIT requires the copyright and permission notice to accompany all copies, so the upstream root LICENSE is copied verbatim into every vendored skill directory."
+  },
+  "notes": "5 of upstream's 408 skills under skills/ are vendored. The corpus was swept systematically for this project's actual concerns rather than read end to end; the sweep method and its shortlist are recorded in awesome-copilot-skills-policy.md. Only skills that are a MATERIAL ADDITION over the mattpocock, anthropic, Compound Engineering and Trail of Bits sets were installed.",
+  "skills": [
+    {
+      "name": "github-actions-efficiency",
+      "path": ".claude/skills/github-actions-efficiency",
+      "upstream_path": "skills/github-actions-efficiency",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/github-actions-efficiency/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for github/awesome-copilot (Copyright GitHub, Inc.), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/github-actions-efficiency/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-efficiency/SKILL.md",
+          "upstream_blob_sha": "e63a2bad12e13978a52ddb655573856d12314746",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e63a2bad12e13978a52ddb655573856d12314746",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-efficiency/references/actions.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-efficiency/references/actions.md",
+          "upstream_blob_sha": "c6303903518c4923b6b787e02083d04f8a6052d1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c6303903518c4923b6b787e02083d04f8a6052d1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-efficiency/references/patterns.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-efficiency/references/patterns.md",
+          "upstream_blob_sha": "c030717ba0ef444ece4bf227f4f4b9c126a24922",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c030717ba0ef444ece4bf227f4f4b9c126a24922",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-efficiency/references/reporting.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-efficiency/references/reporting.md",
+          "upstream_blob_sha": "de78b8faf14aed78e1cd5ecd764d853ce0fae6b4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "de78b8faf14aed78e1cd5ecd764d853ce0fae6b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-efficiency/references/review-rubric.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-efficiency/references/review-rubric.md",
+          "upstream_blob_sha": "a086e212b4a5821f47a11507dc9549e88167cb55",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a086e212b4a5821f47a11507dc9549e88167cb55",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "github-actions-hardening",
+      "path": ".claude/skills/github-actions-hardening",
+      "upstream_path": "skills/github-actions-hardening",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/github-actions-hardening/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for github/awesome-copilot (Copyright GitHub, Inc.), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/SKILL.md",
+          "upstream_blob_sha": "61fa956e0ca6a0958ff6713b7b94ed22ecdc2e7e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61fa956e0ca6a0958ff6713b7b94ed22ecdc2e7e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/references/injection.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/references/injection.md",
+          "upstream_blob_sha": "113ff1aa65ae2826c36f7cc8c6d503bb7058ca31",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "113ff1aa65ae2826c36f7cc8c6d503bb7058ca31",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/references/permissions-and-tokens.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/references/permissions-and-tokens.md",
+          "upstream_blob_sha": "784ea92ef100390b08f5d01607369d6fcad94554",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "784ea92ef100390b08f5d01607369d6fcad94554",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/references/report-format.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/references/report-format.md",
+          "upstream_blob_sha": "20f9f064650da6237bbea03aa67d7f2c14c694f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "20f9f064650da6237bbea03aa67d7f2c14c694f3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/references/supply-chain.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/references/supply-chain.md",
+          "upstream_blob_sha": "6cb05474467ab11925d31a4d1ba9e74297ca1596",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6cb05474467ab11925d31a4d1ba9e74297ca1596",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/github-actions-hardening/references/triggers-and-privilege.md",
+          "origin": "upstream",
+          "upstream_path": "skills/github-actions-hardening/references/triggers-and-privilege.md",
+          "upstream_blob_sha": "3081d9145f6b6abaede423574725ef001b20a1e3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3081d9145f6b6abaede423574725ef001b20a1e3",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "harness-engineering",
+      "path": ".claude/skills/harness-engineering",
+      "upstream_path": "skills/harness-engineering",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/harness-engineering/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for github/awesome-copilot (Copyright GitHub, Inc.), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/harness-engineering/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/harness-engineering/SKILL.md",
+          "upstream_blob_sha": "7dcaad853e624c8d418dd975118e757e2a30dfdc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7dcaad853e624c8d418dd975118e757e2a30dfdc",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "threat-model-analyst",
+      "path": ".claude/skills/threat-model-analyst",
+      "upstream_path": "skills/threat-model-analyst",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "ghac-generated-output-links"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/threat-model-analyst/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for github/awesome-copilot (Copyright GitHub, Inc.), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/SKILL.md",
+          "upstream_blob_sha": "9b38ea261d76986d0479300e3d5ea3a07856eac3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9b38ea261d76986d0479300e3d5ea3a07856eac3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/analysis-principles.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/analysis-principles.md",
+          "upstream_blob_sha": "be8a2dd30ea688bf7ba8244c513073e627b535f9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "be8a2dd30ea688bf7ba8244c513073e627b535f9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/diagram-conventions.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/diagram-conventions.md",
+          "upstream_blob_sha": "c02565b041ec40f21a8a2d12dfbfaf6a9dd5508b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c02565b041ec40f21a8a2d12dfbfaf6a9dd5508b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/incremental-orchestrator.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/incremental-orchestrator.md",
+          "upstream_blob_sha": "d11082b416031c9c6425d55015cc4f29be90a1eb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d11082b416031c9c6425d55015cc4f29be90a1eb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/orchestrator.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/orchestrator.md",
+          "upstream_blob_sha": "571caab1cdedd31873c79a51ee0cde854acec2ad",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "571caab1cdedd31873c79a51ee0cde854acec2ad",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/output-formats.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/output-formats.md",
+          "upstream_blob_sha": "7c14d81c13f27fe7f3205ab714dd8fb2eeb0d8aa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "21c8563fbabea8c828e0eefcdcd831130a578088",
+          "locally_modified": true,
+          "patch_ids": [
+            "ghac-generated-output-links"
+          ]
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-architecture.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-architecture.md",
+          "upstream_blob_sha": "1503cfd5b069c792e4caa891ce9e256f83166a3f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1503cfd5b069c792e4caa891ce9e256f83166a3f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-assessment.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-assessment.md",
+          "upstream_blob_sha": "0e58c4d2c6d0b29e0d2eb8cb96d46be985b9108c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0e58c4d2c6d0b29e0d2eb8cb96d46be985b9108c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-dfd.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-dfd.md",
+          "upstream_blob_sha": "54e83e503bcc6f2ff868e33d2a07ee0b0125d18e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "54e83e503bcc6f2ff868e33d2a07ee0b0125d18e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-findings.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-findings.md",
+          "upstream_blob_sha": "cfed926f8afb20b559a5a04b9d35a0c7bafaa90c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cfed926f8afb20b559a5a04b9d35a0c7bafaa90c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-incremental-html.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-incremental-html.md",
+          "upstream_blob_sha": "868730ae0a93fd8fe5a90b6909817ac26f77e0b1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "868730ae0a93fd8fe5a90b6909817ac26f77e0b1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-inventory.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-inventory.md",
+          "upstream_blob_sha": "e5266c59503a3914968701f4164a7d9104f51d20",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e5266c59503a3914968701f4164a7d9104f51d20",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-stride-analysis.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-stride-analysis.md",
+          "upstream_blob_sha": "6c093fc06a7207de46cb977c0695c7815711d185",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6c093fc06a7207de46cb977c0695c7815711d185",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-summary-dfd.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-summary-dfd.md",
+          "upstream_blob_sha": "9c2d9b41b9d5ba045c1de293bda2e95f776c79d5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9c2d9b41b9d5ba045c1de293bda2e95f776c79d5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/skeletons/skeleton-threatmodel.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/skeletons/skeleton-threatmodel.md",
+          "upstream_blob_sha": "8f3ae4a2c6cecdf9f77e17ace1a327da919446fa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8f3ae4a2c6cecdf9f77e17ace1a327da919446fa",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/tmt-element-taxonomy.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/tmt-element-taxonomy.md",
+          "upstream_blob_sha": "acb0aa959bb2faa8ca4eca97fdd61e3e87759b8f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "acb0aa959bb2faa8ca4eca97fdd61e3e87759b8f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/threat-model-analyst/references/verification-checklist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/threat-model-analyst/references/verification-checklist.md",
+          "upstream_blob_sha": "09df14c62587c8a99f1aa52e7fa4a7e55311b8b9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "09df14c62587c8a99f1aa52e7fa4a7e55311b8b9",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "web-design-reviewer",
+      "path": ".claude/skills/web-design-reviewer",
+      "upstream_path": "skills/web-design-reviewer",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/web-design-reviewer/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89bc5e962c9944cdb050887062afdaaf89be504a",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "MIT notice for github/awesome-copilot (Copyright GitHub, Inc.), copied verbatim from the upstream repository root into each vendored skill directory; MIT requires the notice to accompany all copies."
+        },
+        {
+          "path": ".claude/skills/web-design-reviewer/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/web-design-reviewer/SKILL.md",
+          "upstream_blob_sha": "21764d37e99e24b2f4f0df3ea9fbbe099f0b739b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "21764d37e99e24b2f4f0df3ea9fbbe099f0b739b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/web-design-reviewer/references/framework-fixes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/web-design-reviewer/references/framework-fixes.md",
+          "upstream_blob_sha": "d400ca14d71e23f2e94a552cc41be882df423ff6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d400ca14d71e23f2e94a552cc41be882df423ff6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/web-design-reviewer/references/visual-checklist.md",
+          "origin": "upstream",
+          "upstream_path": "skills/web-design-reviewer/references/visual-checklist.md",
+          "upstream_blob_sha": "24346c54918a6caf0374931c502f605f20ff1b9b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "24346c54918a6caf0374931c502f605f20ff1b9b",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    }
+  ],
+  "excluded_skills": [
+    {
+      "name": "acquire-codebase-knowledge",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Two independent audit lanes disagreed (one INSTALL, one EXCLUDE). Deciding evidence: the skill's Output Contract mandates seven files under docs/codebase/ (STACK/STRUCTURE/ARCHITECTURE/CONVENTIONS/INTEGRATIONS/TESTING/CONCERNS) as a required, non-optional deliverable, while docs/agents/domain.md commits this project to a single-context layout -- CONTEXT.md at the repo root, ADRs under docs/adr/. Installing it would invite a parallel, competing documentation tree against a documented repo decision, and the mapping/onboarding role is already held by wayfinder and domain-modeling. Its Go-awareness is real (scan.py handles go.mod, cmd/*/main.go, .golangci.yml) but does not overcome the structural conflict."
+    },
+    {
+      "name": "agent-skill-stack",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "Real, non-duplicated capability — a methodology for discovering, hard-gating, ranking, conflict-checking and staged-installing skills, which is precisely the work this audit is doing by hand and which nothing installed covers. Its best asset is scripts/inventory_skills.py: a fully read-only scanner (no network, no subprocess, no writes) that walks skill roots, parses frontmatter, computes pairwise trigger-description Jaccard overlap, and flags eight risk-indicator classes. With 26+ vendored skills and more landing, recall-collision detection between skill descriptions is a gap the repo's own validator does not fill (it checks manifests, blob hashes and frontmatter keys, not routing overlap). But the skill's discovery backbone and its install destinations are both blocked as written, and its install flow competes with the Governance v3 vendoring process."
+    },
+    {
+      "name": "agent-supply-chain",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Every concrete pattern is already covered by first-party infrastructure that is strictly stronger, or targets ecosystems this repo does not use. Pattern 1/2 (generate INTEGRITY.json of SHA-256 file hashes, re-hash later, report MODIFIED/MISSING/UNTRACKED) is exactly what scripts/validate-agent-governance.py already does for vendored skills — and better: the registry's 'file-level' schema stores an `upstream_blob_sha` AND a `vendored_blob_sha` per vendored file and verifies against a pinned upstream clone, so it detects divergence from UPSTREAM, not merely self-consistency, which INTEGRITY.json cannot do. Pattern 3 (audit_versions) handles only package.json, requirements.txt and pyproject.toml — this repo has none of them, and the actual Go supply chain (go.mod/go.sum, the Go checksum database, the Tailwind CLI download in the Makefile) is not addressed anywhere in the file. Pattern 4 (promotion_check) requires README.md plus `.claude-plugin/plugin.json` or `.github/plugin/plugin.json` and scans `.mcp.json` for '@latest' — none of which exist here, and `.claude-plugin` is itself a FORBIDDEN_VENDOR_NAME. Combined with the built-in security-review skill for pending changes, there is n"
+    },
+    {
+      "name": "agentic-eval",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Irrelevant platform. This is a catalogue of patterns for BUILDING LLM evaluation into an application — reflect_and_refine(), an EvaluatorOptimizer class, a CodeReflector, LLM-as-judge and weighted-rubric scoring — all written against an undefined `llm()` call and a `run_tests()` helper, i.e. pseudo-code for a Python AI product. bukerov-twitch-miner-go contains no LLM feature of any kind; it is a Go binary doing Twitch GQL/PubSub/IRC/SQLite work. Read charitably as 'agent self-critique methodology' it is a true duplicate of better-fitting installed skills: the generate->evaluate->refine loop is what code-review, tdd (red-green-refactor), grilling and diagnosing-bugs already do concretely against real `go test -race` output rather than against an LLM-produced rubric score. Nothing in the selection rule's lanes is served."
+    },
+    {
+      "name": "ai-team-orchestration",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Fails on three independent grounds. (1) BROKEN CLOSURE: the skill's entire mechanism is three agents — its opening table lists `@ai-team-producer`, `@ai-team-dev`, `@ai-team-qa`, and line 78 says 'The bundled agents intentionally omit `tools` and `model` frontmatter' — but no agents/ directory exists under skills/ai-team-orchestration/. The three files live at clone-root agents/ai-team-{producer,dev,qa}.agent.md in Copilot's `.agent.md` custom-agent format, invoked with Copilot's `@name` chat-participant syntax. Vendored as-is the skill is a dangling reference; vendored with the agents it needs format and path conversion. (2) TRUE DUPLICATE: producer/dev/QA plan->implement->verify->handoff is already covered by mattpocock's implement, to-spec, to-tickets, triage, code-review, tdd and handoff, and the repo has its OWN documented orchestration layer (docs/agents/agent-orchestration.md, docs/agents/task-contract.md, Governance v3 skill-native default). PROJECT_BRIEF.md duplicates the documented CONTEXT.md + docs/adr/ layout. (3) GOVERNANCE CONFLICT: merge authority is written into the Producer role (see patch_needs). Installing a generic orchestration skill that competes with the repo"
+    },
+    {
+      "name": "anti-ui-slop",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Two independent audit lanes disagreed (one INSTALL, one EXCLUDE). Deciding evidence, verified directly against the pin: the skill's differentiating input is browsing the third-party hosted catalogue at https://uizze.com (SKILL.md:10 and :29), with its own stated fallback being 'continue from repository evidence' -- a vendor dependency rather than a capability. Its section 5 Finish Gate (responsive behaviour, keyboard navigation, focus visibility, contrast, touch targets) is covered with concrete thresholds by web-design-reviewer's references/visual-checklist.md, which IS installed, and its anti-generic design thesis is the installed frontend-design's repo-pinned role. Excluded as a role duplicate carrying an external vendor dependency -- not merely for overlapping."
+    },
+    {
+      "name": "architecture-blueprint-generator",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Not actually a skill — it is an unconverted GitHub Copilot PROMPT FILE wearing skill frontmatter. The body opens with a '## Configuration Variables' block of `${PROJECT_TYPE=\"Auto-detect|.NET|Java|React|...\"}` declarations, then a '## Generated Prompt' section whose entire 300-line contents are wrapped in a single opening quote, shot through with template ternaries no runtime evaluates — e.g. line 132 `${PROJECT_TYPE == \"Auto-detect\" ? \"For each detected technology stack...\" : ...}` and section headings literally numbered `### ${INCLUDES_DECISION_RECORDS ? \"16\" : INCLUDES_CODE_EXAMPLES ? \"15\" : \"14\"}. Architecture Governance`. Under Claude Code the agent reads that raw. Substantively it is also wrong for this project: §9 'Technology-Specific Architectural Patterns' enumerates .NET, Java, React, Angular and Python — Go is absent from both the PROJECT_TYPE enum and the pattern sections, and the whole document assumes DI containers, ORMs, controllers and service meshes rather than goroutines, contexts and a per-module SQLite migration system. Finally its deliverable (Project_Architecture_Blueprint.md) duplicates acquire-codebase-knowledge's ARCHITECTURE.md in this very slice, plus the"
+    },
+    {
+      "name": "bug-reproduction-brief",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "True duplicate of the installed diagnosing-bugs, and the weaker of the two. Its whole content — record the observed failure, separate Expected from Actual, reduce to the smallest failing fixture, prove repeatability, stop before repair — is diagnosing-bugs Phase 1 (Build a feedback loop) and Phase 2 (Reproduce + minimise), which go materially further: ten ranked loop-construction techniques, an explicit red-capable/deterministic/fast/agent-runnable completion gate, a non-deterministic-bug protocol aimed at raising reproduction rate, tightening guidance, and a secret-redaction rule. Installing this alongside it would split the same trigger between two skills."
+    },
+    {
+      "name": "chrome-devtools",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "The one capability in this slice that the installed frontend/QA pair genuinely lacks is browser performance profiling — `performance_start_trace`, `performance_analyze_insight`, LCP/CLS insight, CPU and network throttling emulation, plus `list_network_requests` for the dashboard's HTMX partial round-trips and SSE status stream. webapp-testing covers navigation, screenshots and console logs but not tracing or network analysis. BLOCKER: the entire 98-line file is a tool catalog for the `chrome-devtools` MCP server — every workflow pattern calls MCP tool names (`take_snapshot`, `performance_start_trace`, `evaluate_script`) and the skill provides no fallback, no install instructions, and no non-MCP path. That MCP server is not configured for this session or this repo. UNBLOCK: configure the chrome-devtools MCP server (pinned, not @latest) and confirm it can reach a locally-served dashboard; the skill is then usable verbatim with no patch. If the owner does not want another MCP dependency, the profiling gap is better closed by a small first-party skill than by vendoring this catalog."
+    },
+    {
+      "name": "cloud-design-patterns",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Investigated specifically because the Go-architecture/concurrency lane came back empty from the sweep, and this was the only distributed-systems candidate. It does not fill it. The applicable subset for a single-process client — Retry, Circuit Breaker, Bulkhead, Throttling/Rate Limiting, Queue-Based Load Leveling, Health Endpoint Monitoring — is roughly 15 lines apiece of Problem / Solution / When to Use / Considerations lifted from the Azure Architecture Center, and the skill states outright 'Focus on why you should choose a specific pattern instead of how to implement it' — no implementation guidance, nothing Go-specific, nothing about goroutine lifecycle, context cancellation or race detection. The remaining ~36 patterns (Deployment Stamps, Geode, Sharding, Sidecar, Gateway Aggregation, Saga, Event Sourcing, Valet Key) are irrelevant to a single static binary."
+    },
+    {
+      "name": "codeql",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Its two primary paths both run through non-delegable prohibitions: default setup is enabled from 'repository Settings > Advanced Security > CodeQL analysis' (GitHub repo settings), and the value of an advanced-setup workflow is only realized by running it (workflow trigger/rerun). What remains an agent can legitimately do here is author one .github/workflows/codeql.yml for `language: go` with `autobuild` — a single one-time act with no recurring capability, and one that github-actions-hardening already covers for the authoring-securely half. Go support is real (references/compiled-languages.md Go section documents autobuild, go.mod detection, CODEQL_EXTRACTOR_GO_OPTION_EXTRACT_TESTS), so this is a governance-and-recurrence exclusion rather than a relevance one; revisit only if the owner explicitly wants code scanning stood up."
+    },
+    {
+      "name": "dependabot",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Would need a patch to clear the owner-only merge boundary and does not repay it. references/pr-commands.md:44 instructs `gh pr merge <PR_NUMBER> --auto --squash`, line 40 calls auto-merge 'the recommended replacement', and SKILL.md:314 repeats it — direct collisions with 'no merge/auto-merge'. The residual value is authoring a ~10-line .github/dependabot.yml for the gomod and github-actions ecosystems, which github-actions-hardening's references/supply-chain.md already hands over verbatim as part of its SHA-pinning guidance. The rest of the 35 KB is GHAS alert triage, monorepo grouping and multi-ecosystem strategy that a two-ecosystem Go repo does not need."
+    },
+    {
+      "name": "doc-and-modernize",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Documentation mode duplicates domain-modeling / wayfinder (and acquire-codebase-knowledge, excluded above) by producing one cited architecture document from a local checkout. Modernization mode targets legacy-stack migration with a feasibility spike and a safety ladder for systems whose 'legacy stack may be dead' — this project IS the modernization (a from-scratch Go rewrite of a Python miner), so there is no legacy system to plan off. Its bundled references/copilot-instructions.template.md is Copilot-harness-specific and duplicates CLAUDE.md's role."
+    },
+    {
+      "name": "documentation-writer",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Below the material-addition bar. The entire skill is 46 lines: four one-sentence Diátaxis quadrant definitions, four generic principles (clarity, accuracy, user-centricity, consistency), and a three-step ask-then-outline-then-write loop. There are no references, no templates, no worked examples and no repo-specific mechanics — it is a reminder of a framework rather than a methodology, and the writing lanes are already held by to-spec, writing-for-agents, research and domain-modeling. It also imposes a hard constraint that fights this repo's research workflow: 'You may not consult external websites or other sources unless I provide a link and instruct you to do so.'"
+    },
+    {
+      "name": "gh-attach",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Credential-handling and supply-chain profile that this repo's Secrets policy will not accept. It installs an unpinned third-party gh extension (`gh extension install sudosubin/gh-attach`) and authenticates uploads with a raw GitHub browser session cookie rather than the gh token — the skill itself says of GH_ATTACH_SESSION_TOKEN, 'Treat it as a full account credential.' CLAUDE.md forbids displaying, testing or reusing credentials. The capability (attaching before/after dashboard screenshots to a PR) is real but is not worth handing an agent a full-account session cookie; the owner can drag-and-drop in the web UI."
+    },
+    {
+      "name": "github-release",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Its entire purpose is a non-delegable prohibition. The skill 'guides IA through releasing a new version of a GitHub library end-to-end' with SemVer tagging and Keep a Changelog, and its frontmatter declares 'requires: gh CLI and git'; a provider-wide grep for prohibited actions returned exactly three skills, and this is the one whose core loop is release/tag. Release, tag and deploy require a separate direct user command and are never executed autonomously under this policy, so there is no configuration in which this skill is usable here. Listed because the sweep surfaced it, not because it was ever a close call."
+    },
+    {
+      "name": "incident-postmortem",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Closest call in this slice. The repo's CLAUDE.md does codify production-log discipline, and a 24/7 miner has real incident shapes (token expiry, PubSub reconnect storms, lost watch slots). But the artifact is built for a multi-person on-call org: it requires an Incident Commander, severity P1-P4, SLA/SLO breach quantification, customer communication timing, PagerDuty/Slack timeline sources, and action items whose owner must be 'a named individual, not a team' — for a single-maintainer project every one of those fields collapses to the same person. Strip them and what remains is 5 Whys plus a timeline table, which does not clear the material-addition bar against the installed diagnosing-bugs (root cause) and handoff (context capture). Flagging it as the exclusion most worth the owner overriding if the deployment ever grows past one operator."
+    },
+    {
+      "name": "multi-stage-dockerfile",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "No plausible addition — the repo's Dockerfile already implements every recommendation (multi-stage Go + Tailwind + UPX into a scratch final image, pinned bases, ldflags version injection, volume layout), and some advice actively conflicts with it: 'use `USER` to specify a non-root user', 'Use Alpine-based images', and 'appropriate HEALTHCHECK' are not applicable to a scratch image with no shell, no /etc/passwd and no healthcheck binary. The remaining content is 60 lines of generic layer-caching guidance with Node-flavored examples (NODE_ENV=production)."
+    },
+    {
+      "name": "pr-screenshots",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Thin and practically blocked. It is a markdown convention page — put before/after pairs in the PR body, do not hide them behind <details>, size with <img width=\"800\"> — with the substantive half covering Azure DevOps image upload, which this repo does not use. Crucially it presumes an upload mechanism an agent does not have: GitHub has no public attachment API, so the images arrive either by web-UI drag-and-drop (owner-performed) or via gh-attach, which is excluded above on credential grounds. Whatever value remains is one paragraph in a PR-description convention, not a skill."
+    },
+    {
+      "name": "premium-frontend-ui",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Concretely incompatible with this stack. It prescribes preloader entry sequences, GSAP ScrollTrigger scroll-driven narratives, pinned/horizontal-scroll sections, parallax mapping, per-character span-wrapped headline animation, glassmorphism and 3D-model asset resolution. The dashboard is Go html/template + HTMX + Tailwind + ApexCharts with no JS bundler, no CDN assets and no external fonts (everything vendored through go:embed) — adopting any of this would require exactly the new build steps and remote dependencies the repo forbids. It is landing-page/portfolio craft, not analytics-dashboard craft."
+    },
+    {
+      "name": "quality-playbook",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Broken dependency closure at this pin. SKILL.md's Phase 1 mandates `python -m bin.reference_docs_ingest <target>` and says 'If the ingest command fails ... stop the run', and Mode B is built on `python3 -m bin.run_playbook`; SKILL.md also cites bin/citation_verifier, bin/run_state_lib and a top-level schemas.md. None of bin/, schemas.md, or the referenced quality_gate/test_quality_gate.py exists anywhere in the provider clone (`find . -name 'run_playbook*'` returned empty), so even the 'self-contained' Mode A halts at its first mandated command. Also carries hard multi-CLI-agent requirements (the 'Council of Three' spawns claude/copilot/codex/cursor per phase) and a 3,385-line quality_gate.py that would need a full read before any execution."
+    },
+    {
+      "name": "scoutqa-test",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Hard dependency on a third-party hosted service: the `scoutqa` CLI dispatches the run to ScoutQA's own infrastructure and returns an execution ID plus an app.scoutqa.ai browser URL ('the test continues running remotely on ScoutQA's infrastructure'). A remotely-hosted browser cannot reach this project's localhost dashboard, so the primary use case is structurally unreachable, and the capability it advertises — exploratory web QA plus accessibility audit — is already covered locally by webapp-testing plus web-design-reviewer. Not a HOLD, because unblocking it would not yield a capability this repo can actually use."
+    },
+    {
+      "name": "security-review",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Name collides head-on with the Claude Code builtin `security-review` on the owner's must-not-collide list, so it could only be installed under a rename (the skill-creator-anthropic precedent). That cost is not repaid: the content is a generic OWASP-shaped sweep (injection / authn / secrets / crypto / business logic) whose Go coverage in references/language-patterns.md is one section among seven languages, and it sits squarely on top of the Trail of Bits slice, which owns code-level security depth. The genuinely distinct security angles in this provider are the Actions threat model and STRIDE architecture modeling, both recommended above."
+    },
+    {
+      "name": "sql-code-review",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Wrong engines and wrong shape. Its 'Database-Specific Best Practices' section covers PostgreSQL, MySQL, SQL Server and Oracle; grep -i sqlite over the file returns zero hits, and this project is SQLite-only. Its unit of review is standalone SQL scripts and DBA-facing concerns (GRANT/role permissions, index strategy, window functions, N+1 across an ORM), whereas here SQL lives inline in Go with a per-module `schema_versions` migration system — the actual correctness risks (migration ordering, single shared connection, cross-module version bumps) are not in scope for it. Nothing in this provider covers SQLite or schema migrations; that gap stays open."
+    },
+    {
+      "name": "ui-screenshots",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Near-duplicate of the installed anthropic webapp-testing for the part that applies here — both are Python Playwright against a local app, and webapp-testing already ships helper scripts (scripts/with_server.py, examples/console_logging.py) plus this repo's audit-before-exec patch. The remainder (~half the file) is Windows-only desktop capture via mss + ctypes/Win32 EnumWindows and Electron/VS Code capture over CDP, which is irrelevant to a Linux-built Go binary. The only novel ideas are the iterate-on-crop-not-on-capture discipline and the before/after-must-share-viewport-and-crop rule — worth a line in a manifest note, not a vendored skill."
+    }
+  ]
+}

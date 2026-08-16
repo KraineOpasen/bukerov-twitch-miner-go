@@ -152,6 +152,63 @@ MANIFESTS = [
         "extra_frontmatter_keys": frozenset({"license"}),
         "license": {"spdx": "Apache-2.0", "layout": "per-skill", "filename": "LICENSE.txt"},
     },
+    {
+        "label": "compound-engineering",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-policy.md"),
+        "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_COMPOUND_ENGINEERING",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        # `allowed-tools` is a real Claude Code key that NARROWS a skill's tool surface, so it is
+        # preserved rather than stripped (ce-resolve-pr-feedback uses it).
+        "extra_frontmatter_keys": frozenset({"allowed-tools"}),
+        # MIT requires the notice to accompany all copies, so each vendored skill dir carries its own.
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "trailofbits",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-policy.md"),
+        "upstream_repo": "https://github.com/trailofbits/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_TRAILOFBITS",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        # `allowed-tools` narrows the tool surface; `type` is Trail of Bits' own skill-kind marker.
+        "extra_frontmatter_keys": frozenset({"allowed-tools", "type"}),
+        # CC BY-SA 4.0 §3(a)(1) requires the licence notice with every distributed copy.
+        "license": {"spdx": "CC-BY-SA-4.0", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "awesome-copilot",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-policy.md"),
+        "upstream_repo": "https://github.com/github/awesome-copilot",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "builderio",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-policy.md"),
+        "upstream_repo": "https://github.com/BuilderIO/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_BUILDERIO",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
+    },
 ]
 
 # Top-level manifest fields every provider manifest must carry, whatever its schema.
@@ -585,12 +642,34 @@ def check_frontmatter_keys():
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+# Inline code spans. Deliberately single-line: a span is matched only within one line, so an odd
+# number of backticks on some line (upstream really does write things like `](` as a code span)
+# cannot swallow the rest of the file and expose unrelated text as if it were prose. Multi-line
+# spans are legal CommonMark but vanishingly rare in these skills, and mis-pairing across lines
+# produced exactly the phantom "dangling link" findings this form prevents.
+INLINE_CODE_RE = re.compile(r"(`+)(?:(?!\1)[^\n])*?\1")
+
+
+def strip_fenced_blocks(text):
+    """Drop ONLY fenced code blocks, keeping inline code spans intact.
+
+    Used by the dependency-closure check, which deliberately reads backticked paths
+    (`scripts/context.mjs`) as closure claims -- stripping inline code there would blind it.
+    Link checking wants the stronger strip_code_fences() below."""
+    return FENCE_RE.sub("", text)
 
 
 def strip_code_fences(text):
-    """Drop fenced code blocks so illustrative example links inside a ```md
-    template (not real links in this file) aren't checked as real targets."""
-    return FENCE_RE.sub("", text)
+    """Drop fenced code blocks AND inline code spans, so text that merely *shows* link syntax is
+    not checked as if it were a real link.
+
+    Both halves matter. The fenced half keeps an example inside a ```md template from being read as
+    a live link. The inline half is the same rule for `[T01.S](2-stride-analysis.md#anchor)` written
+    in backticks: a skill documenting the link syntax its OUTPUT must use is quoting a string, not
+    referencing a file that has to exist. Without this, every such quotation is a false "dangling
+    link" -- and the pressure that creates is to edit correct upstream prose to satisfy the
+    checker, which the vendoring policies exist to prevent."""
+    return INLINE_CODE_RE.sub("", FENCE_RE.sub("", text))
 
 
 # Trail of Bits' skills write intra-skill paths as `{baseDir}/references/foo.md`. `{baseDir}` is
@@ -647,7 +726,11 @@ def check_relative_links_resolve():
                     if kind == "absolute":
                         details.append("%s: absolute-path link %r" % (rel(path), raw.strip()))
                         continue
-                    if not os.path.isfile(resolved):
+                    # os.path.exists, not isfile: a link to a DIRECTORY inside the skill (e.g.
+                    # `./references/skeletons/`) is a legitimate reference, and treating it as
+                    # dangling was a bug in the original check that only surfaced once a provider
+                    # shipping directory links was vendored.
+                    if not os.path.exists(resolved):
                         details.append("%s: dangling link %r" % (rel(path), raw.strip()))
     report("relative-links-resolve", not details, details)
 
@@ -758,6 +841,29 @@ def check_manifest_ownership_partition():
     report("manifest-ownership-partition", not details, details)
 
 
+def exclusion_entry_details(label, key, excluded, fs_names):
+    """Pure core of check_excluded_absent's per-entry validation: a rejected candidate must not
+    also be installed, must carry a non-blank reason, and (when it states one) must use a
+    recognised verdict. Shared with the self-test fixture so both exercise identical logic."""
+    if not isinstance(excluded, list):
+        return ["%s: %s must be a list" % (label, key)]
+    details = []
+    for item in excluded:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            details.append("%s: malformed exclusion entry %r" % (label, item))
+            continue
+        name = item["name"]
+        if name in fs_names:
+            details.append("%s: excluded but present: %s" % (label, name))
+        if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
+            details.append("%s: exclusion %r has no reason" % (label, name))
+        status = item.get("status")
+        if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
+            details.append("%s: exclusion %r has status %r, expected one of %s" % (
+                label, name, status, sorted(ALLOWED_EXCLUSION_STATUSES)))
+    return details
+
+
 def check_excluded_absent():
     """A candidate the review REJECTED must not also be installed, and every rejection must carry
     a verdict a human can audit: a non-empty `reason`, and (when present) a `status` of EXCLUDE or
@@ -771,23 +877,15 @@ def check_excluded_absent():
             manifest = provider_manifest(entry)
         except Exception:
             continue  # reported by check_json_validity / check_provider_manifest_fields
-        excluded = manifest.get(entry["excluded_key"], [])
-        if not isinstance(excluded, list):
-            details.append("%s: %s must be a list" % (label, entry["excluded_key"]))
-            continue
-        for item in excluded:
-            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-                details.append("%s: malformed exclusion entry %r" % (label, item))
-                continue
-            name = item["name"]
-            if name in fs_names:
-                details.append("%s: excluded but present: %s" % (label, name))
-            if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
-                details.append("%s: exclusion %r has no reason" % (label, name))
-            status = item.get("status")
-            if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
-                details.append("%s: exclusion %r has status %r, expected one of %s" % (
-                    label, name, status, sorted(ALLOWED_EXCLUSION_STATUSES)))
+        # Compare a provider's rejections against the dirs THAT PROVIDER owns, not against every
+        # dir on disk. Two upstreams can ship same-named skills (github/awesome-copilot and
+        # trailofbits both publish a `codeql`); rejecting one while installing the other is a
+        # deliberate, recorded choice, not a contradiction. Global name uniqueness is still
+        # enforced -- by check_unique_skill_names and check_manifest_ownership_partition, which is
+        # where that invariant belongs.
+        details += exclusion_entry_details(
+            label, entry["excluded_key"], manifest.get(entry["excluded_key"], []),
+            provider_skill_dir_names(entry))
 
         # A skill vendored under a different directory name than upstream's (to dodge a builtin
         # collision) must not ALSO leave the pre-rename name on disk -- that would shadow the
@@ -1044,8 +1142,15 @@ def provider_scripts_audited_details(entry, skills, repo_root):
             p = fentry["path"]
             if p.endswith(SCRIPT_EXTS):
                 scripts.append(p)
-            elif "." not in os.path.basename(p) and _has_shebang(os.path.join(repo_root, p)):
-                scripts.append(p)
+            elif "." not in os.path.basename(p):
+                # _has_shebang returns (is_shebang, error) -- unpack it. Testing the tuple itself
+                # would be truthy for EVERY extensionless file (a LICENSE would read as a script).
+                is_shebang, err = _has_shebang(os.path.join(repo_root, p))
+                if err:
+                    details.append("%s: %s: %s: could not read to classify: %s" % (
+                        label, skill.get("name"), p, err))
+                elif is_shebang:
+                    scripts.append(p)
         if scripts and not skill.get("scripts_audited"):
             details.append("%s: %s: ships %d script file(s) (e.g. %s) but scripts_audited is not true"
                            % (label, skill.get("name"), len(scripts), sorted(scripts)[0]))
@@ -1105,10 +1210,23 @@ def check_builtin_collision_denylist():
 #     (a change region is usually a whole function or block, not cleanly bracketable by a
 #     standalone comment line the way HTML/Markdown text is), so PY_MARK_RE matches are collected
 #     for coverage purposes only -- they are never subject to an open/close balance check.
+#   - Shell scripts (.sh, and extensionless files with a shell shebang) use the same single-line
+#     `#` form as Python -- `#` is a comment in both, so PY_MARK_RE covers them unchanged.
+#   - JavaScript/ESM (.mjs, .js) has no `#` comment, so it uses the equivalent `//` form:
+#     `// bukerov-local-patch: <id> — <note>`. Like the Python form it is single-line only and
+#     has no balance concept.
 PATCH_OPEN_RE = re.compile(r"<!--\s*bukerov-local-patch:\s*([\w-]+)\s*-->")
 PATCH_CLOSE_RE = re.compile(r"<!--\s*/bukerov-local-patch:\s*([\w-]+)\s*-->")
 PATCH_SELFCLOSING_RE = re.compile(r"<!--\s*bukerov-local-patch:\s*([\w-]+)\s*—[^>]*-->")
 PY_MARK_RE = re.compile(r"#\s*bukerov-local-patch:\s*([\w-]+)")
+JS_MARK_RE = re.compile(r"//\s*bukerov-local-patch:\s*([\w-]+)")
+
+# Extensions carrying the single-line `#` marker form (no open/close balance).
+HASH_MARK_EXTS = (".py", ".sh", ".bash", ".zsh", ".yaml", ".yml")
+# Extensions carrying the single-line `//` marker form.
+SLASH_MARK_EXTS = (".mjs", ".js", ".ts")
+# Extensions carrying the wrapping HTML-comment marker pair.
+WRAP_MARK_EXTS = (".md", ".html")
 
 
 def check_patch_marker_balance():
@@ -1125,12 +1243,12 @@ def check_patch_marker_balance():
     for dirpath, _, filenames in os.walk(SKILLS_DIR):
         for fname in filenames:
             path = os.path.join(dirpath, fname)
-            if fname.endswith(".py"):
-                with open(path, encoding="utf-8") as f:
+            if fname.endswith(HASH_MARK_EXTS) or fname.endswith(SLASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
-                py_mark_count += len(PY_MARK_RE.findall(text))
+                py_mark_count += len(PY_MARK_RE.findall(text)) + len(JS_MARK_RE.findall(text))
                 continue
-            if not (fname.endswith(".md") or fname.endswith(".html")):
+            if not fname.endswith(WRAP_MARK_EXTS):
                 continue
             with open(path, encoding="utf-8") as f:
                 text = f.read()
@@ -1158,15 +1276,26 @@ def find_all_patch_marker_ids(root_dir):
     for dirpath, _, filenames in os.walk(root_dir):
         for fname in filenames:
             path = os.path.join(dirpath, fname)
-            if fname.endswith(".py"):
-                with open(path, encoding="utf-8") as f:
-                    text = f.read()
-                ids.update(PY_MARK_RE.findall(text))
-            elif fname.endswith(".md") or fname.endswith(".html"):
-                with open(path, encoding="utf-8") as f:
+            if fname.endswith(WRAP_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
                 ids.update(PATCH_OPEN_RE.findall(text))
                 ids.update(PATCH_SELFCLOSING_RE.findall(text))
+                continue
+            if fname.endswith(HASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(PY_MARK_RE.findall(f.read()))
+                continue
+            if fname.endswith(SLASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(JS_MARK_RE.findall(f.read()))
+                continue
+            # Extensionless bundled scripts (e.g. CE's `pr-snapshot`) carry the `#` form; detect
+            # them by shebang rather than by name so a patched one can never go uncounted.
+            # _has_shebang returns (is_shebang, error) -- unpack it; the bare tuple is always truthy.
+            if "." not in fname and _has_shebang(path)[0]:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(PY_MARK_RE.findall(f.read()))
     return ids
 
 
@@ -1267,7 +1396,7 @@ def dependency_closure_details(skills_dir):
                     continue
                 path = os.path.join(dirpath, fname)
                 with open(path, encoding="utf-8") as f:
-                    text = strip_code_fences(f.read())
+                    text = strip_fenced_blocks(f.read())
                 for target in sorted(set(CLOSURE_REF_RE.findall(text))):
                     head = target.split("/", 1)[0]
                     if head not in present_dirs:
@@ -2760,8 +2889,21 @@ def _st_g10():
 
 
 def _st_g11():
+    # Pins the registry's shape, not just its size: every entry must be fully specified, and the
+    # project (first-party) manifest must never be reachable through the vendored registry.
     labels = {entry["label"] for entry in MANIFESTS}
-    assert labels == {"mattpocock", "anthropic"}, labels
+    assert labels == {"mattpocock", "anthropic", "compound-engineering", "trailofbits",
+                      "awesome-copilot", "builderio"}, labels
+    required = ("label", "manifest", "patches", "policy", "upstream_repo", "upstream_env",
+                "schema", "excluded_key", "extra_frontmatter_keys", "license")
+    for entry in MANIFESTS:
+        missing = [k for k in required if k not in entry]
+        assert not missing, (entry.get("label"), missing)
+        assert entry["schema"] in ("skill-level", "file-level"), entry["schema"]
+        lic = entry["license"]
+        assert lic.get("spdx"), entry["label"]
+        assert lic.get("layout") in ("shared", "per-skill"), lic
+        assert ("path" in lic) if lic["layout"] == "shared" else ("filename" in lic), lic
     manifest_paths = {entry["manifest"] for entry in MANIFESTS}
     assert PROJECT_MANIFEST_PATH not in manifest_paths, manifest_paths
     mattpocock_shaped = load_manifest(MANIFEST_PATH)
@@ -3687,12 +3829,25 @@ def _st_p10():
             "locally_modified": False, "patch_ids": [],
         })
         details2 = provider_scripts_audited_details(entry2, skills2, root2)
-        assert any("pr-snapshot" in d or "scripts_audited is not true" in d for d in details2), details2
-        # A prose-only skill is exempt: nothing to audit.
-        entry3, skills3, root3, _sd3, _m3 = _build_provider_fixture(
+        assert any("scripts_audited is not true" in d for d in details2), details2
+
+        # ...and an extensionless file that is NOT a script (a LICENSE) must NOT be counted as one.
+        # Without this half the shebang branch passes vacuously: `_has_shebang` returns a
+        # (bool, error) TUPLE, and testing the tuple itself is truthy for every extensionless file,
+        # which is exactly the bug this assertion exists to catch.
+        entry3, skills3, root3, skills_dir3, _m3 = _build_provider_fixture(
             tmp, skill_name="p10c", with_script=False)
+        licpath = os.path.join(skills_dir3, "p10c", "LICENSE")
+        _write_file(licpath, "MIT License\n\nCopyright (c) 2026 Someone\n")
         skills3[0]["scripts_audited"] = False
-        assert provider_scripts_audited_details(entry3, skills3, root3) == []
+        skills3[0]["files"].append({
+            "path": os.path.relpath(licpath, root3), "origin": "local", "reason": "license notice",
+            "upstream_blob_sha": "x", "vendored_blob_sha": "x",
+            "upstream_mode": "100644", "vendored_mode": "100644",
+            "locally_modified": False, "patch_ids": [],
+        })
+        assert provider_scripts_audited_details(entry3, skills3, root3) == [], \
+            "a prose-only skill with an extensionless LICENSE must not be flagged as shipping a script"
 
 
 def _st_p11():
@@ -3740,24 +3895,18 @@ def _st_p13():
     """Every rejected candidate must carry an auditable verdict: a missing/blank reason fails, and
     a status outside {EXCLUDE, HOLD} fails. HOLD is accepted so a blocked-but-valuable candidate is
     recorded rather than silently omitted."""
-    fs_names = set()
-    def details_for(excluded):
-        out = []
-        for item in excluded:
-            name = item.get("name")
-            if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
-                out.append("exclusion %r has no reason" % name)
-            status = item.get("status")
-            if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
-                out.append("exclusion %r has status %r" % (name, status))
-            if name in fs_names:
-                out.append("excluded but present: %s" % name)
-        return out
-    assert details_for([{"name": "a", "reason": "   "}]), "blank reason must fail"
-    assert details_for([{"name": "a"}]), "missing reason must fail"
-    assert details_for([{"name": "a", "reason": "r", "status": "MAYBE"}]), "bad status must fail"
-    assert details_for([{"name": "a", "reason": "r", "status": "HOLD"}]) == []
-    assert details_for([{"name": "a", "reason": "r", "status": "EXCLUDE"}]) == []
+    def d(excluded, fs=()):
+        return exclusion_entry_details("fx", "excluded_skills", excluded, set(fs))
+    assert any("no reason" in x for x in d([{"name": "a", "reason": "   "}])), "blank reason must fail"
+    assert any("no reason" in x for x in d([{"name": "a"}])), "missing reason must fail"
+    assert any("status" in x for x in d([{"name": "a", "reason": "r", "status": "MAYBE"}])), "bad status must fail"
+    assert any("excluded but present" in x
+               for x in d([{"name": "a", "reason": "r"}], fs=["a"])), "installed-and-excluded must fail"
+    assert d([{"name": "a", "reason": "r", "status": "HOLD"}]) == []
+    assert d([{"name": "a", "reason": "r", "status": "EXCLUDE"}]) == []
+    assert d([{"name": "a", "reason": "r"}]) == []
+    assert d("not-a-list") == ["fx: excluded_skills must be a list"]
+    assert any("malformed" in x for x in d([{"no-name": 1}]))
 
 
 def _st_p14():
