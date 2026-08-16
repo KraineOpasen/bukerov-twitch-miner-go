@@ -20,12 +20,25 @@ other reviewed change to this repository — write it, review it, merge it, and 
 containing `upstream` anywhere in a project entry is a schema violation (enforced by `project-manifest-valid`):
 a first-party entry must never assert provenance it doesn't have.
 
-## Governance v2 precedence
+## Authority precedence
 
-Nothing here changes `CLAUDE.md`'s policy precedence order: (1) an explicit task contract, (2) `CLAUDE.md` +
-`.claude/rules/*.md`, (3) vendored skills (patched) — and, at the same tier, this project's own first-party
-skills — (4) unpatched upstream skill defaults, (5) generic model behavior. A first-party skill instruction never
-overrides a `.claude/rules/*.md` constraint or a hook denial, exactly like a vendored one.
+Nothing here changes `CLAUDE.md`'s authority chain, which has exactly four levels (see
+`docs/agents/agent-orchestration.md`), narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched and this project's own first-party
+   skills, at the same tier; ownership class changes review procedure, never authority.
+4. **Generic model behavior** — fallback only.
+
+There is no fifth tier for "unpatched upstream defaults": a first-party skill has no upstream at all, and a
+vendored skill's instructions are whatever its vendored bytes say, patched and unpatched alike, resolved inside
+level 3. A first-party skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial,
+exactly like a vendored one.
+
+On **workflow**, a first-party skill owns its documented methodology the same way a vendored one does (see
+`docs/agents/agent-orchestration.md`) — the authority chain above constrains what it may reach, not how it
+organizes its agents.
 
 ## Allowed invocation modes
 
@@ -46,7 +59,7 @@ Every entry declares `mutation_capability`: `read-only` or `mutation-capable`. *
 evidence, not a capability boundary.** A `read-only` classification is a deterministic proxy the validator can
 check (it requires `scripts: []` and `hooks: []` — no scripts, no hooks), and it records what the reviewer
 concluded when the skill was last read end-to-end. It grants nothing by itself. Actual mutation authority — the
-ability to edit, commit, push, or touch the tracker — comes only from Governance v2's operation modes
+ability to edit, commit, push, or touch the tracker — comes only from the operation modes
 (`docs/agents/operation-modes.md`) and an active task contract (`docs/agents/task-contract.md`), the same as for
 every other skill, vendored or not. A skill marked `mutation-capable` in the manifest still cannot commit or push
 outside an active contract that grants it; a skill marked `read-only` is not itself what stops a determined
@@ -72,8 +85,10 @@ independent comparator judging the outputs), not a self-report from the same ses
 Every first-party skill install or update goes through the same two-lens review this repository uses elsewhere
 (`code-review` skill): a **Standards** review (does it follow this repo's conventions, minimal footprint, no
 unjustified scripts/hooks) and a **Spec** review (does it do what it claims, does its eval evidence actually
-support the claim). Both reviewers are read-only — see "Agent orchestration" in `CLAUDE.md`: the agent that
-writes the skill is never the agent that approves it.
+support the claim). The agent that writes the skill is never the agent that approves it — reviewer
+independence is a review-integrity requirement for this specific category of change, not a general
+orchestration rule (see `docs/agents/agent-orchestration.md`, which leaves reviewer topology to the invoked
+skill).
 
 ## Manifest integrity rules
 

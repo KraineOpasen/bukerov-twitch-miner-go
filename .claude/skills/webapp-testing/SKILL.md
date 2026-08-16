@@ -96,7 +96,7 @@ with sync_playwright() as p:
 
 <!-- bukerov-local-patch: webapp-testing-localhost-only -->
 - Target ONLY `http://localhost`, `http://127.0.0.1` or `file://` URLs. Never production, staging,
-  remote, or TrueNAS hosts.
+  or remote hosts.
 - Credentials (e.g. `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` for this repo's dashboard) come only
   from environment variables; never hardcode them in scripts, and render them as `[REDACTED]` in any
   report or log.

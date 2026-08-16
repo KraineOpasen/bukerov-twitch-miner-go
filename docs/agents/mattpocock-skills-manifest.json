@@ -260,7 +260,7 @@
       "path": ".claude/skills/wizard",
       "upstream_path": "skills/engineering/wizard",
       "upstream_blob_sha": "fdc2a72162b75db138df2f81c9cc6fd8a72f4495",
-      "vendored_blob_sha": "d370459a643c73fa237773a40b6a9fafaef9d372",
+      "vendored_blob_sha": "227926d9d82dc1718e87ffd70a761cfced9adc29",
       "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
       "locally_modified": true,

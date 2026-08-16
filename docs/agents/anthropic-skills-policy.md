@@ -98,15 +98,43 @@ license.
 examples, and the new local test file). Full ledger, one row per patch id per file:
 `docs/agents/anthropic-skills-patches.md`. No patch translates or stylistically rewrites upstream text — every
 change narrows a capability (background execution, auto-open, CDN/network fetch, tracker-mutation-shaped
-writes into a git repo, shell-metachar execution, unbounded subagent fan-out, invocation scope) to match this
-project's governance model, the same principle `mattpocock-skills-policy.md` uses for its own patch set.
+writes into a git repo, shell-metachar execution, invocation scope) to match this project's governance model,
+the same principle `mattpocock-skills-policy.md` uses for its own patch set.
+
+### Default: minimal patching
+
+Under Governance v3 (`docs/adr/0002-governance-v3-skill-native-orchestration.md`), skills are preserved as
+close to their authors' intent as practical. **Do not patch a skill merely because it uses subagents, several
+writers, reviewers/critics, parallel analysis, iterative fixes, or its own handoff/orchestration pattern** —
+including fan-out that upstream leaves unbounded. That is engineering workflow, and workflow belongs to the
+skill (see `docs/agents/agent-orchestration.md`). Patch only for concrete project incompatibility, a broken
+dependency, license/provenance necessity, or a genuine authority/integrity boundary.
+
+The `skc-agent-cap` patch id, and the concurrency-cap clauses inside `skc-change-mode-gate` and
+`skc-runloop-foreground-sandbox`, were written under Governance v2's orchestration rules and would not be
+justified by the v3 test above. They are left in place, byte-identical, and are candidates for removal at the
+next re-vendor — each needs its own reviewed PR through the update procedure below.
 
 ## Governance precedence
 
-Vendored skills sit **below** this project's own policy. Precedence (see `CLAUDE.md`'s "Claude Code Governance
-(v2)" section): (1) the active task contract, (2) `CLAUDE.md` + `.claude/rules/*.md`, (3) vendored skills as
-patched (both this set and the Matt Pocock set), (4) unpatched upstream skill defaults, (5) generic model
-behavior. A skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial.
+Vendored skills sit **below** this project's own policy **on authority**. The authority chain has exactly four
+levels (see `CLAUDE.md`'s "Claude Code Governance (v3)" section and `docs/agents/agent-orchestration.md`),
+narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched (both this set and the Matt Pocock set).
+4. **Generic model behavior** — fallback only.
+
+Unpatched upstream text is **not** a separate tier below the patches: a vendored skill's instructions are
+whatever its vendored bytes say, patched and unpatched alike, and they all sit together at level 3. Where a
+local patch and the upstream text around it disagree, the patch wins — that is what patching means, and it is
+resolved inside level 3 rather than by a fifth level. A skill instruction never overrides a
+`.claude/rules/*.md` constraint or a hook denial.
+
+**On workflow the order is inverted**: an invoked audited skill owns its documented engineering methodology —
+agents, lanes, reviewers, writers, repair loops — and the project does not override it. See
+`docs/agents/agent-orchestration.md`.
 
 ## Supply-chain assumptions
 
@@ -142,9 +170,11 @@ already-reviewed script) and have the validator stay green.
    raw upstream — several files are locally patched) to isolate genuinely new upstream content from an old
    patch.
 4. Re-run the same review judgment as the original vendoring for anything new: does it assume standing
-   background execution, auto-open, external network fetch, unbounded fan-out, or a write into a git working
-   tree this project doesn't grant by default? If so, patch it the same way (minimal, marked, no rewrites,
-   `scripts_audited: true` re-confirmed for any touched script) rather than installing it unpatched.
+   background execution, auto-open, external network fetch, or a write into a git working tree this project
+   doesn't grant by default? If so, patch it the same way (minimal, marked, no rewrites, `scripts_audited:
+   true` re-confirmed for any touched script) rather than installing it unpatched. The test is **authority**,
+   not orchestration — a skill's agent topology, fan-out width, writer count, reviewer lanes and repair loops
+   are not grounds for a patch (see "Default: minimal patching" above).
 5. Update `upstream_commit`, `upstream_tree`, `upstream_current_head`, `drift`, and `reviewed_at` in
    `anthropic-skills-manifest.json`; update every touched file's `upstream_blob_sha`/`upstream_mode` and
    `locally_modified`/`patch_ids`. Recompute `vendored_blob_sha` (`git hash-object <path>`) for every touched
@@ -173,7 +203,7 @@ Positive/negative expectations, useful when re-tuning any of these three descrip
 | --- | --- | --- |
 | `skill-creator-anthropic` | Only the explicit `/skill-creator-anthropic` invocation. | A plain "create a skill for X" (routes to the built-in `skill-creator` instead — that's the point of the rename); "benchmark `internal/models`'s bet strategies" (that's `go test -bench`, not a skill-triggering eval). |
 | `frontend-design` | "Restyle the dashboard's streamer detail page with a more distinctive look"; "the settings page looks templated, make it feel intentional." | Backend/API/schema work ("add a new settings field", "change the analytics query") — out of scope per `fd-stack-pin`; wanting several candidate directions at once — that's `prototype`; picking chart series colors — that's `dataviz`'s territory, not this skill's. |
-| `webapp-testing` | "Click through the dashboard at localhost:8080 and confirm the notifications toggle works"; "screenshot the settings page after my CSS change." | "Add tests for the analytics repository" (that's `go test`/`tdd`, not browser automation); "debug why the dashboard shows stale data" (that's `diagnosing-bugs`'s loop — this skill only supplies browser evidence into it); anything naming a production or TrueNAS host — refused outright by the `webapp-testing-localhost-only` patch. |
+| `webapp-testing` | "Click through the dashboard at localhost:8080 and confirm the notifications toggle works"; "screenshot the settings page after my CSS change." | "Add tests for the analytics repository" (that's `go test`/`tdd`, not browser automation); "debug why the dashboard shows stale data" (that's `diagnosing-bugs`'s loop — this skill only supplies browser evidence into it); anything naming a production or remote host — refused outright by the `webapp-testing-localhost-only` patch. |
 
 The eval/benchmark loop inside `skill-creator-anthropic` never auto-starts for any of this — it only runs when
 a user explicitly asks for it in the current session (per the `skc-change-mode-gate` patch).

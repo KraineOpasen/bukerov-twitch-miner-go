@@ -1,7 +1,8 @@
 # CONTEXT.md
 
 Minimal verified domain skeleton, generated at `main` SHA `041f02dfa324ae64278304d937a2bd1a92f1b422` as part of
-Claude Code Governance v2 (see `docs/adr/0001-agent-governance-v2.md`). This is deliberately thin — it lists
+Claude Code agent governance (see `docs/adr/0001-agent-governance-v2.md`, superseded in part by
+`docs/adr/0002-governance-v3-skill-native-orchestration.md`). This is deliberately thin — it lists
 what exists, not an invented domain model. `SPECIFICATIONS.md` and `CLAUDE.md` remain the authoritative sources
 for architecture, protocols, and conventions; consult them first.
 
@@ -65,7 +66,8 @@ Seeded from the Ф4d trusted-LAN lifecycle work (2026-07-31); the miner's core d
 
 ## ADRs
 
-See `docs/adr/`. Currently: `0001-agent-governance-v2.md` (governance, not product domain).
+See `docs/adr/`. Currently: `0001-agent-governance-v2.md` and
+`0002-governance-v3-skill-native-orchestration.md` (both governance, not product domain).
 
 ## Gaps
 

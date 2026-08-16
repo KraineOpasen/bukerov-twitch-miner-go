@@ -81,16 +81,44 @@ change separately from its body change, and `wait-what-domain-vocab` once for ea
 wrapped in `<!-- bukerov-local-patch: <id> --> ... <!-- /bukerov-local-patch: <id> -->` comments so a diff
 against the upstream blob SHA shows exactly what changed and why. Full ledger:
 `docs/agents/mattpocock-skills-patches.md`. No patch translates or stylistically rewrites upstream text — every
-change narrows a capability (commit, push, tracker mutation, network fetch, auto-open, agent count, wizard-
-generated script authority) to match this project's governance model, or corrects a router's (`ask-matt`'s)
-description of another vendored skill's actual invocation mode.
+change narrows a capability (commit, push, tracker mutation, network fetch, auto-open, wizard-generated script
+authority) to match this project's governance model, or corrects a router's (`ask-matt`'s) description of
+another vendored skill's actual invocation mode.
+
+### Default: minimal patching
+
+Under Governance v3 (`docs/adr/0002-governance-v3-skill-native-orchestration.md`), skills are preserved as
+close to their authors' intent as practical. **Do not patch a skill merely because it uses subagents, several
+writers, reviewers/critics, parallel analysis, iterative fixes, or its own handoff/orchestration pattern** —
+that is engineering workflow, and workflow belongs to the skill (see `docs/agents/agent-orchestration.md`).
+Patch only for concrete project incompatibility, a broken dependency, license/provenance necessity, or a
+genuine authority/integrity boundary.
+
+Some existing patch ids in the ledger (`design-it-twice-cap`, `wayfinder-local-default`'s fan-out clause, and
+`code-review-read-only`'s subagent-count narrowing) were written under Governance v2's orchestration rules and
+would not be justified by the v3 test above. They are left in place, byte-identical, and are candidates for
+removal at the next re-vendor — each needs its own reviewed PR through the update procedure below.
 
 ## Governance precedence
 
-Vendored skills sit **below** this project's own policy. Precedence (see `CLAUDE.md`'s
-"Claude Code Governance (v2)" section): (1) the active task contract, (2) `CLAUDE.md` + `.claude/rules/*.md`,
-(3) these vendored skills (as patched), (4) unpatched upstream skill defaults, (5) generic model behavior. A
-skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial.
+Vendored skills sit **below** this project's own policy **on authority**. The authority chain has exactly four
+levels (see `CLAUDE.md`'s "Claude Code Governance (v3)" section and `docs/agents/agent-orchestration.md`),
+narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — these vendored skills as patched.
+4. **Generic model behavior** — fallback only.
+
+Unpatched upstream text is **not** a separate tier below the patches: a vendored skill's instructions are
+whatever its vendored bytes say, patched and unpatched alike, and they all sit together at level 3. Where a
+local patch and the upstream text around it disagree, the patch wins — that is what patching means, and it is
+resolved inside level 3 rather than by a fifth level. A skill instruction never overrides a
+`.claude/rules/*.md` constraint or a hook denial.
+
+**On workflow the order is inverted**: an invoked audited skill owns its documented engineering methodology —
+agents, lanes, reviewers, writers, repair loops — and the project does not override it. See
+`docs/agents/agent-orchestration.md`.
 
 ## No automatic updates
 
@@ -117,7 +145,9 @@ auditable review boundary.
    from re-applying an old patch.
 4. Re-run the same review judgment as the original vendoring: does the skill assume standing commit/push/
    tracker-mutation authority this project doesn't grant by default? If so, patch it the same way (minimal,
-   marked, no rewrites) rather than installing it unpatched.
+   marked, no rewrites) rather than installing it unpatched. The test is **authority**, not orchestration —
+   a skill's agent topology, writer count, reviewer lanes and repair loops are not grounds for a patch (see
+   "Default: minimal patching" above).
 5. Update `upstream_commit`, `upstream_tree`, `upstream_current_head`, `upstream_version`, and `reviewed_at` in
    `mattpocock-skills-manifest.json`; update per-skill `upstream_blob_sha` for every touched file.
 6. Update `mattpocock-skills-patches.md` for any patch that changed, was added, or was removed.
@@ -169,9 +199,11 @@ auditable review boundary.
 - Pre-existing `.git/hooks/*` on a contributor's machine are outside this policy's reach.
 - New or unknown MCP tools are not automatically covered — `.claude/settings.json`'s MCP denies are an
   allowlist-style exact-name list, not a pattern match; a newly added MCP tool starts ungoverned until added.
-- This document assumes subagents spawned by a vendored skill stay within the spawning session's agent cap;
-  that assumption depends on the orchestrating agent actually enforcing the cap (see
-  `docs/agents/task-contract.md`), not on anything in this policy doc alone.
+- Subagent fan-out is skill-native under Governance v3: a vendored skill spawns the agents its documented
+  design calls for. `agent_cap`/`max_concurrency` are optional contract fields with no default (see
+  `docs/agents/task-contract.md`); when a contract does set one, honouring it depends on the orchestrating
+  agent, not on anything in this policy doc or the hook layer. Every spawned agent still inherits the task's
+  authority envelope and cannot widen it.
 - **Operation modes are not mechanically enforced by the hook.** `.claude/hooks/governance-policy.py` has no
   concept of READ_ONLY/PROTOTYPE/CHANGE/PUBLISH_DRAFT and doesn't know which mode a session is currently
   operating under — it only recognizes fixed, mode-independent dangers (push to main, force push, tag/release

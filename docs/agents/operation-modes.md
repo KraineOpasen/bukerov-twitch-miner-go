@@ -1,9 +1,13 @@
 # Operation modes
 
-Four modes gate what an agent session may do to this repo. The active mode is set by the task contract (see
-`docs/agents/task-contract.md`); absent a contract, the mode is always `READ_ONLY`. A contract can only grant a
-mode — it can never grant capabilities the policy precedence in `CLAUDE.md` reserves for a direct user command
-(merge, release, deploy, production access).
+Four **capability ceilings** on what an agent session may do to this repo. The active mode is set by the task
+contract (see `docs/agents/task-contract.md`); absent a contract, the mode is always `READ_ONLY`. A contract
+can only grant a mode — it can never grant capabilities the authority chain in `CLAUDE.md` reserves for a
+direct user command (merge, release, deploy).
+
+Modes bound **reach**, never workflow. A mode says which operations are available to the session; it does not
+prescribe how a skill organizes its agents, lanes, reviewers, or repair loops — that is skill-native and lives
+in `docs/agents/agent-orchestration.md`. Every subagent inherits the session's mode; none may exceed it.
 
 ## READ_ONLY (default)
 
@@ -41,19 +45,30 @@ which mode it was in.
 
 ## Expiry triggers (force revert to READ_ONLY)
 
+These are **integrity and authority** failures — the contract's premises stopped holding, or something was
+attempted outside them:
+
 - Repo switch (a tool targets a different repository than the contract names)
 - Unexpected branch (current branch != contract branch)
 - Main drift (main/master's HEAD SHA has moved since the contract's base SHA)
 - Dirty worktree the contract didn't expect
 - A competing PR appears on the task branch
-- A quality gate fails (see `docs/agents/quality-gates.md`)
+- An operation outside granted authority, attempted by any agent at any delegation depth
+- Irreconcilable scope expansion
+- Environment corruption, or state that can no longer be proven
+- A **final** gate that cannot be made to pass after the skill's repair strategy is exhausted (see
+  `docs/agents/quality-gates.md`)
 - Session end
+
+**Not an expiry trigger:** ordinary development feedback. A red test, a failing build, a review finding, a
+surviving mutant, an expected TDD red state — these are diagnosed and repaired inside the active task. Only an
+exhausted repair strategy on a final gate expires the contract.
 
 ## Drift handling
 
 Before acting on a mode's permissions, verify the facts the contract assumed still hold (repo, branch, base
 SHA, PR/CI state — see `docs/agents/task-contract.md`'s re-check points). On any detected drift, stop, report
-what changed, and treat the contract as expired until re-verified.
+what changed with exact evidence, and treat the contract as expired until re-verified.
 
 ## Session boundary
 

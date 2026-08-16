@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """validate-agent-governance.py — offline, read-only consistency checks for the
-Claude Code Governance v2 layer (.claude/**, docs/agents/**, docs/adr/**).
+Claude Code Governance v3 layer (CLAUDE.md, CONTEXT.md, README.md, .claude/**, docs/agents/**,
+docs/adr/**), plus a repo-wide tracked-file scan for the forbidden host-OS token and the
+application-path guard over go.mod/go.sum/Dockerfile/docker-compose/.github/workflows/.
+
+Governance v3 is defined by docs/adr/0002-governance-v3-skill-native-orchestration.md and
+docs/agents/agent-orchestration.md. The checks named `governance-v3-*` below enforce that the prose
+layer stays mechanically consistent with it: the v3 docs exist, `CLAUDE.md` declares v3, no
+Governance-v2 orchestration mandate survives as current policy, `docs/agents/task-contract.md` reads
+as an authority envelope rather than an orchestration recipe, and no host operating-system name is
+used as governance vocabulary anywhere in the tree.
 
 Stdlib only, no network access, deterministic. Exits 0 if every check passes,
 1 if any check fails. Diagnostics print as `[FAIL] check-name: detail` /
@@ -17,14 +26,24 @@ Usage:
     python3 scripts/validate-agent-governance.py
     python3 scripts/validate-agent-governance.py --self-test-hook
     python3 scripts/validate-agent-governance.py --self-test
-        Runs ONLY this script's own offline fixture matrix (G1-G12, N1-N16) -- no network, no
-        sleeps, fully deterministic. Most fixtures build synthetic, never-committed trees under
-        tempfile.TemporaryDirectory; a couple (G11, G12) instead read the real repository
-        read-only, to check the vendored MANIFESTS registry's shape and to validate the real
-        (empty) project manifest. The guarantee this flag makes is "this run never WRITES to the
-        repo" -- not "every fixture is synthetic-only". Prints "N/N self-test fixtures passed"
-        and exits 1 on any fixture failure, 0 otherwise. Independent of --self-test-hook and of
-        the default run.
+        Runs ONLY this script's own offline fixture matrix -- no network, no sleeps, fully
+        deterministic. `_self_test_fixtures()` is the single source of truth for which fixtures
+        exist and what each one covers; that list is expected to grow, so it is deliberately not
+        duplicated as an id range here. Three families, by id prefix: G* positive/structural cases,
+        N* negative cases (one per distinct violation class in project-skills-policy.md's schema),
+        V* the Governance-v3 prose checks.
+
+        Fixtures come in two flavours, and BOTH are normal. Most build a synthetic, never-committed
+        tree under tempfile.TemporaryDirectory. The rest read the REAL repository, read-only, to
+        assert facts about actual repo state -- the vendored MANIFESTS registry's shape, the real
+        (empty) project manifest, and each Governance-v3 prose invariant against the real documents.
+        The guarantee this flag makes is "this run never WRITES to the repo", not "every fixture is
+        synthetic-only".
+
+        Every V* fixture calls the same production helper its corresponding check calls
+        (`*_details()`), so a self-test pass means the production logic passed -- the fixtures never
+        re-implement a check's conditions. Prints "N/N self-test fixtures passed" and exits 1 on any
+        fixture failure, 0 otherwise. Independent of --self-test-hook and of the default run.
 
 Env vars (all optional, all make specific checks stricter, never required):
     GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK  path to a read-only clone of mattpocock/skills; when set,
@@ -267,6 +286,8 @@ def check_required_files():
         "docs/agents/issue-tracker.md", "docs/agents/domain.md", "docs/agents/triage-labels.md",
         "docs/agents/mattpocock-skills-manifest.json", "docs/agents/mattpocock-skills-patches.md",
         "docs/agents/mattpocock-skills-policy.md", "docs/adr/0001-agent-governance-v2.md",
+        "docs/agents/agent-orchestration.md",
+        "docs/adr/0002-governance-v3-skill-native-orchestration.md",
         "scripts/validate-agent-governance.py",
         "docs/agents/anthropic-skills-manifest.json", "docs/agents/anthropic-skills-patches.md",
         "docs/agents/anthropic-skills-policy.md",
@@ -1248,7 +1269,8 @@ def validate_project_manifest(manifest, repo_root, require_tracked=True):
         hooks = entry.get("hooks")
         # mutation_capability is REVIEWED METADATA / review evidence only -- it is not a
         # mechanical capability boundary. Actual mutation authority comes solely from Governance
-        # v2's operation modes and an active task contract (see project-skills-policy.md); the
+        # v3's operation modes (docs/agents/operation-modes.md) and an active task contract (see
+        # project-skills-policy.md); the
         # "read-only requires empty scripts/hooks" rule below is a deterministic proxy the
         # validator can check, not the thing that grants or denies write access.
         if mutation_capability not in ("read-only", "mutation-capable"):
@@ -1568,6 +1590,559 @@ def check_project_manifest():
     report("project-manifest-valid", not details, details)
 
 
+# --------------------------------------------------------------------------
+# Governance v3 consistency (ADR-0002)
+# --------------------------------------------------------------------------
+#
+# These checks keep the prose governance layer mechanically consistent with
+# Governance v3 (docs/adr/0002-governance-v3-skill-native-orchestration.md).
+# They are deterministic, stdlib-only, and never touch the network — same
+# contract as every other check in this file.
+#
+# GOVERNANCE_SURFACE is the set of tracked text this repository's governance
+# owns. It deliberately EXCLUDES:
+#   - .claude/skills/**     vendored upstream bodies, integrity-pinned by blob
+#                           SHA; their content is governed by the vendoring
+#                           policies + patch ledgers, not by these checks.
+#   - .claude/hooks/**      the mechanical enforcement layer, edit-denied.
+#   - Dockerfile, SPECIFICATIONS.md
+#                           deployment/protocol reference text, not governance.
+# A file is scanned only if it exists; the set is a fixed list plus two
+# directory walks, so the check is stable regardless of repo state.
+
+GOVERNANCE_SURFACE_FILES = ("CLAUDE.md", "CONTEXT.md", "README.md")
+GOVERNANCE_SURFACE_DIRS = (
+    os.path.join(".claude", "rules"),
+    os.path.join("docs", "agents"),
+    os.path.join("docs", "adr"),
+)
+
+# ADRs are the historical-decision layer: ADR-0001 preserves the Governance v2
+# wording verbatim, and ADR-0002 must name the v2 mandates it removes in order
+# to record the decision at all. Both are exempt from the stale-language scan;
+# policy documents are not.
+V2_LANGUAGE_EXEMPT = (
+    "docs/adr/0001-agent-governance-v2.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+# Normative Governance-v2 orchestration wording that v3 removed. Matched
+# case-insensitively as normalized substrings (see normalize_prose_line).
+# Deliberately phrase-level, not the bare string "v2": describing what v2 did
+# (in ADR-0002, in the vendoring policies' migration notes) is legitimate and
+# must stay possible.
+#
+# Every phrase here is quoted from the Governance-v2 text ADR-0002 superseded --
+# see `git show <pre-v3-sha>:CLAUDE.md` "### Agent orchestration" and ADR-0001's
+# preserved wording. A phrase is only admissible if it produces ZERO hits against
+# the current governance surface; the V3 fixture proves that continuously, and
+# the V8/V9 fixtures prove each family is actually detected.
+STALE_V2_ORCHESTRATION_PHRASES = (
+    # --- v2's single-writer / ledger / spawning mandates ---
+    # The identifier and the prose forms are listed separately on purpose:
+    # normalize_prose_line preserves underscores (they are part of the field
+    # name), so "single_writer" does not also cover "single-writer" or
+    # "single writer per task". Note what is deliberately ABSENT: "one writer
+    # per task" and "exactly one writer" both occur in the legitimate v3
+    # sentence at agent-orchestration.md ("Governance v2 required exactly one
+    # writer per task. v3 replaces that with ..."), so needling them would fail
+    # the check against correct text.
+    "single_writer",
+    "single-writer",
+    "single writer per task",
+    "one production writer",
+    "role ledger",
+    "no recursive subagent",
+    "no recursive spawning",
+    "no recursive delegation",
+    "claude code governance (v2)",
+    "governance v2 precedence",
+    # --- v2's UNIVERSAL reviewer-read-only mandate (removed by ADR-0002 §2) ---
+    # v2: "One production writer per task; every other agent is read-only ..."
+    #     "Reviewer/analysis agents never write to tracked files or push."
+    # A skill may still choose read-only reviewers; what v3 removed is the
+    # project imposing it on every skill, so only the universal phrasings match.
+    "every other agent is read-only",
+    "reviewer/analysis agents never write",
+    "reviewer agents never write",
+    "analysis agents never write",
+    "reviewers are always read-only",
+    "reviewer agents are always read-only",
+    "reviewers must always be read-only",
+    # --- v2's MANDATORY resource caps (v3 keeps both as optional, no default) ---
+    # Phrased so that legitimately quoting the field name -- which
+    # agent-orchestration.md, task-contract.md and both patch ledgers all do --
+    # never matches; only an assertion that a cap is obligatory does.
+    "agent_cap is mandatory",
+    "mandatory agent_cap",
+    "agent_cap is required",
+    "agent_cap must be set",
+    "must set an agent_cap",
+    "max_concurrency is mandatory",
+    "mandatory max_concurrency",
+    "max_concurrency is required",
+    "max_concurrency must be set",
+    "must set a max_concurrency",
+    # NOT listed: "respect the task contract's agent_cap". Every occurrence of
+    # that phrasing is legitimate. In vendored skill bodies it is upstream text
+    # this scan cannot reach anyway (the surface excludes .claude/skills/**); in
+    # the patch ledgers and in agent-orchestration.md / task-contract.md /
+    # ADR-0002 it is QUOTED, precisely in order to state the v3 re-reading rule
+    # for it. Needling it would fail the check against the documents that fix
+    # the problem. Those texts are governed by that re-reading rule, not here.
+)
+
+# The host operating system of a machine that happens to run the miner's
+# container is not a governance concept (ADR-0002 §8), and the acceptance
+# condition is zero occurrences across ALL tracked files -- with no exemption for
+# the ADR that records the decision, or for this file.
+#
+# The token is therefore assembled from fragments rather than written as a
+# literal: were it spelled out here, this enforcement script would itself become
+# the last surviving occurrence of the very string it forbids, and the repo-wide
+# check below would fail on its own source. Splitting it is not obfuscation --
+# it is what lets the rule be absolute.
+FORBIDDEN_HOST_OS_TOKEN = "true" + "nas"
+
+V3_REQUIRED_DOCS = (
+    "docs/agents/agent-orchestration.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+
+def governance_surface_paths(repo_root):
+    """Repo-relative, sorted list of the governance text this repo owns.
+
+    Pure: takes the root as an argument so self-test fixtures can point it at
+    a synthetic tree. Missing files/dirs are skipped, not errors.
+    """
+    paths = []
+    for name in GOVERNANCE_SURFACE_FILES:
+        if os.path.isfile(os.path.join(repo_root, name)):
+            paths.append(name)
+    for subdir in GOVERNANCE_SURFACE_DIRS:
+        abs_dir = os.path.join(repo_root, subdir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(abs_dir):
+            for filename in sorted(filenames):
+                if not filename.endswith(".md"):
+                    continue
+                abs_path = os.path.join(dirpath, filename)
+                paths.append(os.path.relpath(abs_path, repo_root).replace(os.sep, "/"))
+    return sorted(set(paths))
+
+
+_PROSE_MARKUP_RE = re.compile(r"[`*]+")
+_PROSE_WS_RE = re.compile(r"\s+")
+
+
+def normalize_prose_line(line):
+    """Lowercase a Markdown line and strip the markup that would hide a phrase.
+
+    Backticks and asterisks are removed (so ``respect the task contract's
+    `agent_cap``` normalizes to the same text as the unformatted sentence), and
+    whitespace runs collapse to a single space. Underscores are deliberately
+    LEFT ALONE -- they carry meaning in `single_writer`, `agent_cap` and
+    `max_concurrency`, which are exactly the identifiers being matched.
+    """
+    return _PROSE_WS_RE.sub(" ", _PROSE_MARKUP_RE.sub("", line.lower())).strip()
+
+
+def scan_governance_surface(repo_root, needles, exempt=()):
+    """Return ["<relpath>:<lineno>: <needle>", ...] for case-insensitive hits.
+
+    `needles` is an iterable of lowercase substrings, matched against
+    normalize_prose_line() output. `exempt` is an iterable of repo-relative
+    paths to skip entirely.
+
+    These documents hard-wrap at ~110 columns, so a reinstated mandate can land
+    with its phrase split across two physical lines. Each line is therefore
+    matched both on its own and joined to its successor, with the hit reported
+    against the FIRST line of the pair. A phrase that spans a single wrap is
+    caught; one deliberately spread over three lines is not, which is the
+    accepted limit of a line-oriented scan.
+    """
+    exempt_set = set(exempt)
+    hits = []
+    for relpath in governance_surface_paths(repo_root):
+        if relpath in exempt_set:
+            continue
+        try:
+            with io.open(os.path.join(repo_root, relpath), encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except Exception as e:
+            hits.append("%s: unreadable: %s" % (relpath, _safe(str(e))))
+            continue
+        normalized = [normalize_prose_line(line) for line in lines]
+        for idx, current in enumerate(normalized):
+            nxt = normalized[idx + 1] if idx + 1 < len(normalized) else ""
+            window = (current + " " + nxt).strip() if nxt else current
+            for needle in needles:
+                if needle in current:
+                    # Contained in one line: report it at that line.
+                    hits.append("%s:%d: %s" % (relpath, idx + 1, _safe(needle)))
+                elif nxt and needle in window and needle not in nxt:
+                    # Only visible across the wrap. A phrase wholly inside `nxt`
+                    # is skipped here and reported on its own line next pass, so
+                    # no hit is ever counted twice.
+                    hits.append("%s:%d: %s" % (relpath, idx + 1, _safe(needle)))
+    return hits
+
+
+def governance_v3_docs_details(repo_root):
+    """Return [] if the v3 docs exist and CLAUDE.md declares v3, else reasons.
+
+    Pure in `repo_root` so the self-test fixture runs this exact function
+    against the real repository rather than restating its conditions.
+    """
+    details = []
+    for relpath in V3_REQUIRED_DOCS:
+        if not os.path.isfile(os.path.join(repo_root, relpath)):
+            details.append("missing required Governance v3 doc: %s" % relpath)
+
+    claude_md = os.path.join(repo_root, "CLAUDE.md")
+    if not os.path.isfile(claude_md):
+        details.append("CLAUDE.md missing")
+        return details
+
+    with io.open(claude_md, encoding="utf-8") as f:
+        text = f.read()
+    if "## Claude Code Governance (v3)" not in text:
+        details.append("CLAUDE.md must declare the heading '## Claude Code Governance (v3)'")
+    if "## Claude Code Governance (v2)" in text:
+        details.append("CLAUDE.md must not still declare the Governance v2 heading")
+    if "docs/agents/agent-orchestration.md" not in text:
+        details.append("CLAUDE.md must point at docs/agents/agent-orchestration.md")
+    return details
+
+
+def check_governance_v3_docs():
+    """The v3 docs exist and CLAUDE.md declares v3, not v2."""
+    details = governance_v3_docs_details(REPO_ROOT)
+    report("governance-v3-docs", not details, details)
+
+
+def stale_orchestration_details(repo_root):
+    """Return [] if no Governance-v2 orchestration mandate survives, else the hits."""
+    return scan_governance_surface(
+        repo_root, STALE_V2_ORCHESTRATION_PHRASES, exempt=V2_LANGUAGE_EXEMPT
+    )
+
+
+def check_governance_v3_no_stale_orchestration():
+    """No Governance-v2 orchestration mandates left in the governance surface."""
+    details = stale_orchestration_details(REPO_ROOT)
+    report("governance-v3-no-stale-orchestration", not details, details)
+
+
+RESOURCE_CEILING_FIELDS = ("agent_cap", "max_concurrency")
+
+_YAML_FENCE_RE = re.compile(r"```ya?ml\n(.*?)```", re.DOTALL)
+
+
+def _extract_yaml_schema_block(text):
+    """The contents of task-contract.md's `task_contract:` yaml fence, or None.
+
+    Selected by the `task_contract:` key rather than by position: taking the
+    FIRST yaml fence would silently rebind this whole check to an unrelated
+    example if one were ever added above the schema, and every field lookup
+    below would then pass against the wrong block while still reporting PASS.
+
+    Returns None -- never a positional guess -- when no fence declares the key.
+    Falling back to the first fence would reopen exactly the hole this function
+    closes; None instead surfaces "no ```yaml schema block found", which is a
+    real, actionable diagnostic.
+    """
+    for block in _YAML_FENCE_RE.findall(text):
+        if re.search(r"^\s*task_contract\s*:", block, re.MULTILINE):
+            return block
+    return None
+
+
+def _schema_field_line(schema_block, field):
+    """The single schema line declaring `field`, or None.
+
+    Matches the key at the start of a line (modulo indentation) so that a field
+    merely *mentioned* inside another entry's comment is never mistaken for its
+    declaration.
+    """
+    pattern = re.compile(r"^\s*%s\s*:" % re.escape(field))
+    for line in schema_block.splitlines():
+        if pattern.match(line):
+            return line
+    return None
+
+
+def _field_note_bullet(text, field):
+    """The '## Field notes' bullet that defines `field`, joined into one string.
+
+    Field notes are hard-wrapped Markdown bullets: a `- ` line followed by
+    indented continuation lines. Returns the whole logical bullet whose FIRST
+    line names the field, so a passing-mention in a neighbouring bullet cannot
+    satisfy a requirement about this field's own definition.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.strip().lower() == "## field notes")
+    except StopIteration:
+        return None
+
+    bullets = []
+    current = None
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        if line.startswith("- "):
+            # Only a TOP-LEVEL dash opens a new bullet; an indented "- " is a
+            # sub-bullet and stays part of the logical bullet above it (handled
+            # by the else-branch), which would otherwise be truncated
+            # mid-definition. An indented sub-bullet with no open parent -- one
+            # separated from it by a blank line -- has no bullet to belong to
+            # and is skipped rather than promoted to a top-level definition.
+            if current is not None:
+                bullets.append(current)
+            current = [line]
+        elif current is not None:
+            if not line.strip():
+                bullets.append(current)
+                current = None
+            else:
+                current.append(line)
+    if current is not None:
+        bullets.append(current)
+
+    for bullet in bullets:
+        if field in normalize_prose_line(bullet[0]):
+            return normalize_prose_line(" ".join(bullet))
+    return None
+
+
+def contract_schema_details(text):
+    """Return [] if `text` reads as a Governance-v3 authority envelope, else reasons.
+
+    Pure: takes the document text so both the production check and the self-test
+    fixtures exercise this exact function -- the fixtures never restate these
+    conditions themselves.
+
+    The v2 implementation of the resource-ceiling test asked only whether the
+    word "optional" occurred ANYWHERE in the document. That is vacuous here: the
+    schema's own preamble opens "Every field is optional except ...", so the
+    substring is always present and the test could never fail, no matter how the
+    fields were actually described. Each field is now checked against its OWN
+    schema line and its OWN field-note bullet, and must positively establish all
+    four v3 properties:
+
+      1. optional -- not a required field;
+      2. a resource ceiling -- not orchestration policy;
+      3. absent => no cap, and no default value;
+      4. no longer mandatory (the explicit v2 reversal).
+    """
+    details = []
+    lowered = normalize_prose_line(text.replace("\n", " "))
+
+    if "orchestration: skill_native | main_context_only" not in lowered:
+        details.append("schema must offer 'orchestration: skill_native | main_context_only'")
+    if "absent => skill_native" not in lowered:
+        details.append("schema must state that an absent 'orchestration' field means skill_native")
+
+    schema_block = _extract_yaml_schema_block(text)
+    if schema_block is None:
+        details.append("no ```yaml schema block found")
+        schema_block = ""
+
+    for field in RESOURCE_CEILING_FIELDS:
+        schema_line = _schema_field_line(schema_block, field)
+        if schema_line is None:
+            details.append("%s: no declaration in the yaml schema block" % field)
+        else:
+            norm = normalize_prose_line(schema_line)
+            if "optional" not in norm:
+                details.append(
+                    "%s: schema line must mark the field optional, got: %s" % (field, _safe(schema_line.strip()))
+                )
+            if not ("absent" in norm and "no cap" in norm):
+                details.append(
+                    "%s: schema line must state 'absent => no cap', got: %s" % (field, _safe(schema_line.strip()))
+                )
+            if "required" in norm or "mandatory" in norm:
+                details.append(
+                    "%s: schema line must not describe the field as required/mandatory, got: %s"
+                    % (field, _safe(schema_line.strip()))
+                )
+
+        bullet = _field_note_bullet(text, field)
+        if bullet is None:
+            details.append("%s: no '## Field notes' bullet defines this field" % field)
+            continue
+        if "optional" not in bullet:
+            details.append("%s: field note must call the field optional" % field)
+        if "resource ceiling" not in bullet:
+            details.append("%s: field note must describe the field as a resource ceiling" % field)
+        if "not orchestration policy" not in bullet:
+            details.append(
+                "%s: field note must state the field is NOT orchestration policy" % field
+            )
+        if "no longer mandatory" not in bullet:
+            details.append("%s: field note must record that the field is no longer mandatory" % field)
+        if not ("absent" in bullet and "no cap" in bullet):
+            details.append("%s: field note must state that absence means no cap" % field)
+        if "no default" not in bullet and "have no default" not in bullet:
+            details.append("%s: field note must state the field has no default" % field)
+
+    # v2 made single_writer a required contract field and a global invariant.
+    # v3 has no such field at any strength, so its presence anywhere in the
+    # schema document is a regression -- checked structurally (required-field
+    # sentence, yaml keys) and then document-wide.
+    single_writer_details = []
+    for line in text.splitlines():
+        low = normalize_prose_line(line)
+        if "except" in low and "authorized_by" in low and "single_writer" in low:
+            single_writer_details.append(
+                "single_writer must not be a required contract field: %s" % _safe(line.strip())
+            )
+    if _schema_field_line(schema_block, "single_writer") is not None:
+        single_writer_details.append("single_writer must not appear as a key in the yaml schema block")
+    if "single_writer" in lowered and not single_writer_details:
+        # The two checks above are the specific, actionable diagnoses; the
+        # document-wide sweep is the catch-all beneath them. Reported only when
+        # neither fired, so one regression yields one finding, not three.
+        single_writer_details.append(
+            "single_writer must not appear in the v3 contract schema document at all"
+        )
+    details.extend(single_writer_details)
+
+    return details
+
+
+def check_governance_v3_contract_schema():
+    """task-contract.md is a v3 authority envelope, not a v2 orchestration recipe."""
+    path = os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md")
+    if not os.path.isfile(path):
+        report("governance-v3-contract-schema", False, ["docs/agents/task-contract.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    details = contract_schema_details(text)
+    report("governance-v3-contract-schema", not details, details)
+
+
+def host_os_tracked_file_details(repo_root):
+    """Repo-wide, tracked-file hits for the forbidden host-OS token.
+
+    ADR-0002 §8's acceptance condition is literally `git grep -ni <token>`
+    returning nothing, over EVERY tracked file -- vendored skill bodies,
+    Dockerfile and SPECIFICATIONS.md included, with no document exempt. The
+    governance-surface scan alone cannot express that, so this mirrors the
+    acceptance command exactly.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "grep", "-n", "-i", "-I", "-e", FORBIDDEN_HOST_OS_TOKEN],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, text=True,
+        )
+    except Exception as e:
+        return ["could not run git grep: %s" % _safe(str(e))]
+    if out.returncode == 1:
+        return []                      # git grep: no matches
+    if out.returncode != 0:
+        return ["git grep failed: %s" % _safe(out.stderr.strip())]
+    return [_safe(line) for line in out.stdout.splitlines() if line.strip()]
+
+
+def host_os_details(repo_root):
+    """Return [] if no host-OS name appears anywhere in the tree, else the hits.
+
+    Two complementary scans, both of which must be clean and neither of which
+    grants an exemption to any file:
+
+      - the pure governance-surface scan, which works without git;
+      - a repo-wide tracked-file scan, which additionally covers the vendored
+        skill bodies, Dockerfile, SPECIFICATIONS.md and this script itself.
+
+    Both live here rather than in the check, so the fixture runs this exact
+    function instead of restating the pair.
+
+    Their coverage overlaps on CLAUDE.md and docs/**, so results are merged
+    order-preservingly and de-duplicated: one offending line is one finding,
+    not two.
+    """
+    merged = (scan_governance_surface(repo_root, (FORBIDDEN_HOST_OS_TOKEN,))
+              + host_os_tracked_file_details(repo_root))
+    seen = set()
+    deduped = []
+    for hit in merged:
+        # The two scans format hits differently ("path:line: needle" vs git
+        # grep's "path:line:content"), so key on the path:line prefix they share.
+        key = ":".join(hit.split(":", 2)[:2])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+    return deduped
+
+
+# --- ADR-0002 §1: the four-level authority chain, restated in six documents ---
+#
+# agent-orchestration.md is canonical; the other five restate it. Governance v2's
+# chain had a FIFTH tier ("unpatched upstream skill defaults") sitting below the
+# local patches, and the original v3 change-set left that stale five-level list
+# standing in all three skills policies. Prose alone could not stop that
+# regressing, so it is checked here.
+AUTHORITY_CHAIN_DOCS = (
+    "CLAUDE.md",
+    "docs/agents/agent-orchestration.md",
+    "docs/agents/mattpocock-skills-policy.md",
+    "docs/agents/anthropic-skills-policy.md",
+    "docs/agents/project-skills-policy.md",
+    "docs/adr/0002-governance-v3-skill-native-orchestration.md",
+)
+
+# Enumeration fragments that only occur in a five-level chain. Deliberately
+# matched with their list marker attached: ADR-0002 legitimately NAMES the
+# retired fifth tier in past tense when recording what v3 dropped, and must
+# stay able to.
+FIFTH_LEVEL_ENUMERATIONS = (
+    "(4) unpatched upstream skill defaults",
+    "4. unpatched upstream skill defaults",
+    "(5) generic model behavior",
+    "5. generic model behavior",
+)
+
+
+def authority_chain_details(repo_root):
+    """Return [] if all six documents state the same four-level chain, else reasons."""
+    details = []
+    for relpath in AUTHORITY_CHAIN_DOCS:
+        abs_path = os.path.join(repo_root, relpath)
+        if not os.path.isfile(abs_path):
+            details.append("missing authority-chain document: %s" % relpath)
+            continue
+        with io.open(abs_path, encoding="utf-8") as f:
+            text = f.read()
+        # Joined before normalizing: these documents hard-wrap, and "exactly four
+        # levels" is split across a line break in both vendoring policies.
+        flat = normalize_prose_line(text.replace("\n", " "))
+        if "four levels" not in flat:
+            details.append("%s: must state that the authority chain has exactly four levels" % relpath)
+        for phrase in FIFTH_LEVEL_ENUMERATIONS:
+            if phrase in flat:
+                details.append("%s: five-level authority chain survives: %s" % (relpath, _safe(phrase)))
+    return details
+
+
+def check_governance_v3_authority_chain():
+    """One four-level authority chain, restated consistently and with no fifth tier."""
+    details = authority_chain_details(REPO_ROOT)
+    report("governance-v3-authority-chain", not details, details)
+
+
+def check_governance_no_host_os_reference():
+    """No host-OS name anywhere in the tree (ADR-0002 section 8)."""
+    details = host_os_details(REPO_ROOT)
+    report("governance-no-host-os-reference", not details, details)
+
+
 ALL_CHECKS = [
     check_required_files,
     check_json_validity,
@@ -1595,6 +2170,11 @@ ALL_CHECKS = [
     check_rules_frontmatter_and_uniqueness,
     check_hidden_unicode,
     check_project_manifest,
+    check_governance_v3_docs,
+    check_governance_v3_no_stale_orchestration,
+    check_governance_v3_contract_schema,
+    check_governance_v3_authority_chain,
+    check_governance_no_host_os_reference,
 ]
 
 
@@ -1602,14 +2182,25 @@ ALL_CHECKS = [
 # --self-test: offline fixture matrix for the project-manifest logic above.
 #
 # Most fixtures build their own tree under tempfile.TemporaryDirectory; none ever WRITES to this
-# repo, makes a network call, or sleeps. Two fixtures (G11, G12) are the exception to "synthetic
-# tree" specifically, not to "never writes": they READ real files from this repo (the vendored
-# mattpocock manifest, and the real project manifest) to check facts about the actual repo state
-# -- read-only, like every other check this script performs. G1-G12 exercise positive/structural
-# cases; N1-N16 are negative cases, one per distinct violation class named in
-# project-skills-policy.md's schema. Each fixture function raises AssertionError (with a
-# diagnostic message) on failure and returns None on success -- the runner below is the only place
-# results are aggregated or printed.
+# repo, makes a network call, or sleeps. A MINORITY are the exception to "synthetic tree"
+# specifically, not to "never writes": they READ real files from this repo to check facts about the
+# actual repo state -- read-only, like every other check this script performs. Some of those also
+# shell out to git (`hash-object`, `grep`) against the real tree, exactly as the corresponding
+# production checks do, so a handful of fixtures depend on git and on a clean working tree.
+#
+# This comment deliberately does NOT enumerate which fixtures those are. Two successive attempts to
+# do so both went stale -- once by naming a pair that had grown to seven, once by giving a heuristic
+# that was already wrong for fixtures reaching the repo through a helper. `_self_test_fixtures()` is
+# the authority for what exists, and each fixture's own docstring says what it reads.
+#
+# Three families by id prefix: G* positive/structural, N* negative (one per distinct violation class
+# named in project-skills-policy.md's schema), V* the Governance-v3 prose checks. Exact id ranges are
+# deliberately NOT restated here -- they drift, and `_self_test_fixtures()` already enumerates them.
+#
+# Every V* fixture calls the same `*_details()` production helper its corresponding check calls, so
+# the fixtures assert on production logic rather than re-deriving it. Each fixture function raises
+# AssertionError (with a diagnostic message) on failure and returns None on success -- the runner
+# below is the only place results are aggregated or printed.
 # --------------------------------------------------------------------------
 
 
@@ -1791,7 +2382,7 @@ def _st_g12():
     assert details == [], details
 
 
-# ---- N1-N13: one negative fixture per distinct violation class ----
+# ---- N*: one negative fixture per distinct violation class (see _self_test_fixtures) ----
 
 def _st_n1():
     with tempfile.TemporaryDirectory() as tmp:
@@ -2055,9 +2646,11 @@ def _st_n21():
     # Full-report continuation: point the real production path constant at a malformed temp
     # manifest and run the REAL ALL_CHECKS list end to end (not validate_project_manifest() in
     # isolation) -- this is what actually proves the MINOR-1 gap is closed, since the original
-    # failure mode was project_skill_names() raising inside check_unique_skill_names (check 5 of
-    # 26), which aborted the whole run before check_project_manifest's own diagnostic was ever
-    # reached. RESULTS is saved/restored alongside PROJECT_MANIFEST_PATH so this fixture can never
+    # failure mode was project_skill_names() raising inside check_unique_skill_names -- an early
+    # entry in ALL_CHECKS -- which aborted the whole run before check_project_manifest's own
+    # diagnostic was ever reached. (The fixture body asserts against len(ALL_CHECKS) rather than a
+    # literal count, precisely so this comment is the only thing that can drift.)
+    # RESULTS is saved/restored alongside PROJECT_MANIFEST_PATH so this fixture can never
     # leave stray report() entries for anything that inspects RESULTS afterward.
     global PROJECT_MANIFEST_PATH, RESULTS
     with tempfile.TemporaryDirectory() as tmp:
@@ -2081,8 +2674,14 @@ def _st_n21():
         finally:
             PROJECT_MANIFEST_PATH = saved_path
             RESULTS = saved_results
-    assert len(results) == 26, "expected exactly 26 labeled results, got %d: %r" % (
-        len(results), [r[0] for r in results])
+    # Every registered check must report exactly once, even when a manifest is
+    # malformed. Pinned to len(ALL_CHECKS) rather than a literal so adding a
+    # check doesn't require editing this fixture -- duplicates and silent
+    # non-reporters are still caught by the name-uniqueness assert below.
+    names = [r[0] for r in results]
+    assert len(results) == len(ALL_CHECKS), "expected %d labeled results, got %d: %r" % (
+        len(ALL_CHECKS), len(results), names)
+    assert len(set(names)) == len(names), "duplicate check labels: %r" % (names,)
     failing = [name for name, ok, _ in results if not ok]
     assert failing, "expected at least one failing check, got none"
     assert "project-manifest-valid" in failing, failing
@@ -2198,6 +2797,249 @@ def _st_n24():
         assert not any("skill directory must not be a symlink" in d for d in details2), details2
 
 
+def _st_v1():
+    """governance_surface_paths picks up the fixed files + .md under the walked dirs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "x\n")
+        _write_file(os.path.join(tmp, "README.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "rules", "go-code.md"), "x\n")
+        # Not governance surface: skill bodies, hooks, non-markdown, absent CONTEXT.md.
+        _write_file(os.path.join(tmp, ".claude", "skills", "s", "SKILL.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "hooks", "h.py"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "manifest.json"), "{}\n")
+        _write_file(os.path.join(tmp, "Dockerfile"), "x\n")
+        got = governance_surface_paths(tmp)
+        expected = [
+            ".claude/rules/go-code.md",
+            "CLAUDE.md",
+            "README.md",
+            "docs/adr/0001.md",
+            "docs/agents/task-contract.md",
+        ]
+        assert got == sorted(expected), got
+
+
+def _st_v2():
+    """scan_governance_surface reports file:line hits and honours the exempt list."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "ok\nOne Production Writer per task\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001-agent-governance-v2.md"),
+                    "one production writer\n")
+        hits = scan_governance_surface(tmp, ("one production writer",))
+        assert any(h.startswith("CLAUDE.md:2:") for h in hits), hits
+        assert any("0001-agent-governance-v2.md" in h for h in hits), hits
+
+        exempt_hits = scan_governance_surface(
+            tmp, ("one production writer",), exempt=("docs/adr/0001-agent-governance-v2.md",)
+        )
+        assert len(exempt_hits) == 1, exempt_hits
+        assert exempt_hits[0].startswith("CLAUDE.md:2:"), exempt_hits
+
+
+def _real_contract_text():
+    with io.open(os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _st_v3():
+    """The real repo's governance surface is free of stale v2 orchestration mandates."""
+    hits = stale_orchestration_details(REPO_ROOT)
+    assert not hits, hits
+
+
+def _st_v4():
+    """The real repo names no host operating system, on the surface or in any tracked file."""
+    hits = host_os_details(REPO_ROOT)
+    assert not hits, hits
+
+
+def _st_v5():
+    """Governance v3 required docs exist and CLAUDE.md declares v3."""
+    details = governance_v3_docs_details(REPO_ROOT)
+    assert not details, details
+
+
+def _st_v6():
+    """The real task-contract.md passes the production authority-envelope check."""
+    details = contract_schema_details(_real_contract_text())
+    assert not details, details
+
+
+def _st_v7():
+    """REGRESSION: a mandatory agent_cap must FAIL, even though 'optional' occurs elsewhere.
+
+    This is the fixture the superseded implementation would have passed. That
+    version asked `if field in lowered and "optional" not in lowered`, i.e. it
+    searched the WHOLE document for the word "optional" -- and the schema's own
+    preamble ("Every field is optional except ...") guarantees a match, so the
+    test could never fire. The document below keeps that preamble verbatim while
+    describing agent_cap as a mandatory orchestration requirement, which is
+    precisely the v2 mandate ADR-0002 removed.
+    """
+    text = (
+        "# Task contract\n\n"
+        "Every field is optional except `mode`, `repository`, `base_branch`, `base_sha`,\n"
+        "`task_branch`, and `authorized_by`.\n\n"
+        "```yaml\n"
+        "task_contract:\n"
+        "  mode: READ_ONLY | PROTOTYPE | CHANGE | PUBLISH_DRAFT\n"
+        "  orchestration: skill_native | main_context_only   # optional; absent => skill_native\n"
+        "  agent_cap: <int>                             # mandatory orchestration cap\n"
+        "  max_concurrency: <int>                       # mandatory orchestration cap\n"
+        "```\n\n"
+        "## Field notes\n\n"
+        "- **`agent_cap`** / **`max_concurrency`** are mandatory orchestration policy and every\n"
+        "  contract must set them; absent, they default to 4.\n"
+    )
+    details = contract_schema_details(text)
+    assert details, "a mandatory agent_cap/max_concurrency contract must be rejected"
+    joined = " ".join(details)
+    assert "agent_cap" in joined and "max_concurrency" in joined, details
+    # And prove the old vacuous condition really would have passed this text.
+    lowered = text.lower()
+    for field in RESOURCE_CEILING_FIELDS:
+        assert not (field in lowered and "optional" not in lowered), (
+            "fixture no longer reproduces the vacuous-pass condition for %s" % field
+        )
+
+
+def _st_v8():
+    """REGRESSION: a resurrected universal reviewer-read-only mandate must be detected."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "# x\n\n- One writer per task; every other agent is read-only (research, review).\n"
+                    "- Reviewer/analysis agents never write to tracked files or push.\n")
+        hits = stale_orchestration_details(tmp)
+        assert any("every other agent is read-only" in h for h in hits), hits
+        assert any("reviewer/analysis agents never write" in h for h in hits), hits
+
+    # Positive control: a skill CHOOSING read-only reviewers is not a project mandate.
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "# x\n\nInvoking a skill authorizes its lanes, reviewers, critics and verifiers.\n")
+        assert not stale_orchestration_details(tmp), stale_orchestration_details(tmp)
+
+
+def _st_v9():
+    """REGRESSION: a resurrected mandatory resource cap must be detected, through Markdown markup.
+
+    Also pins normalize_prose_line's job: the phrase is written with backticks
+    and bold markers, exactly as it would appear in these documents, and must
+    still match.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"),
+                    "- **`agent_cap` is mandatory** for every contract.\n"
+                    "- `max_concurrency` is required whenever more than one agent runs.\n")
+        hits = stale_orchestration_details(tmp)
+        assert any("agent_cap is mandatory" in h for h in hits), hits
+        assert any("max_concurrency is required" in h for h in hits), hits
+
+    # Positive control: naming the fields as OPTIONAL ceilings must not match.
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"),
+                    "- **`agent_cap`** / **`max_concurrency`** are **optional resource ceilings**, not\n"
+                    "  orchestration policy. They are no longer mandatory and have no default.\n")
+        assert not stale_orchestration_details(tmp), stale_orchestration_details(tmp)
+
+
+def _st_v10():
+    """scan_governance_surface catches a phrase split across a hard wrap, exactly once."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Genuinely split: "role" ends line 1, "ledger" opens line 2. Neither
+        # line contains the phrase; only the wrap does. Reported at the opening
+        # line, once.
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "Keep an explicit role\nledger when several agents run.\n")
+        hits = scan_governance_surface(tmp, ("role ledger",))
+        assert len(hits) == 1, hits
+        assert hits[0].startswith("CLAUDE.md:1:"), hits
+
+        # Wholly on one line: reported at that line, once -- the preceding
+        # line's wrap window also contains it and must not double-report.
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "Some preamble.\nKeep an explicit role ledger here.\n")
+        hits = scan_governance_surface(tmp, ("role ledger",))
+        assert len(hits) == 1, hits
+        assert hits[0].startswith("CLAUDE.md:2:"), hits
+
+
+def _st_v11():
+    """REGRESSION: the host-OS token is rejected with no document exempt.
+
+    The token is assembled from the production constant rather than written
+    out, for the same reason the constant itself is assembled -- a literal here
+    would make this file a tracked occurrence and fail the repo-wide check.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "adr", "0002-governance-v3-skill-native-orchestration.md"),
+                    "Deploys to the %s box are out of scope.\n" % FORBIDDEN_HOST_OS_TOKEN.upper())
+        hits = scan_governance_surface(tmp, (FORBIDDEN_HOST_OS_TOKEN,))
+        assert len(hits) == 1, hits
+        assert "0002-governance-v3-skill-native-orchestration.md:1:" in hits[0], hits
+
+
+def _st_v12():
+    """The schema block is selected by its `task_contract:` key, not by position.
+
+    Guards the failure mode where an example yaml fence added ABOVE the schema
+    would silently rebind every field lookup in contract_schema_details to the
+    wrong block -- which reports PASS while validating nothing.
+    """
+    real = _real_contract_text()
+    schema = _extract_yaml_schema_block(real)
+    assert schema is not None and "task_contract:" in schema, schema
+
+    decoy = (
+        "# Task contract\n\n"
+        "An example of what a contract is NOT:\n\n"
+        "```yaml\n"
+        "some_other_example:\n"
+        "  agent_cap: <int>   # mandatory\n"
+        "```\n\n"
+    ) + real
+    assert _extract_yaml_schema_block(decoy) == schema, "decoy fence was selected"
+    # The decoyed document must still validate exactly as the real one does.
+    assert contract_schema_details(decoy) == contract_schema_details(real)
+
+
+def _st_v13():
+    """The real repo's six authority-chain documents agree on four levels."""
+    details = authority_chain_details(REPO_ROOT)
+    assert not details, details
+
+
+def _st_v14():
+    """REGRESSION: a resurrected five-level chain must be rejected.
+
+    The fixture text is the Governance-v2 chain the three skills policies still
+    carried at 6d28ef8 -- the actual Defect 3 regression, not an invented one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath),
+                        "The authority chain has exactly four levels.\n")
+        stale = os.path.join(tmp, "docs", "agents", "mattpocock-skills-policy.md")
+        _write_file(stale,
+                    "Authority chain: (1) the active task contract, (2) `CLAUDE.md` +\n"
+                    "`.claude/rules/*.md`, (3) these vendored skills (as patched),\n"
+                    "(4) unpatched upstream skill defaults, (5) generic model behavior.\n")
+        details = authority_chain_details(tmp)
+        assert any("five-level authority chain survives" in d for d in details), details
+        assert any("mattpocock-skills-policy.md" in d for d in details), details
+        # Only the tampered document is faulted.
+        assert not any("anthropic-skills-policy.md" in d for d in details), details
+
+    # A document that simply omits the four-level statement is also caught.
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath), "no chain stated here\n")
+        details = authority_chain_details(tmp)
+        assert len(details) == len(AUTHORITY_CHAIN_DOCS), details
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -2236,6 +3078,20 @@ def _self_test_fixtures():
         ("N22", "eval_evidence.path is a working-tree symlink", _st_n22),
         ("N23", "eval_evidence.path is a git-index symlink (tracked-mode check)", _st_n23),
         ("N24", "symlinked skill root, standalone validate_project_manifest", _st_n24),
+        ("V1", "governance_surface_paths selects exactly the owned governance text", _st_v1),
+        ("V2", "scan_governance_surface reports file:line hits and honours exemptions", _st_v2),
+        ("V3", "repo governance surface has no stale v2 orchestration mandates", _st_v3),
+        ("V4", "no tracked file names a host operating system", _st_v4),
+        ("V5", "Governance v3 docs exist and CLAUDE.md declares v3", _st_v5),
+        ("V6", "the real task-contract.md is a v3 authority envelope", _st_v6),
+        ("V7", "mandatory agent_cap/max_concurrency rejected (old vacuous check passed it)", _st_v7),
+        ("V8", "universal reviewer-read-only mandate detected; skill-chosen reviewers are not", _st_v8),
+        ("V9", "mandatory resource caps detected through Markdown markup; optional ones are not", _st_v9),
+        ("V10", "surface scan catches a hard-wrapped phrase exactly once", _st_v10),
+        ("V11", "host-OS token rejected with no document exempt", _st_v11),
+        ("V12", "schema block selected by task_contract: key, not by fence position", _st_v12),
+        ("V13", "the six authority-chain documents agree on four levels", _st_v13),
+        ("V14", "a resurrected five-level authority chain is rejected", _st_v14),
     ]
 
 
