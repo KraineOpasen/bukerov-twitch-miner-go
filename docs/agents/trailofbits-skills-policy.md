@@ -125,8 +125,9 @@ prose — `uv run {baseDir}/scripts/diagram.py`, `uv run {baseDir}/scripts/merge
 `uv run {baseDir}/scripts/collect.py`, and so on. Three shell scripts were `100755` upstream and are
 `100644` here (`tob-mode-normalize`): `codeql/scripts/find_databases.sh`,
 `codeql/scripts/generate_suite.sh`, `semgrep/scripts/run-scans.sh`. Their content is untouched — each
-file's `upstream_blob_sha` still matches on disk. The consequence for the three bare-path invocations that
-survive in upstream prose is recorded under "Known limitations"; it is a real caveat, not a silent one.
+file's `upstream_blob_sha` still matches on disk. Upstream prose invoked those three scripts by bare path
+at six call sites, every one of which would fail with `EACCES` at mode `100644`; all six are prefixed with
+`bash` under `tob-exec-bit-interpreter`, and the reasoning is recorded under "Known limitations".
 
 ## Installed: 23 skills
 
@@ -199,6 +200,17 @@ not here.
 
 ## Excluded / Held
 
+**Finding a rejected candidate upstream.** `excluded_skills[]` records a candidate by `name` only — its
+`upstream_path` is the empty string in all 25 entries, so the manifest alone will not lead you to the
+directory. Use the layout convention instead: every upstream skill lives at
+`plugins/<plugin>/skills/<skill>/`, so any named candidate is `plugins/*/skills/<name>/` in a clone at the
+pin. `<plugin>` is frequently *not* `<skill>` — 14 of the 25 sit under
+`plugins/testing-handbook-skills/skills/` and 6 under `plugins/trailmark/skills/`; only
+`agentic-actions-auditor`, `entry-point-analyzer`, `second-opinion` and `semgrep-rule-variant-creator` are
+in same-named single-skill plugins. The twenty-fifth, `insecure-defaults`, has no `skills/` directory at
+all — it is `plugins/insecure-defaults/` with `commands/`, `workflows/`, `references/` and `tests/` and
+nothing else, which is exactly why it is held.
+
 The arithmetic, stated plainly because it does not close to a single number without explanation:
 
 - **78** skill directories exist upstream at the pin.
@@ -207,18 +219,38 @@ The arithmetic, stated plainly because it does not close to a single number with
   an `EXCLUDE`/`HOLD` verdict: **23 `EXCLUDE`, 2 `HOLD`**. Twenty-four of those are upstream skill
   directories; the twenty-fifth, `insecure-defaults`, is a *plugin that ships no skill directory at all*,
   which is precisely why it is held.
-- That leaves **31 upstream skill directories not itemised individually.** They are whole plugins outside
-  the reviewed slice: `building-secure-contracts` (11 chain-specific skills — Algorand, Cairo, Cosmos,
-  Solana, Substrate, TON scanners, plus `audit-prep-assistant`, `code-maturity-assessor`,
-  `guidelines-advisor`, `secure-workflow-guide` and `token-integration-analyzer`),
-  `c-review`, `rust-review`, `constant-time-analysis`, `zeroize-audit`, `dwarf-expert`,
-  `dimensional-analysis`, `writing-lean-proofs`, `yara-rule-authoring`, `firebase-apk-scanner`,
-  `burpsuite-project-parser`, `modern-python`, `devcontainer-setup`, `gh-cli`, `git-cleanup`,
-  `github-triage`, `open-sourcing`, `skill-improver`, `let-fate-decide`, `interpreting-culture-index` and
-  `chrome-mcp-troubleshooting`. Their subject matter — other languages, other chains, other tools, or Trail
-  of Bits' internal workflow — put them outside the slice before any per-skill read. See step 3 of the
-  update procedure: this is a scoped review, not an exhaustive one, and this document does not claim
-  otherwise.
+- That leaves **31 upstream skill directories with no per-candidate verdict.** Stated exactly, because the
+  distinction matters: they were ruled out at **plugin** granularity — 21 plugins whose own subject matter,
+  as their `plugin.json` and skill descriptions state it, placed them outside the slice — and the skills
+  inside them were **not read individually**. Nothing here is a per-skill judgement about any of the 31.
+  Every one of the 21 plugins is wholly out: none of them contributed an installed skill or an itemised
+  `excluded_skills[]` entry either. The 21, grouped by the ground that ruled them out:
+  - **Smart contracts (1 plugin, 11 skills).** `building-secure-contracts`, which its own `plugin.json`
+    describes as a "smart contract security toolkit … vulnerability scanners for 6 blockchains and 5
+    development guideline assistants": the six scanners are `algorand-`, `cairo-`, `cosmos-`, `solana-`,
+    `substrate-` and `ton-vulnerability-scanner`; the five assistants are `audit-prep-assistant`,
+    `code-maturity-assessor`, `guidelines-advisor`, `secure-workflow-guide` and
+    `token-integration-analyzer`.
+  - **Other languages (3).** `c-review`, `rust-review`, `modern-python`.
+  - **Cryptographic secret handling (2).** `constant-time-analysis`, `zeroize-audit` — the same ground on
+    which `constant-time-testing` is itemised below, not a language ground: `constant-time-analysis` names
+    Go among its target languages, but this project implements no cryptographic primitive to leak timing on.
+  - **Blockchain arithmetic (1).** `dimensional-analysis`, whose description scopes it to "a DeFi protocol,
+    offchain code, or other blockchain-related codebase".
+  - **Other artifact and tool domains (4).** `dwarf-expert` (DWARF debug info), `firebase-apk-scanner`
+    (Android APKs), `burpsuite-project-parser` (`.burp` project files), `yara-authoring` (YARA-X rules;
+    skill `yara-rule-authoring`).
+  - **Proof assistants (1).** `writing-lean-proofs` (Lean 4 / Mathlib).
+  - **Developer, agent and internal workflow (9).** `devcontainer-setup`, `gh-cli`, `git-cleanup`,
+    `github-triage`, `open-sourcing`, `skill-improver`, `claude-in-chrome-troubleshooting` (skill
+    `chrome-mcp-troubleshooting`), `culture-index` (skill `interpreting-culture-index`), `let-fate-decide`.
+
+  Plugin granularity is a real cost and it is not hypothetical here. Inside `building-secure-contracts`,
+  `audit-prep-assistant` is not itself smart-contract-only: its Step 2 runs `slither`, `dylint` **and**
+  `golangci-lint run`, so a Go repository is squarely in its range. It stays unreviewed because its plugin
+  was ruled out, which is the honest description of what happened rather than a verdict on the skill. See
+  step 3 of the update procedure: this is a scoped review, not an exhaustive one, and this document does
+  not claim otherwise.
 
 The 23 exclusions fall into four groups, all reasoned in the manifest:
 
@@ -371,9 +403,10 @@ attributions.
 
 ## Local patches summary
 
-**Six patch ids across 21 touched files**, plus one file-exclusion recorded in the ledger without an id
-(the `openai.yaml` deletion, which can carry no in-file marker). Eighteen files have content changes; three
-have a mode change only, with content byte-identical to upstream. By id:
+**Seven patch ids across 26 touched files**, plus one file-exclusion recorded in the ledger without an id
+(the `openai.yaml` deletion, which can carry no in-file marker). Twenty-three files have content changes;
+three have a mode change only, with content byte-identical to upstream. By id — the counts sum to 28
+rather than 26 because `codeql/SKILL.md` and `variant-analysis/SKILL.md` each carry two ids:
 
 | Patch id | Files | What it is |
 | --- | --- | --- |
@@ -382,6 +415,7 @@ have a mode change only, with content byte-identical to upstream. By id:
 | `tob-plugin-agents-relocated` | 4 | Drops the now-wrong `skills/<skill>/` segment from `{baseDir}` paths inside relocated agent files. Mechanical. |
 | `tob-no-hidden-unicode` | 3 | Removes U+200B / U+200D characters that this repo forbids outright, preserving rendering by other means. |
 | `tob-mode-normalize` | 3 | `100755` → `100644`. No byte of content changes. |
+| `tob-exec-bit-interpreter` | 6 | Prefixes `bash` onto the six bare-path `.sh` invocations that the `100644` normalization above would otherwise make fail with `EACCES`. Concrete project incompatibility — patch ground (c). |
 | `tob-no-tree-mutation` | 1 | Replaces a `git checkout <baseline>` that moves HEAD mid-review with a temporary worktree. |
 
 Two of those deserve a sentence here rather than only in the ledger:
@@ -437,9 +471,9 @@ capped, serialized or made read-only by this vendoring:
   both preserved — indeed both were *rescued* by the relocation adaptation rather than dropped.
 
 No patch in this set caps concurrency, imposes a writer count, forces any reviewer into a read-only role,
-or reorders a repair loop. The six ids are, without exception, about a missing plugin runtime, a pointer to
-something that is not installed, a path segment, an invisible character, a file mode, and a git command
-that moves HEAD.
+or reorders a repair loop. The seven ids are, without exception, about a missing plugin runtime, a pointer
+to something that is not installed, a path segment, an invisible character, a file mode, an interpreter
+prefix that file mode made necessary, and a git command that moves HEAD.
 
 ## Governance precedence
 
@@ -515,6 +549,18 @@ it was reviewed on that basis:
   unpatched — it is a runtime dependency decision, not an authority boundary — but installing a package
   from PyPI on the strength of a skill instruction is a decision for whoever runs it, and this policy does
   not pre-authorize it.
+- **`genotoxic` instructs installing a toolchain too, and it is the one whose installs land in *this*
+  repo's toolchain.** Its Prerequisites repeat the `uv pip install trailmark` instruction above with the
+  same "**DO NOT** fall back to manual analysis" wording, extend it to "install it using the instructions
+  in `references/mutation-frameworks.md`" for whichever mutation framework the target language needs, and
+  recommend `cargo install necessist`. For Go, `references/mutation-frameworks.md` says
+  `go install github.com/go-gremlins/gremlins/cmd/gremlins@latest` (or `brew tap go-gremlins/tap && brew
+  install gremlins`) and `go install github.com/zimmski/go-mutesting/cmd/go-mutesting@latest`; the same
+  file carries `cargo install cargo-mutants`, `gem install mutant`, `uv tool install slither-analyzer` and
+  `apt-get`/`brew` installs of LLVM and Mull for the other languages. All unpinned, all `@latest` or
+  equivalent. None of it is patched — it is upstream's own runtime dependency guidance — but a `go install
+  …@latest` puts an unpinned third-party binary on the invoker's `PATH`, and this policy pre-authorizes
+  none of them.
 - **`codeql` and `supply-chain-risk-auditor` reach the network too** — query packs and advisory databases
   respectively. Same reasoning.
 - Several *excluded* candidates were rejected partly on this axis, which is why they were read in full
@@ -546,8 +592,8 @@ to end, diffing the vendored tree against a read-only clone at the pin, and reco
    each of the five dispatching skills still dispatch exactly the plugin-root agents relocated here, and
    have any new ones appeared at `plugins/<plugin>/agents/`?
 5. For each vendored skill, diff every file in its `files[]` list against the **currently-vendored copy**
-   (not raw upstream — 18 files are patched) to separate genuinely new upstream content from an existing
-   patch.
+   (not raw upstream — 23 files carry content patches, and three more differ from upstream only in mode) to
+   separate genuinely new upstream content from an existing patch.
 6. Re-run the same review judgment on anything new: does it assume a plugin runtime, background execution,
    external network fetch, credentials, or a write into a git working tree this project doesn't grant? Does
    it introduce an invisible Unicode character or an executable bit? If so, patch it minimally and mark it
@@ -615,10 +661,11 @@ directories, and no patch id in this set is shared with another provider's ledge
   between the topology being documented and it being auto-wired, and only the former is true here.
 - **`excluded_skills[]` itemises 25 candidates, not all 55 non-installed skills.** Twenty-four of the 25
   are among those 55 (the twenty-fifth, `insecure-defaults`, is a plugin with no skill directory); the
-  other 31 are whole plugins ruled out by subject matter before any per-skill read (listed under
-  "Excluded / Held"). A useful
-  skill hiding inside `modern-python` or `gh-cli` would have been missed. Step 3 of the update procedure
-  exists for that reason.
+  other 31 carry no per-candidate verdict, having been ruled out at plugin granularity by subject matter
+  with no per-skill read (listed under "Excluded / Held"). That gap is not hypothetical:
+  `audit-prep-assistant`, inside the smart-contract plugin `building-secure-contracts`, runs
+  `golangci-lint` on Go codebases and is not itself out of scope. Step 3 of the update procedure exists
+  for that reason.
 - **`differential-review/patterns.md` still points at `building-secure-contracts/development-guidelines`.**
   The `tob-dead-pointer` patch removed the bullets naming `not-so-smart-contracts`,
   `token-integration-analyzer` and the three `domain-specific-audits` corpora, but left this one: it names

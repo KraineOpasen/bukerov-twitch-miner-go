@@ -2,8 +2,12 @@
 
 Which installed skill to reach for, by kind of work. Every name below is a directory under
 `.claude/skills/` claimed by exactly one ownership manifest — **81 installed skills across six
-providers**. If a skill is not listed here, it is not installed; each provider's manifest records
-what was reviewed and rejected, with a reason and an `EXCLUDE`/`HOLD` verdict for every candidate.
+providers**, and all 81 are routed somewhere below, so if a skill is not listed here it is not
+installed. Each provider's manifest records what was reviewed and rejected, with a reason and an
+`EXCLUDE`/`HOLD` verdict for every candidate it reviewed individually — with two deliberately
+sweep-scoped exceptions: `trailofbits/skills` rules out a further 31 upstream skill directories at
+whole-plugin granularity rather than one by one, and `github/awesome-copilot`'s 408-directory corpus
+was swept by name and frontmatter description rather than read end to end.
 
 Routing is advice, not authority. Invoking a skill authorizes the agent topology that skill
 documents (`docs/agents/agent-orchestration.md`), but never widens the task contract's authority
@@ -34,6 +38,7 @@ Exact upstream pins are each manifest's `upstream_commit`. No provider auto-upda
 | `ce-debug` | A second, differently-shaped root-cause loop: explicit causal chain, pipeline mode for CI failures. Use when `diagnosing-bugs` has stalled or the bug arrived from CI. |
 | `fp-check` | You have a *claimed* bug and need a TRUE/FALSE POSITIVE verdict with evidence. The anti-hallucination gate before acting on a finding. |
 | `variant-analysis` | A bug is confirmed — where else does it live? |
+| `trailmark-variant-neighborhood` | Seeds that hunt from the code graph: siblings, shared callers and callees, common sinks and entry-point paths around the confirmed bug, handed to `variant-analysis` or `semgrep-rule-creator` as candidate locations. |
 | `trailmark-finding-triage` | Is this one finding actually reachable from an entry point? |
 | `wait-what` | A result contradicts what the code should do; surface the wrong assumption first. |
 | `webapp-testing` | Browser-side evidence for a dashboard bug. Supplies evidence *to* the diagnosis loop; does not own it. |

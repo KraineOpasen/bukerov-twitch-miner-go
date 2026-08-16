@@ -466,7 +466,7 @@
     {
       "name": "agents/openai.yaml (all skills)",
       "category": "metadata",
-      "reason": "Every promoted skill ships an agents/openai.yaml sidecar with Codex-specific agent metadata. Claude Code does not read this file, so it was not vendored for any skill (including the 21 installed above) — see docs/agents/mattpocock-skills-policy.md.",
+      "reason": "Every promoted skill ships an agents/openai.yaml sidecar with Codex-specific agent metadata. Claude Code does not read this file, so it was not vendored for any skill (including the 23 installed above) — see docs/agents/mattpocock-skills-policy.md.",
       "status": "EXCLUDE"
     }
   ]

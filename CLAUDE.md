@@ -204,13 +204,15 @@ file). `scripts/validate-agent-governance.py` drives all of them from one provid
 `skill-creator-anthropic` is renamed from upstream's `skill-creator` and is explicit-invocation-only —
 use `/skill-creator-anthropic`; a plain "create a skill" request routes to the built-in instead.
 `BuilderIO/builder-agent-skills` was audited and **nothing was vendored from it**: at its reviewed pin
-the repository carries no root licence, so there is no redistribution grant (see
+the repository carries no root licence, and the tree's only licence file is an MIT `hallmark/LICENSE`
+held by "Hallmark contributors" — which by directory convention plausibly covers `hallmark/` alone, a
+weaker provenance footing than the repository-level grant every installed provider stands on (see
 `docs/agents/builderio-skills-policy.md`).
 
 A further ownership class covers project-owned first-party skills: content authored directly in this
 repo rather than vendored from an upstream source. It is governed by
 `docs/agents/project-skills-policy.md`, tracked in `docs/agents/project-skills-manifest.json`, and
-validated by `scripts/validate-agent-governance.py` alongside the two vendored sets above. The
+validated by `scripts/validate-agent-governance.py` alongside the six vendored provider sets above. The
 manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
 Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
 authority: mechanical authority to change tracked files always comes from an active task contract,

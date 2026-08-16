@@ -24,8 +24,8 @@ ledger is independent, and no skill name is shared across them (see
 - Current upstream HEAD at review time: same SHA (**drift: none**).
 - Scope of the read: all 33 skill directories under upstream `skills/`, plus the repo-local
   `.agents/skills/ce-skill-work`, were read with their complete dependency closures, and every bundled script
-  in the installed set was read end to end. 22 directories are installed; 11 of the remaining 12 candidates
-  are recorded in the manifest's `excluded_skills[]` with a verdict and a reason (see "Excluded / Held").
+  in the installed set was read end to end. 22 directories are installed; all 12 remaining candidates are
+  recorded in the manifest's `excluded_skills[]` with a verdict and a reason (see "Excluded / Held").
 
 ## Installation model
 
@@ -292,9 +292,13 @@ away.
   Bash(git *), Read`. That key *narrows* the tool surface, so the validator's allowlist was widened for this
   provider (`extra_frontmatter_keys` in `scripts/validate-agent-governance.py`) instead of the skill being
   edited.
-- **Known metadata inaccuracy:** the manifest records `"invocation": "model"` for all 22 skills, including
-  `ce-setup`. The on-disk frontmatter governs, and it says otherwise. Fix the manifest field at the next
-  re-vendor; do not "fix" the skill.
+- **A metadata inaccuracy this review found and corrected:** the manifest first recorded `"invocation":
+  "model"` for all 22 skills, including `ce-setup`, contradicting that skill's own frontmatter. Review caught
+  it; the manifest now records `"invocation": "user"` for `ce-setup` and `model` for the other 21, which is
+  what the on-disk frontmatter says. The agreement no longer depends on bookkeeping care:
+  `scripts/validate-agent-governance.py`'s `provider-invocation-matches-frontmatter` check fails closed, for
+  every provider, whenever a manifest's `invocation` disagrees with the skill's `disable-model-invocation`
+  frontmatter — so this class of drift cannot recur silently at the next re-vendor.
 
 ## License & attribution
 
@@ -523,8 +527,6 @@ carry `null`.
 - **`ce-setup` refreshes `.compound-engineering/config.example.yaml` unconditionally** once Phase 2 runs in a
   git repo — it is the one CE write that is not consent-gated. It writes a file byte-identical to the vendored
   template, so the effect is bounded, but it is a repo write.
-- **The manifest's `invocation` field says `model` for `ce-setup`**, which contradicts that skill's own
-  frontmatter. See "Invocation modes".
 - **The `context.mjs` clause in the `ce-sweep` exclusion reason is superseded**, per "Where the audit lanes
   disagreed". The exclusion itself is not in question.
 - **`ce-babysit-pr`'s watch loop needs a harness background-and-wake capability.** Without one it degrades to
