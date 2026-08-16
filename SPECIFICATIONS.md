@@ -2565,8 +2565,8 @@ persisted settings), so the web server enforces a fail-closed exposure model:
 else `analytics.host` from config.json. The env override is never persisted
 back into config.json. The Docker image sets `DASHBOARD_HOST=0.0.0.0` so
 published container ports keep working; actual LAN exposure is then governed
-by the container runtime's port publishing (Docker `-p`, TrueNAS SCALE /
-unraid app UI).
+by the container runtime's port publishing (Docker `-p`, unraid or other NAS
+app UI).
 
 **Startup gate.** `Server.Start()` returns an error — and `cmd/miner` exits —
 when the resolved bind is non-loopback and `DASHBOARD_USERNAME`/

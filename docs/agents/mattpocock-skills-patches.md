@@ -9,6 +9,14 @@ capability/safety constraint, not a wording preference. Where an upstream edit l
 patch was reapplied via a 3-way merge (old-upstream base, previously-vendored ours, new-upstream theirs) so
 upstream's new wording survives alongside the constraint; those rows note it below.
 
+**Host-OS wording correction (ADR-0002 §8).** The `wizard-governance-gate` block originally named the owner's
+host operating system. That name is removed; the constraint is unchanged in substance ("a production system,
+remote-host access, or a real secret/credential" must still be flagged before authoring anything). No patch was
+added or removed and the patch id is unchanged — only the wording inside an existing block moved, so
+`wizard`'s `upstream_blob_sha` is untouched and only `vendored_blob_sha` advances, to
+`227926d9d82dc1718e87ffd70a761cfced9adc29`. The "Local change" cell below quotes the resulting vendored text as
+it now stands on disk, not the superseded wording.
+
 | Skill | Upstream path | Blob SHA (SKILL.md) | Local change | Reason | Rule |
 | --- | --- | --- | --- | --- | --- |
 | implement | `skills/engineering/implement/SKILL.md` | `7a0b11f5f4fe9505ea5c7983c3083ba1bf754f69` | Replaced the unconditional "Commit your work to the current branch." with a capability-aware envelope (commit only if the contract allows it and only on the task branch; push only under PUBLISH_DRAFT; Draft PR only when authorized; never Ready/merge/release/deploy). | Upstream assumed standing commit/push authority; this project's default is READ_ONLY. | `implement-commit-envelope` |

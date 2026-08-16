@@ -117,11 +117,20 @@ next re-vendor — each needs its own reviewed PR through the update procedure b
 
 ## Governance precedence
 
-Vendored skills sit **below** this project's own policy **on authority**. Authority chain (see `CLAUDE.md`'s
-"Claude Code Governance (v3)" section): (1) the active task contract, (2) `CLAUDE.md` + `.claude/rules/*.md`,
-(3) vendored skills as patched (both this set and the Matt Pocock set), (4) unpatched upstream skill defaults,
-(5) generic model behavior. A skill instruction never overrides a `.claude/rules/*.md` constraint or a hook
-denial.
+Vendored skills sit **below** this project's own policy **on authority**. The authority chain has exactly four
+levels (see `CLAUDE.md`'s "Claude Code Governance (v3)" section and `docs/agents/agent-orchestration.md`),
+narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched (both this set and the Matt Pocock set).
+4. **Generic model behavior** — fallback only.
+
+Unpatched upstream text is **not** a separate tier below the patches: a vendored skill's instructions are
+whatever its vendored bytes say, patched and unpatched alike, and they all sit together at level 3. Where a
+local patch and the upstream text around it disagree, the patch wins — that is what patching means, and it is
+resolved inside level 3 rather than by a fifth level. A skill instruction never overrides a
+`.claude/rules/*.md` constraint or a hook denial.
 
 **On workflow the order is inverted**: an invoked audited skill owns its documented engineering methodology —
 agents, lanes, reviewers, writers, repair loops — and the project does not override it. See

@@ -312,7 +312,7 @@
           "upstream_blob_sha": "decdff43d05908b4c1fc2cfd2d80fc5743440934",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "4163f8d2063472a2bfd06d7a04986ed5ae966631",
+          "vendored_blob_sha": "45311c896cdce8724865d0aaac39589647153e19",
           "locally_modified": true,
           "patch_ids": [
             "fd-description-scope",
@@ -359,7 +359,7 @@
           "upstream_blob_sha": "4726215301db64a0cc4d41fc3219c61f37a30f4a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6a1efae3c00088f9d7c8801cffa2cd62dc5a53e1",
+          "vendored_blob_sha": "256b8cc59c354ea36dd91e114fd0f21efbcb6903",
           "locally_modified": true,
           "patch_ids": [
             "webapp-testing-description-scope",

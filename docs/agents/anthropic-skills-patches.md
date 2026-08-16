@@ -10,6 +10,15 @@ rewrites — every change here is a capability/safety constraint, not a wording 
 modification notice under Apache License 2.0 §4(b) ("You must cause any modified files to carry
 prominent notices stating that You changed the files").
 
+**Host-OS wording correction (ADR-0002 §8).** The `fd-artifact-paths` and `webapp-testing-localhost-only`
+blocks originally named the owner's host operating system. That name is removed; the constraint is unchanged
+in substance ("never production or a remote host" / "never production, staging, or remote hosts"). No patch was
+added or removed and every patch id is unchanged — only the wording inside two existing blocks moved, so each
+skill's `upstream_blob_sha` is untouched and only `vendored_blob_sha` advances:
+`frontend-design/SKILL.md` → `45311c896cdce8724865d0aaac39589647153e19`,
+`webapp-testing/SKILL.md` → `256b8cc59c354ea36dd91e114fd0f21efbcb6903`. The "Local change" cells below quote
+the resulting vendored text as it now stands on disk, not the superseded wording.
+
 | Skill | Upstream path | Blob SHA | Local change | Reason | Rule |
 | --- | --- | --- | --- | --- | --- |
 | skill-creator-anthropic | `skills/skill-creator/SKILL.md` | `65b3a402dbd09b8e83f9d637c6b553875189085c` | Frontmatter `name: skill-creator` → `name: skill-creator-anthropic`. | Upstream's name collides with the Claude Code built-in `skill-creator` skill; a distinct name lets both coexist without one shadowing the other. | `skc-rename-vendored` |

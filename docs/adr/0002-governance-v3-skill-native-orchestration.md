@@ -35,10 +35,12 @@ with safety. Three concrete problems followed:
    intervention. That is not how engineering works, and it pushed sessions toward either stopping constantly
    or quietly reinterpreting the rule — the second of which is much worse.
 
-Separately, "TrueNAS" had leaked into governance vocabulary (`CLAUDE.md`'s non-delegable prohibitions, the
-task-contract doc, the vendoring policies and patch ledgers) as if it were an architectural concept. It is
-not: it is the operating-system name of one server that happens to run the miner's Docker container. Naming a
-host OS in coding governance is a category error that makes the policy look deployment-specific when it isn't.
+Separately, the operating-system name of one particular server had leaked into governance vocabulary
+(`CLAUDE.md`'s non-delegable prohibitions, the task-contract doc, the vendoring policies and patch ledgers) as
+if it were an architectural concept. It is not: it is the host OS of one machine that happens to run the
+miner's Docker container. Naming a host OS in coding governance is a category error that makes the policy look
+deployment-specific when it isn't. This ADR deliberately does not repeat that name, so that the rule in §8 can
+be enforced mechanically as "zero occurrences anywhere in the tree" with no document needing an exemption.
 
 ## Decision
 
@@ -48,9 +50,15 @@ Adopt Governance v3.
 
 Two independent chains, replacing the single v2 precedence list.
 
-**Authority** (narrowing only — each layer may restrict, never widen): owner/task contract → `CLAUDE.md` +
-`.claude/rules/*.md` (genuine repository safety and integrity invariants only) → skill instructions → generic
-model behavior.
+**Authority** — exactly four levels, narrowing only (each layer may restrict, never widen): (1) owner/task
+contract → (2) repository invariants, `CLAUDE.md` + `.claude/rules/*.md` (genuine repository safety and
+integrity invariants only) → (3) invoked audited skill instructions, vendored and first-party at one tier →
+(4) generic model behavior as fallback.
+
+v2's chain had a fifth tier, "unpatched upstream skill defaults", sitting below the local patches. v3 drops it:
+a vendored skill's instructions are its vendored bytes, patched and unpatched alike, all at level 3, with
+patch-versus-upstream conflicts resolved inside that level. `docs/agents/agent-orchestration.md` carries the
+canonical statement; every other document restates those same four levels.
 
 **Workflow**: the invoked audited skill's documented methodology → task-prompt narrowing of scope/acceptance →
 generic model behavior.
@@ -118,10 +126,18 @@ auto-merge, at any depth, under any contract.
 
 ### 8. No OS-specific governance
 
-Every project/governance reference to "TrueNAS" is removed from the text this change-set owns. Where a generic
-concept is needed the wording is "runtime", "remote runtime", "server runtime", or "Docker container". Remote
-runtime and container operations are a separate task concern, raised only when the owner explicitly asks for
-runtime work; a host operating-system name is never part of coding governance.
+Every reference to the owner's host operating system is removed from every tracked file, including this ADR
+itself and the vendored skill bodies. Where a generic concept is needed the wording is "runtime", "remote
+runtime", "server runtime", "remote host", or "Docker container"; where a specific deployment target ships
+real assets in this repository (the `unraid/` app template), naming that target in deployment documentation is
+a product fact, not governance vocabulary, and stays. Remote runtime and container operations are a separate
+task concern, raised only when the owner explicitly asks for runtime work; a host operating-system name is
+never part of coding governance.
+
+The acceptance condition is mechanical and absolute: the forbidden token occurs **zero** times across all
+tracked files. No document — not this ADR, not the validator that enforces it — is exempt. The validator
+therefore assembles the token from fragments at import time rather than embedding it as a literal, so that the
+enforcement code cannot become the last surviving occurrence of the thing it forbids.
 
 ## Consequences
 
@@ -141,8 +157,13 @@ runtime work; a host operating-system name is never part of coding governance.
   envelope, and does its ownership model prevent competing writes?" Existing patches created purely to enforce
   an orchestration cap (`design-it-twice-cap`, `skc-agent-cap`, `wayfinder`'s fan-out narrowing,
   `code-review`'s reviewer-subagent narrowing) are now candidates for removal at the next re-vendor — they are
-  **not** touched by this change-set, which deliberately changes no skill bytes. Each needs its own reviewed
-  PR against the vendoring policies' update procedure.
+  **not** touched by this change-set. Each needs its own reviewed PR against the vendoring policies' update
+  procedure.
+- The only vendored skill bytes this decision changes are the three host-OS mentions inside existing patch
+  blocks (`fd-artifact-paths`, `webapp-testing-localhost-only`, `wizard-governance-gate`), required by §8. No
+  patch is added or removed, no upstream text is touched, every patch id is unchanged, and each skill's
+  `upstream_blob_sha` is preserved — only the `vendored_blob_sha` moves, with the patch ledger rows quoting the
+  resulting text verbatim.
 - ADR-0001's authority decisions (operation modes, task contract, quality gates, mechanical enforcement,
   vendored-skill discipline) remain in force; only its orchestration and failure-handling decisions are
   superseded.

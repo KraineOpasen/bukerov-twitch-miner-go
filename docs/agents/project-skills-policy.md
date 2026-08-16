@@ -22,10 +22,19 @@ a first-party entry must never assert provenance it doesn't have.
 
 ## Authority precedence
 
-Nothing here changes `CLAUDE.md`'s authority chain: (1) an explicit task contract, (2) `CLAUDE.md` +
-`.claude/rules/*.md`, (3) vendored skills (patched) — and, at the same tier, this project's own first-party
-skills — (4) unpatched upstream skill defaults, (5) generic model behavior. A first-party skill instruction never
-overrides a `.claude/rules/*.md` constraint or a hook denial, exactly like a vendored one.
+Nothing here changes `CLAUDE.md`'s authority chain, which has exactly four levels (see
+`docs/agents/agent-orchestration.md`), narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched and this project's own first-party
+   skills, at the same tier; ownership class changes review procedure, never authority.
+4. **Generic model behavior** — fallback only.
+
+There is no fifth tier for "unpatched upstream defaults": a first-party skill has no upstream at all, and a
+vendored skill's instructions are whatever its vendored bytes say, patched and unpatched alike, resolved inside
+level 3. A first-party skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial,
+exactly like a vendored one.
 
 On **workflow**, a first-party skill owns its documented methodology the same way a vendored one does (see
 `docs/agents/agent-orchestration.md`) — the authority chain above constrains what it may reach, not how it

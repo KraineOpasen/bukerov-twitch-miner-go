@@ -80,7 +80,7 @@ ENV CONFIG_PATH=/config/config.json
 # container would make published ports (-p 5000:5000) unreachable, so the
 # image explicitly binds all container interfaces. Actual network exposure is
 # then decided by the container runtime's port publishing (docker -p /
-# compose ports / the TrueNAS SCALE or unraid app UI). Because this is a
+# compose ports / the unraid or other NAS app UI). Because this is a
 # non-loopback bind, the miner REQUIRES DASHBOARD_USERNAME and
 # DASHBOARD_PASSWORD to be set and refuses to start without them; set
 # DASHBOARD_INSECURE_NO_AUTH=true instead to explicitly accept an

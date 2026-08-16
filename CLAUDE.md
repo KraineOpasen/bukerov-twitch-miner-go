@@ -97,10 +97,18 @@ Full semantics: `docs/agents/agent-orchestration.md`.
 
 #### Authority chain (narrowing only)
 
-1. An explicit task contract (`docs/agents/task-contract.md`) for the current session.
-2. This file + `.claude/rules/*.md` — repository safety and integrity invariants only.
-3. Skill instructions (`.claude/skills/**`) — may narrow their own scope, never widen authority.
-4. Generic model behavior.
+Exactly four levels. Each layer may restrict, never widen.
+
+1. **Owner / task contract** — an explicit task contract (`docs/agents/task-contract.md`) for the current
+   session; absent one, `READ_ONLY`.
+2. **Repository invariants** — this file + `.claude/rules/*.md`, safety and integrity only.
+3. **Invoked audited skill instructions** (`.claude/skills/**`) — vendored and first-party alike, at one tier;
+   may narrow their own scope, never widen authority.
+4. **Generic model behavior** — fallback only.
+
+There is no fifth level. "Unpatched upstream skill defaults" is not a tier of its own: a vendored skill's
+instructions are its vendored bytes, patched and unpatched alike, all at level 3. Ownership class
+(vendored vs first-party) changes review procedure, never authority.
 
 A task contract can **never** authorize merge, auto-merge, release/tag, or deploy — those always require a
 separate, direct user command, and even then are not executed autonomously under this policy.

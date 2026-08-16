@@ -14,7 +14,7 @@ the contract covers. The agent never runs the generated script itself, not even 
 it is handed to the human to run, exactly as upstream's own step 4 already recommends, made a hard rule here
 rather than a suggestion. The generated script is never committed or pushed without a separate explicit
 envelope authorizing that (see `implement`'s commit envelope). Any value the script's target would be a
-production or TrueNAS system, remote-host access, or a real secret/credential: state that plainly to the user
+production system, remote-host access, or a real secret/credential: state that plainly to the user
 before authoring anything, and don't proceed without explicit authorization. While scoping or authoring the
 wizard (reading `.env`/`.env.example`/CI workflow files for existing secret names, or discussing example
 values), never echo an actual secret value back to the user or into any report/log — write `[REDACTED]`

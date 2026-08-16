@@ -57,8 +57,10 @@ task_contract:
 - **`agent_cap`** / **`max_concurrency`** are **optional resource ceilings**, not orchestration policy. They
   are no longer mandatory and have no default: absent from the contract there is no cap, and the skill's own
   design governs fan-out. Set them only when a task genuinely needs a resource bound. Where a vendored skill's
-  local patch text still references "the task contract's `agent_cap`", read it as *"respect a cap if the
-  contract sets one"*.
+  local patch text or a patch-ledger row still references a cap — "the task contract's `agent_cap`", "the task
+  contract's concurrency cap", "the session's agent budget", "its agent cap", or any other phrasing — read it
+  as *"respect a cap if the contract sets one"*, never as an assertion that a cap always exists (see
+  `docs/agents/agent-orchestration.md`).
 - **`forbidden`** is for task-specific call-outs on top of the always-forbidden list (e.g. a task might add
   `forbidden: [schema_migration]` if this particular change must not touch `internal/database`'s migrations)
   — it narrows further, it never removes anything from the always-forbidden list.

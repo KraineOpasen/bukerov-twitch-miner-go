@@ -21,13 +21,22 @@ internal design of every audited skill. v3 keeps a single **authority** chain an
 
 ### Authority chain (narrowing only — each layer may restrict, never widen)
 
+Exactly four levels. This is the canonical statement; `CLAUDE.md`, the two vendoring policies, the
+first-party skills policy and ADR-0002 all restate these same four and must not diverge.
+
 1. **Owner / task contract** — the authority envelope: repo, mode, branch, base SHA, allowed paths, allowed
    file/git/GitHub operations, and the final publication boundary.
-2. **`CLAUDE.md` + `.claude/rules/*.md`** — genuine repository safety and integrity invariants only (secrets
-   handling, non-delegable prohibitions, GitHub verification, truthful reporting). Not a place for
-   orchestration micromanagement.
-3. **Audited skill instructions** — may narrow authority further for their own scope; may never widen it.
+2. **Repository invariants — `CLAUDE.md` + `.claude/rules/*.md`** — genuine repository safety and integrity
+   invariants only (secrets handling, non-delegable prohibitions, GitHub verification, truthful reporting).
+   Not a place for orchestration micromanagement.
+3. **Invoked audited skill instructions** — vendored (as patched) and project-owned first-party skills at one
+   and the same tier; may narrow authority further for their own scope, may never widen it.
 4. **Generic model behavior** — fallback only.
+
+There is no fifth level. Governance v2's chain listed "unpatched upstream skill defaults" as a tier of its own
+below the patches; v3 does not. A vendored skill's instructions are its vendored bytes — patched and unpatched
+text together — and a conflict between a local patch and the upstream text around it is resolved inside level
+3, where the patch wins. Ownership class changes review procedure, never authority.
 
 ### Workflow chain
 
@@ -114,9 +123,13 @@ Skill-native orchestration governs *shape*, not *reach*. Independent of any skil
 
 `agent_cap` and `max_concurrency` remain **optional** contract fields for tasks that genuinely need a
 resource ceiling (see `docs/agents/task-contract.md`). They are no longer mandatory and no longer default to
-anything: absent from the contract, there is no cap and the skill's own design governs fan-out. Where a
-vendored skill's local patch text still references "the task contract's `agent_cap`", read it as *"respect a
-cap if the contract sets one"* — not as an assertion that a cap always exists.
+anything: absent from the contract, there is no cap and the skill's own design governs fan-out.
+
+This re-reading applies to **every** cap reference in vendored skill bodies and patch ledgers, however it is
+worded — "the task contract's `agent_cap`", "the task contract's concurrency cap", "the session's agent
+budget", "its agent cap". Each reads as *"respect a cap if the contract sets one"*, never as an assertion that
+a cap always exists. The rule is deliberately stated on the meaning rather than on one literal string, because
+those texts predate v3 and phrase the same idea several ways.
 
 ## Development feedback vs. final gates
 
