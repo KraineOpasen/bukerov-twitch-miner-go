@@ -1392,6 +1392,47 @@ CLOSURE_REF_RE = re.compile(
     r"`(?:\{baseDir\}/)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
 
 
+def invocation_consistency_details(entry, skills, skills_dir):
+    """Pure core of check_provider_invocation_matches_frontmatter, root-parameterized for fixtures."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict) or "name" not in skill:
+            continue
+        declared = skill.get("invocation")
+        if declared is None:
+            continue  # not every manifest schema records it
+        skillmd = os.path.join(skills_dir, skill["name"], "SKILL.md")
+        if not os.path.isfile(skillmd):
+            continue  # reported elsewhere
+        raw = parse_frontmatter_value(skillmd, "disable-model-invocation")
+        user_only = isinstance(raw, str) and raw.strip().lower() == "true"
+        expected = "user" if user_only else "model"
+        if declared != expected:
+            details.append(
+                "%s: %s: manifest invocation %r but SKILL.md frontmatter says %s "
+                "(disable-model-invocation: %s)" % (
+                    label, skill["name"], declared, expected,
+                    raw if raw is not None else "absent"))
+    return details
+
+
+def check_provider_invocation_matches_frontmatter():
+    """A manifest's `invocation` must agree with the skill's own frontmatter: `user` exactly when the
+    skill sets `disable-model-invocation: true`, `model` otherwise.
+
+    This is not bookkeeping. `invocation` is how a reader learns whether a skill can fire from model
+    judgment alone, and it is the field the vendoring policies cite when explaining why a
+    high-authority skill was moved to explicit invocation. A manifest that says `model` for a skill
+    whose frontmatter disables model invocation (or the reverse) misdescribes the installed system's
+    actual trigger surface -- which is exactly the class of drift the manifests exist to prevent.
+    Caught first by a reviewer on one real entry; now mechanical for every provider."""
+    details = []
+    for entry in MANIFESTS:
+        details += invocation_consistency_details(entry, provider_skills(entry), SKILLS_DIR)
+    report("provider-invocation-matches-frontmatter", not details, details)
+
+
 def check_provider_dependency_closure():
     """Every file a vendored skill points at must actually have been vendored with it.
 
@@ -2708,6 +2749,7 @@ ALL_CHECKS = [
     check_provider_file_hashes,
     check_provider_vendored_modes,
     check_provider_scripts_audited,
+    check_provider_invocation_matches_frontmatter,
     check_provider_dependency_closure,
     check_builtin_collision_denylist,
     check_patch_ledger_coverage,
@@ -4036,6 +4078,36 @@ def _st_p16():
     assert "scripts/run.sh" not in strip_code_fences(doc), "link check must not see inline code"
 
 
+def _st_p17():
+    """`invocation` must agree with the skill's own frontmatter in BOTH directions, and a manifest
+    that simply omits the field is not fabricated into a finding."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, _root, skills_dir, _m = _build_provider_fixture(tmp, skill_name="p17-skill")
+        name, skillmd = skills[0]["name"], os.path.join(skills_dir, "p17-skill", "SKILL.md")
+
+        # Fixture skill is model-invoked and the manifest says so.
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+        # Manifest claims user-invoked, frontmatter does not disable model invocation.
+        skills[0]["invocation"] = "user"
+        d = invocation_consistency_details(entry, skills, skills_dir)
+        assert any("manifest invocation 'user'" in x and "says model" in x for x in d), d
+
+        # Frontmatter disables model invocation but the manifest still says model.
+        _write_file(skillmd, "---\nname: %s\ndescription: d\ndisable-model-invocation: true\n---\n" % name)
+        skills[0]["invocation"] = "model"
+        d = invocation_consistency_details(entry, skills, skills_dir)
+        assert any("manifest invocation 'model'" in x and "says user" in x for x in d), d
+
+        # Correcting the manifest clears it.
+        skills[0]["invocation"] = "user"
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+        # A manifest schema that does not record invocation is not a finding.
+        skills[0].pop("invocation")
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -4104,6 +4176,7 @@ def _self_test_fixtures():
         ("P14", "frontmatter allowlist widens per provider, not globally", _st_p14),
         ("P15", "{baseDir} link resolution is real, not a rubber stamp", _st_p15),
         ("P16", "fence pairing handles nested/longer fences; strippers divide labour", _st_p16),
+        ("P17", "manifest invocation must agree with the skill's own frontmatter", _st_p17),
     ]
 
 

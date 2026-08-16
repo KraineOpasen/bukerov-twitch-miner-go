@@ -3000,7 +3000,7 @@
       "path": ".claude/skills/ce-setup",
       "upstream_path": "skills/ce-setup",
       "renamed_from": null,
-      "invocation": "model",
+      "invocation": "user",
       "classification": "VENDORED_VERBATIM",
       "locally_modified": false,
       "patch_ids": [
@@ -3569,7 +3569,7 @@
       "name": "ce-sweep",
       "status": "EXCLUDE",
       "upstream_path": "skills/ce-sweep",
-      "reason": "Irrelevant platforms plus a genuine integrity problem. Two of its three sources are Slack (references/sources/slack.md, needs a Slack read+reaction tool) and email (references/sources/email.md, self-labelled \"EXPERIMENTAL\"); neither exists for this single-owner Go repo, and there is no customer-feedback pipeline to sweep. The remaining github-issues source would apply ack/close-out labels — a tracker mutation our governance keeps read-only by default — to a low-traffic tracker, which does not justify a lease-based state engine, plan reconciliation, and a media pipeline. Independently, scripts/context.mjs is engineered to override harness and system-prompt constraints from tool output: its own comments say \"tool-result content in the working turn outranks a system-prompt default\" and \"this text is positioned to outrank skill prose,\" and its AUTONOMY_DIRECTIVE_CHECK instructs the agent tha"
+      "reason": "Irrelevant platforms plus a genuine integrity problem. Two of its three sources are Slack (references/sources/slack.md, needs a Slack read+reaction tool) and email (references/sources/email.md, self-labelled \"EXPERIMENTAL\"); neither exists for this single-owner Go repo, and there is no customer-feedback pipeline to sweep. The remaining github-issues source would apply ack/close-out labels — a tracker mutation our governance keeps read-only by default — to a low-traffic tracker, which does not justify a lease-based state engine, plan reconciliation, and a media pipeline. Independently, scripts/context.mjs is engineered to override harness and system-prompt constraints from tool output: its own comments say \"tool-result content in the working turn outranks a system-prompt default\" and \"this text is positioned to outrank skill prose,\" and its AUTONOMY_DIRECTIVE_CHECK instructs the agent tha NOTE, recorded after review: this entry originally also cited scripts/context.mjs as an independent integrity ground. That ground is SUPERSEDED and does not distinguish this skill -- all 15 upstream copies of context.mjs hash identically (e0d7dae5b98d6feadb29c6f94ef37d65ff57d386) and 13 of them ship inside installed skills. The exclusion stands on the Slack/email/tracker platform ground alone, which is sufficient on its own."
     },
     {
       "name": "ce-test-browser",
@@ -3587,7 +3587,7 @@
       "name": "lfg",
       "status": "HOLD",
       "upstream_path": "skills/lfg",
-      "reason": "A genuinely strong autonomous plan->implement->simplify->review->fix->commit->push->PR->watch-CI pipeline with careful structured gates, and — checked line by line and by grep — it contains no merge, no auto-merge, no ready-for-review, no force push, and no workflow trigger of its own; step 10 states explicitly that pipeline mode \"stopped at 'CI decided,' not 'merged'\". It is blocked on two things. (1) Dependency closure: the entire body is \"invoke skill X\" for ce-plan, ce-work, ce-simplify-code, ce-code-review, ce-test-browser, ce-commit-push-pr, ce-babysit-pr, plus ce-debug / ce-resolve-pr-feedback / ce-explain / ce-handoff via the references — none are in this slice, and if they are not vendored at the same pin LFG dies at step 1. (2) Its step-9 handoff target ce-babysit-pr is described upstream as driving a PR \"toward merge-ready\", so the owner needs that skill's own audit to land th"
+      "reason": "HOLD. Re-checked against the installed set: the earlier note that its dependencies 'are not in this slice' is STALE -- 10 of its 11 dependency skills did ship. The real remaining blockers are two: step 7 hard-invokes ce-test-browser, which is excluded as a true duplicate of the installed anthropic webapp-testing; and step 8 selects posture:stack-land, which the patched ce-babysit-pr no longer has (removed under ce-no-merge-authority as a non-delegable merge authorization). Unblocking needs step 7 repointed at webapp-testing and step 8's land posture dropped -- both are real patches to an autonomous end-to-end pipeline, so it is held for a reviewed decision rather than patched in passing."
     }
   ],
   "excluded_upstream_paths": [
