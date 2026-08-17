@@ -15,17 +15,30 @@ ledger is independent, and no skill name is shared across them (see
 ## Upstream
 
 - Repo: `https://github.com/EveryInc/compound-engineering-plugin`
-- Reviewed commit: `57e586d66194585757ffa30a23dcd0f4ec0210a4` (`fix(ce-work): run cross-model verification on
+- Reviewed commit: `d6ae46457b3364ca1a3d6eb9954613217000c0ec` (`chore: release main (#1405)`; advanced by
+  fast-forward from `57e586d66194585757ffa30a23dcd0f4ec0210a4`, `fix(ce-work): run cross-model verification on
   warm checkouts (#1404)`)
-- Plugin version at that commit: `3.22.0` (`plugin.json`), MIT, `"author": {"name": "Kieran Klaassen and
+- Plugin version at that commit: `3.22.1` (`plugin.json`), MIT, `"author": {"name": "Kieran Klaassen and
   Trevin Chow"}`
 - Reviewed tree SHAs, one per vendored skill directory: recorded in the manifest's `upstream_tree` map (22
   entries).
-- Current upstream HEAD at review time: same SHA (**drift: none**).
-- Scope of the read: all 33 skill directories under upstream `skills/`, plus the repo-local
-  `.agents/skills/ce-skill-work`, were read with their complete dependency closures, and every bundled script
-  in the installed set was read end to end. 22 directories are installed; all 12 remaining candidates are
-  recorded in the manifest's `excluded_skills[]` with a verdict and a reason (see "Excluded / Held").
+- Current upstream HEAD at review time: **ahead of the pin, and not audited** — see the manifest's `drift`
+  field for the observed SHA, the observation instant, and which installed skills it touches. It is a
+  fast-forward extension of the reviewed pin (the pin is still a true ancestor), it leaves the version at
+  `3.22.1`, and it does not touch `ce-setup`, so it takes nothing away from the pin recorded above. Those
+  bytes are not vendored here; the next scheduled detection run prepares them as their own candidate.
+- Scope of the read: at `57e586d66194585757ffa30a23dcd0f4ec0210a4`, all 33 skill directories under upstream
+  `skills/`, plus the repo-local `.agents/skills/ce-skill-work`, were read with their complete dependency
+  closures, and every bundled script in the installed set was read end to end. The advance to
+  `d6ae46457b3364ca1a3d6eb9954613217000c0ec` is a fast-forward whose only installed-set change is
+  `ce-setup/scripts/check-health`: that script was re-read end to end and behaviourally compared against the
+  superseded bytes under `EVAL_REQUIRED` (see the manifest's `audit_ref` for that skill, including the one
+  environment-conditional difference the comparison found), the other 274 tracked files were re-verified by
+  blob hash and mode in both directions against the target tree rather than re-read, and every
+  `excluded_skills[]` entry was re-checked against the upstream delta (`.agents/skills/ce-skill-work` moved in
+  five files; its EXCLUDE verdict stands on unchanged grounds). 22 directories are installed; all 12 remaining
+  candidates are recorded in the manifest's `excluded_skills[]` with a verdict and a reason (see "Excluded /
+  Held").
 
 ## Installation model
 
@@ -567,6 +580,20 @@ Full detail, including the nine blocked conditions and the security posture:
 - **`ce-setup` refreshes `.compound-engineering/config.example.yaml` unconditionally** once Phase 2 runs in a
   git repo — it is the one CE write that is not consent-gated. It writes a file byte-identical to the vendored
   template, so the effect is bounded, but it is a repo write.
+- **`ce-setup/scripts/check-health` now depends on a usable `/dev/fd` on its always-taken path.** At this pin
+  upstream replaced two here-string reads (`<<< "$x"`) with process substitution
+  (`< <(printf '%s\n' "$x")`) to stop requiring a writable `$TMPDIR` in read-only sandboxes. The audit ran both
+  versions against identical fixtures: on bash 5.2.21 with a usable `/dev/fd` they are byte-identical in
+  stdout, stderr and exit status, with no filesystem write, no git mutation and no network syscall. Where
+  `/dev/fd` is *unusable at runtime* — a bash built with `HAVE_DEV_FD` but run without `/proc`, for instance —
+  bash offers no FIFO fallback, so both reads fail and the report degrades from `Optional capabilities 1/5`
+  with correct rows to `0/5` with blank rows, plus one stderr line per iteration. The direction is fail-safe:
+  it under-reports optional tools, never fabricates or executes an install command, never writes, never
+  reaches the network, and still exits `0` — and the old bytes already carried the same `/dev/fd` dependency
+  conditionally, at the `work_engine_preferences` read. The bytes were accepted verbatim rather than patched:
+  reverting would put a content patch on a file that is mode-only today and reinstate exactly what upstream
+  removed. Note for the next re-vendor: process substitution sets `$!`, inert here only because the script
+  uses no `$!`, `wait`, `trap` or job control.
 - **The `context.mjs` clause in the `ce-sweep` exclusion reason is superseded**, per "Where the audit lanes
   disagreed". The exclusion itself is not in question.
 - **`ce-babysit-pr`'s watch loop needs a harness background-and-wake capability.** Without one it degrades to
@@ -585,6 +612,7 @@ Full detail, including the nine blocked conditions and the security posture:
 Reviewed and vendored against the same Claude Code version and governance-layer assumptions recorded in
 `mattpocock-skills-policy.md`'s "Compatibility" section (frontmatter handling, `Edit(path)` permission
 semantics, PreToolUse hook payload shape) — see that document rather than duplicating the version pin here;
-re-verify both together if either changes. On the upstream side the pin is plugin `3.22.0` at
-`57e586d66194585757ffa30a23dcd0f4ec0210a4`; Compound Engineering releases frequently, so expect real content
-drift on any re-vendor rather than a provenance-only pin bump.
+re-verify both together if either changes. On the upstream side the pin is plugin `3.22.1` at
+`d6ae46457b3364ca1a3d6eb9954613217000c0ec`; Compound Engineering releases frequently, so expect real content
+drift on any re-vendor rather than a provenance-only pin bump. That prediction held on the very next advance:
+this pin's audit found upstream already two commits further on, touching three installed skills.

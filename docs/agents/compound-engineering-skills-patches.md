@@ -3,7 +3,7 @@
 Every local change applied to a vendored skill from
 [EveryInc/compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin), one row per
 patch id per touched file. **All unpatched content is byte-identical to upstream commit
-`57e586d66194585757ffa30a23dcd0f4ec0210a4`** (plugin `3.22.0`); see
+`d6ae46457b3364ca1a3d6eb9954613217000c0ec`** (plugin `3.22.1`); see
 `compound-engineering-skills-manifest.json` for the per-file `upstream_blob_sha` that pins it, and the
 `vendored_blob_sha` that pins what is actually on disk.
 
@@ -89,7 +89,7 @@ documents, in either direction.
 | ce-resolve-pr-feedback | `skills/ce-resolve-pr-feedback/scripts/get-thread-for-comment` | `a0e2eae242116fee01b3de8a8428adf1429979d4` | Mode `100755` → `100644`; content byte-identical. | Extensionless shell script, invoked through `bash`. | `ce-mode-normalize` |
 | ce-resolve-pr-feedback | `skills/ce-resolve-pr-feedback/scripts/reply-to-pr-thread` | `18390e778e150500832692b0d60841cbcb9a11c4` | Mode `100755` → `100644`; content byte-identical. | Extensionless shell script, invoked through `bash`. | `ce-mode-normalize` |
 | ce-resolve-pr-feedback | `skills/ce-resolve-pr-feedback/scripts/resolve-pr-thread` | `0e40002c63bf22f1ef0606e24cdf6ef1b43a4c33` | Mode `100755` → `100644`; content byte-identical. | Extensionless shell script, invoked through `bash`. | `ce-mode-normalize` |
-| ce-setup | `skills/ce-setup/scripts/check-health` | `cba4de9ecc0ec4889aff8941e2d8688426389bf7` | Mode `100755` → `100644`; content byte-identical. | Extensionless shell script; SKILL.md invokes it as `bash "$SKILL_DIR/scripts/check-health" --version VERSION`. | `ce-mode-normalize` |
+| ce-setup | `skills/ce-setup/scripts/check-health` | `363973b7960fba6750fb17f5cb9c85889511a6ea` | Mode `100755` → `100644`; content byte-identical. Blob re-pinned at the `d6ae4645` advance (was `cba4de9ecc0ec4889aff8941e2d8688426389bf7`); still mode-only, no content patch. | Extensionless shell script; SKILL.md invokes it as `bash "$SKILL_DIR/scripts/check-health" --version VERSION`. | `ce-mode-normalize` |
 | ce-work | `skills/ce-work/scripts/cross-model-work.sh` | `92420343677706b52b25ecbc81265d9245d5499d` | Mode `100755` → `100644`. Content **also** changed — see the `ce-no-permission-bypass` row above; on-disk bytes pinned by that file's `vendored_blob_sha` in the manifest. | Shell script, invoked through `bash`. | `ce-mode-normalize` |
 | ce-work | `skills/ce-work/scripts/peer-job-runner.py` | `41234ae6d4cbbd6dca0dca37c87df37b344f439e` | Mode `100755` → `100644`; content byte-identical. | Python script, invoked through an explicit interpreter. | `ce-mode-normalize` |
 | ce-work | `skills/ce-work/scripts/unit-workspace.py` | `07f35f4e03414a49d2381f17402347c3cf55b0d0` | Mode `100755` → `100644`; content byte-identical. | Python script, invoked through an explicit interpreter. | `ce-mode-normalize` |
