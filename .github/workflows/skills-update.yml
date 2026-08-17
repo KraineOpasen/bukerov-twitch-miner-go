@@ -1,0 +1,200 @@
+name: Skills update
+
+# Detects upstream drift in the vendored Claude skill providers (.claude/skills/**) and, when a
+# refresh can be prepared with no judgement call, opens ONE Draft PR per provider. When it
+# cannot, it records a single deduplicated issue instead and changes nothing.
+#
+# What this workflow deliberately never does:
+#   * run anything fetched from upstream. Provider repositories are read through `git cat-file`
+#     out of a bare clone that is never checked out, so upstream content has no filename, no
+#     mode and no execute bit on this runner -- it is data, start to finish.
+#   * push to the default branch, force-push, mark a PR ready, merge, tag, or release.
+#   * mutate repository settings or secrets. Where a setting is required (see "PR creation
+#     permission" below) it is reported, never changed.
+#
+# Neither trigger below can be fired by an outside contributor: `schedule` runs from the default
+# branch and `workflow_dispatch` requires write access. There is deliberately no
+# `pull_request_target` and no `pull_request` trigger -- either would run this privileged job
+# alongside code from a fork.
+on:
+  # Daily at a deliberately non-round minute: :00 is the busiest slot on GitHub's scheduler and
+  # is where cron jobs are most often delayed or dropped.
+  schedule:
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Which provider to process"
+        type: choice
+        default: all
+        # An enumerated `choice` is the strongest possible input control: GitHub rejects
+        # anything not on this list before the workflow starts, so no dispatch input can carry a
+        # path, a flag, or a shell metacharacter. The scripts validate their inputs again
+        # anyway (config.select raises on an unknown key), because defence in depth here costs
+        # one function call.
+        options:
+          - all
+          - mattpocock
+          - anthropic
+          - compound-engineering
+          - trailofbits
+          - awesome-copilot
+          - builderio
+          - builder-agent-skills
+      mode:
+        description: "check = report only; prepare = also open Draft PRs / issues"
+        type: choice
+        default: check
+        options:
+          - check
+          - prepare
+
+# No ambient authority. Every job below re-declares exactly what it needs, so a step added to
+# the read-only job in future cannot silently inherit write scopes.
+permissions: {}
+
+# One updater run at a time. Never cancel in flight: a cancelled run could stop between
+# `git push` and the pull-request call, leaving a branch with no PR and no summary explaining it.
+concurrency:
+  group: skills-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for upstream drift
+    # Never run in a fork. Forks have Actions disabled by default, so this is belt and braces --
+    # but a fork owner who enables them would otherwise inherit a daily job that pushes branches
+    # and opens pull requests in their copy, against this project's provider registry.
+    if: github.repository == 'KraineOpasen/bukerov-twitch-miner-go'
+    runs-on: ubuntu-latest
+    # Bound the job as well as the calls inside it. Every git invocation (300s) and API call
+    # (30s) is already bounded, so this is the backstop for a hang nothing else models -- and it
+    # matters here specifically because `cancel-in-progress: false` means a wedged run holds the
+    # concurrency group against every later scheduled run.
+    timeout-minutes: 20
+    # Read-only. This job resolves refs, fetches upstream objects and classifies drift; it has
+    # no reason to write anything to this repository and cannot.
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      providers: ${{ steps.plan.outputs.providers }}
+      any_action: ${{ steps.plan.outputs.any_action }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # This job never pushes, so the token must not be left in .git/config where a later
+          # step (or a compromised dependency of one) could reach it.
+          persist-credentials: false
+
+      - name: Report drift for every configured provider
+        env:
+          # Dispatch inputs reach the script through the environment, never through `${{ }}`
+          # interpolated into the shell text. Inline interpolation is the GitHub Actions script
+          # injection sink: the expression is substituted before bash parses the line, so a
+          # value containing shell syntax would execute. `"$PROVIDER"` is just a string to bash.
+          PROVIDER: ${{ inputs.provider || 'all' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check-skill-updates.py \
+            --provider "$PROVIDER" \
+            --json-out "$RUNNER_TEMP/skills-update.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Plan the publication phase
+        id: plan
+        env:
+          # A scheduled run has no inputs, so it defaults to `prepare`: the point of the daily
+          # job is to surface a reviewable candidate without anyone having to ask for one.
+          # A manual run defaults to `check`, which is the safe thing to click.
+          MODE: ${{ inputs.mode || 'prepare' }}
+          REPORT: ${{ runner.temp }}/skills-update.json
+        run: |
+          set -euo pipefail
+          python3 scripts/skill_updates/plan.py \
+            --report "$REPORT" --mode "$MODE" --github-output "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.provider }}
+    needs: check
+    if: needs.check.outputs.any_action == 'true' && needs.check.outputs.mode == 'prepare'
+    runs-on: ubuntu-latest
+    # Bound the job as well as the calls inside it. Every git invocation (300s) and API call
+    # (30s) is already bounded, so this is the backstop for a hang nothing else models -- and it
+    # matters here specifically because `cancel-in-progress: false` means a wedged run holds the
+    # concurrency group against every later scheduled run.
+    timeout-minutes: 20
+    # The only elevated job, and only for the three things it actually does: push a candidate
+    # branch (contents), open a Draft PR (pull-requests), record a blocked-update issue
+    # (issues). Notably absent: actions, packages, id-token, attestations, deployments.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    strategy:
+      # Providers are independent by design: one blocked provider must not stop another's
+      # candidate from being prepared.
+      fail-fast: false
+      # Serialized so the job summaries and any API writes happen in a predictable order, and so
+      # a run touching several providers cannot burst the REST secondary rate limit.
+      max-parallel: 1
+      matrix:
+        provider: ${{ fromJSON(needs.check.outputs.providers) }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history: the candidate branch is pushed from this checkout, and pushing a new
+          # branch out of a shallow clone is a known source of "shallow update not allowed".
+          fetch-depth: 0
+
+      - name: Prepare and publish the candidate
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          # The workflow token, scoped by the `permissions:` block above. No PAT, no GitHub App,
+          # no repository secret is used anywhere in this workflow.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare-skill-update.py \
+            --provider "$PROVIDER" \
+            --base-branch "$BASE_BRANCH" \
+            --publish \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+# ---------------------------------------------------------------------------
+# PR creation permission
+#
+# GitHub blocks Actions from opening pull requests unless the repository (or its organisation)
+# enables:
+#
+#     Settings -> Actions -> General -> Workflow permissions
+#       [x] Allow GitHub Actions to create and approve pull requests
+#
+# When it is disabled, the REST call returns 403 and this workflow FAILS LOUDLY with that exact
+# remediation text (scripts/skill_updates/ghadapter.py:PR_PERMISSION_REMEDY). The candidate
+# branch has already been pushed at that point, so nothing is lost -- a maintainer can open the
+# PR by hand, or enable the setting and re-dispatch. This workflow never changes repository
+# settings and never routes around the restriction with a PAT or an App token.
+#
+# Note that a PR opened by GITHUB_TOKEN does not trigger further workflow runs (GitHub's
+# recursion guard), so the candidate PR will not start CI on its own.
+#
+# Be precise about what that means today: `scripts/validate-agent-governance.py` FAILS on an
+# `automated_candidate` block, but it is **not wired into any GitHub workflow** — `ci.yml` runs
+# lint/build/docker only. So the gate is real but currently MANUAL: run it locally, or read the
+# job summary this workflow writes. The safeguards that do act automatically are the Draft
+# status, the banner at the top of the PR body, and the block itself sitting in the diff.
+# Wiring the validator into `ci.yml` as a required check would make it mechanical; that edit is
+# out of scope for the change that introduced this workflow (`ci.yml` is deliberately untouched)
+# and is the natural follow-up.
+#
+# Toolchain: only `actions/checkout` is used, pinned to a full commit SHA. Python comes from the
+# runner image (`python3`), so there is no setup action, no `pip install`, no `npm`/`npx`, and
+# nothing piped into a shell. The updater is stdlib-only and shells out solely to `git`.
+# Temporary upstream clones live under Python `tempfile.TemporaryDirectory()` context managers
+# and are removed on every exit path, including exceptions.
+# ---------------------------------------------------------------------------

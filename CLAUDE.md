@@ -190,7 +190,11 @@ never a marketplace install, never a floating branch. Every provider ships the s
 under `docs/agents/`: `<provider>-skills-policy.md` (policy, update/rollback), `-manifest.json`
 (installed set, exact upstream pin, per-file blob hashes, and an `EXCLUDE`/`HOLD` verdict with a
 reason for every reviewed-but-not-installed candidate), and `-patches.md` (every local patch, by
-file). `scripts/validate-agent-governance.py` drives all of them from one provider registry:
+file). All six providers use the **file-level** manifest schema — one `upstream_blob_sha` /
+`vendored_blob_sha` pair per vendored FILE, the only granularity that can prove a complete inventory
+in both directions; `all-providers-file-level` fails closed if one is ever added on the retired
+skill-level schema. `scripts/validate-agent-governance.py` drives all of them from one provider
+registry:
 
 | Provider | Prefix | Skills | Licence |
 | --- | --- | --: | --- |
@@ -208,6 +212,38 @@ the repository carries no root licence, and the tree's only licence file is an M
 held by "Hallmark contributors" — which by directory convention plausibly covers `hallmark/` alone, a
 weaker provenance footing than the repository-level grant every installed provider stands on (see
 `docs/agents/builderio-skills-policy.md`).
+
+##### Automated update candidates
+
+`automatic_updates` stays **false** for every provider — nothing is updated without review. What is
+automated is *noticing* that upstream moved, and the mechanical half of preparing a re-vendor.
+`.github/workflows/skills-update.yml` runs daily: when nothing has drifted it does nothing at all
+(no branch, PR, issue or comment); when something has, it opens **one Draft PR per provider**, or —
+if any judgement call is required — refuses entirely and opens **one deduplicated issue**. It never
+opens a partial or conflicted PR, never force-pushes, never marks a PR ready or merges, and never
+executes anything fetched from upstream.
+
+The review boundary is mechanical, not advisory. Candidates move through an explicit state machine
+— `NO_DRIFT`, `DRIFT_DETECTED`, `PREPARED_AUDIT_REQUIRED`, `BLOCKED`, `AUDITED` — and **automation
+may create only `PREPARED_AUDIT_REQUIRED`**. `AUDITED` is reached by *deleting* the
+`automated_candidate` block after a review, never by writing the word;
+`no-unaudited-update-candidate` fails while the block is present, whatever state it claims.
+`reviewed_at`/`reviewed_by` are left untouched (they describe the superseded commit), and
+`scripts_audited` is withdrawn when a candidate changes a script's bytes.
+
+Only a **fast-forward** from the reviewed commit is ever prepared: diverged, rewritten or
+unreachable history is blocked, because a force-push that swaps reviewed history for different
+content of the same shape is invisible to any tree-content check. Refs resolve to full 40-hex
+SHAs and nothing hardcodes `main` — the reviewed *branch* per provider lives in
+`docs/agents/skills-update-providers.json` while the manifest keeps owning the *pin*, so no
+floating ref enters the vendored tree.
+
+A candidate that could change behaviour is marked `EVAL_REQUIRED` (provenance proves which bytes
+changed, never that a skill still behaves the same); a new sibling skill upstream opens a
+`DISCOVERY_REQUIRED` issue without blocking the provider's other updates. Native marketplace
+plugins are a separate, monitored-only surface — `docs/agents/skills-update-plugins.json` ships
+empty and nothing runs `claude plugin update` or installs Claude Code in CI. Detail:
+`docs/agents/skills-update-automation.md`, ADR-0003.
 
 A further ownership class covers project-owned first-party skills: content authored directly in this
 repo rather than vendored from an upstream source. It is governed by

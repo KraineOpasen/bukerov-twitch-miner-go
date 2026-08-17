@@ -4,6 +4,17 @@
   "upstream_tree": "717d7f0ef7363b35c967d43629f3b71d4ec3ba77",
   "upstream_current_head": "068b6e0c62393147daf03530149cdce209c93da8",
   "upstream_version": "1.2.3",
+  "license": {
+    "spdx": "MIT",
+    "layout": "shared",
+    "notice_path": ".claude/skills/LICENSE",
+    "upstream_path": "LICENSE",
+    "upstream_blob_sha": "f1dd2c09108dde1a5f56097cee8461b3ea834499",
+    "upstream_mode": "100644",
+    "vendored_blob_sha": "1c5d84634614f91399b4562d314b5fdace50a26f",
+    "locally_modified": true,
+    "notes": "MIT requires the copyright and permission notice to accompany all copies. This provider uses ONE shared notice at .claude/skills/LICENSE rather than a per-skill file, which is why the 23 vendored directories carry none of their own. The vendored file is upstream's MIT text verbatim, preceded by a locally authored SCOPE OF THIS NOTICE header explaining that it covers the mattpocock set only -- .claude/skills/ holds 81 skills from six providers under three different licences. The header is an addition to the notice, not a modification of the MIT terms, so it carries no patch id; upstream_blob_sha pins the upstream half so the update bot can detect licence drift."
+  },
   "reviewed_at": "2026-08-16T00:00:00Z",
   "reviewed_by": "Claude Code Governance v2 task (skills refresh, single production writer)",
   "installation_mode": "project-local-vendored-copy",
@@ -15,15 +26,41 @@
       "category": "engineering",
       "path": ".claude/skills/ask-matt",
       "upstream_path": "skills/engineering/ask-matt",
-      "upstream_blob_sha": "7f3ab7829fba2321ac9e5b2ff9d58b8321734aa8",
-      "vendored_blob_sha": "27de3b462812bb03c2983a7e2ee6f20650db1a8d",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "ask-matt-setup-pointer",
-        "wizard-user-invoked",
-        "wait-what-domain-vocab"
+        "wait-what-domain-vocab",
+        "wizard-user-invoked"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/ask-matt/PHASE-BOUNDARIES.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/ask-matt/PHASE-BOUNDARIES.md",
+          "upstream_blob_sha": "cb31e6abf5c3fce903f1f4ed554cf541c9354977",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cb31e6abf5c3fce903f1f4ed554cf541c9354977",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ask-matt/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/ask-matt/SKILL.md",
+          "upstream_blob_sha": "7f3ab7829fba2321ac9e5b2ff9d58b8321734aa8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "27de3b462812bb03c2983a7e2ee6f20650db1a8d",
+          "locally_modified": true,
+          "patch_ids": [
+            "ask-matt-setup-pointer",
+            "wait-what-domain-vocab",
+            "wizard-user-invoked"
+          ]
+        }
       ]
     },
     {
@@ -31,13 +68,26 @@
       "category": "engineering",
       "path": ".claude/skills/code-review",
       "upstream_path": "skills/engineering/code-review",
-      "upstream_blob_sha": "8ff164acd5f343ed02f361ff796732c31c72f878",
-      "vendored_blob_sha": "c640d626f688d302113a8ef343f4fb7d21f64d53",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "code-review-read-only"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/code-review/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/code-review/SKILL.md",
+          "upstream_blob_sha": "8ff164acd5f343ed02f361ff796732c31c72f878",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c640d626f688d302113a8ef343f4fb7d21f64d53",
+          "locally_modified": true,
+          "patch_ids": [
+            "code-review-read-only"
+          ]
+        }
       ]
     },
     {
@@ -45,12 +95,48 @@
       "category": "engineering",
       "path": ".claude/skills/codebase-design",
       "upstream_path": "skills/engineering/codebase-design",
-      "upstream_blob_sha": "16620c24528b737408e78d95dd6a0e01a98d3d63",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "design-it-twice-cap"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/codebase-design/DEEPENING.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/codebase-design/DEEPENING.md",
+          "upstream_blob_sha": "3938457b88ddf98262d5f461aac703dbd74f749a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3938457b88ddf98262d5f461aac703dbd74f749a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codebase-design/DESIGN-IT-TWICE.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/codebase-design/DESIGN-IT-TWICE.md",
+          "upstream_blob_sha": "8419ad6fa966be2e9e435c932b3584df56cb1af6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89afb7ac4265e77865fcda50414d4ff65053aac5",
+          "locally_modified": true,
+          "patch_ids": [
+            "design-it-twice-cap"
+          ]
+        },
+        {
+          "path": ".claude/skills/codebase-design/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/codebase-design/SKILL.md",
+          "upstream_blob_sha": "16620c24528b737408e78d95dd6a0e01a98d3d63",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "16620c24528b737408e78d95dd6a0e01a98d3d63",
+          "locally_modified": false,
+          "patch_ids": []
+        }
       ]
     },
     {
@@ -58,13 +144,39 @@
       "category": "engineering",
       "path": ".claude/skills/diagnosing-bugs",
       "upstream_path": "skills/engineering/diagnosing-bugs",
-      "upstream_blob_sha": "ad911b016e5ebddb305daf9b02f6258e38c45617",
-      "vendored_blob_sha": "5edb67f4c9300db8d9ab2d7c81f33865bdd441d9",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "diagnosing-bugs-commit-note"
+      ],
+      "scripts_audited": true,
+      "audit_ref": "read-only audit during the file-level manifest migration, upstream pin 068b6e0c -- both bundled shell files read end to end; neither is executed by this project (both are 100644 templates a human copies and runs)",
+      "files": [
+        {
+          "path": ".claude/skills/diagnosing-bugs/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/diagnosing-bugs/SKILL.md",
+          "upstream_blob_sha": "ad911b016e5ebddb305daf9b02f6258e38c45617",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5edb67f4c9300db8d9ab2d7c81f33865bdd441d9",
+          "locally_modified": true,
+          "patch_ids": [
+            "diagnosing-bugs-commit-note"
+          ]
+        },
+        {
+          "path": ".claude/skills/diagnosing-bugs/scripts/hitl-loop.template.sh",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/diagnosing-bugs/scripts/hitl-loop.template.sh",
+          "upstream_blob_sha": "43daedd1bdbb47b49638c82557990fc5100d7c9c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "43daedd1bdbb47b49638c82557990fc5100d7c9c",
+          "locally_modified": false,
+          "patch_ids": []
+        }
       ]
     },
     {
@@ -72,57 +184,140 @@
       "category": "engineering",
       "path": ".claude/skills/domain-modeling",
       "upstream_path": "skills/engineering/domain-modeling",
-      "upstream_blob_sha": "e660e8cca0a97f1924016eeb8a504cac8f96a120",
-      "classification": "SAFE_WITH_PROJECT_POLICY",
       "invocation": "model",
+      "classification": "SAFE_WITH_PROJECT_POLICY",
       "locally_modified": false,
-      "patch_ids": []
+      "patch_ids": [],
+      "files": [
+        {
+          "path": ".claude/skills/domain-modeling/ADR-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/domain-modeling/ADR-FORMAT.md",
+          "upstream_blob_sha": "da7e78ec1c220cd0aedf7ad36424c9398034f375",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "da7e78ec1c220cd0aedf7ad36424c9398034f375",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/domain-modeling/CONTEXT-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/domain-modeling/CONTEXT-FORMAT.md",
+          "upstream_blob_sha": "eaf2a18573f0a2d8c69ed53e29e4d9e21baf81d8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eaf2a18573f0a2d8c69ed53e29e4d9e21baf81d8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/domain-modeling/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/domain-modeling/SKILL.md",
+          "upstream_blob_sha": "e660e8cca0a97f1924016eeb8a504cac8f96a120",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e660e8cca0a97f1924016eeb8a504cac8f96a120",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
     },
     {
       "name": "grill-me",
       "category": "productivity",
       "path": ".claude/skills/grill-me",
       "upstream_path": "skills/productivity/grill-me",
-      "upstream_blob_sha": "3947ff9c4ad980d14fc07fccbf659d47c114e81d",
-      "classification": "SAFE_AS_IS",
       "invocation": "user",
+      "classification": "SAFE_AS_IS",
       "locally_modified": false,
-      "patch_ids": []
+      "patch_ids": [],
+      "files": [
+        {
+          "path": ".claude/skills/grill-me/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/grill-me/SKILL.md",
+          "upstream_blob_sha": "3947ff9c4ad980d14fc07fccbf659d47c114e81d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3947ff9c4ad980d14fc07fccbf659d47c114e81d",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
     },
     {
       "name": "grill-with-docs",
       "category": "engineering",
       "path": ".claude/skills/grill-with-docs",
       "upstream_path": "skills/engineering/grill-with-docs",
-      "upstream_blob_sha": "62b9efb6f991d1b229adee7506962f13ced0c499",
-      "classification": "SAFE_AS_IS",
       "invocation": "user",
+      "classification": "SAFE_AS_IS",
       "locally_modified": false,
-      "patch_ids": []
+      "patch_ids": [],
+      "files": [
+        {
+          "path": ".claude/skills/grill-with-docs/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/grill-with-docs/SKILL.md",
+          "upstream_blob_sha": "62b9efb6f991d1b229adee7506962f13ced0c499",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "62b9efb6f991d1b229adee7506962f13ced0c499",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
     },
     {
       "name": "grilling",
       "category": "productivity",
       "path": ".claude/skills/grilling",
       "upstream_path": "skills/productivity/grilling",
-      "upstream_blob_sha": "1c2bb7bffed8386f51ae138b3c1348341e19616b",
-      "classification": "SAFE_AS_IS",
       "invocation": "model",
+      "classification": "SAFE_AS_IS",
       "locally_modified": false,
-      "patch_ids": []
+      "patch_ids": [],
+      "files": [
+        {
+          "path": ".claude/skills/grilling/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/grilling/SKILL.md",
+          "upstream_blob_sha": "1c2bb7bffed8386f51ae138b3c1348341e19616b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1c2bb7bffed8386f51ae138b3c1348341e19616b",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
     },
     {
       "name": "handoff",
       "category": "productivity",
       "path": ".claude/skills/handoff",
       "upstream_path": "skills/productivity/handoff",
-      "upstream_blob_sha": "2eb98a51b97bb5bac461a26ad14828eeac827909",
-      "vendored_blob_sha": "f76156b4ba9cc05ff4e113dbf8bf729ffcecf3cf",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "handoff-scratch-redact"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/handoff/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/handoff/SKILL.md",
+          "upstream_blob_sha": "2eb98a51b97bb5bac461a26ad14828eeac827909",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f76156b4ba9cc05ff4e113dbf8bf729ffcecf3cf",
+          "locally_modified": true,
+          "patch_ids": [
+            "handoff-scratch-redact"
+          ]
+        }
       ]
     },
     {
@@ -130,12 +325,26 @@
       "category": "engineering",
       "path": ".claude/skills/implement",
       "upstream_path": "skills/engineering/implement",
-      "upstream_blob_sha": "7a0b11f5f4fe9505ea5c7983c3083ba1bf754f69",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "implement-commit-envelope"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/implement/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/implement/SKILL.md",
+          "upstream_blob_sha": "7a0b11f5f4fe9505ea5c7983c3083ba1bf754f69",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d44c43ff07c457adbd060842ad586eaa2ea4882e",
+          "locally_modified": true,
+          "patch_ids": [
+            "implement-commit-envelope"
+          ]
+        }
       ]
     },
     {
@@ -143,14 +352,41 @@
       "category": "engineering",
       "path": ".claude/skills/improve-codebase-architecture",
       "upstream_path": "skills/engineering/improve-codebase-architecture",
-      "upstream_blob_sha": "86c025ba94c45a4a85bdbf2e0318b3b72044d608",
-      "vendored_blob_sha": "eeca1ef6c3b951e9377fe02a6774fa59292ab1b4",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
-        "architecture-selfcontained-html",
-        "architecture-no-autoopen"
+        "architecture-no-autoopen",
+        "architecture-selfcontained-html"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/improve-codebase-architecture/HTML-REPORT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/improve-codebase-architecture/HTML-REPORT.md",
+          "upstream_blob_sha": "17f6d2c7b8342ee7c4260d8d98024d462c7d3eaa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "710fcb6a7ad37f992770335e014496e53614c7bf",
+          "locally_modified": true,
+          "patch_ids": [
+            "architecture-selfcontained-html"
+          ]
+        },
+        {
+          "path": ".claude/skills/improve-codebase-architecture/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/improve-codebase-architecture/SKILL.md",
+          "upstream_blob_sha": "86c025ba94c45a4a85bdbf2e0318b3b72044d608",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eeca1ef6c3b951e9377fe02a6774fa59292ab1b4",
+          "locally_modified": true,
+          "patch_ids": [
+            "architecture-no-autoopen",
+            "architecture-selfcontained-html"
+          ]
+        }
       ]
     },
     {
@@ -158,13 +394,52 @@
       "category": "engineering",
       "path": ".claude/skills/prototype",
       "upstream_path": "skills/engineering/prototype",
-      "upstream_blob_sha": "094571156140f5993cce8557dc31383c82817f3e",
-      "vendored_blob_sha": "cf0742311e977e1fc7f6e32f29e04af1bff561b7",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "prototype-disposable"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/prototype/LOGIC.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/prototype/LOGIC.md",
+          "upstream_blob_sha": "5f5a3fd5a8cbd69c029854e9881ddc6e87ae5093",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "bce2bc6692dc1c2422ee59eff44d1978d6bccd29",
+          "locally_modified": true,
+          "patch_ids": [
+            "prototype-disposable"
+          ]
+        },
+        {
+          "path": ".claude/skills/prototype/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/prototype/SKILL.md",
+          "upstream_blob_sha": "094571156140f5993cce8557dc31383c82817f3e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cf0742311e977e1fc7f6e32f29e04af1bff561b7",
+          "locally_modified": true,
+          "patch_ids": [
+            "prototype-disposable"
+          ]
+        },
+        {
+          "path": ".claude/skills/prototype/UI.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/prototype/UI.md",
+          "upstream_blob_sha": "76c0f6012b016af04d6105fa696a9a0e29dfa53a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "72aff07663b76a144b50ec1df9b394bade131c31",
+          "locally_modified": true,
+          "patch_ids": [
+            "prototype-disposable"
+          ]
+        }
       ]
     },
     {
@@ -172,12 +447,26 @@
       "category": "engineering",
       "path": ".claude/skills/research",
       "upstream_path": "skills/engineering/research",
-      "upstream_blob_sha": "0ba594a07f306479baa67104381f48e209ab6aae",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "research-read-only"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/research/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/research/SKILL.md",
+          "upstream_blob_sha": "0ba594a07f306479baa67104381f48e209ab6aae",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c53bb699c2cfde392c43546a4878afb6a81265ea",
+          "locally_modified": true,
+          "patch_ids": [
+            "research-read-only"
+          ]
+        }
       ]
     },
     {
@@ -185,12 +474,26 @@
       "category": "engineering",
       "path": ".claude/skills/resolving-merge-conflicts",
       "upstream_path": "skills/engineering/resolving-merge-conflicts",
-      "upstream_blob_sha": "aadb3fcb1dfb43413dff30c2fb4b18b7cf58e90e",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "merge-conflicts-read-only"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/resolving-merge-conflicts/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/resolving-merge-conflicts/SKILL.md",
+          "upstream_blob_sha": "aadb3fcb1dfb43413dff30c2fb4b18b7cf58e90e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9a3df7530219304de6222c3e3cc0cb2293f67c6a",
+          "locally_modified": true,
+          "patch_ids": [
+            "merge-conflicts-read-only"
+          ]
+        }
       ]
     },
     {
@@ -198,13 +501,48 @@
       "category": "engineering",
       "path": ".claude/skills/tdd",
       "upstream_path": "skills/engineering/tdd",
-      "upstream_blob_sha": "d8a646611ed9d2a9d2e5ea1f9b9b82d4f0821774",
-      "vendored_blob_sha": "91c84501e0e932d86c34a4ee6811a1fc4e746cfc",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "model",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "tdd-seam-preagreed"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/tdd/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/tdd/SKILL.md",
+          "upstream_blob_sha": "d8a646611ed9d2a9d2e5ea1f9b9b82d4f0821774",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "91c84501e0e932d86c34a4ee6811a1fc4e746cfc",
+          "locally_modified": true,
+          "patch_ids": [
+            "tdd-seam-preagreed"
+          ]
+        },
+        {
+          "path": ".claude/skills/tdd/mocking.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/tdd/mocking.md",
+          "upstream_blob_sha": "71cbfee674d93244ce81d1830b930ca9a69200bd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "71cbfee674d93244ce81d1830b930ca9a69200bd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/tdd/tests.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/tdd/tests.md",
+          "upstream_blob_sha": "7ab86479f925a1f9e8ba680af33cb3b12e015381",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7ab86479f925a1f9e8ba680af33cb3b12e015381",
+          "locally_modified": false,
+          "patch_ids": []
+        }
       ]
     },
     {
@@ -212,12 +550,70 @@
       "category": "productivity",
       "path": ".claude/skills/teach",
       "upstream_path": "skills/productivity/teach",
-      "upstream_blob_sha": "b1603e5ac536d2b5c29496c06df4db0bb9f74e69",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "teach-workspace"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/teach/GLOSSARY-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/teach/GLOSSARY-FORMAT.md",
+          "upstream_blob_sha": "9cae84c44c8eb5d27b8695d4ef29a2893dc4900c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9cae84c44c8eb5d27b8695d4ef29a2893dc4900c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/teach/LEARNING-RECORD-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/teach/LEARNING-RECORD-FORMAT.md",
+          "upstream_blob_sha": "2faa7c98fabcdff48eb6bd07e4847d48a6b8d4e1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2faa7c98fabcdff48eb6bd07e4847d48a6b8d4e1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/teach/MISSION-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/teach/MISSION-FORMAT.md",
+          "upstream_blob_sha": "5dac184a319308e2ec0c18c16d6b8d52b9be2748",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5dac184a319308e2ec0c18c16d6b8d52b9be2748",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/teach/RESOURCES-FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/teach/RESOURCES-FORMAT.md",
+          "upstream_blob_sha": "c94aac6a2634cc229fe0b777fc5cc7da3a28c3d2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c94aac6a2634cc229fe0b777fc5cc7da3a28c3d2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/teach/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/teach/SKILL.md",
+          "upstream_blob_sha": "b1603e5ac536d2b5c29496c06df4db0bb9f74e69",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "50c951ff8ef8d0503f654ea98ba60ab0fa4dc474",
+          "locally_modified": true,
+          "patch_ids": [
+            "teach-workspace"
+          ]
+        }
       ]
     },
     {
@@ -225,13 +621,26 @@
       "category": "engineering",
       "path": ".claude/skills/to-spec",
       "upstream_path": "skills/engineering/to-spec",
-      "upstream_blob_sha": "54dbc4bfea178525d64ac8e7b95791326aff4659",
-      "vendored_blob_sha": "fed5397ef0b85acb635012e95a19443eb5d92155",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "to-spec-local-first"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/to-spec/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/to-spec/SKILL.md",
+          "upstream_blob_sha": "54dbc4bfea178525d64ac8e7b95791326aff4659",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fed5397ef0b85acb635012e95a19443eb5d92155",
+          "locally_modified": true,
+          "patch_ids": [
+            "to-spec-local-first"
+          ]
+        }
       ]
     },
     {
@@ -239,13 +648,26 @@
       "category": "engineering",
       "path": ".claude/skills/to-tickets",
       "upstream_path": "skills/engineering/to-tickets",
-      "upstream_blob_sha": "4a21285cbd01c7d2c6e97d8406d6d23e21b4b850",
-      "vendored_blob_sha": "f021a470297ddc7eb7989ad6ba73034da00b27bd",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "to-tickets-local-first"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/to-tickets/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/to-tickets/SKILL.md",
+          "upstream_blob_sha": "4a21285cbd01c7d2c6e97d8406d6d23e21b4b850",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f021a470297ddc7eb7989ad6ba73034da00b27bd",
+          "locally_modified": true,
+          "patch_ids": [
+            "to-tickets-local-first"
+          ]
+        }
       ]
     },
     {
@@ -253,13 +675,48 @@
       "category": "engineering",
       "path": ".claude/skills/triage",
       "upstream_path": "skills/engineering/triage",
-      "upstream_blob_sha": "41749a9c458b91c3bf41aef480e93d229b316853",
-      "vendored_blob_sha": "320cfcc5403b047085b49cdb573a577a0f4f274c",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "triage-read-only-default"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/triage/AGENT-BRIEF.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/triage/AGENT-BRIEF.md",
+          "upstream_blob_sha": "6535c9bd00e81266e03fc257348aa02405ee3d10",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6535c9bd00e81266e03fc257348aa02405ee3d10",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/triage/OUT-OF-SCOPE.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/triage/OUT-OF-SCOPE.md",
+          "upstream_blob_sha": "fc0e39f529146883d23d0dd315f55af05a39cbdf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fc0e39f529146883d23d0dd315f55af05a39cbdf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/triage/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/triage/SKILL.md",
+          "upstream_blob_sha": "41749a9c458b91c3bf41aef480e93d229b316853",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "320cfcc5403b047085b49cdb573a577a0f4f274c",
+          "locally_modified": true,
+          "patch_ids": [
+            "triage-read-only-default"
+          ]
+        }
       ]
     },
     {
@@ -267,28 +724,54 @@
       "category": "productivity",
       "path": ".claude/skills/wait-what",
       "upstream_path": "skills/productivity/wait-what",
-      "upstream_blob_sha": "d493cfa883645bb7ce2e12f5232c0fbe3a0b9f87",
-      "vendored_blob_sha": "133712aa5731b42b69fdffbf6d45c9a5253145f6",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "wait-what-domain-vocab"
       ],
-      "notes": "Newly promoted upstream in this refresh; added after separate explicit owner authorization (was excluded pending review). Already user-invoked upstream (disable-model-invocation: true) -- kept as-is. Read-only, grants no new capability."
+      "notes": "Newly promoted upstream in this refresh; added after separate explicit owner authorization (was excluded pending review). Already user-invoked upstream (disable-model-invocation: true) -- kept as-is. Read-only, grants no new capability.",
+      "files": [
+        {
+          "path": ".claude/skills/wait-what/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/wait-what/SKILL.md",
+          "upstream_blob_sha": "d493cfa883645bb7ce2e12f5232c0fbe3a0b9f87",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "133712aa5731b42b69fdffbf6d45c9a5253145f6",
+          "locally_modified": true,
+          "patch_ids": [
+            "wait-what-domain-vocab"
+          ]
+        }
+      ]
     },
     {
       "name": "wayfinder",
       "category": "engineering",
       "path": ".claude/skills/wayfinder",
       "upstream_path": "skills/engineering/wayfinder",
-      "upstream_blob_sha": "7fe64c1057c2810c72941c07c8c7ad21aae42c45",
-      "vendored_blob_sha": "cde0819cb04e00573b1f72af419c620c3c597544",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "wayfinder-local-default"
+      ],
+      "files": [
+        {
+          "path": ".claude/skills/wayfinder/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/wayfinder/SKILL.md",
+          "upstream_blob_sha": "7fe64c1057c2810c72941c07c8c7ad21aae42c45",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cde0819cb04e00573b1f72af419c620c3c597544",
+          "locally_modified": true,
+          "patch_ids": [
+            "wayfinder-local-default"
+          ]
+        }
       ]
     },
     {
@@ -296,20 +779,36 @@
       "category": "engineering",
       "path": ".claude/skills/wizard",
       "upstream_path": "skills/engineering/wizard",
-      "upstream_blob_sha": "fdc2a72162b75db138df2f81c9cc6fd8a72f4495",
-      "vendored_blob_sha": "227926d9d82dc1718e87ffd70a761cfced9adc29",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "wizard-governance-gate"
       ],
+      "scripts_audited": true,
+      "audit_ref": "read-only audit during the file-level manifest migration, upstream pin 068b6e0c -- both bundled shell files read end to end; neither is executed by this project (both are 100644 templates a human copies and runs)",
       "notes": "Newly promoted upstream in this refresh; added after separate explicit owner authorization (was excluded pending review). Moved from model- to user-invoked (disable-model-invocation: true). Ships a sibling script, template.sh (upstream_blob_sha/vendored_blob_sha both fdc2a72...e5b28ab -- see files list); template.sh itself is unpatched (byte-identical to upstream) because it is only ever run by the human, never the agent -- the governance gate lives in SKILL.md.",
       "files": [
         {
+          "path": ".claude/skills/wizard/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/engineering/wizard/SKILL.md",
+          "upstream_blob_sha": "fdc2a72162b75db138df2f81c9cc6fd8a72f4495",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "227926d9d82dc1718e87ffd70a761cfced9adc29",
+          "locally_modified": true,
+          "patch_ids": [
+            "wizard-governance-gate"
+          ]
+        },
+        {
           "path": ".claude/skills/wizard/template.sh",
+          "origin": "upstream",
           "upstream_path": "skills/engineering/wizard/template.sh",
           "upstream_blob_sha": "e5b28ab65e034cec1bd61f12116808d343bdb957",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
           "vendored_blob_sha": "e5b28ab65e034cec1bd61f12116808d343bdb957",
           "locally_modified": false,
           "patch_ids": []
@@ -321,10 +820,8 @@
       "category": "productivity",
       "path": ".claude/skills/writing-for-agents",
       "upstream_path": "skills/productivity/writing-for-agents",
-      "upstream_blob_sha": "c059d48cd70cfd1494bde74afcc426010b1c10e3",
-      "vendored_blob_sha": "8a3a4d31dd4bc91997495e5e5341da7240dabc5d",
-      "classification": "REQUIRES_LOCAL_PATCH",
       "invocation": "user",
+      "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
         "writing-for-agents-user-invoked"
@@ -333,11 +830,27 @@
       "files": [
         {
           "path": ".claude/skills/writing-for-agents/SKILL-MECHANICS.md",
+          "origin": "upstream",
           "upstream_path": "skills/productivity/writing-for-agents/SKILL-MECHANICS.md",
           "upstream_blob_sha": "c28e3bf035403080a849ac4b7816d3af93d145ff",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
           "vendored_blob_sha": "c28e3bf035403080a849ac4b7816d3af93d145ff",
           "locally_modified": false,
           "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/writing-for-agents/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "skills/productivity/writing-for-agents/SKILL.md",
+          "upstream_blob_sha": "c059d48cd70cfd1494bde74afcc426010b1c10e3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8a3a4d31dd4bc91997495e5e5341da7240dabc5d",
+          "locally_modified": true,
+          "patch_ids": [
+            "writing-for-agents-user-invoked"
+          ]
         }
       ]
     }
