@@ -1,8 +1,19 @@
 {
   "upstream_repo": "https://github.com/mattpocock/skills",
-  "upstream_commit": "068b6e0c62393147daf03530149cdce209c93da8",
-  "upstream_tree": "717d7f0ef7363b35c967d43629f3b71d4ec3ba77",
-  "upstream_current_head": "068b6e0c62393147daf03530149cdce209c93da8",
+  "upstream_commit": "9c9f36ccd3995266cd675468af71639c8dde1ec5",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "068b6e0c62393147daf03530149cdce209c93da8",
+    "target_commit": "9c9f36ccd3995266cd675468af71639c8dde1ec5",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "068b6e0c62393147daf03530149cdce209c93da8",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward"
+  },
+  "upstream_tree": "bc764b848934ed1ea7183aa78e059783fedff92b",
+  "upstream_current_head": "9c9f36ccd3995266cd675468af71639c8dde1ec5",
   "upstream_version": "1.2.3",
   "license": {
     "spdx": "MIT",
