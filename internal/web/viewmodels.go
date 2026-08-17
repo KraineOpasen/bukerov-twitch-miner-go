@@ -774,6 +774,13 @@ type ProvenanceChipData struct {
 	Session  bool
 	Aged     bool
 	Unknown  bool
+	// Neutral renders the age with no tier colour at all, for a region that
+	// reports its evidence without judging how fresh it is. Without it the
+	// chip's default variant is the positive one, which asserts a freshness
+	// verdict; a caller that has deliberately declined to set a staleness
+	// threshold must not make that claim by omission. Defaults false, so
+	// every existing consumer keeps its current variant.
+	Neutral bool
 }
 
 // StateBlockData feeds the C1 state-block component: the single host for the
@@ -924,6 +931,12 @@ type SystemStatusPageData struct {
 	DiscordEnabled bool
 	DebugURL       string
 
+	// Lifecycle is the read-only lifecycle echo rendered above the
+	// subsystem table. It is deliberately NOT one of Signals: the approved
+	// V3 composition reserves the table for tracked subsystems and gives
+	// the miner's own state its own band, and nothing on this page may
+	// mutate that state (the controls live only on /overview).
+	Lifecycle SystemStatusRowView
 	Signals   []SystemStatusRowView
 	Resources SystemResourcesView
 }
