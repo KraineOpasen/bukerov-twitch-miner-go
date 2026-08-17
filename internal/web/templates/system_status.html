@@ -1,13 +1,37 @@
-{{/* /system/status (task S5-5): a pure server-rendered, STATUS-ONLY snapshot
-     built only from data already collected in memory by existing providers.
-     No hx-get, no polling, no new API endpoint — the only "live" affordance
-     is the plain same-route manual refresh link below. This page never
-     renders a settings form or a lifecycle mutation control: every existing
-     config surface (Health Center's canary/watchdog forms, the lifecycle
-     panel's Pause/Resume/Restart/Stop) stays exactly where it is today.
-     Rows reuse the existing health-grid/health-card/health-sev-* classes
-     (already compiled into app.css from the Health Center) — no CSS
-     changes in this slice. */}}
+{{/* /system/status (task S5-5, Dashboard Stage 1 first seam): a pure
+     server-rendered, STATUS-ONLY snapshot built only from data already
+     collected in memory by existing providers. No hx-get, no polling, no new
+     API endpoint — the only "live" affordance is the plain same-route manual
+     refresh link in the header.
+
+     Composition is the owner-approved V3 one (frozen decision 10, and
+     docs/dashboard/stage-4-visual-design-system.md §11 route 23): a DENSE
+     SUBSYSTEM TABLE carrying freshness on EVERY row, with the miner's own
+     state as a read-only echo band above it and no lifecycle mutation
+     control anywhere — those live only on /overview.
+
+     Route 23's component list is C4 + "C0 per row": the table is the C4
+     surface and every freshness cell is a real C0 provenance chip, so an
+     absent reading takes the chip's own S-UNK variant instead of being
+     eyeballed from a dash. Beneath the chip sits the "what was measured, and
+     when" stamp — the age alone cannot be checked against anything, the
+     absolute wall clock can.
+
+     Route 23's Transform is T (table <-> cards): the C4 table is the >=lg
+     representation and the C3 list-cards below are the <lg one, exactly the
+     pairing /overview/queue already uses. Both render the SAME .Signals, so
+     no field can silently disappear at a narrower viewport.
+
+     Status is icon + text + colour via the existing C10 badge, never colour
+     alone, and an unknown subsystem always takes the neutral tier — it can
+     never render as ok. The resources row deliberately carries no health
+     verdict: no health provider judges the sampler, and its snapshot reports
+     Available on the first sample while the per-section rates still need a
+     second one.
+
+     Markup reuses classes already compiled into app.css (c4-table*, c3-*,
+     c10-badge*, c0-chip*, health-card*, type-*, num) — this slice adds no
+     CSS and therefore requires no Tailwind regeneration. */}}
 {{define "title"}}{{ t "system.status.heading" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -21,25 +45,118 @@
 </div>
 <p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "system.status.subtitle" }}</p>
 
-<div class="health-grid mb-6">
-    {{range .Signals}}
-    <div class="health-card {{.Sev}}">
-        <div class="health-card-label">{{.Label}}</div>
-        <div class="health-card-status">
-            <span class="num font-semibold health-card-status-text">{{.StatusText}}</span>
-        </div>
-        {{if .ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.ClockLabel}}</span>{{.ClockText}}</div>{{end}}
-        {{if .Clock2Label}}<div class="health-card-row"><span class="health-card-row-label">{{.Clock2Label}}</span>{{.Clock2Text}}</div>{{end}}
-        {{if .Secondary}}<div class="health-card-row">{{.Secondary}}</div>{{end}}
-        {{if .Detail}}<div class="health-card-row health-card-detail">{{.Detail}}</div>{{end}}
+{{/* Read-only lifecycle echo, laid out as one band: state on the left, the
+     ownership note pushed to the far right. The state is shown; changing it
+     is not offered here, and the note names where the controls actually
+     live. */}}
+<div class="health-card mb-6">
+    <div class="flex items-center flex-wrap gap-4">
+        <span class="health-card-label">{{.Lifecycle.Label}}</span>
+        {{template "c10.badge" .Lifecycle.StatusBadge}}
+        {{if .Lifecycle.Secondary}}<span class="type-micro text-text-muted">{{.Lifecycle.Secondary}}</span>{{end}}
+        {{/* The echo left the table but not the mandatory-freshness gate:
+             when there is no reading it must still say so, or "never started"
+             becomes indistinguishable from "this band has no clock". */}}
+        {{range .Lifecycle.Freshness}}{{template "c0.provenance_chip" .Chip}}<span class="type-micro text-text-muted uppercase">{{.Kind}}{{if .Stamp}} <span class="num">{{.Stamp}}</span>{{end}}</span>{{end}}
+        <span class="type-micro text-text-muted ml-auto">{{ t "system.status.lifecycle.controls_note" }}</span>
     </div>
+    {{if .Lifecycle.Detail}}<div class="health-card-row health-card-detail">{{.Lifecycle.Detail}}</div>{{end}}
+</div>
+
+{{/* >=lg: the dense C4 table. The wrapper is a real scroll container, so it
+     is focusable and labelled — otherwise a keyboard-only user on a browser
+     that does not auto-focus scroll regions could not reach the last column
+     at a narrow width. */}}
+<div class="c4-table-card mb-6 hidden lg:block" tabindex="0" role="region" aria-label="{{ t "system.status.table.region_label" }}">
+<table class="c4-table" id="system-subsystems">
+    <caption class="visually-hidden">{{ t "system.status.table.caption" }}</caption>
+    <thead>
+        <tr>
+            <th scope="col" class="w-64">{{ t "system.status.col.subsystem" }}</th>
+            <th scope="col" class="w-40">{{ t "system.status.col.status" }}</th>
+            <th scope="col" class="w-52">{{ t "system.status.col.freshness" }}</th>
+            <th scope="col">{{ t "system.status.col.detail" }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Signals}}
+        <tr data-system-row>
+            <th scope="row" class="text-left align-middle px-3 border-b border-border-default text-text-primary font-medium">{{.Label}}</th>
+            <td>{{template "c10.badge" .StatusBadge}}</td>
+            <td data-system-freshness>
+                {{range .Freshness}}
+                <div class="mb-2" data-system-clock>
+                {{template "c0.provenance_chip" .Chip}}
+                <div class="type-micro text-text-muted uppercase">{{.Kind}}{{if .Stamp}} <span class="num">{{.Stamp}}</span>{{end}}</div>
+                </div>
+                {{end}}
+            </td>
+            <td class="text-text-secondary">
+                {{if .Secondary}}<div>{{.Secondary}}</div>{{end}}
+                {{if .Detail}}<div class="health-card-detail">{{.Detail}}</div>{{end}}
+                {{if and (not .Secondary) (not .Detail)}}<span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span>{{end}}
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+</div>
+
+{{/* <lg: the same rows as C3 list-cards, status first — no horizontal
+     scrolling and no column dropped. */}}
+{{/* The viewport toggle lives on a WRAPPER, never on .c3-roster-cards
+     itself: that component sets display:flex, so a display utility on the
+     same element is a specificity coin-flip. queue.html pairs C4/C3 the same
+     way for the same reason. */}}
+<div class="lg:hidden">
+<ul class="c3-roster-cards mb-6" id="system-subsystem-cards">
+    {{range .Signals}}
+    <li class="c3-list-card" data-system-card>
+        <div>{{template "c10.badge" .StatusBadge}}</div>
+        <div class="c3-list-card-evidence">
+            <span class="text-text-primary font-medium">{{.Label}}</span>
+        </div>
+        <div class="c3-list-card-metadata flex-wrap">
+            {{range .Freshness}}
+            <span class="c3-list-card-metric flex-wrap">
+                <span class="c3-list-card-metric-label uppercase">{{.Kind}}</span>
+                {{template "c0.provenance_chip" .Chip}}
+                {{if .Stamp}}<span class="num">{{.Stamp}}</span>{{end}}
+            </span>
+            {{end}}
+        </div>
+        {{if .Secondary}}<div class="type-small text-text-secondary" data-card-secondary>{{.Secondary}}</div>{{end}}
+        {{if .Detail}}<div class="type-small text-text-secondary health-card-detail" data-card-detail>{{.Detail}}</div>{{end}}
+        {{if and (not .Secondary) (not .Detail)}}<div class="type-small text-text-secondary"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></div>{{end}}
+    </li>
+    {{end}}
+</ul>
+</div>
+
+<div class="health-card mb-6" data-system-resources>
+    <div class="flex items-center flex-wrap gap-3">
+        <span class="health-card-label">{{ t "system.status.resources.heading" }}</span>
+        {{range .Resources.Freshness}}
+        <span class="ml-auto type-micro text-text-muted uppercase">{{.Kind}}{{if .Stamp}} <span class="num">{{.Stamp}}</span>{{end}}</span>
+        {{template "c0.provenance_chip" .Chip}}
+        {{end}}
+    </div>
+    {{range .Resources.Rows}}
+    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{if eq .Primary "—"}}<span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span>{{else}}{{.Primary}}{{end}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
     {{end}}
 </div>
 
-<div class="health-card">
-    <div class="health-card-label">{{ t "system.status.resources.heading" }}</div>
-    {{range .Resources.Rows}}
-    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{.Primary}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
-    {{end}}
+{{/* Build evidence: the version field only. Commit SHA, image digest and
+     build time do not exist in this build, and an absent update signal is
+     never rendered as "you are up to date" — /system/diagnostics owns that
+     statement and makes the absence explicit. */}}
+{{if .Version}}
+<div class="health-card" data-system-build>
+    <div class="flex items-center flex-wrap gap-3">
+        <span class="health-card-label">{{ t "system.status.build.label" }}</span>
+        <span class="num">{{.Version}}</span>
+        <a href="/system/diagnostics" class="text-link-text ml-auto">{{ t "system.tab.diagnostics" }}</a>
+    </div>
 </div>
+{{end}}
 {{end}}
