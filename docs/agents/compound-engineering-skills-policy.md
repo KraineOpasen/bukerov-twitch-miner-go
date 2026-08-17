@@ -458,6 +458,46 @@ end-to-end during this review, not merely diffed. It is set on 17 skills; the re
 `ce-commit-push-pr`, `ce-handoff`, `ce-strategy`, `ce-worktree`) ship no `scripts/` directory at all and
 carry `null`.
 
+## Automated drift detection
+
+`automatic_updates` stays **false**: nothing here is ever updated without review. What is automated is
+*noticing*, and the mechanical half of preparing a re-vendor.
+
+A scheduled workflow (`.github/workflows/skills-update.yml`) resolves this provider's reviewed branch —
+recorded in `docs/agents/skills-update-providers.json`, which owns the ref while this manifest owns the
+pin — to a concrete commit each day. When nothing has moved it does nothing at all: no branch, no pull
+request, no issue, no comment. When something has moved it either opens **one Draft PR** carrying
+refreshed bytes and regenerated provenance, or — if any judgement call is required — refuses entirely
+and opens **one deduplicated issue** explaining why. It never opens a partial or conflicted PR.
+
+A candidate it produces is **not** a reviewed pin. The manifest it writes carries an
+`automated_candidate` block, and `scripts/validate-agent-governance.py` fails while that block is
+present, so the candidate cannot pass the governance gate on automation alone. `reviewed_at` and
+`reviewed_by` are left untouched, because they remain true statements about the superseded commit.
+Clearing the candidate state — reading the diff, re-asserting any withdrawn `scripts_audited`, recording
+fresh review fields, deleting the block — is the human step the update procedure below describes, and
+the bot cannot perform it.
+
+Upstream is read as data: repositories are fetched bare and read through `git cat-file`, never checked
+out, and no fetched script is ever executed, including to assess it.
+
+Three further rules bound what a candidate can be. **Only a fast-forward** from the reviewed
+commit is ever prepared: if upstream's history diverged, was rewritten, or no longer contains the
+reviewed commit, that is BLOCKED — a force-push that swaps reviewed history for different content
+of the same shape passes every tree-content check, so the history relation is the only thing that
+catches it. **The trigger surface is audit-required**, and it includes `description` and
+`when_to_use`: those are what the model reads to decide whether to invoke a skill, so an upstream
+rewording changes when the skill fires. And **provenance is not behavioural equivalence** — a
+candidate whose changed bytes could alter behaviour is marked `EVAL_REQUIRED`, with old-vs-candidate
+instructions to run in a fresh Claude session; the bot never runs evals itself.
+
+A new skill appearing upstream *outside* this project's installed selection is not installed and
+does not block this provider's other updates; it opens its own deduplicated `DISCOVERY_REQUIRED`
+issue so adopting it stays a human decision taken on its own schedule.
+
+Full detail, including the nine blocked conditions and the security posture:
+`docs/agents/skills-update-automation.md`.
+
 ## Update procedure
 
 1. Fetch the new upstream commit into a read-only clone (never edit it in place); set

@@ -136,7 +136,11 @@ MANIFESTS = [
         "upstream_repo": "https://github.com/mattpocock/skills",
         "upstream_env": "GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK",
         "legacy_upstream_env": "GOVERNANCE_UPSTREAM_DIR",
-        "schema": "skill-level",
+        # Migrated from "skill-level" to "file-level": every one of the 42 files in the 23
+        # vendored directories now carries its own upstream/vendored hash pair, closing the
+        # 17-files-with-no-recorded-hash gap this policy's "Known limitations" documented. All
+        # six providers are now file-level, which check_all_providers_file_level enforces.
+        "schema": "file-level",
         "excluded_key": "excluded",
         "extra_frontmatter_keys": frozenset(),
         "license": {"spdx": "MIT", "layout": "shared", "path": LICENSE_SHARED_MATTPOCOCK},
@@ -237,6 +241,13 @@ ALLOWED_RULE_KEYS = {"paths"}
 FORBIDDEN_VENDOR_NAMES = {".github", ".claude-plugin", "package.json", "package-lock.json", "openai.yaml"}
 APPLICATION_PATH_PREFIXES = ("internal/", "cmd/")
 APPLICATION_PATH_EXACT_PREFIXES = ("go.mod", "go.sum", "Dockerfile", "docker-compose", ".github/workflows/")
+
+# Workflows that ARE part of the governance layer rather than the application's build/release
+# pipeline, and are therefore editable by a governance task. Deliberately an exact-path
+# allowlist, not a prefix: `.github/workflows/` stays forbidden as a whole, so ci.yml and
+# release.yml remain untouchable and a NEW workflow cannot be introduced by adding a file --
+# it has to be added to this list, in a diff a reviewer sees.
+GOVERNANCE_OWNED_WORKFLOWS = (".github/workflows/skills-update.yml",)
 
 # Skill names Claude Code (or another first-party surface) already provides. No vendored skill dir
 # name and no manifest skill name may collide with one of these -- that's exactly the problem the
@@ -942,41 +953,98 @@ def check_excluded_absent():
     report("excluded-skills-absent", not details, details)
 
 
-def check_blob_hashes():
-    """mattpocock branch: unchanged from before the anthropic set was added -- skill-level,
-    SKILL.md-only, locally_modified skills are skipped (only unmodified ones can be verified
-    byte-for-byte against a single recorded hash)."""
-    manifest = load_manifest()
+def all_providers_file_level_details(manifests):
+    """Root-parameterized core of check_all_providers_file_level."""
+    return ["%s: schema is %r, not \"file-level\"" % (entry["label"], entry.get("schema"))
+            for entry in manifests if entry.get("schema") != "file-level"]
+
+
+def check_all_providers_file_level():
+    """Every provider in the registry must record one hash pair per FILE.
+
+    This replaces the old mattpocock-only `check_blob_hashes`, which verified a single
+    SKILL.md hash per skill and skipped every locally-modified skill -- so of that provider's
+    42 files it could speak for 4. Migrating mattpocock to the file-level schema made
+    `check_provider_file_hashes` (which proves the inventory in BOTH directions, covers patched
+    and local-origin files, and catches any undeclared file on disk) apply to all six
+    providers, strictly subsuming what the old check did.
+
+    Keeping this as a check rather than deleting the concept is the point: `file_level_providers()`
+    silently skips any entry whose schema is something else, so a future provider added on a
+    retired schema would get NO hash coverage and every hash check would still report PASS.
+    This fails closed on that instead."""
+    details = all_providers_file_level_details(MANIFESTS)
+    report("all-providers-file-level", not details, details)
+
+
+#: Key an automated update candidate carries in a provider manifest. See
+#: scripts/skill_updates/candidate.py and docs/agents/skills-update-automation.md.
+CANDIDATE_KEY = "automated_candidate"
+
+#: The candidate state machine, mirrored from scripts/skill_updates/states.py. Only
+#: PREPARED_AUDIT_REQUIRED may ever appear in a checked-in manifest written by automation;
+#: AUDITED is what a human establishes, and it is established by DELETING the block, never by
+#: writing the word.
+CANDIDATE_STATE_PREPARED = "PREPARED_AUDIT_REQUIRED"
+CANDIDATE_STATE_AUDITED = "AUDITED"
+
+
+def unaudited_candidate_details(manifests):
+    """Root-parameterized core of check_no_unaudited_candidate.
+
+    Note what is checked: the PRESENCE of the block, not its `state` value. A candidate that
+    rewrote its own state to AUDITED is caught by exactly the same rule as one that left it
+    alone -- there is no string a machine can write into this block that makes it pass. The
+    state value is still reported, and an AUDITED claim is called out separately, because a
+    manifest asserting it is either a bug in the bot or a hand-edit that took the wrong route.
+    """
     details = []
-    upstream_dir = os.environ.get("GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK") or os.environ.get("GOVERNANCE_UPSTREAM_DIR")
-    for skill in manifest["skills"]:
-        if skill.get("locally_modified"):
-            continue  # only unmodified skills can be hash-verified byte-for-byte
-        local_path = os.path.join(REPO_ROOT, skill["path"], "SKILL.md")
-        if not os.path.isfile(local_path):
-            continue  # already reported by manifest-filesystem-consistency
+    for entry in manifests:
         try:
-            out = subprocess.run(["git", "hash-object", local_path], stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=5, text=True)
-        except Exception as e:
-            details.append("%s: could not run git hash-object (%s)" % (skill["name"], e))
+            manifest = provider_manifest(entry)
+        except Exception:
+            continue  # reported by check_json_validity
+        block = manifest.get(CANDIDATE_KEY)
+        if not isinstance(block, dict):
             continue
-        if out.returncode != 0:
-            details.append("%s: git hash-object failed" % skill["name"])
+        state = block.get("state")
+        if state == CANDIDATE_STATE_AUDITED:
+            details.append(
+                "%s: %s block claims state=%r. AUDITED is never written into this block -- it is "
+                "established by auditing the diff, recording a fresh reviewed_at/reviewed_by, "
+                "and DELETING the block. A manifest that writes the word instead is asserting a "
+                "review through the one route that is not allowed to grant it."
+                % (entry["label"], CANDIDATE_KEY, state))
             continue
-        local_sha = out.stdout.strip()
-        if local_sha != skill.get("upstream_blob_sha"):
-            details.append("%s: local blob %s != manifest upstream_blob_sha %s" % (
-                skill["name"], local_sha, skill.get("upstream_blob_sha")))
-        if upstream_dir:
-            upstream_path = os.path.join(upstream_dir, skill["upstream_path"], "SKILL.md")
-            if os.path.isfile(upstream_path):
-                out2 = subprocess.run(["git", "hash-object", upstream_path], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, timeout=5, text=True)
-                if out2.returncode == 0 and out2.stdout.strip() != local_sha:
-                    details.append("%s: local blob differs from %s" % (skill["name"], upstream_path))
-    label = "blob-hash-verified-against-upstream-clone" if upstream_dir else "blob-hash-verified-locally"
-    report(label, not details, details)
+        details.append(
+            "%s: manifest carries an unaudited %s block (state=%r, %s -> %s). This is a "
+            "machine-prepared candidate, not a reviewed pin: audit the diff, record a fresh "
+            "reviewed_at/reviewed_by, and delete the block.%s" % (
+                entry["label"], CANDIDATE_KEY, state,
+                str(block.get("superseded_commit"))[:12], str(block.get("target_commit"))[:12],
+                (" EVAL_REQUIRED: %d changed file(s) can alter behaviour, so provenance alone "
+                 "does not establish equivalence -- run the behavioural comparison before "
+                 "clearing." % len(block["eval_required"]))
+                if isinstance(block.get("eval_required"), list) and block["eval_required"]
+                else ""))
+    return details
+
+
+def check_no_unaudited_candidate():
+    """No provider manifest may claim a pin that only a machine has ever looked at.
+
+    The scheduled update bot (.github/workflows/skills-update.yml) can prepare a mechanically
+    clean refresh, but it has no standing to establish that the new upstream content is
+    something this project wants to run. It marks every candidate with an `automated_candidate`
+    block, and this check FAILS while that block is present.
+
+    That is what makes "audited" unfakeable rather than merely asserted in a PR body: the only
+    way to a passing governance run is for a human -- or an agent under a task contract -- to
+    read the diff, record a fresh reviewed_at/reviewed_by, and remove the block deliberately.
+    An automated candidate therefore cannot masquerade as a reviewed pin no matter how clean
+    its merge was."""
+    details = unaudited_candidate_details(MANIFESTS)
+    report("no-unaudited-update-candidate", not details, details)
 
 
 def check_patch_ledger_coverage():
@@ -1510,13 +1578,26 @@ def check_application_paths_untouched():
     if not base_sha:
         # `git status --porcelain` lines are "XY path"; take the path portion.
         lines = [ln[3:] if len(ln) > 3 else ln for ln in lines]
-    for path in lines:
+    details = application_path_violations(lines)
+    report("application-paths-untouched", not details, details)
+
+
+def application_path_violations(paths):
+    """Pure core of check_application_paths_untouched, so the allowlist is directly testable.
+
+    Extracted specifically because GOVERNANCE_OWNED_WORKFLOWS punches a hole in an otherwise
+    blanket prohibition: a fixture has to be able to prove that the hole is exactly one path
+    wide and that ci.yml/release.yml are still caught."""
+    details = []
+    for path in paths:
         path = path.strip()
         if not path:
             continue
+        if path in GOVERNANCE_OWNED_WORKFLOWS:
+            continue  # governance-layer workflow, not an application path -- see the constant
         if path.startswith(APPLICATION_PATH_PREFIXES) or path.startswith(APPLICATION_PATH_EXACT_PREFIXES):
             details.append("touched application path: %s" % path)
-    report("application-paths-untouched", not details, details)
+    return details
 
 
 def check_settings_schema():
@@ -2763,7 +2844,8 @@ ALL_CHECKS = [
     check_manifest_fs_consistency,
     check_manifest_ownership_partition,
     check_excluded_absent,
-    check_blob_hashes,
+    check_all_providers_file_level,
+    check_no_unaudited_candidate,
     check_provider_file_hashes,
     check_provider_vendored_modes,
     check_provider_scripts_audited,
@@ -4144,6 +4226,141 @@ def _st_p17():
         assert invocation_consistency_details(entry, skills, skills_dir) == []
 
 
+def _st_p18():
+    """Every registry entry must be file-level; a retired-schema entry is rejected.
+
+    The real registry is asserted clean too, so this fixture fails the moment a provider is
+    added on a schema that would silently receive no hash coverage."""
+    assert all_providers_file_level_details(MANIFESTS) == [], (
+        "the real registry has a non-file-level provider: %r"
+        % all_providers_file_level_details(MANIFESTS))
+    stale = [{"label": "legacy", "schema": "skill-level"},
+             {"label": "ok", "schema": "file-level"},
+             {"label": "missing"}]
+    details = all_providers_file_level_details(stale)
+    assert len(details) == 2, details
+    assert any("legacy" in d for d in details), details
+    assert any("missing" in d for d in details), details
+
+
+def _st_p19():
+    """An automated update candidate must fail the governance gate.
+
+    This is the anti-masquerade guarantee: the bot can prepare a mechanically clean refresh,
+    but the manifest it writes carries `automated_candidate`, and that block failing here is
+    what makes "audited" impossible to fake. Cleared only by a deliberate human edit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        docs = os.path.join(tmp, "docs", "agents")
+        os.makedirs(docs)
+        path = os.path.join(docs, "fixture-skills-manifest.json")
+        entry = dict(_fake_provider_entry(docs))
+        base = {"upstream_repo": "https://github.com/fixture/skills",
+                "upstream_commit": "a" * 40, "reviewed_at": "2026-01-01T00:00:00Z",
+                "reviewed_by": "human", "installation_mode": REQUIRED_INSTALLATION_MODE,
+                "automatic_updates": False, "skills": []}
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(base, f)
+        assert unaudited_candidate_details([entry]) == [], "a reviewed manifest must pass"
+
+        candidate = dict(base)
+        candidate[CANDIDATE_KEY] = {"state": CANDIDATE_STATE_PREPARED,
+                                    "superseded_commit": "a" * 40,
+                                    "target_commit": "b" * 40}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        details = unaudited_candidate_details([entry])
+        assert len(details) == 1, details
+        assert CANDIDATE_STATE_PREPARED in details[0], details
+        assert "reviewed_at/reviewed_by" in details[0], details
+
+        # A candidate cannot hide by renaming its own state: the KEY is what fails, not the
+        # value, so "state": "AUDITED" is still caught -- and is called out specifically, because
+        # a manifest that WRITES the word is taking the one route that cannot grant a review.
+        candidate[CANDIDATE_KEY]["state"] = CANDIDATE_STATE_AUDITED
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        audited = unaudited_candidate_details([entry])
+        assert len(audited) == 1, "renaming the state must not help: %r" % (audited,)
+        assert "AUDITED is never written into this block" in audited[0], audited
+        assert "DELETING the block" in audited[0], audited
+
+        # An EVAL_REQUIRED candidate says so in the diagnostic, so a reader clearing the block
+        # learns that provenance alone did not establish behavioural equivalence.
+        candidate[CANDIDATE_KEY]["state"] = CANDIDATE_STATE_PREPARED
+        candidate[CANDIDATE_KEY]["eval_required"] = ["SKILL.md changed"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        evald = unaudited_candidate_details([entry])
+        assert len(evald) == 1 and "EVAL_REQUIRED" in evald[0], evald
+
+
+def _st_p21():
+    """The native-plugin inventory ships empty, parses, and documents all three surfaces.
+
+    Surface B (marketplace plugins) is monitored, never mutated, and nothing is installed by the
+    task that added the schema. If a plugin ever IS adopted, that is a reviewed data change and
+    this fixture is where the "empty" assumption stops holding -- deliberately, so the change
+    cannot pass unnoticed."""
+    path = os.path.join(DOCS_AGENTS_DIR, "skills-update-plugins.json")
+    assert os.path.isfile(path), "plugin inventory missing: %s" % path
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    assert doc.get("schema_version") == 1, doc.get("schema_version")
+    assert doc.get("plugins") == [], (
+        "the plugin inventory is expected to ship EMPTY; adopting a plugin is a reviewed change "
+        "that must update this fixture too, got: %r" % (doc.get("plugins"),))
+    surfaces = doc.get("surfaces") or {}
+    assert sorted(surfaces) == ["A_project_skills", "B_native_plugins",
+                                "C_claudeai_zip_skills"], sorted(surfaces)
+    assert doc["version_precedence"][0] == "plugin.json version", doc["version_precedence"]
+    assert doc["version_precedence"][-1] == "unknown", doc["version_precedence"]
+
+
+def _st_p22():
+    """The provider registry owns the reviewed REF; manifests own the pin. No floating pins.
+
+    A registry entry whose `upstream_ref` were a SHA would freeze drift detection permanently,
+    and a manifest whose `upstream_commit` were a branch name would be the floating dependency
+    vendoring exists to avoid. Both directions are asserted against the real files."""
+    with open(os.path.join(DOCS_AGENTS_DIR, "skills-update-providers.json"),
+              encoding="utf-8") as f:
+        registry = json.load(f)
+    keys = set()
+    for entry in registry["providers"]:
+        assert not SHA1_RE.match(entry["upstream_ref"]), (
+            "%s: upstream_ref must be a branch name, not a pin" % entry["key"])
+        assert entry["key"] not in keys, "duplicate provider key %s" % entry["key"]
+        keys.add(entry["key"])
+        if entry.get("monitor_only"):
+            assert SHA1_RE.match(entry["baseline_commit"]), entry["key"]
+            continue
+        with open(os.path.join(REPO_ROOT, entry["manifest"]), encoding="utf-8") as mf:
+            manifest = json.load(mf)
+        assert SHA1_RE.match(manifest["upstream_commit"]), (
+            "%s: manifest upstream_commit must be a full sha" % entry["key"])
+        assert _canon_repo(manifest["upstream_repo"]) == _canon_repo(entry["upstream_repo"]), (
+            "%s: registry and manifest disagree about the upstream repo" % entry["key"])
+    # Every vendored provider in the MANIFESTS registry must be represented.
+    assert {e["label"] for e in MANIFESTS} <= keys, (
+        "a validated provider is missing from the update registry: %r"
+        % ({e["label"] for e in MANIFESTS} - keys))
+
+
+def _st_p20():
+    """The governance-owned workflow allowlist is exactly one path wide."""
+    caught = application_path_violations([
+        ".github/workflows/ci.yml", ".github/workflows/release.yml",
+        ".github/workflows/anything-else.yml", "internal/web/server.go", "cmd/miner/main.go",
+        "go.mod", "go.sum", "Dockerfile", "docker-compose.yml"])
+    assert len(caught) == 9, caught
+    assert application_path_violations([".github/workflows/skills-update.yml"]) == []
+    # Governance-layer paths this task owns are not application paths and never were.
+    assert application_path_violations([
+        "scripts/skill_updates/analyze.py", "scripts/check-skill-updates.py",
+        "docs/agents/skills-update-providers.json", "CLAUDE.md"]) == []
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -4213,6 +4430,11 @@ def _self_test_fixtures():
         ("P15", "{baseDir} link resolution is real, not a rubber stamp", _st_p15),
         ("P16", "fence pairing handles nested/longer fences; strippers divide labour", _st_p16),
         ("P17", "manifest invocation must agree with the skill's own frontmatter", _st_p17),
+        ("P18", "every registry provider is file-level; a retired schema is rejected", _st_p18),
+        ("P19", "an automated update candidate cannot masquerade as audited", _st_p19),
+        ("P20", "governance-owned workflow allowlist is exactly one path wide", _st_p20),
+        ("P21", "native-plugin inventory ships empty and documents all three surfaces", _st_p21),
+        ("P22", "registry owns the reviewed ref, manifests own the pin (no floating pin)", _st_p22),
     ]
 
 
