@@ -1,21 +1,6 @@
 {
   "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
   "upstream_commit": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
-  "automated_candidate": {
-    "state": "PREPARED_AUDIT_REQUIRED",
-    "prepared_by": "scripts/skill_updates (automated skills update bot)",
-    "superseded_commit": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
-    "target_commit": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
-    "upstream_ref": "main",
-    "reviewed_fields_refer_to": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
-    "audited_state_reachable_by_automation": false,
-    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
-    "ancestry": "fast-forward",
-    "eval_required": [
-      ".claude/skills/ce-setup/scripts/check-health changed: executable content the skill runs"
-    ],
-    "eval_note": "Provenance checks proved WHICH bytes changed and that each was reviewed at the superseded commit. They do NOT establish that these skills still behave the same way. Run the old-vs-candidate comparison in a fresh Claude session before clearing this block; see docs/agents/skills-update-automation.md."
-  },
   "upstream_version": "3.22.1",
   "upstream_tree": {
     "ce-babysit-pr": "eef0d57c1c3863575a506eaa19b9bc58c526cc80",
@@ -41,10 +26,10 @@
     "ce-work": "79d8f2b7c063c49167cec10095c9b0d224b45edf",
     "ce-worktree": "7b1caeddd4ae8beee629c65da2d097ff05900606"
   },
-  "upstream_current_head": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
-  "drift": "none",
-  "reviewed_at": "2026-08-16T00:00:00Z",
-  "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3). All 33 upstream skills under skills/ plus the repo-local .agents/skills/ce-skill-work were read with their complete dependency closures; every bundled script was read end to end.",
+  "upstream_current_head": "5835448d8a478828b2ec42acbba13d9bdf6aa712",
+  "drift": "AHEAD OF PIN, not audited. The reviewed pin is upstream_commit d6ae4645; upstream refs/heads/main -- the ref recorded for this provider in docs/agents/skills-update-providers.json -- resolved to d6ae4645 when the bot prepared this candidate, and had advanced 2 commits to 5835448d8a478828b2ec42acbba13d9bdf6aa712 by the time this audit fetched it (observed 2026-08-17T19:35:26Z). That advance is a fast-forward extension of the reviewed pin, not a rewrite: d6ae4645 is still a true ancestor of it. It leaves plugin version at 3.22.1 and does NOT touch ce-setup, so it takes nothing away from this audit. It does change four installed skills' upstream sources -- skills/ce-code-review/references/cross-model-review.md, skills/ce-doc-review/SKILL.md, skills/ce-doc-review/references/cross-model-review.md, skills/ce-doc-review/scripts/cross-model-doc-review.sh, skills/ce-work/SKILL.md, skills/ce-work/references/shipping-workflow.md -- plus skills/lfg/SKILL.md (HOLD, not installed). None of those bytes are vendored here and none were audited. Note for whoever takes the next candidate: cross-model-doc-review.sh carries the ce-no-permission-bypass patch, so that one needs a three-way merge and a fresh end-to-end script audit, and ce-doc-review/SKILL.md is a trigger-surface file. The next scheduled skills-update run will prepare it as its own PREPARED_AUDIT_REQUIRED candidate.",
+  "reviewed_at": "2026-08-17T19:35:26Z",
+  "reviewed_by": "Governance v3 compound-engineering re-vendor audit (task audit-compound-engineering-d6ae4645) of the machine-prepared candidate 57e586d66194585757ffa30a23dcd0f4ec0210a4 -> d6ae46457b3364ca1a3d6eb9954613217000c0ec (plugin 3.22.0 -> 3.22.1), audited rather than accepted on the bot's report. Upstream was re-fetched into a fresh bare read-only clone and read through git cat-file/ls-tree only; nothing fetched was executed, and the clone was re-made without a blob filter so every object is local and `git fsck` is clean. Re-proven independently at the target commit: 57e586d6 -> d6ae4645 is a true fast-forward (merge-base --is-ancestor exit 0; merge-base equals the old pin; 5 commits forward, 0 reverse, 0 merge commits, one parent each). The complete upstream delta across those 5 commits is 22 paths, all modifications, of which exactly one lies inside the installed set: skills/ce-setup/scripts/check-health (cba4de9ecc0ec4889aff8941e2d8688426389bf7 -> 363973b7960fba6750fb17f5cb9c85889511a6ea, from abc75c73 'fix(ce-setup): support read-only sandboxes (#1407)'). That script was re-read end to end and behaviourally compared against the superseded bytes -- see this skill's audit_ref for the EVAL_REQUIRED method and its one environment-conditional difference. The other 274 tracked files were re-verified by blob hash and mode in both directions against the target tree (253 upstream-origin plus 22 per-skill LICENSE copies of unchanged root blob 959dd283c510cfac6fd912555f99b14613ee9018), with no undeclared upstream file under the 22 installed directories and no manifest entry missing from the tree; scripts/validate-agent-governance.py's provider-file-hashes was additionally run in its strict upstream-clone mode against the target pin's extracted bytes, and shown to discriminate by failing on exactly this file when pointed at the superseded pin. All 22 upstream_tree entries match the target tree: 21 byte-identical to the superseded pin, ce-setup 45d96a6e -> 00e2e196. The upstream skills/ directory listing is 33 entries and identical at both pins, so no sibling skill appeared (no DISCOVERY_REQUIRED) and none was removed or renamed; no symlink, submodule or new executable bit appeared, and the 27-file executable set is unchanged. ce-setup's SKILL.md (d29413086edc4e71a79667376f0a0c69d400aacc) and references/config-template.yaml (9353b48f232cd7e90eeec4472f8aae046af211a7) are byte-identical at both pins, so the trigger and frontmatter authority surface did not move; that frontmatter is exactly {name, description, disable-model-invocation} at both pins, and allowed-tools/argument-hint/type are absent from both rather than matching. Every excluded_skills[] entry was re-checked against the delta per the policy's step 2: .agents/skills/ce-skill-work moved in five files and its EXCLUDE verdict stands on unchanged grounds (broken dependency closure, hardcoded bun toolchain, skill-creator name collision). SCOPE BOUNDARY, stated so this field is not read as more than it is: the vendored prose of the 22 installed skills was NOT re-read end to end at this pin. It is carried forward on byte-identity to the bytes reviewed at 57e586d6, with the single changed script re-read and behaviourally compared. The policy's local-patch counts were not re-verified either; one pre-existing discrepancy found incidentally is recorded as a deferred finding rather than certified here.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
   "license": {
@@ -53,7 +38,7 @@
     "copyright_notice": "Copyright (c) 2025 Every",
     "notes": "MIT requires the copyright and permission notice to accompany all copies, so the upstream root LICENSE is copied verbatim into every vendored skill directory (origin=local, with a reason) rather than relying on a single shared notice."
   },
-  "notes": "22 of upstream's 33 skills are vendored; 10 are excluded and 2 are held (see excluded_skills[]). Upstream deliberately DUPLICATES shared components into each owning skill rather than factoring them out, and pins the duplicates with byte-parity tests, so each vendored skill directory is self-contained: there is no shared runtime tree to install alongside it. Verified at this pin: no skill references a sibling skill's files and no skill uses ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_SKILL_DIR}. Every bundled script is located via an inline SKILL_DIR anchor and invoked through an explicit interpreter, so normalizing file modes to 100644 breaks no invocation.",
+  "notes": "Pin advanced from 57e586d6 (upstream_tree ce-setup 45d96a6e) to d6ae4645 (ce-setup 00e2e196), plugin 3.22.0 -> 3.22.1. Exactly ONE vendored byte-change rode in: .claude/skills/ce-setup/scripts/check-health, taken verbatim (no new local patch), whose two changed lines were re-read in full context and behaviourally compared old-vs-candidate under EVAL_REQUIRED -- see that skill's audit_ref. Everything else in the installed set is byte-identical to the previously reviewed bytes and was re-verified by hash and mode rather than re-read. THE REMAINDER OF THIS NOTE IS THE STANDING DESCRIPTION OF THE INSTALLATION, unchanged by that advance and re-verified true at this pin. 22 of upstream's 33 skills are vendored; 10 are excluded and 2 are held (see excluded_skills[]). Upstream deliberately DUPLICATES shared components into each owning skill rather than factoring them out, and pins the duplicates with byte-parity tests, so each vendored skill directory is self-contained: there is no shared runtime tree to install alongside it. Verified at this pin: no skill references a sibling skill's files and no skill uses ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_SKILL_DIR}. Every bundled script is located via an inline SKILL_DIR anchor and invoked through an explicit interpreter, so normalizing file modes to 100644 breaks no invocation.",
   "skills": [
     {
       "name": "ce-babysit-pr",
@@ -3024,8 +3009,8 @@
       "patch_ids": [
         "ce-mode-normalize"
       ],
-      "scripts_audited": false,
-      "audit_ref": "SUPERSEDED — the previous audit described bytes this candidate replaced. Re-read .claude/skills/ce-setup/scripts/check-health end to end and re-assert scripts_audited. (Previous note: none recorded)",
+      "scripts_audited": true,
+      "audit_ref": "check-health re-read end to end at upstream blob 363973b7960fba6750fb17f5cb9c85889511a6ea (superseding cba4de9ecc0ec4889aff8941e2d8688426389bf7). The only change is the two IFS-read redirections at lines 302 and 517, `<<< \"$x\"` -> `< <(printf '%s\\n' \"$x\")`, from upstream abc75c7398d614b0e71b0aca63b4bb3c0f57b57f 'fix(ce-setup): support read-only sandboxes (#1407)', whose own test asserts the script no longer contains `<<<`. EVAL_REQUIRED discharged by running BOTH versions against identical fixtures on bash 5.2.21 (11 fixture cases x 3 repetitions over the real deps[] data, plus targeted shell-semantics probes): byte-identical stdout, byte-identical stderr (empty), identical exit status 0, zero filesystem writes, zero git mutation and zero network syscalls in every case where /dev/fd is usable. NOT unconditionally equivalent: with /dev/fd unusable at runtime (reproduced by mounting tmpfs over /proc in a private namespace) bash offers no FIFO fallback, so the new form fails both reads and the report degrades from 'Optional capabilities 1/5' with correct rows to '0/5' with five blank rows plus 1890 bytes on stderr, while the old form is unaffected. That direction is fail-safe -- it under-reports optional tools and never fabricates or executes an install command, never writes, never reaches the network, and still exits 0 -- and the old form already carried the same /dev/fd dependency conditionally at line 435. Accepted verbatim rather than patched: reverting would add a content patch to a file that is mode-only today and reinstate the $TMPDIR-write dependency upstream removed on purpose. No new execution, injection, network or filesystem-write surface; printf's format operand is a fixed single-quoted literal at both call sites, so data never reaches the format slot. Mode stays 100644 under ce-mode-normalize, and SKILL.md still invokes it as bash \"$SKILL_DIR/scripts/check-health\". Forward-looking note for the next re-vendor: process substitution now sets $!, which is inert only because the script uses no $!, wait, trap or job control.",
       "files": [
         {
           "path": ".claude/skills/ce-setup/LICENSE",
@@ -3074,9 +3059,6 @@
             "ce-mode-normalize"
           ]
         }
-      ],
-      "scripts_reaudit_required": [
-        ".claude/skills/ce-setup/scripts/check-health"
       ]
     },
     {
