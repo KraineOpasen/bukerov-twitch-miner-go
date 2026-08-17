@@ -11,19 +11,29 @@ what's installed, why, how it's patched, and how to update it. See also
 ## Upstream
 
 - Repo: `https://github.com/mattpocock/skills`
-- Reviewed commit: `068b6e0c62393147daf03530149cdce209c93da8` (refreshed from `ed37663cc5fbef691ddfecd080dff42f7e7e350d`)
-- Reviewed tree: `717d7f0ef7363b35c967d43629f3b71d4ec3ba77` (was `04b0fcb78e3de7c58744fcba2528354cc64ab988`)
+- Reviewed commit: `9c9f36ccd3995266cd675468af71639c8dde1ec5` (advanced from
+  `068b6e0c62393147daf03530149cdce209c93da8`, itself refreshed from `ed37663cc5fbef691ddfecd080dff42f7e7e350d`)
+- Reviewed tree: `bc764b848934ed1ea7183aa78e059783fedff92b` (was `717d7f0ef7363b35c967d43629f3b71d4ec3ba77`,
+  before that `04b0fcb78e3de7c58744fcba2528354cc64ab988`)
 - Current upstream HEAD at review time: same SHA (**drift: none**)
 - `package.json` version: `1.2.3`
-- `.claude-plugin/plugin.json` version: `1.2.3` — matches `package.json` in this refresh; the pre-bump drift
-  noted at the previous review (`1.2.0` plugin.json vs. `1.1.0` released) has resolved itself upstream.
-- Between the previously reviewed commit and this one, upstream **deleted**
+- `.claude-plugin/plugin.json` version: `1.2.3` — matches `package.json`; the pre-bump drift
+  noted two reviews ago (`1.2.0` plugin.json vs. `1.1.0` released) has resolved itself upstream.
+- **`068b6e0c` → `9c9f36cc` is a provenance-only advance.** The two intervening upstream commits change exactly
+  one path, `docs/engineering/grill-with-docs.md` (upstream's prose documentation site, not the skill), which
+  this project has never vendored. **Zero vendored bytes changed**, no promoted skill was added, deleted or
+  renamed, and no skill's frontmatter or trigger surface moved — so the installed selection, the local patches
+  and the licence below are carried forward re-verified rather than re-reviewed from scratch, and no
+  behavioural eval was required. See the manifest's `reviewed_by` for the full re-verification.
+- Between `ed37663c` and `068b6e0c` — the refresh before that one, and the last time the installed set actually
+  moved — upstream **deleted**
   `skills/productivity/writing-great-skills` (one of this project's then-21 installed skills) and replaced it
   with an unrelated new skill, `skills/productivity/writing-for-agents` (different name, different file
   structure, fully rewritten content — not a rename upstream's own history tracks as one). This project now
   vendors `writing-for-agents` under a fresh review in its place; see `mattpocock-skills-manifest.json`'s
   `excluded[]` entry for `writing-great-skills` and the `writing-for-agents` skill entry.
-- This refresh also newly promoted three skills that weren't previously part of the reviewed set:
+- That same `ed37663c` → `068b6e0c` refresh also newly promoted three skills that weren't previously part of
+  the reviewed set:
   `skills/engineering/wizard` (moved from `skills/in-progress/`), `skills/productivity/to-questionnaire`
   (moved from `skills/in-progress/`), and `skills/productivity/wait-what` (new). `wizard` and `wait-what` were
   added to this project's installed set after a separate explicit owner authorization; `to-questionnaire`
@@ -52,7 +62,8 @@ full per-skill list with classification and invocation mode.
   triage label vocabulary, domain-doc layout) was instead performed deterministically by this governance task —
   see `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, `docs/agents/triage-labels.md`.
 - **`to-questionnaire`** — the one promoted `productivity` skill excluded from vendoring. Newly promoted
-  upstream in this refresh (moved out of `skills/in-progress/`); excluded by explicit owner decision alongside
+  upstream in the `ed37663c` → `068b6e0c` refresh (moved out of `skills/in-progress/`); excluded by explicit
+  owner decision alongside
   `setup-matt-pocock-skills` rather than a content-safety finding — `ask-matt`'s vendored precondition note
   (see `ask-matt-setup-pointer` in the patch ledger) tells the router not to suggest either.
 - **Non-promoted skills** under `skills/deprecated/`, `skills/in-progress/`, `skills/misc/`, and
@@ -122,10 +133,17 @@ agents, lanes, reviewers, writers, repair loops — and the project does not ove
 
 ## No automatic updates
 
-There is no update mechanism wired into this repo — no CI job, no Claude Code plugin auto-update, nothing that
-re-vendors on a schedule. Updating is a deliberate, reviewed, human-initiated act (see "Update procedure"
-below). This is intentional: an upstream skill change is effectively new instructions an agent will follow, and
-this project doesn't want that arriving silently.
+Nothing here is ever re-vendored without review. `automatic_updates` stays **false**: no Claude Code plugin
+auto-update, and no job of any kind that advances this provider's pin on its own. Updating is a deliberate,
+reviewed, human-initiated act (see "Update procedure" below). This is intentional: an upstream skill change is
+effectively new instructions an agent will follow, and this project doesn't want that arriving silently.
+
+What *is* wired into this repo is a scheduled **detection** job — `.github/workflows/skills-update.yml`, added
+after this policy was first written. It can notice that upstream moved and mechanically prepare a candidate,
+but it can only ever reach `PREPARED_AUDIT_REQUIRED`; `scripts/validate-agent-governance.py` fails while the
+candidate block it writes is present, so nothing it produces can pass the governance gate on automation alone.
+That is a narrowing of the manual step, not an exception to it — see "Automated drift detection" below for the
+full contract.
 
 ## Supply-chain assumptions
 
