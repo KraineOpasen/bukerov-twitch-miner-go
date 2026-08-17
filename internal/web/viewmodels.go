@@ -924,6 +924,12 @@ type SystemStatusPageData struct {
 	DiscordEnabled bool
 	DebugURL       string
 
+	// Lifecycle is the read-only lifecycle echo rendered above the
+	// subsystem table. It is deliberately NOT one of Signals: the approved
+	// V3 composition reserves the table for tracked subsystems and gives
+	// the miner's own state its own band, and nothing on this page may
+	// mutate that state (the controls live only on /overview).
+	Lifecycle SystemStatusRowView
 	Signals   []SystemStatusRowView
 	Resources SystemResourcesView
 }

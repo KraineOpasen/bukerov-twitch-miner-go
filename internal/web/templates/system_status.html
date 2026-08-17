@@ -1,13 +1,25 @@
-{{/* /system/status (task S5-5): a pure server-rendered, STATUS-ONLY snapshot
-     built only from data already collected in memory by existing providers.
-     No hx-get, no polling, no new API endpoint — the only "live" affordance
-     is the plain same-route manual refresh link below. This page never
-     renders a settings form or a lifecycle mutation control: every existing
-     config surface (Health Center's canary/watchdog forms, the lifecycle
-     panel's Pause/Resume/Restart/Stop) stays exactly where it is today.
-     Rows reuse the existing health-grid/health-card/health-sev-* classes
-     (already compiled into app.css from the Health Center) — no CSS
-     changes in this slice. */}}
+{{/* /system/status (task S5-5, Dashboard Stage 1 first seam): a pure
+     server-rendered, STATUS-ONLY snapshot built only from data already
+     collected in memory by existing providers. No hx-get, no polling, no new
+     API endpoint — the only "live" affordance is the plain same-route manual
+     refresh link in the header.
+
+     Composition is the owner-approved V3 one (frozen decision 10, and
+     docs/dashboard/stage-4-visual-design-system.md §11 route 23): a DENSE
+     SUBSYSTEM TABLE carrying freshness on EVERY row, with the miner's own
+     state as a read-only echo band above it and no lifecycle mutation
+     control anywhere — those live only on /overview.
+
+     Freshness is mandatory per row, so a row with no reading still renders
+     a populated cell that says "no reading" out loud; eliding the line
+     would make "never checked" look identical to "this row has no clock".
+     Status is icon + text + colour via the existing C10 badge, never colour
+     alone, and an unknown subsystem always takes the neutral tier — it can
+     never render as ok.
+
+     Markup reuses classes already compiled into app.css (c4-table*,
+     c10-badge*, health-card*, type-*, num) — this slice adds no CSS and
+     therefore requires no Tailwind regeneration. */}}
 {{define "title"}}{{ t "system.status.heading" }} - Twitch Points Miner{{end}}
 
 {{define "content"}}
@@ -21,25 +33,75 @@
 </div>
 <p class="type-body text-text-secondary mb-6" style="max-width:72ch">{{ t "system.status.subtitle" }}</p>
 
-<div class="health-grid mb-6">
-    {{range .Signals}}
-    <div class="health-card {{.Sev}}">
-        <div class="health-card-label">{{.Label}}</div>
-        <div class="health-card-status">
-            <span class="num font-semibold health-card-status-text">{{.StatusText}}</span>
-        </div>
-        {{if .ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.ClockLabel}}</span>{{.ClockText}}</div>{{end}}
-        {{if .Clock2Label}}<div class="health-card-row"><span class="health-card-row-label">{{.Clock2Label}}</span>{{.Clock2Text}}</div>{{end}}
-        {{if .Secondary}}<div class="health-card-row">{{.Secondary}}</div>{{end}}
-        {{if .Detail}}<div class="health-card-row health-card-detail">{{.Detail}}</div>{{end}}
+{{/* Read-only lifecycle echo. The state is shown; changing it is not
+     offered here — the page copy names where the controls actually live. */}}
+<div class="health-card {{.Lifecycle.Sev}} mb-6">
+    <div class="health-card-label">{{.Lifecycle.Label}}</div>
+    <div class="health-card-status">
+        {{template "c10.badge" .Lifecycle.StatusBadge}}
     </div>
-    {{end}}
+    {{if .Lifecycle.ClockLabel}}<div class="health-card-row"><span class="health-card-row-label">{{.Lifecycle.ClockLabel}}</span><span class="num">{{.Lifecycle.ClockText}}</span></div>{{end}}
+    {{if .Lifecycle.Clock2Label}}<div class="health-card-row"><span class="health-card-row-label">{{.Lifecycle.Clock2Label}}</span><span class="num">{{.Lifecycle.Clock2Text}}</span></div>{{end}}
+    {{if .Lifecycle.Detail}}<div class="health-card-row health-card-detail">{{.Lifecycle.Detail}}</div>{{end}}
+    <div class="health-card-row type-micro text-text-muted">{{ t "system.status.lifecycle.controls_note" }}</div>
 </div>
 
-<div class="health-card">
+<div class="c4-table-card mb-6">
+<table class="c4-table" id="system-subsystems">
+    <caption class="visually-hidden">{{ t "system.status.table.caption" }}</caption>
+    <thead>
+        <tr>
+            <th scope="col">{{ t "system.status.col.subsystem" }}</th>
+            <th scope="col">{{ t "system.status.col.status" }}</th>
+            <th scope="col">{{ t "system.status.col.freshness" }}</th>
+            <th scope="col">{{ t "system.status.col.detail" }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Signals}}
+        <tr class="{{.Sev}}" data-system-row>
+            <th scope="row" class="text-left text-text-primary font-medium">{{.Label}}</th>
+            <td>{{template "c10.badge" .StatusBadge}}</td>
+            <td data-system-freshness>
+                {{if .ClockText}}
+                <div class="num">{{.ClockText}}</div>
+                <div class="type-micro text-text-muted">{{.ClockLabel}}</div>
+                {{else}}
+                <div class="num" aria-hidden="true">—</div>
+                <div class="type-micro text-text-muted">{{.FreshnessNote}}</div>
+                {{end}}
+                {{if .Clock2Label}}
+                <div class="num">{{.Clock2Text}}</div>
+                <div class="type-micro text-text-muted">{{.Clock2Label}}</div>
+                {{end}}
+            </td>
+            <td class="text-text-secondary">
+                {{if .Secondary}}<div>{{.Secondary}}</div>{{end}}
+                {{if .Detail}}<div class="health-card-detail">{{.Detail}}</div>{{end}}
+                {{if and (not .Secondary) (not .Detail)}}<span aria-hidden="true">—</span>{{end}}
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+</div>
+
+<div class="health-card mb-6">
     <div class="health-card-label">{{ t "system.status.resources.heading" }}</div>
     {{range .Resources.Rows}}
     <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{.Primary}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
     {{end}}
 </div>
+
+{{/* Build evidence: the version field only. Commit SHA, image digest and
+     build time do not exist in this build, and an absent update signal is
+     never rendered as "you are up to date" — /system/diagnostics owns that
+     statement and makes the absence explicit. */}}
+{{if .Version}}
+<div class="health-card">
+    <div class="health-card-label">{{ t "system.status.build.label" }}</div>
+    <div class="health-card-row"><span class="num">{{.Version}}</span></div>
+    <div class="health-card-row"><a href="/system/diagnostics" class="text-link-text">{{ t "system.tab.diagnostics" }}</a></div>
+</div>
+{{end}}
 {{end}}

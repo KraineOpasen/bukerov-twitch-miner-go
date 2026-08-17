@@ -161,47 +161,50 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // 2. Drops sync: two distinct clocks, never merged.
 // ---------------------------------------------------------------------
 
-// s55HealthCardRowValue returns the text rendered immediately after the label
-// span of the health-card-row whose label is exactly label, plus whether such
-// a row exists at all.
+// s55FreshnessValue returns the age rendered by the subsystem table's
+// freshness cell whose kind-label is exactly label, plus whether such a pair
+// was rendered at all.
 //
-// The scan is bounded to a single row's `<div class="health-card-row">` ...
-// `</div>` span (see system_status.html:31-32, which emits the label span and
-// its value adjacently with no intervening markup), so an assertion built on
-// it binds a label to ITS OWN value. A page-wide strings.Contains check for
-// each label and each value independently cannot tell two correctly-paired
-// rows apart from two rows whose values have been transposed — which is
-// exactly the coverage gap this helper closes.
-func s55HealthCardRowValue(body, label string) (string, bool) {
+// The subsystem table renders each clock as an ADJACENT pair — the age in
+// `<div class="num">` immediately followed by its kind in
+// `<div class="type-micro text-text-muted">` (see system_status.html). This
+// helper requires that exact adjacency (only inter-tag whitespace may sit
+// between the two), so an assertion built on it binds a label to ITS OWN
+// value. A page-wide strings.Contains check for each label and each value
+// independently cannot tell two correctly-paired clocks apart from two
+// clocks whose values have been transposed — which is exactly the coverage
+// gap this helper closes, and which the move from the old health-card rows
+// to the dense table must not lose.
+func s55FreshnessValue(body, label string) (string, bool) {
 	const (
-		rowOpen    = `<div class="health-card-row">`
-		labelOpen  = `<span class="health-card-row-label">`
-		labelClose = `</span>`
-		rowClose   = `</div>`
+		valueOpen = `<div class="num">`
+		labelOpen = `<div class="type-micro text-text-muted">`
+		divClose  = `</div>`
 	)
 	for rest := body; ; {
-		i := strings.Index(rest, rowOpen)
+		i := strings.Index(rest, valueOpen)
 		if i < 0 {
 			return "", false
 		}
-		rest = rest[i+len(rowOpen):]
+		rest = rest[i+len(valueOpen):]
 
-		end := strings.Index(rest, rowClose)
+		end := strings.Index(rest, divClose)
 		if end < 0 {
 			return "", false
 		}
-		row := rest[:end]
-		rest = rest[end+len(rowClose):]
+		value := rest[:end]
+		after := strings.TrimLeft(rest[end+len(divClose):], " \t\r\n")
+		rest = rest[end+len(divClose):]
 
-		if !strings.HasPrefix(row, labelOpen) {
+		if !strings.HasPrefix(after, labelOpen) {
 			continue
 		}
-		inner := row[len(labelOpen):]
-		j := strings.Index(inner, labelClose)
-		if j < 0 || inner[:j] != label {
+		kind := after[len(labelOpen):]
+		j := strings.Index(kind, divClose)
+		if j < 0 || kind[:j] != label {
 			continue
 		}
-		return inner[j+len(labelClose):], true
+		return value, true
 	}
 }
 
@@ -210,8 +213,8 @@ func s55HealthCardRowValue(body, label string) (string, bool) {
 // (LastSuccessAt) as two separately labeled, separately valued lines — never
 // merged into one, and never one substituted for the other.
 //
-// Each clock is asserted INSIDE its own rendered row via
-// s55HealthCardRowValue, so transposing only the two values (leaving both
+// Each clock is asserted against its OWN adjacent kind-label via
+// s55FreshnessValue, so transposing only the two values (leaving both
 // labels in place) fails here.
 func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 	srv := newRenderServer(t)
@@ -235,9 +238,9 @@ func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 		{tr("system.status.drops_sync.attempt_label"), "5m ago"},
 		{tr("system.status.drops_sync.success_label"), "3h 0m ago"},
 	} {
-		got, ok := s55HealthCardRowValue(body, want.label)
+		got, ok := s55FreshnessValue(body, want.label)
 		if !ok {
-			t.Errorf("no health-card-row labeled %q was rendered", want.label)
+			t.Errorf("no freshness cell labeled %q was rendered", want.label)
 			continue
 		}
 		if got != want.value {
@@ -957,9 +960,9 @@ func TestS5_5StatusClockLocalizesElapsedSuffix(t *testing.T) {
 		{"ru", ru, ruTr("system.status.drops_sync.attempt_label"), "5m назад"},
 		{"ru", ru, ruTr("system.status.drops_sync.success_label"), "3h 0m назад"},
 	} {
-		got, ok := s55HealthCardRowValue(tc.body, tc.label)
+		got, ok := s55FreshnessValue(tc.body, tc.label)
 		if !ok {
-			t.Errorf("%s: no health-card-row labeled %q was rendered", tc.lang, tc.label)
+			t.Errorf("%s: no freshness cell labeled %q was rendered", tc.lang, tc.label)
 			continue
 		}
 		if got != tc.want {

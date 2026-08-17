@@ -25,6 +25,7 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
@@ -63,6 +64,20 @@ type SystemStatusRowView struct {
 
 	Secondary string
 	Detail    string
+
+	// StatusBadge is the C10 badge encoding of StatusText at Sev's tier, so
+	// the status reads as icon + text + colour and never colour alone
+	// (Stage 4 §3 P4). Derived by systemRowBadge — never set by a row
+	// builder, so no builder can pick a tier that disagrees with Sev.
+	StatusBadge BadgeData
+
+	// FreshnessNote is what a missing clock says out loud. /system/status
+	// renders freshness on EVERY row (the frozen V3 decision 10 and
+	// docs/dashboard/stage-4-visual-design-system.md §11 route 23 both make
+	// per-row freshness mandatory), so a row with no reading must still
+	// render a cell that says so — eliding the line would make "never
+	// checked" indistinguishable from "this row has no clock concept".
+	FreshnessNote string
 }
 
 // SystemResourceRowView is one process/container resource metric line.
@@ -176,6 +191,26 @@ func (s *Server) buildSystemStatusPageData(r *http.Request) SystemStatusPageData
 	oauthSig, _ := healthSnap.Signal(health.SignalOAuth)
 	pubsubSig, _ := healthSnap.Signal(health.SignalPubSub)
 
+	resourceSnap := resources.UnavailableSnapshot()
+	if resourceFn != nil {
+		resourceSnap = safeResourceSnapshot(resourceFn)
+	}
+
+	// Signals is the subsystem table's body. The lifecycle row is NOT in it
+	// any more: the approved V3 composition puts a read-only lifecycle echo
+	// above the table as its own band, leaving the table to the five
+	// tracked subsystems (OAuth, GQL, PubSub, drops sync, resources).
+	signals := []SystemStatusRowView{
+		systemSignalRow(oauthSig, tr("system.status.oauth.label"), checkLabel, tr),
+		buildSystemGQLRow(healthSnap, checkLabel, tr),
+		systemSignalRow(pubsubSig, tr("system.status.pubsub.label"), checkLabel, tr),
+		s.buildSystemDropsSyncRow(tr),
+		buildSystemResourcesRow(resourceSnap, tr),
+	}
+	for i := range signals {
+		signals[i] = finishSystemRow(signals[i], tr)
+	}
+
 	return SystemStatusPageData{
 		Username:       s.username,
 		RefreshMinutes: refresh,
@@ -183,14 +218,9 @@ func (s *Server) buildSystemStatusPageData(r *http.Request) SystemStatusPageData
 		DiscordEnabled: discordEnabled,
 		DebugURL:       debugURL,
 
-		Signals: []SystemStatusRowView{
-			s.buildSystemLifecycleRow(tr),
-			systemSignalRow(oauthSig, tr("system.status.oauth.label"), checkLabel, tr),
-			buildSystemGQLRow(healthSnap, checkLabel, tr),
-			systemSignalRow(pubsubSig, tr("system.status.pubsub.label"), checkLabel, tr),
-			s.buildSystemDropsSyncRow(tr),
-		},
-		Resources: buildSystemResourcesView(resourceFn, tr),
+		Lifecycle: finishSystemRow(s.buildSystemLifecycleRow(tr), tr),
+		Signals:   signals,
+		Resources: buildSystemResourcesView(resourceSnap, tr),
 	}
 }
 
@@ -244,6 +274,7 @@ func systemSignalRow(sig health.Signal, label, clockLabel string, tr func(string
 		row.ClockLabel = clockLabel
 		row.ClockText = systemAgo(sig.CheckedAt, tr)
 	}
+	row.Detail = systemSignalDetail(sig, tr)
 	return row
 }
 
@@ -296,6 +327,84 @@ func systemHealthSeverity(status string) string {
 	default:
 		return "health-sev-neutral"
 	}
+}
+
+// systemRowBadge maps an already-decided health-sev-* class to the C10
+// badge's (tier, icon) pair, reusing health.html's established glyph
+// vocabulary (✓ / ✕ / ! / •) so the same severity reads identically on the
+// legacy Health Center and here. It deliberately derives from Sev rather
+// than from a raw status string: Sev is where every "unknown is never ok"
+// decision has already been made (systemHealthSeverity,
+// systemLifecycleSeverity, the drops-sync switch), so a new caller cannot
+// accidentally reintroduce a green unknown by picking its own tier.
+func systemRowBadge(sev, label string) BadgeData {
+	switch sev {
+	case "health-sev-ok":
+		return BadgeData{Tier: "ok", Icon: "✓", Label: label}
+	case "health-sev-bad":
+		return BadgeData{Tier: "danger", Icon: "✕", Label: label}
+	case "health-sev-warn":
+		return BadgeData{Tier: "caution", Icon: "!", Label: label}
+	default:
+		return BadgeData{Tier: "neutral", Icon: "•", Label: label}
+	}
+}
+
+// finishSystemRow fills the presentation-only fields every /system/status
+// row needs but no row builder should have to remember: the C10 badge
+// encoding, and the explicit "no reading" note that keeps the freshness
+// column populated on every single row. It is idempotent and never
+// overwrites evidence a builder already established.
+func finishSystemRow(row SystemStatusRowView, tr func(string) string) SystemStatusRowView {
+	row.StatusBadge = systemRowBadge(row.Sev, row.StatusText)
+	if row.ClockText == "" {
+		row.FreshnessNote = tr("system.status.freshness.none")
+	}
+	return row
+}
+
+// systemSignalDetail renders the evidence a health.Signal already carries
+// but /system/status used to discard: its stage, its short human detail and
+// its stable error code (the legacy /health page has always rendered all
+// three — see partials/health.html). Everything crosses the boundary
+// through supportbundle.Redact, matching the lifecycle/drops-sync rows on
+// this page; the health package stores no credentials, so redaction here is
+// belt-and-braces rather than a correction.
+func systemSignalDetail(sig health.Signal, tr func(string) string) string {
+	parts := make([]string, 0, 3)
+	if sig.Stage != "" {
+		parts = append(parts, tr("health.card.stage")+" "+supportbundle.Redact(sig.Stage))
+	}
+	if sig.Detail != "" {
+		parts = append(parts, supportbundle.Redact(sig.Detail))
+	}
+	if sig.ErrorCode != "" {
+		parts = append(parts, tr("health.card.error_code")+" "+supportbundle.Redact(sig.ErrorCode))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// buildSystemResourcesRow is the process/container resources row inside the
+// subsystem table. It exists so the table's freshness column is genuinely
+// total: the sampler publishes SampledAt (already part of /api/resources'
+// public contract) and this page simply never read it. An unavailable
+// sampler is "unknown"/neutral — never ok — and an unparseable or absent
+// SampledAt degrades to the same "no reading" note every other row uses.
+func buildSystemResourcesRow(snap resources.Snapshot, tr func(string) string) SystemStatusRowView {
+	row := SystemStatusRowView{Label: tr("system.status.resources.heading")}
+	if !snap.Available {
+		row.StatusText = tr("health.status.unknown")
+		row.Sev = "health-sev-neutral"
+		return row
+	}
+
+	row.StatusText = tr("health.status.ok")
+	row.Sev = "health-sev-ok"
+	if sampled, err := time.Parse(time.RFC3339, snap.SampledAt); err == nil {
+		row.ClockLabel = tr("system.status.resources.sampled_label")
+		row.ClockText = systemAgo(sampled, tr)
+	}
+	return row
 }
 
 // buildSystemLifecycleRow reads the lifecycle controller's snapshot (nil ->
@@ -394,20 +503,21 @@ func (s *Server) buildSystemDropsSyncRow(tr func(string) string) SystemStatusRow
 	return row
 }
 
-// buildSystemResourcesView reads the resource sampler's latest snapshot
-// through the same safeResourceSnapshot (handlers_resources.go) the
-// /api/resources endpoint uses — a nil fn (sampler not wired yet) degrades
-// to resources.UnavailableSnapshot(), exactly like that endpoint. Every row
-// is systemDash ("—") — never a fabricated 0 — whenever the whole snapshot,
-// or that specific section, is unavailable. Labels reuse the existing
-// rw.cpu/rw.memory/rw.network/rw.disk keys (the Overview mini-widgets), so
-// the metric names read identically everywhere in the dashboard.
-func buildSystemResourcesView(fn func() resources.Snapshot, tr func(string) string) SystemResourcesView {
-	snap := resources.UnavailableSnapshot()
-	if fn != nil {
-		snap = safeResourceSnapshot(fn)
-	}
-
+// buildSystemResourcesView renders the process/container resource detail
+// block. Every row is systemDash ("—") — never a fabricated 0 — whenever the
+// whole snapshot, or that specific section, is unavailable. Labels reuse the
+// existing rw.cpu/rw.memory/rw.network/rw.disk keys (the Overview
+// mini-widgets), so the metric names read identically everywhere in the
+// dashboard.
+//
+// It takes the snapshot the caller already read rather than the provider
+// func: /system/status samples ONCE per request (through the same
+// safeResourceSnapshot the /api/resources endpoint uses, degrading a nil
+// sampler to resources.UnavailableSnapshot()) and feeds both the subsystem
+// table's resources row and this detail block from that single snapshot, so
+// the freshness stamp in the table can never disagree with the values
+// underneath it.
+func buildSystemResourcesView(snap resources.Snapshot, tr func(string) string) SystemResourcesView {
 	rows := []SystemResourceRowView{
 		{Label: tr("rw.cpu"), Primary: systemDash},
 		{Label: tr("rw.memory"), Primary: systemDash},
