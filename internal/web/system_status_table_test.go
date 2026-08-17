@@ -687,9 +687,12 @@ func TestSystemStatusCardsCarrySameEvidenceAsTable(t *testing.T) {
 	body := sstRender(t, srv, "en")
 
 	cs := strings.Index(body, "system-subsystem-cards")
+	if cs < 0 {
+		t.Fatal("the card list is missing")
+	}
 	ce := strings.Index(body[cs:], "</ul>")
-	if cs < 0 || ce < 0 {
-		t.Fatal("the card list is missing or unterminated")
+	if ce < 0 {
+		t.Fatal("the card list is unterminated")
 	}
 	cards := body[cs : cs+ce]
 
@@ -748,7 +751,7 @@ func TestSystemStatusResourcesBlockAlwaysCarriesProvenance(t *testing.T) {
 				t.Fatal("the resource block marker is missing")
 			}
 			block := body[start:]
-			if end := strings.Index(block, "data-system-build"); end > 0 {
+			if end := strings.Index(block, "data-system-build"); end >= 0 {
 				block = block[:end]
 			}
 			if !strings.Contains(block, "c0-chip") {
