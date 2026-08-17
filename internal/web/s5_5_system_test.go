@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -189,6 +190,13 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // 2. Drops sync: two distinct clocks, never merged.
 // ---------------------------------------------------------------------
 
+// s55KindOpenRe matches the freshness cell's kind element. The TAG is
+// deliberately not pinned — the table renders a <div>, the lifecycle band a
+// <span> inside its flex row — but the match is anchored at offset 0 by the
+// caller, so the kind line must still be the element IMMEDIATELY after the
+// chip. That is what keeps a label bound to its own value.
+var s55KindOpenRe = regexp.MustCompile(`^<(?:div|span) class="type-micro text-text-muted uppercase">`)
+
 // s55FreshnessValue returns the age rendered by the subsystem table's
 // freshness cell whose kind-label is exactly label, plus whether such a pair
 // was rendered at all.
@@ -202,28 +210,28 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // clocks apart from two clocks whose values have been transposed — which is
 // exactly the coverage gap this helper closes, and which neither the move to
 // the dense table nor the move to the C0 chip may lose.
-func s55FreshnessValue(body, label string) (string, bool) {
+func s55FreshnessValue(body, label string) (age string, stamp string, ok bool) {
 	const (
 		ageOpen  = `<span class="c0-chip-text">`
-		kindOpen = `<div class="type-micro text-text-muted uppercase">`
 		spanEnd  = `</span>`
-		divEnd   = `</div>`
 		stampSep = `<span class="num">`
 	)
 	for rest := body; ; {
 		i := strings.Index(rest, ageOpen)
 		if i < 0 {
-			return "", false
+			return "", "", false
 		}
 		rest = rest[i+len(ageOpen):]
 
 		end := strings.Index(rest, spanEnd)
 		if end < 0 {
-			return "", false
+			return "", "", false
 		}
-		age := rest[:end]
+		got := rest[:end]
 		// Skip the chip's own closing </span> and any layout whitespace, then
-		// require the kind line to be the very next element.
+		// require the kind line to be the very next element. The tag itself is
+		// deliberately not pinned: the table renders a <div>, the lifecycle
+		// band a <span> inside its flex row, and both are the same contract.
 		after := rest[end+len(spanEnd):]
 		if k := strings.Index(after, spanEnd); k >= 0 && strings.TrimSpace(after[:k]) == "" {
 			after = after[k+len(spanEnd):]
@@ -231,22 +239,31 @@ func s55FreshnessValue(body, label string) (string, bool) {
 		after = strings.TrimLeft(after, " \t\r\n")
 		rest = rest[end+len(spanEnd):]
 
-		if !strings.HasPrefix(after, kindOpen) {
+		m := s55KindOpenRe.FindStringIndex(after)
+		if m == nil || m[0] != 0 {
 			continue
 		}
-		kind := after[len(kindOpen):]
-		j := strings.Index(kind, divEnd)
-		if j < 0 {
+		tail := after[m[1]:]
+		lt := strings.Index(tail, "<")
+		if lt < 0 {
 			continue
 		}
-		kind = kind[:j]
-		if c := strings.Index(kind, stampSep); c >= 0 {
-			kind = kind[:c]
+		kind := strings.TrimSpace(tail[:lt])
+		gotStamp := ""
+		// The absolute wall clock is RETURNED, not discarded: it is the half
+		// of the freshness contract the page argues hardest for ("43s ago
+		// alone cannot be checked against anything"), and stripping it here
+		// is what made it untestable.
+		if strings.HasPrefix(tail[lt:], stampSep) {
+			stampRest := tail[lt+len(stampSep):]
+			if e := strings.Index(stampRest, spanEnd); e >= 0 {
+				gotStamp = stampRest[:e]
+			}
 		}
-		if strings.TrimSpace(kind) != label {
+		if kind != label {
 			continue
 		}
-		return age, true
+		return got, gotStamp, true
 	}
 }
 
@@ -280,10 +297,13 @@ func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 		{tr("system.status.drops_sync.attempt_label"), "5m ago"},
 		{tr("system.status.drops_sync.success_label"), "3h 0m ago"},
 	} {
-		got, ok := s55FreshnessValue(body, want.label)
+		got, stamp, ok := s55FreshnessValue(body, want.label)
 		if !ok {
 			t.Errorf("no freshness cell labeled %q was rendered", want.label)
 			continue
+		}
+		if stamp == "" {
+			t.Errorf("freshness cell %q rendered no absolute wall clock next to its age", want.label)
 		}
 		if got != want.value {
 			t.Errorf("row %q rendered value %q, want %q (label/value pair must not be transposed)", want.label, got, want.value)
@@ -1008,7 +1028,7 @@ func TestS5_5StatusClockLocalizesElapsedSuffix(t *testing.T) {
 		{"ru", ru, ruTr("system.status.drops_sync.attempt_label"), "5m назад"},
 		{"ru", ru, ruTr("system.status.drops_sync.success_label"), "3h 0m назад"},
 	} {
-		got, ok := s55FreshnessValue(tc.body, tc.label)
+		got, _, ok := s55FreshnessValue(tc.body, tc.label)
 		if !ok {
 			t.Errorf("%s: no freshness cell labeled %q was rendered", tc.lang, tc.label)
 			continue

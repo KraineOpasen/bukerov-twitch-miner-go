@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/resources"
@@ -408,12 +409,17 @@ func TestSystemStatusResourcesRowCarriesSampledFreshness(t *testing.T) {
 	if !strings.Contains(last, tr("system.status.resources.heading")) {
 		t.Fatalf("the last subsystem row must be the resources row, got: %s", last)
 	}
-	got, ok := s55FreshnessValue(last, tr("system.status.resources.sampled_label"))
+	got, stamp, ok := s55FreshnessValue(last, tr("system.status.resources.sampled_label"))
 	if !ok {
 		t.Fatalf("the resources row must bind an age to the %q label", tr("system.status.resources.sampled_label"))
 	}
 	if !strings.HasSuffix(got, tr("common.ago")) {
 		t.Errorf("resources freshness %q must be a localized elapsed age", got)
+	}
+	// The absolute wall clock is the other half of the contract; without it
+	// the age cannot be checked against anything.
+	if !regexp.MustCompile(`^\d{2}:\d{2}:\d{2}$`).MatchString(stamp) {
+		t.Errorf("resources freshness stamp %q must be an HH:MM:SS wall clock", stamp)
 	}
 
 	// An unavailable sampler must degrade to unknown + no reading, never ok.
@@ -504,7 +510,7 @@ func TestSystemStatusResourcesRowMakesNoHealthClaim(t *testing.T) {
 		t.Error("the resources row must point at the values below it")
 	}
 	// Non-vacuity: the row is still present and still stamped.
-	if _, ok := s55FreshnessValue(last, tr("system.status.resources.sampled_label")); !ok {
+	if _, _, ok := s55FreshnessValue(last, tr("system.status.resources.sampled_label")); !ok {
 		t.Error("the resources row must still carry its sampled freshness")
 	}
 }
@@ -517,7 +523,7 @@ func TestSystemStatusCardsMirrorTableRows(t *testing.T) {
 		body := sstRender(t, sstMixedServer(t), lang)
 
 		tableRows := sstRows(t, body)
-		cards := strings.Count(body, "data-system-card")
+		cards := strings.Count(body, "data-system-card>")
 		if cards != len(tableRows) {
 			t.Errorf("%s: %d table rows but %d cards — the two representations must carry the same rows", lang, len(tableRows), cards)
 		}
@@ -534,8 +540,18 @@ func TestSystemStatusCardsMirrorTableRows(t *testing.T) {
 		if strings.Contains(body, `class="c3-roster-cards mb-6 lg:hidden"`) {
 			t.Errorf("%s: a display utility on .c3-roster-cards itself is a specificity coin-flip", lang)
 		}
-		// Every subsystem label must appear in both representations.
-		cardBlock := body[strings.Index(body, "system-subsystem-cards"):]
+		// Scoped to the card list itself: run to EOF and the resources detail
+		// block below satisfies the resources label whether or not the card
+		// renders.
+		cs := strings.Index(body, "system-subsystem-cards")
+		if cs < 0 {
+			t.Fatalf("%s: the card list is missing", lang)
+		}
+		ce := strings.Index(body[cs:], "</ul>")
+		if ce < 0 {
+			t.Fatalf("%s: unterminated card list", lang)
+		}
+		cardBlock := body[cs : cs+ce]
 		tr := func(k string) string {
 			if lang == "ru" {
 				return ruTR(t)(k)
@@ -646,5 +662,150 @@ func TestSystemStatusBuildBandShowsVersionOnly(t *testing.T) {
 	// restating it.
 	if !strings.Contains(body, `href="/system/diagnostics"`) {
 		t.Error("the build band must link to the owner of build/update detail")
+	}
+}
+
+// TestSystemStatusCardsCarrySameEvidenceAsTable closes the field-level half of
+// route 23's Transform T. Comparing row COUNTS and label presence let the
+// DETAIL column — the headline addition of this seam — vanish below lg with
+// the whole suite green: deleting the Secondary and Detail lines from the card
+// survived every other test in the package.
+func TestSystemStatusCardsCarrySameEvidenceAsTable(t *testing.T) {
+	srv := newRenderServer(t)
+	srv.SetHealthProvider(&s55FakeHealthProvider{snap: health.Snapshot{
+		ActiveClientID: "TV",
+		Signals: []health.Signal{
+			{Name: health.SignalOAuth, Status: health.StatusOK, CheckedAt: time.Now().Add(-30 * time.Second)},
+			{Name: health.SignalGQLAPI, Status: health.StatusOK, CheckedAt: time.Now().Add(-30 * time.Second)},
+		},
+	}})
+	srv.SetCampaignsProvider(&s55FakeCampaignsProvider{status: drops.SyncStatus{
+		LastSyncAt:    time.Now().Add(-4 * time.Minute),
+		LastSuccessAt: time.Now().Add(-2 * time.Hour),
+		LastError:     "inventory: HTTP 500",
+	}})
+	body := sstRender(t, srv, "en")
+
+	cs := strings.Index(body, "system-subsystem-cards")
+	ce := strings.Index(body[cs:], "</ul>")
+	if cs < 0 || ce < 0 {
+		t.Fatal("the card list is missing or unterminated")
+	}
+	cards := body[cs : cs+ce]
+
+	// Non-vacuity: this fixture must actually produce both evidence kinds.
+	if !strings.Contains(body, "data-card-secondary") {
+		t.Fatal("fixture drift: no row carries Secondary evidence, so the parity check is vacuous")
+	}
+	if !strings.Contains(body, "data-card-detail") {
+		t.Fatal("fixture drift: no row carries Detail evidence, so the parity check is vacuous")
+	}
+
+	// Every piece of evidence the table shows must also reach the cards.
+	for _, row := range sstRows(t, body) {
+		if strings.Contains(row, "Active GQL Client ID") && !strings.Contains(cards, "Active GQL Client ID") {
+			t.Error("the GQL row's secondary evidence is missing from the card representation")
+		}
+		if strings.Contains(row, "inventory: HTTP 500") && !strings.Contains(cards, "inventory: HTTP 500") {
+			t.Error("the drops-sync row's detail evidence is missing from the card representation")
+		}
+	}
+	// A row with neither field must still carry the no-data marker in BOTH
+	// representations, or the marker silently disappears below lg.
+	if !strings.Contains(cards, enTR(t)("queue.slot.no_data")) {
+		t.Error("the card representation must carry the no-data marker for evidence-free rows")
+	}
+}
+
+// TestSystemStatusResourcesBlockAlwaysCarriesProvenance proves the resources
+// detail block states its freshness in EVERY state. It is a live region, and
+// the subsystem row directly above it always states its own — a block that
+// fell silent whenever SampledAt was absent or malformed would contradict the
+// row printed one line up.
+func TestSystemStatusResourcesBlockAlwaysCarriesProvenance(t *testing.T) {
+	tr := enTR(t)
+	for _, tc := range []struct {
+		name string
+		snap func() resources.Snapshot
+	}{
+		{"no sampler wired", nil},
+		{"available, no timestamp yet", func() resources.Snapshot {
+			return resources.Snapshot{Available: true} // SampledAt "" before the first sample
+		}},
+		{"malformed timestamp", func() resources.Snapshot {
+			return resources.Snapshot{Available: true, SampledAt: "not-a-timestamp"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newRenderServer(t)
+			if tc.snap != nil {
+				srv.SetResourceSnapshotProvider(tc.snap)
+			}
+			body := sstRender(t, srv, "en")
+
+			start := strings.Index(body, "data-system-resources")
+			if start < 0 {
+				t.Fatal("the resource block marker is missing")
+			}
+			block := body[start:]
+			if end := strings.Index(block, "data-system-build"); end > 0 {
+				block = block[:end]
+			}
+			if !strings.Contains(block, "c0-chip") {
+				t.Error("the resources block must carry a C0 provenance chip in every state")
+			}
+			if !strings.Contains(block, tr("system.status.freshness.none")) {
+				t.Error("with no usable timestamp the block must say so, not fall silent")
+			}
+		})
+	}
+}
+
+// TestSystemStatusFreshnessMakesNoUnearnedVerdict proves the page never paints
+// a positive freshness verdict. It deliberately declines to set a staleness
+// threshold (route 23's S-STALE stays a known gap), so rendering the C0 chip's
+// default green tier would assert exactly the judgement it refuses to make —
+// "3h ago" would look as healthy as "1m ago".
+func TestSystemStatusFreshnessMakesNoUnearnedVerdict(t *testing.T) {
+	body := sstRender(t, sstMixedServer(t), "en")
+
+	if strings.Contains(body, "c0-chip--live") {
+		t.Error("a present reading must not take the chip's positive tier — this page does not judge staleness")
+	}
+	if strings.Contains(body, "c0-chip--aged") {
+		t.Error("no staleness threshold exists, so the aged tier must be unreachable rather than guessed")
+	}
+	// Non-vacuity: chips are rendered, and the S-UNK variant is still reachable.
+	if !strings.Contains(body, "c0-chip") {
+		t.Fatal("fixture drift: no provenance chip rendered at all")
+	}
+	if !strings.Contains(body, "c0-chip--unknown") {
+		t.Error("the S-UNK chip variant must still be reachable for rows with no reading")
+	}
+}
+
+// TestSystemStatusLifecycleBandCarriesProvenanceChip proves the band that was
+// promoted OUT of the table did not lose the provenance treatment the rest of
+// the page uses: the C0 component and the absolute wall clock, not a
+// hand-rolled age.
+func TestSystemStatusLifecycleBandCarriesProvenanceChip(t *testing.T) {
+	srv := sstMixedServer(t)
+	started := time.Now().Add(-2 * time.Hour)
+	srv.SetLifecycleController(&s55FakeLifecycleController{snap: lifecycle.Snapshot{
+		Observed:  lifecycle.ObservedRunning,
+		Desired:   lifecycle.DesiredRunning,
+		StartedAt: started,
+	}})
+	body := sstRender(t, srv, "en")
+	tr := enTR(t)
+
+	head := body[:strings.Index(body, `id="system-subsystems"`)]
+	if !strings.Contains(head, "c0-chip") {
+		t.Error("the lifecycle echo must use the C0 provenance component like every other clock on the page")
+	}
+	if _, stamp, ok := s55FreshnessValue(head, tr("system.status.lifecycle.started_label")); !ok {
+		t.Error("the lifecycle echo must bind its age to the started label")
+	} else if stamp != started.Format("15:04:05") {
+		t.Errorf("lifecycle stamp = %q, want the absolute start clock %q", stamp, started.Format("15:04:05"))
 	}
 }

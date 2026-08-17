@@ -120,8 +120,9 @@ type SystemResourcesView struct {
 	Rows []SystemResourceRowView
 	// Freshness stamps the block itself, not just the table row that points
 	// at it: it is a live data region, and Stage 4 §7 S-READY requires every
-	// live region to carry its own provenance. Empty only when the sampler
-	// has produced no timestamp at all.
+	// live region to carry its own provenance. ALWAYS populated — an absent
+	// or malformed SampledAt yields the same "no reading" entry the table
+	// rows use, never an empty slice.
 	Freshness []SystemFreshnessView
 }
 
@@ -399,17 +400,24 @@ func systemFinishRow(row SystemStatusRowView, tr func(string) string) SystemStat
 		row.Freshness = append(row.Freshness, systemFreshness(row.Clock2Label, row.Clock2Text, row.Clock2At))
 	}
 	if len(row.Freshness) == 0 {
-		// No reading at all: the C0 chip takes its S-UNK variant and the
-		// stamp line says so in real text, never an empty cell.
-		row.Freshness = []SystemFreshnessView{{
-			Chip: ProvenanceChipData{Unknown: true},
-			Kind: tr("system.status.freshness.none"),
-		}}
+		row.Freshness = []SystemFreshnessView{systemNoReading(tr)}
 	}
 	return row
 }
 
-// systemFreshness builds one provenance entry: a live C0 chip carrying the
+// systemNoReading is the single definition of "this region has no reading":
+// the C0 chip's own S-UNK variant plus the localized note in real text,
+// never an empty cell. Both the subsystem rows and the resources block use
+// it, so the two can never disagree about what an absent timestamp looks
+// like.
+func systemNoReading(tr func(string) string) SystemFreshnessView {
+	return SystemFreshnessView{
+		Chip: ProvenanceChipData{Unknown: true},
+		Kind: tr("system.status.freshness.none"),
+	}
+}
+
+// systemFreshness builds one provenance entry: a C0 chip carrying the
 // relative age, the localized kind label, and the absolute wall clock the
 // age was measured from. The absolute stamp is deliberately printed next to
 // the age — "43s ago" alone cannot be checked against anything, whereas
@@ -419,10 +427,18 @@ func systemFinishRow(row SystemStatusRowView, tr func(string) string) SystemStat
 // needs a staleness threshold, and this repository has an explicit
 // precedent against inventing one (viewmodels_slots.go's c12PairProvenance
 // refuses the same invention for watch-slot evidence). A threshold is an
-// owner decision, not a rendering detail.
+// owner decision, not a rendering detail, so route 23's S-STALE-per-row
+// remains a KNOWN GAP on this page rather than something this seam fakes.
+//
+// Neutral follows directly from that refusal. The chip's default variant is
+// the positive one (.c0-chip--live renders in --state-ok, i.e. green), which
+// would assert exactly the freshness verdict the paragraph above declines to
+// make: "3h 1m ago" would paint the same green as "1m ago". Neutral renders
+// the age with no tier at all, which is the honest encoding of "here is the
+// reading; the product is not judging it".
 func systemFreshness(kind, age string, at time.Time) SystemFreshnessView {
 	v := SystemFreshnessView{
-		Chip: ProvenanceChipData{AgeLabel: age},
+		Chip: ProvenanceChipData{AgeLabel: age, Neutral: true},
 		Kind: kind,
 	}
 	if !at.IsZero() {
@@ -613,10 +629,20 @@ func buildSystemResourcesView(snap resources.Snapshot, tr func(string) string) S
 		{Label: tr("rw.network"), Primary: systemDash},
 		{Label: tr("rw.disk"), Primary: systemDash},
 	}
+	// Provenance on the block is unconditional. Stage 4 §7 S-READY makes the
+	// C0 chip mandatory on every live region, and the subsystem table's
+	// resources row (which shares this very snapshot) always states its
+	// freshness — a block that fell silent whenever SampledAt was absent or
+	// malformed would contradict the row printed directly above it.
+	// SampledAt is documented as "" before the first sample, and a nil
+	// sampler degrades to UnavailableSnapshot(), so the empty case is
+	// ordinary, not exceptional.
 	if sampled, err := time.Parse(time.RFC3339, snap.SampledAt); err == nil {
 		view.Freshness = []SystemFreshnessView{
 			systemFreshness(tr("system.status.resources.sampled_label"), systemAgo(sampled, tr), sampled),
 		}
+	} else {
+		view.Freshness = []SystemFreshnessView{systemNoReading(tr)}
 	}
 	if snap.Available {
 		if snap.CPU.Available {

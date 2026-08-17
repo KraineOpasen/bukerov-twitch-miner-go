@@ -57,7 +57,7 @@
         {{/* The echo left the table but not the mandatory-freshness gate:
              when there is no reading it must still say so, or "never started"
              becomes indistinguishable from "this band has no clock". */}}
-        {{range .Lifecycle.Freshness}}<span class="type-micro text-text-muted">{{.Kind}}{{if .Chip.AgeLabel}} <span class="num">{{.Chip.AgeLabel}}</span>{{end}}</span>{{end}}
+        {{range .Lifecycle.Freshness}}{{template "c0.provenance_chip" .Chip}}<span class="type-micro text-text-muted uppercase">{{.Kind}}{{if .Stamp}} <span class="num">{{.Stamp}}</span>{{end}}</span>{{end}}
         <span class="type-micro text-text-muted ml-auto">{{ t "system.status.lifecycle.controls_note" }}</span>
     </div>
     {{if .Lifecycle.Detail}}<div class="health-card-row health-card-detail">{{.Lifecycle.Detail}}</div>{{end}}
@@ -85,14 +85,16 @@
             <td>{{template "c10.badge" .StatusBadge}}</td>
             <td data-system-freshness>
                 {{range .Freshness}}
+                <div class="mb-2" data-system-clock>
                 {{template "c0.provenance_chip" .Chip}}
                 <div class="type-micro text-text-muted uppercase">{{.Kind}}{{if .Stamp}} <span class="num">{{.Stamp}}</span>{{end}}</div>
+                </div>
                 {{end}}
             </td>
             <td class="text-text-secondary">
                 {{if .Secondary}}<div>{{.Secondary}}</div>{{end}}
                 {{if .Detail}}<div class="health-card-detail">{{.Detail}}</div>{{end}}
-                {{if and (not .Secondary) (not .Detail)}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{end}}
+                {{if and (not .Secondary) (not .Detail)}}<span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span>{{end}}
             </td>
         </tr>
         {{end}}
@@ -123,8 +125,9 @@
             </span>
             {{end}}
         </div>
-        {{if .Secondary}}<div class="type-small text-text-secondary">{{.Secondary}}</div>{{end}}
-        {{if .Detail}}<div class="type-small text-text-secondary health-card-detail">{{.Detail}}</div>{{end}}
+        {{if .Secondary}}<div class="type-small text-text-secondary" data-card-secondary>{{.Secondary}}</div>{{end}}
+        {{if .Detail}}<div class="type-small text-text-secondary health-card-detail" data-card-detail>{{.Detail}}</div>{{end}}
+        {{if and (not .Secondary) (not .Detail)}}<div class="type-small text-text-secondary"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></div>{{end}}
     </li>
     {{end}}
 </ul>
@@ -139,7 +142,7 @@
         {{end}}
     </div>
     {{range .Resources.Rows}}
-    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{if eq .Primary "—"}}<span aria-label="{{ t "queue.slot.no_data" }}">—</span>{{else}}{{.Primary}}{{end}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
+    <div class="health-card-row"><span class="health-card-row-label">{{.Label}}</span><span class="num">{{if eq .Primary "—"}}<span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span>{{else}}{{.Primary}}{{end}}</span>{{if .Secondary}} <span class="num text-text-faint">{{.Secondary}}</span>{{end}}</div>
     {{end}}
 </div>
 
@@ -148,7 +151,7 @@
      never rendered as "you are up to date" — /system/diagnostics owns that
      statement and makes the absence explicit. */}}
 {{if .Version}}
-<div class="health-card">
+<div class="health-card" data-system-build>
     <div class="flex items-center flex-wrap gap-3">
         <span class="health-card-label">{{ t "system.status.build.label" }}</span>
         <span class="num">{{.Version}}</span>

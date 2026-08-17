@@ -774,6 +774,13 @@ type ProvenanceChipData struct {
 	Session  bool
 	Aged     bool
 	Unknown  bool
+	// Neutral renders the age with no tier colour at all, for a region that
+	// reports its evidence without judging how fresh it is. Without it the
+	// chip's default variant is the positive one, which asserts a freshness
+	// verdict; a caller that has deliberately declined to set a staleness
+	// threshold must not make that claim by omission. Defaults false, so
+	// every existing consumer keeps its current variant.
+	Neutral bool
 }
 
 // StateBlockData feeds the C1 state-block component: the single host for the
