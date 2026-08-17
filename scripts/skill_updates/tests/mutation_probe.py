@@ -73,13 +73,15 @@ PROBES = [
      "the bot would assert a review it never performed"),
 
     ("dedup-branch-check-removed", "publish.py",
-     "    if adapter.branch_exists(branch):",
-     "    if False and adapter.branch_exists(branch):",
-     "a re-run would re-push and re-open a candidate a human already handled"),
+     "    branch_present = adapter.branch_exists(branch)",
+     "    branch_present = False",
+     "a wedged branch would be re-committed and re-pushed instead of just getting its PR"),
 
     ("dedup-pr-check-removed", "publish.py",
-     "    existing = adapter.find_pull_request(branch)\n    if existing:",
-     "    existing = adapter.find_pull_request(branch)\n    if False:",
+     "    if existing:\n        return {\"status\": \"duplicate\", \"branch\": branch,"
+     " \"pull_request\": existing.get(\"number\"),",
+     "    if False:\n        return {\"status\": \"duplicate\", \"branch\": branch,"
+     " \"pull_request\": existing.get(\"number\"),",
      "a closed-unmerged candidate would be reopened nightly"),
 
     ("blocked-candidate-write-allowed", "candidate.py",
@@ -206,6 +208,41 @@ PROBES = [
      "    if \"upstream_version\" not in new_doc:\n        return",
      "    if True:\n        return",
      "a candidate would assert a version belonging to the superseded commit, invisibly"),
+
+    # --- final exact-HEAD Q3 repairs -----------------------------------------------------
+    ("prepare-drops-the-resolved-default-ref", "cli.py",
+     "            analysis = _analyze_one(provider, repo_root, workdir,\n"
+     "                                    target_override=args.target_sha)",
+     "            analysis = analyze.analyze_provider(\n"
+     "                provider, repo_root,\n"
+     "                gitio.fetch_commits(provider.upstream_repo,\n"
+     "                                    [_pinned_of(provider),\n"
+     "                                     ancestry.resolve(provider)[0]],\n"
+     "                                    os.path.join(workdir, 'x-' + provider.key)),\n"
+     "                ancestry.resolve(provider)[0])",
+     "check would report BLOCKED on ref drift while publish opened a Draft PR anyway"),
+
+    ("target-override-trusted-without-proof", "cli.py",
+     "        if target is not None and target_override != target:",
+     "        if False:",
+     "a dispatch input could vendor any commit in upstream's history"),
+
+    ("branch-presence-short-circuits-pr-lookup", "publish.py",
+     "    existing = adapter.find_pull_request(branch)\n"
+     "    branch_present = adapter.branch_exists(branch)",
+     "    branch_present = adapter.branch_exists(branch)\n"
+     "    existing = {'number': 0} if branch_present else adapter.find_pull_request(branch)",
+     "a pushed branch whose PR failed would report duplicate and exit 0 forever"),
+
+    ("failed-publish-treated-as-success", "publish.py",
+     'FAILED_PUBLISH_STATUSES = ("pushed", "pushed-no-pr")',
+     'FAILED_PUBLISH_STATUSES = ()',
+     "a branch on the remote with no pull request would exit the job green"),
+
+    ("eval-exemption-inverted-to-a-trigger-list", "analyze.py",
+     "        if _eval_exempt(path):\n            continue",
+     "        if not path.endswith('SKILL.md'):\n            continue",
+     "369 of 602 vendored files, including the instruction Markdown, would stop triggering an eval"),
 
     ("merged-authority-guard-removed", "analyze.py",
      "        if lost:\n            analysis.block(AUTHORITY,\n"

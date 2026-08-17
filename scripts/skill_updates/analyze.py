@@ -439,10 +439,22 @@ def _find_discoveries(analysis, doc, provider, base_entries, head_entries):
                ", ".join(d.name for d in analysis.discoveries)))
 
 
-#: Path shapes whose content change alters what a skill DOES, as opposed to what it says about
-#: itself. A change to any of them means provenance gates can no longer argue behavioural
-#: equivalence, so the candidate is marked EVAL_REQUIRED.
-EVAL_TRIGGER_DIRS = ("agents", "hooks", "scripts", "commands", "prompts", "rules")
+#: Basenames whose content cannot change what a skill DOES. This is an EXEMPTION list, and the
+#: direction matters: an earlier version listed the directories that DO trigger an eval, which
+#: silently exempted 369 of the 602 vendored files -- including 268 Markdown files such as
+#: `references/injection.md`, which is not documentation *about* a skill but the instruction text
+#: the skill follows. Anything not exempted here triggers, so a new content directory upstream is
+#: covered the day it appears rather than the day someone remembers to add it.
+EVAL_EXEMPT_BASENAMES = ("LICENSE", "LICENSE.txt", "LICENSE.md", "LICENCE", "COPYING", "NOTICE")
+
+#: Extensions that are assets rather than instructions.
+EVAL_EXEMPT_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".woff", ".woff2")
+
+
+def _eval_exempt(path):
+    """True when a changed file provably cannot alter behaviour."""
+    name = posixpath.basename(path)
+    return name in EVAL_EXEMPT_BASENAMES or name.lower().endswith(EVAL_EXEMPT_EXTS)
 
 
 def _classify_eval(analysis):
@@ -454,23 +466,30 @@ def _classify_eval(analysis):
     hash checks out. Recording that explicitly is the honest alternative to letting a green
     provenance run be mistaken for a behavioural guarantee.
 
+    The rule is deliberately the inverse of a trigger list: **everything changed counts unless it
+    is provably inert**. The module's own argument -- that provenance cannot establish
+    behavioural equivalence -- applies to every instruction file a skill ships, not to a
+    hand-picked set of directories, and a trigger list silently exempts whatever upstream invents
+    next.
+
     Evals are never RUN here. They cost model time and money, and a scheduled GitHub Actions job
     is the wrong place to spend either; `report.eval_instructions()` emits what to run in a fresh
     Claude session instead.
     """
     for change in analysis.changed_files:
         path = change.path
+        if _eval_exempt(path):
+            continue
         name = posixpath.basename(path)
-        parts = path.split("/")
         if name == "SKILL.md":
             analysis.needs_eval(
                 "%s changed: a skill's own instructions decide when it fires and what it does"
                 % path)
-        elif any(part in EVAL_TRIGGER_DIRS for part in parts):
-            analysis.needs_eval(
-                "%s changed: agent/hook/script content shapes the skill's workflow" % path)
         elif _is_scriptish(path, change.content):
-            analysis.needs_eval("%s changed: executable-ish content" % path)
+            analysis.needs_eval("%s changed: executable content the skill runs" % path)
+        else:
+            analysis.needs_eval(
+                "%s changed: content a skill reads and follows" % path)
     if analysis.eval_required:
         analysis.notes.append(
             "EVAL_REQUIRED: %d changed file(s) can alter behaviour; provenance checks do not "

@@ -42,13 +42,32 @@ class PublishCase(unittest.TestCase):
 
 
 class TestDeduplication(PublishCase):
-    def test_existing_branch_suppresses_everything(self):
+    def test_existing_branch_without_a_pr_is_recovered_not_suppressed(self):
+        """A branch on the remote with no PR is an UNFINISHED publish, not a duplicate.
+
+        `git push` runs before `create_pull_request`, so one transient failure leaves exactly
+        this state. Treating the branch as the dedup signal made every later run report
+        "duplicate" and exit 0 — red once, then green and silent forever while the candidate
+        never reached a human.
+        """
         branch = candidate.branch_name(self.scenario.provider.key, self.analysis.target_sha)
         self.gh.branches.add(branch)
         result = publish.publish_candidate(
             self.scenario.root, self.scenario.provider, self.analysis, [], self.gh, "main")
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(len(self.gh.pulls), 1)
+        self.assertTrue(self.gh.pulls[0]["draft"])
+        # Nothing was re-pushed or re-committed: only the missing PR was created.
+        self.assertNotIn("push", [c[0] for c in self.gh.calls])
+
+    def test_existing_branch_with_a_pr_is_a_duplicate(self):
+        branch = candidate.branch_name(self.scenario.provider.key, self.analysis.target_sha)
+        self.gh.branches.add(branch)
+        self.gh.pulls.append({"number": 5, "head": branch, "state": "open"})
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, [], self.gh, "main")
         self.assertEqual(result["status"], "duplicate")
-        self.assertEqual(self.gh.pulls, [])
+        self.assertEqual(len(self.gh.pulls), 1)
 
     def test_existing_pull_request_suppresses_creation(self):
         branch = candidate.branch_name(self.scenario.provider.key, self.analysis.target_sha)
@@ -239,7 +258,9 @@ class TestPullRequestPermission(PublishCase):
                       result["remedy"])
         self.assertIn("does not change repository settings", result["remedy"])
 
-    def test_other_errors_are_not_swallowed(self):
+    def test_non_403_failure_reports_a_failing_status_not_success(self):
+        """Any PR-creation failure must be reported as a failure, not swallowed OR raised past
+        the caller as an unhandled crash that later runs then paper over."""
         class Boom(ghadapter.FakeGitHub):
             def create_pull_request(self, *a, **kw):
                 raise AdapterError("upstream is on fire", status=500)
@@ -247,9 +268,43 @@ class TestPullRequestPermission(PublishCase):
         gh = Boom()
         fixtures.init_work_repo(self.scenario.root)
         paths = candidate.write(self.analysis, self.scenario.provider, self.scenario.root)
-        with self.assertRaises(AdapterError):
-            publish.publish_candidate(self.scenario.root, self.scenario.provider,
-                                      self.analysis, paths, gh, "main")
+        result = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                           self.analysis, paths, gh, "main")
+        self.assertEqual(result["status"], "pushed-no-pr")
+        self.assertIn(result["status"], publish.FAILED_PUBLISH_STATUSES)
+        self.assertIn("retry ONLY the pull-request creation", result["remedy"])
+
+    def test_a_wedged_branch_keeps_failing_until_a_pr_exists(self):
+        """The regression that matters: it must NOT go green on the second run."""
+        class Boom(ghadapter.FakeGitHub):
+            fail = True
+
+            def create_pull_request(self, *a, **kw):
+                if self.fail:
+                    raise AdapterError("transient", status=502)
+                return super().create_pull_request(*a, **kw)
+
+        gh = Boom()
+        fixtures.init_work_repo(self.scenario.root)
+        paths = candidate.write(self.analysis, self.scenario.provider, self.scenario.root)
+        first = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                          self.analysis, paths, gh, "main")
+        self.assertIn(first["status"], publish.FAILED_PUBLISH_STATUSES)
+
+        # Second run: the branch now exists on the remote. Old behaviour returned "duplicate"
+        # and exited 0 forever.
+        gh.branches.add(first["branch"])
+        second = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                           self.analysis, paths, gh, "main")
+        self.assertIn(second["status"], publish.FAILED_PUBLISH_STATUSES)
+        self.assertNotEqual(second["status"], "duplicate")
+
+        # Third run, once GitHub recovers: the PR is finally created.
+        gh.fail = False
+        third = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                          self.analysis, paths, gh, "main")
+        self.assertEqual(third["status"], "recovered")
+        self.assertEqual(len(gh.pulls), 1)
 
 
 class TestEndToEndPublish(PublishCase):

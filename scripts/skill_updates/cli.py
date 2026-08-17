@@ -73,9 +73,30 @@ def _analyze_all(providers, repo_root, workdir):
     return analyses
 
 
-def _analyze_one(provider, repo_root, workdir):
-    """Resolve and classify exactly one provider. Raises on failure; the caller isolates it."""
+class _TargetRefused(Exception):
+    """An explicitly supplied --target-sha is not what the reviewed ref points at."""
+
+
+def _analyze_one(provider, repo_root, workdir, target_override=None):
+    """Resolve and classify exactly one provider. Raises on failure; the caller isolates it.
+
+    This is the ONLY place a provider is classified. Both `check` and `prepare` call it, so the
+    two phases cannot reach different verdicts for the same upstream state -- which is exactly
+    what happened when `prepare` had its own copy and dropped the resolved default branch.
+
+    `target_override` pins the target commit (the `--target-sha` dispatch input). It is still
+    proved against the reviewed ref rather than trusted: accepting an arbitrary commit would let
+    a dispatch input vendor any object in upstream's history -- an abandoned branch, an
+    unreviewed fork merge. The default-branch lookup happens on this path too, so it is not a
+    second bypass.
+    """
     target, default_ref, error = ancestry.resolve(provider)
+    if target_override is not None:
+        gitio.validate_sha(target_override, "target")
+        if target is not None and target_override != target:
+            raise _TargetRefused(
+                "refusing --target-sha %s: reviewed ref %r on %s currently points at %s"
+                % (target_override, provider.upstream_ref, provider.upstream_repo, target))
     if target is None:
         item = analyze.Analysis(provider.key, provider.upstream_repo, provider.upstream_ref,
                                 provider.baseline_commit or "?", None,
@@ -152,46 +173,25 @@ def cmd_prepare(args):
         return _prepare_monitor(args, provider, adapter)
 
     with tempfile.TemporaryDirectory(prefix="skills-update-") as workdir:
-        target = args.target_sha
-        if target:
-            gitio.validate_sha(target, "target")
-            proved = gitio.ls_remote(provider.upstream_repo, provider.upstream_ref)
-            if proved != target:
-                # An explicitly supplied SHA must still be the one the reviewed ref points at.
-                # Accepting an arbitrary commit would let a dispatch input vendor any object in
-                # upstream's history -- an abandoned branch, an unreviewed fork merge.
-                sys.stderr.write(
-                    "refusing --target-sha %s: reviewed ref %r on %s currently points at %s\n"
-                    % (target, provider.upstream_ref, provider.upstream_repo, proved))
-                return 1
-        else:
-            target, _default_ref, error = ancestry.resolve(provider)
-            if target is None:
-                # An unprovable ref is a BLOCKED outcome, not a silent tool failure: record the
-                # issue so a human learns the upstream is unreachable or was renamed.
-                item = analyze.Analysis(provider.key, provider.upstream_repo,
-                                        provider.upstream_ref, _pinned_of(provider), None)
-                item.block(analyze.UNPROVABLE,
-                           "could not resolve ref %r on %s" % (provider.upstream_ref,
-                                                               provider.upstream_repo),
-                           [error or "no reason reported"])
-                sys.stdout.write(report.text_report([item]))
-                if adapter is not None:
-                    sys.stdout.write("blocked: %s\n" % publish.publish_blocked(
-                        item, provider, adapter, dry_run=args.dry_run))
-                _write_if(args.summary, report.job_summary([item], "prepare"))
-                return 1 if args.fail_on_blocked else 0
+        # ONE classification path, shared with `check`. An earlier version re-implemented this
+        # here and bound the resolved default branch to a throwaway, which silently disabled the
+        # ref-drift ANCESTRY block in the only job that actually writes anything: `check` reported
+        # BLOCKED and `publish` opened a Draft PR for the same upstream state, in the same run.
+        # Two code paths that must agree is the bug; sharing the function is the fix, so a future
+        # argument cannot be dropped on one side only.
+        try:
+            analysis = _analyze_one(provider, repo_root, workdir,
+                                    target_override=args.target_sha)
+        except _TargetRefused as exc:
+            sys.stderr.write("%s\n" % exc)
+            return 1
 
-        pinned = _pinned_of(provider)
-        if target == pinned:
-            sys.stdout.write("%s is already at %s; nothing to prepare\n" % (provider.key, target))
-            _write_if(args.summary, "`%s` is already at `%s`. No action taken.\n"
-                      % (provider.key, target[:12]))
-            return 0
-
-        repo = gitio.fetch_commits(provider.upstream_repo, [pinned, target],
-                                   os.path.join(workdir, "upstream-" + provider.key))
-        analysis = analyze.analyze_provider(provider, repo_root, repo, target)
+    if not analysis.drifted and not analysis.is_blocked:
+        sys.stdout.write("%s is already at %s; nothing to prepare\n"
+                         % (provider.key, analysis.pinned_sha))
+        _write_if(args.summary, "`%s` is already at `%s`. No action taken.\n"
+                  % (provider.key, analysis.pinned_sha[:12]))
+        return 0
 
     sys.stdout.write(report.text_report([analysis]))
 
@@ -218,9 +218,10 @@ def cmd_prepare(args):
         result = publish.publish_candidate(repo_root, provider, analysis, paths, adapter,
                                            args.base_branch, dry_run=args.dry_run)
         sys.stdout.write("publish: %s\n" % result)
-        if result.get("status") == "pushed":
-            # The branch is safe on the remote; only PR creation was refused. Surface the exact
-            # repository setting and fail, because a candidate nobody can see is not published.
+        if result.get("status") in publish.FAILED_PUBLISH_STATUSES:
+            # The branch is safe on the remote; only PR creation failed. Fail LOUDLY every time
+            # until a PR exists -- a candidate nobody can see is not published, and reporting
+            # success here is exactly how the bot would go silently dark for a provider.
             sys.stderr.write(result["remedy"] + "\n")
             _write_if(args.summary,
                       "### `%s` branch pushed, pull request NOT created\n\n%s\n"

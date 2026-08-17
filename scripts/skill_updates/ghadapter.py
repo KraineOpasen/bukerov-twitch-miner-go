@@ -24,6 +24,7 @@ Two behaviours are worth calling out because they encode requirements rather tha
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,7 +66,29 @@ class GitHubAdapter:
         if not self._token:
             raise AdapterError("GITHUB_TOKEN is not set; refusing to call the GitHub API")
 
+    #: Statuses worth one more attempt: GitHub's transient 5xx and its rate limiters. A single
+    #: blip on PR creation used to be enough to leave a branch on the remote with no pull
+    #: request, so retrying cheaply here removes the common cause of that state.
+    RETRY_STATUSES = (429, 500, 502, 503, 504)
+    RETRY_ATTEMPTS = 3
+    RETRY_BACKOFF_SECONDS = (1, 4)
+
     def _request(self, method, path, payload=None, params=None):
+        last = None
+        for attempt in range(self.RETRY_ATTEMPTS):
+            try:
+                return self._request_once(method, path, payload, params)
+            except AdapterError as exc:
+                # Only transport-level transients are retried. A 403/404/422 is a real answer
+                # about authority or input and retrying it would just repeat the same mistake.
+                if exc.status not in self.RETRY_STATUSES or attempt == self.RETRY_ATTEMPTS - 1:
+                    raise
+                last = exc
+                time.sleep(self.RETRY_BACKOFF_SECONDS[
+                    min(attempt, len(self.RETRY_BACKOFF_SECONDS) - 1)])
+        raise last  # unreachable; kept so the loop has no implicit None return
+
+    def _request_once(self, method, path, payload=None, params=None):
         url = "%s/repos/%s/%s%s" % (self.api_root, self.owner, self.repo, path)
         if params:
             url += "?" + urllib.parse.urlencode(params)

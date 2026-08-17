@@ -55,18 +55,20 @@ re-hash" diagnostic cannot fire when the bot is itself the rehash.
 
 ### 3. Refuse rather than guess
 
-Nine conditions block a candidate outright — merge conflict, skill added/deleted/renamed,
-inventory or dependency-closure change, licence change, a new symlink/submodule/executable,
-frontmatter authority drift, an unmappable local patch, and an unprovable ref. A blocked provider
-gets one deduplicated issue and **no partial PR**. Each condition marks a place where the right
-answer depends on reading something.
+Ten conditions block a candidate outright — `unprovable`, `ancestry`, `skill-set`, `inventory`,
+`licence`, `executable`, `authority`, `conflict`, `patch-map` and `closure` (the codes in
+`analyze.BLOCK_ORDER`). A blocked provider gets one deduplicated issue and **no partial PR**. Each
+condition marks a place where the right answer depends on reading something.
 
-Two calibrations matter. `executable` fires only on a file that became executable *between* the
-pinned and target commits, because several providers legitimately ship `100755` scripts this
+One calibration matters here: `executable` fires only on a file that became executable *between*
+the pinned and target commits, because several providers legitimately ship `100755` scripts this
 project vendors `100644` under a documented patch id — blocking on their mere presence would
-refuse every update forever and train readers to wave blocks through. `authority` excludes
-`description` for the same reason, while checking the remaining keys in both directions
-(BASE→THEIRS for what upstream changed, OURS→merged for what we might lose).
+refuse every update forever and train readers to wave blocks through.
+
+`authority` is calibrated the other way, and §10 below is the decision of record: it **includes**
+`description` and `when_to_use`, and is checked in both directions (BASE→THEIRS for what upstream
+changed, OURS→merged for what we might lose). Do not read the `executable` narrowing as licence to
+narrow `authority` too — the two are opposite calls, made for opposite reasons.
 
 ### 4. Determinism over convenience
 

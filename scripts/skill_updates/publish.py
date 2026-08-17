@@ -98,18 +98,41 @@ def publish_candidate(repo_root, provider, analysis, paths, adapter, base_branch
         "pushed"      branch pushed but the PR could not be created (see `remedy`)
     """
     branch = branch_name(provider.key, analysis.target_sha)
-    if adapter.branch_exists(branch):
-        return {"status": "duplicate", "branch": branch,
-                "reason": "branch already exists on the remote"}
     existing = adapter.find_pull_request(branch)
+    branch_present = adapter.branch_exists(branch)
+
+    # The PULL REQUEST is the authoritative dedup signal, not the branch. Checking the branch
+    # first was a wedge: `git push` runs before `create_pull_request`, so a single transient 5xx
+    # on PR creation left the branch on the remote with no PR -- and every later run then saw
+    # the branch, reported "duplicate", and exited 0. Red once, green and silent forever after,
+    # with the candidate never surfacing to a human. That is the bot's entire purpose failing
+    # while reporting success.
     if existing:
         return {"status": "duplicate", "branch": branch, "pull_request": existing.get("number"),
                 "reason": "a pull request for this branch already exists"}
     if dry_run:
-        return {"status": "dry-run", "branch": branch, "files": list(paths)}
+        return {"status": "dry-run", "branch": branch, "files": list(paths),
+                "branch_already_pushed": branch_present}
+
+    if branch_present:
+        # Branch pushed, PR missing: finish the job instead of re-pushing. Nothing is committed
+        # or force-pushed -- the existing branch is left exactly as it is and only the missing
+        # pull request is created.
+        return _open_pull_request(provider, analysis, adapter, branch, base_branch,
+                                  recovered=True)
 
     commit_candidate(repo_root, provider, analysis, paths, base_branch)
     push_branch(repo_root, branch)
+    return _open_pull_request(provider, analysis, adapter, branch, base_branch)
+
+
+def _open_pull_request(provider, analysis, adapter, branch, base_branch, recovered=False):
+    """Create the Draft PR for an already-pushed branch.
+
+    Every failure returns a status the caller treats as a FAILURE, never as success: the branch
+    is on the remote either way, so "no PR" must stay loud until a PR exists. `pushed` is the
+    403 case (the repository setting), `pushed-no-pr` is anything else.
+    """
     title = "chore(skills): %s update candidate %s" % (provider.key, analysis.target_sha[:8])
     try:
         pull = adapter.create_pull_request(
@@ -117,10 +140,21 @@ def publish_candidate(repo_root, provider, analysis, paths, adapter, base_branch
             body=report.pr_body(analysis, provider), draft=True)
     except AdapterError as exc:
         if exc.status == 403:
-            return {"status": "pushed", "branch": branch, "remedy": str(exc)}
-        raise
-    return {"status": "published", "branch": branch, "pull_request": pull.get("number"),
-            "url": pull.get("html_url")}
+            return {"status": "pushed", "branch": branch, "remedy": str(exc),
+                    "recovered": recovered}
+        return {"status": "pushed-no-pr", "branch": branch, "recovered": recovered,
+                "remedy": ("The candidate branch %s exists on the remote but its pull request "
+                           "could not be created: %s\nThe branch is intact; re-running the "
+                           "workflow will retry ONLY the pull-request creation, without "
+                           "re-pushing. This run is failed deliberately so the missing PR "
+                           "cannot go unnoticed." % (branch, exc))}
+    return {"status": "recovered" if recovered else "published", "branch": branch,
+            "pull_request": pull.get("number"), "url": pull.get("html_url")}
+
+
+#: Publication outcomes that mean "a branch is on the remote with no pull request". The caller
+#: must exit non-zero on these; treating either as success is what made the wedge silent.
+FAILED_PUBLISH_STATUSES = ("pushed", "pushed-no-pr")
 
 
 def _supersede_stale(adapter, prefix, keep_title, label, target_sha, dry_run):
