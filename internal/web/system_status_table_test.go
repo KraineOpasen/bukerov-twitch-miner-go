@@ -22,6 +22,8 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -206,9 +208,41 @@ func TestSystemStatusSurfacesSignalEvidence(t *testing.T) {
 	}})
 
 	body := sstRender(t, srv, "en")
-	for _, want := range []string{"token_refresh", "retrying after a transient failure", "gql_429"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the OAuth row must surface its own evidence %q", want)
+	tr := enTR(t)
+
+	rows := sstRows(t, body)
+	if len(rows) == 0 {
+		t.Fatal("no subsystem rows rendered")
+	}
+	oauth := ""
+	for _, row := range rows {
+		if strings.Contains(row, tr("system.status.oauth.label")) {
+			oauth = row
+			break
+		}
+	}
+	if oauth == "" {
+		t.Fatal("the OAuth row was not rendered")
+	}
+	// Row-scoped: a regression that hangs the OAuth signal's evidence on a
+	// different subsystem must fail here, which a page-wide Contains cannot
+	// detect. The label prefixes are pinned too, so a locale-key typo shows
+	// up as a failure rather than as a raw key on the page.
+	for _, want := range []string{
+		tr("health.card.stage") + " token_refresh",
+		"retrying after a transient failure",
+		tr("health.card.error_code") + " gql_429",
+	} {
+		if !strings.Contains(oauth, want) {
+			t.Errorf("the OAuth row must surface its own evidence %q; row was: %s", want, oauth)
+		}
+	}
+	for _, other := range rows {
+		if other == oauth {
+			continue
+		}
+		if strings.Contains(other, "gql_429") {
+			t.Errorf("another row carries the OAuth signal's error code: %s", other)
 		}
 	}
 }
@@ -270,11 +304,29 @@ func TestSystemStatusTableSemantics(t *testing.T) {
 	body := sstRender(t, sstMixedServer(t), "en")
 	tr := enTR(t)
 
-	if !strings.Contains(body, `<table class="c4-table" id="system-subsystems">`) {
-		t.Error("the subsystem surface must be a semantic <table>, not a card grid")
-	}
 	if !strings.Contains(body, `<caption class="visually-hidden">`+tr("system.status.table.caption")) {
 		t.Error("the subsystem table must carry its localized visually-hidden caption")
+	}
+	// Scoped to this table, not the whole response: base.html and every
+	// partial parsed into the page set also render into `body`, so a page-wide
+	// count would break this page's assertions from a change that never
+	// touched this page.
+	start := strings.Index(body, `<table class="c4-table" id="system-subsystems">`)
+	if start < 0 {
+		t.Fatal("the subsystem surface must be a semantic <table>, not a card grid")
+	}
+	end := strings.Index(body[start:], "</table>")
+	if end < 0 {
+		t.Fatal("unterminated subsystem table")
+	}
+	table := body[start : start+end]
+
+	// Attribute-order tolerant: some headers also carry a width class, so
+	// match the element rather than one exact byte sequence.
+	colHeader := regexp.MustCompile(`<th scope="col"[^>]*>([^<]*)`)
+	var headers []string
+	for _, m := range colHeader.FindAllStringSubmatch(table, -1) {
+		headers = append(headers, strings.TrimSpace(m[1]))
 	}
 	for _, col := range []string{
 		tr("system.status.col.subsystem"),
@@ -282,14 +334,14 @@ func TestSystemStatusTableSemantics(t *testing.T) {
 		tr("system.status.col.freshness"),
 		tr("system.status.col.detail"),
 	} {
-		if !strings.Contains(body, `<th scope="col">`+col) {
-			t.Errorf("column header %q must be a <th scope=\"col\">", col)
+		if !slices.Contains(headers, col) {
+			t.Errorf("column header %q must be a <th scope=\"col\">; got %v", col, headers)
 		}
 	}
-	if n := strings.Count(body, `<th scope="col">`); n != 4 {
-		t.Errorf("expected exactly 4 scoped column headers, found %d", n)
+	if len(headers) != 4 {
+		t.Errorf("expected exactly 4 scoped column headers, found %d: %v", len(headers), headers)
 	}
-	if n := strings.Count(body, `<th scope="row"`); n != 5 {
+	if n := strings.Count(table, `<th scope="row"`); n != 5 {
 		t.Errorf("expected one <th scope=\"row\"> per subsystem row (5), found %d", n)
 	}
 }
@@ -318,6 +370,17 @@ func TestSystemStatusLifecycleIsReadOnlyEchoOutsideTable(t *testing.T) {
 	if !strings.Contains(body, tr("system.status.lifecycle.controls_note")) {
 		t.Error("the echo must name where the lifecycle controls actually live")
 	}
+	// Moving the row out of the table must not move it out of the
+	// mandatory-freshness gate: with a real StartedAt the band states its
+	// age, and with no controller at all it states the absence in words.
+	if !strings.Contains(body, tr("system.status.lifecycle.started_label")) {
+		t.Error("the echo must state the age of its own evidence")
+	}
+	bare := sstRender(t, sstMixedServer(t), "en") // no lifecycle controller wired
+	head := bare[:strings.Index(bare, `id="system-subsystems"`)]
+	if !strings.Contains(head, tr("system.status.freshness.none")) {
+		t.Error("with no lifecycle controller the echo must say it has no reading, not fall silent")
+	}
 	// Scoped to lifecycle affordances specifically: the page legitimately
 	// carries the chrome's own hx-post language switcher, so a blanket
 	// hx-post ban would be false. What must never appear is a way to
@@ -338,6 +401,9 @@ func TestSystemStatusResourcesRowCarriesSampledFreshness(t *testing.T) {
 	tr := enTR(t)
 
 	rows := sstRows(t, body)
+	if len(rows) == 0 {
+		t.Fatal("no subsystem rows rendered")
+	}
 	last := rows[len(rows)-1]
 	if !strings.Contains(last, tr("system.status.resources.heading")) {
 		t.Fatalf("the last subsystem row must be the resources row, got: %s", last)
@@ -354,6 +420,9 @@ func TestSystemStatusResourcesRowCarriesSampledFreshness(t *testing.T) {
 	srv := newRenderServer(t)
 	srv.SetResourceSnapshotProvider(func() resources.Snapshot { return resources.UnavailableSnapshot() })
 	rows = sstRows(t, sstRender(t, srv, "en"))
+	if len(rows) == 0 {
+		t.Fatal("no subsystem rows rendered for the unavailable sampler")
+	}
 	last = rows[len(rows)-1]
 	if !strings.Contains(last, tr("system.status.freshness.none")) {
 		t.Error("an unavailable sampler must render the no-reading note, not an empty freshness cell")
@@ -363,30 +432,219 @@ func TestSystemStatusResourcesRowCarriesSampledFreshness(t *testing.T) {
 	}
 }
 
-// TestSystemStatusTableLocaleKeysPresentAndTranslated proves every locale key
-// this seam introduced exists in both catalogs, is not an echoed key name,
-// and is genuinely translated rather than copy-pasted across languages.
-func TestSystemStatusTableLocaleKeysPresentAndTranslated(t *testing.T) {
-	en, ru := enTR(t), ruTR(t)
-	for _, key := range []string{
-		"system.status.col.subsystem",
-		"system.status.col.status",
-		"system.status.col.freshness",
-		"system.status.col.detail",
-		"system.status.table.caption",
-		"system.status.freshness.none",
-		"system.status.resources.sampled_label",
-		"system.status.lifecycle.controls_note",
-		"system.status.build.label",
-	} {
-		e, r := en(key), ru(key)
-		switch {
-		case e == "" || r == "":
-			t.Errorf("%q is empty in EN (%q) or RU (%q)", key, e, r)
-		case e == key || r == key:
-			t.Errorf("%q echoed its own key back (EN %q, RU %q)", key, e, r)
-		case e == r:
-			t.Errorf("%q has identical EN/RU text %q — looks untranslated", key, e)
+// TestSystemStatusFreshnessUsesProvenanceChip proves route 23's "C0 per row"
+// component requirement is met by the real component, not by an ad-hoc
+// lookalike: every freshness cell renders a c0.provenance_chip, and a row
+// with no reading takes the chip's own S-UNK variant rather than being
+// eyeballed from a bare dash.
+func TestSystemStatusFreshnessUsesProvenanceChip(t *testing.T) {
+	body := sstRender(t, sstMixedServer(t), "en")
+	tr := enTR(t)
+
+	rows := sstRows(t, body)
+	if len(rows) != 5 {
+		t.Fatalf("expected 5 subsystem rows, got %d", len(rows))
+	}
+	// Pair the chip variant to the row's OWN evidence: a row with a reading
+	// must be live, a row without one must be the chip's S-UNK variant. The
+	// counters below then prove both cases were actually exercised, so
+	// neither branch can rot into a vacuous pass.
+	live, unknown := 0, 0
+	for i, row := range rows {
+		if !strings.Contains(row, `class="c0-chip`) {
+			t.Errorf("row %d renders no C0 provenance chip", i)
+			continue
 		}
+		hasReading := strings.Contains(row, tr("common.ago"))
+		switch {
+		case hasReading && strings.Contains(row, "c0-chip--unknown"):
+			t.Errorf("row %d has a reading but renders the S-UNK chip variant", i)
+		case hasReading:
+			live++
+		case strings.Contains(row, "c0-chip--unknown"):
+			unknown++
+		default:
+			t.Errorf("row %d has no reading but does not render the S-UNK chip variant: %s", i, row)
+		}
+	}
+	if live == 0 || unknown == 0 {
+		t.Errorf("fixture drift: need both cases exercised, got %d live and %d unknown chips", live, unknown)
+	}
+}
+
+// TestSystemStatusResourcesRowMakesNoHealthClaim proves the resources row
+// never borrows the health vocabulary. resources.Snapshot reports Available
+// on its FIRST sample while the per-section rates still need a second one,
+// so deriving "ok" from availability would render a green row sitting above
+// four em-dashes — and no health provider judges the sampler at all.
+func TestSystemStatusResourcesRowMakesNoHealthClaim(t *testing.T) {
+	tr := enTR(t)
+
+	// The exact partial state: the snapshot is available, every section is not.
+	srv := newRenderServer(t)
+	srv.SetResourceSnapshotProvider(func() resources.Snapshot {
+		return resources.Snapshot{
+			Available: true,
+			SampledAt: time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339),
+			// CPU/Memory/Network/Disk all zero-value: Available false.
+		}
+	})
+	rows := sstRows(t, sstRender(t, srv, "en"))
+	last := rows[len(rows)-1]
+	if !strings.Contains(last, tr("system.status.resources.heading")) {
+		t.Fatalf("the last subsystem row must be the resources row, got: %s", last)
+	}
+	if strings.Contains(last, "c10-badge--ok") {
+		t.Error("a first-sample snapshot with no section data must not render an ok tier")
+	}
+	if strings.Contains(last, tr("health.status.ok")) {
+		t.Error("the resources row must not borrow the health vocabulary")
+	}
+	if !strings.Contains(last, tr("system.status.resources.pointer")) {
+		t.Error("the resources row must point at the values below it")
+	}
+	// Non-vacuity: the row is still present and still stamped.
+	if _, ok := s55FreshnessValue(last, tr("system.status.resources.sampled_label")); !ok {
+		t.Error("the resources row must still carry its sampled freshness")
+	}
+}
+
+// TestSystemStatusCardsMirrorTableRows proves route 23's Transform T: the
+// <lg card representation renders the SAME subsystems as the >=lg table, so
+// no row and no evidence silently disappears at a narrower viewport.
+func TestSystemStatusCardsMirrorTableRows(t *testing.T) {
+	for _, lang := range []string{"en", "ru"} {
+		body := sstRender(t, sstMixedServer(t), lang)
+
+		tableRows := sstRows(t, body)
+		cards := strings.Count(body, "data-system-card")
+		if cards != len(tableRows) {
+			t.Errorf("%s: %d table rows but %d cards — the two representations must carry the same rows", lang, len(tableRows), cards)
+		}
+		if !strings.Contains(body, `class="c4-table-card mb-6 hidden lg:block"`) {
+			t.Errorf("%s: the table must be the >=lg representation only", lang)
+		}
+		// The toggle is on the wrapper, not on .c3-roster-cards itself: that
+		// component sets display:flex, so a display utility on the same
+		// element would be a specificity coin-flip (proven in the browser —
+		// the cards stayed visible at >=lg until the wrapper was added).
+		if !strings.Contains(body, `<div class="lg:hidden">`) {
+			t.Errorf("%s: the card representation must be gated by a wrapper", lang)
+		}
+		if strings.Contains(body, `class="c3-roster-cards mb-6 lg:hidden"`) {
+			t.Errorf("%s: a display utility on .c3-roster-cards itself is a specificity coin-flip", lang)
+		}
+		// Every subsystem label must appear in both representations.
+		cardBlock := body[strings.Index(body, "system-subsystem-cards"):]
+		tr := func(k string) string {
+			if lang == "ru" {
+				return ruTR(t)(k)
+			}
+			return enTR(t)(k)
+		}
+		for _, key := range []string{
+			"system.status.oauth.label", "system.status.gql.label", "system.status.pubsub.label",
+			"system.status.drops_sync.label", "system.status.resources.heading",
+		} {
+			if !strings.Contains(cardBlock, tr(key)) {
+				t.Errorf("%s: card representation is missing subsystem %q", lang, tr(key))
+			}
+		}
+	}
+}
+
+// TestSystemStatusScrollContainerIsReachableByKeyboard proves the table's
+// horizontal scroll container is focusable and named. It contains no
+// interactive element of its own, so without this a keyboard-only user on a
+// browser that does not auto-focus scroll regions could never reach the
+// last column at a narrow width (WCAG 2.1.1). The repo's own precedent is
+// the log viewport in logs.html.
+func TestSystemStatusScrollContainerIsReachableByKeyboard(t *testing.T) {
+	body := sstRender(t, sstMixedServer(t), "en")
+	tr := enTR(t)
+
+	i := strings.Index(body, `class="c4-table-card`)
+	if i < 0 {
+		t.Fatal("the scroll container is missing")
+	}
+	tag := body[i:]
+	if j := strings.Index(tag, ">"); j > 0 {
+		tag = tag[:j]
+	}
+	for _, want := range []string{`tabindex="0"`, `role="region"`, `aria-label="` + tr("system.status.table.region_label")} {
+		if !strings.Contains(tag, want) {
+			t.Errorf("the scroll container must carry %s; got <div %s>", want, tag)
+		}
+	}
+}
+
+// TestSystemDiagnosticsCanarySurfacesEvidence pins the deliberate cross-page
+// consequence of fixing systemSignalRow: /system/diagnostics builds its
+// watch-transport canary row through the same shared builder, so it too now
+// shows the stage/detail/error-code the signal already carried and the page
+// used to discard. Without this test that change is invisible and untested
+// on the page it also affects.
+func TestSystemDiagnosticsCanarySurfacesEvidence(t *testing.T) {
+	srv := newRenderServer(t)
+	srv.SetHealthProvider(&s55FakeHealthProvider{snap: health.Snapshot{
+		Signals: []health.Signal{{
+			Name:      health.SignalWatchTransport,
+			Status:    health.StatusDegraded,
+			CheckedAt: time.Now().Add(-time.Minute),
+			Stage:     "beacon",
+			Detail:    "watch beacon accepted",
+			ErrorCode: "canary_slow",
+		}},
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/system/diagnostics", nil)
+	req.AddCookie(&http.Cookie{Name: langCookieName, Value: "en"})
+	rec := httptest.NewRecorder()
+	srv.handleSystemDiagnosticsPage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/system/diagnostics = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	tr := enTR(t)
+
+	for _, want := range []string{
+		tr("health.card.stage") + " beacon",
+		"watch beacon accepted",
+		tr("health.card.error_code") + " canary_slow",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the canary row must surface its own evidence %q", want)
+		}
+	}
+	// The diagnostics page keeps its own markup: it must NOT have silently
+	// acquired the status page's table.
+	if strings.Contains(body, `id="system-subsystems"`) {
+		t.Error("/system/diagnostics must keep its own composition, not the status table")
+	}
+}
+
+// TestSystemStatusBuildBandShowsVersionOnly proves the build band renders the
+// version and nothing it cannot evidence: no commit SHA, no image digest, no
+// build time, and above all no "up to date" claim — /system/diagnostics owns
+// the update statement and states the absence explicitly.
+func TestSystemStatusBuildBandShowsVersionOnly(t *testing.T) {
+	body := sstRender(t, sstMixedServer(t), "en")
+	tr := enTR(t)
+
+	if !strings.Contains(body, tr("system.status.build.label")) {
+		t.Error("the build band must render")
+	}
+	for _, forbidden := range []string{
+		"up to date", "актуальная версия",
+		tr("system.diagnostics.build_info_unavailable"),
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("/system/status must not claim %q — that statement belongs to /system/diagnostics", forbidden)
+		}
+	}
+	// The band links to the page that owns build/update detail rather than
+	// restating it.
+	if !strings.Contains(body, `href="/system/diagnostics"`) {
+		t.Error("the build band must link to the owner of build/update detail")
 	}
 }

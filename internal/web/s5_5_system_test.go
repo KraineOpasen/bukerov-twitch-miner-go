@@ -141,16 +141,44 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 		t.Error("no signal is genuinely OK in this fixture; health-sev-ok must never appear")
 	}
 
-	if got := strings.Count(body, tr("health.status.unknown")); got < 3 {
-		t.Errorf("expected at least 3 unknown OAuth/GQL/PubSub rows, found %d occurrences of %q", got, tr("health.status.unknown"))
+	// Row-scoped, not page-wide: with nothing wired every subsystem row must
+	// say "unknown" in its own cell. A page-wide count tolerated one signal
+	// regressing to ok once the resources row began contributing a fourth
+	// occurrence of the same word.
+	rows := sstRows(t, body)
+	if len(rows) != 5 {
+		t.Fatalf("expected 5 subsystem rows, got %d", len(rows))
+	}
+	for i, row := range rows {
+		// Every row must name its own absence in words: the signal rows and
+		// the resources row say "unknown", the drops row (no provider wired
+		// at all) says "not available". Neither may be silently blank, and
+		// neither may borrow a healthy word.
+		if !strings.Contains(row, tr("health.status.unknown")) && !strings.Contains(row, tr("system.status.unavailable")) {
+			t.Errorf("row %d must report unknown/unavailable when nothing is wired: %s", i, row)
+		}
 	}
 
 	if !strings.Contains(body, tr("system.status.unavailable")) {
 		t.Error("expected the lifecycle/drops-sync unavailable text (nil providers) to render")
 	}
 
-	if got := strings.Count(body, systemDash); got < 4 {
-		t.Errorf("expected all 4 resource rows to render the absence marker %q, found %d occurrences", systemDash, got)
+	// Scoped to the resource block via its own marker: base.html's embedded
+	// js catalog already puts a dozen em-dashes on every page, so a
+	// page-wide count proved nothing about these four rows, and the block
+	// heading text also appears as the subsystem row's label.
+	start := strings.Index(body, "data-system-resources")
+	if start < 0 {
+		t.Fatal("the resource block marker is missing")
+	}
+	block := body[start:]
+	if end := strings.Index(block, "</div>"); end > 0 {
+		if tail := strings.Index(block[end:], "data-system"); tail > 0 {
+			block = block[:end+tail]
+		}
+	}
+	if got := strings.Count(block, systemDash); got < 4 {
+		t.Errorf("expected all 4 resource rows to render the absence marker %q, found %d in the resource block", systemDash, got)
 	}
 	if strings.Contains(body, `<span class="num">0</span>`) {
 		t.Error("resources must never fabricate a literal 0 when the sampler is unavailable")
@@ -165,46 +193,60 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // freshness cell whose kind-label is exactly label, plus whether such a pair
 // was rendered at all.
 //
-// The subsystem table renders each clock as an ADJACENT pair — the age in
-// `<div class="num">` immediately followed by its kind in
-// `<div class="type-micro text-text-muted">` (see system_status.html). This
-// helper requires that exact adjacency (only inter-tag whitespace may sit
-// between the two), so an assertion built on it binds a label to ITS OWN
-// value. A page-wide strings.Contains check for each label and each value
-// independently cannot tell two correctly-paired clocks apart from two
-// clocks whose values have been transposed — which is exactly the coverage
-// gap this helper closes, and which the move from the old health-card rows
-// to the dense table must not lose.
+// Each clock renders as an ADJACENT pair — the age inside the C0 provenance
+// chip's text span, immediately followed by the uppercase kind line (see
+// system_status.html). This helper requires that exact adjacency (only
+// inter-tag whitespace may sit between them), so an assertion built on it
+// binds a label to ITS OWN value. A page-wide strings.Contains check for
+// each label and each value independently cannot tell two correctly-paired
+// clocks apart from two clocks whose values have been transposed — which is
+// exactly the coverage gap this helper closes, and which neither the move to
+// the dense table nor the move to the C0 chip may lose.
 func s55FreshnessValue(body, label string) (string, bool) {
 	const (
-		valueOpen = `<div class="num">`
-		labelOpen = `<div class="type-micro text-text-muted">`
-		divClose  = `</div>`
+		ageOpen  = `<span class="c0-chip-text">`
+		kindOpen = `<div class="type-micro text-text-muted uppercase">`
+		spanEnd  = `</span>`
+		divEnd   = `</div>`
+		stampSep = `<span class="num">`
 	)
 	for rest := body; ; {
-		i := strings.Index(rest, valueOpen)
+		i := strings.Index(rest, ageOpen)
 		if i < 0 {
 			return "", false
 		}
-		rest = rest[i+len(valueOpen):]
+		rest = rest[i+len(ageOpen):]
 
-		end := strings.Index(rest, divClose)
+		end := strings.Index(rest, spanEnd)
 		if end < 0 {
 			return "", false
 		}
-		value := rest[:end]
-		after := strings.TrimLeft(rest[end+len(divClose):], " \t\r\n")
-		rest = rest[end+len(divClose):]
+		age := rest[:end]
+		// Skip the chip's own closing </span> and any layout whitespace, then
+		// require the kind line to be the very next element.
+		after := rest[end+len(spanEnd):]
+		if k := strings.Index(after, spanEnd); k >= 0 && strings.TrimSpace(after[:k]) == "" {
+			after = after[k+len(spanEnd):]
+		}
+		after = strings.TrimLeft(after, " \t\r\n")
+		rest = rest[end+len(spanEnd):]
 
-		if !strings.HasPrefix(after, labelOpen) {
+		if !strings.HasPrefix(after, kindOpen) {
 			continue
 		}
-		kind := after[len(labelOpen):]
-		j := strings.Index(kind, divClose)
-		if j < 0 || kind[:j] != label {
+		kind := after[len(kindOpen):]
+		j := strings.Index(kind, divEnd)
+		if j < 0 {
 			continue
 		}
-		return value, true
+		kind = kind[:j]
+		if c := strings.Index(kind, stampSep); c >= 0 {
+			kind = kind[:c]
+		}
+		if strings.TrimSpace(kind) != label {
+			continue
+		}
+		return age, true
 	}
 }
 
@@ -803,7 +845,13 @@ func TestS5_5LocaleKeysPresentAndTranslated(t *testing.T) {
 		"system.status.lifecycle.label", "system.status.lifecycle.started_label", "system.status.lifecycle.transition_started_label",
 		"system.status.oauth.label", "system.status.gql.label", "system.status.pubsub.label",
 		"system.status.drops_sync.label", "system.status.drops_sync.attempt_label", "system.status.drops_sync.success_label",
-		"system.status.resources.heading",
+		"system.status.resources.heading", "system.status.resources.sampled_label",
+		"system.status.resources.pointer", "system.status.resources.metrics",
+		"system.status.lifecycle.controls_note", "system.status.lifecycle.desired_label",
+		"system.status.col.subsystem", "system.status.col.status",
+		"system.status.col.freshness", "system.status.col.detail",
+		"system.status.table.caption", "system.status.table.region_label",
+		"system.status.freshness.none", "system.status.build.label",
 		"system.diagnostics.heading", "system.diagnostics.subtitle",
 		"system.diagnostics.watchdog.evaluated_label", "system.diagnostics.watchdog.enabled", "system.diagnostics.watchdog.disabled",
 		"system.diagnostics.version_label", "system.diagnostics.build_info_unavailable",
