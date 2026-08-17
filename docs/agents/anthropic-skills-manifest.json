@@ -1,12 +1,22 @@
 {
   "upstream_repo": "https://github.com/anthropics/skills",
-  "upstream_commit": "f6656c1256d5a8adfa37db9110046ef20bac644c",
+  "upstream_commit": "89dcaa3a283f79ed84fd8fe53e2208b9442a6427",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "f6656c1256d5a8adfa37db9110046ef20bac644c",
+    "target_commit": "89dcaa3a283f79ed84fd8fe53e2208b9442a6427",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "f6656c1256d5a8adfa37db9110046ef20bac644c",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward"
+  },
   "upstream_tree": {
-    "skill-creator": "3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6",
     "frontend-design": "0d5b74a14bdf3ebcd64f352d06376a2ef05ed296",
     "webapp-testing": "5ffb7dc66b9fd4c25c3e400a4c00da99a349b714"
   },
-  "upstream_current_head": "f6656c1256d5a8adfa37db9110046ef20bac644c",
+  "upstream_current_head": "89dcaa3a283f79ed84fd8fe53e2208b9442a6427",
   "drift": "none",
   "reviewed_at": "2026-08-16T00:00:00Z",
   "reviewed_by": "Claude Code Governance v2 task (skills refresh, single production writer) — re-review confirmed the full selected subtree (skill-creator, frontend-design, webapp-testing directory trees, including every .py/.html/.sh file) is byte-identical between b29e7cf6 and f6656c12; no content changed, provenance only updated.",
@@ -33,20 +43,21 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
-        "skc-rename-vendored",
-        "skc-user-invoked",
-        "skc-change-mode-gate",
-        "skc-workspace-tmp",
+        "anthropic-mode-normalize",
         "skc-agent-cap",
+        "skc-change-mode-gate",
+        "skc-html-no-cdn",
         "skc-no-nohup-static-viewer",
         "skc-no-open-evalreview",
-        "skc-runloop-foreground-sandbox",
         "skc-package-output-tmp",
-        "skc-html-no-cdn",
-        "skc-py-static-only-viewer",
+        "skc-py-no-autoopen-runloop",
         "skc-py-no-claudecode-strip",
         "skc-py-sandbox-guard",
-        "skc-py-no-autoopen-runloop"
+        "skc-py-static-only-viewer",
+        "skc-rename-vendored",
+        "skc-runloop-foreground-sandbox",
+        "skc-user-invoked",
+        "skc-workspace-tmp"
       ],
       "scripts_audited": true,
       "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
@@ -72,15 +83,15 @@
           "vendored_blob_sha": "c9e7fe38cf33df7682263390eea10d9ee89ad543",
           "locally_modified": true,
           "patch_ids": [
-            "skc-rename-vendored",
-            "skc-user-invoked",
-            "skc-change-mode-gate",
-            "skc-workspace-tmp",
             "skc-agent-cap",
+            "skc-change-mode-gate",
             "skc-no-nohup-static-viewer",
             "skc-no-open-evalreview",
+            "skc-package-output-tmp",
+            "skc-rename-vendored",
             "skc-runloop-foreground-sandbox",
-            "skc-package-output-tmp"
+            "skc-user-invoked",
+            "skc-workspace-tmp"
           ]
         },
         {
@@ -200,8 +211,8 @@
           "vendored_blob_sha": "d07e808da71b200fc0908739e1c08c24354adcef",
           "locally_modified": true,
           "patch_ids": [
-            "skc-html-no-cdn",
-            "anthropic-mode-normalize"
+            "anthropic-mode-normalize",
+            "skc-html-no-cdn"
           ]
         },
         {
@@ -214,8 +225,8 @@
           "vendored_blob_sha": "4889cfde6c9f7cc7ae98960ec747eeb44b5d61eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-claudecode-strip",
-            "anthropic-mode-normalize"
+            "anthropic-mode-normalize",
+            "skc-py-no-claudecode-strip"
           ]
         },
         {
@@ -241,8 +252,8 @@
           "vendored_blob_sha": "557be6266f4c11689d1f0028d62a133c315e78eb",
           "locally_modified": true,
           "patch_ids": [
-            "skc-user-invoked",
-            "anthropic-mode-normalize"
+            "anthropic-mode-normalize",
+            "skc-user-invoked"
           ]
         },
         {
@@ -255,9 +266,9 @@
           "vendored_blob_sha": "ed1b6c2c125510505369bd279aa7f2c902d21c5a",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-py-no-claudecode-strip",
-            "skc-py-sandbox-guard",
-            "anthropic-mode-normalize"
+            "skc-py-sandbox-guard"
           ]
         },
         {
@@ -270,8 +281,8 @@
           "vendored_blob_sha": "17db557665790992db27d6c0345830452eb62ff5",
           "locally_modified": true,
           "patch_ids": [
-            "skc-py-no-autoopen-runloop",
-            "anthropic-mode-normalize"
+            "anthropic-mode-normalize",
+            "skc-py-no-autoopen-runloop"
           ]
         },
         {
@@ -296,9 +307,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
+        "fd-artifact-paths",
         "fd-description-scope",
-        "fd-stack-pin",
-        "fd-artifact-paths"
+        "fd-stack-pin"
       ],
       "scripts_audited": null,
       "audit_ref": "not applicable -- this skill ships no scripts (SKILL.md + LICENSE.txt only)",
@@ -324,9 +335,9 @@
           "vendored_blob_sha": "45311c896cdce8724865d0aaac39589647153e19",
           "locally_modified": true,
           "patch_ids": [
+            "fd-artifact-paths",
             "fd-description-scope",
-            "fd-stack-pin",
-            "fd-artifact-paths"
+            "fd-stack-pin"
           ]
         }
       ]
@@ -340,12 +351,13 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
-        "webapp-testing-description-scope",
+        "anthropic-mode-normalize",
+        "webapp-testing-artifact-paths",
         "webapp-testing-audit-before-exec",
-        "webapp-testing-no-blackbox",
+        "webapp-testing-description-scope",
         "webapp-testing-localhost-only",
-        "webapp-testing-server-cleanup",
-        "webapp-testing-artifact-paths"
+        "webapp-testing-no-blackbox",
+        "webapp-testing-server-cleanup"
       ],
       "scripts_audited": true,
       "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
@@ -371,10 +383,10 @@
           "vendored_blob_sha": "256b8cc59c354ea36dd91e114fd0f21efbcb6903",
           "locally_modified": true,
           "patch_ids": [
-            "webapp-testing-description-scope",
             "webapp-testing-audit-before-exec",
-            "webapp-testing-no-blackbox",
+            "webapp-testing-description-scope",
             "webapp-testing-localhost-only",
+            "webapp-testing-no-blackbox",
             "webapp-testing-server-cleanup"
           ]
         },
@@ -439,8 +451,8 @@
           "vendored_blob_sha": "d3089b1d733aef875344ab9a592a0743f8ee0bd2",
           "locally_modified": true,
           "patch_ids": [
-            "webapp-testing-server-cleanup",
-            "anthropic-mode-normalize"
+            "anthropic-mode-normalize",
+            "webapp-testing-server-cleanup"
           ]
         }
       ]
