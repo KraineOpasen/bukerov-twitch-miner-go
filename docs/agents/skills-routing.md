@@ -204,6 +204,20 @@ Recorded honestly so the next review knows what to look for:
 - **Accessibility beyond a review rubric** — `web-design-reviewer` supplies criteria, but nothing
   runs an automated a11y audit.
 
+## Keeping the stack itself current
+
+Routing tells you which installed skill to reach for. Keeping those installed skills from silently
+falling behind upstream is a separate job, and it is automated:
+`.github/workflows/skills-update.yml` checks all six vendored providers daily and opens **one Draft
+PR per provider** when a refresh needs no judgement call, or **one deduplicated issue** when it
+does. Nothing is updated without review — a candidate manifest carries an `automated_candidate`
+block that makes `scripts/validate-agent-governance.py` fail until a human audits the diff and
+clears it.
+
+What this means for routing: if a skill in the table above behaves differently than documented
+here, check whether an update candidate is open before assuming the table is wrong. See
+`docs/agents/skills-update-automation.md` and ADR-0003.
+
 ## Next product stage: Dashboard Stage 1
 
 The next main product stage is **Dashboard Stage 1 — actual web-interface implementation work**,

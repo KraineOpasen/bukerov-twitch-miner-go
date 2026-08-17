@@ -136,6 +136,46 @@ review step. Vendoring converts that "live trust" into "trust as of a specific r
 only when someone deliberately re-reviews." The trade-off is manual update effort in exchange for a fixed,
 auditable review boundary.
 
+## Automated drift detection
+
+`automatic_updates` stays **false**: nothing here is ever updated without review. What is automated is
+*noticing*, and the mechanical half of preparing a re-vendor.
+
+A scheduled workflow (`.github/workflows/skills-update.yml`) resolves this provider's reviewed branch —
+recorded in `docs/agents/skills-update-providers.json`, which owns the ref while this manifest owns the
+pin — to a concrete commit each day. When nothing has moved it does nothing at all: no branch, no pull
+request, no issue, no comment. When something has moved it either opens **one Draft PR** carrying
+refreshed bytes and regenerated provenance, or — if any judgement call is required — refuses entirely
+and opens **one deduplicated issue** explaining why. It never opens a partial or conflicted PR.
+
+A candidate it produces is **not** a reviewed pin. The manifest it writes carries an
+`automated_candidate` block, and `scripts/validate-agent-governance.py` fails while that block is
+present, so the candidate cannot pass the governance gate on automation alone. `reviewed_at` and
+`reviewed_by` are left untouched, because they remain true statements about the superseded commit.
+Clearing the candidate state — reading the diff, re-asserting any withdrawn `scripts_audited`, recording
+fresh review fields, deleting the block — is the human step the update procedure below describes, and
+the bot cannot perform it.
+
+Upstream is read as data: repositories are fetched bare and read through `git cat-file`, never checked
+out, and no fetched script is ever executed, including to assess it.
+
+Three further rules bound what a candidate can be. **Only a fast-forward** from the reviewed
+commit is ever prepared: if upstream's history diverged, was rewritten, or no longer contains the
+reviewed commit, that is BLOCKED — a force-push that swaps reviewed history for different content
+of the same shape passes every tree-content check, so the history relation is the only thing that
+catches it. **The trigger surface is audit-required**, and it includes `description` and
+`when_to_use`: those are what the model reads to decide whether to invoke a skill, so an upstream
+rewording changes when the skill fires. And **provenance is not behavioural equivalence** — a
+candidate whose changed bytes could alter behaviour is marked `EVAL_REQUIRED`, with old-vs-candidate
+instructions to run in a fresh Claude session; the bot never runs evals itself.
+
+A new skill appearing upstream *outside* this project's installed selection is not installed and
+does not block this provider's other updates; it opens its own deduplicated `DISCOVERY_REQUIRED`
+issue so adopting it stays a human decision taken on its own schedule.
+
+Full detail, including the nine blocked conditions and the security posture:
+`docs/agents/skills-update-automation.md`.
+
 ## Update procedure
 
 1. Fetch the new upstream commit into a read-only clone (never edit it in place).
@@ -168,32 +208,26 @@ auditable review boundary.
 
 ## Known limitations
 
-- **This is the only provider still on the skill-level manifest schema, so 17 vendored files carry no recorded
-  blob hash.** The other five providers (`anthropic`, `compound-engineering`, `trailofbits`, `awesome-copilot`,
-  `builderio`) record an `upstream_blob_sha`/`vendored_blob_sha` pair per **file**; this manifest records one
-  pair per **skill**, against that skill's `SKILL.md`. Of the 42 files in the 23 vendored directories, 23 are
-  those `SKILL.md`s and two more are pinned individually through a per-skill `files[]` array
-  (`wizard/template.sh`, `writing-for-agents/SKILL-MECHANICS.md`). The remaining 17 have no hash anywhere in
-  the manifest (paths relative to `.claude/skills/`): `ask-matt/PHASE-BOUNDARIES.md`;
-  `codebase-design/DEEPENING.md`, `codebase-design/DESIGN-IT-TWICE.md`;
-  `diagnosing-bugs/scripts/hitl-loop.template.sh`; `domain-modeling/ADR-FORMAT.md`,
-  `domain-modeling/CONTEXT-FORMAT.md`; `improve-codebase-architecture/HTML-REPORT.md`; `prototype/LOGIC.md`,
-  `prototype/UI.md`; `tdd/mocking.md`, `tdd/tests.md`; `teach/GLOSSARY-FORMAT.md`,
-  `teach/LEARNING-RECORD-FORMAT.md`, `teach/MISSION-FORMAT.md`, `teach/RESOURCES-FORMAT.md`;
-  `triage/AGENT-BRIEF.md`, `triage/OUT-OF-SCOPE.md`. Four of them are locally patched —
-  `DESIGN-IT-TWICE.md` (`design-it-twice-cap`), `HTML-REPORT.md` (`architecture-selfcontained-html`),
-  `LOGIC.md` and `UI.md` (both `prototype-disposable`) — and one is a bundled shell script
-  (`diagnosing-bugs/scripts/hitl-loop.template.sh`). **What that means:** `provider-file-hashes`, the
-  fail-closed check that catches any on-disk edit to a vendored file and any on-disk file no manifest entry
-  claims, runs over the file-level providers only. An edit to one of these 17 files — or a new file dropped
-  into a mattpocock skill directory — would not be caught by it. This set's own `blob-hash-verified-locally`
-  check covers `SKILL.md` alone, and only for the four skills that are not locally modified
-  (`domain-modeling`, `grill-me`, `grill-with-docs`, `grilling`). What still applies to every file here is the
-  tree-wide half of the validator: `patch-marker-balance`, `no-symlinks-no-exec-under-claude` and
-  `no-hidden-unicode` walk the whole of `.claude/skills/`, and `relative-links-resolve` walks every `.md` in
-  it. **The fix is to migrate this manifest to the file-level schema**, which is a reviewed change of its own
-  through the update procedure above and its own Draft PR (see "Dedicated Draft PR requirement") — not
-  something to fold into an unrelated edit.
+- ~~**This is the only provider still on the skill-level manifest schema, so 17 vendored files carry no
+  recorded blob hash.**~~ **RESOLVED.** This manifest was migrated to the **file-level** schema, so all six
+  providers now record an `upstream_blob_sha`/`vendored_blob_sha` pair per **file**. All **42** files in the
+  23 vendored directories now carry one (22 of them locally modified, each naming its patch ids), where
+  previously only 25 did and 17 had no hash anywhere. The migration changed **no skill bytes**: every file's
+  `git hash-object` was recorded before and after and the two lists are identical. What this buys:
+  `provider-file-hashes` — the fail-closed check that catches any on-disk edit to a vendored file *and* any
+  on-disk file no manifest entry claims — now runs over this provider too, in both directions, as do
+  `provider-vendored-modes`, `provider-scripts-audited` and `provider-patch-marker-coverage`. The old
+  skill-level `blob-hash-verified-locally` check (which could speak for `SKILL.md` alone, and only for the
+  four skills that were not locally modified) was retired as strictly subsumed, and replaced by
+  `all-providers-file-level`, which fails closed if any provider is ever added back on the retired schema —
+  `file_level_providers()` silently skips such an entry, so without this check a new provider would get zero
+  hash coverage while every hash check still reported PASS. Two skills gained `scripts_audited: true`
+  (`diagnosing-bugs`, for `scripts/hitl-loop.template.sh`, and `wizard`, for `template.sh`); both files were
+  read end to end during the migration, and both are non-executable templates a human copies and runs, never
+  something this project invokes. The shared MIT notice at `.claude/skills/LICENSE` — which sits outside every
+  skill directory and so belongs to no `files[]` array — gained provenance in the manifest's new `license`
+  block, recording that it is upstream's `LICENSE` text preceded by a locally authored scope header, so the
+  update bot can detect upstream licence drift.
 - The hook/permission layer (`.claude/hooks/governance-policy.py`, `.claude/settings.json`) is a mechanical
   backstop, not a substitute for reading a skill before vendoring it — a sufficiently subtle instruction could
   still shape agent *reasoning* even where it can't force a blocked tool call.
