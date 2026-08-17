@@ -1,7 +1,22 @@
 {
   "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
-  "upstream_commit": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
-  "upstream_version": "3.22.0",
+  "upstream_commit": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
+    "target_commit": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward",
+    "eval_required": [
+      ".claude/skills/ce-setup/scripts/check-health changed: executable content the skill runs"
+    ],
+    "eval_note": "Provenance checks proved WHICH bytes changed and that each was reviewed at the superseded commit. They do NOT establish that these skills still behave the same way. Run the old-vs-candidate comparison in a fresh Claude session before clearing this block; see docs/agents/skills-update-automation.md."
+  },
+  "upstream_version": "3.22.1",
   "upstream_tree": {
     "ce-babysit-pr": "eef0d57c1c3863575a506eaa19b9bc58c526cc80",
     "ce-brainstorm": "c4573060ec038a135429b8fe507bd9d0dc3c7144",
@@ -20,13 +35,13 @@
     "ce-pov": "d4db4d49cfd92f0f96a85c5446d6452de7ac01a4",
     "ce-prototype": "3b54d65f4f3bada99ef5602eedd20adf47259c64",
     "ce-resolve-pr-feedback": "67f696863cdd1a67f3adfdac2657363d926bc09b",
-    "ce-setup": "45d96a6ef56c76b258b8e9d201f57d9fa4279f81",
+    "ce-setup": "00e2e19621eca86fb359a0aecc45557933c8be5e",
     "ce-simplify-code": "cedfb5c8230688c680bba0481e56ede8bd115c59",
     "ce-strategy": "ae9a402f5a9c30bddfa2e224ba84494addb38ff8",
     "ce-work": "79d8f2b7c063c49167cec10095c9b0d224b45edf",
     "ce-worktree": "7b1caeddd4ae8beee629c65da2d097ff05900606"
   },
-  "upstream_current_head": "57e586d66194585757ffa30a23dcd0f4ec0210a4",
+  "upstream_current_head": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
   "drift": "none",
   "reviewed_at": "2026-08-16T00:00:00Z",
   "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3). All 33 upstream skills under skills/ plus the repo-local .agents/skills/ce-skill-work were read with their complete dependency closures; every bundled script was read end to end.",
@@ -3009,8 +3024,8 @@
       "patch_ids": [
         "ce-mode-normalize"
       ],
-      "scripts_audited": true,
-      "audit_ref": null,
+      "scripts_audited": false,
+      "audit_ref": "SUPERSEDED — the previous audit described bytes this candidate replaced. Re-read .claude/skills/ce-setup/scripts/check-health end to end and re-assert scripts_audited. (Previous note: none recorded)",
       "files": [
         {
           "path": ".claude/skills/ce-setup/LICENSE",
@@ -3050,15 +3065,18 @@
           "path": ".claude/skills/ce-setup/scripts/check-health",
           "origin": "upstream",
           "upstream_path": "skills/ce-setup/scripts/check-health",
-          "upstream_blob_sha": "cba4de9ecc0ec4889aff8941e2d8688426389bf7",
+          "upstream_blob_sha": "363973b7960fba6750fb17f5cb9c85889511a6ea",
           "upstream_mode": "100755",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "cba4de9ecc0ec4889aff8941e2d8688426389bf7",
+          "vendored_blob_sha": "363973b7960fba6750fb17f5cb9c85889511a6ea",
           "locally_modified": false,
           "patch_ids": [
             "ce-mode-normalize"
           ]
         }
+      ],
+      "scripts_reaudit_required": [
+        ".claude/skills/ce-setup/scripts/check-health"
       ]
     },
     {
