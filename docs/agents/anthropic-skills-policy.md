@@ -51,11 +51,19 @@ commit.
 
 ## Excluded
 
-- **14 non-installed promoted skills** — `algorithmic-art`, `brand-guidelines`, `canvas-design`, `claude-api`,
-  `doc-coauthoring`, `docx`, `internal-comms`, `mcp-builder`, `pdf`, `pptx`, `slack-gif-creator`,
-  `theme-factory`, `web-artifacts-builder`, `xlsx` — none requested by this integration's contract; `docx`,
-  `pdf`, `pptx`, and `xlsx` are additionally source-available-not-open-source per upstream's README (see
-  "Upstream" above). Full list with reasons in `anthropic-skills-manifest.json`'s `excluded_skills[]`.
+- **14 non-installed promoted skills, reviewed at the current pin** — `algorithmic-art`, `brand-guidelines`,
+  `canvas-design`, `claude-api`, `doc-coauthoring`, `docx`, `internal-comms`, `mcp-builder`, `pdf`, `pptx`,
+  `slack-gif-creator`, `theme-factory`, `web-artifacts-builder`, `xlsx` — none requested by this integration's
+  contract; `docx`, `pdf`, `pptx`, and `xlsx` are additionally source-available-not-open-source per upstream's
+  README (see "Upstream" above). Full list with reasons in `anthropic-skills-manifest.json`'s `excluded_skills[]`.
+- **1 discovery-reviewed exclusion, ahead of the current pin** — `claude-academy-guide`
+  (`skills/claude-academy-guide`), reviewed from discovery snapshot `89dcaa3a283f79ed84fd8fe53e2208b9442a6427`
+  (Issue #175) rather than from the pinned `upstream_commit` above, since that commit predates this skill's
+  appearance upstream. Recorded `EXCLUDE`: an end-user Claude Academy learning-recommendation skill (broad
+  model-invoked Claude/Claude Code/skills/plugins/MCP/prompting trigger, runtime `academy.claude.com` catalog
+  fetch) with no material-addition case for this repository's engineering-only scope. This entry does not
+  change the installed count above and is independent of provider pin advancement; see the manifest's
+  `excluded_skills[]` for the full reason.
 - **Non-skill upstream paths** — `spec/`, `template/`, `.claude-plugin/`, `README.md`,
   `THIRD_PARTY_NOTICES.md`, `.gitignore` — repo scaffolding and marketplace metadata, not skill content. See
   `excluded_upstream_paths[]` in the manifest.
