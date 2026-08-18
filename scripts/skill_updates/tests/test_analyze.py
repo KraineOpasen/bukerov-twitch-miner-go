@@ -530,6 +530,164 @@ class TestUpstreamVersion(AnalyzeCase):
         self.assertNotIn("upstream_version", analysis.new_manifest)
 
 
+class TestUpstreamTreeRegeneration(AnalyzeCase):
+    """`upstream_tree` is keyed on UPSTREAM identity, which a rename makes distinct from `name`.
+
+    A skill vendored under a different local name than it carries upstream -- anthropic renames
+    `skill-creator` to `skill-creator-anthropic` so it cannot collide with the Claude Code
+    built-in -- still occupies one entry in the per-skill map, and that entry is keyed on the
+    upstream directory the tree SHA is actually computed from. Regenerating the map by the
+    vendored `name` alone silently drops that skill's provenance, and no validator check reads
+    `upstream_tree`, so nothing downstream would catch the loss.
+    """
+
+    UPSTREAM_NAME = "fixture-skill"
+    LOCAL_NAME = "fixture-skill-vendorlocal"
+
+    def test_renamed_skill_keeps_its_upstream_tree_key(self):
+        analysis, scenario = self.analyze(vendored_name=self.LOCAL_NAME,
+                                          target_files={"SKILL.md": BASE_BODY + "\nnew\n"})
+        self.assertFalse(analysis.is_blocked, analysis.blocked)
+        tree = analysis.new_manifest["upstream_tree"]
+        self.assertIn(self.UPSTREAM_NAME, tree,
+                      "the renamed skill's upstream_tree entry was dropped: %r" % (tree,))
+        self.assertEqual(
+            tree[self.UPSTREAM_NAME],
+            scenario.upstream.path_tree_sha(scenario.target_sha,
+                                            "skills/%s" % self.UPSTREAM_NAME),
+            "the entry must be recomputed from the skill's upstream_path at the TARGET commit")
+
+    def test_renamed_skill_gains_no_ghost_key(self):
+        """The local name must not appear as a second, invented entry."""
+        analysis, _ = self.analyze(vendored_name=self.LOCAL_NAME,
+                                   target_files={"SKILL.md": BASE_BODY + "\nnew\n"})
+        tree = analysis.new_manifest["upstream_tree"]
+        self.assertEqual(set(tree), {self.UPSTREAM_NAME}, tree)
+
+    def test_ordinary_skill_still_regenerates_its_key(self):
+        """Positive control: a provider with no renamed skill is unaffected."""
+        analysis, scenario = self.analyze(target_files={"SKILL.md": BASE_BODY + "\nnew\n"})
+        tree = analysis.new_manifest["upstream_tree"]
+        self.assertEqual(set(tree), {self.UPSTREAM_NAME}, tree)
+        self.assertEqual(
+            tree[self.UPSTREAM_NAME],
+            scenario.upstream.path_tree_sha(scenario.target_sha,
+                                            "skills/%s" % self.UPSTREAM_NAME))
+
+    def test_provenance_only_advance_preserves_every_key(self):
+        """The live anthropic case: nothing in the subtree changed, so no key may be lost."""
+        analysis, scenario = self.analyze(vendored_name=self.LOCAL_NAME)
+        self.assertFalse(analysis.is_blocked, analysis.blocked)
+        self.assertEqual(analysis.changed_files, [])
+        self.assertEqual(set(analysis.new_manifest["upstream_tree"]),
+                         set(scenario.manifest()["upstream_tree"]))
+
+
+class TestRebuildUpstreamTreeUnit(unittest.TestCase):
+    """Direct unit coverage of the key-selection rule, independent of a built scenario."""
+
+    class FakeRepo:
+        def __init__(self, trees=None):
+            self.trees = dict(trees or {})
+            self.asked = []
+
+        def path_tree_sha(self, commit, path):
+            self.asked.append(path)
+            return self.trees.get(path)
+
+        def commit_tree_sha(self, commit):
+            return "c" * 40
+
+    @staticmethod
+    def doc(tree, skills):
+        return {"upstream_tree": tree, "skills": skills}
+
+    def test_key_is_taken_from_renamed_from_when_the_map_uses_upstream_identity(self):
+        doc = self.doc({"upstream-name": "a" * 40},
+                       [{"name": "local-name", "renamed_from": "upstream-name",
+                         "upstream_path": "skills/upstream-name"}])
+        repo = self.FakeRepo({"skills/upstream-name": "b" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40),
+                         {"upstream-name": "b" * 40})
+
+    def test_key_falls_back_to_the_upstream_path_basename(self):
+        """`renamed_from` is optional metadata; the path the SHA comes from always exists."""
+        doc = self.doc({"upstream-name": "a" * 40},
+                       [{"name": "local-name", "upstream_path": "skills/upstream-name"}])
+        repo = self.FakeRepo({"skills/upstream-name": "b" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40),
+                         {"upstream-name": "b" * 40})
+
+    def test_local_name_wins_when_the_map_is_keyed_that_way(self):
+        """A map keyed on the vendored name keeps that convention, not the upstream one."""
+        doc = self.doc({"local-name": "a" * 40},
+                       [{"name": "local-name", "renamed_from": "upstream-name",
+                         "upstream_path": "skills/upstream-name"}])
+        repo = self.FakeRepo({"skills/upstream-name": "b" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40),
+                         {"local-name": "b" * 40})
+
+    def test_a_skill_the_map_never_tracked_is_not_added(self):
+        """Regeneration re-derives the entries a manifest documents; it never invents one."""
+        doc = self.doc({"tracked": "a" * 40},
+                       [{"name": "tracked", "upstream_path": "skills/tracked"},
+                        {"name": "untracked", "upstream_path": "skills/untracked"}])
+        repo = self.FakeRepo({"skills/tracked": "b" * 40, "skills/untracked": "c" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40),
+                         {"tracked": "b" * 40})
+
+    def test_an_unresolvable_upstream_tree_drops_the_entry(self):
+        """Fail-safe: a path that does not exist at TARGET yields no entry, never a stale one."""
+        doc = self.doc({"gone": "a" * 40},
+                       [{"name": "gone", "upstream_path": "skills/gone"}])
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, self.FakeRepo(), "0" * 40), {})
+
+    def test_a_skill_with_no_upstream_path_is_skipped_not_crashed(self):
+        """A malformed entry must not take the whole candidate down with a KeyError."""
+        doc = self.doc({"tracked": "a" * 40},
+                       [{"name": "tracked"},
+                        {"name": "ok", "upstream_path": "skills/ok"}])
+        repo = self.FakeRepo({"skills/ok": "b" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40), {})
+        self.assertEqual(repo.asked, [])
+
+    def test_a_trailing_slash_upstream_path_is_normalized_before_lookup(self):
+        """`skills/x/` and `skills/x` name the same tree; git rev-parse only accepts the latter."""
+        doc = self.doc({"x": "a" * 40},
+                       [{"name": "x", "upstream_path": "skills/x/"}])
+        repo = self.FakeRepo({"skills/x": "b" * 40})
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40), {"x": "b" * 40})
+        self.assertEqual(repo.asked, ["skills/x"])
+
+    def test_a_string_shaped_upstream_tree_still_records_the_commit_tree(self):
+        """mattpocock's shape: one SHA for the whole commit, not a per-skill map."""
+        doc = self.doc("a" * 40, [{"name": "x", "upstream_path": "skills/x"}])
+        repo = self.FakeRepo()
+        self.assertEqual(analyze._rebuild_upstream_tree(doc, repo, "0" * 40), "c" * 40)
+        self.assertEqual(repo.asked, [])
+
+    def test_every_shipped_provider_manifest_regenerates_every_key_it_records(self):
+        """Blast-radius guard: no provider may lose an entry, whatever its naming convention."""
+        import glob
+        import json
+        import posixpath
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        found = 0
+        for path in sorted(glob.glob(os.path.join(root, "docs", "agents",
+                                                  "*-skills-manifest.json"))):
+            with open(path, encoding="utf-8") as handle:
+                doc = json.load(handle)
+            if not isinstance(doc.get("upstream_tree"), dict) or not doc["upstream_tree"]:
+                continue
+            found += 1
+            repo = self.FakeRepo({s["upstream_path"].rstrip("/"): "b" * 40
+                                  for s in doc["skills"] if s.get("upstream_path")})
+            rebuilt = analyze._rebuild_upstream_tree(doc, repo, "0" * 40)
+            self.assertEqual(set(rebuilt), set(doc["upstream_tree"]),
+                             "%s: regenerated key set differs" % posixpath.basename(path))
+        self.assertGreater(found, 0, "no dict-shaped upstream_tree manifest was exercised")
+
+
 class TestLicenceCoverage(unittest.TestCase):
     """Licence comparison must cover every layout the six providers actually use.
 
