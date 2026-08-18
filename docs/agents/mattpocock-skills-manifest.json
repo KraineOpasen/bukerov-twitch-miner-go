@@ -1,8 +1,8 @@
 {
   "upstream_repo": "https://github.com/mattpocock/skills",
-  "upstream_commit": "068b6e0c62393147daf03530149cdce209c93da8",
-  "upstream_tree": "717d7f0ef7363b35c967d43629f3b71d4ec3ba77",
-  "upstream_current_head": "068b6e0c62393147daf03530149cdce209c93da8",
+  "upstream_commit": "9c9f36ccd3995266cd675468af71639c8dde1ec5",
+  "upstream_tree": "bc764b848934ed1ea7183aa78e059783fedff92b",
+  "upstream_current_head": "9c9f36ccd3995266cd675468af71639c8dde1ec5",
   "upstream_version": "1.2.3",
   "license": {
     "spdx": "MIT",
@@ -15,11 +15,11 @@
     "locally_modified": true,
     "notes": "MIT requires the copyright and permission notice to accompany all copies. This provider uses ONE shared notice at .claude/skills/LICENSE rather than a per-skill file, which is why the 23 vendored directories carry none of their own. The vendored file is upstream's MIT text verbatim, preceded by a locally authored SCOPE OF THIS NOTICE header explaining that it covers the mattpocock set only -- .claude/skills/ holds 81 skills from six providers under three different licences. The header is an addition to the notice, not a modification of the MIT terms, so it carries no patch id; upstream_blob_sha pins the upstream half so the update bot can detect licence drift."
   },
-  "reviewed_at": "2026-08-16T00:00:00Z",
-  "reviewed_by": "Claude Code Governance v2 task (skills refresh, single production writer)",
+  "reviewed_at": "2026-08-17T17:51:20Z",
+  "reviewed_by": "Governance v3 skill-update audit (task audit-mattpocock-9c9f36cc), auditing the machine-prepared candidate from .github/workflows/skills-update.yml rather than accepting its report. Upstream was re-fetched into a fresh bare read-only clone and read through git cat-file/ls-tree only -- nothing from it was executed. Independently re-proven at the target commit: 068b6e0c -> 9c9f36cc is a true fast-forward (git merge-base --is-ancestor), 9c9f36cc is the tip of the reviewed ref main and matches upstream_tree bc764b84; the complete upstream file delta across the two intervening commits is ONE path, docs/engineering/grill-with-docs.md, which this project does not vendor. All 42 vendored files across the 23 installed skills were checked in both directions -- every upstream_blob_sha/upstream_mode re-derived from the target tree, every vendored_blob_sha re-derived from the bytes on disk, no unclaimed on-disk file and no missing manifest entry, no symlink/submodule/executable bit, no vendored SKILL.md byte changed, promoted plugin.json skills[] identical old-vs-target (nothing added, deleted or renamed), MIT LICENSE blob f1dd2c09 unchanged upstream and the shared notice intact, and all 21 patch ids still resolving to live markers in the vendored bytes. Vendored skill bytes changed: 0, so the trigger/authority surface is untouched and no behavioural eval was required (EVAL_REQUIRED not applicable to this candidate). Provenance only.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
-  "notes": "Refreshed from upstream_commit ed37663c (upstream_tree 04b0fcb7) to 068b6e0c. package.json and .claude-plugin/plugin.json versions now both read 1.2.3 -- the prior release/pre-bump drift noted at the previous review is resolved. This refresh also changed the installed-skill inventory from 21 to 23: writing-great-skills was deleted upstream (replaced by an unrelated new skill, writing-for-agents) and is now vendored under that new name/content with a fresh review; wizard and wait-what, newly promoted upstream in this release, were added after separate explicit owner authorization. to-questionnaire (also newly promoted) and setup-matt-pocock-skills remain excluded. See docs/agents/mattpocock-skills-policy.md for the update-procedure write-up and docs/agents/mattpocock-skills-patches.md for every patch touched by this refresh.",
+  "notes": "Pin advanced from 068b6e0c (upstream_tree 717d7f0e) to 9c9f36cc (upstream_tree bc764b84) by a provenance-only audit -- the two intervening upstream commits touch a single documentation path, docs/engineering/grill-with-docs.md, which this project does not vendor, so zero vendored bytes changed and the installed selection, patch ledger and licence are carried forward unchanged and re-verified rather than re-derived. upstream_version stays 1.2.3. THE REMAINDER OF THIS NOTE DESCRIBES THE EARLIER ed37663c -> 068b6e0c REFRESH, which is where the installed set last actually moved. That refresh went from upstream_commit ed37663c (upstream_tree 04b0fcb7) to 068b6e0c. package.json and .claude-plugin/plugin.json versions came to both read 1.2.3 -- the release/pre-bump drift noted at the review before it is resolved. That refresh also changed the installed-skill inventory from 21 to 23: writing-great-skills was deleted upstream (replaced by an unrelated new skill, writing-for-agents) and is now vendored under that new name/content with a fresh review; wizard and wait-what, newly promoted upstream in this release, were added after separate explicit owner authorization. to-questionnaire (also newly promoted) and setup-matt-pocock-skills remain excluded. See docs/agents/mattpocock-skills-policy.md for the update-procedure write-up and docs/agents/mattpocock-skills-patches.md for every patch touched by this refresh.",
   "skills": [
     {
       "name": "ask-matt",

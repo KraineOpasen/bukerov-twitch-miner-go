@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -141,16 +142,44 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 		t.Error("no signal is genuinely OK in this fixture; health-sev-ok must never appear")
 	}
 
-	if got := strings.Count(body, tr("health.status.unknown")); got < 3 {
-		t.Errorf("expected at least 3 unknown OAuth/GQL/PubSub rows, found %d occurrences of %q", got, tr("health.status.unknown"))
+	// Row-scoped, not page-wide: with nothing wired every subsystem row must
+	// say "unknown" in its own cell. A page-wide count tolerated one signal
+	// regressing to ok once the resources row began contributing a fourth
+	// occurrence of the same word.
+	rows := sstRows(t, body)
+	if len(rows) != 5 {
+		t.Fatalf("expected 5 subsystem rows, got %d", len(rows))
+	}
+	for i, row := range rows {
+		// Every row must name its own absence in words: the signal rows and
+		// the resources row say "unknown", the drops row (no provider wired
+		// at all) says "not available". Neither may be silently blank, and
+		// neither may borrow a healthy word.
+		if !strings.Contains(row, tr("health.status.unknown")) && !strings.Contains(row, tr("system.status.unavailable")) {
+			t.Errorf("row %d must report unknown/unavailable when nothing is wired: %s", i, row)
+		}
 	}
 
 	if !strings.Contains(body, tr("system.status.unavailable")) {
 		t.Error("expected the lifecycle/drops-sync unavailable text (nil providers) to render")
 	}
 
-	if got := strings.Count(body, systemDash); got < 4 {
-		t.Errorf("expected all 4 resource rows to render the absence marker %q, found %d occurrences", systemDash, got)
+	// Scoped to the resource block via its own marker: base.html's embedded
+	// js catalog already puts a dozen em-dashes on every page, so a
+	// page-wide count proved nothing about these four rows, and the block
+	// heading text also appears as the subsystem row's label.
+	start := strings.Index(body, "data-system-resources")
+	if start < 0 {
+		t.Fatal("the resource block marker is missing")
+	}
+	block := body[start:]
+	if end := strings.Index(block, "</div>"); end > 0 {
+		if tail := strings.Index(block[end:], "data-system"); tail > 0 {
+			block = block[:end+tail]
+		}
+	}
+	if got := strings.Count(block, systemDash); got < 4 {
+		t.Errorf("expected all 4 resource rows to render the absence marker %q, found %d in the resource block", systemDash, got)
 	}
 	if strings.Contains(body, `<span class="num">0</span>`) {
 		t.Error("resources must never fabricate a literal 0 when the sampler is unavailable")
@@ -161,47 +190,80 @@ func TestS5_5StatusUnknownNeverHealthy(t *testing.T) {
 // 2. Drops sync: two distinct clocks, never merged.
 // ---------------------------------------------------------------------
 
-// s55HealthCardRowValue returns the text rendered immediately after the label
-// span of the health-card-row whose label is exactly label, plus whether such
-// a row exists at all.
+// s55KindOpenRe matches the freshness cell's kind element. The TAG is
+// deliberately not pinned — the table renders a <div>, the lifecycle band a
+// <span> inside its flex row — but the match is anchored at offset 0 by the
+// caller, so the kind line must still be the element IMMEDIATELY after the
+// chip. That is what keeps a label bound to its own value.
+var s55KindOpenRe = regexp.MustCompile(`^<(?:div|span) class="type-micro text-text-muted uppercase">`)
+
+// s55FreshnessValue returns the age rendered by the subsystem table's
+// freshness cell whose kind-label is exactly label, plus whether such a pair
+// was rendered at all.
 //
-// The scan is bounded to a single row's `<div class="health-card-row">` ...
-// `</div>` span (see system_status.html:31-32, which emits the label span and
-// its value adjacently with no intervening markup), so an assertion built on
-// it binds a label to ITS OWN value. A page-wide strings.Contains check for
+// Each clock renders as an ADJACENT pair — the age inside the C0 provenance
+// chip's text span, immediately followed by the uppercase kind line (see
+// system_status.html). This helper requires that exact adjacency (only
+// inter-tag whitespace may sit between them), so an assertion built on it
+// binds a label to ITS OWN value. A page-wide strings.Contains check for
 // each label and each value independently cannot tell two correctly-paired
-// rows apart from two rows whose values have been transposed — which is
-// exactly the coverage gap this helper closes.
-func s55HealthCardRowValue(body, label string) (string, bool) {
+// clocks apart from two clocks whose values have been transposed — which is
+// exactly the coverage gap this helper closes, and which neither the move to
+// the dense table nor the move to the C0 chip may lose.
+func s55FreshnessValue(body, label string) (age string, stamp string, ok bool) {
 	const (
-		rowOpen    = `<div class="health-card-row">`
-		labelOpen  = `<span class="health-card-row-label">`
-		labelClose = `</span>`
-		rowClose   = `</div>`
+		ageOpen  = `<span class="c0-chip-text">`
+		spanEnd  = `</span>`
+		stampSep = `<span class="num">`
 	)
 	for rest := body; ; {
-		i := strings.Index(rest, rowOpen)
+		i := strings.Index(rest, ageOpen)
 		if i < 0 {
-			return "", false
+			return "", "", false
 		}
-		rest = rest[i+len(rowOpen):]
+		rest = rest[i+len(ageOpen):]
 
-		end := strings.Index(rest, rowClose)
+		end := strings.Index(rest, spanEnd)
 		if end < 0 {
-			return "", false
+			return "", "", false
 		}
-		row := rest[:end]
-		rest = rest[end+len(rowClose):]
+		got := rest[:end]
+		// Skip the chip's own closing </span> and any layout whitespace, then
+		// require the kind line to be the very next element. The tag itself is
+		// deliberately not pinned: the table renders a <div>, the lifecycle
+		// band a <span> inside its flex row, and both are the same contract.
+		after := rest[end+len(spanEnd):]
+		if k := strings.Index(after, spanEnd); k >= 0 && strings.TrimSpace(after[:k]) == "" {
+			after = after[k+len(spanEnd):]
+		}
+		after = strings.TrimLeft(after, " \t\r\n")
+		rest = rest[end+len(spanEnd):]
 
-		if !strings.HasPrefix(row, labelOpen) {
+		m := s55KindOpenRe.FindStringIndex(after)
+		if m == nil || m[0] != 0 {
 			continue
 		}
-		inner := row[len(labelOpen):]
-		j := strings.Index(inner, labelClose)
-		if j < 0 || inner[:j] != label {
+		tail := after[m[1]:]
+		lt := strings.Index(tail, "<")
+		if lt < 0 {
 			continue
 		}
-		return inner[j+len(labelClose):], true
+		kind := strings.TrimSpace(tail[:lt])
+		gotStamp := ""
+		// The absolute wall clock is RETURNED, not discarded: it is the half
+		// of the freshness contract the page argues hardest for ("43s ago
+		// alone cannot be checked against anything"), and stripping it here
+		// is what made it untestable.
+		if strings.HasPrefix(tail[lt:], stampSep) {
+			stampRest := tail[lt+len(stampSep):]
+			if e := strings.Index(stampRest, spanEnd); e >= 0 {
+				gotStamp = stampRest[:e]
+			}
+		}
+		if kind != label {
+			continue
+		}
+		return got, gotStamp, true
 	}
 }
 
@@ -210,8 +272,8 @@ func s55HealthCardRowValue(body, label string) (string, bool) {
 // (LastSuccessAt) as two separately labeled, separately valued lines — never
 // merged into one, and never one substituted for the other.
 //
-// Each clock is asserted INSIDE its own rendered row via
-// s55HealthCardRowValue, so transposing only the two values (leaving both
+// Each clock is asserted against its OWN adjacent kind-label via
+// s55FreshnessValue, so transposing only the two values (leaving both
 // labels in place) fails here.
 func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 	srv := newRenderServer(t)
@@ -235,10 +297,13 @@ func TestS5_5StatusDistinctAttemptAndSuccessClocks(t *testing.T) {
 		{tr("system.status.drops_sync.attempt_label"), "5m ago"},
 		{tr("system.status.drops_sync.success_label"), "3h 0m ago"},
 	} {
-		got, ok := s55HealthCardRowValue(body, want.label)
+		got, stamp, ok := s55FreshnessValue(body, want.label)
 		if !ok {
-			t.Errorf("no health-card-row labeled %q was rendered", want.label)
+			t.Errorf("no freshness cell labeled %q was rendered", want.label)
 			continue
+		}
+		if stamp == "" {
+			t.Errorf("freshness cell %q rendered no absolute wall clock next to its age", want.label)
 		}
 		if got != want.value {
 			t.Errorf("row %q rendered value %q, want %q (label/value pair must not be transposed)", want.label, got, want.value)
@@ -800,7 +865,13 @@ func TestS5_5LocaleKeysPresentAndTranslated(t *testing.T) {
 		"system.status.lifecycle.label", "system.status.lifecycle.started_label", "system.status.lifecycle.transition_started_label",
 		"system.status.oauth.label", "system.status.gql.label", "system.status.pubsub.label",
 		"system.status.drops_sync.label", "system.status.drops_sync.attempt_label", "system.status.drops_sync.success_label",
-		"system.status.resources.heading",
+		"system.status.resources.heading", "system.status.resources.sampled_label",
+		"system.status.resources.pointer", "system.status.resources.metrics",
+		"system.status.lifecycle.controls_note", "system.status.lifecycle.desired_label",
+		"system.status.col.subsystem", "system.status.col.status",
+		"system.status.col.freshness", "system.status.col.detail",
+		"system.status.table.caption", "system.status.table.region_label",
+		"system.status.freshness.none", "system.status.build.label",
 		"system.diagnostics.heading", "system.diagnostics.subtitle",
 		"system.diagnostics.watchdog.evaluated_label", "system.diagnostics.watchdog.enabled", "system.diagnostics.watchdog.disabled",
 		"system.diagnostics.version_label", "system.diagnostics.build_info_unavailable",
@@ -957,9 +1028,9 @@ func TestS5_5StatusClockLocalizesElapsedSuffix(t *testing.T) {
 		{"ru", ru, ruTr("system.status.drops_sync.attempt_label"), "5m назад"},
 		{"ru", ru, ruTr("system.status.drops_sync.success_label"), "3h 0m назад"},
 	} {
-		got, ok := s55HealthCardRowValue(tc.body, tc.label)
+		got, _, ok := s55FreshnessValue(tc.body, tc.label)
 		if !ok {
-			t.Errorf("%s: no health-card-row labeled %q was rendered", tc.lang, tc.label)
+			t.Errorf("%s: no freshness cell labeled %q was rendered", tc.lang, tc.label)
 			continue
 		}
 		if got != tc.want {

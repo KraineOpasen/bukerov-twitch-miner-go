@@ -32,7 +32,7 @@
       "frontend-design": "vendored LICENSE.txt has no Appendix/copyright block (ends at 'END OF TERMS AND CONDITIONS'); attribution recorded here on its behalf per Apache-2.0 practice"
     }
   },
-  "notes": "Three of upstream's 17 promoted skills (skill-creator, frontend-design, webapp-testing) are vendored here; the other 14 are excluded (see excluded_skills[]). skill-creator was renamed skill-creator-anthropic to avoid colliding with the Claude Code built-in skill of the same name, and moved from model- to user-invoked (disable-model-invocation: true). Upstream's README notes that skills/docx, skills/pdf, skills/pptx, and skills/xlsx are source-available (not open source) reference copies of Claude's built-in document capabilities -- excluded here regardless of license, since they weren't requested. See docs/agents/anthropic-skills-policy.md for the full review writeup.",
+  "notes": "Three of upstream's 17 promoted skills (skill-creator, frontend-design, webapp-testing) are vendored here; the other 14 are excluded (see excluded_skills[]), all reviewed against the pinned upstream_commit above. A 15th excluded_skills[] entry, claude-academy-guide, was reviewed separately from a later discovery snapshot (89dcaa3a283f79ed84fd8fe53e2208b9442a6427, Issue #175) that this manifest's upstream_commit does not yet include -- it is pre-recorded as EXCLUDE independent of provider pin advancement, per the discovery issue's documented resolution path (vendor it under the update procedure, or record an exclusion verdict). skill-creator was renamed skill-creator-anthropic to avoid colliding with the Claude Code built-in skill of the same name, and moved from model- to user-invoked (disable-model-invocation: true). Upstream's README notes that skills/docx, skills/pdf, skills/pptx, and skills/xlsx are source-available (not open source) reference copies of Claude's built-in document capabilities -- excluded here regardless of license, since they weren't requested. See docs/agents/anthropic-skills-policy.md for the full review writeup.",
   "skills": [
     {
       "name": "skill-creator-anthropic",
@@ -475,6 +475,12 @@
       "name": "canvas-design",
       "upstream_path": "skills/canvas-design",
       "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
+    },
+    {
+      "name": "claude-academy-guide",
+      "upstream_path": "skills/claude-academy-guide",
+      "reason": "Reviewed as DISCOVERY_REQUIRED at upstream 89dcaa3a283f79ed84fd8fe53e2208b9442a6427 (Issue #175) -- this discovery commit is downstream of the manifest's pinned upstream_commit above, not part of the tree that pin describes. End-user Claude Academy learning-recommendation skill whose distinguishing capability is recommending Academy courses/tutorials, including a runtime academy.claude.com catalog fetch. EXCLUDE on the material-addition bar: this repository has no Claude-product support/onboarding/training lane, and existing documentation/research capabilities already cover engineering grounding. The broad model-invoked Claude/Claude Code/skills/plugins/MCP/prompting trigger would add routing/context cost without a project workflow that justifies it. Apache-2.0 license and the catalog-fetch data/network hygiene were reviewed and are not grounds for exclusion. Re-evaluate if the project acquires a Claude-product education/onboarding responsibility, or the owner explicitly wants Academy guidance.",
       "status": "EXCLUDE"
     },
     {
