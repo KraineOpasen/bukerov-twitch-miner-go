@@ -84,7 +84,7 @@ class Scenario:
 def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
           skill_name="fixture-skill", license_at_target=LICENSE_TEXT,
           target_modes=None, extra_skills=None, target_extra_skills=None,
-          root_files_at_target=None, key="fixture"):
+          root_files_at_target=None, key="fixture", vendored_name=None):
     """Build a scenario.
 
     `base_files`  upstream file contents at BASE, relative to the skill's upstream dir.
@@ -96,11 +96,18 @@ def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
                   long declined. They must NOT read as discoveries.
     `target_extra_skills` sibling skills that appear only at TARGET -- genuinely new upstream,
                   and the only thing that should produce a `Discovery`.
+    `vendored_name` the LOCAL name of the vendored skill, when it differs from its upstream
+                  directory name. This models a skill renamed on vendoring to avoid colliding
+                  with a built-in (anthropic's skill-creator -> skill-creator-anthropic): the
+                  manifest records `name` as the local name and `renamed_from` as the upstream
+                  one, while `upstream_path` and the `upstream_tree` key stay keyed on upstream
+                  identity. Defaults to `skill_name`, i.e. no rename.
     """
     base_files = dict(base_files or {"SKILL.md": SKILL_MD % {"name": skill_name}})
     target_files = base_files if target_files is None else dict(target_files)
     vendored_overrides = dict(vendored_overrides or {})
     target_modes = dict(target_modes or {})
+    local_name = vendored_name or skill_name
 
     up_dir = os.path.join(tmp, "upstream")
     os.makedirs(up_dir, exist_ok=True)
@@ -154,7 +161,7 @@ def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
 
     # --- working tree: the vendored copy of BASE, plus any local patches ------------------
     root = os.path.join(tmp, "repo")
-    skills_dir = os.path.join(root, ".claude", "skills", skill_name)
+    skills_dir = os.path.join(root, ".claude", "skills", local_name)
     docs = os.path.join(root, "docs", "agents")
     os.makedirs(docs, exist_ok=True)
 
@@ -166,7 +173,7 @@ def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
         if content is None:
             continue
         vendored_content = vendored_overrides.get(rel, content)
-        vpath = ".claude/skills/%s/%s" % (skill_name, rel)
+        vpath = ".claude/skills/%s/%s" % (local_name, rel)
         _write(os.path.join(root, vpath), vendored_content)
         data = (vendored_content.encode("utf-8") if isinstance(vendored_content, str)
                 else vendored_content)
@@ -189,6 +196,8 @@ def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
     manifest = {
         "upstream_repo": FIXTURE_URL,
         "upstream_commit": base_sha,
+        # Keyed on UPSTREAM identity, which is what the live provider manifests record: for a
+        # renamed skill that is not the same string as the vendored `name`.
         "upstream_tree": {skill_name: upstream.path_tree_sha(base_sha, skill_up)},
         "reviewed_at": "2026-01-01T00:00:00Z",
         "reviewed_by": "fixture review",
@@ -201,9 +210,10 @@ def build(tmp, base_files=None, target_files=None, vendored_overrides=None,
             "upstream_blob_sha": base_entries["LICENSE"][2],
         },
         "skills": [{
-            "name": skill_name,
-            "path": ".claude/skills/%s" % skill_name,
+            "name": local_name,
+            "path": ".claude/skills/%s" % local_name,
             "upstream_path": skill_up,
+            "renamed_from": skill_name if local_name != skill_name else None,
             "invocation": "model",
             "locally_modified": any(f["locally_modified"] for f in files),
             "patch_ids": sorted({p for f in files for p in f["patch_ids"]}),
