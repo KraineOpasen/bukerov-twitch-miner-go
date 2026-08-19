@@ -1,6 +1,17 @@
 {
   "upstream_repo": "https://github.com/trailofbits/skills",
-  "upstream_commit": "04b241176fd9c10738a61df53d2c677c53e42990",
+  "upstream_commit": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "04b241176fd9c10738a61df53d2c677c53e42990",
+    "target_commit": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "04b241176fd9c10738a61df53d2c677c53e42990",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward"
+  },
   "upstream_tree": {
     "audit-augmentation": "3cd7bb5361170da22144c5213abfcc0c0ec1bd0c",
     "audit-context-building": "2fee1a2e10b9c861e97013d192a81379d070a60e",
@@ -27,7 +38,7 @@
     "vulnerability-triage-brocards": "d7bb84ba652643b0cac54a5dae8c33f50fb69be7"
   },
   "upstream_current_head": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
-  "drift": "AHEAD OF PIN, not audited. The reviewed pin is upstream_commit 04b24117; upstream refs/heads/main -- the ref recorded for this provider in docs/agents/skills-update-providers.json -- resolved to 04b24117 when Issue #177 fixed this task's target, and had advanced 9 commits to 07bce8a2c8ccc56c5b44b7067a04b8bf46128f05 by the time this audit re-fetched it at publication (observed 2026-08-19T05:21:17Z). That advance is a fast-forward extension of the reviewed pin, not a rewrite: 04b24117 is a true ancestor of it. Its delta touches NONE of the 23 installed subtrees (verified per-subtree at both commits); it adds a new sibling plugin, plugins/goal-prompt/, and modifies only repo infrastructure and non-installed plugin content (vector-forge, modern-python, semgrep-rule-variant-creator -- all excluded here). goal-prompt was deliberately NOT reviewed, adopted, held or excluded by this task: a new-plugin adoption decision is not mechanical and is out of this audit's scope; the scheduled skills-update run will surface it on its own schedule. The Issue #177 target stays fixed at 04b24117.",
+  "drift": "none",
   "reviewed_at": "2026-08-19T00:00:00Z",
   "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3): candidate skills read in full with their complete dependency closures; every bundled script read end to end. Pin advanced 4db88ee7 -> 04b24117 by task trailofbits-property-based-testing-04b24117 (Issue #177): the reworked property-based-testing closure (SKILL.md, README.md, 5 references) was re-read end to end and its two deleted references' guidance mapped item-by-item into the target; the other 22 installed skills were verified by exact subtree/blob identity at both pins, not re-read. SKILL.md is locally modified by tob-effort-pin-dropped (upstream `effort: low` frontmatter removed); every other vendored file is byte-identical to upstream at the pin.",
   "installation_mode": "project-local-vendored-copy",
