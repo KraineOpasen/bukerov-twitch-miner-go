@@ -2,7 +2,7 @@
 
 Every local change applied to a vendored skill from
 [trailofbits/skills](https://github.com/trailofbits/skills), one row per patch id per touched file.
-**Seven patch ids across 26 touched files**, giving 28 rows — `codeql/SKILL.md` and
+**Eight patch ids across 27 touched files**, giving 29 rows — `codeql/SKILL.md` and
 `variant-analysis/SKILL.md` each carry two ids — plus one final row for a file **exclusion** that
 carries no patch id because a deleted file cannot hold a marker.
 
@@ -18,18 +18,18 @@ stated in their rows: `tob-mode-normalize` (a file mode cannot hold a comment) a
 exclusion (a deleted file cannot hold one either).
 
 All unpatched content is **byte-identical** to upstream commit
-`4db88ee79db0a68bbe049fe827e272ee2bc19510` (see `trailofbits-skills-manifest.json` for each file's
-`upstream_blob_sha` and `vendored_blob_sha`). Verified by diffing all 206 vendored files — 183
+`04b241176fd9c10738a61df53d2c677c53e42990` (see `trailofbits-skills-manifest.json` for each file's
+`upstream_blob_sha` and `vendored_blob_sha`). Verified by diffing all 204 vendored files — 181
 upstream-origin plus 23 verbatim `LICENSE` copies — against a read-only clone at that commit: exactly the
-23 content-modified files listed below differ, every one of the remaining 183 — 160 upstream-origin plus
+24 content-modified files listed below differ, every one of the remaining 180 — 157 upstream-origin plus
 all 23 `LICENSE` copies — is identical byte for byte, and every `vendored_blob_sha` in the manifest matches
 `git hash-object` on disk.
 
 No translations, no stylistic rewrites, no reworded guidance. Every change here is one of: a pointer to a
 plugin runtime this project-local install does not have, a pointer to something that is not installed, a
 path segment made wrong by relocating a file, an invisible Unicode character this repository forbids, a
-file mode, an interpreter prefix that mode normalization made necessary, or a git command that mutates the
-working tree. **No patch caps concurrency, imposes a writer count, forces a reviewer into a read-only role,
+file mode, an interpreter prefix that mode normalization made necessary, a git command that mutates the
+working tree, or an upstream frontmatter `effort` pin that would override the session effort level. **No patch caps concurrency, imposes a writer count, forces a reviewer into a read-only role,
 or changes any skill's agent topology** — see `trailofbits-skills-policy.md`, "Default: minimal patching".
 
 Under **CC BY-SA 4.0 §3(a)(1)(B)** ("If You Share the Licensed Material … You must indicate if You modified
@@ -68,6 +68,7 @@ here are adaptations of BY-SA material and are themselves CC BY-SA 4.0, not GPL-
 | codeql | `plugins/static-analysis/skills/codeql/workflows/create-data-extensions.md` | `see manifest` | `find_databases.sh` bare invocation → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
 | codeql | `plugins/static-analysis/skills/codeql/workflows/run-analysis.md` | `see manifest` | `find_databases.sh` bare invocation → prefixed with `bash`. | Same. | `tob-exec-bit-interpreter` |
 | semgrep | `plugins/static-analysis/skills/semgrep/workflows/scan-workflow.md` | `see manifest` | `{baseDir}/scripts/run-scans.sh` → prefixed with `bash` (line 263). | Same. | `tob-exec-bit-interpreter` |
+| property-based-testing | `plugins/property-based-testing/skills/property-based-testing/SKILL.md` | `1cc39d8d8cba5955bf9c8d7c9a2aef348722a55e` | One self-closing marker below the frontmatter; the frontmatter line `effort: low` is removed. Nothing else changes: `name`, the reworked `description`, and every line of the body are byte-identical to upstream at the pin. A frontmatter line cannot carry an HTML-comment marker, so the marker sits in the body directly under the closing `---`, the same placement the `semgrep` frontmatter patch uses. | The upstream rework pins `effort: low`, and Claude Code's documented semantics for that key are "Effort level when this skill is active. Overrides the session effort level" — upstream's own README says the same and warns it "drags a deliberate `xhigh` session *down*". The decisive ground for removal is **authority**: the pin silently overrides an owner-selected session effort every time this model-invocable skill fires, and `effort` is on this repository's authority-surface key list (`docs/agents/skills-update-automation.md`). The mechanical constraint alongside it is stated precisely: the key as vendored fails `check_frontmatter_keys` (this provider's `extra_frontmatter_keys` allowlist is `{allowed-tools, type}`), but the validator's documented default for a legitimate upstream key is to PRESERVE the frontmatter and widen the allowlist (`allowed_frontmatter_keys_by_dir`, which names `effort` as an example) — that route was deliberately declined, not overlooked: it is a reviewed validator change outside any re-vendor task, and the authority ground makes adopting the pin undesirable regardless. Cost stated honestly: upstream measured `low` as sufficient on its eval fixture and pinned it to cut cost; without the pin the skill inherits the session effort — the pre-rework behaviour. Knock-on, recorded in the policy's "Known limitations": the vendored README (verbatim) still describes the pin as present and documents un-vendored `evals-extra/` commands. | `tob-effort-pin-dropped` |
 | 22 skills (all except `vulnerability-triage-brocards`) | `plugins/<plugin>/skills/<skill>/agents/openai.yaml` | `1d437b6dfffe6d157d6744ea946a9c9620578c2a` (identical in all 22) | **File excluded from the vendored copy** — not modified, not present. In every one of the 22 skills this file is the sole occupant of the skill's own `agents/` directory, so the directory is absent too. Its content is four lines of Codex marketplace interface metadata: `interface: icon_small / icon_large` both pointing at `assets/trail-of-bits-mark.svg`, and `brand_color: "#D83A34"`. The referenced SVG **is** vendored, unmodified, in all 22 directories. `vulnerability-triage-brocards` ships no `agents/` directory upstream and so has nothing to exclude. | Two independent reasons. First, it is not an agent definition and carries nothing an agent reads: it is interface chrome for a different marketplace, and the real Claude Code subagent definitions live at plugin root (relocated separately — see the four `tob-plugin-agents-relocated` rows). Second, `openai.yaml` is a forbidden vendored filename in this repository (`FORBIDDEN_VENDOR_NAMES` in `scripts/validate-agent-governance.py`, checked by `forbidden-vendor-files-absent`), alongside `.github`, `.claude-plugin`, `package.json` and `package-lock.json`. A deleted file can carry no in-file marker, so this ledger row is the whole notice — which is why it appears here despite having no patch id. | n/a — file exclusion, no patch id |
 
 ## `tob-exec-bit-interpreter` — why this is a patch and not a documented workaround
