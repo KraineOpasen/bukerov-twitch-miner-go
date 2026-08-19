@@ -13,32 +13,36 @@ never share a skill name (see `scripts/validate-agent-governance.py`'s `manifest
 ## Upstream
 
 - Repo: `https://github.com/anthropics/skills`
-- Reviewed commit: `89dcaa3a283f79ed84fd8fe53e2208b9442a6427` (advanced from
-  `f6656c1256d5a8adfa37db9110046ef20bac644c` by a **provenance-only** audit of the machine-prepared candidate
-  on PR #176: `f6656c12 -> 89dcaa3a` is a true fast-forward — one commit, merge-base equal to the old pin, no
-  reverse commits, no merges — and its complete upstream delta is three paths, `.claude-plugin/marketplace.json`
-  and the two files of a new sibling skill, `skills/claude-academy-guide/{LICENSE.txt,SKILL.md}`. None of them
-  lies under an installed subtree, so zero vendored bytes changed. The three installed skill trees were compared
-  in both directions at both pins — identical subtree SHAs and identical complete recursive inventories, every
-  path, mode and blob SHA equal, no symlink, submodule or executable-bit change, both Apache-2.0 `LICENSE.txt`
-  notices unchanged. The installed prose and scripts were therefore **carried forward on demonstrated byte
-  identity, not re-read end to end**; the standing end-to-end read is the one each skill's `audit_ref` records)
-- The pin before that, `f6656c12`, was itself refreshed from `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`, also as a
-  provenance-only bump: the full selected subtree — all three vendored skills' complete directory trees, including
-  every `.py`/`.html`/`.sh` file — was re-audited and found byte-identical between those two commits, with zero
-  content or patch changes
-- Reviewed tree SHAs (per vendored skill directory), unchanged from `f6656c12` and re-proven against
-  `89dcaa3a`: `skill-creator` `3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6`, `frontend-design`
+- Reviewed commit: `0a64e398ec6bb34a494f0c347e8ccae53a862f8e` (advanced from `89dcaa3a283f79ed84fd8fe53e2208b9442a6427`
+  by a **provenance-only** audit of the machine-prepared candidate on PR #188: `89dcaa3a -> 0a64e398` is a true
+  fast-forward — two commits (`f379e5a` then `0a64e39`), merge-base equal to the old pin, no reverse commits, no
+  merges — and its complete upstream delta is five paths: `.claude-plugin/marketplace.json`; the rename of
+  `skills/claude-academy-guide/{LICENSE.txt,SKILL.md}` to `skills/academy-guide/{LICENSE.txt,SKILL.md}`
+  (`LICENSE.txt` byte-identical, `SKILL.md` an 88%-similarity rename that shortens the description without
+  changing purpose or trigger scope); and the two files of a new sibling skill,
+  `skills/discernment-nudge/{LICENSE.txt,SKILL.md}`. None of them lies under an installed subtree, so zero
+  vendored bytes changed. The three installed skill trees were compared in both directions at both pins —
+  identical subtree SHAs and identical complete recursive inventories, every path, mode and blob SHA equal, no
+  symlink, submodule or executable-bit change, both Apache-2.0 `LICENSE.txt` notices unchanged. The installed
+  prose and scripts were therefore **carried forward on demonstrated byte identity, not re-read end to end**;
+  the standing end-to-end read is the one each skill's `audit_ref` records)
+- The pin before that, `89dcaa3a`, was itself advanced from `f6656c1256d5a8adfa37db9110046ef20bac644c` by a
+  provenance-only audit on PR #176 — one commit, fast-forward, complete delta three paths
+  (`.claude-plugin/marketplace.json` and the two files that first added `skills/claude-academy-guide`) — and
+  `f6656c12` was itself refreshed from `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`, also provenance-only: the
+  full selected subtree was re-audited byte-identical between those two commits, with zero content or patch
+  changes
+- Reviewed tree SHAs (per vendored skill directory), unchanged since `f6656c12` and re-proven against
+  `0a64e398`: `skill-creator` `3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6`, `frontend-design`
   `0d5b74a14bdf3ebcd64f352d06376a2ef05ed296`, `webapp-testing` `5ffb7dc66b9fd4c25c3e400a4c00da99a349b714`.
   This map is keyed on **upstream** directory identity, not on the vendored directory name — which is why
   `skill-creator` appears here rather than `skill-creator-anthropic` (see "Installed: 3 skills" for the rename)
-- Current upstream HEAD at review time: `f379e5ad66e2febc1616cf8d6284666fecbe514e` (**drift: ahead of pin, not
-  audited**, observed 2026-08-18T05:44:38Z). It is a fast-forward extension of the reviewed pin, not a rewrite —
-  `89dcaa3a` is still a true ancestor — and its complete delta is again three paths: `.claude-plugin/marketplace.json`
-  metadata plus a new sibling skill, `skills/discernment-nudge/{LICENSE.txt,SKILL.md}`. It touches none of the
-  three installed subtrees. `discernment-nudge` was **not** reviewed, adopted, held or excluded by this audit:
-  adopting or declining a new skill is a judgement call, not a mechanical one, and it gets its own
-  `DISCOVERY_REQUIRED` issue and its own candidate under "Update procedure" below
+- Current upstream HEAD at review time: `0a64e398ec6bb34a494f0c347e8ccae53a862f8e` (**drift: none**, observed
+  2026-08-19T10:00:42Z) — this is the pinned `upstream_commit` itself, confirmed by a fresh full clone of
+  `refs/heads/main`, the reviewed ref recorded in `docs/agents/skills-update-providers.json`; there is no further
+  advance to report. The two new sibling skills this pin brought in were both reviewed under Issue #187
+  (`DISCOVERY_REQUIRED` at this commit) and recorded `EXCLUDE` — see "Excluded" below; adopting or declining a
+  new skill remains a judgement call, never automated
 - Upstream's own `README.md` notes that `skills/docx`, `skills/pdf`, `skills/pptx`, and `skills/xlsx` are
   **source-available, not open source** — reference copies of the skills powering Claude's built-in document
   capabilities, shared for developers to read but not under an open-source license. None of the three skills
@@ -74,18 +78,31 @@ commit.
   `slack-gif-creator`, `theme-factory`, `web-artifacts-builder`, `xlsx` — none requested by this integration's
   contract; `docx`, `pdf`, `pptx`, and `xlsx` are additionally source-available-not-open-source per upstream's
   README (see "Upstream" above). Full list with reasons in `anthropic-skills-manifest.json`'s `excluded_skills[]`.
-- **1 discovery-reviewed exclusion, now inside the current pin** — `claude-academy-guide`
-  (`skills/claude-academy-guide`), reviewed from discovery snapshot `89dcaa3a283f79ed84fd8fe53e2208b9442a6427`
-  (Issue #175) while that commit was still ahead of the pin. `89dcaa3a` is now the pinned `upstream_commit`
-  above — it is the very commit that adds this skill — so the skill is part of the reviewed tree and the
-  verdict below is a verdict on a skill the pin describes. The verdict itself is unchanged by the pin advance.
-  Recorded `EXCLUDE`: an end-user Claude Academy learning-recommendation skill (broad
-  model-invoked Claude/Claude Code/skills/plugins/MCP/prompting trigger, runtime `academy.claude.com` catalog
-  fetch) with no material-addition case for this repository's engineering-only scope. This entry does not
-  change the installed count above; see the manifest's `excluded_skills[]` for the full reason.
-- **Totals at the reviewed pin** — `89dcaa3a` promotes 18 skill directories under `skills/`: the 3 installed
-  above and the 15 excluded across the two bullets here (14 + `claude-academy-guide`). The predecessor pin
-  `f6656c12` promoted 17; the one commit between them is what added the 18th.
+- **2 discovery-reviewed exclusions, now inside the current pin**:
+  - `academy-guide` (`skills/academy-guide`), reviewed from discovery snapshot
+    `89dcaa3a283f79ed84fd8fe53e2208b9442a6427` under its then name `claude-academy-guide` (Issue #175) while
+    that commit was still ahead of the pin. Upstream commit `0a64e398ec6bb34a494f0c347e8ccae53a862f8e`
+    ("Rename claude-academy-guide skill to academy-guide and shorten its description (#1605)") is the exact
+    rename — confirmed by that commit's own message and a `git diff -M` showing `LICENSE.txt` byte-identical
+    and `SKILL.md` an 88%-similarity rename, not assumed — and `0a64e398` is now the pinned `upstream_commit`
+    above, so the skill is part of the reviewed tree under its current name and the verdict below is a verdict
+    on a skill the pin describes. The verdict itself is unchanged by the rename or the pin advance. Recorded
+    `EXCLUDE`: an end-user Claude Academy learning-recommendation skill (broad model-invoked
+    Claude/Claude Code/skills/plugins/MCP trigger, runtime `academy.claude.com` catalog fetch) with no
+    material-addition case for this repository's engineering-only scope.
+  - `discernment-nudge` (`skills/discernment-nudge`), added upstream by commit
+    `f379e5ad66e2febc1616cf8d6284666fecbe514e` (PR #1553) and reviewed under Issue #187
+    (`DISCOVERY_REQUIRED` at `0a64e398ec6bb34a494f0c347e8ccae53a862f8e`). Appends 2-3 short reflection
+    questions after any substantive answer the user may act on, at most once per conversation; pure prose, no
+    scripts, no network fetch. Recorded `EXCLUDE` on the same material-addition bar as `academy-guide`: the
+    trigger is broad and ambient — most substantive replies, not a scoped engineering task — with no
+    response-quality-coaching lane this integration's contract asks for.
+
+  Neither entry changes the installed count above; see the manifest's `excluded_skills[]` for the full reasons.
+- **Totals at the reviewed pin** — `0a64e398` promotes 19 skill directories under `skills/`: the 3 installed
+  above and the 16 excluded across the two bullets here (14 + `academy-guide` + `discernment-nudge`). The
+  predecessor pin `89dcaa3a` promoted 18; the two commits between them renamed one existing entry
+  (`claude-academy-guide` → `academy-guide`) and added the 19th (`discernment-nudge`).
 - **Non-skill upstream paths** — `spec/`, `template/`, `.claude-plugin/`, `README.md`,
   `THIRD_PARTY_NOTICES.md`, `.gitignore` — repo scaffolding and marketplace metadata, not skill content. See
   `excluded_upstream_paths[]` in the manifest.
