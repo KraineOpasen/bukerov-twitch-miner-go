@@ -8,6 +8,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -507,6 +508,84 @@ func TestS5_3SlotPairProvenanceUnknownWithNoEvidence(t *testing.T) {
 	body := f3GetPage(t, srv, "/overview", "en")
 	if !strings.Contains(body, "c0-chip--unknown") {
 		t.Error("the slot-pair provenance chip must render the unknown variant when no evidence is wired")
+	}
+}
+
+// s53ChipTextRe captures the C0 chip's rendered text; s53ChipAgeRe is the exact
+// shape util.FormatDuration emits ("<digits><unit>", never a compound).
+var (
+	s53ChipTextRe = regexp.MustCompile(`<span class="c0-chip-text">([^<]*)</span>`)
+	s53ChipAgeRe  = regexp.MustCompile(`^\d+[smhd]$`)
+)
+
+// s53SlotPairRegion narrows a rendered /overview page to the watch-pair region
+// only - from the [data-ov-slots] group down to the health summary that follows
+// it. The chip assertions below are about THIS region's provenance, so they must
+// not be satisfied (or broken) by a C0 chip belonging to some other region:
+// Stage 4 §14.1's /overview mockup draws a second C0 on the lifecycle card
+// ("▲ 8 с · SSE"), and an SSE-backed chip CAN derive a real threshold from its
+// transport and legitimately earn the positive tier. It fails loudly rather than returning the whole page, so the
+// narrowing can never silently degrade into a page-wide search.
+func s53SlotPairRegion(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, "data-ov-slots")
+	if start < 0 {
+		t.Fatal("fixture drift: no [data-ov-slots] watch-pair region on /overview")
+	}
+	end := strings.Index(body[start:], "data-ov-health-summary")
+	if end < 0 {
+		t.Fatal("fixture drift: no [data-ov-health-summary] terminator after the watch-pair region")
+	}
+	return body[start : start+end]
+}
+
+// TestS5_3SlotPairProvenanceMakesNoUnearnedVerdict proves the /overview
+// slot-pair chip never paints a POSITIVE freshness verdict. c12PairProvenance
+// deliberately establishes no staleness threshold for watch-slot evidence, so
+// taking the C0 chip's default tier would assert exactly the judgement it
+// declined to make: "3h ago" would paint the same green as "1m ago". This is
+// the same rule /system/status already pins for the same component - see
+// TestSystemStatusFreshnessMakesNoUnearnedVerdict.
+func TestS5_3SlotPairProvenanceMakesNoUnearnedVerdict(t *testing.T) {
+	srv := s53LeakTestServer(t)
+
+	// Both languages are exercised, but ONLY to pin that the tier outcome is
+	// language-invariant. It is not RU copy coverage and must not be read as
+	// such: the chip's own text comes from util.FormatDuration, which emits
+	// untranslated ASCII ("3h"), and the one localized string the component has
+	// (c0.unknown) is asserted ABSENT here. Rendered RU/EN copy is covered by
+	// the browser matrix, not by this test.
+	for _, lang := range []string{"en", "ru"} {
+		t.Run(lang, func(t *testing.T) {
+			region := s53SlotPairRegion(t, f3GetPage(t, srv, "/overview", lang))
+
+			// A chip must actually be here. Prefix match, so this stays true
+			// whichever variant renders - it proves presence, not tier.
+			if !strings.Contains(region, `class="c0-chip`) {
+				t.Fatal("fixture drift: the watch-pair region rendered no provenance chip at all")
+			}
+
+			// None of the three VERDICT tiers may appear. Asserting the absence
+			// of each verdict (rather than the presence of the bare base class)
+			// keeps this correct if an explicit untiered modifier is ever added.
+			for _, verdict := range []string{"c0-chip--live", "c0-chip--aged", "c0-chip--unknown"} {
+				if strings.Contains(region, verdict) {
+					t.Errorf("a present watch-slot reading took the %s tier; this region establishes no staleness threshold, so it must render no verdict at all", verdict)
+				}
+			}
+
+			// The age reading itself, not just its wrapper: the
+			// <span class="c0-chip-text"> element is emitted for EVERY variant,
+			// so asserting its mere presence would pass even with AgeLabel
+			// emptied. util.FormatDuration always yields "<digits><unit>".
+			age := s53ChipTextRe.FindStringSubmatch(region)
+			if age == nil {
+				t.Fatal("fixture drift: the chip rendered no c0-chip-text span at all")
+			}
+			if !s53ChipAgeRe.MatchString(age[1]) {
+				t.Errorf("the chip must still carry its age reading - only the tier changes; got %q", age[1])
+			}
+		})
 	}
 }
 

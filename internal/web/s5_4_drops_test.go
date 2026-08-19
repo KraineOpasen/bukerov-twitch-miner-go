@@ -306,6 +306,21 @@ func TestS5_4CurrentAgedChipBecomesStale(t *testing.T) {
 	if !stale.Campaigns[0].Chip.Aged {
 		t.Error("a sync 130m old on a 60m interval (>2x) must be Aged (S-STALE)")
 	}
+
+	// This surface's freshness verdict is EARNED whenever a threshold exists: it
+	// derives one from the sync interval above (config clamps
+	// CampaignSyncInterval to [5,120], so one always exists in production), and a
+	// fresh reading is then entitled to the C0 chip's positive tier. /overview's
+	// slot pair and /system/status both
+	// establish no threshold and therefore render Neutral instead. Pin the
+	// distinction so a future sweep cannot flatten every provenance chip to
+	// Neutral and silently delete a verdict this page actually computed.
+	if fresh.Campaigns[0].Chip.Neutral {
+		t.Error("drops computes a real staleness threshold, so its fresh reading must keep the earned positive tier, not Neutral")
+	}
+	if stale.Campaigns[0].Chip.Neutral {
+		t.Error("an Aged verdict is a judgement this page earned; it must not be neutralised")
+	}
 }
 
 // TestS5_4UnknownProgressNeverZero proves a drop with no authoritative
