@@ -57,7 +57,11 @@ Before submit, resolve the ordinary `pr_teaching_archive` / `archive:on|off` gat
 
 Before submit, inspect the manager's open PRs (`gh stack view --json` / `gh pr view`) for any **existing draft** layers. If any draft already exists that the author did not explicitly ask to open this run, do **not** pass `--open` (GitHub documents `--open` as also marking existing PRs ready for review). In that case: submit with `gh stack submit --auto` only, then treat remaining drafts as a hard residual before babysit when babysit is on — never auto-ready WIP drafts.
 
-When no existing drafts are present (or the user explicitly authorized opening every layer):
+When no existing drafts are present:<!-- bukerov-local-patch: ce-draft-pr-only — dropped the alternative
+"(or the user explicitly authorized opening every layer)". Upstream used it to select `--open`; with that flag
+removed this branch submits drafts exactly like the branch above, so the clause named an outcome it can no
+longer reach and would have an agent report layers as opened ready. Marking a PR ready for review is
+owner-only. -->
 
 <!-- bukerov-local-patch: ce-draft-pr-only -->
 ```bash
