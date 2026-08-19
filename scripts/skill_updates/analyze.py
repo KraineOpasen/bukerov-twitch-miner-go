@@ -496,25 +496,61 @@ def _classify_eval(analysis):
             "establish behavioural equivalence" % len(analysis.eval_required))
 
 
+def _upstream_dir(skill):
+    """The upstream directory a skill is vendored from, normalized, or "" when unrecorded."""
+    return (skill.get("upstream_path") or "").rstrip("/")
+
+
+def _upstream_tree_key(skill, existing):
+    """Which key in an existing per-skill `upstream_tree` map this skill occupies, or None.
+
+    A skill has two identities and they are not always the same string. Its **local** identity
+    is `name` -- the directory it is vendored under. Its **upstream** identity is the directory
+    it comes from, recorded as `renamed_from` and always visible as the basename of
+    `upstream_path`. They diverge whenever a skill is renamed on vendoring, which this project
+    does when an upstream name would collide with a Claude Code built-in.
+
+    Matching on `name` alone therefore fails to find a renamed skill's existing entry, and the
+    entry is then dropped from the regenerated map -- a silent provenance loss, because no
+    validator check reads `upstream_tree`. Matching on the upstream identity alone would be just
+    as wrong for a manifest that keys the map locally. So the candidates are tried in order,
+    local identity first, and the first one the map already contains wins.
+
+    Only keys the map already documents are ever returned: regeneration re-derives the entries a
+    manifest tracks, it never invents one for a skill the map deliberately omits.
+    """
+    upstream_dir = _upstream_dir(skill)
+    candidates = (skill.get("name"), skill.get("renamed_from"),
+                  posixpath.basename(upstream_dir) if upstream_dir else None)
+    for candidate in candidates:
+        if candidate and candidate in existing:
+            return candidate
+    return None
+
+
 def _rebuild_upstream_tree(doc, repo, target_sha):
     """Regenerate `upstream_tree` in whichever shape the manifest already uses.
 
     Two shapes exist across the six providers: a single tree SHA for the whole upstream commit
     (mattpocock) and a per-skill map of subdirectory tree SHAs (the other five). The shape is
     read from the existing document rather than chosen here, so regeneration never silently
-    reformats a manifest into a different convention than the one its policy documents.
+    reformats a manifest into a different convention than the one its policy documents. The same
+    applies to the map's key convention, which `_upstream_tree_key` reads off the document
+    rather than imposing.
     """
     existing = doc.get("upstream_tree")
     if isinstance(existing, dict):
         rebuilt = {}
         for skill in doc.get("skills", []):
-            if not isinstance(skill, dict) or "name" not in skill:
+            if not isinstance(skill, dict):
                 continue
-            if skill["name"] not in existing:
+            upstream_dir = _upstream_dir(skill)
+            key = _upstream_tree_key(skill, existing)
+            if key is None or not upstream_dir:
                 continue
-            tree = repo.path_tree_sha(target_sha, skill["upstream_path"])
+            tree = repo.path_tree_sha(target_sha, upstream_dir)
             if tree:
-                rebuilt[skill["name"]] = tree
+                rebuilt[key] = tree
         return rebuilt
     return repo.commit_tree_sha(target_sha)
 

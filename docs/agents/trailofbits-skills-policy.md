@@ -24,8 +24,14 @@ installed provider covers. Its subagent topologies were preserved deliberately (
 ## Upstream
 
 - Repo: `https://github.com/trailofbits/skills`
-- Reviewed commit: `4db88ee79db0a68bbe049fe827e272ee2bc19510`
-- Current upstream HEAD at review time: same SHA (**drift: none**)
+- Reviewed commit: `04b241176fd9c10738a61df53d2c677c53e42990` — advanced from
+  `4db88ee79db0a68bbe049fe827e272ee2bc19510` by the audited re-vendor for Issue #177 (one true
+  fast-forward commit, upstream #235, which reworks the `property-based-testing` skill; the other 22
+  installed subtrees are byte-identical at both pins)
+- Current upstream HEAD at publication of that re-vendor: `07bce8a2c8ccc56c5b44b7067a04b8bf46128f05`
+  (**drift: ahead of pin, not audited** — a 9-commit fast-forward that touches none of the 23 installed
+  subtrees and adds a new sibling plugin, `goal-prompt`, deliberately left to the update bot's own
+  discovery schedule; see the manifest's `drift` field for the full record)
 - Reviewed tree SHAs: one per vendored skill directory, all 23 recorded in the manifest's `upstream_tree`
   map rather than duplicated here — a 23-entry hash table is a copy-drift hazard in prose, and the
   validator reads the manifest, not this document.
@@ -51,7 +57,7 @@ normalized to `100644` — no executable bits anywhere under `.claude/skills/**`
 re-fetches or re-syncs from upstream on its own. A human, or an explicitly-contracted agent task, must
 re-run the review process to move the pin.
 
-The vendored set is **206 files: 183 upstream-origin plus 23 local-origin `LICENSE` copies** (one per skill
+The vendored set is **204 files: 181 upstream-origin plus 23 local-origin `LICENSE` copies** (one per skill
 directory, see "License & attribution"). Six of the 23 skills ship executable content — `codeql`,
 `semgrep`, `sarif-parsing`, `diagramming-code`, `graph-evolution` and `supply-chain-risk-auditor` — and
 those six carry `scripts_audited: true` in the manifest, meaning every `.py` and `.sh` file in their
@@ -186,8 +192,16 @@ neighbours live.
   ships a per-language footgun guide including `references/lang-go.md`.
 - **`supply-chain-risk-auditor`** (13) — dependency risk: version-matched advisories, abandoned upstreams,
   install-time script execution. Ships eight Python files with a `pyproject.toml` and `uv.lock`.
-- **`property-based-testing`** (11) — property-based testing guidance across languages; relevant to
-  `internal/models`' bet-strategy and filter-condition logic.
+- **`property-based-testing`** (9) — writes, reviews and debugs property-based tests across languages
+  (Go via `pgregory.net/rapid`); relevant to `internal/models`' bet-strategy and filter-condition logic.
+  Reworked upstream at the current pin (#235): tighter SKILL.md with explicit tautology/vacuity failure
+  modes and a sharper trigger description with explicit negative boundaries (no fuzzing, mutation
+  testing, static analysis, benchmarking or E2E); `references/design.md` and `references/strategies.md`
+  were deleted upstream with recorded rationale (`strategies.md`'s decision-level guidance was absorbed
+  into `generating.md`; `design.md`'s Property-Driven-Development workflow was retired outright, its
+  durable fragments — the property-discovery table, strength ordering and tautology warning — surviving
+  as SKILL.md's catalog and failure-mode sections). The upstream frontmatter `effort: low` pin is
+  removed here by `tob-effort-pin-dropped` (see "Local patches summary").
 - **`mutation-testing`** (5) — scoping and tuning mutation-testing campaigns (mewt, muton).
 - **`harness-writing`** (3) — fuzzing-harness technique, language-agnostic. The one skill in the set
   carrying a `type: technique` frontmatter key.
@@ -346,7 +360,7 @@ set that is not under a permissive licence.**
 Upstream is licensed **CC BY-SA 4.0** (`SPDX: CC-BY-SA-4.0`), and upstream's own `README.md:148` states:
 "This work is licensed under a Creative Commons Attribution-ShareAlike 4.0 International License. Made by
 Trail of Bits." Creative Commons Attribution-ShareAlike is a copyleft licence with real, enumerated
-conditions on redistribution, and vendoring 183 upstream files into this repository *is* redistribution.
+conditions on redistribution, and vendoring 181 upstream files into this repository *is* redistribution.
 Each condition and how this vendoring meets it:
 
 - **§3(a)(1)(A) — retain attribution, the copyright notice, the licence notice, the disclaimer notice, and
@@ -403,10 +417,10 @@ attributions.
 
 ## Local patches summary
 
-**Seven patch ids across 26 touched files**, plus one file-exclusion recorded in the ledger without an id
-(the `openai.yaml` deletion, which can carry no in-file marker). Twenty-three files have content changes;
-three have a mode change only, with content byte-identical to upstream. By id — the counts sum to 28
-rather than 26 because `codeql/SKILL.md` and `variant-analysis/SKILL.md` each carry two ids:
+**Eight patch ids across 27 touched files**, plus one file-exclusion recorded in the ledger without an id
+(the `openai.yaml` deletion, which can carry no in-file marker). Twenty-four files have content changes;
+three have a mode change only, with content byte-identical to upstream. By id — the counts sum to 29
+rather than 27 because `codeql/SKILL.md` and `variant-analysis/SKILL.md` each carry two ids:
 
 | Patch id | Files | What it is |
 | --- | --- | --- |
@@ -417,8 +431,31 @@ rather than 26 because `codeql/SKILL.md` and `variant-analysis/SKILL.md` each ca
 | `tob-mode-normalize` | 3 | `100755` → `100644`. No byte of content changes. |
 | `tob-exec-bit-interpreter` | 6 | Prefixes `bash` onto the six bare-path `.sh` invocations that the `100644` normalization above would otherwise make fail with `EACCES`. Concrete project incompatibility — patch ground (c). |
 | `tob-no-tree-mutation` | 1 | Replaces a `git checkout <baseline>` that moves HEAD mid-review with a temporary worktree. |
+| `tob-effort-pin-dropped` | 1 | Removes the `effort: low` frontmatter line the upstream rework added to `property-based-testing/SKILL.md`. |
 
-Two of those deserve a sentence here rather than only in the ledger:
+Three of those deserve a sentence here rather than only in the ledger:
+
+**`tob-effort-pin-dropped`.** The upstream rework pins `effort: low` in the skill's frontmatter. Claude
+Code documents that key as "Effort level when this skill is active. **Overrides the session effort
+level**" — upstream's own README states the same ("`effort` overrides the session level in both
+directions, so this drags a deliberate `xhigh` session *down* while the skill is active"). The
+**decisive ground for removal is authority**: the pin silently overrides an owner-selected session
+effort whenever this model-invocable skill fires, and `effort` is on this repository's recorded
+authority-surface key list (`docs/agents/skills-update-automation.md`). A mechanical constraint sits
+alongside, stated precisely because the two must not be conflated: this provider's
+`extra_frontmatter_keys` allowlist in `scripts/validate-agent-governance.py` is `{allowed-tools,
+type}`, so the key as vendored fails `check_frontmatter_keys` — but the validator's own documented
+default for a *legitimate* upstream key is the opposite of deletion: "PRESERVE that frontmatter and
+widen the allowlist per provider" (`allowed_frontmatter_keys_by_dir`, whose docstring even names
+`effort` as an example). That widening route exists and was **deliberately declined, not overlooked**:
+it is a reviewed validator change no re-vendor task performs as a side effect, and the authority ground
+above makes adopting the pin undesirable here regardless of the allowlist. The honest cost: upstream
+measured `low` as sufficient on its own eval fixture (4/4 defect detection) and chose it to cut cost;
+removing the pin forgoes that optimization and the skill inherits the session's effort instead — which
+is precisely the pre-rework behaviour. If the pin is ever wanted, the route is that reviewed allowlist
+widening plus deliberately re-adding the line, not silently keeping upstream's default. No other byte
+of the reworked skill is modified; one knock-on is recorded in "Known limitations" (the vendored README
+still describes the pin as present).
 
 **`tob-no-hidden-unicode`.** Upstream used **U+200B ZERO WIDTH SPACE** in two `ANALYSIS_FORMAT.md` files to
 stop a nested code fence from closing its outer block — an invisible character placed immediately before
@@ -632,7 +669,7 @@ Full detail, including the nine blocked conditions and the security posture:
    each of the five dispatching skills still dispatch exactly the plugin-root agents relocated here, and
    have any new ones appeared at `plugins/<plugin>/agents/`?
 5. For each vendored skill, diff every file in its `files[]` list against the **currently-vendored copy**
-   (not raw upstream — 23 files carry content patches, and three more differ from upstream only in mode) to
+   (not raw upstream — 24 files carry content patches, and three more differ from upstream only in mode) to
    separate genuinely new upstream content from an existing patch.
 6. Re-run the same review judgment on anything new: does it assume a plugin runtime, background execution,
    external network fetch, credentials, or a write into a git working tree this project doesn't grant? Does
@@ -712,6 +749,16 @@ directories, and no patch id in this set is shared with another provider's ledge
   an upstream *plugin* (which exists at the pin, just uninstalled here) rather than a skill this install
   claims to provide. Reaching it means going to upstream, which is a legitimate thing for a reader to do.
   Flagged so nobody reads the surviving bullet as an installed dependency.
+- **`property-based-testing/README.md` describes upstream state this install does not have.** Vendored
+  verbatim at the current pin, it documents the `effort: low` frontmatter pin as present in SKILL.md —
+  including the note that `effectiveness.sh` refuses a multi-level sweep "while `SKILL.md` pins an
+  effort" — while `tob-effort-pin-dropped` removes that pin from the vendored SKILL.md; and its eval
+  walkthrough invokes `evals-extra/run.sh` / `evals-extra/effectiveness.sh`, which live at upstream's
+  plugin root and are not vendored, so every command it prints is unrunnable here. Nothing dispatches
+  through the README (SKILL.md routes only to `references/*.md`), so this is inert documentation of
+  upstream's own eval machinery, kept verbatim on the same minimal-patching ground as the other
+  surviving upstream-layout references. Flagged so nobody reads it as a description of the vendored
+  copy.
 - **Most of this set is scoped to languages and platforms this repository does not use.** `sharp-edges`
   ships eleven per-language footgun guides of which one is Go; `variant-analysis` ships five CodeQL and
   five Semgrep templates of which one each is Go; `codeql` documents eight languages. That breadth is why
