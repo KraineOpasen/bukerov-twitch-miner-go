@@ -2,14 +2,40 @@
 
 **This provider has no local patches.** All 37 vendored files — 32 upstream-origin plus 5 verbatim
 `LICENSE` copies — are byte-identical to upstream commit
-`a80885b76044550770f60f360f8a0e5ae3524a31`. The manifest records
+`318066d2213b510e89b500ed0d53506c54093ddc`. The manifest records
 `locally_modified: false` for every file, and every `upstream_blob_sha` equals its
 `vendored_blob_sha`.
+
+The pin moved from `a80885b76044550770f60f360f8a0e5ae3524a31` on 2026-08-19 and **this ledger's
+substance did not change with it**: the two commits carry identical bytes for all five installed
+skills, so every statement below was true at the old pin and remains true at the new one. Only the
+commit this file names as the provenance baseline moved.
 
 Verified by diffing the whole vendored set against a read-only clone at that commit, and again by
 `scripts/validate-agent-governance.py` with `GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT` set, which
 compares each unmodified file byte-for-byte against the clone rather than only against the recorded
-hash. `provider-file-hashes` fails closed on any on-disk edit that is not accompanied by a
+hash.
+
+Two limits of that check are worth recording, because a green run is easy to over-read.
+
+First, it covers **32 of the 37 files, not all 37**: the five `LICENSE` copies carry
+`origin: "local"`, and `provider_file_hash_details` `continue`s on that before it reaches the
+clone comparison — so their bytes are checked against the recorded `vendored_blob_sha` but never
+against upstream. Their identity to upstream's root `LICENSE` blob
+(`89bc5e962c9944cdb050887062afdaaf89be504a`) is established by hand, and must be re-established by
+hand on every re-vendor.
+
+Second, the variable must point at a **working-tree checkout**, never a bare or mirror clone.
+`provider_file_hash_details` guards its comparison with `os.path.isfile(<clone>/<upstream_path>)`
+and has no else branch: against a bare clone no such file exists, every comparison is skipped
+silently, and the run still prints both the "verified against an upstream clone" banner and
+`[PASS]`. A bare clone therefore yields a green result that proves nothing. Note also what the
+strict mode does *not* prove: it compares **bytes, not the pin**. The clone's `HEAD` is never
+resolved and `upstream_commit` is only shape-checked as 40 hex characters, so a pass is compatible
+with the clone sitting at any commit whose installed subtrees match — including the superseded one.
+Whoever moves the pin must establish the commit out of band; this check will not do it.
+
+`provider-file-hashes` fails closed on any on-disk edit that is not accompanied by a
 deliberate `vendored_blob_sha` bump, so this table cannot silently go stale.
 
 | Skill | Upstream path | Blob SHA | Local change | Reason | Rule |
