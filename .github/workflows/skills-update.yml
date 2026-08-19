@@ -88,6 +88,13 @@ jobs:
           # step (or a compromised dependency of one) could reach it.
           persist-credentials: false
 
+      - name: Updater integrity gate — refuse to prepare candidates on red
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-agent-governance.py --self-test-hook
+          python3 scripts/skill_updates/tests/mutation_probe.py --check-anchors
+          python3 -m unittest discover -t scripts -s scripts/skill_updates/tests
+
       - name: Report drift for every configured provider
         env:
           # Dispatch inputs reach the script through the environment, never through `${{ }}`
@@ -181,16 +188,20 @@ jobs:
 # settings and never routes around the restriction with a PAT or an App token.
 #
 # Note that a PR opened by GITHUB_TOKEN does not trigger further workflow runs (GitHub's
-# recursion guard), so the candidate PR will not start CI on its own.
+# recursion guard), so an initial candidate PR does not start CI by itself on every GitHub
+# configuration; that recursion-guard behaviour is GitHub's, may evolve, and is not depended on
+# here either way. What does not depend on it: `scripts/validate-agent-governance.py` FAILS
+# (`no-unaudited-update-candidate`) on an `automated_candidate` block regardless of its `state`
+# value, and `ci.yml`'s `governance` job runs that exact check on ordinary PR/push CI. So the
+# initial unaudited candidate is expected to show red governance state whenever normal CI does
+# execute on its head. Clearing the block still requires a human to read the diff, re-assert any
+# withdrawn script audit, record a fresh `reviewed_at`/`reviewed_by`, and delete it; only the
+# resulting audited commit is expected to pass the `governance` job.
 #
-# Be precise about what that means today: `scripts/validate-agent-governance.py` FAILS on an
-# `automated_candidate` block, but it is **not wired into any GitHub workflow** — `ci.yml` runs
-# lint/build/docker only. So the gate is real but currently MANUAL: run it locally, or read the
-# job summary this workflow writes. The safeguards that do act automatically are the Draft
-# status, the banner at the top of the PR body, and the block itself sitting in the diff.
-# Wiring the validator into `ci.yml` as a required check would make it mechanical; that edit is
-# out of scope for the change that introduced this workflow (`ci.yml` is deliberately untouched)
-# and is the natural follow-up.
+# This job's own read-only integrity preflight (above) is a second, independent enforcement
+# point: it refuses to let this workflow's elevated `publish` job start when the updater's own
+# regression suite or the mutation-probe anchors are red, which is a different failure mode than
+# an unaudited candidate and is checked before any candidate is prepared, not after.
 #
 # Toolchain: only `actions/checkout` is used, pinned to a full commit SHA. Python comes from the
 # runner image (`python3`), so there is no setup action, no `pip install`, no `npm`/`npx`, and

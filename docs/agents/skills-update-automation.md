@@ -364,8 +364,31 @@ Clearing the candidate state therefore requires a deliberate human act: read the
 any withdrawn script audit, record a fresh `reviewed_at`/`reviewed_by`, and delete the block.
 
 Note that a PR opened by `GITHUB_TOKEN` does not trigger further workflow runs (GitHub's recursion
-guard), so a candidate PR does not start CI by itself. That is harmless here — the candidate is a
-Draft that a human must audit, and the governance gate fails on it by design.
+guard), so an initial candidate PR does not necessarily start CI by itself; that recursion-guard
+behaviour is GitHub's own and may evolve, and nothing here depends on which way it goes. What is
+enforced independently of it: `.github/workflows/ci.yml` carries an independent `governance` job
+that runs `scripts/validate-agent-governance.py` (plus its self-tests and the updater regression
+suite) on ordinary `pull_request`/`push` CI, so whenever normal CI does execute on an unaudited
+candidate's head, that job is expected to fail on the `automated_candidate` block. The candidate
+stays a Draft that a human must audit; only the audited commit — the block deleted, any withdrawn
+script attestation re-asserted, `reviewed_at`/`reviewed_by` refreshed — is expected to pass the
+`governance` job. Whether a given candidate's first CI run happens automatically, is suppressed by
+the recursion guard, or needs an approval click is a GitHub-behavior detail that does not change
+this authority/state-machine boundary either way.
+
+Separately, `.github/workflows/skills-update.yml`'s own read-only `check` job runs an integrity
+preflight — `--self-test-hook` (which still exercises the live `automated_candidate` check, not
+just the hook's own self-test), the mutation-probe anchors, and the updater regression suite —
+before it reports drift for any provider. This is a deliberately narrower set than `ci.yml`'s
+`governance` job: it does not also run `--self-test` (the offline fixture matrix that regression-
+tests the validator's own check logic), because ordinary PR/push CI already covers that matrix on
+every change to `main`, and the daily/dispatched updater run does not need to duplicate it. That
+is a different enforcement point from the `governance` job, not a redundant copy of it: it stops
+this workflow's elevated `publish` job (the one with `contents: write` / `pull-requests: write` /
+`issues: write`) from starting when the updater's own tooling is red, independent of whether any
+particular candidate PR happens to get a governance run. Neither preflight ever runs the full
+mutation-probe rewrite (`scripts/skill_updates/tests/mutation_probe.py` with no flag) — that stays
+a separate, deliberately local/deep verification step, never ordinary CI.
 
 ## Security posture
 
@@ -451,7 +474,24 @@ failure). `2` command-line misuse. `--fail-on-blocked` inverts the first case fo
 python3 -m unittest discover -t scripts -s scripts/skill_updates/tests
 python3 scripts/validate-agent-governance.py
 python3 scripts/validate-agent-governance.py --self-test
+python3 scripts/validate-agent-governance.py --self-test-hook
+python3 scripts/skill_updates/tests/mutation_probe.py --check-anchors
 ```
+
+Most of those now also run as ordinary CI, in two places, though not identically in both.
+`ci.yml`'s independent `governance` job runs the updater suite, `--self-test-hook`, `--self-test`,
+and the anchor check — four separate steps, on every `pull_request`/`push`. `--self-test-hook`
+alone already covers the bare `validate-agent-governance.py` invocation above (its live check
+falls through to the same `ALL_CHECKS` loop plus the hook's own self-test), so `ci.yml` does not
+run the bare command as a fifth, separate step. `skills-update.yml`'s read-only `check` job runs a
+deliberately narrower integrity preflight — `--self-test-hook`, the anchor check, and the updater
+suite, but not `--self-test` — before it reports drift for any provider, gating whether the
+elevated `publish` job can start; see "Why a candidate cannot pass as audited" above for why that
+narrower set is still sufficient for its purpose. Running the full command list by hand, as above,
+stays the fastest way to reproduce a CI failure locally and is what this document continues to
+recommend during development. The full mutation-probe rewrite (no flag) is
+excluded from both CI paths on purpose — it mutates tracked files in place — and stays a separate
+local/deep verification step; see "Running it by hand" above for the read-only commands.
 
 Every test is offline and hermetic: upstream repositories are real local git repositories built in
 a temporary directory, and GitHub is a fake adapter that mirrors the real deduplication rules. The

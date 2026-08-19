@@ -191,6 +191,39 @@ status, the banner, and the block sitting in the diff. Wiring the validator into
 required check is the natural follow-up and needs both a `ci.yml` edit and a repository-settings
 change — neither of which an agent may perform under this project's governance.
 
+## Addendum (2026-08-19): CI enforcement
+
+The "Known limitation" above — `scripts/validate-agent-governance.py` not wired into any GitHub
+workflow — is superseded as of this addendum. Two enforcement points now exist, added without
+reopening any decision recorded above:
+
+- **Level 1 — ordinary CI.** `.github/workflows/ci.yml` carries one independent `governance` job
+  (no `needs:`, runs in parallel with `lint`/`build`/`docker`) that runs the validator, its
+  self-tests, the mutation-probe anchor check, and the updater regression suite on every
+  `pull_request`/`push`. This is what makes the anti-masquerade gate mechanical on a normal PR
+  rather than something a reviewer has to remember to run locally.
+- **Level 3 — updater privilege boundary.** `.github/workflows/skills-update.yml`'s existing
+  read-only `check` job runs a matching integrity preflight — the live validator check via
+  `--self-test-hook`, the anchor check, and the updater regression suite — before it reports any
+  provider's drift. It deliberately omits the offline `--self-test` fixture matrix that `ci.yml`'s
+  `governance` job also runs, since ordinary PR/push CI already covers that matrix on every change
+  to `main` and the daily/dispatched updater run does not need to duplicate it. The pre-existing `needs: check`
+  relationship to the elevated `publish` job (§14, unchanged) is what makes this a gate rather than
+  an observation: a red preflight means `publish` never starts, so a broken updater cannot push a
+  candidate branch or open a PR in the first place.
+- **Level 2 — repository-required-status-check settings — is deliberately not part of this
+  addendum.** Marking `governance` (or any check) as *required* in branch protection is a
+  repository-settings change, which §14 already places outside what this bot, or an agent acting
+  under this project's governance, may do. Nothing here marks any check required; that remains an
+  owner action, if and when the owner chooses to take it.
+
+Neither level changes the state machine, the block-vs-candidate semantics, or §2's rule that a
+candidate's `automated_candidate` block fails the validator on the key's presence, not its
+`state` value: an unaudited candidate is still expected to show red governance state whenever
+normal CI executes on its head, exactly as before this addendum — the difference is only that
+"whenever it is executed" now includes ordinary automatic CI rather than only a manual or
+local run. Full mutation-probe rewrites remain out of both CI paths, unchanged.
+
 ## Links
 
 - `docs/agents/skills-update-automation.md` — operational detail
