@@ -101,7 +101,8 @@ the tree are Markdown link targets, not commands.
 CE skills are artifact producers, and the owner should know where those artifacts land before running one.
 
 - **Artifact root.** Every CE skill that writes an artifact resolves `<root>` through the same block
-  (`ce-setup/SKILL.md`, the `<!-- ce-docs-root:start -->` section, duplicated into 21 files): read `docs_root`
+  (`ce-setup/SKILL.md`, the `<!-- ce-docs-root:start -->` section, duplicated into 14 of the vendored files —
+  18 copies exist upstream at this pin): read `docs_root`
   from `<repo-root>/.compound-engineering/config.yaml` **only**; unset → `<root>` is `docs`. A set value must
   be a repo-relative directory whose symlink-resolved path stays inside the repo and is neither the repo root
   nor under `.git/`; otherwise the skill must "stop with an error naming `docs_root` and the value — never
@@ -554,7 +555,10 @@ Full detail, including the nine blocked conditions and the security posture:
    `context.mjs` or `peer-job-runner.py` lands in every consumer at once. Diff one copy, then confirm the rest
    are byte-identical to it, exactly as upstream's own parity tests do.
 4. For each vendored skill, diff every file in its `files[]` list against the **currently-vendored copy** (not
-   raw upstream — 14 files are patched) to isolate genuinely new upstream content from an old patch.
+   raw upstream — see "Local patches summary" for the current patched-file count) to isolate genuinely new
+   upstream content from an old patch. Diff the **directory**, not just the files `files[]` already lists: a
+   restructure can move patched text into a file that did not exist at the previous pin, and a per-file walk
+   over the old list cannot see it.
 5. Re-run the same review judgment on anything new. The test is **authority**, not orchestration: does it
    merge, mark ready, rerun a workflow, push to `main`, force-push, write into `.claude/**` or `CLAUDE.md`, or
    bypass the permission layer? Then patch it minimally and mark it. A skill's agent topology, fan-out width,
@@ -642,7 +646,9 @@ Full detail, including the nine blocked conditions and the security posture:
 Reviewed and vendored against the same Claude Code version and governance-layer assumptions recorded in
 `mattpocock-skills-policy.md`'s "Compatibility" section (frontmatter handling, `Edit(path)` permission
 semantics, PreToolUse hook payload shape) — see that document rather than duplicating the version pin here;
-re-verify both together if either changes. On the upstream side the pin is plugin `3.22.1` at
-`d6ae46457b3364ca1a3d6eb9954613217000c0ec`; Compound Engineering releases frequently, so expect real content
-drift on any re-vendor rather than a provenance-only pin bump. That prediction held on the very next advance:
-this pin's audit found upstream already two commits further on, touching three installed skills.
+re-verify both together if either changes. On the upstream side the pin is plugin `3.22.4` at
+`67cc7dc7a11ab3724ca8e0723fcf18ee08e605de`; Compound Engineering releases frequently, so expect real content
+drift on any re-vendor rather than a provenance-only pin bump. That prediction keeps holding, and harder each
+time: this pin's advance was 56 commits, 70 added and 70 modified files across 20 of the 22 installed skills,
+and it relocated patched authority text rather than only editing it in place — the scheduled bot refused to
+prepare the candidate at all (issue #189). Budget a re-vendor of this provider as an audit, not a pin bump.
