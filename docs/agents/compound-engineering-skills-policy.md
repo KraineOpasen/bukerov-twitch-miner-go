@@ -423,10 +423,12 @@ restructure, so the patch's own note was corrected to cite `references/loop.md` 
 
 27 files whose upstream mode is `100755` are stored `100644`. Content is untouched — each file's
 `upstream_blob_sha` still matches on disk, except for the four cross-model scripts, whose content change is
-recorded separately under `ce-no-permission-bypass`. The set of 27 is unchanged at this pin; two blobs were
-re-pinned because upstream changed them (`ce-babysit-pr/scripts/pr-snapshot`,
-`ce-resolve-pr-feedback/scripts/get-pr-comments`), and both were re-audited end to end rather than merely
-re-hashed — a changed blob under `scripts_audited: true` requires re-audit, not a hash bump. Vendored files are content an agent reads and then runs
+recorded separately under `ce-no-permission-bypass`. The set of 27 is unchanged at this pin; **three** of its
+blobs were re-pinned because upstream changed them — `ce-babysit-pr/scripts/pr-snapshot` and
+`ce-resolve-pr-feedback/scripts/get-pr-comments`, which are mode-only, plus
+`ce-doc-review/scripts/cross-model-doc-review.sh`, which also carries a content patch and is therefore
+described under `ce-no-permission-bypass`. All three were re-audited end to end rather than merely re-hashed —
+a changed blob under `scripts_audited: true` requires re-audit, not a hash bump. Vendored files are content an agent reads and then runs
 through an explicit interpreter, never a binary invoked off disk (see "Self-contained by upstream design"), so
 `.claude/skills/**` carries no executable bit at all (`no-symlinks-no-exec-under-claude`), and
 `provider-vendored-modes` fails closed on any mode difference no patch id documents, in either direction.

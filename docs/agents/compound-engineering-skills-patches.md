@@ -7,6 +7,22 @@ patch id per touched file. **All unpatched content is byte-identical to upstream
 `compound-engineering-skills-manifest.json` for the per-file `upstream_blob_sha` that pins it, and the
 `vendored_blob_sha` that pins what is actually on disk.
 
+**What that pin is mechanically worth, stated precisely.** `provider-file-hashes` short-circuits on a file
+marked `locally_modified`: it verifies the file's `vendored_blob_sha` against disk, then `continue`s past both
+the `upstream_blob_sha` comparison and the upstream-clone comparison. So for the **25 patched files** — the
+ones this ledger is about, and the ones that grew from 15 at the last pin — the validator's guarantee is
+"disk matches what the manifest says disk should be", which is self-referential; the recorded
+`upstream_blob_sha` is a **review record**, not something the default validator run re-derives. Note also that
+the clone comparison is opt-in for every file: without
+`GOVERNANCE_UPSTREAM_DIR_COMPOUND_ENGINEERING` set, a 36/36 pass proves manifest-versus-disk agreement and
+says nothing about agreement with upstream at all.
+
+At this pin that gap was closed out of band rather than left open: every file's `upstream_blob_sha` and
+`upstream_mode` — patched files included — was compared against the real target tree in both directions, and
+the strict clone mode was additionally run against a working-tree checkout at `67cc7dc7` and shown to fail
+against the superseded pin. That is a property of this round's review, not of the checked-in guard, so a
+future re-vendor must repeat it rather than infer it from a green validator.
+
 **Marker convention.** Three forms appear in this set, all carrying the same id:
 
 - Paired, wrapping replacement text in Markdown —
@@ -41,7 +57,7 @@ retired — all seven survive — but their file lists changed substantially, in
 | `ce-no-governance-file-writes` | 2 | **3** | the Discoverability Check left both `SKILL.md`s for `refresh-and-discoverability.md` / `discoverability.md` |
 | `ce-no-direct-main-push` | 2 | 2 | the commit-strategy menu left `ce-compound-refresh/SKILL.md` for `references/commit.md` |
 | `ce-draft-pr-only` | 3 | 3 | the `gh pr create` fence left `ce-commit-push-pr/SKILL.md` for `references/apply-and-handoff.md` |
-| `ce-mode-normalize` | 27 | 27 | unchanged set; one blob re-pinned (`pr-snapshot`) |
+| `ce-mode-normalize` | 27 | 27 | unchanged set; **three** blobs re-pinned — `pr-snapshot` and `get-pr-comments` (mode-only), plus `cross-model-doc-review.sh`, whose content change is recorded under `ce-no-permission-bypass`. All three re-audited end to end, not re-hashed |
 
 Two `SKILL.md` files — `ce-compound-refresh/SKILL.md` and `ce-work/SKILL.md` — **stopped being patch targets
 entirely**, because upstream reduced them to pointer shells that no longer contain the text the patch edits.
