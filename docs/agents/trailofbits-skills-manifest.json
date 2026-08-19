@@ -1,17 +1,6 @@
 {
   "upstream_repo": "https://github.com/trailofbits/skills",
   "upstream_commit": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
-  "automated_candidate": {
-    "state": "PREPARED_AUDIT_REQUIRED",
-    "prepared_by": "scripts/skill_updates (automated skills update bot)",
-    "superseded_commit": "04b241176fd9c10738a61df53d2c677c53e42990",
-    "target_commit": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
-    "upstream_ref": "main",
-    "reviewed_fields_refer_to": "04b241176fd9c10738a61df53d2c677c53e42990",
-    "audited_state_reachable_by_automation": false,
-    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
-    "ancestry": "fast-forward"
-  },
   "upstream_tree": {
     "audit-augmentation": "3cd7bb5361170da22144c5213abfcc0c0ec1bd0c",
     "audit-context-building": "2fee1a2e10b9c861e97013d192a81379d070a60e",
@@ -39,8 +28,8 @@
   },
   "upstream_current_head": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
   "drift": "none",
-  "reviewed_at": "2026-08-19T00:00:00Z",
-  "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3): candidate skills read in full with their complete dependency closures; every bundled script read end to end. Pin advanced 4db88ee7 -> 04b24117 by task trailofbits-property-based-testing-04b24117 (Issue #177): the reworked property-based-testing closure (SKILL.md, README.md, 5 references) was re-read end to end and its two deleted references' guidance mapped item-by-item into the target; the other 22 installed skills were verified by exact subtree/blob identity at both pins, not re-read. SKILL.md is locally modified by tob-effort-pin-dropped (upstream `effort: low` frontmatter removed); every other vendored file is byte-identical to upstream at the pin.",
+  "reviewed_at": "2026-08-19T06:45:36Z",
+  "reviewed_by": "Governance v3 provenance audit (task trailofbits-07bce8a2-provenance-audit, contract authorized_by KraineOpasen): advances the reviewed pin from 04b24117 (previous audit: task trailofbits-property-based-testing-04b24117 / Issue #177, which read the reworked property-based-testing closure in full and verified the other 22 installed skills by exact subtree/blob identity) to 07bce8a2, the 9-commit fast-forward this repo's own automated skills-update bot had already staged in Draft PR #190. Independently re-verified against a fresh read-only clone of trailofbits/skills rather than trusting the bot's or the prior task's claim: `git merge-base --is-ancestor 04b24117 07bce8a2` confirms true fast-forward ancestry (not a rewrite); `git fetch origin main` on the clone resolves to 07bce8a2 exactly, matching the recorded upstream_ref; a full `git diff --name-status` between the two commits shows all 47 changed files fall into the new out-of-scope plugins/goal-prompt/ (a brand-new plugin, deliberately left to the update bot's own DISCOVERY_REQUIRED schedule per this policy's drift-handling rule) or the already-EXCLUDE-verdicted plugins/modern-python/, plugins/semgrep-rule-variant-creator/, plugins/trailmark/skills/{slicing-code-context,vector-forge}/, plus non-vendored repo infrastructure (.github/, .claude-plugin/, AGENTS.md, CODEOWNERS, root README.md); explicit per-path diffs against all 23 installed skill upstream_paths and all 5 relocated plugin-root agents/ directories return zero changed files; the root LICENSE blob is untouched; and a spot-check of 5 of the 23 upstream_tree hashes (audit-augmentation, codeql, differential-review, property-based-testing, vulnerability-triage-brocards) recomputed directly from the clone at 07bce8a2 matches every value already recorded in this manifest's upstream_tree map byte for byte. No vendored file, licence, frontmatter authority-surface key, or patch context changed as a result: every files[] entry's upstream_blob_sha/vendored_blob_sha pair from the 04b24117 review remains correct verbatim at 07bce8a2, so none were re-touched here.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
   "license": {
