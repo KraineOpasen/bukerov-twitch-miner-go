@@ -76,3 +76,7 @@ gh pr merge …
 ```
 
 Landing uses `gh stack merge` only (<!-- bukerov-local-patch: ce-no-merge-authority -->owned by the user<!-- /bukerov-local-patch: ce-no-merge-authority -->).
+
+## Ownership
+
+Step 5 exclusively owns stack submission and the post-submit metadata route below, for PRs created in this run.

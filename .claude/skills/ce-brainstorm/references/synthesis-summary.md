@@ -174,7 +174,7 @@ No open decisions — writing the requirements-only plan now. Interrupt if the s
 
 Proceed to Phase 3 doc-write in the same turn — do NOT end the turn waiting for an acknowledgment. The "interrupt if wrong" affordance means the user can revise after the doc lands, not before. Lightweight Path A docs are short, so post-hoc revision is cheap.
 
-Ask the user open-ended on Path B (no `AskUserQuestion` menu). The justification is Interaction Rule 5(a) in SKILL.md — an option menu would unintentionally influence the user's feedback toward the parts the menu lists.
+Ask the user open-ended on Path B (no `AskUserQuestion` menu). The justification is Interaction Rule 5(a) in `references/interaction-rules.md` — an option menu would unintentionally influence the user's feedback toward the parts the menu lists.
 
 ### Worked example: compression from internal draft to scoping synthesis (Standard tier)
 
@@ -245,7 +245,7 @@ When the soft-cut fires, use the platform's blocking question tool (`AskUserQues
 - `Proceed and write the requirements-only plan`
 - `Hold off — keep discussing before the doc`
 
-Fall back to a numbered list in chat only when no blocking tool exists or the call errors. Never silently skip.
+Fall back to a numbered list on the host's user-visible chat surface only when no blocking tool exists or the call errors. Never silently skip.
 
 ---
 

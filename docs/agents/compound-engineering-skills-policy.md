@@ -15,38 +15,42 @@ ledger is independent, and no skill name is shared across them (see
 ## Upstream
 
 - Repo: `https://github.com/EveryInc/compound-engineering-plugin`
-- Reviewed commit: `d6ae46457b3364ca1a3d6eb9954613217000c0ec` (`chore: release main (#1405)`; advanced by
-  fast-forward from `57e586d66194585757ffa30a23dcd0f4ec0210a4`, `fix(ce-work): run cross-model verification on
-  warm checkouts (#1404)`)
-- Plugin version at that commit: `3.22.1` (`plugin.json`), MIT, `"author": {"name": "Kieran Klaassen and
+- Reviewed commit: `67cc7dc7a11ab3724ca8e0723fcf18ee08e605de` (`docs(skill-design): third-sweep learnings`,
+  #1483; advanced by fast-forward from `d6ae46457b3364ca1a3d6eb9954613217000c0ec`, 56 commits back)
+- Plugin version at that commit: `3.22.4` (`plugin.json`), MIT, `"author": {"name": "Kieran Klaassen and
   Trevin Chow"}`
 - Reviewed tree SHAs, one per vendored skill directory: recorded in the manifest's `upstream_tree` map (22
   entries).
-- Current upstream HEAD at review time: **ahead of the pin, and not audited** — see the manifest's `drift`
-  field for the observed SHA, the observation instant, and which installed skills it touches. It is a
-  fast-forward extension of the reviewed pin (the pin is still a true ancestor), it leaves the version at
-  `3.22.1`, and it does not touch `ce-setup`, so it takes nothing away from the pin recorded above. Those
-  bytes are not vendored here; the next scheduled detection run prepares them as their own candidate.
-- Scope of the read: at `57e586d66194585757ffa30a23dcd0f4ec0210a4`, all 33 skill directories under upstream
-  `skills/`, plus the repo-local `.agents/skills/ce-skill-work`, were read with their complete dependency
-  closures, and every bundled script in the installed set was read end to end. The advance to
-  `d6ae46457b3364ca1a3d6eb9954613217000c0ec` is a fast-forward whose only installed-set change is
-  `ce-setup/scripts/check-health`: that script was re-read end to end and behaviourally compared against the
-  superseded bytes under `EVAL_REQUIRED` (see the manifest's `audit_ref` for that skill, including the one
-  environment-conditional difference the comparison found), the other 274 tracked files were re-verified by
-  blob hash and mode in both directions against the target tree rather than re-read, and every
-  `excluded_skills[]` entry was re-checked against the upstream delta (`.agents/skills/ce-skill-work` moved in
-  five files; its EXCLUDE verdict stands on unchanged grounds). 22 directories are installed; all 12 remaining
-  candidates are recorded in the manifest's `excluded_skills[]` with a verdict and a reason (see "Excluded /
-  Held").
+- Current upstream HEAD at review time: **level with the pin** — `refs/heads/main` resolved to exactly
+  `67cc7dc7a11ab3724ca8e0723fcf18ee08e605de` when this audit fetched it. There are no unaudited bytes ahead
+  of the pin; see the manifest's `drift` field for the observation instant.
+- Scope of the read: this pin was reached by a **deliberate re-vendor**, not a provenance refresh. The scheduled
+  bot refused to prepare the candidate (issue #189: inventory changes in 19 skills, five frontmatter/authority
+  surface changes, and four three-way merge conflicts), so the whole delta was re-derived independently rather
+  than taken from that report. Upstream restructured by size: `SKILL.md` bodies were split into
+  `references/*.md` (`ce-babysit-pr`'s went 90128 → 7939 bytes), giving **70 added and 70 modified files across
+  20 of the 22 installed skills, 0 removed**; `ce-commit` and `ce-worktree` are byte-identical. Every one of
+  those 140 files was read end to end against both pins, per skill, and all 20 changed skills were swept for
+  new authority — merge, ready-flip, workflow rerun, direct-main push, force push, governance-file write,
+  permission bypass, child-agent authority expansion. **Zero new patches were required: upstream added no
+  authority in this update.** What it did do is *relocate* patched authority text, which is why the patch file
+  lists moved so much (see "Local patches summary"). All three bundled scripts whose bytes changed
+  (`ce-babysit-pr/scripts/pr-snapshot`, `ce-doc-review/scripts/cross-model-doc-review.sh`,
+  `ce-resolve-pr-feedback/scripts/get-pr-comments`) were re-read end to end and behaviourally compared under
+  `EVAL_REQUIRED`; see each skill's `audit_ref`. Nothing fetched from upstream was executed. Every
+  `excluded_skills[]` entry was re-checked against its actual new bytes per the update procedure's step 2:
+  **zero verdict changes**, including `ce-skill-work`, the one candidate the final commit touched. 22
+  directories are installed; all 12 remaining candidates are recorded in the manifest's `excluded_skills[]`
+  with a verdict and a reason (see "Excluded / Held").
 
 ## Installation model
 
 **Project-local vendored copy**, not a live plugin install. Each installed skill's complete directory tree is
 copied verbatim into `.claude/skills/<name>/` at review time, then minimally patched (see "Local patches
 summary"), and every file's mode is normalized to `100644` — no executable bit anywhere under
-`.claude/skills/**`. 275 files are tracked in total: 253 of upstream origin plus one per-skill `LICENSE` copy
-in each of the 22 directories.
+`.claude/skills/**`. 345 files are tracked in total: 323 of upstream origin plus one per-skill `LICENSE` copy
+in each of the 22 directories. (At the superseded pin this was 275 = 253 + 22; the restructure added 70
+upstream files and removed none.)
 
 `automatic_updates: false` — nothing about this installation re-fetches, re-syncs, or version-checks upstream
 on its own. A human, or an agent task under an explicit contract, must re-run the review process to move the
@@ -334,17 +338,30 @@ needs.
 
 ## Local patches summary
 
-Seven patch ids, touching 14 files by content and 27 files by mode. Full ledger, one row per patch id per
-touched file (45 rows): `docs/agents/compound-engineering-skills-patches.md`.
+Seven patch ids, touching 25 files by content and 27 files by mode. Full ledger, one row per patch id per
+touched file (57 rows: 30 content + 27 mode): `docs/agents/compound-engineering-skills-patches.md`.
+
+**These counts moved sharply at the `d6ae4645 → 67cc7dc7` re-vendor, and the reason matters.** Upstream's
+size-driven restructure moved prose out of `SKILL.md` into `references/*.md`, and the patched text moved
+with it — so patches had to follow their text rather than stay on their recorded paths. Content-patched
+files went 15 → 25. No patch id was created and none was retired; all seven survive, re-placed. Two
+`SKILL.md` files (`ce-compound-refresh`, `ce-work`) stopped being patch targets entirely, having become
+pointer shells. Re-applying the previous file list would have left dead patches on those two while leaving
+the relocated authority — including the full `stack-land` land step with `gh stack merge … --yes --squash`
+— unpatched in the new files it moved to, and a blob-hash check alone would not have caught it.
+
+(The superseded revision of this document recorded "14 files by content … 45 rows", which was already
+wrong against the ledger and the tree at that pin: 15 files / 46 rows. That pre-existing off-by-one was
+flagged as a deferred finding by the previous audit and is corrected here.)
 
 | Patch id | Files | Ground |
 | --- | --- | --- |
-| `ce-no-merge-authority` | 5 (3 in `ce-babysit-pr`, 2 in `ce-commit-push-pr`) | (a) owner-only merge boundary |
+| `ce-no-merge-authority` | 13 (10 in `ce-babysit-pr`, 3 in `ce-commit-push-pr`) | (a) owner-only merge boundary |
 | `ce-draft-pr-only` | 3 (`ce-commit-push-pr`) | (a) owner-only Ready-for-review boundary |
-| `ce-no-workflow-rerun` | 1 (`ce-babysit-pr/SKILL.md`) | (a) + (c) — reruns are owner-only *and* denied by `.claude/settings.json` |
+| `ce-no-workflow-rerun` | 3 (`ce-babysit-pr`: `SKILL.md`, `tick.md`, `envelope.md`) | (a) + (c) — reruns are owner-only *and* denied by `.claude/settings.json` |
 | `ce-no-direct-main-push` | 2 (`ce-compound-refresh`, `ce-debug`) | (b) direct-main-push prevention |
-| `ce-no-governance-file-writes` | 2 (`ce-compound`, `ce-compound-refresh`) | (f) integrity — a skill must not rewrite the layer that authorizes it |
-| `ce-no-permission-bypass` | 5 (4 scripts + one prose line in `ce-work/SKILL.md`) | (f) integrity + (c) incompatibility |
+| `ce-no-governance-file-writes` | 3 (2 in `ce-compound`, 1 in `ce-compound-refresh`) | (f) integrity — a skill must not rewrite the layer that authorizes it |
+| `ce-no-permission-bypass` | 6 (4 scripts, one spec enum, one prose line in `ce-work/references/execution-strategy.md`) | (f) integrity + (c) incompatibility |
 | `ce-mode-normalize` | 27 (mode only, content untouched) | (c) project convention: no exec bit under `.claude/skills/**` |
 
 Mapping to the six legitimate grounds this project recognizes for patching a vendored skill:
@@ -386,16 +403,25 @@ Note also that this repo sets `"disableBypassPermissionsMode": "disable"` in `.c
 `bypassPermissions` route could not have worked here anyway — the patch removes an instruction that would have
 failed loudly, and removes it for the right reason rather than leaving it to fail.
 
-The fifth file under this id is prose, and it is mechanical: `ce-work/SKILL.md` line 196 warns not to pass
-`mode: "auto"` because "it overrides user-level settings like `bypassPermissions`". The instruction is
+Two further files carry this id. One is prose, and it is mechanical: the note warning not to pass
+`mode: "auto"` because "it overrides user-level settings like `bypassPermissions`" — which upstream moved
+out of `ce-work/SKILL.md` into `ce-work/references/execution-strategy.md` at this pin. The instruction is
 unchanged; only the illustrative example becomes `acceptEdits`, because naming a mode this repo disables
-outright as the setting worth preserving is misleading.
+outright as the setting worth preserving is misleading. The other is
+`ce-optimize/references/optimize-spec-schema.yaml`, whose `codex_security` enum offered `yolo`
+(`--dangerously-bypass-approvals-and-sandbox`) as one of exactly two selectable postures, with a live step
+applying whichever is selected; the value is removed and `full-auto` retained. That step also moved in the
+restructure, so the patch's own note was corrected to cite `references/loop.md` § 3.2 step 5 rather than
+`SKILL.md` step 5 — a patch rationale can go stale by relocation just as a patch can.
 
 ### `ce-mode-normalize`
 
 27 files whose upstream mode is `100755` are stored `100644`. Content is untouched — each file's
 `upstream_blob_sha` still matches on disk, except for the four cross-model scripts, whose content change is
-recorded separately under `ce-no-permission-bypass`. Vendored files are content an agent reads and then runs
+recorded separately under `ce-no-permission-bypass`. The set of 27 is unchanged at this pin; two blobs were
+re-pinned because upstream changed them (`ce-babysit-pr/scripts/pr-snapshot`,
+`ce-resolve-pr-feedback/scripts/get-pr-comments`), and both were re-audited end to end rather than merely
+re-hashed — a changed blob under `scripts_audited: true` requires re-audit, not a hash bump. Vendored files are content an agent reads and then runs
 through an explicit interpreter, never a binary invoked off disk (see "Self-contained by upstream design"), so
 `.claude/skills/**` carries no executable bit at all (`no-symlinks-no-exec-under-claude`), and
 `provider-vendored-modes` fails closed on any mode difference no patch id documents, in either direction.

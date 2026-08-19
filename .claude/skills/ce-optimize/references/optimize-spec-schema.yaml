@@ -281,9 +281,9 @@ optional_fields:
         minimum: 1
         description: "Maximum experiments to run in parallel. Capped at 6 for worktree backend. 8+ only valid for Codex backend."
       # bukerov-local-patch: ce-no-permission-bypass — removed the `yolo` posture, which mapped to
-      # `--dangerously-bypass-approvals-and-sandbox`. SKILL.md step 5 applies whichever posture is
-      # selected, so leaving it listed made a full approvals-and-sandbox bypass a selectable option.
-      # Same ground as the four cross-model scripts patched under this id. `full-auto` is retained.
+      # `--dangerously-bypass-approvals-and-sandbox`. references/loop.md § 3.2 step 5 applies whichever
+      # posture is selected, so leaving it listed made a full approvals-and-sandbox bypass a selectable
+      # option. Same ground as the four cross-model scripts patched under this id. `full-auto` is retained.
       codex_security:
         type: enum
         values:
