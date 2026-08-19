@@ -161,6 +161,14 @@ to reach green. Publication requires the task's final gates to actually pass. `R
 authority failures (drift, unexpected dirty state, acting outside authority, unprovable state, a repair
 strategy exhausted without a valid final gate) — see `docs/agents/quality-gates.md`.
 
+### Session continuity
+
+Interrupted DEEP work is resumed through `docs/agents/session-recovery.md`: the session emits a user-visible
+`deep-checkpoint/v1` block at meaningful boundaries, and a resume is opened with `SAME — <same task /
+recovery>` plus that block. A checkpoint is **evidence, never authority** — every new session still starts
+`READ_ONLY` and still needs a current task contract before it may mutate anything, and live git/GitHub state,
+never the checkpoint, is what a recovery reconciles against.
+
 ### Secrets
 
 Never display, test, or reuse credentials (tokens, cookies, webhook URLs, passwords). Represent any secret

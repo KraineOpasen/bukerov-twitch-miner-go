@@ -75,3 +75,9 @@ what changed with exact evidence, and treat the contract as expired until re-ver
 Mode and contract state exist only for the current live session. A new session always starts at READ_ONLY,
 regardless of what a prior session did or claimed. Background subagents may run only inside an active session
 — never report work as continuing or completing after the session that spawned it has ended.
+
+Continuity is not an exception to that rule, it is built around it. A DEEP task interrupted mid-flight may
+carry its *evidence* forward through the checkpoint protocol in `docs/agents/session-recovery.md` — what was
+proven, at which SHA, which gate last passed, what remains. A checkpoint never restores a mode and never
+restores authority: the resumed session still starts READ_ONLY and still needs a current task contract before
+it may mutate anything.

@@ -157,6 +157,13 @@ patch; see each provider's ledger.
 | `teach` / `ce-explain` | Explain a subsystem to a human / build a durable visual explainer. |
 | `ask-matt` / `wizard` | Router over the skill set / generate a human-run bash wizard. |
 
+Durable DEEP recovery is **not** a skill — it is project-owned governance documentation at
+`docs/agents/session-recovery.md`. Route an interrupted long-running task there: resume with
+`SAME — <same task / recovery>` plus that task's last `deep-checkpoint/v1` block. It **composes with**
+`handoff` / `ce-handoff` rather than replacing them — those two compact and orient a session for the next
+agent, while the checkpoint protocol carries the machine-checkable evidence (base SHA, local/remote heads,
+last passed gate, open findings). A checkpoint never restores authority.
+
 ### Dashboard design
 
 | Skill | Use it for |
