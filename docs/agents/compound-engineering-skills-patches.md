@@ -192,7 +192,9 @@ them.
   forbids as a patch ground.
 - **`ce-doc-review`'s new egress-disclosure log line** — taken verbatim; it discloses more, not less.
 
-## Deferred finding — not patched here, owner decision
+## Deferred findings — not patched here, owner decision
+
+### 1. `ce-plan` may write into the governance layer
 
 `ce-plan/references/plan-handoff.md` (Issue Creation, step 3) instructs: "Offer to persist the choice by adding
 a `project_tracker: <value>` declaration to the project's root agent-instructions file (e.g., `AGENTS.md`; if
@@ -209,3 +211,19 @@ accepted state, not a re-vendor blocker, and `Edit(CLAUDE.md)` is independently 
 > - Do not write the choice into the project's agent-instructions file. Report the suggested
 >   `project_tracker: <value>` line (lowercase tracker key — `github`, `linear`, `jira`, …) to the owner and
 >   let them add it themselves.
+
+### 2. The `ce-sweep` exclusion reason overruns its documented cap and is spliced mid-word
+
+`compound-engineering-skills-policy.md` states that each `excluded_skills[].reason` in the manifest is "capped
+at 900 characters there". Eleven of the twelve entries respect that; `ce-sweep`'s is **1329 characters**, and
+its text is joined mid-word at the old 900-character truncation boundary:
+
+> …instructs the agent tha NOTE, recorded after review: this entry originally also cited
+> `scripts/context.mjs` as an independent…
+
+("tha" is a truncated "that".) This predates the `d6ae4645 → 67cc7dc7` re-vendor — that round does not touch
+the `excluded_skills[]` array or the cap sentence — and it is prose only: `ce-sweep`'s **EXCLUDE verdict is
+unaffected, and was re-confirmed against its actual new bytes** along with the other eleven candidates. It is
+recorded here rather than rewritten, because repairing it means re-authoring an exclusion rationale this
+re-vendor otherwise had no cause to touch. The owner can either restore the truncated clause and re-cap the
+field, or relax the cap sentence in the policy.

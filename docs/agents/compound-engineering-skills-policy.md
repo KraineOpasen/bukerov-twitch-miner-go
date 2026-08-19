@@ -29,7 +29,11 @@ ledger is independent, and no skill name is shared across them (see
   surface changes, and four three-way merge conflicts), so the whole delta was re-derived independently rather
   than taken from that report. Upstream restructured by size: `SKILL.md` bodies were split into
   `references/*.md` (`ce-babysit-pr`'s went 90128 → 7939 bytes), giving **70 added and 70 modified files across
-  20 of the 22 installed skills, 0 removed**; `ce-commit` and `ce-worktree` are byte-identical. Every one of
+  20 of the 22 installed skills, 0 removed**; `ce-commit` and `ce-worktree` are byte-identical. Those are the
+  counts of the **upstream** delta, which is what the audit scope below is measured against; `git diff` over the
+  vendored tree shows 70 added and **71** modified, because one further file changed for a purely local reason —
+  `ce-optimize/references/optimize-spec-schema.yaml` is upstream-byte-identical at both pins and moved only
+  because its patch note had to be re-pointed at a section the restructure relocated. Every one of
   those 140 files was read end to end against both pins, per skill, and all 20 changed skills were swept for
   new authority — merge, ready-flip, workflow rerun, direct-main push, force push, governance-file write,
   permission bypass, child-agent authority expansion. **Zero new patches were required: upstream added no
