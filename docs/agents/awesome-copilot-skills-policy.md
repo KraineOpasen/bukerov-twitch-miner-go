@@ -19,15 +19,23 @@ Trail of Bits one is what is installed (see "Excluded / Held" below).
 ## Upstream
 
 - Repo: `https://github.com/github/awesome-copilot`
-- Reviewed commit: `a80885b76044550770f60f360f8a0e5ae3524a31` (authored 2026-08-14)
+- Reviewed commit: `318066d2213b510e89b500ed0d53506c54093ddc` (authored 2026-08-17, committed
+  2026-08-18) — re-pinned from `a80885b76044550770f60f360f8a0e5ae3524a31` (2026-08-14) by the
+  2026-08-19 audit. The move is a true fast-forward (`a80885b` is an ancestor; 7 commits, 38 paths)
+  and is **metadata-only for this provider**: not one vendored byte changed.
 - Reviewed tree SHAs (per vendored skill directory): `github-actions-efficiency`
   `a9041cbe0a768c8c11c26c2524e3a780035988f5`, `github-actions-hardening`
   `25d75a622f5f8c034be5b25bf6585850d6f7fcd7`, `harness-engineering`
   `7135eb67252e4d77c70f388b6cdcbaaa684d3dc7`, `threat-model-analyst`
   `4c51abac7859b9529f721ae5043fffc2f9812b5a`, `web-design-reviewer`
   `eded2bc5a7d38261501a76b2e4913b703cc547ec`
+- Reviewed tree SHAs above are **unchanged at the new pin** — re-verified, not carried forward:
+  `git diff a80885b..318066d2` over the five installed paths is empty and each directory's tree
+  SHA is identical at both commits.
 - Current upstream HEAD at review time: same SHA (**drift: none**)
-- Corpus size at the pin: **408 directories under `skills/`**, of which **5** are installed here.
+- Corpus size at the pin: **410 directories under `skills/`** (408 at the superseded pin; the delta
+  added `gem-design-md-guidelines` and `gem-devops-guidelines` and removed none), of which **5** are
+  installed here.
 
 One property of this upstream shaped the whole review: `github/awesome-copilot` is a Copilot-first
 catalogue, not a Claude Code skill library. Several entries are prompt files or Copilot custom agents
@@ -60,9 +68,9 @@ see "License & attribution"). **Every one of the 32 is Markdown.** This provider
 Python, no shell, no HTML, no JSON — which is why `scripts_audited` is `null` for all five skills rather
 than `true`: there was no executable content to audit, not an audit that was skipped.
 
-## Selection: how the 408-skill corpus was swept
+## Selection: how the 410-skill corpus was swept
 
-**Coverage here is a sweep, not an exhaustive read.** The 408 skill directories were not read end to end,
+**Coverage here is a sweep, not an exhaustive read.** The 410 skill directories were not read end to end,
 and this document does not claim they were. The method was:
 
 1. **Sweep by signal.** Every directory name and every `SKILL.md` frontmatter `description` was scanned
@@ -71,9 +79,9 @@ and this document does not claim they were. The method was:
    regression testing, observability, Docker, CI, PR review, technical writing, and handoff.
 2. **Shortlist, read in full.** Anything that hit one of those concerns — or that looked like it might
    cover a lane no installed skill holds — was opened and read completely, together with its dependency
-   closure (every `references/`, `scripts/`, `agents/` and `assets/` file it points at). Thirty skills were
-   read this way: the 5 installed, plus the 25 candidates recorded with a verdict and a reason in the
-   manifest's `excluded_skills[]`.
+   closure (every `references/`, `scripts/`, `agents/` and `assets/` file it points at). Thirty-three
+   skills have been read this way: the 5 installed, plus the 28 candidates recorded with a verdict and
+   a reason in the manifest's `excluded_skills[]`.
 3. **Material-addition bar.** A shortlisted skill was installed only if it added something the
    already-installed mattpocock, anthropic, Compound Engineering and Trail of Bits sets do not already
    cover — not merely if it was good. Most exclusions below are duplication findings, not quality
@@ -132,22 +140,29 @@ different answer:
 
 ## Excluded / Held
 
-Twenty-five candidates were read in full and rejected: **23 `EXCLUDE`, 2 `HOLD`**. Every one carries its
-own reason in `awesome-copilot-skills-manifest.json`'s `excluded_skills[]`; the categories are:
+Twenty-eight candidates were read in full and rejected: **26 `EXCLUDE`, 2 `HOLD`**. Every one carries
+its own reason in `awesome-copilot-skills-manifest.json`'s `excluded_skills[]`; the categories are:
 
 - **Duplicates of stronger installed skills** — `bug-reproduction-brief` (a subset of `diagnosing-bugs`
   phases 1-2), `agentic-eval`, `ai-team-orchestration`, `doc-and-modernize`, `documentation-writer`,
   `ui-screenshots`, `security-review` (which additionally collides with the Claude Code built-in of the
   same name, so it could only be installed under a rename).
-- **Wrong stack or wrong platform** — `sql-code-review` (no SQLite), `cloud-design-patterns`,
+- **Wrong stack or wrong platform** — `gem-design-md-guidelines` (~41% iOS/Material 3/React
+  Native/Flutter; its `DESIGN.md` + `npx @google/design.md lint` contract has no artifact and no npm
+  toolchain to run against here), `gem-devops-guidelines` (12 of 25 substantive lines are Kubernetes,
+  Vercel, EAS/Fastlane and percentage feature-flag rollout, none of which this single-container,
+  single-operator binary has), `sql-code-review` (no SQLite), `cloud-design-patterns`,
   `multi-stage-dockerfile` (this repo's `Dockerfile` already does everything it recommends, and its
-  `USER`/Alpine/`HEALTHCHECK` advice is inapplicable to a `scratch` image), `premium-frontend-ui` (GSAP
+  `USER`/Alpine advice is inapplicable to a `scratch` image — its `HEALTHCHECK` advice is not
+  inapplicable but already satisfied, `Dockerfile:109-110`), `premium-frontend-ui` (GSAP
   scroll narratives and glassmorphism against a `go:embed`-only HTMX dashboard),
   `architecture-blueprint-generator` (unconverted prompt file; Go absent from its stack enum).
 - **Governance boundaries** — `github-release` (its core loop *is* release/tag), `dependabot` (its
   reference material instructs `gh pr merge --auto --squash`), `codeql` (see below), `gh-attach` (installs
   an unpinned third-party `gh` extension and authenticates with a raw browser session cookie the skill
   itself calls "a full account credential").
+- **Depends on an unconfigured MCP server, with no gap left to fill** — `codebase-memory-mcp`
+  (see below).
 - **Broken or unusable as written** — `quality-playbook` (its mandated `python -m bin.reference_docs_ingest`
   entry point does not exist anywhere in the clone at this pin), `scoutqa-test` (dispatches runs to a
   hosted service whose remote browser cannot reach this project's localhost dashboard),
@@ -184,6 +199,35 @@ stronger for this repo. The awesome-copilot version's Go support is genuine (its
 relevance one — its two primary paths also run straight through non-delegable prohibitions (enabling
 default setup is a *repository settings* change, and an advanced-setup workflow only pays off when someone
 *runs* it).
+
+Three of the twenty-eight were added by the 2026-08-19 re-pin audit and are worth a sentence each,
+because a later reviewer will meet them as the newest names on the list:
+
+- **`gem-design-md-guidelines` — EXCLUDED.** Its web/desktop branch is three bullets
+  (`SKILL.md:19-21`); everything else is native-platform material or generic aesthetics. The one
+  genuinely novel asset is the Google alpha-format `DESIGN.md` schema (`:52-60`), and this project's
+  token authority is `internal/web/static/css/input.css` under the frozen
+  `docs/dashboard/stage-4-visual-design-system.md`, which states the same discipline more strongly
+  (`:77`, `:139`, `:707`) and backs it with a build-time check. Note what is **not** the ground: the
+  `npx @google/design.md lint` line is recorded as *stack absence* (no `package.json` in the tree),
+  not as a supply-chain bar — the installed `web-design-reviewer` from this same provider recommends
+  an `npx`-launched MCP server at its own `SKILL.md:310`, so `npx` alone disqualifies nothing.
+- **`gem-devops-guidelines` — EXCLUDED.** Roughly half is structurally dead here; the rest is
+  already solved in-tree or held by `github-actions-hardening`. Its rollback and mobile-release
+  sections prescribe deploys and store submissions that `CLAUDE.md`'s non-delegable prohibitions
+  bar outright — but at the `dependabot` weight (2 of 10 sections), not the `github-release` weight
+  (the whole skill), so authority is a contributing ground here and not the decisive one. It is also
+  a superset wrapper of the already-excluded `multi-stage-dockerfile`.
+- **`codebase-memory-mcp` — EXCLUDED, and the one that needed the most care.** It is not new
+  upstream; the delta rewrote it, dropping the "when a configured … server can assist" precondition
+  from its description so that it now advertises on bare capability and became a sweep hit. It is an
+  MCP tool catalogue for a server this repo does not run, which is the `chrome-devtools` shape — but
+  it is `EXCLUDE`, not `HOLD`, because the two are blocked for different reasons. `chrome-devtools`
+  is held because browser performance profiling is a real uncovered gap; here the installed Trail of
+  Bits `trailmark` family already owns graph-backed discovery, call paths, taint and data-flow
+  tracing, blast radius and complexity hotspots, and owns them from a local parse with no server and
+  no network. Unblocking it would not yield a capability this project lacks — the `scoutqa-test`
+  test, not the `chrome-devtools` one.
 
 ### Held, not excluded
 
@@ -254,9 +298,13 @@ the manifest. `provider-license-files` enforces the per-skill layout.
 ## Local patches summary
 
 **There are no local patches.** All 37 vendored files — 32 upstream-origin plus 5 verbatim `LICENSE`
-copies — are byte-identical to upstream commit `a80885b76044550770f60f360f8a0e5ae3524a31`. The manifest
-records `locally_modified: false` for every file, and `provider-file-hashes` verifies each one against a
-read-only clone at that commit when `GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT` is set.
+copies — are byte-identical to upstream commit `318066d2213b510e89b500ed0d53506c54093ddc`, and were
+byte-identical to the superseded `a80885b76044550770f60f360f8a0e5ae3524a31` as well: the pin move
+changed none of them. The manifest records `locally_modified: false` for every file, and
+`provider-file-hashes` verifies the 32 upstream-origin files against a read-only clone at that commit
+when `GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT` is set — a **working-tree** clone, never a bare one.
+The 5 `LICENSE` copies are `origin: "local"` and never reach that comparison. The ledger records both
+limits, and why a bare clone makes the check pass without comparing anything at all.
 
 One patch was made during vendoring and then **withdrawn**, and the reasoning is recorded in
 `docs/agents/awesome-copilot-skills-patches.md` because it is reusable. `relative-links-resolve` had
@@ -410,20 +458,28 @@ Full detail, including the nine blocked conditions and the security posture:
 
 ## Update procedure
 
-1. Fetch the new upstream commit into a read-only clone (never edit it in place); set
-   `GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT` to that clone's path for the validator's stricter blob-hash
-   mode.
+1. Fetch the new upstream commit into a read-only **working-tree** checkout (never edit it in place,
+   and never a bare or mirror clone — against a bare clone the stricter mode compares nothing and
+   still reports PASS); set `GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT` to that checkout's path. Prove
+   the mode is live before trusting it: flip one byte in the checkout, confirm the run FAILS naming
+   that file, restore, confirm it passes again. Note that pointing it at the *superseded* pin is not
+   a valid control — when the installed bytes are unchanged across the move, that passes too.
 2. Diff the set of directories under `skills/` against the last-reviewed list — additions, removals and
-   renames among the five installed skills, **and** whether any of the 25 recorded candidates changed in a
-   way that alters its verdict (especially the two `HOLD` entries).
-3. **Re-sweep, don't assume.** The corpus grows; the last sweep covered 408 directories by name and
-   description. Sweep the delta the same way, against the same concern list in
-   "Selection: how the 408-skill corpus was swept", and read in full anything that hits. Record every new
+   renames among the five installed skills, **and** whether any of the 28 recorded candidates changed in a
+   way that alters its verdict (especially the two `HOLD` entries). The 2026-08-19 audit ran this check
+   and found every previously recorded candidate's upstream tree unchanged across the pin move, so no
+   existing verdict was disturbed; the three candidates added in that round came from the delta itself.
+3. **Re-sweep, don't assume.** The corpus grows; the last full sweep covered 408 directories by name
+   and description, and the 2026-08-19 re-pin swept only the 2-directory delta on top of it (410
+   total). Sweep the delta the same way, against the same concern list in
+   "Selection: how the 410-skill corpus was swept", and read in full anything that hits. Record every new
    candidate in `excluded_skills[]` with a reason and an `EXCLUDE`/`HOLD` verdict, even the easy nos —
    the value of that list is that the next reviewer doesn't repeat the work.
-4. For each vendored skill, diff every file in its `files[]` list against the **currently-vendored copy**
-   (not raw upstream — `output-formats.md` is patched) to separate genuinely new upstream content from the
-   existing patch.
+4. For each vendored skill, diff every file in its `files[]` list against raw upstream at the new
+   commit. This provider carries **no local patches** — the `ghac-generated-output-links` patch on
+   `output-formats.md` was withdrawn once the validator defect behind it was fixed (see "Local
+   patches summary") — so vendored and upstream bytes are expected to be equal, and any difference
+   is a finding rather than an existing patch to separate out.
 5. Re-run the same review judgment on anything new: does it assume background execution, external network
    fetch, credentials, an unconfigured MCP server, or a write into a git working tree this project doesn't
    grant? If so, patch it minimally and mark it — the test is **authority**, not orchestration. A skill's
@@ -471,9 +527,10 @@ directories, and no cross-provider patch id exists.
 - **`threat-model-analyst` writes a multi-file report tree into the working directory.** Its orchestrator
   creates a timestamped output folder and writes `0-assessment.md`, `0.1-architecture.md`,
   `1-threatmodel.md`, `2-stride-analysis.md`, `3-findings.md`, `.mmd` diagram sources and
-  `threat-inventory.json`. The `ghac-generated-output-links` patch changes how those filenames *render* in
-  the reference doc; it does not change where the skill writes. Output location is governed by the active
-  task contract and operation mode, as with any other writing skill.
+  `threat-inventory.json`. Those filenames appear as ordinary Markdown links in the reference doc —
+  the `ghac-generated-output-links` patch that once re-rendered them was **withdrawn**, so the file is
+  byte-identical to upstream. Output location is governed by the active task contract and operation
+  mode, as with any other writing skill.
 - **`harness-engineering` proposes a layout this repo does not use.** Its artifact table names
   `.github/copilot-instructions.md`, `docs/decisions/*.md` and `docs/failures/*.md`; the equivalents here
   are `CLAUDE.md` plus `.claude/rules/*.md`, ADRs under `docs/adr/` (per `docs/agents/domain.md`), and
@@ -485,9 +542,11 @@ directories, and no cross-provider patch id exists.
 - **Both Actions skills stop at authoring and review.** Neither may verify a recommendation by dispatching
   or rerunning a workflow. `github-actions-efficiency`'s cost estimates against this repo are therefore
   static unless the owner supplies real run data.
-- **The sweep is a sweep.** 408 directories screened by name and description; 30 read in full. A useful
-  skill hidden behind an opaque name and a vague description would have been missed. See step 3 of the
-  update procedure.
+- **The sweep is a sweep.** 410 directories screened by name and description; 33 read in full. A useful
+  skill hidden behind an opaque name and a vague description would have been missed — and the
+  2026-08-19 audit is a live example of how that gets caught late rather than never:
+  `codebase-memory-mcp` only became a shortlist hit when a rewrite changed its *description*, though
+  its capability had been there all along. See step 3 of the update procedure.
 - **The hook/permission layer is a backstop, not a substitute for reading a skill.** As
   `mattpocock-skills-policy.md`'s "Known limitations" section notes, a sufficiently subtle instruction can
   still shape agent *reasoning* even where it cannot force a blocked tool call. That caveat applies to this
