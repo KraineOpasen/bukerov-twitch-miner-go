@@ -1,35 +1,35 @@
 {
   "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
-  "upstream_commit": "d6ae46457b3364ca1a3d6eb9954613217000c0ec",
-  "upstream_version": "3.22.1",
+  "upstream_commit": "67cc7dc7a11ab3724ca8e0723fcf18ee08e605de",
+  "upstream_version": "3.22.4",
   "upstream_tree": {
-    "ce-babysit-pr": "eef0d57c1c3863575a506eaa19b9bc58c526cc80",
-    "ce-brainstorm": "c4573060ec038a135429b8fe507bd9d0dc3c7144",
-    "ce-code-review": "f873e7fd8bcfba4e9c1b4da037d41e689ae0c015",
+    "ce-babysit-pr": "9cb75cf41a0167686827d4b0bbf3e19363cb2c84",
+    "ce-brainstorm": "9c7ab1ab16bebbebba3b246eb388f49d4234846b",
+    "ce-code-review": "97644c5ac63f3759e4ff9b010e83ab76543cc095",
     "ce-commit": "3a43bff81a76d887849474e3d5f6a0e257ae3932",
-    "ce-commit-push-pr": "fae458bc90cf1f28720ffd5adce2bd3c65c405f7",
-    "ce-compound": "d072651f9382a0156f15622691b5e1542a123d5d",
-    "ce-compound-refresh": "2bc5f92b9493b227d45da298c67fac75ba7f8c76",
-    "ce-debug": "757086f881fd3ea7a726f9b89760e669dcec818f",
-    "ce-doc-review": "6b13372b650881c4d466f9d536e0a44598c22c64",
-    "ce-explain": "b788204ada086c17205556d340f69dbdcf10d6fd",
-    "ce-handoff": "d5b1ee1e54571bfbdccef8c7c09025f0fd7c0945",
-    "ce-ideate": "90ded46f4268fa10605e07887efe6123f4322e4e",
-    "ce-optimize": "d85eae083d8abfb9b572a46ee97ec90f4c9b0897",
-    "ce-plan": "439226a10b3e8ae02b53a850475a7c022580d41f",
-    "ce-pov": "d4db4d49cfd92f0f96a85c5446d6452de7ac01a4",
-    "ce-prototype": "3b54d65f4f3bada99ef5602eedd20adf47259c64",
-    "ce-resolve-pr-feedback": "67f696863cdd1a67f3adfdac2657363d926bc09b",
-    "ce-setup": "00e2e19621eca86fb359a0aecc45557933c8be5e",
-    "ce-simplify-code": "cedfb5c8230688c680bba0481e56ede8bd115c59",
-    "ce-strategy": "ae9a402f5a9c30bddfa2e224ba84494addb38ff8",
-    "ce-work": "79d8f2b7c063c49167cec10095c9b0d224b45edf",
+    "ce-commit-push-pr": "486957b67ec5bfeb0481dc4c356ba3a5ab3fbc52",
+    "ce-compound": "226ddc1698f80c146d2ddf88425457dc20e2024f",
+    "ce-compound-refresh": "a4a2d6022be60c95f7a1bedd5793176b140c177e",
+    "ce-debug": "ac522d7b5a855131c98f4298fee6997b9ecfdd9d",
+    "ce-doc-review": "01bc1b48a1501e5e4348b99f308aa3e4500d49a6",
+    "ce-explain": "98f82d9b10d3225635a53438b19394f76a1c8b47",
+    "ce-handoff": "80adfc13310f541da0e225f56cf9e8fd11e3a3fe",
+    "ce-ideate": "7e245148d26b8ef2200ee2cfcf9cd80cd73beab7",
+    "ce-optimize": "2ff5b1734da27353c5b22247190d0093086cc86e",
+    "ce-plan": "6be5e821912c1379acff80024fdd53fff015e95e",
+    "ce-pov": "0465dcbc4f668316ed9b9aa63543559ca23ad980",
+    "ce-prototype": "f38e85e32546c5ad1ec251e0ae17036371ad2b2f",
+    "ce-resolve-pr-feedback": "e1826faf6d961f2337e6e7ff41c27423c8ece820",
+    "ce-setup": "9f160a1eedfb65f89b22379b043d815285452fd1",
+    "ce-simplify-code": "91c4b4b14d74b40ca2417c24af2d25068ebb45a2",
+    "ce-strategy": "a3ae3e2de97a39ee7017b59ea54ed2bdc74734d6",
+    "ce-work": "0201bf79fd09daf8a89830fdb448d51663157122",
     "ce-worktree": "7b1caeddd4ae8beee629c65da2d097ff05900606"
   },
-  "upstream_current_head": "5835448d8a478828b2ec42acbba13d9bdf6aa712",
-  "drift": "AHEAD OF PIN, not audited. The reviewed pin is upstream_commit d6ae4645; upstream refs/heads/main -- the ref recorded for this provider in docs/agents/skills-update-providers.json -- resolved to d6ae4645 when the bot prepared this candidate, and had advanced 2 commits to 5835448d8a478828b2ec42acbba13d9bdf6aa712 by the time this audit fetched it (observed 2026-08-17T19:35:26Z). That advance is a fast-forward extension of the reviewed pin, not a rewrite: d6ae4645 is still a true ancestor of it. It leaves plugin version at 3.22.1 and does NOT touch ce-setup, so it takes nothing away from this audit. It does change four installed skills' upstream sources -- skills/ce-code-review/references/cross-model-review.md, skills/ce-doc-review/SKILL.md, skills/ce-doc-review/references/cross-model-review.md, skills/ce-doc-review/scripts/cross-model-doc-review.sh, skills/ce-work/SKILL.md, skills/ce-work/references/shipping-workflow.md -- plus skills/lfg/SKILL.md (HOLD, not installed). None of those bytes are vendored here and none were audited. Note for whoever takes the next candidate: cross-model-doc-review.sh carries the ce-no-permission-bypass patch, so that one needs a three-way merge and a fresh end-to-end script audit, and ce-doc-review/SKILL.md is a trigger-surface file. The next scheduled skills-update run will prepare it as its own PREPARED_AUDIT_REQUIRED candidate.",
-  "reviewed_at": "2026-08-17T19:35:26Z",
-  "reviewed_by": "Governance v3 compound-engineering re-vendor audit (task audit-compound-engineering-d6ae4645) of the machine-prepared candidate 57e586d66194585757ffa30a23dcd0f4ec0210a4 -> d6ae46457b3364ca1a3d6eb9954613217000c0ec (plugin 3.22.0 -> 3.22.1), audited rather than accepted on the bot's report. Upstream was re-fetched into a fresh bare read-only clone and read through git cat-file/ls-tree only; nothing fetched was executed, and the clone was re-made without a blob filter so every object is local and `git fsck` is clean. Re-proven independently at the target commit: 57e586d6 -> d6ae4645 is a true fast-forward (merge-base --is-ancestor exit 0; merge-base equals the old pin; 5 commits forward, 0 reverse, 0 merge commits, one parent each). The complete upstream delta across those 5 commits is 22 paths, all modifications, of which exactly one lies inside the installed set: skills/ce-setup/scripts/check-health (cba4de9ecc0ec4889aff8941e2d8688426389bf7 -> 363973b7960fba6750fb17f5cb9c85889511a6ea, from abc75c73 'fix(ce-setup): support read-only sandboxes (#1407)'). That script was re-read end to end and behaviourally compared against the superseded bytes -- see this skill's audit_ref for the EVAL_REQUIRED method and its one environment-conditional difference. The other 274 tracked files were re-verified by blob hash and mode in both directions against the target tree (253 upstream-origin plus 22 per-skill LICENSE copies of unchanged root blob 959dd283c510cfac6fd912555f99b14613ee9018), with no undeclared upstream file under the 22 installed directories and no manifest entry missing from the tree; scripts/validate-agent-governance.py's provider-file-hashes was additionally run in its strict upstream-clone mode against the target pin's extracted bytes, and shown to discriminate by failing on exactly this file when pointed at the superseded pin. All 22 upstream_tree entries match the target tree: 21 byte-identical to the superseded pin, ce-setup 45d96a6e -> 00e2e196. The upstream skills/ directory listing is 33 entries and identical at both pins, so no sibling skill appeared (no DISCOVERY_REQUIRED) and none was removed or renamed; no symlink, submodule or new executable bit appeared, and the 27-file executable set is unchanged. ce-setup's SKILL.md (d29413086edc4e71a79667376f0a0c69d400aacc) and references/config-template.yaml (9353b48f232cd7e90eeec4472f8aae046af211a7) are byte-identical at both pins, so the trigger and frontmatter authority surface did not move; that frontmatter is exactly {name, description, disable-model-invocation} at both pins, and allowed-tools/argument-hint/type are absent from both rather than matching. Every excluded_skills[] entry was re-checked against the delta per the policy's step 2: .agents/skills/ce-skill-work moved in five files and its EXCLUDE verdict stands on unchanged grounds (broken dependency closure, hardcoded bun toolchain, skill-creator name collision). SCOPE BOUNDARY, stated so this field is not read as more than it is: the vendored prose of the 22 installed skills was NOT re-read end to end at this pin. It is carried forward on byte-identity to the bytes reviewed at 57e586d6, with the single changed script re-read and behaviourally compared. The policy's local-patch counts were not re-verified either; one pre-existing discrepancy found incidentally is recorded as a deferred finding rather than certified here.",
+  "upstream_current_head": "67cc7dc7a11ab3724ca8e0723fcf18ee08e605de",
+  "drift": "NONE at review time. Upstream refs/heads/main -- the ref recorded for this provider in docs/agents/skills-update-providers.json -- resolved to 67cc7dc7a11ab3724ca8e0723fcf18ee08e605de when this audit fetched it (observed 2026-08-19T11:32:40Z), which is exactly the reviewed upstream_commit. The pin is level with upstream; there are no unaudited bytes ahead of it.",
+  "reviewed_at": "2026-08-19T11:32:40Z",
+  "reviewed_by": "Governance v3 compound-engineering deliberate re-vendor of the BLOCKED skills-update candidate reported in issue #189, advancing the pin d6ae46457b3364ca1a3d6eb9954613217000c0ec -> 67cc7dc7a11ab3724ca8e0723fcf18ee08e605de (plugin 3.22.1 -> 3.22.4). Audited rather than accepted on the bot's report: issue #189 named 956087b3e1dd7ccc03df32cee9e7c044dfbe75cf as the target and the live ref had advanced one commit further, so the extra commit was reconciled before any mutation. RECONCILIATION, PROVEN INDEPENDENTLY: d6ae4645 -> 956087b3 -> 67cc7dc7 is a true reachable fast-forward chain (merge-base --is-ancestor exit 0 on both hops); 956087b3..67cc7dc7 is exactly one commit and 67cc7dc7^ == 956087b3; that extra commit ('docs(skill-design): third-sweep learnings', #1483) touches exactly two paths -- .agents/skills/ce-skill-work/references/edit-skill.md (an EXCLUDE candidate, not installed) and docs/solutions/skill-design/size-driven-skill-restructure.md (upstream docs, not vendored) -- so it changes no installed ce-* subtree, no shared dependency, no licence, no authority surface, no patch context and no routing fact; 67cc7dc7 was therefore adopted as the pin so this re-vendor does not land stale. WHAT THIS UPDATE IS: a size-driven upstream restructure. SKILL.md bodies were split into references/*.md (ce-babysit-pr's SKILL.md went 90128 -> 7939 bytes), producing 70 ADDED and 70 MODIFIED files across 20 of the 22 installed skills, 0 removals; ce-commit and ce-worktree are byte-identical. Those figures describe the UPSTREAM delta, which is the audit scope; git diff over the vendored tree shows 70 added and 71 modified, the extra file being ce-optimize/references/optimize-spec-schema.yaml -- upstream-byte-identical at both pins, changed only because its patch note had to be re-pointed at a relocated section. THE CENTRAL RISK, and why a mechanical re-vendor was refused: the restructure RELOCATED patched authority text rather than deleting it, in both directions. Authority moved INTO new files -- the entire `stack-land` land step, including the squash-merge and stack-sync commands, now lives in the new references/stack.md, and the same posture is duplicated into envelope.md, settle.md, tick.md, pipeline.md, report.md and setup.md; the workflow-rerun instruction moved into tick.md; the PR-creation command moved into ce-commit-push-pr/references/apply-and-handoff.md; the commit-strategy menu moved into ce-compound-refresh/references/commit.md; the permission-mode prose moved into ce-work/references/execution-strategy.md. Authority also moved OFF files -- ce-compound-refresh/SKILL.md and ce-work/SKILL.md became pointer shells and are no longer patch targets. Re-applying the ledger's recorded file list would have silently restored merge, workflow-rerun, direct-main-push and permission-bypass authority while still passing a blob-hash check. Consequently ce-no-merge-authority grew 5 -> 13 files, ce-no-workflow-rerun 1 -> 3, ce-no-governance-file-writes 2 -> 3, ce-no-permission-bypass 5 -> 6; content-patched files 15 -> 25. SCOPE OF THE READ: every one of the 140 changed/added files in the installed set was read end to end, per skill, against both pins; all 20 changed skills were swept for NEW authority (merge, ready-flip, workflow rerun, direct-main push, force push, governance-file write, permission bypass, child-agent authority expansion) and ZERO new patches were required -- upstream added no authority in this update. All three bundled scripts whose bytes changed were re-read end to end and behaviourally compared (see each skill's audit_ref); nothing fetched was executed. VERIFICATION: file-level provenance was regenerated from the target tree and checked in both directions -- 345 files (323 upstream-origin + 22 per-skill LICENSE copies of unchanged root blob 959dd283c510cfac6fd912555f99b14613ee9018), no undeclared upstream file under the 22 installed directories and no manifest entry missing from the tree; the set of files differing from upstream (25) is exactly the set carrying a bukerov-local-patch marker (25), with no unmarked modification and no marker on an unmodified file. scripts/validate-agent-governance.py was run in its strict upstream-clone mode against a working-tree checkout at 67cc7dc7, and shown to discriminate by failing against the superseded pin. An 18-probe behavioural suite over the final bytes asserts every patched authority is absent as a LIVE instruction; it passes 18/18 on the vendored tree and only 2/18 on raw upstream at the same commit, so it tests the patches rather than tautologies. Shared-asset parity re-verified at the pin (context.mjs identical across 15 copies and unchanged from the old pin; peer-job-runner.py across 6; elevation-dispatch.sh 2; validate-frontmatter.py 2). Upstream's skills/ listing is 33 entries and identical at both pins, so no sibling appeared, disappeared or was renamed; no symlink, submodule or new executable bit appeared and the 27-file executable set is unchanged. Every excluded_skills[] entry was re-checked against its actual new bytes per the policy's step 2: ZERO verdict changes, including ce-skill-work (the one candidate the extra commit touched). Frontmatter key union is unchanged ({name, description, argument-hint, allowed-tools, disable-model-invocation}) and ce-setup remains the only user-invoked skill. TWO PRE-EXISTING FINDINGS are reported to the owner rather than silently fixed: (1) the policy's local-patch counts were already wrong before this round (14 files / 45 rows, against 15 files / 46 rows actually on disk) -- corrected here as part of rewriting those counts; (2) ce-plan/references/plan-handoff.md instructs persisting a `project_tracker:` key into 'the project's root agent-instructions file', which in this repository is CLAUDE.md -- the target ce-no-governance-file-writes protects elsewhere. It is byte-identical at both pins and was already present unpatched in the superseded vendored copy, so it is NOT introduced by this update and was left unpatched here; Edit(CLAUDE.md) is independently gated to `ask` in .claude/settings.json. Patching it is a separate owner decision, with the minimal edit drafted in the PR. (3) The ce-sweep entry in excluded_skills[] carries a 1329-character reason, overrunning the 900-character cap the policy states for that field, and its text is spliced mid-word at the old truncation boundary ('...instructs the agent tha NOTE, recorded after review: ...'). It predates this re-vendor, this round does not touch excluded_skills[], and the entry's EXCLUDE verdict is unaffected and was re-confirmed, so the corrupted prose is reported rather than rewritten here.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
   "license": {
@@ -38,7 +38,7 @@
     "copyright_notice": "Copyright (c) 2025 Every",
     "notes": "MIT requires the copyright and permission notice to accompany all copies, so the upstream root LICENSE is copied verbatim into every vendored skill directory (origin=local, with a reason) rather than relying on a single shared notice."
   },
-  "notes": "Pin advanced from 57e586d6 (upstream_tree ce-setup 45d96a6e) to d6ae4645 (ce-setup 00e2e196), plugin 3.22.0 -> 3.22.1. Exactly ONE vendored byte-change rode in: .claude/skills/ce-setup/scripts/check-health, taken verbatim (no new local patch), whose two changed lines were re-read in full context and behaviourally compared old-vs-candidate under EVAL_REQUIRED -- see that skill's audit_ref. Everything else in the installed set is byte-identical to the previously reviewed bytes and was re-verified by hash and mode rather than re-read. THE REMAINDER OF THIS NOTE IS THE STANDING DESCRIPTION OF THE INSTALLATION, unchanged by that advance and re-verified true at this pin. 22 of upstream's 33 skills are vendored; 10 are excluded and 2 are held (see excluded_skills[]). Upstream deliberately DUPLICATES shared components into each owning skill rather than factoring them out, and pins the duplicates with byte-parity tests, so each vendored skill directory is self-contained: there is no shared runtime tree to install alongside it. Verified at this pin: no skill references a sibling skill's files and no skill uses ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_SKILL_DIR}. Every bundled script is located via an inline SKILL_DIR anchor and invoked through an explicit interpreter, so normalizing file modes to 100644 breaks no invocation.",
+  "notes": "Pin advanced d6ae4645 -> 67cc7dc7, plugin 3.22.1 -> 3.22.4, across a size-driven upstream restructure: 70 files ADDED and 70 MODIFIED in the installed set, 0 removed; tracked files 275 -> 345 (253 -> 323 upstream-origin, plus the unchanged 22 per-skill LICENSE copies). 20 of 22 skills changed; ce-commit and ce-worktree are byte-identical. Because the restructure moved prose out of SKILL.md into references/*.md, local patches FOLLOWED their text rather than staying on their recorded paths: content-patched files went 15 -> 25 and two SKILL.md files (ce-compound-refresh, ce-work) stopped being patch targets entirely. No NEW patch id was created and none was retired: all seven ids survive, re-placed. THE REMAINDER OF THIS NOTE IS THE STANDING DESCRIPTION OF THE INSTALLATION, re-verified true at this pin. 22 of upstream's 33 skills are vendored; 10 are excluded and 2 are held (see excluded_skills[]), and no verdict moved at this pin. Upstream deliberately DUPLICATES shared components into each owning skill rather than factoring them out, and pins the duplicates with byte-parity tests, so each vendored skill directory is self-contained: there is no shared runtime tree to install alongside it. Verified at this pin: no skill references a sibling skill's files, no skill uses ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_SKILL_DIR}, and every relative link resolves inside its own skill directory -- which matters more than usual this round, because the new ce-explain/SKILL.md and ce-handoff/SKILL.md declare non-optional reads of references/orchestration.md, references/create.md and references/resume.md, none of which existed in the superseded vendored tree. Every bundled script is located via an inline SKILL_DIR anchor and invoked through an explicit interpreter, so normalizing file modes to 100644 breaks no invocation.",
   "skills": [
     {
       "name": "ce-babysit-pr",
@@ -54,7 +54,7 @@
         "ce-no-workflow-rerun"
       ],
       "scripts_audited": true,
-      "audit_ref": null,
+      "audit_ref": "scripts/pr-snapshot re-read end to end at upstream blob 1865073d3fc04cd941d30d42abd3f6ff34228b38 (superseding 622e9d41515f53cef36463b0a9339f57b5ffc4db); +272/-31 lines. EVAL_REQUIRED discharged by reading the new file, the superseded blob and the previously vendored copy in full and comparing behaviour; nothing was executed. The change is entirely additive observation/robustness and removes no guard: _run() now copies os.environ, sets NO_COLOR=1 and pops CLICOLOR_FORCE/GH_FORCE_TTY before every gh call (gh honoured those even for --json and corrupted parsing); a new _run_git() helper runs with GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never, GIT_ASKPASS and SSH_ASKPASS emptied and timeout=30, used only for a read-only `git ls-remote --exit-code --refs` fallback when the REST git-ref read 404s; the merge-identity query gains head-commit parents; a bounded stale-computation degrade covers a stale potentialMergeCommit; an unrequested-base-merge detector adds a wake reason; _extract_feedback no longer excludes the PR author; and --downstack-pr/--downstack-fetch-file watcher flags emit a downstack-actionable wake. NO authority is performed or instructed: no merge, no ready-flip, no PR creation, no workflow rerun, no push, no commit, no write under .claude/ or to CLAUDE.md, and no permission/sandbox flag anywhere. All gh calls are read-only (pr view/list, repo view, REST GETs, four read-only query documents), dispatched as argv lists with shell=False and no string interpolation into a shell. The only process signal is os.kill(pid, SIGTERM) against a pid this script itself recorded for its own watcher. Taken verbatim; the file's only patch remains ce-mode-normalize (100755 -> 100644).",
       "files": [
         {
           "path": ".claude/skills/ce-babysit-pr/LICENSE",
@@ -72,14 +72,91 @@
           "path": ".claude/skills/ce-babysit-pr/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-babysit-pr/SKILL.md",
-          "upstream_blob_sha": "0dafb50966d048c4c64bcde4f041388ca634b20b",
+          "upstream_blob_sha": "89eeb9717841b31947c2efab1c4a476c3ec28c69",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "3f75cd9420c26b718395363643a780a1c89afa4f",
+          "vendored_blob_sha": "77366a94d859a00dea2db958cd5ea614843a48c3",
           "locally_modified": true,
           "patch_ids": [
             "ce-no-merge-authority",
             "ce-no-workflow-rerun"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/branch-currency.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/branch-currency.md",
+          "upstream_blob_sha": "19c5d0664382059e91902de3d8d6b8311a4a858c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "19c5d0664382059e91902de3d8d6b8311a4a858c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/envelope.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/envelope.md",
+          "upstream_blob_sha": "e40745746da1cefefbd4396aa364b8d45ce35fb6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "55f8398e2d92a6631399223f07f1e2fa67609909",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority",
+            "ce-no-workflow-rerun"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/pipeline.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/pipeline.md",
+          "upstream_blob_sha": "05f8bab628862bbe87299ce9f9fc5a8b0526ec04",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7fd72cb52267f4aef5261733a66d71153f535f8e",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/report.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/report.md",
+          "upstream_blob_sha": "e09d67682cbf24790a1efc7a6ed10ae6fb91b17c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e687bb8afb1d3e087f6a67d5e851a17f1bc3eff2",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/settle.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/settle.md",
+          "upstream_blob_sha": "fd51ee93cbc2be3aa1b5bb0eace319ce3be33452",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "000070ce23ca2f2d606e3c1f9f721a8b5e1c7dec",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/setup.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/setup.md",
+          "upstream_blob_sha": "bf50a2551b6a3f453e47a85c76296666e1cc7f66",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "883ac59d73906f8b78e2c9952d3937f8c2399f04",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
           ]
         },
         {
@@ -96,13 +173,40 @@
           ]
         },
         {
+          "path": ".claude/skills/ce-babysit-pr/references/stack.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/stack.md",
+          "upstream_blob_sha": "fab329c65089d4e7461f71344aab50f0afdb0f4d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4eb317c81ff011dd2d217d1d975ddbc186765f06",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-babysit-pr/references/tick.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-babysit-pr/references/tick.md",
+          "upstream_blob_sha": "fbc07b5f0ceed50c3da47e2576cf8dc4fbb7ce8c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d11b164edcb64cc75e7ccc13848ffe5cd08d3935",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority",
+            "ce-no-workflow-rerun"
+          ]
+        },
+        {
           "path": ".claude/skills/ce-babysit-pr/references/watch-loop.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-babysit-pr/references/watch-loop.md",
-          "upstream_blob_sha": "457a63b3b82c05e2c356f4f1ec08b8fd62f2c4c2",
+          "upstream_blob_sha": "e95c9a75c9e9e417ec787b01bca0a92e61362a5b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "22c0beeb3b84ea649bd73f4db7723fcbae0eaed1",
+          "vendored_blob_sha": "5add20b00330da0c47fb0c1acc338bbd5d4f0fad",
           "locally_modified": true,
           "patch_ids": [
             "ce-no-merge-authority"
@@ -112,10 +216,10 @@
           "path": ".claude/skills/ce-babysit-pr/scripts/pr-snapshot",
           "origin": "upstream",
           "upstream_path": "skills/ce-babysit-pr/scripts/pr-snapshot",
-          "upstream_blob_sha": "622e9d41515f53cef36463b0a9339f57b5ffc4db",
+          "upstream_blob_sha": "1865073d3fc04cd941d30d42abd3f6ff34228b38",
           "upstream_mode": "100755",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "622e9d41515f53cef36463b0a9339f57b5ffc4db",
+          "vendored_blob_sha": "1865073d3fc04cd941d30d42abd3f6ff34228b38",
           "locally_modified": false,
           "patch_ids": [
             "ce-mode-normalize"
@@ -153,10 +257,10 @@
           "path": ".claude/skills/ce-brainstorm/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/SKILL.md",
-          "upstream_blob_sha": "ee5dcb4aa04c1fe2f44273a77c0f2adfcb056bf8",
+          "upstream_blob_sha": "10d53d8e0cbd194c6d142b2a95d03b06c4dc25d8",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ee5dcb4aa04c1fe2f44273a77c0f2adfcb056bf8",
+          "vendored_blob_sha": "10d53d8e0cbd194c6d142b2a95d03b06c4dc25d8",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -168,6 +272,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "fa9b1671614da5899816ff969a81e70c94a2fd95",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/approaches.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/approaches.md",
+          "upstream_blob_sha": "6a39e111556a8908e1a794e516c6ce8bcad6c3cf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a39e111556a8908e1a794e516c6ce8bcad6c3cf",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -186,10 +301,21 @@
           "path": ".claude/skills/ce-brainstorm/references/brainstorm-sections.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/references/brainstorm-sections.md",
-          "upstream_blob_sha": "ee1f521624a911bfd9bc5a00e0777118e6d96f8b",
+          "upstream_blob_sha": "3a69d213a43852816e96471a6bd5862b667a39b0",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ee1f521624a911bfd9bc5a00e0777118e6d96f8b",
+          "vendored_blob_sha": "3a69d213a43852816e96471a6bd5862b667a39b0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/dialogue.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/dialogue.md",
+          "upstream_blob_sha": "73c4140d257cddb0ef151ef08b7884c7fd1cf60a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "73c4140d257cddb0ef151ef08b7884c7fd1cf60a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -216,13 +342,24 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-brainstorm/references/interaction-rules.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/interaction-rules.md",
+          "upstream_blob_sha": "6880b884a7b5489bcc84f0cd8a56b81569c2bc29",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6880b884a7b5489bcc84f0cd8a56b81569c2bc29",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-brainstorm/references/markdown-rendering.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/references/markdown-rendering.md",
-          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "vendored_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -234,6 +371,39 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "2f6efd4b2ace69ad1cf3cbf913e11513baff6e16",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/output-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/output-mode.md",
+          "upstream_blob_sha": "52e1016c21829b9614f33ea8cb2ab55fda450026",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "52e1016c21829b9614f33ea8cb2ab55fda450026",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/phase-0.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/phase-0.md",
+          "upstream_blob_sha": "3a6a60ab556087a5aea9ac788194926e323ca1dd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3a6a60ab556087a5aea9ac788194926e323ca1dd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-brainstorm/references/plan-write.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-brainstorm/references/plan-write.md",
+          "upstream_blob_sha": "6a77d22c3e56140975e33eb60db08ea026fa585a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a77d22c3e56140975e33eb60db08ea026fa585a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -274,10 +444,10 @@
           "path": ".claude/skills/ce-brainstorm/references/synthesis-summary.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/references/synthesis-summary.md",
-          "upstream_blob_sha": "a481f4784c56132383f38d01180a286dcedb47b3",
+          "upstream_blob_sha": "fd6a8511c6faebac0801d62e96396f17b3f69732",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "a481f4784c56132383f38d01180a286dcedb47b3",
+          "vendored_blob_sha": "fd6a8511c6faebac0801d62e96396f17b3f69732",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -285,10 +455,10 @@
           "path": ".claude/skills/ce-brainstorm/references/universal-brainstorming.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/references/universal-brainstorming.md",
-          "upstream_blob_sha": "05cdb870fbf020a873c13768a04c68cd8c7a00fa",
+          "upstream_blob_sha": "b5c2c7e2bfde680bd093a313efc2675f450a8da5",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "05cdb870fbf020a873c13768a04c68cd8c7a00fa",
+          "vendored_blob_sha": "b5c2c7e2bfde680bd093a313efc2675f450a8da5",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -307,10 +477,10 @@
           "path": ".claude/skills/ce-brainstorm/references/visual-probes.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-brainstorm/references/visual-probes.md",
-          "upstream_blob_sha": "1dad8f31a37ccc094f750c51daffa282341c2b65",
+          "upstream_blob_sha": "40aff759ef198e1ada733f55c97e8f9d1d4c5924",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1dad8f31a37ccc094f750c51daffa282341c2b65",
+          "vendored_blob_sha": "40aff759ef198e1ada733f55c97e8f9d1d4c5924",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -395,10 +565,10 @@
           "path": ".claude/skills/ce-code-review/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/SKILL.md",
-          "upstream_blob_sha": "09e1038cf3fdea60b3b08865ea975784e3e80549",
+          "upstream_blob_sha": "db60d90b3482e558de24bcf8e136df19d88bc41f",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "09e1038cf3fdea60b3b08865ea975784e3e80549",
+          "vendored_blob_sha": "db60d90b3482e558de24bcf8e136df19d88bc41f",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -406,10 +576,10 @@
           "path": ".claude/skills/ce-code-review/references/action-class-rubric.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/references/action-class-rubric.md",
-          "upstream_blob_sha": "bbdc5d7cd2de4679e91bc90c76c4e036bbaebc71",
+          "upstream_blob_sha": "e48f35eb13fdea849ebda15bd86c7648ae791596",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "bbdc5d7cd2de4679e91bc90c76c4e036bbaebc71",
+          "vendored_blob_sha": "e48f35eb13fdea849ebda15bd86c7648ae791596",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -428,10 +598,10 @@
           "path": ".claude/skills/ce-code-review/references/cross-model-review.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/references/cross-model-review.md",
-          "upstream_blob_sha": "717a0f2d1d261fc1e61317bf080c9012c08a0d55",
+          "upstream_blob_sha": "152fa641a247b0ec0683432e74c846b4fb01b71c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "717a0f2d1d261fc1e61317bf080c9012c08a0d55",
+          "vendored_blob_sha": "152fa641a247b0ec0683432e74c846b4fb01b71c",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -450,10 +620,10 @@
           "path": ".claude/skills/ce-code-review/references/dispatch-reviewers.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/references/dispatch-reviewers.md",
-          "upstream_blob_sha": "6827b48e719b10946455d6f35332a9a12a92ba85",
+          "upstream_blob_sha": "5894c31e9f6bfc41959128cb32cbda70a43c0bfb",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6827b48e719b10946455d6f35332a9a12a92ba85",
+          "vendored_blob_sha": "5894c31e9f6bfc41959128cb32cbda70a43c0bfb",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -472,10 +642,32 @@
           "path": ".claude/skills/ce-code-review/references/finish-review.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/references/finish-review.md",
-          "upstream_blob_sha": "5f594e2939ffd04886b3500dc661638b07706c13",
+          "upstream_blob_sha": "e71c9f8ad1e5207981132468094aba357949bd17",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5f594e2939ffd04886b3500dc661638b07706c13",
+          "vendored_blob_sha": "e71c9f8ad1e5207981132468094aba357949bd17",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/intent-and-plan.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/intent-and-plan.md",
+          "upstream_blob_sha": "9ec84336fd9c25f54c784645187d65f81173bc21",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9ec84336fd9c25f54c784645187d65f81173bc21",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/modes-and-output.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/modes-and-output.md",
+          "upstream_blob_sha": "89b6eb05fdaa075e7d046667d517cb691471374a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "89b6eb05fdaa075e7d046667d517cb691471374a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -670,10 +862,32 @@
           "path": ".claude/skills/ce-code-review/references/review-output-template.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-code-review/references/review-output-template.md",
-          "upstream_blob_sha": "ac774710360fc99ce7ab1d88d9712ca908ed1c61",
+          "upstream_blob_sha": "214261809015157b33cd329ca6b13bf6fc58bbbe",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ac774710360fc99ce7ab1d88d9712ca908ed1c61",
+          "vendored_blob_sha": "214261809015157b33cd329ca6b13bf6fc58bbbe",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/scope.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/scope.md",
+          "upstream_blob_sha": "61768ade352755188fc432dac41f8d0c89f5f00c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61768ade352755188fc432dac41f8d0c89f5f00c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-code-review/references/select-and-route.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-code-review/references/select-and-route.md",
+          "upstream_blob_sha": "f547b2473ab48af6ea864f3a00e4a4d7e2a82593",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f547b2473ab48af6ea864f3a00e4a4d7e2a82593",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -844,10 +1058,23 @@
           "path": ".claude/skills/ce-commit-push-pr/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-commit-push-pr/SKILL.md",
-          "upstream_blob_sha": "cec82a932d96b7f1cfbb2b6a57c680506cd1a7d2",
+          "upstream_blob_sha": "40e28da4a70e2ebce0839dd5d3e22c4c1763f979",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "8ea53a37eaa4ed6a412e5fceaf684617f5acf3f2",
+          "vendored_blob_sha": "e1315e26241f60ad6b8d32808ac7f970bb150570",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-merge-authority"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/apply-and-handoff.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/apply-and-handoff.md",
+          "upstream_blob_sha": "da202bfa5fcd7b93587224e8380d8d1f69032db8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cfcc952697d11a6e226260f55bdcbeefd20d55cc",
           "locally_modified": true,
           "patch_ids": [
             "ce-draft-pr-only",
@@ -862,6 +1089,39 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "d727e34e4a025dee09e76472e37430b1744443cd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/commit-and-push.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/commit-and-push.md",
+          "upstream_blob_sha": "fb3a10c68ed2d7583af066c4639f0568d90d3ed2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fb3a10c68ed2d7583af066c4639f0568d90d3ed2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/compose.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/compose.md",
+          "upstream_blob_sha": "ab0e8edb9a046589956998bb88e8616afb298778",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ab0e8edb9a046589956998bb88e8616afb298778",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-commit-push-pr/references/context.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-commit-push-pr/references/context.md",
+          "upstream_blob_sha": "7a809d97c35327b84ff9e04b3f05fbd07d41b367",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7a809d97c35327b84ff9e04b3f05fbd07d41b367",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -882,10 +1142,10 @@
           "path": ".claude/skills/ce-commit-push-pr/references/pr-description-writing.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-commit-push-pr/references/pr-description-writing.md",
-          "upstream_blob_sha": "94ef0cc78552ea3d9f480061d703bb12a9471a8a",
+          "upstream_blob_sha": "6867020a9bb2f3033165dca3a4ce6f232bf77f32",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "94ef0cc78552ea3d9f480061d703bb12a9471a8a",
+          "vendored_blob_sha": "6867020a9bb2f3033165dca3a4ce6f232bf77f32",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -893,10 +1153,10 @@
           "path": ".claude/skills/ce-commit-push-pr/references/stack-submit.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-commit-push-pr/references/stack-submit.md",
-          "upstream_blob_sha": "4eed52f4278eacf42f6573b6d80bed95260c6cba",
+          "upstream_blob_sha": "3418296d517388ffa7cc6de3279932c11f570d62",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "bdbeb3c2aa7ddeb4b93a846309323a8e650ef800",
+          "vendored_blob_sha": "8bc8d7d60d37cfba91d7c310e020bb3fdd0d608d",
           "locally_modified": true,
           "patch_ids": [
             "ce-draft-pr-only",
@@ -936,10 +1196,10 @@
           "path": ".claude/skills/ce-compound/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound/SKILL.md",
-          "upstream_blob_sha": "6fa3babfb21315a0c3c37661908897d6a479ce3a",
+          "upstream_blob_sha": "d500ad6f4fb762ccd4c11006023cefa2407d0a18",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "e17fc904d2f42f16a8f3a2e2447f4fb73b4a59f8",
+          "vendored_blob_sha": "d79b8271070159085a2ea42d6dc697843704e8b2",
           "locally_modified": true,
           "patch_ids": [
             "ce-no-governance-file-writes"
@@ -1034,6 +1294,17 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-compound/references/assembly.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/assembly.md",
+          "upstream_blob_sha": "7aa151bd07ead0b0d933eb2f60d1a7655828f558",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7aa151bd07ead0b0d933eb2f60d1a7655828f558",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-compound/references/concepts-vocabulary.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound/references/concepts-vocabulary.md",
@@ -1041,6 +1312,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/enhancement.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/enhancement.md",
+          "upstream_blob_sha": "672bb2e2ce47ef31bcba187b7cc21dc62da468e4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "672bb2e2ce47ef31bcba187b7cc21dc62da468e4",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1056,6 +1338,63 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-compound/references/lightweight.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/lightweight.md",
+          "upstream_blob_sha": "22020679face85124819f9ec77fbdea9b857a889",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "22020679face85124819f9ec77fbdea9b857a889",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/modes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/modes.md",
+          "upstream_blob_sha": "293cd654bdf75813564daa588f37776abc3352da",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "293cd654bdf75813564daa588f37776abc3352da",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/refresh-and-discoverability.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/refresh-and-discoverability.md",
+          "upstream_blob_sha": "d60617048ad75c7e57404776ca4b25e675dbf608",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9b7875f34f61d98ff64ab7fc9e0687125dd5ed2a",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-governance-file-writes"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/report.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/report.md",
+          "upstream_blob_sha": "5caaff5f71047f902f42ffb4e9d30cdd1658d1e6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5caaff5f71047f902f42ffb4e9d30cdd1658d1e6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/research.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/research.md",
+          "upstream_blob_sha": "2d6bcb4328e11745778858d17c1df7a08ee1b26b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2d6bcb4328e11745778858d17c1df7a08ee1b26b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-compound/references/schema.yaml",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound/references/schema.yaml",
@@ -1063,6 +1402,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound/references/session-history.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound/references/session-history.md",
+          "upstream_blob_sha": "1a408161e65cd995352fa38d84f5e1100c0e2179",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1a408161e65cd995352fa38d84f5e1100c0e2179",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1192,15 +1542,12 @@
           "path": ".claude/skills/ce-compound-refresh/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound-refresh/SKILL.md",
-          "upstream_blob_sha": "b0c717e9afc60e09833bd0f3cb62f3f0ff09b30c",
+          "upstream_blob_sha": "d961759edc9ca3ed6531b15fed2e7da17250f484",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6ecabb57b6beb2943615b291228c659acb693405",
-          "locally_modified": true,
-          "patch_ids": [
-            "ce-no-direct-main-push",
-            "ce-no-governance-file-writes"
-          ]
+          "vendored_blob_sha": "d961759edc9ca3ed6531b15fed2e7da17250f484",
+          "locally_modified": false,
+          "patch_ids": []
         },
         {
           "path": ".claude/skills/ce-compound-refresh/assets/resolution-template.md",
@@ -1214,13 +1561,72 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-compound-refresh/references/classify.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/classify.md",
+          "upstream_blob_sha": "a9b1fd01375bd9fbe14262a4248c2d1a342c6f44",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a9b1fd01375bd9fbe14262a4248c2d1a342c6f44",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/commit.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/commit.md",
+          "upstream_blob_sha": "0957ffd516d4c9ea69e0610a6ab86b9bf1d5f39e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cb0d44c5c1411bc5e55aad32217321c6f6dab2d8",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-direct-main-push"
+          ]
+        },
+        {
           "path": ".claude/skills/ce-compound-refresh/references/concepts-vocabulary.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound-refresh/references/concepts-vocabulary.md",
-          "upstream_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "upstream_blob_sha": "08d3a21ed03652cf652fb84920615678c364cfea",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1230aef4522f48e29f684784538fc67635b568b4",
+          "vendored_blob_sha": "08d3a21ed03652cf652fb84920615678c364cfea",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/discoverability.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/discoverability.md",
+          "upstream_blob_sha": "0102f820d7ae9a6ab82aa16ac21ac94d9b4b4630",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b4477563189f12dd4d55938cf19617d70593f293",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-governance-file-writes"
+          ]
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/investigate.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/investigate.md",
+          "upstream_blob_sha": "0c3b33817e4fc2c756eeddba45557f45cfb9978e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0c3b33817e4fc2c756eeddba45557f45cfb9978e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/modes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/modes.md",
+          "upstream_blob_sha": "54175199a25ff59ecb8ee179c2aaef6313eb71e7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "54175199a25ff59ecb8ee179c2aaef6313eb71e7",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1236,6 +1642,17 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-compound-refresh/references/report.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/report.md",
+          "upstream_blob_sha": "a398e4e198fa8dbf92d020739ff66fdb70500bcf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a398e4e198fa8dbf92d020739ff66fdb70500bcf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-compound-refresh/references/schema.yaml",
           "origin": "upstream",
           "upstream_path": "skills/ce-compound-refresh/references/schema.yaml",
@@ -1243,6 +1660,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "9e362b8cd24aac72ca06c754337673949d5db21a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-compound-refresh/references/scope.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-compound-refresh/references/scope.md",
+          "upstream_blob_sha": "0eb3ec5548f6c153bd6bd5e8d660e7b16061505f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0eb3ec5548f6c153bd6bd5e8d660e7b16061505f",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1324,10 +1752,10 @@
           "path": ".claude/skills/ce-debug/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-debug/SKILL.md",
-          "upstream_blob_sha": "076f823586bc7c509a0fc111cdd2bf2a9b56402a",
+          "upstream_blob_sha": "9c03e8f73e09944641a8649085b69a4ec8f1690b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "076f823586bc7c509a0fc111cdd2bf2a9b56402a",
+          "vendored_blob_sha": "9c03e8f73e09944641a8649085b69a4ec8f1690b",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1354,6 +1782,28 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-debug/references/fix.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/fix.md",
+          "upstream_blob_sha": "4a41c80d8feff04477c3a5977dfc98d760fe2bf6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4a41c80d8feff04477c3a5977dfc98d760fe2bf6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-debug/references/investigate.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-debug/references/investigate.md",
+          "upstream_blob_sha": "d2a5af0e181f10ace7594196e9506bbddc1c0652",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d2a5af0e181f10ace7594196e9506bbddc1c0652",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-debug/references/investigation-techniques.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-debug/references/investigation-techniques.md",
@@ -1368,10 +1818,10 @@
           "path": ".claude/skills/ce-debug/references/pipeline-mode.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-debug/references/pipeline-mode.md",
-          "upstream_blob_sha": "6a48aa849c378281de8155df3ef12353c568b07a",
+          "upstream_blob_sha": "8c2a6c38305d195bc6bfe1ac91c0b6c29bb5e092",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "e3a2d3c42f006dbe683cf8ef07abf274a1bdd501",
+          "vendored_blob_sha": "9760913ae365e289dfd466144da8f97c7817dadb",
           "locally_modified": true,
           "patch_ids": [
             "ce-no-direct-main-push"
@@ -1414,7 +1864,7 @@
         "ce-no-permission-bypass"
       ],
       "scripts_audited": true,
-      "audit_ref": null,
+      "audit_ref": "scripts/cross-model-doc-review.sh re-read end to end at upstream blob 35e34099ee060bbc7a7c835800f04ffb3b6da4d3 (superseding c21d432e276aba3c1ed755493c8d4ecf0934697e). The entire upstream delta is ONE line (1 insertion, 1 deletion) at the attempt_route log call, which upstream IMPROVED to disclose egress: the message now appends '; full document content egresses to this provider via this route'. Taken verbatim -- it is a disclosure improvement, not authority. That line sits about 590 lines away from the patched region, and the three cursor-agent adapter lines the ce-no-permission-bypass patch edits are byte-identical to the reviewed pin, so the patch re-applied verbatim in place: --trust dropped from the grok-cursor, cursor and composer routes with --mode ask, --sandbox enabled, the workspace pin and the output format all kept, each marked with a # bukerov-local-patch comment. Post-check: the vendored file is 1028 lines (upstream 1025 + 3 marker comments) and a --trust search returns exactly those three comment lines and nothing else. Peer routes are CONSTRAINED rather than widened by upstream: codex runs -s read-only, claude runs with an empty --tools allowlist plus --safe-mode --disable-slash-commands --no-session-persistence, and grok-cli carries explicit --deny Read/Edit/Write. No gh invocation, no git command, no merge, no ready-flip, no workflow trigger, no write under .claude/ or to CLAUDE.md.",
       "files": [
         {
           "path": ".claude/skills/ce-doc-review/LICENSE",
@@ -1432,10 +1882,10 @@
           "path": ".claude/skills/ce-doc-review/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/SKILL.md",
-          "upstream_blob_sha": "e0f260dfcb2696be439f4df7bbf5484c7144ea01",
+          "upstream_blob_sha": "407ffb79f9c3252157a91f8c92bd433be65f0829",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "e0f260dfcb2696be439f4df7bbf5484c7144ea01",
+          "vendored_blob_sha": "407ffb79f9c3252157a91f8c92bd433be65f0829",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1465,10 +1915,10 @@
           "path": ".claude/skills/ce-doc-review/references/cross-model-review.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/cross-model-review.md",
-          "upstream_blob_sha": "69ac6d20a328984fb31de71b5308724a410673cd",
+          "upstream_blob_sha": "3fe23fc9695380c6de749e01e006e5c7d6be59bf",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "69ac6d20a328984fb31de71b5308724a410673cd",
+          "vendored_blob_sha": "3fe23fc9695380c6de749e01e006e5c7d6be59bf",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1484,6 +1934,28 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-doc-review/references/dispatch.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/dispatch.md",
+          "upstream_blob_sha": "08e7161d645d360888a702b8805642bddb7f8c5e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "08e7161d645d360888a702b8805642bddb7f8c5e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/document-intake.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/document-intake.md",
+          "upstream_blob_sha": "7d2adfae7f43a7771b340ba85e2c056cf3dba183",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7d2adfae7f43a7771b340ba85e2c056cf3dba183",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-doc-review/references/findings-schema.json",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/findings-schema.json",
@@ -1495,6 +1967,17 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-doc-review/references/modes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/modes.md",
+          "upstream_blob_sha": "41aeefe24f0f9f8d435c465c88cb5d2f99856fea",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "41aeefe24f0f9f8d435c465c88cb5d2f99856fea",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-doc-review/references/open-questions-defer.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/open-questions-defer.md",
@@ -1502,6 +1985,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "3dc470fb41aa65271e40d47883ff2fd70b7873a5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-doc-review/references/persona-selection.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-doc-review/references/persona-selection.md",
+          "upstream_blob_sha": "4858ca6d697b9afd0b4d9dc33a5bb5ea8da54b90",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4858ca6d697b9afd0b4d9dc33a5bb5ea8da54b90",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1520,10 +2014,10 @@
           "path": ".claude/skills/ce-doc-review/references/personas/coherence-reviewer.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/personas/coherence-reviewer.md",
-          "upstream_blob_sha": "ac0a930ec0f6f4c272b577f4713cf8b1ac52b003",
+          "upstream_blob_sha": "dc286a3abb64138e9b0a76ddc1bca7992ed16738",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ac0a930ec0f6f4c272b577f4713cf8b1ac52b003",
+          "vendored_blob_sha": "dc286a3abb64138e9b0a76ddc1bca7992ed16738",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1630,10 +2124,10 @@
           "path": ".claude/skills/ce-doc-review/references/synthesis-and-presentation.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/synthesis-and-presentation.md",
-          "upstream_blob_sha": "fabb0978ed626719c4b2c96941acbfe19db6d7ef",
+          "upstream_blob_sha": "a03b3299a9c3117fd853cae2ddae2698daef2ddf",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "fabb0978ed626719c4b2c96941acbfe19db6d7ef",
+          "vendored_blob_sha": "a03b3299a9c3117fd853cae2ddae2698daef2ddf",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1641,10 +2135,10 @@
           "path": ".claude/skills/ce-doc-review/references/walkthrough.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/references/walkthrough.md",
-          "upstream_blob_sha": "a2c022451b5dddf672b6dee163f4d18bc2ec82b5",
+          "upstream_blob_sha": "bd9b457abbb7e5b7ee58565f3e65421274220433",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "a2c022451b5dddf672b6dee163f4d18bc2ec82b5",
+          "vendored_blob_sha": "bd9b457abbb7e5b7ee58565f3e65421274220433",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1663,10 +2157,10 @@
           "path": ".claude/skills/ce-doc-review/scripts/cross-model-doc-review.sh",
           "origin": "upstream",
           "upstream_path": "skills/ce-doc-review/scripts/cross-model-doc-review.sh",
-          "upstream_blob_sha": "c21d432e276aba3c1ed755493c8d4ecf0934697e",
+          "upstream_blob_sha": "35e34099ee060bbc7a7c835800f04ffb3b6da4d3",
           "upstream_mode": "100755",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "0187242dde17f185a288b1c65d9d3ed148ce629a",
+          "vendored_blob_sha": "15ce3612d525352ab4d6473285dad4c7c7e531eb",
           "locally_modified": true,
           "patch_ids": [
             "ce-mode-normalize",
@@ -1716,10 +2210,10 @@
           "path": ".claude/skills/ce-explain/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-explain/SKILL.md",
-          "upstream_blob_sha": "fc7bf63ad815d7c2588ce59d9ba305842b15e0e7",
+          "upstream_blob_sha": "0e1f938126659f74787893b39a5646652b60a274",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "fc7bf63ad815d7c2588ce59d9ba305842b15e0e7",
+          "vendored_blob_sha": "0e1f938126659f74787893b39a5646652b60a274",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1749,10 +2243,10 @@
           "path": ".claude/skills/ce-explain/references/destinations.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-explain/references/destinations.md",
-          "upstream_blob_sha": "506976c6290cc09ddbc7d5b13a349359ff44d0bc",
+          "upstream_blob_sha": "a724a920dee497607f1ce867347c2be6125f3d78",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "506976c6290cc09ddbc7d5b13a349359ff44d0bc",
+          "vendored_blob_sha": "a724a920dee497607f1ce867347c2be6125f3d78",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1782,10 +2276,21 @@
           "path": ".claude/skills/ce-explain/references/intake.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-explain/references/intake.md",
-          "upstream_blob_sha": "ae12ad8742888044570eb071997a448786e3d2a8",
+          "upstream_blob_sha": "51ed9ef1a8a91815fd620d62078e36cd02564edf",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ae12ad8742888044570eb071997a448786e3d2a8",
+          "vendored_blob_sha": "51ed9ef1a8a91815fd620d62078e36cd02564edf",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-explain/references/orchestration.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-explain/references/orchestration.md",
+          "upstream_blob_sha": "1710a9b8a36bc012d373139c83310a712c858257",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1710a9b8a36bc012d373139c83310a712c858257",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1830,10 +2335,32 @@
           "path": ".claude/skills/ce-handoff/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-handoff/SKILL.md",
-          "upstream_blob_sha": "1305acb1e3e54ded4dab5b37419e07f7f1405e7f",
+          "upstream_blob_sha": "c8fc417d7e38e00b486625a37b7413a89e68e4be",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1305acb1e3e54ded4dab5b37419e07f7f1405e7f",
+          "vendored_blob_sha": "c8fc417d7e38e00b486625a37b7413a89e68e4be",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-handoff/references/create.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-handoff/references/create.md",
+          "upstream_blob_sha": "f72dc4cb4da0de6c41be9e56d5456f19b6ec158a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f72dc4cb4da0de6c41be9e56d5456f19b6ec158a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-handoff/references/resume.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-handoff/references/resume.md",
+          "upstream_blob_sha": "21a9812f2e78cf2c9056ab2cf5bb5be28a4c24b6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "21a9812f2e78cf2c9056ab2cf5bb5be28a4c24b6",
           "locally_modified": false,
           "patch_ids": []
         }
@@ -1867,10 +2394,10 @@
           "path": ".claude/skills/ce-ideate/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/SKILL.md",
-          "upstream_blob_sha": "7eeca4941d533bfa4c5d92efe4188067712d84fa",
+          "upstream_blob_sha": "1c172df27c6ef95ebeddb5a8f69296b4047cb93a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "7eeca4941d533bfa4c5d92efe4188067712d84fa",
+          "vendored_blob_sha": "1c172df27c6ef95ebeddb5a8f69296b4047cb93a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1919,13 +2446,35 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-ideate/references/decomposition.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/decomposition.md",
+          "upstream_blob_sha": "afca32e541d93921402778f8f96299faede448e7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "afca32e541d93921402778f8f96299faede448e7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-ideate/references/divergent-ideation.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/divergent-ideation.md",
-          "upstream_blob_sha": "69a56d14f9945d3dd6746048d5823567209d2aee",
+          "upstream_blob_sha": "35cd11cbe5ee79d78b6faee76c3bc5a3feaffb89",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "69a56d14f9945d3dd6746048d5823567209d2aee",
+          "vendored_blob_sha": "35cd11cbe5ee79d78b6faee76c3bc5a3feaffb89",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/grounding.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/grounding.md",
+          "upstream_blob_sha": "830fe27b8a570080619e5df989d3f719046906d4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "830fe27b8a570080619e5df989d3f719046906d4",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1955,10 +2504,10 @@
           "path": ".claude/skills/ce-ideate/references/issue-intelligence.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/issue-intelligence.md",
-          "upstream_blob_sha": "cf1c914416cb657b1fcfa38051cff5b666bbfd36",
+          "upstream_blob_sha": "aca1bb936716826f2445999669b0fa8770acdf2c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "cf1c914416cb657b1fcfa38051cff5b666bbfd36",
+          "vendored_blob_sha": "aca1bb936716826f2445999669b0fa8770acdf2c",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1966,10 +2515,21 @@
           "path": ".claude/skills/ce-ideate/references/markdown-rendering.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/markdown-rendering.md",
-          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "vendored_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/output-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/output-mode.md",
+          "upstream_blob_sha": "ef46acd4bf1076377cda7efd522bceadbca2db1c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ef46acd4bf1076377cda7efd522bceadbca2db1c",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1977,10 +2537,21 @@
           "path": ".claude/skills/ce-ideate/references/post-ideation-workflow.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/post-ideation-workflow.md",
-          "upstream_blob_sha": "2010aa24800043e99286d2c33180b24599f9ea10",
+          "upstream_blob_sha": "d7b39c1beeadec70fbbba2170f83d7b69a215a34",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "2010aa24800043e99286d2c33180b24599f9ea10",
+          "vendored_blob_sha": "d7b39c1beeadec70fbbba2170f83d7b69a215a34",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-ideate/references/scope-gates.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-ideate/references/scope-gates.md",
+          "upstream_blob_sha": "1b8f8874fd28041cacd63b3bb00b26c29488d40c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1b8f8874fd28041cacd63b3bb00b26c29488d40c",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1988,10 +2559,10 @@
           "path": ".claude/skills/ce-ideate/references/universal-ideation.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/universal-ideation.md",
-          "upstream_blob_sha": "9943500039904195fb6d773ca79d72c0fc0f9b41",
+          "upstream_blob_sha": "3e88af8b15f7b4881b3f3afa8ba880c6b6aad5e9",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "9943500039904195fb6d773ca79d72c0fc0f9b41",
+          "vendored_blob_sha": "3e88af8b15f7b4881b3f3afa8ba880c6b6aad5e9",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -1999,10 +2570,10 @@
           "path": ".claude/skills/ce-ideate/references/user-research-artifacts.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/user-research-artifacts.md",
-          "upstream_blob_sha": "8c84b3723077100ad150e878eba1c7ac9ae0af82",
+          "upstream_blob_sha": "27232b82f4939726e99b124b4aeb8925239996ca",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "8c84b3723077100ad150e878eba1c7ac9ae0af82",
+          "vendored_blob_sha": "27232b82f4939726e99b124b4aeb8925239996ca",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2010,10 +2581,10 @@
           "path": ".claude/skills/ce-ideate/references/web-research-cache.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-ideate/references/web-research-cache.md",
-          "upstream_blob_sha": "ed07a30fef60271d36cbc108f694ff25a60ca460",
+          "upstream_blob_sha": "43bf20254343a2244634797fdcca2f32a6d0eca0",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ed07a30fef60271d36cbc108f694ff25a60ca460",
+          "vendored_blob_sha": "43bf20254343a2244634797fdcca2f32a6d0eca0",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2061,10 +2632,10 @@
           "path": ".claude/skills/ce-optimize/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-optimize/SKILL.md",
-          "upstream_blob_sha": "d286dcc6f7a8d9d782e6c5f3a0d5edae0b1afbdb",
+          "upstream_blob_sha": "63a49f2de7cd06cb11595bdcb03f775bd3a150e7",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "d286dcc6f7a8d9d782e6c5f3a0d5edae0b1afbdb",
+          "vendored_blob_sha": "63a49f2de7cd06cb11595bdcb03f775bd3a150e7",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2146,26 +2717,81 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-optimize/references/loop.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/loop.md",
+          "upstream_blob_sha": "746748bc0b02e17fafc30d4e22060bfffc5ddd40",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "746748bc0b02e17fafc30d4e22060bfffc5ddd40",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/measurement.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/measurement.md",
+          "upstream_blob_sha": "b2778514ab9e513e94c47377bcb02c7afc0b42a3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b2778514ab9e513e94c47377bcb02c7afc0b42a3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-optimize/references/optimize-spec-schema.yaml",
           "origin": "upstream",
           "upstream_path": "skills/ce-optimize/references/optimize-spec-schema.yaml",
           "upstream_blob_sha": "56da4154a48dea4ed6d5b24e4dea9892bc4c8b14",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "a0d572bdc8aed2b7cbddd4f2d06726ee0c09fc8e",
+          "vendored_blob_sha": "ece66d8ce2f23a242c830397bc4b42f3e9db4735",
           "locally_modified": true,
           "patch_ids": [
             "ce-no-permission-bypass"
           ]
         },
         {
+          "path": ".claude/skills/ce-optimize/references/persistence.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/persistence.md",
+          "upstream_blob_sha": "c24ec784e1321155488ca17c5b09d7c863e8f1e0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c24ec784e1321155488ca17c5b09d7c863e8f1e0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/spec.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/spec.md",
+          "upstream_blob_sha": "770321060919f077348856c57af6e703245ec09c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "770321060919f077348856c57af6e703245ec09c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-optimize/references/usage-guide.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-optimize/references/usage-guide.md",
-          "upstream_blob_sha": "1947479f8482956f6a9c2cceaf21834cae5db03f",
+          "upstream_blob_sha": "f6f19174a3099ab4e56a53a38c3d66197f17d43a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1947479f8482956f6a9c2cceaf21834cae5db03f",
+          "vendored_blob_sha": "f6f19174a3099ab4e56a53a38c3d66197f17d43a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-optimize/references/wrap-up.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-optimize/references/wrap-up.md",
+          "upstream_blob_sha": "b8c15095ff2299ad4e8509e50eb800e006762c41",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b8c15095ff2299ad4e8509e50eb800e006762c41",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2251,10 +2877,10 @@
           "path": ".claude/skills/ce-plan/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/SKILL.md",
-          "upstream_blob_sha": "1df387be49315ab9cf26d1d07088f659ed2255e8",
+          "upstream_blob_sha": "2da26e2f241e506b4ec2f637b157c409db891ca5",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1df387be49315ab9cf26d1d07088f659ed2255e8",
+          "vendored_blob_sha": "2da26e2f241e506b4ec2f637b157c409db891ca5",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2438,10 +3064,10 @@
           "path": ".claude/skills/ce-plan/references/approach-altitude.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/approach-altitude.md",
-          "upstream_blob_sha": "57568cc3193beb9a6c86481ef513c364c07fe4b8",
+          "upstream_blob_sha": "00122a115e2680eb036e5df6fb46ea82087d006d",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "57568cc3193beb9a6c86481ef513c364c07fe4b8",
+          "vendored_blob_sha": "00122a115e2680eb036e5df6fb46ea82087d006d",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2457,6 +3083,17 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-plan/references/final-review.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/final-review.md",
+          "upstream_blob_sha": "3b2ce698a091318ebd770152bb6744392f29a91a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b2ce698a091318ebd770152bb6744392f29a91a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-plan/references/html-rendering.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/html-rendering.md",
@@ -2468,13 +3105,24 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-plan/references/intake.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/intake.md",
+          "upstream_blob_sha": "3b0576111291ab849edeab6a1f2d171aef850ff2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b0576111291ab849edeab6a1f2d171aef850ff2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-plan/references/markdown-rendering.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/markdown-rendering.md",
-          "upstream_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "upstream_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5ca177720bd6fce1314bcf618c9d6724caa312f3",
+          "vendored_blob_sha": "51e3b1fc8bc7c314c0e9c16b3b38acb4844bae02",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2482,10 +3130,10 @@
           "path": ".claude/skills/ce-plan/references/plan-handoff.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/plan-handoff.md",
-          "upstream_blob_sha": "2eb8f5c48797a96ef0aa103f5a1be2db94a6e88e",
+          "upstream_blob_sha": "26fc79487d71ae5a1de883e05bffe5512bae4e6e",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "2eb8f5c48797a96ef0aa103f5a1be2db94a6e88e",
+          "vendored_blob_sha": "26fc79487d71ae5a1de883e05bffe5512bae4e6e",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2493,10 +3141,10 @@
           "path": ".claude/skills/ce-plan/references/plan-sections.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/plan-sections.md",
-          "upstream_blob_sha": "758cd81fef9282c8dd9e9647effd2aab7b1b9ce6",
+          "upstream_blob_sha": "169c164fba8b1f82f3db42e180cd676aee79de9a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "758cd81fef9282c8dd9e9647effd2aab7b1b9ce6",
+          "vendored_blob_sha": "169c164fba8b1f82f3db42e180cd676aee79de9a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2512,6 +3160,28 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-plan/references/research.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/research.md",
+          "upstream_blob_sha": "c8b677410a110ff79a7ea9f48f38101bbfad8247",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c8b677410a110ff79a7ea9f48f38101bbfad8247",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-plan/references/resume.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/resume.md",
+          "upstream_blob_sha": "dff65be143bb6536ded2cdf2c83fa76ea2bdbfe3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dff65be143bb6536ded2cdf2c83fa76ea2bdbfe3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-plan/references/settled-decisions.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/settled-decisions.md",
@@ -2523,13 +3193,24 @@
           "patch_ids": []
         },
         {
+          "path": ".claude/skills/ce-plan/references/structure.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-plan/references/structure.md",
+          "upstream_blob_sha": "985e3adac202cce54c3119c6ef3c6f6202af7f71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "985e3adac202cce54c3119c6ef3c6f6202af7f71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
           "path": ".claude/skills/ce-plan/references/synthesis-summary.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/synthesis-summary.md",
-          "upstream_blob_sha": "b07a7749ebc5ab92d1e1c02f6cff56bdcd985c00",
+          "upstream_blob_sha": "c85fbc11dccb5f79d2b13cf0a9cf9b656e9ce9d2",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "b07a7749ebc5ab92d1e1c02f6cff56bdcd985c00",
+          "vendored_blob_sha": "c85fbc11dccb5f79d2b13cf0a9cf9b656e9ce9d2",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2537,10 +3218,10 @@
           "path": ".claude/skills/ce-plan/references/universal-planning.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-plan/references/universal-planning.md",
-          "upstream_blob_sha": "2c7e47028e5b7ab41794ea48b06d8930805e9fa6",
+          "upstream_blob_sha": "f2c892e9716401621ed2d798338ba92297567c45",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "2c7e47028e5b7ab41794ea48b06d8930805e9fa6",
+          "vendored_blob_sha": "f2c892e9716401621ed2d798338ba92297567c45",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2614,10 +3295,10 @@
           "path": ".claude/skills/ce-pov/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-pov/SKILL.md",
-          "upstream_blob_sha": "35991ffd3102915247f41ee071d91ad51b3f6033",
+          "upstream_blob_sha": "096bc7e38953f1fe75d89fe2eb9e58969ab8958a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "35991ffd3102915247f41ee071d91ad51b3f6033",
+          "vendored_blob_sha": "096bc7e38953f1fe75d89fe2eb9e58969ab8958a",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2680,10 +3361,32 @@
           "path": ".claude/skills/ce-pov/references/cross-model-panel.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-pov/references/cross-model-panel.md",
-          "upstream_blob_sha": "3997ac4bfb417db1ff85bdd3c8d05aab4d89dc5d",
+          "upstream_blob_sha": "ff91948dcc7a1153a0bd745ef7c42366aebc7112",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "3997ac4bfb417db1ff85bdd3c8d05aab4d89dc5d",
+          "vendored_blob_sha": "ff91948dcc7a1153a0bd745ef7c42366aebc7112",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/followup.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/followup.md",
+          "upstream_blob_sha": "f5188e5ee631719d648c483182ade9a789839c55",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f5188e5ee631719d648c483182ade9a789839c55",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-pov/references/grounding.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-pov/references/grounding.md",
+          "upstream_blob_sha": "b4e1288d8fbf9ce7162ef9d15874a7e07e2c3c60",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b4e1288d8fbf9ce7162ef9d15874a7e07e2c3c60",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2691,10 +3394,10 @@
           "path": ".claude/skills/ce-pov/references/intake.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-pov/references/intake.md",
-          "upstream_blob_sha": "0a37b47747d453623042d2feb5e65e46fafced1e",
+          "upstream_blob_sha": "3e10708377b253a23e6d23c4b803b807cb3c7a5e",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "0a37b47747d453623042d2feb5e65e46fafced1e",
+          "vendored_blob_sha": "3e10708377b253a23e6d23c4b803b807cb3c7a5e",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2810,10 +3513,21 @@
           "path": ".claude/skills/ce-prototype/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-prototype/SKILL.md",
-          "upstream_blob_sha": "56211e487b89618268b44117119a3d92d7684835",
+          "upstream_blob_sha": "f90d2051b867c2378f6630ba974e9f186ddcc99d",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "56211e487b89618268b44117119a3d92d7684835",
+          "vendored_blob_sha": "f90d2051b867c2378f6630ba974e9f186ddcc99d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/references/build.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/references/build.md",
+          "upstream_blob_sha": "5bebc66e10f4076e2a754bda784e5eb05f5c3941",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5bebc66e10f4076e2a754bda784e5eb05f5c3941",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2821,10 +3535,10 @@
           "path": ".claude/skills/ce-prototype/references/craft-floor.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-prototype/references/craft-floor.md",
-          "upstream_blob_sha": "e5bc5da5dbced0b8f94d1ee11b452a93d66dbba9",
+          "upstream_blob_sha": "04d526f77765551e859dc2a1442d3e9507a8cd18",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "e5bc5da5dbced0b8f94d1ee11b452a93d66dbba9",
+          "vendored_blob_sha": "04d526f77765551e859dc2a1442d3e9507a8cd18",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2832,10 +3546,21 @@
           "path": ".claude/skills/ce-prototype/references/preview.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-prototype/references/preview.md",
-          "upstream_blob_sha": "fb6d622e52941989fb244d994877515277daba97",
+          "upstream_blob_sha": "410e97ee978a54c72e138589259af02a958c59f6",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "fb6d622e52941989fb244d994877515277daba97",
+          "vendored_blob_sha": "410e97ee978a54c72e138589259af02a958c59f6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-prototype/references/scoping.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-prototype/references/scoping.md",
+          "upstream_blob_sha": "f8a023e2c911a7f3b0806f1c4026ee47739a9d64",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f8a023e2c911a7f3b0806f1c4026ee47739a9d64",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2875,7 +3600,7 @@
         "ce-mode-normalize"
       ],
       "scripts_audited": true,
-      "audit_ref": null,
+      "audit_ref": "scripts/get-pr-comments re-read end to end at upstream blob 70bdcf8e2b129c3a3c78fa2ae992a8c73c09f15d (superseding c1c80854cca2eb84e9857a7be0ba3e7100d20116). Two behavioural changes, both read-only and neither authority-bearing: (1) author filtering was REMOVED from both output arrays -- pr_comments and review_bodies each lost the clause excluding the PR author, so a blank body is now the sole exclusion and the skill therefore sees the PR author's own comments; (2) two keys were appended to the emitted object, pr_author and viewer, from bindings that already existed. The three query documents, the pagination structure, the tempfile/trap handling and the pending_review computation are untouched. The script is read-only throughout: three read-only query documents and zero write operations, plus one `gh repo view` metadata read; no merge, no ready-flip, no PR creation, no workflow rerun, no git command at all, no write outside its own mktemp scratch files (removed by trap), and nothing touching .claude/ or CLAUDE.md. No permission, sandbox, trust or approval flag appears anywhere. Taken verbatim; the file's only patch remains ce-mode-normalize (100755 -> 100644).",
       "files": [
         {
           "path": ".claude/skills/ce-resolve-pr-feedback/LICENSE",
@@ -2893,10 +3618,10 @@
           "path": ".claude/skills/ce-resolve-pr-feedback/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-resolve-pr-feedback/SKILL.md",
-          "upstream_blob_sha": "e1b37c2f391331a11090e652671875416958d5eb",
+          "upstream_blob_sha": "c4cffd716fe7aa9f5cc7cafebc04eaf3545b4677",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "e1b37c2f391331a11090e652671875416958d5eb",
+          "vendored_blob_sha": "c4cffd716fe7aa9f5cc7cafebc04eaf3545b4677",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2915,10 +3640,10 @@
           "path": ".claude/skills/ce-resolve-pr-feedback/references/evaluation-rubric.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-resolve-pr-feedback/references/evaluation-rubric.md",
-          "upstream_blob_sha": "6d6cad02531dc4a2a29a50a52762d78a98b97a0c",
+          "upstream_blob_sha": "0ce32d4e8f11bf01c26fba2f9ebb9b2f085f2b9b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6d6cad02531dc4a2a29a50a52762d78a98b97a0c",
+          "vendored_blob_sha": "0ce32d4e8f11bf01c26fba2f9ebb9b2f085f2b9b",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2926,10 +3651,21 @@
           "path": ".claude/skills/ce-resolve-pr-feedback/references/full-mode.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-resolve-pr-feedback/references/full-mode.md",
-          "upstream_blob_sha": "d7b2dc12dcaba2debe6923946533ea8caa30c3e3",
+          "upstream_blob_sha": "f8c45503e2985167a6af139d434b91171c9b1ba1",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "d7b2dc12dcaba2debe6923946533ea8caa30c3e3",
+          "vendored_blob_sha": "f8c45503e2985167a6af139d434b91171c9b1ba1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-resolve-pr-feedback/references/pipeline-mode.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-resolve-pr-feedback/references/pipeline-mode.md",
+          "upstream_blob_sha": "7009405af6db3cc7f1c5af4fcbeb06f255192c13",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7009405af6db3cc7f1c5af4fcbeb06f255192c13",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -2948,10 +3684,10 @@
           "path": ".claude/skills/ce-resolve-pr-feedback/scripts/get-pr-comments",
           "origin": "upstream",
           "upstream_path": "skills/ce-resolve-pr-feedback/scripts/get-pr-comments",
-          "upstream_blob_sha": "c1c80854cca2eb84e9857a7be0ba3e7100d20116",
+          "upstream_blob_sha": "70bdcf8e2b129c3a3c78fa2ae992a8c73c09f15d",
           "upstream_mode": "100755",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "c1c80854cca2eb84e9857a7be0ba3e7100d20116",
+          "vendored_blob_sha": "70bdcf8e2b129c3a3c78fa2ae992a8c73c09f15d",
           "locally_modified": false,
           "patch_ids": [
             "ce-mode-normalize"
@@ -3028,10 +3764,10 @@
           "path": ".claude/skills/ce-setup/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-setup/SKILL.md",
-          "upstream_blob_sha": "d29413086edc4e71a79667376f0a0c69d400aacc",
+          "upstream_blob_sha": "923251175d55ee671f8d146aabee60a69d25b995",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "d29413086edc4e71a79667376f0a0c69d400aacc",
+          "vendored_blob_sha": "923251175d55ee671f8d146aabee60a69d25b995",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3043,6 +3779,17 @@
           "upstream_mode": "100644",
           "vendored_mode": "100644",
           "vendored_blob_sha": "9353b48f232cd7e90eeec4472f8aae046af211a7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-setup/references/repo-fixes.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-setup/references/repo-fixes.md",
+          "upstream_blob_sha": "5d2725490e830806b0677d7d0d876b9bb28fccdd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5d2725490e830806b0677d7d0d876b9bb28fccdd",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3089,10 +3836,10 @@
           "path": ".claude/skills/ce-simplify-code/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-simplify-code/SKILL.md",
-          "upstream_blob_sha": "2e9ca504e68c91744298d16580655cdc070f6f28",
+          "upstream_blob_sha": "6e5ee2c4044c8e17c42113023eaddd9333dcad2b",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "2e9ca504e68c91744298d16580655cdc070f6f28",
+          "vendored_blob_sha": "6e5ee2c4044c8e17c42113023eaddd9333dcad2b",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3170,10 +3917,21 @@
           "path": ".claude/skills/ce-strategy/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-strategy/SKILL.md",
-          "upstream_blob_sha": "1ea6e1d875d9a30f25459eec384d06d08476eaa7",
+          "upstream_blob_sha": "7f6384d4a57144bf4db6d56e9a3858e1e0fc7085",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "1ea6e1d875d9a30f25459eec384d06d08476eaa7",
+          "vendored_blob_sha": "7f6384d4a57144bf4db6d56e9a3858e1e0fc7085",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-strategy/references/grounding.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-strategy/references/grounding.md",
+          "upstream_blob_sha": "a2595c0d42a294af33defae9762b590f95ce06c1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a2595c0d42a294af33defae9762b590f95ce06c1",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3181,10 +3939,10 @@
           "path": ".claude/skills/ce-strategy/references/interview.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-strategy/references/interview.md",
-          "upstream_blob_sha": "4cb5d5b3c6cbd724ab18b302e641245432804e43",
+          "upstream_blob_sha": "79f2e2d0511e7b315c2a6326048e4226ac648e31",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "4cb5d5b3c6cbd724ab18b302e641245432804e43",
+          "vendored_blob_sha": "79f2e2d0511e7b315c2a6326048e4226ac648e31",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3192,10 +3950,21 @@
           "path": ".claude/skills/ce-strategy/references/strategy-template.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-strategy/references/strategy-template.md",
-          "upstream_blob_sha": "ad38ccdf8f3eb6c770093299e41b31334e277424",
+          "upstream_blob_sha": "ceabeffeeafe59621c66e0fa4c2ed436aeee859a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "ad38ccdf8f3eb6c770093299e41b31334e277424",
+          "vendored_blob_sha": "ceabeffeeafe59621c66e0fa4c2ed436aeee859a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-strategy/references/update-run.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-strategy/references/update-run.md",
+          "upstream_blob_sha": "d7425617297eb2d0bf48ad4b6e36274419e74771",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d7425617297eb2d0bf48ad4b6e36274419e74771",
           "locally_modified": false,
           "patch_ids": []
         }
@@ -3232,14 +4001,12 @@
           "path": ".claude/skills/ce-work/SKILL.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-work/SKILL.md",
-          "upstream_blob_sha": "d9b69edc911776b73fdef7a5679b2fbda2b69cba",
+          "upstream_blob_sha": "71629e37461f376fedbaec854bbbd664fa1145ff",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "283c43074366ca6ffe2c72bc9735b72e38617661",
-          "locally_modified": true,
-          "patch_ids": [
-            "ce-no-permission-bypass"
-          ]
+          "vendored_blob_sha": "71629e37461f376fedbaec854bbbd664fa1145ff",
+          "locally_modified": false,
+          "patch_ids": []
         },
         {
           "path": ".claude/skills/ce-work/references/agents/figma-design-sync.md",
@@ -3289,21 +4056,34 @@
           "path": ".claude/skills/ce-work/references/execution-engines.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-work/references/execution-engines.md",
-          "upstream_blob_sha": "15c99f06c1504b04557e89bf54bdfdb61f48a52f",
+          "upstream_blob_sha": "a18f3e359e61124cdf4c1d51538b004f2818ebb8",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "15c99f06c1504b04557e89bf54bdfdb61f48a52f",
+          "vendored_blob_sha": "a18f3e359e61124cdf4c1d51538b004f2818ebb8",
           "locally_modified": false,
           "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/execution-strategy.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/execution-strategy.md",
+          "upstream_blob_sha": "dfe335e061e4a23ac0e71ebe1d9d1f8fb745010c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "338d7490646d0d2752602a1ba5d64dbd67f96758",
+          "locally_modified": true,
+          "patch_ids": [
+            "ce-no-permission-bypass"
+          ]
         },
         {
           "path": ".claude/skills/ce-work/references/implementation-loop.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-work/references/implementation-loop.md",
-          "upstream_blob_sha": "9a9fbba4fadab27b7c4e6c1f4139fde988d42f67",
+          "upstream_blob_sha": "fa4fd5a3b0121fcbb793db84ad3fe9842c638ff1",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "9a9fbba4fadab27b7c4e6c1f4139fde988d42f67",
+          "vendored_blob_sha": "fa4fd5a3b0121fcbb793db84ad3fe9842c638ff1",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3344,10 +4124,10 @@
           "path": ".claude/skills/ce-work/references/shipping-workflow.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-work/references/shipping-workflow.md",
-          "upstream_blob_sha": "3bd6753fe1c6a2f1abfdf9e7602cbc32b9565f56",
+          "upstream_blob_sha": "2864da741ac54196d1c5644bb598295b55eab958",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "3bd6753fe1c6a2f1abfdf9e7602cbc32b9565f56",
+          "vendored_blob_sha": "2864da741ac54196d1c5644bb598295b55eab958",
           "locally_modified": false,
           "patch_ids": []
         },
@@ -3355,10 +4135,21 @@
           "path": ".claude/skills/ce-work/references/tracker-defer.md",
           "origin": "upstream",
           "upstream_path": "skills/ce-work/references/tracker-defer.md",
-          "upstream_blob_sha": "0fc80cd240794a26e72f4552c86881ea45987505",
+          "upstream_blob_sha": "afe30a7872d37db7beba37c27209cdc96ebe124f",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "0fc80cd240794a26e72f4552c86881ea45987505",
+          "vendored_blob_sha": "afe30a7872d37db7beba37c27209cdc96ebe124f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/ce-work/references/work-intake.md",
+          "origin": "upstream",
+          "upstream_path": "skills/ce-work/references/work-intake.md",
+          "upstream_blob_sha": "d0b9de5a3202fc52a300814fc62687405012c1f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d0b9de5a3202fc52a300814fc62687405012c1f3",
           "locally_modified": false,
           "patch_ids": []
         },
