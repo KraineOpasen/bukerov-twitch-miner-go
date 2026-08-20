@@ -64,25 +64,62 @@
      already uses, and the same href the plain Help item already had before
      this task, so /help's compatibility-redirect target and the group's own
      parent link stay identical. Every one of the 30 routes in the design's
-     page matrix (§11) is now reachable from this nav. */}}
+     page matrix (§11) is now reachable from this nav.
+
+     Aug-2 visual restoration (dashboard/restore-aug2-shell-overview): the 30
+     child destinations are still all rendered, but they are no longer all
+     VISIBLE at once. Each group's parent link now shares a .c2-nav-row with a
+     sibling disclosure <button data-nav-toggle>, and base.html's nav script
+     expands exactly one group — the active section (Stage 4 §6: "section
+     auto-expands for the active route") — while every other group collapses.
+     The button is the user's way to open any other group.
+
+     Three details are load-bearing:
+       - the parent <a> is byte-identical to before (its whole opening tag is
+         pinned, attribute-for-attribute, by s5_2_chrome_test.go and
+         s5_9_help_test.go), so the toggle had to be a SIBLING, never an
+         attribute on the link and never a <summary> wrapping it;
+       - the button carries NO data-nav-section: base.html's updateActiveNav()
+         walks [data-nav-section] and would otherwise mark a non-destination
+         with aria-current="page";
+       - it renders `hidden` and is only revealed once the script has stamped
+         data-c2-collapsible on the <nav>. With JS off nothing collapses and
+         all 30 children stay visible exactly as before — the toggle never
+         appears as an inert control.
+     Its accessible name is borrowed from the parent link's own visible label
+     via aria-labelledby, so the folding mechanism introduced no new i18n
+     key. The chevron <svg> deliberately carries no xmlns, matching every
+     other icon here: the rendered /overview body is asserted to contain no
+     absolute-URL scheme prefix at all (overview_delta_test.go), and an xmlns
+     attribute is one. */}}
 {{define "c2.nav"}}<nav class="c2-nav" aria-label="{{ t "a11y.primary_nav" }}" data-c2-nav>
     <ul class="c2-nav-list">
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/overview" class="c2-nav-link" data-nav-section="overview" aria-label="{{ t "nav.overview" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
-                <span class="c2-nav-label">{{ t "nav.overview" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/overview" class="c2-nav-link" data-nav-section="overview" aria-label="{{ t "nav.overview" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-overview">{{ t "nav.overview" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-overview" aria-labelledby="c2-nav-lbl-overview">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-overview">
                 <li><a href="/overview" class="c2-nav-child" data-nav-section="overview" data-nav-child>{{ t "nav.overview" }}</a></li>
                 <li><a href="/overview/queue" class="c2-nav-child" data-nav-section="overview" data-nav-child>{{ t "nav.queue" }}</a></li>
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/drops/current" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
-                <span class="c2-nav-label">{{ t "nav.drops" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/drops/current" class="c2-nav-link" data-nav-section="drops" aria-label="{{ t "nav.drops" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2s7 7 7 12a7 7 0 0 1-14 0c0-5 7-12 7-12z"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-drops">{{ t "nav.drops" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-drops" aria-labelledby="c2-nav-lbl-drops">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-drops">
                 <li><a href="/drops/current" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.current" }}</a></li>
                 <li><a href="/drops/upcoming" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.upcoming" }}</a></li>
                 <li><a href="/drops/claims" class="c2-nav-child" data-nav-section="drops" data-nav-child>{{ t "drops.tab.claims" }}</a></li>
@@ -90,21 +127,31 @@
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/analytics/points" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                <span class="c2-nav-label">{{ t "nav.analytics" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/analytics/points" class="c2-nav-link" data-nav-section="analytics" aria-label="{{ t "nav.analytics" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-analytics">{{ t "nav.analytics" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-analytics" aria-labelledby="c2-nav-lbl-analytics">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-analytics">
                 <li><a href="/analytics/points" class="c2-nav-child" data-nav-section="analytics" data-nav-child>{{ t "nav.an.points" }}</a></li>
                 <li><a href="/analytics/roi" class="c2-nav-child" data-nav-section="analytics" data-nav-child>{{ t "nav.an.roi" }}</a></li>
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
-                <span class="c2-nav-label">{{ t "nav.events" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/events" class="c2-nav-link" data-nav-section="events" aria-label="{{ t "nav.events" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-events">{{ t "nav.events" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-events" aria-labelledby="c2-nav-lbl-events">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-events">
                 <li><a href="/events" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.journal" }}</a></li>
                 <li><a href="/events/browser" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.browser" }}</a></li>
                 <li><a href="/events/sound" class="c2-nav-child" data-nav-section="events" data-nav-child>{{ t "events.tab.sound" }}</a></li>
@@ -112,11 +159,16 @@
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/settings/streamers" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                <span class="c2-nav-label">{{ t "nav.settings" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/settings/streamers" class="c2-nav-link" data-nav-section="settings" aria-label="{{ t "nav.settings" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-settings">{{ t "nav.settings" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-settings" aria-labelledby="c2-nav-lbl-settings">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-settings">
                 <li><a href="/settings/streamers" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.streamers" }}</a></li>
                 <li><a href="/settings/rotation" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.rotation" }}</a></li>
                 <li><a href="/settings/drops" class="c2-nav-child" data-nav-section="settings" data-nav-child>{{ t "nav.set.drops" }}</a></li>
@@ -130,22 +182,32 @@
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/system/status" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                <span class="c2-nav-label">{{ t "nav.system" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/system/status" class="c2-nav-link" data-nav-section="system" aria-label="{{ t "nav.system" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-system">{{ t "nav.system" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-system" aria-labelledby="c2-nav-lbl-system">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-system">
                 <li><a href="/system/status" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "system.tab.status" }}</a></li>
                 <li><a href="/system/diagnostics" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "system.tab.diagnostics" }}</a></li>
                 <li><a href="/system/logs" class="c2-nav-child" data-nav-section="system" data-nav-child>{{ t "nav.logs" }}</a></li>
             </ul>
         </li>
         <li class="c2-nav-item c2-nav-item--group">
-            <a href="/help/getting-started" class="c2-nav-link" data-nav-section="help" aria-label="{{ t "nav.help" }}" data-nav-parent>
-                <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                <span class="c2-nav-label">{{ t "nav.help" }}</span>
-            </a>
-            <ul class="c2-nav-children">
+            <div class="c2-nav-row">
+                <a href="/help/getting-started" class="c2-nav-link" data-nav-section="help" aria-label="{{ t "nav.help" }}" data-nav-parent>
+                    <svg class="c2-nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <span class="c2-nav-label" id="c2-nav-lbl-help">{{ t "nav.help" }}</span>
+                </a>
+                <button type="button" class="c2-nav-disclosure" data-nav-toggle hidden aria-expanded="false" aria-controls="c2-nav-kids-help" aria-labelledby="c2-nav-lbl-help">
+                    <svg class="c2-nav-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+            </div>
+            <ul class="c2-nav-children" id="c2-nav-kids-help">
                 <li><a href="/help/getting-started" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.getting_started" }}</a></li>
                 <li><a href="/help/glossary" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.glossary" }}</a></li>
                 <li><a href="/help/troubleshooting" class="c2-nav-child" data-nav-section="help" data-nav-child>{{ t "nav.help.troubleshooting" }}</a></li>
