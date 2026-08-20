@@ -275,11 +275,17 @@ func c12Pair(evidence watchSlotEvidence, byName map[string]*models.Streamer, sta
 // overviewPollSeconds), so Aged is left at its honest zero value rather than
 // inventing one; this only ever needs the fields ProvenanceChipData already
 // declares, so C0's contract is unchanged.
+//
+// Neutral follows directly from that refusal. The C0 chip's DEFAULT variant is
+// the positive one (.c0-chip--live, --state-ok, i.e. green), so returning a
+// bare AgeLabel would assert exactly the freshness verdict the paragraph above
+// declines to make: a broker tick from hours ago would paint the same green as
+// one from a second ago.
 func c12PairProvenance(evidence watchSlotEvidence) ProvenanceChipData {
 	if evidence.EvaluatedAt.IsZero() {
 		return ProvenanceChipData{Unknown: true}
 	}
-	return ProvenanceChipData{AgeLabel: util.FormatDuration(time.Since(evidence.EvaluatedAt))}
+	return ProvenanceChipData{AgeLabel: util.FormatDuration(time.Since(evidence.EvaluatedAt)), Neutral: true}
 }
 
 // ============================================================================
