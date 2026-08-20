@@ -87,6 +87,25 @@ type lifecycleStep struct {
 // App is the explicit application composition root. Construct it with Build,
 // drive it with Run, tear it down with Shutdown.
 type App struct {
+	// cfgMu/cfg hold the process-level AUTHORITATIVE bot configuration: the
+	// one a NEW miner generation must be constructed from. It is seeded in
+	// buildWith with the snapshot cmd/miner loaded at bootstrap, and is
+	// refreshed at every generation boundary by nextGenerationConfig() from the
+	// configuration the OUTGOING generation actually committed.
+	//
+	// Before this became a real owner, cfg was written once by buildWith and
+	// never read again, while minerFactory captured the boot pointer in its
+	// closure — so a runtime settings apply, which publishes a FRESH
+	// candidate pointer rather than mutating the boot object, was invisible
+	// to every later generation and silently reverted at the next pause/
+	// resume or restart. Only a full process restart re-read config.json,
+	// which is what hid the defect.
+	//
+	// This is MUTABLE bot configuration and nothing else. The immutable
+	// process-level runtime snapshot (dashboard exposure/auth, config path,
+	// auto-update) stays in runtimeconfig.RuntimeConfig, resolved once at the
+	// cmd/miner bootstrap and never re-derived here.
+	cfgMu     sync.Mutex
 	cfg       *config.Config
 	db        *database.DB
 	analytics *analytics.Service
@@ -327,7 +346,7 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	// closes them — App does), so ownership is single and unambiguous no
 	// matter how many generations come and go.
 	app.minerFactory = func() *miner.Miner {
-		m := f.newMiner(cfg, rc.ConfigPath)
+		m := f.newMiner(app.nextGenerationConfig(), rc.ConfigPath)
 		// The miner's fallback web build (used only when App does not inject
 		// a web server) reads the same immutable dashboard snapshot rather
 		// than the env.
@@ -374,9 +393,7 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	updateState := &lifecycleUpdateStateCell{}
 
 	currentManager := func() *notifications.Manager {
-		app.currentMinerMu.Lock()
-		m := app.currentMiner
-		app.currentMinerMu.Unlock()
+		m := app.sampleCurrentMiner()
 		if m == nil {
 			return nil
 		}
@@ -585,6 +602,79 @@ func (a lifecycleStatusAdapter) SetStatus(status, message string) {
 // reload logic whether a startup-phase status belongs to the first boot).
 func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 	a.broadcaster.SetGeneration(gen)
+}
+
+// nextGenerationConfig returns the configuration the NEXT miner generation must
+// be constructed from, and records it as the process-level authoritative one.
+//
+// The rule is a handoff, not a fallback. Each generation OWNS its own
+// configuration for its lifetime: it applies runtime settings to a candidate,
+// persists that candidate, and only then publishes it. When that generation
+// ends, whatever it last committed is what the process now considers current,
+// so the next generation starts from it. The process-boot snapshot is used
+// only for the FIRST generation, where there is no previous generation and the
+// boot snapshot IS the authoritative configuration — never as a stand-in for a
+// later generation's configuration that could not be obtained.
+//
+// There is deliberately no fallible step here, and therefore no stale-config
+// failure mode to guard against. In particular this does NOT reload
+// config.json: config.LoadConfig re-reads DISCORD_BOT_TOKEN from the
+// environment and re-derives DiscordTokenFromEnv (see
+// internal/config/config_secrets_test.go), which would make the generation
+// boundary a second environment-read point and break the deliberate
+// bootstrap-once discipline cmd/miner documents; and because SaveConfig
+// intentionally does not persist an env-managed token, a reloaded object is
+// not the object the generation committed. Reading the committed value
+// directly is both exact and infallible, which is also why
+// lifecycle.Factory does not need to grow an error return.
+//
+// Locking: this function's own three mutexes are taken strictly one at a time
+// and never nested — currentMinerMu to sample the outgoing generation, then
+// the miner's own RLock inside CurrentConfig with no App lock held, then cfgMu
+// to publish. It holds no lock across I/O itself, though acquiring the
+// outgoing miner's lock can briefly wait on one: that package deliberately
+// holds m.mu across config.SaveConfig, so a commit landing on the outgoing
+// generation at this instant delays the sample by one atomic file write.
+//
+// Ordering is guaranteed by the lifecycle core, not assumed here: the factory
+// runs on the controller's single main loop, and a replacement only reaches it
+// after awaitGeneration has observed the outgoing generation's Run return.
+//
+// That drain is NOT total, and this must not be read as one. beginApply/
+// applyWG gate exactly ONE entry point — applySettings, their only caller.
+// ApplyHealthSettings, ApplyCampaignPolicy, SetDropRule and SetAutoRedeem sit
+// outside the interlock, and the web providers a generation registers are
+// never cleared, so a torn-down generation stays the dashboard's target until
+// the NEXT generation reaches setupComponents (which is behind device-code
+// authentication, so the window is not bounded by anything short). A commit
+// landing on the outgoing generation after this sample therefore reaches
+// config.json but not the generation now starting — a lost update, and never
+// a data race, because CurrentConfig hands over an isolated snapshot. Closing
+// that window means gating or draining those four writers, which belongs with
+// them rather than here.
+func (a *App) nextGenerationConfig() *config.Config {
+	var committed *config.Config
+	if outgoing := a.sampleCurrentMiner(); outgoing != nil {
+		committed = outgoing.CurrentConfig()
+	}
+
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	if committed != nil {
+		a.cfg = committed
+	}
+	return a.cfg
+}
+
+// sampleCurrentMiner returns the miner of the most recently built generation,
+// or nil before the first one exists. Sampling under the mutex and acting on
+// the result after releasing it is the discipline every caller uses: the
+// accessors it feeds (NotificationManager, CurrentConfig) take the miner's own
+// locks, and none of them may be entered while an App lock is held.
+func (a *App) sampleCurrentMiner() *miner.Miner {
+	a.currentMinerMu.Lock()
+	defer a.currentMinerMu.Unlock()
+	return a.currentMiner
 }
 
 // Run starts the process-level owned resources in construction order (only the

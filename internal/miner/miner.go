@@ -2018,6 +2018,43 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 	return settings.BuildDefaultSettings(currentStreamers)
 }
 
+// CurrentConfig returns an ISOLATED SNAPSHOT of the configuration this miner
+// is currently running with, so the process-level composition root
+// (internal/app) can hand it to the NEXT generation it builds instead of the
+// snapshot the process booted with — without which a successful runtime
+// settings change silently reverts at the next pause/resume or restart. It
+// mirrors the CurrentHealthSettings (health.go) and CurrentCampaignPolicy
+// (policy.go) readers: same "Current" naming, same m.mu.RLock discipline.
+//
+// What it returns is the value this miner last COMMITTED, which is exactly
+// what m.config means — with one honest caveat about what "committed" covers.
+// The candidate-publishing paths (applySettingsNoRename /
+// applySettingsWithRemovals / applySettingsWithRename here, and
+// ApplyHealthSettings in health.go) build a candidate and publish it into
+// m.config ONLY past their own commit point, so a candidate whose persistence
+// failed is never published and can never be observed here. The in-place
+// writers — ApplyCampaignPolicy and SetDropRule (policy.go) — do not work that
+// way: they mutate m.config under m.mu and call persistLocked, which only LOGS
+// a config.SaveConfig failure. Their changes are therefore live, and visible
+// here, even when the write to disk failed. That is this package's existing
+// behavior, unchanged; this accessor reports it faithfully rather than
+// implying a stricter guarantee than the writers provide.
+//
+// It must return a SNAPSHOT rather than the live pointer. A generation stays
+// reachable after its Run returns — the web providers a generation registers
+// (SetRewardsProvider/SetHealthProvider/SetPolicyProvider, miner.go/web) are
+// never cleared — so a torn-down generation can still execute SetAutoRedeem
+// (rewards.go) or SetDropRule (policy.go), both of which write a MAP inside
+// m.config in place. Handing the live object to a second, concurrently
+// running *Miner would put one map behind two different mutexes, which is a
+// `concurrent map read and map write` fatal throw, not a recoverable race.
+// snapshotConfigLocked breaks exactly that sharing.
+func (m *Miner) CurrentConfig() *config.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.snapshotConfigLocked()
+}
+
 // beginApply registers the caller as an in-flight settings apply, refusing
 // (false) once the miner has started draining (Stop, in progress or done) or
 // its run context is already cancelled — the latter closes the same window
@@ -2581,6 +2618,39 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 		}
 	}
 	return &clone
+}
+
+// snapshotConfigLocked returns a copy of m.config that shares no MAP with the
+// live object, for handing across a generation boundary (CurrentConfig). Both
+// maps a still-reachable torn-down generation can write in place are copied:
+// AutoRedeem (SetAutoRedeem, rewards.go) and DropRules (SetDropRule,
+// policy.go). Every other reference-typed field is either reassigned wholesale
+// by settings.ApplyToConfig or element-mutated only on the applySettings*
+// path, which beginApply/applyWG drain to completion before Run returns — so
+// none of them can be written after this snapshot has been handed on.
+//
+// This is deliberately NOT cloneConfigLocked and must not be merged with it.
+// That function's DropRules ALIASING is load-bearing (see its [R7] note): a
+// candidate carrying a private DropRules copy would silently overwrite any
+// SetDropRule committing during the apply's own unlocked window — the same
+// lost-update refreshCandidateAutoRedeemLocked exists to prevent for
+// AutoRedeem. The two functions want opposite things from the same field, so
+// they stay separate. Caller holds m.mu (read or write).
+func (m *Miner) snapshotConfigLocked() *config.Config {
+	snap := *m.config
+	if m.config.AutoRedeem != nil {
+		snap.AutoRedeem = make(map[string]config.AutoRedeemConfig, len(m.config.AutoRedeem))
+		for k, v := range m.config.AutoRedeem {
+			snap.AutoRedeem[k] = v
+		}
+	}
+	if m.config.DropRules != nil {
+		snap.DropRules = make(map[string]config.DropRule, len(m.config.DropRules))
+		for k, v := range m.config.DropRules {
+			snap.DropRules[k] = v
+		}
+	}
+	return &snap
 }
 
 // finishApply performs everything that must happen once durable persistence
