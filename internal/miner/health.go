@@ -429,9 +429,11 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 // applySettingsNoRename (miner.go) already uses for the general settings
 // path. A save failure returns the error and leaves m.config the very same
 // object, with the very same contents; the canary/watchdog are never
-// reached. This function has no separate outer wrapper the way ApplySettings
-// has — it IS the public entry point the web handler calls directly, so a
-// save failure is logged here rather than left to the caller.
+// reached. This function now DOES have an outer wrapper the way ApplySettings
+// has — exported ApplyHealthSettings applies the generation fence and delegates
+// here — but the wrapper only admits or refuses; this function is still where
+// the apply itself lives, so a save failure is logged here rather than left to
+// the caller.
 // configPath == "" stays the existing documented no-op-persist case (no
 // config file configured) and still hot-applies the validated settings to
 // the live config and to the canary/watchdog.
@@ -441,7 +443,16 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 // across concurrent callers, so two overlapping applies can never publish
 // m.config/config.json at one update while notifying the canary/watchdog of
 // another.
+// The fence sits OUTSIDE healthApplyMu, so a refused call never contends for
+// it — it takes only applyMu, briefly, inside beginApply. It returns
+// ErrShuttingDown once this generation is no longer the authoritative mutable
+// one (see fenced, miner.go), before the clone, the save, and the
+// canary/watchdog notifications, so nothing is changed.
 func (m *Miner) ApplyHealthSettings(s config.HealthSettings) error {
+	return m.fenced(func() error { return m.applyHealthSettings(s) })
+}
+
+func (m *Miner) applyHealthSettings(s config.HealthSettings) error {
 	m.healthApplyMu.Lock()
 	defer m.healthApplyMu.Unlock()
 

@@ -7,7 +7,11 @@ import (
 
 // ErrShuttingDown is returned by a SettingsUpdateCallback (and by
 // miner.ApplySettings/applySettings, whose failure it wraps) when the caller
-// has begun — or already completed — shutdown: nothing was mutated. It lives
+// has begun — or already completed — shutdown: nothing was mutated. The miner
+// returns it from every fenced configuration mutation, not only settings
+// applies: ApplyCampaignPolicy, SetDropRule, ApplyHealthSettings and
+// SetAutoRedeem all report a retired generation this way, so the name reads
+// "this configuration mutation was refused", not "a settings apply was". It lives
 // here, not in internal/miner, purely so internal/web can recognize it via
 // errors.Is without importing internal/miner (which itself imports
 // internal/web — importing it back would cycle); internal/settings already

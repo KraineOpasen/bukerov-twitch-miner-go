@@ -68,9 +68,16 @@ import (
 // found" guard before ever reaching a client) or because the method is
 // itself a pure in-memory/db read (WatchSlots, LivePredictions, DropProgress,
 // PolicySnapshot, CurrentCampaignPolicy, HealthSnapshot, BuildDebugSnapshot,
-// resourceSampler.Latest) or a persist-only local write (ApplyCampaignPolicy,
-// SetDropRule, ApplyHealthSettings) or fails closed before touching anything
-// (ApplySettings, via beginApply once the miner is draining).
+// resourceSampler.Latest) or fails closed before touching anything.
+//
+// That last category grew: every CONFIGURATION mutator now fails closed here,
+// not just ApplySettings. ApplyCampaignPolicy, SetDropRule, ApplyHealthSettings
+// and SetAutoRedeem used to be "persist-only local writes" that a retired
+// generation performed happily — the stale-generation defect — and now go
+// through Miner.fenced onto the same beginApply interlock, so each returns
+// ErrShuttingDown here. Non-configuration mutators are deliberately NOT fenced
+// and are still live after teardown: RedeemCustomReward in particular reaches
+// a real Twitch call, because teardown closes neither m.client nor m.auth.
 func TestProvidersSafeAfterTeardown(t *testing.T) {
 	m, db := newStartupCleanupMiner(t)
 	stubAuthenticate(m)
@@ -201,8 +208,15 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		}},
 		{"GetAutoRedeem", func(*testing.T) { m.GetAutoRedeem("not-a-tracked-streamer") }},
 		{"SetAutoRedeem", func(t *testing.T) {
-			if err := m.SetAutoRedeem("not-a-tracked-streamer", config.AutoRedeemConfig{}); err == nil {
-				t.Error("SetAutoRedeem for an untracked streamer should return an error, not nil")
+			// After teardown the fence refuses BEFORE the roster guard, so
+			// this must assert the fence specifically: a bare "some error"
+			// check would keep passing while silently no longer testing
+			// anything, since the roster guard it was written for is now
+			// unreachable here. The roster guard itself is covered on a LIVE
+			// miner by TestSetAutoRedeemRejectsUntrackedStreamerWhileLive.
+			err := m.SetAutoRedeem("not-a-tracked-streamer", config.AutoRedeemConfig{})
+			if !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("SetAutoRedeem after teardown = %v, want ErrShuttingDown (fail-closed via the generation fence)", err)
 			}
 		}},
 		{"TrackedUsernames", func(*testing.T) { m.TrackedUsernames() }},
@@ -213,17 +227,30 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		{"DropProgress", func(*testing.T) { m.DropProgress() }},
 		{"PolicySnapshot", func(*testing.T) { m.PolicySnapshot() }},
 		{"CurrentCampaignPolicy", func(*testing.T) { m.CurrentCampaignPolicy() }},
-		{"ApplyCampaignPolicy", func(*testing.T) { m.ApplyCampaignPolicy("balanced") }},
-		{"SetDropRule", func(*testing.T) { m.SetDropRule("some-reward-key", config.DropRule{}) }},
+		{"ApplyCampaignPolicy", func(t *testing.T) {
+			if err := m.ApplyCampaignPolicy("balanced"); !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("ApplyCampaignPolicy after teardown = %v, want ErrShuttingDown", err)
+			}
+		}},
+		{"SetDropRule", func(t *testing.T) {
+			if err := m.SetDropRule("some-reward-key", config.DropRule{}); !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("SetDropRule after teardown = %v, want ErrShuttingDown", err)
+			}
+		}},
 		{"HealthSnapshot", func(*testing.T) { m.HealthSnapshot() }},
 		{"CurrentHealthSettings", func(*testing.T) { m.CurrentHealthSettings() }},
 		{"ApplyHealthSettings", func(t *testing.T) {
-			// newStartupCleanupMiner constructs this Miner with configPath ==
-			// "" (see startup_cleanup_test.go), which ApplyHealthSettings
-			// documents as an unconditional no-op success — deterministically
-			// nil here, not just "some sane result".
-			if err := m.ApplyHealthSettings(m.CurrentHealthSettings()); err != nil {
-				t.Errorf("ApplyHealthSettings after teardown = %v, want nil (configPath is empty, a documented no-op-success case)", err)
+			// DELIBERATE INVERSION of this case's original expectation. It
+			// previously asserted nil ("a documented no-op-success case",
+			// because newStartupCleanupMiner uses configPath == ""), which
+			// encoded the very defect this fence exists to close: a RETIRED
+			// generation answering a configuration mutation successfully. The
+			// empty configPath only made the write invisible on disk — the
+			// in-memory publish and the canary/watchdog notifications still
+			// happened. Post-fence a retired generation refuses before any of
+			// that, which is the behavior being pinned here.
+			if err := m.ApplyHealthSettings(m.CurrentHealthSettings()); !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("ApplyHealthSettings after teardown = %v, want ErrShuttingDown", err)
 			}
 		}},
 		{"GetGameIdentity (blank name, no network)", func(t *testing.T) {

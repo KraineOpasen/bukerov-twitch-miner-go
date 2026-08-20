@@ -54,7 +54,13 @@ func TestDropRulesSnapshotRaceFreeAgainstSetDropRule(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.SetDropRule(fmt.Sprintf("k%d", i%16), config.DropRule{HighPriority: true})
+				// This miner was never Run, so the fence admits every write;
+				// the error is checked so a future over-refusal cannot turn
+				// this race probe into a silent no-op loop that proves nothing.
+				if err := m.SetDropRule(fmt.Sprintf("k%d", i%16), config.DropRule{HighPriority: true}); err != nil {
+					t.Errorf("SetDropRule = %v, want nil", err)
+					return
+				}
 			}
 		}
 	}()

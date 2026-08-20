@@ -665,36 +665,45 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 // runs on the controller's single main loop, and a replacement only reaches it
 // after awaitGeneration has observed the outgoing generation's Run return.
 //
-// That drain is NOT total, and this must not be read as one. beginApply/
-// applyWG gate exactly ONE entry point — applySettings, their only caller.
-// ApplyHealthSettings, ApplyCampaignPolicy, SetDropRule and SetAutoRedeem sit
-// outside the interlock, and the web providers a generation registers are
-// never cleared, so a torn-down generation stays the dashboard's target until
-// the NEXT generation re-registers them — every one of them in setupComponents,
-// which Run reaches only after runAuthenticate and runLoadStreamers have both
-// returned.
+// That drain now covers every configuration writer, which is what makes this
+// sample safe to trust. beginApply/applyWG originally gated exactly ONE entry
+// point — applySettings — while ApplyHealthSettings, ApplyCampaignPolicy,
+// SetDropRule and SetAutoRedeem sat outside it. They no longer do: all four go
+// through Miner.fenced (miner.go), so a generation that is draining or already
+// retired refuses them with ErrShuttingDown before any side effect.
 //
-// That window is not bounded by anything short, and the reason is worth naming
-// precisely, because it is what justifies leaving this open. Device-code
-// authentication is only the obvious case. The genuinely unbounded one is
-// retryStartupLookup (startup_retry.go), which wraps the owner's channel-ID
-// resolution inside authenticate in a `for attempt := 1; ; attempt++` loop that
-// exits only on ErrUnauthorized, ErrStreamerDoesNotExist, or ctx cancellation —
-// so a Twitch outage holds the incoming generation short of setupComponents for
-// as long as the outage lasts, deliberately, to keep the dashboard alive. And
-// the lifecycle retry timer reaches this window with no operator present.
+// The reachability that made that gap exploitable is UNCHANGED and still worth
+// naming, because it is why the fence has to live on the writers rather than
+// here. The web providers a generation registers are still never cleared, so a
+// torn-down generation stays the dashboard's target until the NEXT generation
+// re-registers them — every one of them in setupComponents, which Run reaches
+// only after runAuthenticate and runLoadStreamers have both returned. That
+// window is not bounded by anything short. Device-code authentication is only
+// the obvious case; the genuinely unbounded one is retryStartupLookup
+// (startup_retry.go), which wraps the owner's channel-ID resolution inside
+// authenticate in a `for attempt := 1; ; attempt++` loop that exits only on
+// ErrUnauthorized, ErrStreamerDoesNotExist, or ctx cancellation — so a Twitch
+// outage holds the incoming generation short of setupComponents for as long as
+// the outage lasts, deliberately, to keep the dashboard alive. And the
+// lifecycle retry timer reaches this window with no operator present. What
+// reaches the retired generation during it is now refused, not served.
 //
-// A commit landing on the outgoing generation after this sample is worse than
-// invisible to the generation now starting. config.SaveConfig rewrites the
-// WHOLE document from the writing generation's own in-memory configuration and
-// replaces the file atomically, so the stale generation's write can revert
-// fields the new generation already committed, and the new generation's next
-// commit can in turn revert the operator's acknowledged change — with the
-// dashboard reporting success both times, because it read back through the
-// same stale provider. What it is NOT is a data race: CurrentConfig hands over
-// an isolated snapshot, so no two generations ever share a map. Closing the
-// window means gating, draining, or re-pointing those writers, which belongs
-// with them rather than here.
+// Why that mattered: config.SaveConfig rewrites the WHOLE document from the
+// writing generation's own in-memory configuration and replaces the file
+// atomically, so a stale generation's write could revert fields the new
+// generation had already committed, and the new generation's next commit could
+// in turn revert the operator's acknowledged change — with the dashboard
+// reporting success both times, because it read back through the same stale
+// provider. What it never was is a data race: CurrentConfig hands over an
+// isolated snapshot, so no two generations ever share a map.
+//
+// Two limits on that claim, so it is not read as more than it is. It covers
+// CONFIGURATION mutation only: non-config provider methods (notably
+// RedeemCustomReward, which teardown leaves fully live because it closes
+// neither m.client nor m.auth) can still execute on a retired generation.
+// And "admitted implies present in this sample" is bounded by applySettings'
+// own clone window (miner.go), where a concurrent commit can still be
+// overwritten by that apply's publish — a separate, pre-existing residual.
 func (a *App) nextGenerationConfig() *config.Config {
 	var committed *config.Config
 	if outgoing := a.sampleCurrentMiner(); outgoing != nil {

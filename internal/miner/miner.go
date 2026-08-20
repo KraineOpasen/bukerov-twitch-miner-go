@@ -284,8 +284,8 @@ type Miner struct {
 	// file, and analytics history disagreeing about a streamer's identity.
 	coordinatorMu sync.Mutex
 
-	// applyMu/applyWG/applyDraining are the shutdown/settings-apply interlock
-	// (M1): beginApply refuses a NEW apply once applyDraining is set or
+	// applyMu/applyWG/applyDraining are the shutdown/configuration-mutation
+	// interlock (M1): beginApply refuses a NEW mutation once applyDraining is set or
 	// m.runCtx is already cancelled, and registers an accepted one in
 	// applyWG; endApply (deferred by every accepted apply) removes it. stop()
 	// sets applyDraining and calls applyWG.Wait() BEFORE any other teardown,
@@ -295,6 +295,14 @@ type Miner struct {
 	// Wait()" — without it, an apply could observe draining=false and call
 	// Add(1) AFTER Wait() has already seen the counter reach zero and
 	// returned, which is a data race on sync.WaitGroup's own contract.
+	//
+	// That same atomicity is what fences a RETIRED generation: applySettings
+	// is no longer the only admitted caller — ApplyCampaignPolicy, SetDropRule,
+	// ApplyHealthSettings and SetAutoRedeem enter through Miner.fenced, so a
+	// web request holding a provider pointer to a torn-down generation is
+	// refused here instead of rewriting that generation's config. It admits,
+	// it does not ORDER: this is a counter, not a mutex, and it does not
+	// serialize those four against applySettings.
 	applyMu       sync.Mutex
 	applyWG       sync.WaitGroup
 	applyDraining bool
@@ -1906,11 +1914,15 @@ func (m *Miner) stop() error {
 // below may call back into stop(): a re-entrant call would deadlock on the
 // once guard.
 func (m *Miner) teardown() error {
-	// Drain in-flight settings applies FIRST, before anything else tears
-	// down: App.Shutdown closes the DB only after Run (and therefore this
-	// function) returns, so once applyWG.Wait() returns here no apply can
-	// still be mid-flight when that close happens (M1: closes the same race
-	// class as the cancelled-runCtx hazard, but for the DB handle itself).
+	// Drain in-flight configuration mutations FIRST, before anything else
+	// tears down: App.Shutdown closes the DB only after Run (and therefore
+	// this function) returns, so once applyWG.Wait() returns here no mutation
+	// can still be mid-flight when that close happens (M1: closes the same
+	// race class as the cancelled-runCtx hazard, but for the DB handle
+	// itself). Setting applyDraining before this Wait is also what retires
+	// the generation for mutation purposes: every later arrival is refused
+	// by beginApply, so what this drains is final and what CurrentConfig
+	// hands to the next generation cannot change afterwards.
 	m.applyMu.Lock()
 	m.applyDraining = true
 	m.applyMu.Unlock()
@@ -2042,14 +2054,20 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 // it faithfully rather than implying a stricter guarantee than the writers
 // provide.
 //
-// It must return a SNAPSHOT rather than the live pointer. A generation stays
-// reachable after its Run returns — the web providers a generation registers
+// It must return a SNAPSHOT rather than the live pointer, and it must keep
+// doing so even though the mutation fence now refuses the writes that first
+// made this urgent. A generation stays REACHABLE after its Run returns — the
+// web providers a generation registers
 // (SetRewardsProvider/SetHealthProvider/SetPolicyProvider, miner.go/web) are
-// never cleared — so a torn-down generation can still execute SetAutoRedeem
-// (rewards.go) or SetDropRule (policy.go), both of which write a MAP inside
-// m.config in place. Handing the live object to a second, concurrently
-// running *Miner would put one map behind two different mutexes, which is a
-// `concurrent map read and map write` fatal throw, not a recoverable race.
+// never cleared — and that has not changed; what changed is that SetAutoRedeem
+// (rewards.go) and SetDropRule (policy.go), which write a MAP inside m.config
+// in place, now fail closed on a retired generation instead of performing that
+// write. Handing the live object to a second, concurrently running *Miner
+// would still put one map behind two different mutexes, which is a
+// `concurrent map read and map write` fatal throw, not a recoverable race —
+// so the isolation stays load-bearing rather than becoming belt-and-braces:
+// it is what makes the handoff safe independently of which callers happen to
+// be fenced, and the two unfenced non-config mutators are still live.
 // snapshotConfigLocked breaks exactly that sharing.
 func (m *Miner) CurrentConfig() *config.Config {
 	m.mu.RLock()
@@ -2081,6 +2099,45 @@ func (m *Miner) beginApply() bool {
 // immediately after a successful beginApply.
 func (m *Miner) endApply() {
 	m.applyWG.Done()
+}
+
+// fenced admits fn as a configuration mutation on THIS generation, refusing
+// with ErrShuttingDown — before fn runs, so with no side effect whatsoever —
+// once this generation is no longer the authoritative mutable one.
+//
+// It exists because the web providers a generation registers in
+// setupComponents are never cleared: a RETIRED generation stays the
+// dashboard's target until the NEXT one re-registers them, which Run reaches
+// only after runAuthenticate and runLoadStreamers return (retryStartupLookup
+// can hold that open for an entire Twitch outage). Every web mutation handler
+// samples its provider under the Server's RLock and calls it after releasing
+// that lock, so no locking in internal/web can close the resulting
+// check->call race — the web layer has no lifetime protocol with a generation
+// to check against. Fencing in the callee is what closes it: beginApply takes
+// applyMu, and teardown's FIRST act is to take applyMu, set applyDraining and
+// Wait, so admission and retirement are mutually exclusive with no third
+// interleaving. A request that sampled this generation immediately BEFORE
+// retirement and calls immediately AFTER it is refused here rather than
+// mutating a config the process has already handed on.
+//
+// The ordering that makes a refusal safe to retry, and an acknowledgement
+// safe to trust: an admitted mutation holds applyWG, teardown waits on it
+// before Run returns, and the lifecycle reaches the next generation's factory
+// — and therefore nextGenerationConfig's CurrentConfig sample — only after
+// that return. So anything answered successfully is in the handoff.
+//
+// This is drain ADMISSION only. It is NOT serialization against applySettings:
+// applyWG is a counter, not a mutex, and applySettings additionally takes
+// coordinatorMu, which these callers do not. In particular it does not fix the
+// residual documented at applySettings' clone window, where a concurrent
+// commit landing inside that window is still overwritten by the apply's own
+// publish.
+func (m *Miner) fenced(fn func() error) error {
+	if !m.beginApply() {
+		return ErrShuttingDown
+	}
+	defer m.endApply()
+	return fn()
 }
 
 // ApplySettings applies posted runtime settings. It satisfies
@@ -2144,8 +2201,8 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // during THIS apply's earlier unlocked I/O (durable admission, analytics
 // rename) is never silently overwritten (D1), and a removed or renamed
 // login's consent can never resurrect after the commit (D2). This guarantee
-// is scoped to AutoRedeem: ApplyHealthSettings (health.go:424-434) and
-// ApplyCampaignPolicy (policy.go:281-287) still mutate live VALUE fields that
+// is scoped to AutoRedeem: ApplyHealthSettings (health.go) and
+// ApplyCampaignPolicy (policy.go) still mutate live VALUE fields that
 // cloneConfigLocked's shallow copy already snapshotted by the time this
 // function took m.mu above, so an edit to either landing inside an apply's
 // own unlocked window is still silently overwritten by that apply's publish

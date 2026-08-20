@@ -2,13 +2,10 @@ package web
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/lifecycle"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -27,7 +24,7 @@ const applyErrorMessage = "Settings could not be applied; no changes were made"
 // retry, since a fail-closed apply never mutates on error, but not a
 // transient condition the caller can wait out).
 func writeApplyError(w http.ResponseWriter, err error) {
-	if errors.Is(err, settings.ErrShuttingDown) || errors.Is(err, database.ErrClosed) {
+	if mutationRefusedAsUnavailable(err) {
 		writeServiceUnavailable(w, applyErrorMessage)
 		return
 	}
