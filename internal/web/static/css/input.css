@@ -1,6 +1,6 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 
-@source "../../../templates";
+@source "../../templates";
 
 /* Vendored variable fonts (embedded, served from /static/fonts) so the
    single-binary/scratch build needs no network at runtime. */
