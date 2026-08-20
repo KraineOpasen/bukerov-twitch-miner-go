@@ -32,9 +32,9 @@
      Together with the lifecycle panel above, this is the page's dominant
      region: it answers "is the miner watching right now?", which is what
      /overview exists to answer. */}}
-<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="mb-6" data-ov-slots>
-    <div class="flex items-center justify-between mb-1">
-        <span class="text-xs uppercase tracking-wide text-text-secondary">{{ t "sidebar.now_watching" }}</span>
+<div role="group" aria-label="{{ t "sidebar.now_watching" }}" class="ov-cell ov-cell--slots" data-ov-slots>
+    <div class="ov-cell-head">
+        <span class="ov-cell-label">{{ t "sidebar.now_watching" }}</span>
         {{template "c0.provenance_chip" .SlotPairProvenance}}
     </div>
     {{template "c12.pair" .SlotPair}}
@@ -51,14 +51,14 @@
      subsystem can never read as healthy. Icon + text, never colour alone
      (I18); the aria-label carries the deciding evidence, because a title
      tooltip alone is mouse-only. */}}
-<section class="health-card mb-4" data-ov-health-summary aria-labelledby="ov-health-heading">
-    <div class="flex items-center justify-between gap-2 flex-wrap">
-        <span class="health-card-label" id="ov-health-heading">{{ t "system.status.heading" }}</span>
-        <a href="/system/status" class="ov-health ov-health-{{.Health.State}}" data-ov-health-state="{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
-            <svg class="ov-health-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-            <span>{{.Health.Label}}</span>
-        </a>
+<section class="ov-cell ov-cell--health" data-ov-health-summary aria-labelledby="ov-health-heading">
+    <div class="ov-cell-head">
+        <span class="ov-cell-label" id="ov-health-heading">{{ t "system.status.heading" }}</span>
     </div>
+    <a href="/system/status" class="ov-health ov-health-{{.Health.State}}" data-ov-health-state="{{.Health.State}}"{{if .Health.Detail}} title="{{.Health.Detail}}"{{end}} aria-label="{{ t "ov.health.aria" }}: {{.Health.Label}}{{if .Health.Detail}}. {{.Health.Detail}}{{end}}">
+        <svg class="ov-health-ico" aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <span>{{.Health.Label}}</span>
+    </a>
 </section>
 
 {{/* ------------------------------------------------------- PREDICTIONS SUMMARY
@@ -74,9 +74,9 @@
      of a board up as positive evidence of no rounds. Today and win rate carry
      no figure at all — this request holds no bet-history evidence, and
      Analytics owns ROI. */}}
-<section class="health-card mb-4" data-ov-pred-kpi aria-labelledby="ov-pred-kpi-heading">
-    <div class="flex items-center justify-between gap-2 flex-wrap">
-        <span class="health-card-label" id="ov-pred-kpi-heading">{{ t "nav.predictions" }}</span>
+<section class="ov-cell ov-cell--pred" data-ov-pred-kpi aria-labelledby="ov-pred-kpi-heading">
+    <div class="ov-cell-head">
+        <span class="ov-cell-label" id="ov-pred-kpi-heading">{{ t "nav.predictions" }}</span>
         {{/* F2.7 board-state chip, unchanged semantics: the TECHNICAL status of
              the board, never a betting outcome. No role=status — this is a
              brand new DOM node on every 30s swap, so a live region here would
@@ -96,25 +96,25 @@
          separate-label shape the c11 progress component already uses; the
          data-ov-pred-* attribute stays on the outer element it has always been
          on. */}}
-    <div class="health-card-row flex items-center gap-4 flex-wrap">
-        <span class="type-small text-text-secondary">
-            {{ t "ov.pred.active" }}
+    <div class="ov-readouts">
+        <span class="ov-readout">
+            <span class="ov-readout-label">{{ t "ov.pred.active" }}</span>
             {{if ne .PredictionsState "unavailable"}}
-            <span class="num text-text-primary" data-ov-pred-active="{{len .Predictions}}">{{len .Predictions}}</span>
+            <span class="num" data-ov-pred-active="{{len .Predictions}}">{{len .Predictions}}</span>
             {{else}}
             <span class="num" data-ov-pred-active="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
             {{end}}
         </span>
-        <span class="type-small text-text-secondary">
-            {{ t "ov.today" }}
+        <span class="ov-readout">
+            <span class="ov-readout-label">{{ t "ov.today" }}</span>
             <span class="num" data-ov-pred-today="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
         </span>
-        <span class="type-small text-text-secondary">
-            {{ t "ov.pred.win_rate" }}
+        <span class="ov-readout">
+            <span class="ov-readout-label">{{ t "ov.pred.win_rate" }}</span>
             <span class="num" data-ov-pred-winrate="unknown"><span aria-hidden="true">—</span><span class="visually-hidden">{{ t "queue.slot.no_data" }}</span></span>
         </span>
-        <a href="/analytics/roi" class="type-small hover:underline">{{ t "ov.pred.roi_link" }} →</a>
     </div>
+    <a href="/analytics/roi" class="ov-cell-link">{{ t "ov.pred.roi_link" }} →</a>
 </section>
 
 {{/* There is deliberately no claims preview here. A claim the Overview could
@@ -128,9 +128,9 @@
      echoing it here gave the same signal two owners, and "up to date" is never
      written from the absence of a signal in either place. */}}
 {{if .Version}}
-<p class="type-small text-text-secondary mb-4" data-ov-version>
-    <span class="num text-text-primary">v{{.Version}}</span>
-    · <a href="/system/diagnostics" class="hover:underline">{{ t "system.diagnostics.heading" }} →</a>
+<p class="ov-cell ov-cell--version" data-ov-version>
+    <span class="num ov-version-value">v{{.Version}}</span>
+    <a href="/system/diagnostics" class="ov-cell-link">{{ t "system.diagnostics.heading" }} →</a>
 </p>
 {{end}}
 
@@ -147,7 +147,7 @@
      suspends the poll while a confirm bar is open or a bet is in flight.
      #predictions stays on the board section itself so a bookmarked
      /#predictions deep link still lands on it. */}}
-<details class="details-panel" data-ov-pred-board>
+<details class="details-panel ov-cell ov-cell--board" data-ov-pred-board>
     <summary class="text-sm">
         {{ t "pred.heading" }}
         {{if .Predictions}}<span class="badge badge-event">{{len .Predictions}}</span>{{end}}

@@ -86,8 +86,8 @@
             <button type="button" class="chrome-drawer-close" data-drawer-close aria-label="{{ t "a11y.close_menu" }}">
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
-            <a href="/" class="sidebar-brand-row flex items-center gap-2.5 px-4 py-3 text-base font-semibold text-text-primary">
-                <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="31" height="52" class="shrink-0" style="height:52px;width:auto;object-fit:contain">
+            <a href="/" class="sidebar-brand-row flex items-center gap-2.5 px-3.5 py-2 text-sm font-semibold text-text-primary">
+                <img src="/static/images/sidebar-logo-full.png" alt="{{ t "a11y.logo_alt" }}" width="26" height="44" class="shrink-0" style="height:44px;width:auto;object-fit:contain">
                 <span class="sidebar-brand">
                     <span class="sidebar-brand-title">Twitch Drops Miner</span>
                     <span class="sidebar-brand-sub">Channel Points</span>
@@ -99,10 +99,10 @@
             <div class="now-watching" id="now-watching"
                  hx-get="/api/now-watching" hx-trigger="load, every 30s" hx-swap="innerHTML">
                 <div class="text-xs uppercase tracking-wide text-text-muted mb-2">{{ t "sidebar.now_watching" }}</div>
-                <div class="skeleton h-16"></div>
+                <div class="skeleton h-[14rem]"></div>
             </div>
 
-            <div class="sidebar-footer px-4 py-3 border-t border-border-default text-xs text-text-muted flex items-center justify-between">
+            <div class="sidebar-footer px-3.5 py-2 border-t border-border-default text-xs text-text-muted flex items-center justify-between">
                 <span class="inline-flex items-center gap-1.5">
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>
                     {{.Username}}
@@ -205,6 +205,63 @@
             updateActiveNav();
             window.addEventListener('hashchange', updateActiveNav);
 
+            // Section accordion (Stage 4 §6: "section auto-expands for the
+            // active route"). All 30 child destinations stay in the DOM and in
+            // the nav's IA; only the ACTIVE group's children are rendered
+            // expanded, and every other group's are folded away behind its
+            // sibling disclosure button. Before this, the >=1280px sidebar
+            // rendered 7 parents + all 30 children = 37 rows, ~1722px of
+            // content inside a 100vh, overflow:hidden column — which silently
+            // clipped the Now Watching block and the username/version footer
+            // off the bottom at EVERY viewport height, 2560x1440 included.
+            //
+            // This is a pure enhancement: the folding only engages once this
+            // script stamps data-c2-collapsible on the <nav> (input.css gates
+            // every accordion rule on that attribute) and unhides the toggles.
+            // With JS off, nothing folds and all 30 children stay visible
+            // exactly as before — no inert control, no unreachable route.
+            //
+            // Folding uses display:none (input.css), never height:0 or
+            // visibility tricks: a folded-away child must leave the tab order
+            // outright, or the drawer's focus trap would cycle through links
+            // nobody can see.
+            //
+            // The 1024-1279.98px icon rail is deliberately untouched — the
+            // accordion rules are scoped to the two ranges that render the
+            // full sidebar, so the rail keeps its existing hover/:focus-within
+            // children flyout as the only way it reaches those destinations.
+            (function () {
+                var nav = document.querySelector('[data-c2-nav]');
+                if (!nav) return;
+                var groups = Array.prototype.slice.call(
+                    nav.querySelectorAll('.c2-nav-item--group')
+                );
+                if (!groups.length) return;
+
+                function setExpanded(group, open) {
+                    var btn = group.querySelector('[data-nav-toggle]');
+                    group.classList.toggle('is-expanded', open);
+                    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+                }
+
+                var active = activeSection(window.location.pathname);
+                groups.forEach(function (group) {
+                    var btn = group.querySelector('[data-nav-toggle]');
+                    var parent = group.querySelector('[data-nav-parent]');
+                    var section = parent && parent.getAttribute('data-nav-section');
+                    setExpanded(group, section !== null && section === active);
+                    if (!btn) return;
+                    btn.hidden = false;
+                    btn.addEventListener('click', function () {
+                        setExpanded(group, !group.classList.contains('is-expanded'));
+                    });
+                });
+
+                // Stamped last, so the folded state never paints before the
+                // toggles that operate it exist.
+                nav.setAttribute('data-c2-collapsible', '');
+            })();
+
             // Scroll to the section named by the URL hash. The in-page section
             // links (#grid/#predictions) rely on this: arriving from another page
             // lands on Overview, but the status-overlay's one-time reload drops the
@@ -233,9 +290,19 @@
             const scrim = document.querySelector('[data-chrome-scrim]');
             if (toggle && sidebar) {
                 function focusableIn(container) {
+                    // Rendered-visibility filter, not just a selector match. The
+                    // section accordion leaves up to 28 collapsed child links in
+                    // the DOM as display:none, and `hidden` disclosure buttons
+                    // exist before the enhancement runs. A selector-only list
+                    // would hand this trap an unrendered first/last item, and
+                    // .focus() on a display:none element is a no-op — so the
+                    // wrap would silently never fire and Tab would escape the
+                    // open, scrimmed drawer. getClientRects() is empty exactly
+                    // for the non-rendered case and non-empty for everything
+                    // that can actually take focus.
                     return Array.prototype.slice.call(
                         container.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
-                    );
+                    ).filter(function (el) { return el.getClientRects().length > 0; });
                 }
 
                 // Single authority for "is the drawer the current off-canvas

@@ -962,6 +962,14 @@
 }
 .app-main {
   min-width: 0;
+  /* Stage 4 §8's desktop contract — "content max-width 1680px centered
+     beyond" — which had never been implemented: below 1680px of available
+     column this is a no-op, above it (the 2560x1440 design target, where the
+     column is 2300px) it is what stops every page stretching a single row of
+     controls across ~2250px. */
+  width: 100%;
+  max-width: 105rem;
+  margin-inline: auto;
   padding: 1.25rem 1.5rem 2rem;
 }
 
@@ -1003,8 +1011,9 @@
 
 .now-watching {
   margin-top: auto;
+  flex: none;
   border-top: 1px solid var(--border-default);
-  padding: 0.75rem;
+  padding: 0.6rem 0.65rem 0.7rem;
 }
 .watch-slot {
   border: 1px solid var(--border-default);
@@ -1135,7 +1144,18 @@
   to { transform: translateX(-100%); }
 }
 
-.pred-board { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); }
+/* auto-FIT, not auto-fill: with auto-fill the empty tracks of a wide board
+   survive, so the one or two rounds this page usually holds rendered as two
+   340px cards pinned to the left of ~1500px of dead grid. auto-fit collapses
+   the empty tracks; the 34rem cap keeps a single round from stretching into
+   one absurd full-width card, and centring spends the remainder as symmetric
+   gutter instead of a right-hand void. */
+.pred-board {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 34rem));
+  justify-content: center;
+}
 .pred-card {
   background: var(--surface-card);
   border: 1px solid var(--border-default);
@@ -2044,7 +2064,18 @@
 
 /* -- Topbar / main column layout ---------------------------------------- */
 .app-main-col { display: flex; flex-direction: column; min-width: 0; }
-.app-topbar { flex: none; }
+/* The topbar sits outside .app-main, so it never had the page gutter and its
+   theme/language controls hugged the extreme top-right corner of the viewport.
+   It now carries .app-main's measure and the SAME literal gutter, including
+   .app-main's one narrow-viewport override below, so the two actually line up
+   at every width rather than only at wide ones. */
+.app-topbar {
+  flex: none;
+  width: 100%;
+  max-width: 105rem;
+  margin-inline: auto;
+  padding: 0.75rem 1.5rem 0;
+}
 
 /* -- Drawer-only active state: the scrim's visible state and the body
    scroll lock must only take effect while the drawer is an off-canvas
@@ -2060,20 +2091,25 @@
 .c2-nav { flex: none; }
 .c2-nav-list { list-style: none; margin: 0; padding: 0.25rem 0; }
 .c2-nav-item { position: relative; }
+/* The parent link and its sibling disclosure button share one row so the
+   chevron sits on the link's own baseline instead of below it. The link keeps
+   every attribute and class it had - the row is a pure layout wrapper. */
+.c2-nav-row { display: flex; align-items: center; }
+.c2-nav-row > .c2-nav-link { flex: 1 1 auto; min-width: 0; }
 .c2-nav-link, .c2-nav-child {
   display: flex;
   align-items: center;
   gap: 0.625rem;
-  padding: 0.5rem 0.75rem;
-  margin: 0.1rem 0.5rem;
+  padding: 0.4rem 0.7rem;
+  margin: 0.05rem 0.5rem;
   border-radius: var(--ds-radius-sm);
   color: var(--text-secondary);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   font-weight: 500;
   text-decoration: none;
   transition: background 0.15s, color 0.15s;
 }
-.c2-nav-child { margin-left: 2.25rem; font-size: 0.82rem; }
+.c2-nav-child { margin-left: 2.25rem; font-size: 0.8125rem; padding-top: 0.3rem; padding-bottom: 0.3rem; }
 .c2-nav-icon { width: 18px; height: 18px; flex: none; color: var(--text-muted); transition: color 0.15s; }
 .c2-nav-link:hover, .c2-nav-child:hover { background: var(--surface-elevated); color: var(--text-primary); }
 .c2-nav-link:hover .c2-nav-icon { color: var(--interactive); }
@@ -2088,6 +2124,79 @@
   outline-offset: 1px;
 }
 .c2-nav-children { list-style: none; margin: 0; padding: 0; }
+
+/* -- C2 section accordion (Aug-2 restoration) ----------------------------
+   Every rule here is gated on [data-c2-collapsible], which ONLY base.html's
+   nav script sets. With JS off the attribute never appears, nothing collapses,
+   the disclosure buttons stay `hidden`, and all 30 child destinations render
+   exactly as they did before - so the accordion can never make a route
+   unreachable.
+
+   Scope: the two ranges that render the FULL sidebar (the <1024px drawer and
+   the >=1280px expanded sidebar). The 1024-1279.98px icon rail is excluded on
+   purpose - it already hides every child unconditionally and re-shows them as
+   a hover/:focus-within flyout, which is its only path to those destinations.
+   Writing the scope as one `max-width, min-width` query keeps these rules out
+   of that range entirely, so the rail block below needs no override at all.
+
+   Collapse is display:none, never height:0/visibility: a collapsed child must
+   leave the tab order outright or the drawer's focus trap would cycle through
+   invisible links. */
+.c2-nav-disclosure {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 0.2rem;
+  border: 0;
+  border-radius: var(--ds-radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.c2-nav-disclosure:hover { color: var(--text-primary); background: var(--surface-elevated); }
+.c2-nav-disclosure:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.c2-nav-chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--motion-fast) var(--motion-easing);
+}
+.c2-nav-disclosure[aria-expanded="true"] .c2-nav-chevron { transform: rotate(180deg); }
+/* The file's global reduced-motion block already zeroes transition-duration,
+   but every other motion this stylesheet ships also states its own opt-out
+   next to the rule that introduces it; this keeps that convention intact. */
+@media (prefers-reduced-motion: reduce) {
+  .c2-nav-chevron { transition: none; }
+}
+/* Stage 4 §8 requires >=44px touch targets in the tablet/mobile range, which
+   is exactly where the drawer makes this button the only way to reveal a
+   folded section's children. */
+@media (max-width: 1023.98px) {
+  .c2-nav-disclosure { width: 2.75rem; height: 2.75rem; margin-right: 0; }
+}
+
+@media (max-width: 1023.98px), (min-width: 1280px) {
+  .c2-nav[data-c2-collapsible] .c2-nav-disclosure { display: inline-flex; }
+  .c2-nav[data-c2-collapsible] .c2-nav-children { display: none; }
+  .c2-nav[data-c2-collapsible] .c2-nav-item--group.is-expanded > .c2-nav-children {
+    display: block;
+    margin: 0.1rem 0.5rem 0.35rem 1.55rem;
+    padding-left: 0.35rem;
+    border-left: 1px solid var(--border-default);
+  }
+  .c2-nav[data-c2-collapsible] .c2-nav-item--group.is-expanded > .c2-nav-children .c2-nav-child {
+    margin-left: 0;
+  }
+  /* The one rule in this block deliberately NOT gated on the enhancement
+     attribute. Scrolling the nav - rather than the sidebar - keeps Now
+     Watching and the username/version footer pinned and visible instead of
+     clipped off the bottom, and that is needed MORE, not less, when the
+     script never runs and all 37 rows render. Still excluded from the rail
+     range, where the sidebar must stay unclipped for the children flyout. */
+  .c2-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+}
 
 /* -- C17 global toast stack (success/neutral only) ----------------------- */
 .c17-toast-stack {
@@ -2392,4 +2501,288 @@
 @media (min-width: 1280px) {
   .app-shell { grid-template-columns: 260px minmax(0, 1fr); }
   .app-sidebar { width: 260px; }
+}
+
+/* =====================================================================
+   /overview — August-2 console restoration (task
+   dashboard/restore-aug2-shell-overview).
+
+   Layout and typography ONLY. Every region, every marker, every evidence
+   gate and the frozen DOM order (lifecycle -> two slots -> health ->
+   predictions KPI -> version -> secondary board) are untouched; nothing
+   here renders a value, and nothing here can render one, because the
+   markup it styles is the same markup as before.
+
+   Appended after the >=1280px sidebar block on purpose. Several chrome
+   contracts in this file are enforced by source ORDER — a handful of
+   sidebar-scoped declarations must not appear anywhere past that block — so
+   this section is scoped entirely to /overview and names none of them, not
+   even in prose.
+   ===================================================================== */
+
+.ov-page-head { margin-bottom: 0.75rem; }
+
+.ov-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  align-content: start;
+}
+
+/* #overview-live is a bare HTMX swap target: no box, no ARIA role, no
+   visible content of its own. display:contents lets the five regions it
+   swaps take part in the console grid directly, leaving its id, hx-get,
+   30s cadence and innerHTML swap contract completely unchanged. */
+.ov-live { display: contents; }
+
+/* The two conditional notice rows. Carries no display property on purpose:
+   both consumers are `hidden` by default, and an author display rule would
+   defeat the UA [hidden] rule. */
+.ov-cell--notice { grid-column: 1; }
+
+.ov-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* The status rail's three readouts are the boxed cells. The watch pair, the
+   lifecycle panel and the predictions board are deliberately NOT boxed: each
+   already owns its own surface (.c12-slot, .card, .details-panel), and
+   wrapping those in a second border is how a console turns into a card wall.
+   It also keeps the lifecycle cell honest: until its 2s poll lands, and
+   whenever the controller reports unavailable, it paints nothing at all
+   rather than an empty bordered widget. */
+.ov-cell--health,
+.ov-cell--pred,
+.ov-cell--version {
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--ds-radius-md);
+  padding: 0.7rem 0.85rem;
+}
+/* Collapsed, this is a three-word summary; stretched across the console it
+   was one of the very wide bands holding a few words that this whole task
+   exists to remove. justify-self:start makes a grid item size to its content,
+   so the closed disclosure hugs its own label and the OPEN one still gets the
+   full console width for its board. */
+.ov-cell--board { display: block; }
+.ov-cell--board:not([open]) { justify-self: start; }
+.ov-cell--lifecycle .lc-panel { margin-bottom: 0; }
+
+.ov-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-height: 1.25rem;
+}
+
+/* The Aug-2 section-heading grammar: a small flat accent tab in front of a
+   micro uppercase label. Flat, not the historical two-stop gradient — the
+   hierarchy is what is being restored, not the technique (Stage 4 §3 P2
+   bans decorative gradients). */
+.ov-cell-label {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.ov-cell-label::before {
+  content: "";
+  flex: none;
+  width: 4px;
+  height: 0.9em;
+  margin-right: 0.45rem;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+.ov-cell--slots .ov-cell-label::before { background: var(--ui-watching); }
+.ov-cell--pred .ov-cell-label::before { background: var(--ui-prediction); }
+
+/* No align-self here: on a flex item it always beats the container's
+   align-items, and .ov-cell--version aligns its own row on the baseline. The
+   column-direction cells that need the link to stop stretching say so
+   themselves, below. */
+.ov-cell-link {
+  font-size: 0.75rem;
+  color: var(--link-text);
+  text-decoration: none;
+}
+.ov-cell-link:hover { text-decoration: underline; }
+.ov-cell--pred .ov-cell-link { align-self: flex-start; }
+
+/* Three stacked micro-label/mono-value readouts instead of one inline run of
+   four items strung across the page. Same three figures, same markers, same
+   unknown treatment (aria-hidden dash + a real visually-hidden "no data"
+   string) — only the arrangement changed. */
+.ov-readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 5rem), 1fr));
+  gap: 0.5rem 0.75rem;
+}
+.ov-readout { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.ov-readout-label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+/* Selected structurally, never by an added class: each figure's opening tag is
+   byte-pinned as `<span class="num" data-ov-pred-<name>="...">`, so the value
+   styling has to reach it through the readout wrapper and its own marker
+   attribute instead of through a new class token. */
+.ov-readout > .num {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+/* An unknown figure is muted, never dressed up as a proven value. */
+.ov-readout > .num[data-ov-pred-active="unknown"],
+.ov-readout > .num[data-ov-pred-today="unknown"],
+.ov-readout > .num[data-ov-pred-winrate="unknown"] {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.ov-cell--health .ov-health { font-size: 1.1875rem; align-self: flex-start; letter-spacing: -0.01em; }
+.ov-cell--health .ov-health-ico { width: 17px; height: 17px; }
+
+.ov-cell--version {
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+}
+.ov-version-value {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+/* The watch pair is the page's dominant region, so it gets the Aug-2 card
+   weight the removed roster grid used to carry: a real name size, a ruled
+   metrics foot, and mono figures with actual presence.
+
+   min-height reserves the region's height across the 30s swap (Stage 4 §3
+   P5). Almost every line inside .c12-slot is conditional — reason badge,
+   campaign, game, streak — so a slot that gains or loses one would otherwise
+   shift every region below it. The floor is set ABOVE the tallest variant
+   /overview can actually produce (name + badge + campaign + ruled metrics +
+   queue link, measured at 188px), not below it: a floor under the real
+   maximum would only stop an empty pair collapsing and would leave the
+   swap-to-swap movement it is meant to prevent. */
+/* The watch pair's own header keeps its provenance chip beside the label
+   rather than flung to the far edge of the widest cell on the page — the
+   label-left/value-right split only reads as a pair while the row is card-
+   width, not console-width. */
+.ov-cell--slots .ov-cell-head { justify-content: flex-start; gap: 0.6rem; }
+.ov-cell--slots .c12-pair { gap: 0.85rem; }
+.ov-cell--slots .c12-slot {
+  min-height: 12.25rem;
+  padding: 0.95rem 1rem;
+  gap: 0.5rem;
+}
+/* The Aug-2 live-card signature: a left data rail on an occupied slot,
+   brand-violet once the channel is positively confirmed watching. Drawn as an
+   inset shadow, not a border, so it costs zero layout and stacks cleanly on
+   top of the existing 1px/2px border — the same technique the active nav item
+   already uses. */
+.ov-cell--slots .c12-slot--occupied { box-shadow: inset 3px 0 0 var(--border-strong); }
+.ov-cell--slots .c12-slot--active {
+  padding: calc(0.9rem - 1px) calc(1rem - 1px);
+  box-shadow: inset 3px 0 0 var(--ui-watching);
+}
+.ov-cell--slots .c12-slot-name { font-size: 1.0625rem; }
+.ov-cell--slots .c12-slot-metrics {
+  border-top: 1px solid var(--border-default);
+  padding-top: 0.55rem;
+  font-size: 0.8125rem;
+}
+.ov-cell--slots .c12-slot-uptime,
+.ov-cell--slots .c12-slot-points {
+  font-size: 1.1875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.ov-cell--slots .c12-slot-uptime { color: var(--text-primary); }
+.ov-cell--slots .c12-slot-link { margin-top: 0.15rem; }
+
+/* The pinned sidebar renders the same C12 component in a 260px column, where
+   the shared two-up .c12-pair grid leaves ~110px per slot. Scoped here so the
+   sidebar stacks without touching /overview or /overview/queue. */
+.now-watching .c12-pair { grid-template-columns: minmax(0, 1fr); gap: 0.4rem; }
+.now-watching .c12-slot { padding: 0.5rem 0.55rem; gap: 0.25rem; }
+.now-watching .c12-slot--occupied { box-shadow: inset 3px 0 0 var(--border-strong); }
+.now-watching .c12-slot--active {
+  padding: calc(0.5rem - 1px) calc(0.55rem - 1px);
+  box-shadow: inset 3px 0 0 var(--ui-watching);
+}
+
+/* The two-column console starts at 1024px, not 1280px: that is where the
+   shell switches to the 56px icon rail and hands the page ~1050px of content —
+   already enough for a watch column plus the status rail. Waiting for the
+   260px sidebar's own 1280px breakpoint would leave the whole 1024-1279 range
+   rendering the very wide-band-for-two-words layout this task set out to
+   remove. */
+@media (min-width: 1024px) {
+  /* Two-column operational console. Reading order still follows DOM order:
+     the full-width lifecycle row, then the wide watch column, then the status
+     rail top-to-bottom, then the full-width board. Nothing is visually
+     reordered away from the sequence assistive tech walks. */
+  .ov-console {
+    /* Fixed-width status rail, fluid watch column: the rail's three readouts
+       are short by nature, so letting them grow with the viewport would just
+       recreate the wide-band-holding-two-words problem one column over. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 21rem);
+    gap: 0.85rem 1rem;
+    align-items: start;
+  }
+  /* Column 1 is the operational flow (lifecycle, then the watch pair);
+     column 2 is the status rail (health, predictions KPI, version). Reading
+     column 1 top-to-bottom and then column 2 top-to-bottom reproduces the
+     frozen DOM order exactly, so nothing is visually reordered away from the
+     sequence assistive tech walks.
+
+     The lifecycle bar deliberately does NOT span both columns any more:
+     full-width it was a 1628px bar whose own controls sat ~950px away from
+     its state text, which is the wide-band pathology in miniature. Confined
+     to the watch column it is a real console bar. Health is pinned to row 1
+     so the rail starts level with it instead of a row lower. */
+  .ov-cell--lifecycle,
+  .ov-cell--notice { grid-column: 1; }
+  /* Spanning two rows is what keeps the rail together: the two columns share
+     the grid's row tracks, so a single-row watch cell would stretch the row
+     the predictions KPI sits in to the watch pair's full height and strand
+     the version line ~86px below it. Spanning lets the pair's height be
+     distributed across both rail rows instead of dumped into one. */
+  .ov-cell--slots { grid-column: 1; grid-row: span 2; }
+  .ov-cell--health { grid-column: 2; grid-row: 1; }
+  .ov-cell--pred,
+  .ov-cell--version { grid-column: 2; }
+  .ov-cell--board { grid-column: 1 / -1; }
+
+  /* Lifecycle as a single console bar rather than a stacked block whose
+     controls sat under three short lines of text. Capability gating, confirm
+     semantics, endpoints and the Advanced disclosure are untouched — only the
+     arrangement of the panel's existing children changes. */
+  .ov-cell--lifecycle .lc-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 1.25rem;
+    row-gap: 0.45rem;
+    padding: 0.7rem 0.9rem;
+  }
+  .ov-cell--lifecycle .lc-panel > * { margin-top: 0; margin-bottom: 0; }
+  .ov-cell--lifecycle .lc-panel > [role="group"] { margin-left: auto; }
+  .ov-cell--lifecycle .lc-panel > .lc-result { flex: 1 1 100%; }
 }

@@ -28,6 +28,44 @@ Provenance legend used throughout — every item is tagged with one of:
 
 ---
 
+## Owner visual supersession — 2026-08-20
+
+**August-2 visual identity supersession (owner-approved).** The Dashboard as it stood on
+**2026-08-02** (`1cf198aa4257a5f9ba250aec29bf027870f8dad7`) is the owner-approved visual-identity
+baseline for the Dashboard's remaining implementation. This narrows which *aesthetic* this report's
+later sections may be read as mandating; it does **not** add, remove, or renumber any of the 30
+routes, change any B-gate's render behavior, alter any S-state treatment, or relax any accessibility
+requirement. Sections 1–18 below are unchanged and stay in force as written.
+
+- **What is now baseline**: the compact miner-console character of the August-2 Dashboard — restrained
+  dark surfaces, useful information density, a compact branded sidebar, tight card and control
+  geometry, clear local data accents, strong readable active/watching states, and pages that use the
+  available screen rather than stretching one region across the full width of a 2560px display.
+- **What is superseded**: the sparse V3 prototype treatment is superseded **only where it conflicts
+  with the line above** — that is, as the future aesthetic target. Everything the V3 work established
+  about *what may be rendered* is untouched.
+- **What remains binding, without exception**: §2's Stage 3 constraints, §7's 13 S-state treatments
+  and the "unknown never converts to healthy/completed/claimed/delivered" invariant, §9's keyboard,
+  focus, WCAG 2.1 AA contrast, reduced-motion and screen-reader contract, §10's HTMX loading/swap/
+  focus behavior, §11's 30-route page matrix and its route ownership, and every `[BE:Bn]` evidence
+  gate. Density is a visual decision; data truth, state semantics, accessibility, information
+  architecture and ownership are not, and this supersession reaches none of them.
+- **How the historical bytes may be used**: `1cf198aa…` is a source of **visual grammar only** —
+  proportions, density, grouping, spacing rhythm, typographic hierarchy and accent use. It is **not**
+  authority to restore behavior or data ownership that later decisions removed. Specifically it does
+  not re-authorize the Overview streamer roster and its filter/sort toolbar (owned by
+  `/overview/queue`), the host-resource strip (owned by `/system/status`), authoritative claim state
+  (owned by `/drops/claims`), the old priority/favorite/manual-watch controls, or any Up Next, ETA or
+  queue-position figure the backend does not actually supply. §3's P2 ("no decorative gradients") also
+  continues to hold: where the historical stylesheet reached for a gradient, the hierarchy is
+  restored, not the technique.
+- **Implementation stack**: unchanged — Go `html/template` + `go:embed`, Tailwind CSS v4 standalone
+  with the explicit source universe, HTMX, vendored ApexCharts, the RU/EN `t` helper, the existing
+  SSE transport, and one static binary. No framework, no bundler, no CDN, no external font, no new
+  Go dependency.
+
+---
+
 ## 1. Repository and design base
 
 - Repo: `KraineOpasen/bukerov-twitch-miner-go`, default branch `main`.

@@ -11,8 +11,8 @@
      freshness honesty is a KEEP, roster controls are not. It stays OUTSIDE
      #overview-live so the 30s innerHTML swap never destroys the role="status"
      node mid-announcement. */}}
-<div class="flex items-center justify-between gap-3 flex-wrap mb-3">
-    <h1 class="text-2xl font-bold text-text-primary">{{ t "nav.overview" }}</h1>
+<div class="ov-page-head flex items-center justify-between gap-3 flex-wrap">
+    <h1 class="type-h1 text-text-primary">{{ t "nav.overview" }}</h1>
     {{/* Text + icon, never colour alone. The __ovDelta clock re-evaluates
          every second (monotonic via performance.now(), anchored to #ov-meta's
          data-generated inside the swapped partial) but only WRITES here — and
@@ -37,15 +37,35 @@
      #lc-conn-lost is the panel's own staleness marker, shown only when polling
      has been failing for a while — htmx's default responseHandling leaves the
      DOM untouched on a failed poll, so age is the only signal available. */}}
+{{/* ---------------------------------------------------------- CONSOLE GRID
+     .ov-console is the Aug-2 restoration's page geometry and nothing else: it
+     adds no region, removes none, and does not reorder the frozen DOM sequence
+     (lifecycle -> two slots -> health -> predictions KPI -> version ->
+     secondary board). It only stops that sequence rendering as six ~2250px-wide
+     bands holding a few words each.
+
+     At >=1280px it lays the SAME markers out as a two-column operational
+     console: the lifecycle bar and the secondary board span the full width,
+     the watch pair (the page's dominant region) takes the wide column, and
+     health / predictions KPI / version stack into a narrow status rail beside
+     it. Reading order still matches DOM order — full-width row, then the wide
+     column, then the rail top-to-bottom — so nothing is visually reordered
+     away from the sequence assistive tech walks.
+
+     #overview-live keeps its id, its hx-get, its 30s cadence and its
+     innerHTML swap contract untouched; input.css gives it display:contents so
+     its children join this grid directly. It carries no visual box and no ARIA
+     role, so removing its own box changes nothing semantically. */}}
+<div class="ov-console">
 <div id="lc-live" class="visually-hidden" aria-live="polite" role="status"></div>
-<div id="lifecycle-panel" hx-get="/api/lifecycle" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+<div id="lifecycle-panel" class="ov-cell ov-cell--lifecycle" hx-get="/api/lifecycle" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
 {{/* #lc-conn-lost carries its own text node plus a diagnostics link, so the
      stale-gating script below can state that the current lifecycle state
      cannot be confirmed without destroying the link via a bare textContent
      write. The link points at the canonical System owner /system/diagnostics;
      the legacy /health route is untouched and still served, only no longer
      linked from here. */}}
-<div id="lc-conn-lost" hidden role="status">
+<div id="lc-conn-lost" class="ov-cell--notice" hidden role="status">
     <span id="lc-conn-lost-text"></span>
     <a href="/system/diagnostics" id="lc-conn-lost-diag">{{ t "lc.stale.diagnostics_link" }}</a>
 </div>
@@ -54,10 +74,11 @@
      the prediction board still writes to it: an "Undo" (unskip) button lives
      outside any [data-manual] card, so sendSkip() falls back here rather than
      to a card-local error node. */}}
-<div id="ov-action-error" class="c1-inline-fail" role="alert" hidden></div>
+<div id="ov-action-error" class="c1-inline-fail ov-cell--notice" role="alert" hidden></div>
 
-<div id="overview-live" hx-get="/api/overview" hx-trigger="every {{.PollSeconds}}s, refresh" hx-swap="innerHTML">
+<div id="overview-live" class="ov-live" hx-get="/api/overview" hx-trigger="every {{.PollSeconds}}s, refresh" hx-swap="innerHTML">
     {{template "overview_live" .}}
+</div>
 </div>
 
 {{/* F2.8: hidden, inert placeholder reserved for a future updater widget.
@@ -337,6 +358,105 @@
 
     document.body.addEventListener('htmx:afterSwap', rehydrateManual);
     rehydrateManual();
+
+    // Preserve the predictions board's OWN disclosure state across the 30s
+    // #overview-live swap. The <details> lives inside the swapped node and the
+    // server never emits ` open` (collapsed-by-default is a frozen contract
+    // and is pinned as such), so without this an opened board silently
+    // re-collapsed on the next tick and the page height jumped by its full
+    // height — the exact layout shift Stage 4 §3 P5 forbids, and the reason
+    // "expanded" was never a state a user could actually sit in.
+    //
+    // __predBusy deliberately does NOT cover this: it suspends the poll only
+    // while a confirm bar is open or a bet is in flight, so merely reading the
+    // board never suspended anything.
+    //
+    // Same shape as the lifecycle panel's #lc-advanced restore below: capture
+    // on beforeRequest (the last point the pre-swap DOM is intact), reapply on
+    // afterSwap. Client-side only — no server flag, no new field, no change to
+    // what the server renders.
+    //
+    // The board is located through the #predictions anchor it already wraps
+    // (the documented /#predictions deep-link target), NOT through its own
+    // region-marker attribute: /overview's region inventory is pinned by
+    // counting raw marker occurrences in the rendered page, so that name
+    // appearing a second time — even only inside a script string, or in a
+    // comment like this one — reads as a duplicated region.
+    //
+    // Focus is restored alongside the open state, for the same reason the
+    // lifecycle panel restores its own: making "expanded" a state a user can
+    // durably sit in is only half the job if their keyboard position is
+    // destroyed every 30 seconds. __predBusy already suspends the poll while a
+    // confirm bar is open or a bet is in flight, so this covers the remaining
+    // case — reading or tabbing the board while the timer fires.
+    (function () {
+        function predBoard() {
+            var section = document.getElementById('predictions');
+            return section && section.closest('details');
+        }
+        var pendingBoardOpen = false;
+        var pendingBoardFocus = null;
+
+        document.body.addEventListener('htmx:beforeRequest', function (e) {
+            var elt = e.detail && e.detail.elt;
+            if (!elt || elt.id !== 'overview-live') return;
+            var board = predBoard();
+            pendingBoardOpen = !!(board && board.open);
+            pendingBoardFocus = null;
+            var active = document.activeElement;
+            if (!board || !active || !board.contains(active)) return;
+            // Identify the focused control by its round and its role within
+            // that round, never by DOM index: the board re-renders from the
+            // server and positions can move between swaps.
+            if (active.tagName === 'SUMMARY') {
+                pendingBoardFocus = { kind: 'summary' };
+                return;
+            }
+            var card = active.closest('[data-pred]');
+            if (!card) return;
+            var eventID = card.getAttribute('data-event-id');
+            if (active.hasAttribute('data-outcome-id')) {
+                pendingBoardFocus = { kind: 'outcome', eventID: eventID, outcomeID: active.getAttribute('data-outcome-id') };
+            } else if (active.hasAttribute('data-amount')) {
+                pendingBoardFocus = { kind: 'amount', eventID: eventID };
+            } else if (active.hasAttribute('data-place')) {
+                pendingBoardFocus = { kind: 'place', eventID: eventID };
+            } else if (active.hasAttribute('data-skip')) {
+                pendingBoardFocus = { kind: 'skip', eventID: eventID };
+            }
+        });
+
+        document.body.addEventListener('htmx:afterSwap', function (e) {
+            if (!e.detail || !e.detail.target || e.detail.target.id !== 'overview-live') return;
+            if (!pendingBoardOpen) { pendingBoardFocus = null; return; }
+            var board = predBoard();
+            if (!board) { pendingBoardFocus = null; return; }
+            // Re-open BEFORE focusing: a control inside a still-closed
+            // <details> is out of the tab order, so focusing it would no-op.
+            board.open = true;
+
+            var want = pendingBoardFocus;
+            pendingBoardFocus = null;
+            if (!want) return;
+            var target = null;
+            if (want.kind === 'summary') {
+                target = board.querySelector('summary');
+            } else {
+                var card = board.querySelector('[data-pred][data-event-id="' + CSS.escape(want.eventID) + '"]');
+                if (card) {
+                    if (want.kind === 'outcome') {
+                        target = card.querySelector('[data-outcome-id="' + CSS.escape(want.outcomeID) + '"]');
+                    } else {
+                        target = card.querySelector('[data-' + want.kind + ']');
+                    }
+                }
+            }
+            // A round that ended between swaps simply has no equivalent
+            // control; falling back to the summary keeps focus inside the
+            // board rather than dropping it to <body>.
+            (target || board.querySelector('summary') || board).focus();
+        });
+    })();
 </script>
 
 
