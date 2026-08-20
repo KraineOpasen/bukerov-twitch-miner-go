@@ -105,6 +105,18 @@ type App struct {
 	// process-level runtime snapshot (dashboard exposure/auth, config path,
 	// auto-update) stays in runtimeconfig.RuntimeConfig, resolved once at the
 	// cmd/miner bootstrap and never re-derived here.
+	//
+	// OWNERSHIP: cfgMu guards the POINTER, never the pointee. What cfg points
+	// at is the live configuration of the generation it was handed to, which
+	// that generation mutates in place under ITS OWN m.mu (SetDropRule,
+	// SetAutoRedeem, ApplyCampaignPolicy). So cfg is a handoff baton, valid as
+	// the factory's input and nothing more: no code outside
+	// nextGenerationConfig may dereference it. An App-level reader that wants
+	// the current configuration must go through sampleCurrentMiner().
+	// CurrentConfig(), which returns an isolated snapshot — reading cfg's
+	// fields under cfgMu alone would be an unsynchronized read of maps another
+	// goroutine writes under a different mutex, which Go answers with an
+	// unrecoverable fatal throw.
 	cfgMu     sync.Mutex
 	cfg       *config.Config
 	db        *database.DB
@@ -616,8 +628,16 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 // boot snapshot IS the authoritative configuration — never as a stand-in for a
 // later generation's configuration that could not be obtained.
 //
-// There is deliberately no fallible step here, and therefore no stale-config
-// failure mode to guard against. In particular this does NOT reload
+// There is deliberately no fallible step in THIS function, so there is no
+// acquisition failure for it to fall back from. That is a statement about the
+// handoff, not a durability guarantee about what is handed over: the in-place
+// writers (ApplyCampaignPolicy, SetDropRule, and the owner-identity
+// reconciliation) only LOG a failed config.SaveConfig and keep the change
+// live, so a value that never reached disk is a value this handoff carries
+// forward. Miner.CurrentConfig documents that asymmetry at its source; closing
+// it means making those writers fail closed, which belongs with them.
+//
+// In particular this does NOT reload
 // config.json: config.LoadConfig re-reads DISCORD_BOT_TOKEN from the
 // environment and re-derives DiscordTokenFromEnv (see
 // internal/config/config_secrets_test.go), which would make the generation
@@ -632,9 +652,14 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 // and never nested — currentMinerMu to sample the outgoing generation, then
 // the miner's own RLock inside CurrentConfig with no App lock held, then cfgMu
 // to publish. It holds no lock across I/O itself, though acquiring the
-// outgoing miner's lock can briefly wait on one: that package deliberately
-// holds m.mu across config.SaveConfig, so a commit landing on the outgoing
-// generation at this instant delays the sample by one atomic file write.
+// outgoing miner's lock can wait on one: most of that package's config writers
+// deliberately hold m.mu across config.SaveConfig (the owner-identity
+// reconciliation is the exception — it saves off the lock), so a commit
+// landing on the outgoing generation at this instant delays the sample by one
+// atomic file write. Note WHO waits: the factory runs on the lifecycle
+// controller's single main loop, so that wait also defers pause/stop/resume
+// dispatch and the shutdown path. WriteFileAtomic fsyncs and has no timeout,
+// so on a wedged filesystem the delay is bounded by nothing.
 //
 // Ordering is guaranteed by the lifecycle core, not assumed here: the factory
 // runs on the controller's single main loop, and a replacement only reaches it
@@ -645,13 +670,21 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 // ApplyHealthSettings, ApplyCampaignPolicy, SetDropRule and SetAutoRedeem sit
 // outside the interlock, and the web providers a generation registers are
 // never cleared, so a torn-down generation stays the dashboard's target until
-// the NEXT generation reaches setupComponents (which is behind device-code
-// authentication, so the window is not bounded by anything short). A commit
-// landing on the outgoing generation after this sample therefore reaches
-// config.json but not the generation now starting — a lost update, and never
-// a data race, because CurrentConfig hands over an isolated snapshot. Closing
-// that window means gating or draining those four writers, which belongs with
-// them rather than here.
+// the NEXT generation re-registers them (SetRewardsProvider during
+// loadStreamers, the health/policy pair during setupComponents) — both behind
+// device-code authentication, so the window is not bounded by anything short.
+//
+// A commit landing on the outgoing generation after this sample is worse than
+// invisible to the generation now starting. config.SaveConfig rewrites the
+// WHOLE document from the writing generation's own in-memory configuration and
+// replaces the file atomically, so the stale generation's write can revert
+// fields the new generation already committed, and the new generation's next
+// commit can in turn revert the operator's acknowledged change — with the
+// dashboard reporting success both times, because it read back through the
+// same stale provider. What it is NOT is a data race: CurrentConfig hands over
+// an isolated snapshot, so no two generations ever share a map. Closing the
+// window means gating, draining, or re-pointing those writers, which belongs
+// with them rather than here.
 func (a *App) nextGenerationConfig() *config.Config {
 	var committed *config.Config
 	if outgoing := a.sampleCurrentMiner(); outgoing != nil {

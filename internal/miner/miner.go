@@ -2033,12 +2033,14 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 // ApplyHealthSettings in health.go) build a candidate and publish it into
 // m.config ONLY past their own commit point, so a candidate whose persistence
 // failed is never published and can never be observed here. The in-place
-// writers — ApplyCampaignPolicy and SetDropRule (policy.go) — do not work that
-// way: they mutate m.config under m.mu and call persistLocked, which only LOGS
-// a config.SaveConfig failure. Their changes are therefore live, and visible
-// here, even when the write to disk failed. That is this package's existing
-// behavior, unchanged; this accessor reports it faithfully rather than
-// implying a stricter guarantee than the writers provide.
+// writers do not work that way: ApplyCampaignPolicy and SetDropRule (policy.go)
+// mutate m.config under m.mu and call persistLocked, which only LOGS a
+// config.SaveConfig failure, and the owner-identity reconciliation in Run
+// mutates it off m.mu entirely and only warns on a failed save. Their changes
+// are therefore live, and visible here, even when the write to disk failed.
+// That is this package's existing behavior, unchanged; this accessor reports
+// it faithfully rather than implying a stricter guarantee than the writers
+// provide.
 //
 // It must return a SNAPSHOT rather than the live pointer. A generation stays
 // reachable after its Run returns — the web providers a generation registers
@@ -2621,13 +2623,30 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 }
 
 // snapshotConfigLocked returns a copy of m.config that shares no MAP with the
-// live object, for handing across a generation boundary (CurrentConfig). Both
-// maps a still-reachable torn-down generation can write in place are copied:
-// AutoRedeem (SetAutoRedeem, rewards.go) and DropRules (SetDropRule,
-// policy.go). Every other reference-typed field is either reassigned wholesale
-// by settings.ApplyToConfig or element-mutated only on the applySettings*
-// path, which beginApply/applyWG drain to completion before Run returns — so
-// none of them can be written after this snapshot has been handed on.
+// live object, for handing across a generation boundary (CurrentConfig).
+//
+// config.Config reaches exactly three maps, and all three are copied here.
+// AutoRedeem (written in place by SetAutoRedeem, rewards.go) and DropRules
+// (SetDropRule, policy.go) have live in-place writers today and are the reason
+// this function exists. Notifications.ProviderBatching has none — the
+// notifications package deep-copies it on ingest rather than writing the
+// caller's map — but it is reached through a by-value struct field, so the
+// shallow copy above would alias it, and "no shared map" is the whole safety
+// argument for handing this object to a second, concurrently running *Miner.
+// Copying it keeps that argument true by construction rather than by an
+// inventory of who writes what today.
+//
+// The remaining reference-typed fields are SLICES, which stay shared: the
+// Streamers backing array (and each element's Settings pointer), Priority,
+// DropBlacklist, DropCampaignGameIDs, DropCampaignGames, DirectoryGames, each
+// AutoRedeemConfig's RewardIDs, and Batching.ImmediateEvents. Every writer of
+// those either reassigns the whole slice (settings.ApplyToConfig) or mutates
+// elements only on the applySettings* path, which beginApply/applyWG drain to
+// completion before Run returns and which refuses admission once runCtx is
+// cancelled — so none can be written after this snapshot has been handed on.
+// A shared slice element is also an ordinary race rather than the unrecoverable
+// throw a shared map produces, which is why the maps get copies and these get
+// an argument.
 //
 // This is deliberately NOT cloneConfigLocked and must not be merged with it.
 // That function's DropRules ALIASING is load-bearing (see its [R7] note): a
@@ -2648,6 +2667,12 @@ func (m *Miner) snapshotConfigLocked() *config.Config {
 		snap.DropRules = make(map[string]config.DropRule, len(m.config.DropRules))
 		for k, v := range m.config.DropRules {
 			snap.DropRules[k] = v
+		}
+	}
+	if m.config.Notifications.ProviderBatching != nil {
+		snap.Notifications.ProviderBatching = make(map[string]config.BatchingSettings, len(m.config.Notifications.ProviderBatching))
+		for k, v := range m.config.Notifications.ProviderBatching {
+			snap.Notifications.ProviderBatching[k] = v
 		}
 	}
 	return &snap

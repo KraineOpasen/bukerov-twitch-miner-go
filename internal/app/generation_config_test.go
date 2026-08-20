@@ -29,13 +29,25 @@ import (
 // pause/resume or restart, and silently reverted for generation N+1 — a full
 // process restart re-read config.json and hid the defect entirely.
 //
-// The seam under test is the real one: a real *lifecycle.Controller drives a
-// real in-process generation replacement, and each generation is built by the
-// REAL app.minerFactory (exactly as buildWith wires it into
-// lifecycle.Config.Factory). Only the generation's Run BODY is substituted —
-// *miner.Miner.Run performs device-code OAuth and opens Twitch connections,
-// which no unit test can reach, and which is irrelevant to the question of
-// WHICH CONFIGURATION the generation was constructed from.
+// The seam under test is the real one where it matters: a real
+// *lifecycle.Controller drives a real in-process generation replacement, and
+// every generation is built by the REAL app.minerFactory — the function that
+// actually decides which configuration a generation starts from. What each
+// generation does NOT do is run: *miner.Miner.Run performs device-code OAuth
+// and opens Twitch connections, which no unit test can reach and which is
+// irrelevant to which configuration the generation was constructed from, so
+// the harness supplies a controllable Runner in its place.
+//
+// Be precise about what that costs, so nobody reads more coverage into these
+// tests than they have. The harness builds its own lifecycle.Controller and
+// installs it on the App, rather than driving the one buildWith constructed.
+// So buildWith's own Factory closure, its persistence decorator, status sink,
+// ForceRunning/NoControlSurface flags and updater wiring are NOT exercised
+// here — only app.minerFactory beneath them is. Two consequences worth
+// knowing: a regression in that closure itself would not be caught by this
+// file, and the web server stays wired to the original, never-Run controller,
+// so this harness is not a faithful stand-in for dashboard-driven pause/resume
+// if anyone extends it that way.
 
 // genHarness drives real generations built by a real App's real minerFactory
 // through a real lifecycle.Controller.
@@ -111,8 +123,12 @@ func (h *genHarness) generation(i int) *miner.Miner {
 }
 
 func (h *genHarness) runner(i int) *ctrlFakeRunner {
+	h.t.Helper()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if i >= len(h.runners) {
+		h.t.Fatalf("generation %d was never built (only %d exist)", i+1, len(h.runners))
+	}
 	return h.runners[i]
 }
 
@@ -123,6 +139,30 @@ func (h *genHarness) start() (stop func()) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- h.app.Run(ctx) }()
 
+	// ONE stop, idempotent, registered as a cleanup BEFORE any t.Fatal below
+	// can fire. A fatal between the goroutine spawn and this function's return
+	// would otherwise leave ctx uncancelled: App.Run would keep driving
+	// generations while newGenHarness's own cleanup closed the database
+	// underneath it, and the resulting failure would surface in whichever test
+	// ran next. sync.Once is what lets the caller's own `defer stop()` and this
+	// cleanup both fire — the second call must not wait again on a channel the
+	// first already drained.
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-runErrCh:
+				if err != nil {
+					h.t.Errorf("App.Run = %v, want nil (clean shutdown)", err)
+				}
+			case <-time.After(5 * time.Second):
+				h.t.Error("App.Run did not return after cancel")
+			}
+		})
+	}
+	h.t.Cleanup(stop)
+
 	waitForCond(h.t, 5*time.Second, func() bool { return h.count() == 1 })
 	select {
 	case <-h.runner(0).startedCh:
@@ -130,17 +170,7 @@ func (h *genHarness) start() (stop func()) {
 		h.t.Fatal("generation 1 never started")
 	}
 
-	return func() {
-		cancel()
-		select {
-		case err := <-runErrCh:
-			if err != nil {
-				h.t.Errorf("App.Run = %v, want nil (clean shutdown)", err)
-			}
-		case <-time.After(5 * time.Second):
-			h.t.Fatal("App.Run did not return after cancel")
-		}
-	}
+	return stop
 }
 
 // replaceGeneration performs a REAL in-process generation replacement
@@ -251,12 +281,16 @@ func breakConfigPath(t *testing.T, path string) {
 }
 
 // TestRejectedSettingsCandidateNeverReachesNextGeneration pins the fail-closed
-// half of the contract. Persistence is the commit point: when config.json
-// cannot be written the apply is rejected, nothing is published, and the
-// rejected candidate must stay invisible — including to a generation built
-// after the failed attempt. What the next generation gets is the last
-// SUCCESSFULLY committed configuration, never the rejected one and never the
-// process-boot one.
+// half of the contract for the CANDIDATE-PUBLISHING paths. For those,
+// persistence is the commit point: when config.json cannot be written the
+// apply is rejected, nothing is published, and the rejected candidate stays
+// invisible — including to a generation built after the failed attempt. What
+// the next generation gets is the last successfully committed configuration,
+// never the rejected one and never the process-boot one.
+//
+// This is deliberately NOT a claim about every writer.
+// TestInPlaceRuntimeWriteSurvivesAFailedPersist below pins the opposite, and
+// true, behavior of the in-place writers.
 func TestRejectedSettingsCandidateNeverReachesNextGeneration(t *testing.T) {
 	const (
 		bootCanary      = "boot-config-A"
@@ -326,7 +360,10 @@ func TestGenerationConfigHandoffChainsAcrossGenerations(t *testing.T) {
 }
 
 // TestGenerationConfigWithoutConfigPathStillHandsOffCommit pins the
-// documented configPath == "" semantics through the generation boundary.
+// documented configPath == "" semantics across the handoff. It exercises the
+// factory directly rather than through a controller: with no config file there
+// is nothing for a lifecycle replacement to add to the question, and building
+// an App with no ConfigPath is the whole point of the case.
 // With no config file configured, a settings apply persists nothing and is
 // still a plain success (internal/miner's
 // TestApplySettingsNoRenameWithoutConfigPathStaysSuccessful pins that for the
@@ -357,10 +394,10 @@ func TestGenerationConfigWithoutConfigPathStillHandsOffCommit(t *testing.T) {
 }
 
 // TestGenerationConfigCarriesInPlaceRuntimeMutations covers the OTHER shape a
-// runtime settings change takes in internal/miner: ApplyCampaignPolicy and
-// SetDropRule mutate the live config in place under m.mu and persist it,
-// rather than publishing a fresh candidate the way the Settings and Health
-// paths do. Both shapes are commits, and both must survive a generation
+// runtime settings change takes in internal/miner: ApplyCampaignPolicy (a
+// plain string field) and SetDropRule (a map entry) mutate the live config in
+// place under m.mu and persist it, rather than publishing a fresh candidate
+// the way the Settings and Health paths do. Both shapes are commits, and both must survive a generation
 // replacement — a fix that only followed republished pointers would leave
 // this half silently reverting once any candidate-publishing apply had run.
 func TestGenerationConfigCarriesInPlaceRuntimeMutations(t *testing.T) {
@@ -409,10 +446,11 @@ func TestGenerationConfigCarriesInPlaceRuntimeMutations(t *testing.T) {
 //
 // A generation stays reachable after its Run returns: the web providers a
 // generation registers are never cleared, so the dashboard keeps routing to a
-// torn-down generation until the next one finishes authenticating. Several of
-// those still-reachable entry points — SetDropRule and ApplyCampaignPolicy
-// here, SetAutoRedeem in rewards.go — write MAPS inside the live config in
-// place, under their OWN miner's lock. Handing the live *config.Config to the
+// torn-down generation until the next one finishes authenticating. Two of
+// those still-reachable entry points — SetDropRule here and SetAutoRedeem in
+// rewards.go — write MAPS inside the live config in place, under their OWN
+// miner's lock. (Per-map isolation is pinned directly in internal/miner's
+// current_config_test.go; this test pins it at the generation boundary.) Handing the live *config.Config to the
 // next generation would therefore put one map behind two different mutexes,
 // which Go answers with a `concurrent map read and map write` fatal throw that
 // no recover can catch.
@@ -452,5 +490,62 @@ func TestGenerationConfigHandsOverAnIsolatedSnapshot(t *testing.T) {
 		t.Errorf("generation 2 DropRules = %v — the running generation shares a live map with the "+
 			"torn-down one, so an in-place write on the old generation reaches the new one's config "+
 			"under a different mutex", rules)
+	}
+}
+
+// TestInPlaceRuntimeWriteSurvivesAFailedPersist characterizes a REAL asymmetry
+// this handoff exposes, rather than leaving it to be discovered later.
+//
+// The candidate-publishing paths make persistence the commit point, so a
+// failed config.SaveConfig publishes nothing (pinned above). The in-place
+// writers do not: SetDropRule and ApplyCampaignPolicy mutate the live config
+// under m.mu and call persistLocked, which only LOGS a SaveConfig failure and
+// returns nothing to its caller — so the change stays live and the dashboard
+// reports success. That is pre-existing behavior in internal/miner and is not
+// changed here.
+//
+// What the handoff changes is where such a value ENDS UP. Before, the next
+// generation was rebuilt from the boot snapshot, so an unpersisted in-place
+// change died with the generation that made it. Now the next generation
+// inherits it, and a later successful save by THAT generation writes the whole
+// document — so a value whose only write to disk failed can become durable one
+// generation later.
+//
+// This test pins the behavior as it actually is. It is deliberately NOT
+// asserting that this is desirable: making those writers fail closed means
+// giving them error returns and changing their web callers, which is a change
+// to those writers and not to this seam. If they are ever made fail-closed,
+// this test SHOULD fail, and updating it is then the deliberate act of
+// recording that decision.
+func TestInPlaceRuntimeWriteSurvivesAFailedPersist(t *testing.T) {
+	const unpersistedRule = "rule-whose-save-failed"
+
+	h := newGenHarness(t, bootConfigWithCanary("boot-config-A"))
+	stop := h.start()
+	defer stop()
+
+	gen1 := h.generation(0)
+
+	// Make the next persist fail, then perform an in-place runtime write.
+	breakConfigPath(t, h.configPath)
+	gen1.SetDropRule(unpersistedRule, config.DropRule{HighPriority: true})
+
+	// persistLocked only logged the failure, so the change is live regardless.
+	if _, rules := gen1.CurrentCampaignPolicy(); !rules[unpersistedRule].HighPriority {
+		t.Fatalf("generation 1 did not keep the in-place write: %v", rules)
+	}
+	// And nothing reached disk: the directory breakConfigPath installed is
+	// still a directory, exactly as internal/miner's own commit-point tests
+	// assert.
+	if info, err := os.Stat(h.configPath); err != nil || !info.IsDir() {
+		t.Fatalf("configPath must still be the untouched directory (nothing was written): stat=%v err=%v", info, err)
+	}
+
+	h.replaceGeneration(2)
+
+	if _, rules := h.generation(1).CurrentCampaignPolicy(); !rules[unpersistedRule].HighPriority {
+		t.Errorf("generation 2 DropRules = %v; the handoff carries the LIVE value of the in-place writers, "+
+			"including one whose persist failed. If this now fails because those writers were made "+
+			"fail-closed, that is an intended improvement — update this test to record it", rules)
 	}
 }
