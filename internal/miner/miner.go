@@ -2018,6 +2018,45 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 	return settings.BuildDefaultSettings(currentStreamers)
 }
 
+// CurrentConfig returns an ISOLATED SNAPSHOT of the configuration this miner
+// is currently running with, so the process-level composition root
+// (internal/app) can hand it to the NEXT generation it builds instead of the
+// snapshot the process booted with — without which a successful runtime
+// settings change silently reverts at the next pause/resume or restart. It
+// mirrors the CurrentHealthSettings (health.go) and CurrentCampaignPolicy
+// (policy.go) readers: same "Current" naming, same m.mu.RLock discipline.
+//
+// What it returns is the value this miner last COMMITTED, which is exactly
+// what m.config means — with one honest caveat about what "committed" covers.
+// The candidate-publishing paths (applySettingsNoRename /
+// applySettingsWithRemovals / applySettingsWithRename here, and
+// ApplyHealthSettings in health.go) build a candidate and publish it into
+// m.config ONLY past their own commit point, so a candidate whose persistence
+// failed is never published and can never be observed here. The in-place
+// writers do not work that way: ApplyCampaignPolicy and SetDropRule (policy.go)
+// mutate m.config under m.mu and call persistLocked, which only LOGS a
+// config.SaveConfig failure, and the owner-identity reconciliation in Run
+// mutates it off m.mu entirely and only warns on a failed save. Their changes
+// are therefore live, and visible here, even when the write to disk failed.
+// That is this package's existing behavior, unchanged; this accessor reports
+// it faithfully rather than implying a stricter guarantee than the writers
+// provide.
+//
+// It must return a SNAPSHOT rather than the live pointer. A generation stays
+// reachable after its Run returns — the web providers a generation registers
+// (SetRewardsProvider/SetHealthProvider/SetPolicyProvider, miner.go/web) are
+// never cleared — so a torn-down generation can still execute SetAutoRedeem
+// (rewards.go) or SetDropRule (policy.go), both of which write a MAP inside
+// m.config in place. Handing the live object to a second, concurrently
+// running *Miner would put one map behind two different mutexes, which is a
+// `concurrent map read and map write` fatal throw, not a recoverable race.
+// snapshotConfigLocked breaks exactly that sharing.
+func (m *Miner) CurrentConfig() *config.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.snapshotConfigLocked()
+}
+
 // beginApply registers the caller as an in-flight settings apply, refusing
 // (false) once the miner has started draining (Stop, in progress or done) or
 // its run context is already cancelled — the latter closes the same window
@@ -2581,6 +2620,62 @@ func (m *Miner) cloneConfigLocked() *config.Config {
 		}
 	}
 	return &clone
+}
+
+// snapshotConfigLocked returns a copy of m.config that shares no MAP with the
+// live object, for handing across a generation boundary (CurrentConfig).
+//
+// config.Config reaches exactly three maps, and all three are copied here.
+// AutoRedeem (written in place by SetAutoRedeem, rewards.go) and DropRules
+// (SetDropRule, policy.go) have live in-place writers today and are the reason
+// this function exists. Notifications.ProviderBatching has none — the
+// notifications package deep-copies it on ingest rather than writing the
+// caller's map — but it is reached through a by-value struct field, so the
+// shallow copy above would alias it, and "no shared map" is the whole safety
+// argument for handing this object to a second, concurrently running *Miner.
+// Copying it keeps that argument true by construction rather than by an
+// inventory of who writes what today.
+//
+// The remaining reference-typed fields are SLICES, which stay shared: the
+// Streamers backing array (and each element's Settings pointer), Priority,
+// DropBlacklist, DropCampaignGameIDs, DropCampaignGames, DirectoryGames, each
+// AutoRedeemConfig's RewardIDs, and Batching.ImmediateEvents. Every writer of
+// those either reassigns the whole slice (settings.ApplyToConfig) or mutates
+// elements only on the applySettings* path, which beginApply/applyWG drain to
+// completion before Run returns and which refuses admission once runCtx is
+// cancelled — so none can be written after this snapshot has been handed on.
+// A shared slice element is also an ordinary race rather than the unrecoverable
+// throw a shared map produces, which is why the maps get copies and these get
+// an argument.
+//
+// This is deliberately NOT cloneConfigLocked and must not be merged with it.
+// That function's DropRules ALIASING is load-bearing (see its [R7] note): a
+// candidate carrying a private DropRules copy would silently overwrite any
+// SetDropRule committing during the apply's own unlocked window — the same
+// lost-update refreshCandidateAutoRedeemLocked exists to prevent for
+// AutoRedeem. The two functions want opposite things from the same field, so
+// they stay separate. Caller holds m.mu (read or write).
+func (m *Miner) snapshotConfigLocked() *config.Config {
+	snap := *m.config
+	if m.config.AutoRedeem != nil {
+		snap.AutoRedeem = make(map[string]config.AutoRedeemConfig, len(m.config.AutoRedeem))
+		for k, v := range m.config.AutoRedeem {
+			snap.AutoRedeem[k] = v
+		}
+	}
+	if m.config.DropRules != nil {
+		snap.DropRules = make(map[string]config.DropRule, len(m.config.DropRules))
+		for k, v := range m.config.DropRules {
+			snap.DropRules[k] = v
+		}
+	}
+	if m.config.Notifications.ProviderBatching != nil {
+		snap.Notifications.ProviderBatching = make(map[string]config.BatchingSettings, len(m.config.Notifications.ProviderBatching))
+		for k, v := range m.config.Notifications.ProviderBatching {
+			snap.Notifications.ProviderBatching[k] = v
+		}
+	}
+	return &snap
 }
 
 // finishApply performs everything that must happen once durable persistence
