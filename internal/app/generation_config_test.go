@@ -504,12 +504,20 @@ func TestGenerationConfigHandsOverAnIsolatedSnapshot(t *testing.T) {
 // reports success. That is pre-existing behavior in internal/miner and is not
 // changed here.
 //
-// What the handoff changes is where such a value ENDS UP. Before, the next
-// generation was rebuilt from the boot snapshot, so an unpersisted in-place
-// change died with the generation that made it. Now the next generation
-// inherits it, and a later successful save by THAT generation writes the whole
-// document — so a value whose only write to disk failed can become durable one
-// generation later.
+// What the handoff changes is only WHEN such a value carries forward, and the
+// delta is narrower than it first looks. Before, the next generation was
+// rebuilt from the process-boot pointer, and miner.New stores that pointer
+// verbatim — so if the outgoing generation had not yet published a candidate,
+// both generations were the SAME object and the unpersisted change carried
+// forward anyway (sharing the map, which is the fatal-throw hazard
+// CurrentConfig's snapshot now removes). It died with its generation only when
+// a candidate-publishing apply had already run first. This scenario publishes
+// no candidate, so at base it would have carried forward too.
+//
+// The handoff makes that propagation unconditional rather than incidental. What
+// is NOT new is the laundering: within a single generation, a failed
+// persistLocked already leaves the value live, and any later successful save
+// writes the whole document with it. That is pre-existing and untouched here.
 //
 // This test pins the behavior as it actually is. It is deliberately NOT
 // asserting that this is desirable: making those writers fail closed means

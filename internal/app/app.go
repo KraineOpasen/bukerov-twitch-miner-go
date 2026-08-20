@@ -670,9 +670,19 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 // ApplyHealthSettings, ApplyCampaignPolicy, SetDropRule and SetAutoRedeem sit
 // outside the interlock, and the web providers a generation registers are
 // never cleared, so a torn-down generation stays the dashboard's target until
-// the NEXT generation re-registers them (SetRewardsProvider during
-// loadStreamers, the health/policy pair during setupComponents) — both behind
-// device-code authentication, so the window is not bounded by anything short.
+// the NEXT generation re-registers them — every one of them in setupComponents,
+// which Run reaches only after runAuthenticate and runLoadStreamers have both
+// returned.
+//
+// That window is not bounded by anything short, and the reason is worth naming
+// precisely, because it is what justifies leaving this open. Device-code
+// authentication is only the obvious case. The genuinely unbounded one is
+// retryStartupLookup (startup_retry.go), which wraps the owner's channel-ID
+// resolution inside authenticate in a `for attempt := 1; ; attempt++` loop that
+// exits only on ErrUnauthorized, ErrStreamerDoesNotExist, or ctx cancellation —
+// so a Twitch outage holds the incoming generation short of setupComponents for
+// as long as the outage lasts, deliberately, to keep the dashboard alive. And
+// the lifecycle retry timer reaches this window with no operator present.
 //
 // A commit landing on the outgoing generation after this sample is worse than
 // invisible to the generation now starting. config.SaveConfig rewrites the
