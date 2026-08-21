@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -410,10 +411,65 @@ func (w *ProgressWatchdog) resolveStreamer(login string) *models.Streamer {
 	return w.resolver(login)
 }
 
+// inconclusiveWatchTransport reports whether a failed watch_transport signal
+// is NOT trustworthy evidence of a Twitch/account-side outage for stall
+// gating. The canary records provenance in Stage/ErrorCode (see Canary.probe
+// and watcher.probeFail for the complete taxonomy); three provenance classes
+// prove nothing about the transport the farming session actually uses:
+//
+//   - canary-local budget/lifecycle aborts ("timeout", "cancelled" — see
+//     abortReason): they prove only that the probe did not complete before its
+//     own local deadline or was stopped, and the canary's own doc notes the
+//     context-unaware client calls can legitimately outlive that budget;
+//   - conditions local to the one configured canary channel
+//     ("channel_offline", "channel_resolve_failed", "spade_url_missing"):
+//     an offline or misconfigured canary channel says nothing about Twitch
+//     globally, and GQL failures have their own gated signal;
+//   - explicitly inconclusive checks ("stream_status_<reason>" — the canary
+//     itself documents this branch "must NOT assert the channel is offline" —
+//     plus "stale_session_error"/"session_snapshot_error", which the sender
+//     documents as non-transport conditions. "session_snapshot_error" is
+//     reachable through the canary (spade URL present but no payload built);
+//     "stale_session_error" is deny-listed defensively — the canary's
+//     single-writer ephemeral streamer cannot change session generation
+//     mid-probe, so only a synthetic Signal can carry it today).
+//
+// Everything else keeps gating (conservative default): HTTP-status-bearing
+// probe codes ("<stage>_http_<n>" — a remote response on the very transport
+// farming uses), genuine status-less network failures ("<stage>_error" with
+// the probe context still live — see the normalization in Canary.probe),
+// degraded states, and unknown or empty codes.
+//
+// The "stream_status_<reason>" suffixes can carry transport/GQL/account
+// evidence (transport_error, graphql_error, unauthorized, ...), but that
+// evidence comes from ONE stream-info call about ONE configured channel
+// through the shared, failure-accounted GQL client — the same failing call
+// feeds the gql_api signal's own degrade/fail accounting, and an
+// account-side failure also fails oauth and the inventory-observability
+// gate, all of which still gate independently. Classification here is
+// deliberately delegation, not dismissal: a single inconclusive stream-info
+// check is weaker evidence than the accounted signals built for exactly
+// that failure class.
+func inconclusiveWatchTransport(sig Signal) bool {
+	switch sig.ErrorCode {
+	case "timeout", "cancelled",
+		"channel_offline", "channel_resolve_failed", "spade_url_missing",
+		"stale_session_error", "session_snapshot_error":
+		return true
+	}
+	return strings.HasPrefix(sig.ErrorCode, "stream_status_")
+}
+
 // twitchOutage reports whether the health center currently shows evidence of
 // a Twitch-side (or account-side) outage — GQL, PubSub, OAuth, or the canary's
 // watch transport failing. During an outage stalls are expected and must not
 // confirm (the spec's "no active Twitch outage state" gate).
+//
+// For watch_transport only, a failed signal whose provenance marks it
+// canary-local, channel-local, or inconclusive (inconclusiveWatchTransport) is
+// NOT outage evidence: the stall gates already demand direct proof of healthy
+// farming (fresh clean inventory observations, delivered minute reports,
+// healthy OAuth/GQL/PubSub), and a real outage keeps failing those directly.
 func (w *ProgressWatchdog) twitchOutage() (bool, string) {
 	if w.center == nil {
 		return false, ""
@@ -423,9 +479,14 @@ func (w *ProgressWatchdog) twitchOutage() (bool, string) {
 		// A degraded (flapping/repeatedly-failing) transport counts as an outage
 		// here too: while the network is impaired, drop stalls are expected and
 		// must not be confirmed against the streamer.
-		if sig, ok := snap.Signal(name); ok && (sig.Status == StatusFailed || sig.Status == StatusDegraded) {
-			return true, name
+		sig, ok := snap.Signal(name)
+		if !ok || (sig.Status != StatusFailed && sig.Status != StatusDegraded) {
+			continue
 		}
+		if name == SignalWatchTransport && sig.Status == StatusFailed && inconclusiveWatchTransport(sig) {
+			continue
+		}
+		return true, name
 	}
 	return false, ""
 }

@@ -262,14 +262,27 @@ func (c *Canary) probe(ctx context.Context, channel string) Signal {
 
 	res := c.prober.Probe(ctx, streamer)
 	if !res.OK {
+		// A status-less failure (no HTTP response reached) at a ctx-aware
+		// stage with the probe context already dead is a canary-local
+		// budget/lifecycle abort, not evidence about the transport: probeFail
+		// derives the same "<stage>_error" code for a genuine network error
+		// and for a request the canary's own deadline killed, and only this
+		// producer can see ctx to tell them apart. Record the abort
+		// classification with the reached stage. An HTTP-status-bearing
+		// failure keeps its code even past the deadline — a remote response
+		// is remote evidence.
+		detail, code := probeDetail(res), res.ErrorCode
+		if ctxErr := ctx.Err(); res.Status == 0 && ctxErr != nil && ctxAwareStage(res.Stage) {
+			detail, code = abortReason(ctxErr)
+		}
 		return Signal{
 			Name:      SignalWatchTransport,
 			Status:    StatusFailed,
 			CheckedAt: c.now(),
 			Duration:  res.Duration,
 			Stage:     string(res.Stage),
-			ErrorCode: res.ErrorCode,
-			Detail:    probeDetail(res),
+			ErrorCode: code,
+			Detail:    detail,
 		}
 	}
 	return Signal{
@@ -292,6 +305,31 @@ func (c *Canary) failSignal(stage, detail, code string, start time.Time) Signal 
 		Detail:    detail,
 		ErrorCode: code,
 	}
+}
+
+// ctxAwareStage reports whether a probe stage's requests observe the probe
+// context, so a status-less failure there CAN have been caused by the canary's
+// own deadline. StagePlaybackToken is deliberately excluded:
+// GetPlaybackAccessToken takes no context and runs its own bounded retry loop
+// (up to ~30s per attempt, times retries and client-id candidates), so it can
+// outlive the canary deadline and still return a genuine GQL verdict — its
+// failure is never CAUSED by ctx, and rewriting its code would hide real
+// account/API evidence from the watchdog gate. The pre-I/O session-snapshot
+// checks and the stale-session re-check are equally ctx-independent. A
+// positive list keeps an unknown future stage on its own (gating) code — the
+// conservative direction.
+//
+// Load-bearing timing invariant: the ctx-aware stages' requests are bounded
+// by the sender's HTTP client timeout (20s, watcher.NewMinuteSender), well
+// under canaryTimeout (60s), so a genuine remote failure there normally
+// returns while ctx is still live and keeps its stage code; a dead ctx at
+// return time therefore marks budget expiry, not a remote verdict.
+func ctxAwareStage(stage watcher.ProbeStage) bool {
+	switch stage {
+	case watcher.StagePlaylist, watcher.StageSegment, watcher.StageBeacon:
+		return true
+	}
+	return false
 }
 
 // probeDetail renders a safe, human summary from the redacted ProbeResult —
