@@ -157,6 +157,17 @@ func (s *Server) handleAutoRedeem(w http.ResponseWriter, r *http.Request, provid
 		return
 	}
 
+	// Paused/stopped/in-transition is a lifecycle CONFLICT rather than a
+	// transient unavailability, and gets this repo's friendly localized 409,
+	// same as the settings routes. UX sugar only: SetAutoRedeem's own fence is
+	// the authoritative backstop for the check->mutate race — which on this
+	// route is unusually wide, since the provider was sampled by the caller
+	// before the request body below was even read.
+	if s.lifecycleMutationBlocked() {
+		s.writeSettingsConflict(w, r)
+		return
+	}
+
 	var view autoRedeemConfigView
 	if err := json.NewDecoder(r.Body).Decode(&view); err != nil {
 		writeBadRequest(w, "Invalid JSON: "+err.Error())
@@ -173,6 +184,14 @@ func (s *Server) handleAutoRedeem(w http.ResponseWriter, r *http.Request, provid
 		RewardIDs: view.RewardIDs,
 	}
 	if err := provider.SetAutoRedeem(name, cfg); err != nil {
+		// A drain/retirement refusal is not a client error: nothing changed
+		// and the request was well-formed, so it must not come back as 400.
+		// The generic body keeps the lifecycle detail server-side; genuine
+		// validation failures keep reporting their own reason as before.
+		if mutationRefusedAsUnavailable(err) {
+			writeServiceUnavailable(w, "Auto-redeem could not be updated; no changes were made")
+			return
+		}
 		writeBadRequest(w, err.Error())
 		return
 	}

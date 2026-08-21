@@ -278,22 +278,51 @@ func (m *Miner) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 
 // ApplyCampaignPolicy validates, applies (runtime, no restart), and persists a
 // new policy mode, then re-ranks immediately so the change is visible at once.
-func (m *Miner) ApplyCampaignPolicy(mode string) {
-	m.mu.Lock()
-	m.config.CampaignPolicy = string(policy.Normalize(mode))
-	m.persistLocked()
-	m.mu.Unlock()
-	m.refreshPolicy(time.Now())
+//
+// A non-nil error means NOTHING was changed: ErrShuttingDown when this
+// generation is no longer the authoritative mutable one (see fenced,
+// miner.go). Callers must not report success on a non-nil error.
+func (m *Miner) ApplyCampaignPolicy(mode string) error {
+	return m.fenced(func() error {
+		m.mu.Lock()
+		m.config.CampaignPolicy = string(policy.Normalize(mode))
+		m.persistLocked()
+		m.mu.Unlock()
+		m.refreshPolicy(time.Now())
+		return nil
+	})
 }
 
 // SetDropRule sets (or, when the rule is the zero value, clears — the "Reset
 // rule" control) the per-drop override for a normalized reward key, persists,
 // and re-ranks immediately.
-func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) {
-	rewardKey = strings.ToLower(strings.TrimSpace(rewardKey))
-	if rewardKey == "" {
-		return
-	}
+//
+// A non-nil error means NOTHING was changed: ErrShuttingDown when this
+// generation is no longer the authoritative mutable one (see fenced,
+// miner.go).
+//
+// The fence is entered BEFORE the empty-key check, not after. An empty or
+// whitespace-only key is a no-op with nothing to refuse, so ordering it the
+// other way would be defensible for this call alone — but it would let a
+// retired generation answer a mutation endpoint with success, which is exactly
+// the untruth this fence exists to prevent. Refusing first keeps "a retired
+// generation never reports a configuration mutation as done" true without
+// exception, and an empty key on a LIVE generation still returns nil as before.
+func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) error {
+	return m.fenced(func() error {
+		rewardKey = strings.ToLower(strings.TrimSpace(rewardKey))
+		if rewardKey == "" {
+			return nil
+		}
+		m.commitDropRule(rewardKey, rule)
+		return nil
+	})
+}
+
+// commitDropRule performs the mutation itself. It takes m.mu (so it is NOT a
+// "Locked" helper in this package's sense); it exists only so SetDropRule's
+// fenced body stays a single statement.
+func (m *Miner) commitDropRule(rewardKey string, rule config.DropRule) {
 	m.mu.Lock()
 	if m.config.DropRules == nil {
 		m.config.DropRules = map[string]config.DropRule{}

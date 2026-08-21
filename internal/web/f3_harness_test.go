@@ -109,6 +109,9 @@ type f3Policy struct {
 	mode      string
 	decisions []policy.Decision
 	rules     map[string]config.DropRule
+	// err, when set, makes both mutators fail closed without recording the
+	// change — the shape a retired miner generation presents.
+	err error
 }
 
 func (f *f3Policy) PolicySnapshot() (policy.Mode, []policy.Decision) {
@@ -117,8 +120,20 @@ func (f *f3Policy) PolicySnapshot() (policy.Mode, []policy.Decision) {
 func (f *f3Policy) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 	return f.mode, f.rules
 }
-func (f *f3Policy) ApplyCampaignPolicy(mode string)                    { f.mode = mode }
-func (f *f3Policy) SetDropRule(rewardKey string, rule config.DropRule) { f.rules[rewardKey] = rule }
+func (f *f3Policy) ApplyCampaignPolicy(mode string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mode = mode
+	return nil
+}
+func (f *f3Policy) SetDropRule(rewardKey string, rule config.DropRule) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.rules[rewardKey] = rule
+	return nil
+}
 
 type f3Settings struct{ rt settings.RuntimeSettings }
 

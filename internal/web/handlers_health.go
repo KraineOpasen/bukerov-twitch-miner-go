@@ -191,6 +191,17 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Paused/stopped/in-transition is a lifecycle CONFLICT, not a transient
+	// unavailability: the operator can resolve it by resuming, and this repo
+	// already answers it with a friendly localized 409 on the settings routes.
+	// Reporting it as the fence's 503 would be truthful about the outcome but
+	// wrong about the cause. This check is UX sugar exactly as it is on those
+	// routes — the fence inside the miner remains the authoritative backstop
+	// for the unavoidable race between checking here and mutating there.
+	if s.lifecycleMutationBlocked() {
+		s.writeSettingsConflict(w, r)
+		return
+	}
 	s.mu.RLock()
 	provider := s.healthProvider
 	s.mu.RUnlock()
@@ -228,7 +239,15 @@ func (s *Server) handleAPIHealthSettings(w http.ResponseWriter, r *http.Request)
 	// change applied when persistence rejected it (see ApplyHealthSettings,
 	// internal/miner/health.go).
 	if err := provider.ApplyHealthSettings(cfg); err != nil {
-		writeInternalError(w, "Health settings could not be applied; no changes were made")
+		const msg = "Health settings could not be applied; no changes were made"
+		// 503 when the generation backing this provider is draining or already
+		// retired: nothing changed and retrying shortly is correct, which a
+		// bare 500 would misreport as a server fault.
+		if mutationRefusedAsUnavailable(err) {
+			writeServiceUnavailable(w, msg)
+			return
+		}
+		writeInternalError(w, msg)
 		return
 	}
 	s.renderHealthPartial(w, r)

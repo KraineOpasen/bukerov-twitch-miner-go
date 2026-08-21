@@ -2,7 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
 // writeJSON writes a JSON response with the given status code
@@ -51,6 +55,19 @@ func writeServiceUnavailable(w http.ResponseWriter, msg string) {
 // refused while the miner is paused/stopped — see handlers_settings.go).
 func writeConflict(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusConflict, msg)
+}
+
+// mutationRefusedAsUnavailable reports whether err is a fail-closed refusal
+// from a miner generation that is shutting down, draining, or already retired
+// — the conditions under which nothing was mutated and retrying shortly is the
+// correct client behavior, so the honest status is 503 rather than 500 (a
+// server fault) or 400 (a client fault).
+//
+// It is the same classification writeApplyError applies on the settings
+// pipeline, lifted here so the Drops, Health Center and Rewards handlers can
+// reuse it while keeping their own domain-appropriate messages.
+func mutationRefusedAsUnavailable(err error) bool {
+	return errors.Is(err, settings.ErrShuttingDown) || errors.Is(err, database.ErrClosed)
 }
 
 // isHTMXRequest reports whether the request came from htmx (the "HX-Request"

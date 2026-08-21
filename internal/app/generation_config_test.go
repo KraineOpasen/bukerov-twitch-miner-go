@@ -426,7 +426,12 @@ func TestGenerationConfigCarriesInPlaceRuntimeMutations(t *testing.T) {
 			break
 		}
 	}
-	gen1.ApplyCampaignPolicy(want)
+	// A live (non-retired) generation must be ADMITTED by the mutation fence;
+	// a refusal here would mean the fence is over-refusing, not that the
+	// handoff broke.
+	if err := gen1.ApplyCampaignPolicy(want); err != nil {
+		t.Fatalf("ApplyCampaignPolicy on a live generation = %v, want nil", err)
+	}
 	if got, _ := gen1.CurrentCampaignPolicy(); got != want {
 		t.Fatalf("generation 1 CampaignPolicy = %q after ApplyCampaignPolicy(%q), want %q", got, want, want)
 	}
@@ -470,7 +475,9 @@ func TestGenerationConfigHandsOverAnIsolatedSnapshot(t *testing.T) {
 	gen1 := h.generation(0)
 	// Seed one rule BEFORE the handoff: it must carry over, proving the
 	// snapshot copies content rather than dropping the map.
-	gen1.SetDropRule("rule-committed-before-the-handoff", config.DropRule{HighPriority: true})
+	if err := gen1.SetDropRule("rule-committed-before-the-handoff", config.DropRule{HighPriority: true}); err != nil {
+		t.Fatalf("SetDropRule on a live generation = %v, want nil", err)
+	}
 
 	h.replaceGeneration(2)
 	gen2 := h.generation(1)
@@ -481,7 +488,13 @@ func TestGenerationConfigHandsOverAnIsolatedSnapshot(t *testing.T) {
 
 	// Now write through the OUTGOING generation, exactly as a dashboard
 	// request routed to the stale provider would.
-	gen1.SetDropRule(lateRule, config.DropRule{Skip: true})
+	// gen1's Run was never started by this harness (it supplies a controllable
+	// Runner in the miner's place), so gen1 is not RETIRED in the miner's own
+	// terms and the fence admits this write. That is what makes this test
+	// still about the config handoff rather than about the fence.
+	if err := gen1.SetDropRule(lateRule, config.DropRule{Skip: true}); err != nil {
+		t.Fatalf("SetDropRule on a never-run generation = %v, want nil", err)
+	}
 
 	if _, rules := gen1.CurrentCampaignPolicy(); !rules[lateRule].Skip {
 		t.Fatalf("generation 1 did not record its own late write: %v", rules)
@@ -536,7 +549,9 @@ func TestInPlaceRuntimeWriteSurvivesAFailedPersist(t *testing.T) {
 
 	// Make the next persist fail, then perform an in-place runtime write.
 	breakConfigPath(t, h.configPath)
-	gen1.SetDropRule(unpersistedRule, config.DropRule{HighPriority: true})
+	if err := gen1.SetDropRule(unpersistedRule, config.DropRule{HighPriority: true}); err != nil {
+		t.Fatalf("SetDropRule = %v, want nil (persist failure is fail-open, not an error return)", err)
+	}
 
 	// persistLocked only logged the failure, so the change is live regardless.
 	if _, rules := gen1.CurrentCampaignPolicy(); !rules[unpersistedRule].HighPriority {

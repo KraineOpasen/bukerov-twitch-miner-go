@@ -79,7 +79,7 @@ func applyConfigRenames(cfg *config.Config, renamed []streamer.RenameEvent) {
 // from the commit-point refresh (rewards.go), it runs under m.mu — slog.Warn
 // already runs under m.mu on other paths in this package (finishApply's
 // non-persisted SaveConfig branch, miner.go; policy.go via persistLocked;
-// health.go:430), so this is not a new pattern.
+// health.go), so this is not a new pattern.
 //
 // Returns true when the clash (destination-wins) branch fired, so a caller
 // tracking commit-time AutoRedeem generations (migrateAutoRedeemGenLocked)

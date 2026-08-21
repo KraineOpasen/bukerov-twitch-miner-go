@@ -103,11 +103,17 @@ type DropProgressProvider interface {
 
 // PolicyProvider exposes the campaign-policy engine's ranked decisions and the
 // mode/per-drop-rule controls to the Drops page. Satisfied by the miner.
+// A non-nil error from either mutator means nothing was changed — matching
+// HealthProvider.ApplyHealthSettings and RewardsProvider.SetAutoRedeem below.
+// In particular the miner returns settings.ErrShuttingDown once the generation
+// backing this provider has been retired: the Server keeps a retired
+// generation's providers until the next one re-registers, so a mutation can
+// arrive here after its target stopped being the authoritative one.
 type PolicyProvider interface {
 	PolicySnapshot() (policy.Mode, []policy.Decision)
 	CurrentCampaignPolicy() (string, map[string]config.DropRule)
-	ApplyCampaignPolicy(mode string)
-	SetDropRule(rewardKey string, rule config.DropRule)
+	ApplyCampaignPolicy(mode string) error
+	SetDropRule(rewardKey string, rule config.DropRule) error
 }
 
 // RewardsProvider exposes custom channel-points reward listing/redemption and

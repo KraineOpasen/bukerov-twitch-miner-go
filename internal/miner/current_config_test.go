@@ -60,14 +60,18 @@ func TestCurrentConfigSnapshotIsolatesDropRules(t *testing.T) {
 	m, _, _ := newCapabilityMiner(t, "alpha")
 	m.configPath = filepath.Join(t.TempDir(), "config.json")
 
-	m.SetDropRule("rule-before", config.DropRule{HighPriority: true})
+	if err := m.SetDropRule("rule-before", config.DropRule{HighPriority: true}); err != nil {
+		t.Fatalf("SetDropRule = %v, want nil", err)
+	}
 
 	snap := m.CurrentConfig()
 	if _, ok := snap.DropRules["rule-before"]; !ok {
 		t.Fatalf("snapshot lost the seeded DropRule: %v", snap.DropRules)
 	}
 
-	m.SetDropRule("rule-after", config.DropRule{Skip: true})
+	if err := m.SetDropRule("rule-after", config.DropRule{Skip: true}); err != nil {
+		t.Fatalf("SetDropRule = %v, want nil", err)
+	}
 
 	if _, leaked := snap.DropRules["rule-after"]; leaked {
 		t.Error("DropRules is shared between the live config and the handed-over snapshot")

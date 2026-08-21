@@ -158,7 +158,16 @@ func configHasStreamerLocked(cfg *config.Config, login string) bool {
 // nil before this call — before returning the error (I6, fixes D5), so
 // memory and disk can never diverge. Runtime state and the generation are
 // touched ONLY after a successful save.
+// The fence runs BEFORE the roster/config guards below, deliberately: a
+// retired generation's roster is frozen, so letting those guards answer first
+// would report a permanent "not tracked" for what is really a retryable
+// lifecycle refusal. ErrShuttingDown here means nothing was changed (see
+// fenced, miner.go).
 func (m *Miner) SetAutoRedeem(username string, cfg config.AutoRedeemConfig) error {
+	return m.fenced(func() error { return m.setAutoRedeem(username, cfg) })
+}
+
+func (m *Miner) setAutoRedeem(username string, cfg config.AutoRedeemConfig) error {
 	key := strings.ToLower(username)
 
 	m.mu.Lock()
