@@ -19,7 +19,11 @@ type fakeClient struct {
 	idErr     error
 	online    bool
 	spade     string
-	checks    int32
+	// noTransition: CheckStreamerOnline returns without touching the streamer,
+	// leaving a fresh probe streamer's status Unknown (reason "initial") — the
+	// canary's inconclusive stream_status_<reason> branch.
+	noTransition bool
+	checks       int32
 
 	// Gates simulate a context-unaware call that hangs at the network level: when
 	// non-nil the method blocks until the gate is closed. The matching done
@@ -45,6 +49,12 @@ func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransi
 	}
 	atomic.AddInt32(&f.checks, 1)
 	var tr models.StatusTransition
+	if f.noTransition {
+		if f.onlineDone != nil {
+			close(f.onlineDone)
+		}
+		return tr
+	}
 	if f.online {
 		tr = s.SetConfirmedOnline()
 		s.Stream.SetSpadeURL(f.spade)
@@ -60,9 +70,10 @@ func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransi
 type fakeProber struct {
 	res     watcher.ProbeResult
 	calls   int32
-	block   chan struct{} // if non-nil, Probe waits on it
-	entered chan struct{} // signaled once Probe is entered
-	waitCtx bool          // if true, Probe waits for ctx.Done
+	block   chan struct{}        // if non-nil, Probe waits on it
+	entered chan struct{}        // signaled once Probe is entered
+	waitCtx bool                 // if true, Probe waits for ctx.Done
+	ctxRes  *watcher.ProbeResult // with waitCtx: result to return after ctx.Done (default: status-less beacon failure)
 }
 
 func (f *fakeProber) callCount() int32 { return atomic.LoadInt32(&f.calls) }
@@ -74,6 +85,9 @@ func (f *fakeProber) Probe(ctx context.Context, _ *models.Streamer) watcher.Prob
 	}
 	if f.waitCtx {
 		<-ctx.Done()
+		if f.ctxRes != nil {
+			return *f.ctxRes
+		}
 		return watcher.ProbeResult{Stage: watcher.StageBeacon, ErrorCode: "beacon_timeout"}
 	}
 	if f.block != nil {
@@ -166,8 +180,8 @@ func TestCanaryChannelOffline(t *testing.T) {
 	client := &fakeClient{channelID: "cid", online: false}
 	c := newCanary(NewCenter(), client, &fakeProber{}, &fakeNotifier{}, nil)
 	sig := c.probe(context.Background(), "canary_chan")
-	if sig.Status != StatusFailed || sig.Stage != "stream_info" {
-		t.Fatalf("expected stream_info failure for an offline channel, got %+v", sig)
+	if sig.Status != StatusFailed || sig.Stage != "stream_info" || sig.ErrorCode != "channel_offline" {
+		t.Fatalf("expected stream_info/channel_offline failure for an offline channel, got %+v", sig)
 	}
 }
 
@@ -175,8 +189,8 @@ func TestCanarySpadeMissing(t *testing.T) {
 	client := &fakeClient{channelID: "cid", online: true, spade: ""} // online but no spade URL
 	c := newCanary(NewCenter(), client, &fakeProber{}, &fakeNotifier{}, nil)
 	sig := c.probe(context.Background(), "canary_chan")
-	if sig.Status != StatusFailed || sig.Stage != "spade_url" {
-		t.Fatalf("expected spade_url failure, got %+v", sig)
+	if sig.Status != StatusFailed || sig.Stage != "spade_url" || sig.ErrorCode != "spade_url_missing" {
+		t.Fatalf("expected spade_url_missing failure, got %+v", sig)
 	}
 }
 
@@ -184,8 +198,8 @@ func TestCanaryChannelResolveError(t *testing.T) {
 	client := &fakeClient{idErr: context.DeadlineExceeded}
 	c := newCanary(NewCenter(), client, &fakeProber{}, &fakeNotifier{}, nil)
 	sig := c.probe(context.Background(), "canary_chan")
-	if sig.Status != StatusFailed || sig.Stage != "stream_info" {
-		t.Fatalf("expected stream_info failure when the channel id cannot resolve, got %+v", sig)
+	if sig.Status != StatusFailed || sig.Stage != "stream_info" || sig.ErrorCode != "channel_resolve_failed" {
+		t.Fatalf("expected stream_info/channel_resolve_failed failure when the channel id cannot resolve, got %+v", sig)
 	}
 }
 
