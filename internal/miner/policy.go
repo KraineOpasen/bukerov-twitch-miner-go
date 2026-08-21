@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -215,14 +216,18 @@ func policyGameRanks(decisions []policy.Decision, campaigns []*models.Campaign) 
 	return ranks
 }
 
-// persistLocked writes the current config to disk if a path is configured.
-// Caller holds m.mu.
-func (m *Miner) persistLocked() {
-	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
-			slog.Error("Failed to save config", "error", err)
-		}
+// persistLocked writes the current config to disk if a path is configured,
+// returning the write error so callers can fail closed on it. configPath ==
+// "" is the documented library no-persist case and reports success. Caller
+// holds m.mu (the deliberate SaveConfig-under-m.mu invariant — see
+// cloneConfigLocked's [R7] note) and owns logging with its own mutation
+// context, mirroring setAutoRedeem (rewards.go) and applyHealthSettings
+// (health.go).
+func (m *Miner) persistLocked() error {
+	if m.configPath == "" {
+		return nil
 	}
+	return config.SaveConfig(m.configPath, m.config)
 }
 
 func streamerCarriesCampaign(s *models.Streamer, campaignID string) bool {
@@ -276,17 +281,39 @@ func (m *Miner) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 	return mode, m.snapshotDropRules()
 }
 
-// ApplyCampaignPolicy validates, applies (runtime, no restart), and persists a
-// new policy mode, then re-ranks immediately so the change is visible at once.
+// ApplyCampaignPolicy validates and applies (runtime, no restart) a new
+// policy mode, durably persists it, and — only once that write has
+// succeeded — keeps it and re-ranks immediately so the change is visible
+// at once.
+//
+// Persistence is the commit point (configPath != ""): on a config.SaveConfig
+// failure the previous raw value is restored inside the same m.mu critical
+// section that applied the new one, so no reader — CurrentCampaignPolicy,
+// refreshPolicy, a settings apply's clone, or the generation handoff's
+// CurrentConfig — can ever observe the rejected mode, no snapshot is
+// re-ranked from it, and a later unrelated save cannot launder it to disk.
+// refreshPolicy runs only on the success path, after Unlock (it takes
+// m.mu.RLock itself). configPath == "" stays the documented library
+// no-persist case: a successful hot-apply that refreshes normally.
 //
 // A non-nil error means NOTHING was changed: ErrShuttingDown when this
 // generation is no longer the authoritative mutable one (see fenced,
-// miner.go). Callers must not report success on a non-nil error.
+// miner.go), or a persistence failure on a live generation. Callers must
+// not report success on a non-nil error.
 func (m *Miner) ApplyCampaignPolicy(mode string) error {
 	return m.fenced(func() error {
 		m.mu.Lock()
+		prev := m.config.CampaignPolicy
 		m.config.CampaignPolicy = string(policy.Normalize(mode))
-		m.persistLocked()
+		if err := m.persistLocked(); err != nil {
+			// Restore the raw stored value byte-exactly (not the mode it
+			// normalizes to) before unlocking, so memory keeps matching the
+			// still-valid on-disk state.
+			m.config.CampaignPolicy = prev
+			m.mu.Unlock()
+			slog.Error("Failed to save config; campaign policy unchanged", "mode", mode, "error", err)
+			return fmt.Errorf("campaign policy rejected; no changes were made: persist config: %w", err)
+		}
 		m.mu.Unlock()
 		m.refreshPolicy(time.Now())
 		return nil
@@ -294,12 +321,14 @@ func (m *Miner) ApplyCampaignPolicy(mode string) error {
 }
 
 // SetDropRule sets (or, when the rule is the zero value, clears — the "Reset
-// rule" control) the per-drop override for a normalized reward key, persists,
-// and re-ranks immediately.
+// rule" control) the per-drop override for a normalized reward key, durably
+// persists it, and — only once that write has succeeded — re-ranks
+// immediately.
 //
 // A non-nil error means NOTHING was changed: ErrShuttingDown when this
 // generation is no longer the authoritative mutable one (see fenced,
-// miner.go).
+// miner.go), or a persistence failure on a live generation (commitDropRule
+// is the commit point and rolls back exactly).
 //
 // The fence is entered BEFORE the empty-key check, not after. An empty or
 // whitespace-only key is a no-op with nothing to refuse, so ordering it the
@@ -314,17 +343,34 @@ func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) error {
 		if rewardKey == "" {
 			return nil
 		}
-		m.commitDropRule(rewardKey, rule)
-		return nil
+		return m.commitDropRule(rewardKey, rule)
 	})
 }
 
 // commitDropRule performs the mutation itself. It takes m.mu (so it is NOT a
 // "Locked" helper in this package's sense); it exists only so SetDropRule's
 // fenced body stays a single statement.
-func (m *Miner) commitDropRule(rewardKey string, rule config.DropRule) {
+//
+// Persistence is the commit point (configPath != ""): the map entry is
+// applied, then persisted under the same m.mu section; on a
+// config.SaveConfig failure the exact pre-call state — value, presence, and
+// map nil-ness — is restored before unlocking (the setAutoRedeem discipline,
+// rewards.go), so the rejected rule is never observable to any reader, no
+// snapshot is re-ranked from it, and a later unrelated save cannot launder
+// it to disk. On the failure path the map is restored IN PLACE (including
+// re-nilling a map this call allocated), so a rollback never changes the
+// map identity a concurrent candidate aliases; on the success path a nil
+// map is allocated exactly as before this change. cloneConfigLocked's
+// load-bearing DropRules aliasing ([R7], miner.go) ultimately rests on
+// every candidate's SaveConfig running under m.mu, which this path
+// preserves; the pre-existing nil-to-allocated corner of the applySettings
+// clone window (see applySettings' [M2/R6] note, miner.go) is unchanged by
+// this fix. refreshPolicy runs only on the success path, after Unlock.
+func (m *Miner) commitDropRule(rewardKey string, rule config.DropRule) error {
 	m.mu.Lock()
-	if m.config.DropRules == nil {
+	prevRule, hadPrev := m.config.DropRules[rewardKey]
+	wasNil := m.config.DropRules == nil
+	if wasNil {
 		m.config.DropRules = map[string]config.DropRule{}
 	}
 	if rule == (config.DropRule{}) {
@@ -332,7 +378,23 @@ func (m *Miner) commitDropRule(rewardKey string, rule config.DropRule) {
 	} else {
 		m.config.DropRules[rewardKey] = rule
 	}
-	m.persistLocked()
+	if err := m.persistLocked(); err != nil {
+		// Restore exactly — including re-nilling the map if it was nil
+		// before this call — so memory keeps matching the still-valid
+		// on-disk state.
+		if hadPrev {
+			m.config.DropRules[rewardKey] = prevRule
+		} else {
+			delete(m.config.DropRules, rewardKey)
+		}
+		if wasNil {
+			m.config.DropRules = nil
+		}
+		m.mu.Unlock()
+		slog.Error("Failed to save config; drop rule unchanged", "rewardKey", rewardKey, "error", err)
+		return fmt.Errorf("drop rule rejected; no changes were made: persist config: %w", err)
+	}
 	m.mu.Unlock()
 	m.refreshPolicy(time.Now())
+	return nil
 }

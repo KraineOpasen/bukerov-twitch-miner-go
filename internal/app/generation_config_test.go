@@ -288,9 +288,9 @@ func breakConfigPath(t *testing.T, path string) {
 // the next generation gets is the last successfully committed configuration,
 // never the rejected one and never the process-boot one.
 //
-// This is deliberately NOT a claim about every writer.
-// TestInPlaceRuntimeWriteSurvivesAFailedPersist below pins the opposite, and
-// true, behavior of the in-place writers.
+// This is deliberately a claim about the candidate-publishing paths;
+// TestRejectedInPlaceWriteNeverReachesNextGeneration below pins the SAME
+// fail-closed contract for the in-place writers.
 func TestRejectedSettingsCandidateNeverReachesNextGeneration(t *testing.T) {
 	const (
 		bootCanary      = "boot-config-A"
@@ -506,40 +506,32 @@ func TestGenerationConfigHandsOverAnIsolatedSnapshot(t *testing.T) {
 	}
 }
 
-// TestInPlaceRuntimeWriteSurvivesAFailedPersist characterizes a REAL asymmetry
-// this handoff exposes, rather than leaving it to be discovered later.
+// TestRejectedInPlaceWriteNeverReachesNextGeneration pins the fail-closed
+// half of the contract for the IN-PLACE writers, completing what
+// TestRejectedSettingsCandidateNeverReachesNextGeneration pins for the
+// candidate-publishing paths.
 //
-// The candidate-publishing paths make persistence the commit point, so a
-// failed config.SaveConfig publishes nothing (pinned above). The in-place
-// writers do not: SetDropRule and ApplyCampaignPolicy mutate the live config
-// under m.mu and call persistLocked, which only LOGS a SaveConfig failure and
-// returns nothing to its caller — so the change stays live and the dashboard
-// reports success. That is pre-existing behavior in internal/miner and is not
-// changed here.
+// DELIBERATE CHARACTERIZATION UPDATE. This test replaces
+// TestInPlaceRuntimeWriteSurvivesAFailedPersist, which characterized the
+// OPPOSITE behavior — SetDropRule/ApplyCampaignPolicy mutating the live
+// config, persistLocked only LOGGING a SaveConfig failure, the change
+// staying live, and the handoff carrying the never-committed value into the
+// next generation — and whose own comment said that if those writers were
+// ever made fail-closed, "this test SHOULD fail, and updating it is then the
+// deliberate act of recording that decision." That is exactly what happened:
+// the in-place writers now make persistence the commit point (exact rollback
+// under m.mu, non-nil error, no refresh from the rejected value —
+// internal/miner/policy.go), so this assertion intentionally inverts to
+// record the improved contract.
 //
-// What the handoff changes is only WHEN such a value carries forward, and the
-// delta is narrower than it first looks. Before, the next generation was
-// rebuilt from the process-boot pointer, and miner.New stores that pointer
-// verbatim — so if the outgoing generation had not yet published a candidate,
-// both generations were the SAME object and the unpersisted change carried
-// forward anyway (sharing the map, which is the fatal-throw hazard
-// CurrentConfig's snapshot now removes). It died with its generation only when
-// a candidate-publishing apply had already run first. This scenario publishes
-// no candidate, so at base it would have carried forward too.
-//
-// The handoff makes that propagation unconditional rather than incidental. What
-// is NOT new is the laundering: within a single generation, a failed
-// persistLocked already leaves the value live, and any later successful save
-// writes the whole document with it. That is pre-existing and untouched here.
-//
-// This test pins the behavior as it actually is. It is deliberately NOT
-// asserting that this is desirable: making those writers fail closed means
-// giving them error returns and changing their web callers, which is a change
-// to those writers and not to this seam. If they are ever made fail-closed,
-// this test SHOULD fail, and updating it is then the deliberate act of
-// recording that decision.
-func TestInPlaceRuntimeWriteSurvivesAFailedPersist(t *testing.T) {
-	const unpersistedRule = "rule-whose-save-failed"
+// The observable chain pinned here: a persist-failed in-place write returns
+// an error, leaves the outgoing generation at its prior committed state, and
+// therefore can never be inherited by generation N+1 through the
+// CurrentConfig handoff. The success half — an ACKNOWLEDGED in-place write
+// does reach generation N+1 — stays pinned by
+// TestGenerationConfigCarriesInPlaceRuntimeMutations above, unchanged.
+func TestRejectedInPlaceWriteNeverReachesNextGeneration(t *testing.T) {
+	const rejectedRule = "rule-whose-save-failed"
 
 	h := newGenHarness(t, bootConfigWithCanary("boot-config-A"))
 	stop := h.start()
@@ -547,15 +539,22 @@ func TestInPlaceRuntimeWriteSurvivesAFailedPersist(t *testing.T) {
 
 	gen1 := h.generation(0)
 
-	// Make the next persist fail, then perform an in-place runtime write.
-	breakConfigPath(t, h.configPath)
-	if err := gen1.SetDropRule(unpersistedRule, config.DropRule{HighPriority: true}); err != nil {
-		t.Fatalf("SetDropRule = %v, want nil (persist failure is fail-open, not an error return)", err)
+	// A committed rule first, so the rejection below is shown to preserve —
+	// not merely empty out — the prior committed state.
+	if err := gen1.SetDropRule("committed-rule", config.DropRule{Skip: true}); err != nil {
+		t.Fatalf("SetDropRule (committed) = %v, want nil", err)
 	}
 
-	// persistLocked only logged the failure, so the change is live regardless.
-	if _, rules := gen1.CurrentCampaignPolicy(); !rules[unpersistedRule].HighPriority {
-		t.Fatalf("generation 1 did not keep the in-place write: %v", rules)
+	// Make the next persist fail, then attempt the in-place runtime write.
+	breakConfigPath(t, h.configPath)
+	if err := gen1.SetDropRule(rejectedRule, config.DropRule{HighPriority: true}); err == nil {
+		t.Fatal("SetDropRule = nil after config.json persistence failed; " +
+			"an in-place policy write must fail closed, not acknowledge a change that never became durable")
+	}
+
+	// The rejected value must not be live on the outgoing generation.
+	if _, rules := gen1.CurrentCampaignPolicy(); rules[rejectedRule].HighPriority {
+		t.Fatalf("generation 1 kept the REJECTED in-place write: %v", rules)
 	}
 	// And nothing reached disk: the directory breakConfigPath installed is
 	// still a directory, exactly as internal/miner's own commit-point tests
@@ -566,9 +565,12 @@ func TestInPlaceRuntimeWriteSurvivesAFailedPersist(t *testing.T) {
 
 	h.replaceGeneration(2)
 
-	if _, rules := h.generation(1).CurrentCampaignPolicy(); !rules[unpersistedRule].HighPriority {
-		t.Errorf("generation 2 DropRules = %v; the handoff carries the LIVE value of the in-place writers, "+
-			"including one whose persist failed. If this now fails because those writers were made "+
-			"fail-closed, that is an intended improvement — update this test to record it", rules)
+	_, rules := h.generation(1).CurrentCampaignPolicy()
+	if rules[rejectedRule].HighPriority {
+		t.Errorf("generation 2 DropRules = %v — a rejected in-place write leaked into a later "+
+			"generation through the CurrentConfig handoff", rules)
+	}
+	if !rules["committed-rule"].Skip {
+		t.Errorf("generation 2 DropRules = %v — the COMMITTED rule must survive the handoff", rules)
 	}
 }
