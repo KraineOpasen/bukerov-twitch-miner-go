@@ -78,8 +78,10 @@ const (
 	watchdogEvalCadence = time.Minute
 	// stallMinReports is how many successful minute-watched deliveries must
 	// have gone to the farming channel since the last observed progress before
-	// a stall can confirm — "we are demonstrably watching, Twitch is
-	// demonstrably not crediting". Roughly five watched minutes.
+	// a stall can confirm. Roughly five watched minutes. This tally is
+	// cumulative and never decays, so on its own it proves delivery worked at
+	// SOME point in the evidence window, not that it still works — confirmation
+	// additionally requires deliveryEvidence.current (see evaluate's predicate).
 	stallMinReports = 5
 	// recoveryStageTimeout bounds the blocking recovery stages (forced full
 	// resync, transport probe) on the watchdog goroutine.
@@ -144,12 +146,19 @@ type dropState struct {
 
 	// evidenceSince is when the current uninterrupted stall-evidence window
 	// began: the moment every confirmation gate started holding. Zero while any
-	// gate fails. All three stall thresholds (delay, observations, reports)
-	// count only inside this window, so a confirmed stall always represents at
-	// least StallDelay of DEMONSTRABLE farming without credit — evidence
-	// accrued while the channel was offline, rotated out, or ineligible never
-	// carries over (that would confirm a stall minutes after farming resumes,
-	// well inside Twitch's ~15-minute crediting batch).
+	// gate fails. All three accrued stall thresholds (delay, observations,
+	// reports) count only inside this window, so a confirmed stall always rests
+	// on at least StallDelay of uninterrupted eligibility — evidence accrued
+	// while the channel was offline, rotated out, or ineligible never carries
+	// over (that would confirm a stall minutes after farming resumes, well
+	// inside Twitch's ~15-minute crediting batch).
+	//
+	// Accrual is necessary but not sufficient, and it is not a claim that
+	// delivery ran throughout: the report tally is cumulative and never decays,
+	// so confirmation additionally demands that delivery is current at that
+	// instant (see deliveryEvidence.current). What a confirmed stall proves is
+	// an eligible window of at least StallDelay, at least stallMinReports
+	// deliveries inside it, and delivery working right now.
 	evidenceSince      time.Time
 	lastObservedSyncAt time.Time // ProgressLastSyncAt already counted as an observation
 	baselineReports    int       // farming channel's success count at last progress
@@ -535,7 +544,7 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 			continue
 		}
 		seen[key] = true
-		w.observeProgress(st, campaign, drop, sync, now)
+		ev := w.observeProgress(st, campaign, drop, sync, now)
 
 		if hold, why := w.gatesHold(st, campaign, drop, sync, outage, outageSignal, cfg, now); !hold {
 			// A gate failing means a stall cannot be *confirmed* right now. The
@@ -569,15 +578,34 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 			st.NoProgressObs++
 		}
 
+		// Delivery currentness is a THRESHOLD, deliberately not a gatesHold gate:
+		// a failing gate calls resetEvidence, so putting it there would let one
+		// transient rejected send erase an otherwise valid StallDelay-long
+		// evidence window. As a threshold it only withholds confirmation for as
+		// long as delivery is actually down, and the very next delivered report
+		// makes an already-accrued window confirmable again.
+		//
+		// Two consequences, both deliberate. A drop whose channel keeps its slot
+		// while every send is rejected is never confirmed — that is a delivery
+		// failure, not Twitch withholding credit, and this watchdog only claims
+		// the latter; the cost is that such a channel is published as healthy and
+		// raises nothing (see the SPEC's known limitation). And because
+		// advanceRecovery is reachable only from here, an in-flight async stage
+		// stops being reconciled while delivery is down — it resumes, or takes
+		// its bounded timeout, on the first pass where delivery is current again.
+		// While it is parked the branch below also overwrites the status and
+		// detail, so a drop mid-pipeline publishes as healthy with its reached
+		// stage still set, rather than keeping resolvePending's own wording.
 		stalled := now.Sub(st.evidenceSince) >= cfg.StallDelay &&
 			st.NoProgressObs >= cfg.StallConfirmations &&
-			st.ReportsSinceProgress >= stallMinReports
+			st.ReportsSinceProgress >= stallMinReports &&
+			ev.current(now, cfg.StallDelay)
 		if !stalled {
 			if st.Status != ProgressStalled {
 				st.Status = ProgressHealthy
-				st.Detail = fmt.Sprintf("progress monitored: last advance %s ago, %s of farming evidence, %d clean observations, %d reports",
+				st.Detail = fmt.Sprintf("progress monitored: last advance %s ago, %s of farming evidence, %d clean observations, %d reports, %s",
 					now.Sub(st.LastProgressAt).Round(time.Minute), now.Sub(st.evidenceSince).Round(time.Minute),
-					st.NoProgressObs, st.ReportsSinceProgress)
+					st.NoProgressObs, st.ReportsSinceProgress, ev.describe(now, cfg.StallDelay))
 			}
 			continue
 		}
@@ -664,8 +692,9 @@ func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, sync drops.SyncS
 
 // observeProgress folds the latest campaign snapshot, inventory observation,
 // and delivery accounting into the drop's state — including the healthy reset
-// (and recovered notification) when minutes advanced.
-func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campaign, drop *models.Drop, sync drops.SyncStatus, now time.Time) {
+// (and recovered notification) when minutes advanced. It returns this pass's
+// single delivery sample for the stall predicate; see deliveryEvidence.
+func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campaign, drop *models.Drop, sync drops.SyncStatus, now time.Time) deliveryEvidence {
 	channel := w.farmingChannel(campaign)
 	if channel == "" && st.Channel != "" && w.watch.IsWatching(st.Channel) {
 		// The previous farming channel still holds a slot but the campaign
@@ -673,13 +702,24 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 		// the eligibility loss precisely instead of a generic "no channel".
 		channel = st.Channel
 	}
+
+	// ONE delivery sample for this drop's entire pass. Every use below — the
+	// baseline, the report tally, and the currentness verdict evaluate derives
+	// from the returned value — reads this same observation, so a broker
+	// republish partway through a pass can never make them describe two
+	// different counter tenures.
+	var ev deliveryEvidence
+	if channel != "" {
+		ev.stats, ev.sampled = w.watch.ReportStats(channel)
+	}
+
 	if channel != st.statsChannel {
 		// The farming channel changed (rotation, displacement, or our own
 		// switch stage): re-baseline the delivery accounting against it.
 		st.statsChannel = channel
 		st.ReportsSinceProgress = 0
-		if stats, ok := w.watch.ReportStats(channel); ok {
-			st.baselineReports, st.baselineValid = stats.Successes, true
+		if ev.sampled {
+			st.baselineReports, st.baselineValid = ev.stats.Successes, true
 		} else {
 			// The watcher hasn't published stats for this channel yet. Leave the
 			// baseline invalid so the first successful read below adopts it,
@@ -690,17 +730,29 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 	}
 	st.Channel = channel
 
-	if channel != "" {
-		if stats, ok := w.watch.ReportStats(channel); ok {
-			if !st.baselineValid {
-				// First successful read after a channel change whose initial
-				// read missed: adopt it as the baseline instead of a delta.
-				st.baselineReports, st.baselineValid = stats.Successes, true
-			}
-			if n := stats.Successes - st.baselineReports; n >= 0 {
-				st.ReportsSinceProgress = n
-			}
+	if ev.sampled {
+		// The recorded baseline can never legitimately exceed the live counter.
+		// Two situations break that, and both mean the same thing — the baseline
+		// is not backed by this counter tenure — so both adopt the live counter:
+		//
+		//   - no baseline yet: the first read after a channel change missed, so
+		//     adoption was deferred rather than fixing 0 as the base and later
+		//     counting the channel's lifetime successes as progress;
+		//   - the counter went BACKWARDS while the login stayed the same: the
+		//     broker's per-slot accounting restarted (the login missed one slot
+		//     allocation and was pruned, or was deleted and re-added), so
+		//     deliveries counted against the retired tenure prove nothing here.
+		//     The restart is detected by the counter going backwards, which is
+		//     reliable at the watchdog's sampling rate but is not a tenure
+		//     identity — carrying one would need new watcher state.
+		//
+		// Adopting is NOT a gate failure: the evidence window survives, only the
+		// delivery baseline restarts. Afterwards the delta is non-negative by
+		// construction, so the tally needs no guard of its own.
+		if !st.baselineValid || ev.stats.Successes < st.baselineReports {
+			st.baselineReports, st.baselineValid = ev.stats.Successes, true
 		}
+		st.ReportsSinceProgress = ev.stats.Successes - st.baselineReports
 	}
 
 	if drop.CurrentMinutesWatched > st.LastMinutes {
@@ -734,17 +786,18 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 			// restarts in evaluate once the gates hold.
 			lastObservedSyncAt: sync.ProgressLastSyncAt,
 		}
-		if stats, ok := w.watch.ReportStats(channel); ok {
-			st.baselineReports, st.baselineValid = stats.Successes, true
+		if ev.sampled {
+			st.baselineReports, st.baselineValid = ev.stats.Successes, true
 		} else {
 			st.baselineValid = false
 		}
-		return
+		return ev
 	}
 
 	st.LastMinutes = drop.CurrentMinutesWatched
 	// No-progress observations are counted in evaluate, and only inside an
 	// active evidence window (every gate holding) — see dropState.evidenceSince.
+	return ev
 }
 
 // gatesHold checks every stall-confirmation gate that is not a threshold:

@@ -1521,15 +1521,62 @@ recovery stage reached.
 
 **Stall confirmation is conjunctive** — every gate must hold simultaneously,
 and any failing gate is named in the published state (explainability). All
-three thresholds (delay, observations, delivered reports) count only inside
-the current **evidence window**: it opens when every gate starts holding and
-is discarded whenever any gate fails, so a confirmed stall always represents
-at least `watchdogStallDelayMinutes` of *demonstrable* farming without credit.
-Evidence accrued while the channel was offline, rotated out, or ineligible
-never carries over — otherwise a stall would confirm minutes after farming
-resumes, inside Twitch's ~15-minute crediting batch. A gate failure pauses
-the recovery pipeline (the reached stage survives) but each next stage
-requires a fresh, complete evidence window:
+three accrued thresholds (delay, observations, delivered reports) count only
+inside the current **evidence window**: it opens when every gate starts holding
+and is discarded whenever any gate fails. Evidence accrued while the channel was
+offline, rotated out, or ineligible never carries over — otherwise a stall would
+confirm minutes after farming resumes, inside Twitch's ~15-minute crediting
+batch. A gate failure pauses the recovery pipeline (the reached stage survives)
+but each next stage requires a fresh, complete evidence window.
+
+Accrual alone is necessary but not sufficient. The delivered-report count is
+cumulative and never decays, so on its own it proves only that delivery worked
+at *some* point in the window — a channel that delivered five reports and then
+had every later send rejected would keep satisfying it. Confirmation therefore
+also requires delivery to be **current at that instant** (condition 6).
+
+What the two together guarantee is precise, and deliberately narrower than
+"`watchdogStallDelayMinutes` of demonstrable farming": at the moment a stall
+confirms, the channel has been continuously eligible for at least
+`watchdogStallDelayMinutes`, at least five minute-watched reports were delivered
+inside that window, and the most recently completed **counted** send succeeded
+and is no older than the window length. It is **not** a claim that delivery ran
+uninterrupted throughout — a long rejected stretch inside the window does not
+discard it, and one delivered report afterwards makes the accrued window
+confirmable again.
+
+That is the deliberate trade-off. Delivery currentness is a threshold rather
+than one of the reset-triggering gates, because a single transient rejected send
+must withhold confirmation without destroying an otherwise valid evidence
+window; treating it as a gate would re-create the false-negative amplifier the
+evidence window exists to avoid.
+
+**Known limitation:** the converse is that a channel which keeps its slot, its
+game and its campaign assignment while *every* minute-watched send is rejected
+never confirms, so it stays `healthy` and raises nothing. That is correct as far
+as this watchdog's claim goes — the fault is local delivery, not Twitch
+withholding credit, and only the canary's `watch_transport` signal speaks for
+delivery, and only about its own configured channel. The reason is published in
+the watchdog's `detail` field, which reaches `/debug/snapshot` only — the
+Drops-page badge does not render `detail` for a healthy drop, and the support
+bundle drops it deliberately, as it drops every free-form text field. No recovery
+stage runs while confirmation is withheld either. So chronic delivery failure on
+a farming channel is currently silent rather than misdiagnosed. Surfacing it
+needs a signal of its own.
+
+The same reachability rule has a second effect: the recovery pipeline is driven
+only from a confirmed stall, so while delivery is not current an in-flight staged
+session refresh stops being reconciled — its bounded outcome deadline is not
+evaluated during the outage, and the drop publishes as `healthy` with its reached
+stage still set rather than keeping the pipeline's own "awaiting outcome"
+wording. The correlation resumes, or takes that deadline, on the first pass where
+delivery is current again.
+
+The confirmation conditions follow. They are not all the same kind of thing:
+items 1 and 2 decide whether the drop is **tracked** at all (failing one ends the
+episode); items 3, 4, 5, 9 and 10 are **gates** (failing one discards the evidence
+window); items 6, 7 and 8 are **thresholds** — counted or sampled, and failing one
+withholds confirmation without discarding the window.
 
 1. campaign `ACTIVE`, not past `endAt`; drop inside its date window;
 2. drop not claimable and not claimed (claimable = fully progressed — the
@@ -1538,16 +1585,44 @@ requires a fresh, complete evidence window:
    campaign↔channel intersection still assigns it);
 4. the channel has not switched games (`Stream.GameID()` vs campaign game);
 5. `HasPreconditionsMet` is not explicitly false;
-6. minute-watched reports are demonstrably delivered — the broker's new
-   per-slot delivery accounting shows ≥5 successes since the last progress;
-7. ≥ `watchdogStallConfirmations` consecutive inventory observations completed
+6. *(threshold)* minute-watched reports are demonstrably delivered **and still
+   being delivered** — both halves read from a single coherent sample of the
+   broker's per-slot delivery accounting (`ReportStats`), taken once per drop per
+   evaluation pass so the count and the freshness verdict can never come from two
+   different broker snapshots:
+   - ≥5 successes since the last progress; **and**
+   - that sample shows delivery is current: a successful report exists, the most
+     recently completed **counted** attempt was not a later failure (equal
+     timestamps count as not current, since which landed last is unknowable),
+     and the last success is no older than `watchdogStallDelayMinutes`.
+
+   A send whose playback session moved mid-flight is reported *stale* and
+   increments neither counter, so a run of stale-only ticks is indistinguishable
+   from quiet-but-healthy delivery until the last success ages past the horizon.
+   What currentness reads is a timestamp inside the last published snapshot, not
+   the health of the loop that publishes it: a wedged broker that stops
+   republishing freezes that timestamp, and the threshold keeps holding until it
+   ages past the horizon. `BrokerSnapshot.EvaluatedAt` exists to answer that
+   separately; nothing consumes it yet.
+
+   When the accounting cannot be read at all, the currentness half fails closed:
+   the previously counted tally is retained and still published, but on its own
+   it can no longer confirm anything. (The ordinary cause is a slotted channel that
+   has had no counted send outcome yet, since the broker creates an entry only on
+   a counted outcome; a login that has fully LEFT the allocation never reaches
+   this threshold, because gate 3 fails first.) When the counter restarts *below* the recorded
+   baseline — the same login lost and regained its slot, so the broker's per-slot
+   counters began a new tenure — the new tenure is adopted as the baseline and
+   the count restarts from it. Neither is a gate failure: the evidence window
+   survives both;
+7. *(threshold)* ≥ `watchdogStallConfirmations` consecutive inventory observations completed
    **successfully** without progress ("checked and unchanged", never "could not
    check" — the tracker's progress sync now records
    `ProgressLastSyncAt`/`ProgressLastError`, errored reads never count, one
    observation is never counted twice, and the observation cursor is seeded on
    episode start so the read whose data *showed* the last progress — or one
    completed before tracking began — can never count);
-8. more than `watchdogStallDelayMinutes` of evidence-window time;
+8. *(threshold)* more than `watchdogStallDelayMinutes` of evidence-window time;
 9. inventory currently observable: the last progress-sync attempt did not
    error, and a successful observation completed within the stall-delay window
    (an invisible Twitch-side credit during an inventory outage must not be
