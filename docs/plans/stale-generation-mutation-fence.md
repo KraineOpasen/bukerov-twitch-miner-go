@@ -251,8 +251,8 @@ Both halves of the required stub set are therefore private to *different* packag
 package can hold both. Closing this last element would require adding an exported, production-only
 testing API to `internal/miner` — which the contract forbids.
 
-What `App` contributes to a replacement beyond the controller is two things, and the test reproduces
-one of them directly rather than assuming it away:
+What `App` contributes to a replacement beyond the controller is set out below. The test reproduces
+the first item directly rather than assuming it away; the rest are what this deviation costs:
 
 - **`web.Server.SetLifecycleController`** (`internal/app/app.go:480`) — load-bearing for this route,
   because `handleAPIPolicyMode` consults `lifecycleMutationBlocked()` *before* it samples the provider.
@@ -263,5 +263,25 @@ one of them directly rather than assuming it away:
   `setupComponents`. Verified on base: the in-gap request is answered **200 OK**, not 409, so the 409
   gate demonstrably does not cover this window and the miner-side fence is the only backstop. The test
   asserts `!= 409` explicitly so it can never pass by being refused upstream of the fence.
-- **The generation config handoff**, already covered on its own by
+- **The generation config handoff.** `App.nextGenerationConfig` sources the next generation's config
+  from the **outgoing miner's in-memory `CurrentConfig()`** (`internal/app/app.go`), not from disk.
+  This test's factory reads the file instead — the stricter choice for these assertions, since they
+  then observe what actually reached disk rather than a value inherited from the generation under
+  test, but it means the test does not exercise App's real in-memory handoff, which is the very path
+  a stale mutation would corrupt. That handoff is covered on its own by
   `internal/app/generation_config_test.go` (PR #200).
+- **Five controller inputs this test does not construct**, since it builds
+  `lifecycle.New(Config{Factory, StatusSink})` directly: the persistence decorator, the real
+  `lifecycleStatusAdapter` sink, `ForceRunning`, `NoControlSurface`, and `UpdaterRun`. `minerFactory`
+  additionally calls `SetDashboardConfig`/`SetAnalyticsService` and publishes `app.currentMiner`
+  before returning.
+- **`wireDirtyTeardownClassifier`**, which widens `IsDirtyTeardownError` to also match
+  `miner.IsJoinTimeoutError`. On a **dirty** teardown `runRestart` returns before
+  `launchFreshGeneration`, so production never opens this gap at all in that case. This test's
+  teardown is clean, so its path is unaffected — but the window is a **clean-teardown** phenomenon
+  and nothing here should be read as covering the dirty one.
+
+An earlier draft of this section called the handoff simply "already covered" and listed only two App
+contributions. That understated the gap. `generation_config_test.go`'s own header disclaims coverage
+of `buildWith`'s Factory closure, persistence decorator, status sink and flags, so **no test covers
+App's real controller wiring** — this deviation does not claim otherwise.

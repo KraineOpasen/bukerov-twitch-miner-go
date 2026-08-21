@@ -62,24 +62,31 @@ func TestControllerDrivenReplacementGapRefusesStaleMutation(t *testing.T) {
 		t.Fatalf("database.Open: %v", err)
 	}
 
-	seed := config.DefaultConfig()
-	seed.Username = "lifecycle_gap_tester"
-	seed.Streamers = nil
-	seed.EnableAnalytics = false
-	seed.Discord.Enabled = false
-	seed.Debug.Enabled = false
-	seed.CampaignPolicy = string(policy.ModeGameOrder)
-
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
 	port := probe.Addr().(*net.TCPAddr).Port
 	_ = probe.Close()
-	seed.Analytics.Host = "127.0.0.1"
-	seed.Analytics.Port = port
 
-	if err := config.SaveConfig(configPath, &seed); err != nil {
+	// Built fresh on every call, never copied from a shared value: a
+	// generation MUTATES the config it is handed, and config.Config carries
+	// maps, so a struct copy would still alias them across generations.
+	newConfig := func() *config.Config {
+		c := config.DefaultConfig()
+		c.Username = "lifecycle_gap_tester"
+		c.Streamers = nil
+		c.EnableAnalytics = false
+		c.Discord.Enabled = false
+		c.Debug.Enabled = false
+		c.CampaignPolicy = string(policy.ModeGameOrder)
+		c.Analytics.Host = "127.0.0.1"
+		c.Analytics.Port = port
+		return &c
+	}
+	seed := newConfig()
+
+	if err := config.SaveConfig(configPath, seed); err != nil {
 		t.Fatalf("seed config.json: %v", err)
 	}
 
@@ -111,19 +118,25 @@ func TestControllerDrivenReplacementGapRefusesStaleMutation(t *testing.T) {
 		genN      = 0
 		genNPlus1 = 1
 	)
-	built := genN // Factory is worker-goroutine-only, never concurrent
-	//             (internal/lifecycle/worker.go:78), so this needs no lock.
+	built := genN // Factory is called only from the worker goroutine
+	//             (internal/lifecycle/worker.go:633), so this needs no lock.
+
+	// The Factory runs on the worker goroutine, which can outlive a failing
+	// test; reporting through t there risks logging after the test completed.
+	// Errors are recorded and asserted on the test's own goroutine instead.
+	loadErrs := make(chan error, 4)
 
 	factory := func() lifecycle.Runner {
-		// Each generation starts from the last committed config, exactly as
-		// App.nextGenerationConfig does.
+		// Each generation starts from the last COMMITTED config. Note this is
+		// deliberately NOT how App.nextGenerationConfig sources it: App samples
+		// the OUTGOING miner's in-memory CurrentConfig() (internal/app/app.go),
+		// whereas this reads the file. Reading the file is the stricter choice
+		// here — it means the post-gap assertions observe what actually reached
+		// disk rather than a value inherited from the generation under test.
 		cfg, err := config.LoadConfig(configPath)
 		if err != nil {
-			// Never alias &seed here: the generation MUTATES the config it is
-			// given, and the test goroutine still reads seed.
-			t.Errorf("generation config load: %v", err)
-			fallback := seed
-			cfg = &fallback
+			loadErrs <- err
+			cfg = newConfig()
 		}
 		m := New(cfg, configPath)
 		m.SetDatabase(db)
@@ -198,9 +211,16 @@ func TestControllerDrivenReplacementGapRefusesStaleMutation(t *testing.T) {
 		t.Fatalf("seeded on-disk CampaignPolicy = %q, want %q", got, want)
 	}
 
-	// A REAL controller-driven replacement. Submit blocks until the worker
-	// accepts, and the worker is about to block awaiting N's teardown, so this
-	// runs on its own goroutine.
+	// Drain every status generation N has published BEFORE asking for the
+	// restart, so the "running" awaited below is unambiguously N+1's. Without
+	// this the barrier is decorative: N's own launch already published
+	// "running" into the buffer, awaitStatus would consume THAT and return
+	// without waiting for the restart transition to clear at all.
+	sink.drain()
+
+	// A REAL controller-driven replacement. Submit does not block on the
+	// worker (its cmdCh send is non-blocking), but it is run on its own
+	// goroutine anyway so the test can never wedge if that ever changes.
 	restarted := make(chan lifecycle.SubmitResult, 1)
 	go func() { restarted <- ctrl.Restart(context.Background()) }()
 
@@ -276,6 +296,16 @@ func TestControllerDrivenReplacementGapRefusesStaleMutation(t *testing.T) {
 		t.Fatal("Restart never returned")
 	}
 
+	for {
+		select {
+		case err := <-loadErrs:
+			t.Errorf("generation config load: %v", err)
+			continue
+		default:
+		}
+		break
+	}
+
 	resumed := postForm(t, baseURL, "/api/policy/mode", url.Values{
 		"mode": {string(policy.ModeSmart)},
 	})
@@ -304,6 +334,18 @@ func (s *gapStatusSink) SetStatus(status, _ string) {
 }
 
 func (s *gapStatusSink) SetGeneration(uint64) {}
+
+// drain discards every status published so far, so a subsequent awaitStatus
+// can only be satisfied by a status published AFTER this call.
+func (s *gapStatusSink) drain() {
+	for {
+		select {
+		case <-s.statuses:
+		default:
+			return
+		}
+	}
+}
 
 // awaitStatus blocks until the sink reports the wanted observed state.
 func awaitStatus(t *testing.T, sink *gapStatusSink, want string) {
