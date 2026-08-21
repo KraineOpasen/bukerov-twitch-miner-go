@@ -203,3 +203,65 @@ at `miner.go:2145-2153`).
 A1-A3 policy repro red→green · A5-A8 all four fenced · A4 visible failure during the gap · A9 normal
 mutation resumes on N+1 · A10 acknowledged-before-retirement survives into the handoff · A11 refused
 changes neither memory nor disk · A12 never two accepting generations · A13 `-race` clean.
+
+## Contract verification: the integrated seam (corrective pass)
+
+The owner's contract required the RED reproduction to be **one** test containing all of: a
+process-level App/web `Server`; a **real `lifecycle.Controller` generation transition**; generation N
+registering providers through the real `setupComponents`; N retiring; **N+1 deterministically held
+short of provider registration**; an HTTP configuration mutation in that gap; RED on the pinned base;
+GREEN after the fix.
+
+The first pass did **not** satisfy that literally, and the two tests it offered are not jointly
+equivalent to it:
+
+- `stale_generation_fence_test.go` never imports `internal/lifecycle`, so no real controller-driven
+  replacement occurs; `TestOnlyOneGenerationAcceptsMutationAtATime` does build two generations, but
+  both reach `setupComponents` — that is the *post-gap* state, not the gap.
+- `internal/app`'s `genHarness` does drive a real controller, but its factory wraps the real miner in
+  `ctrlFakeRunner`, so real `Miner.Run` — and therefore real provider registration — never executes.
+
+`TestControllerDrivenReplacementGapRefusesStaleMutation`
+(`internal/miner/lifecycle_replacement_gap_test.go`) closes that gap. It drives a real
+`lifecycle.Controller` whose `Factory` returns real `*Miner` generations over one process-level
+`web.Server`, uses `ctrl.Restart` for a genuine replacement, and parks generation N+1 inside its
+authenticate stage — which `Run` reaches *before* `setupComponents` — on a channel, never a sleep.
+`runRestart` (`internal/lifecycle/worker.go:769`) cancels N and **awaits its `Run` return** before
+calling `Factory` for N+1, so the window the test holds open is the production window exactly.
+
+Verified RED against a pristine checkout of base `5266736` (only test helpers ported; **zero** tracked
+production files modified): the in-gap `POST /api/policy/mode` answered **200 OK**, moved the retired
+generation's `CampaignPolicy` to `SMART`, and rewrote `config.json` to `SMART`. GREEN on this branch,
+20/20 under `-race`.
+
+### Recorded deviation: the `App` element
+
+One element of requirement (1) is **not** met and is not silently claimed: the test uses the real
+process-level `web.Server`, but not the literal `app.App`. This is a hard language constraint, proven
+rather than asserted:
+
+- `internal/app` imports `internal/miner`, so a `package miner` test importing `internal/app` fails to
+  compile — `import cycle not allowed in test` (verified with a throwaway probe).
+- `app.minerFactory` is unexported, so no test outside `package app` can build generations through
+  App's real factory.
+- `Miner.authenticateFn` / `startMiningFn` are unexported with no `export_test.go` and no exported
+  setter, so `package app` cannot park a generation short of `setupComponents`.
+
+Both halves of the required stub set are therefore private to *different* packages, and no single test
+package can hold both. Closing this last element would require adding an exported, production-only
+testing API to `internal/miner` — which the contract forbids.
+
+What `App` contributes to a replacement beyond the controller is two things, and the test reproduces
+one of them directly rather than assuming it away:
+
+- **`web.Server.SetLifecycleController`** (`internal/app/app.go:480`) — load-bearing for this route,
+  because `handleAPIPolicyMode` consults `lifecycleMutationBlocked()` *before* it samples the provider.
+  The test wires the real controller into the real server itself, so the handler runs its real gate.
+  That gate is **open** at the moment under test: `*Miner` does not implement
+  `lifecycle.ReadySignaler`, so the worker marks a generation ready the instant its goroutine launches
+  — observed returns to `running` and `Transition` to `TransitionNone` while N+1 is still short of
+  `setupComponents`. Verified on base: the in-gap request is answered **200 OK**, not 409, so the 409
+  gate demonstrably does not cover this window and the miner-side fence is the only backstop. The test
+  asserts `!= 409` explicitly so it can never pass by being refused upstream of the fence.
+- **The generation config handoff**, already covered on its own by
+  `internal/app/generation_config_test.go` (PR #200).
