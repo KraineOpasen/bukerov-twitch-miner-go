@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
@@ -486,6 +487,135 @@ func TestWatchdogHealthyWhileProgressAdvances(t *testing.T) {
 	}
 	if syncNow, triggered := h.drops.counts(); syncNow != 0 || triggered != 0 {
 		t.Fatalf("no recovery work while healthy, got syncNow=%d triggered=%d", syncNow, triggered)
+	}
+}
+
+func recoveredEventCount() int {
+	n := 0
+	for _, event := range events.Recent(200) {
+		if event.Type == events.TypeDropRecovered {
+			n++
+		}
+	}
+	return n
+}
+
+// This is the primary regression for the former LastMinutes comparison. On
+// the buggy implementation, 90 lowers LastMinutes and the restored 100 then
+// falsely enters the progress branch, resetting RecoveryStage to zero.
+func TestWatchdogRestoredDropMinutesAreNotProgress(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+	h.w.mu.Lock()
+	h.w.states["camp-1\x00drop-1"].RecoveryStage = 2
+	h.w.mu.Unlock()
+
+	h.campaign.Drops[0].CurrentMinutesWatched = 90
+	h.tick(time.Minute, true, 0)
+	h.campaign.Drops[0].CurrentMinutesWatched = 100
+	h.tick(time.Minute, true, 0)
+
+	if got := h.state(t); got.LastMinutes != 100 || got.RecoveryStage != 2 {
+		t.Fatalf("100 -> 90 -> 100 must not be progress, got %+v", got)
+	}
+}
+
+// A regressed inventory snapshot may later be repaired to its former value.
+// Neither observation is new progress: only a value above the episode's
+// private high-water may recover/reset the watchdog.
+func TestWatchdogDropProgressHighWaterRegressionRestorationAndRecovery(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now) // seed both latest=100 and high-water=100
+
+	h.w.mu.Lock()
+	st := h.w.states["camp-1\x00drop-1"]
+	st.Status = ProgressStalled
+	st.RecoveryStage = 3
+	st.RecoveryStageName = "stream info refresh"
+	st.pending = &pendingRecovery{requestID: "pending-restoration"}
+	st.avoidedChannel = "chan"
+	st.notifiedStalled = true
+	h.w.mu.Unlock()
+	h.w.avoid.Avoid("chan", h.now.Add(time.Hour), "test")
+
+	beforeEvents := recoveredEventCount()
+	for _, minutes := range []int{90, 100, 40, 80, 99, 100} {
+		h.campaign.Drops[0].CurrentMinutesWatched = minutes
+		h.tick(time.Minute, true, 0)
+		got := h.state(t)
+		if got.LastMinutes != minutes {
+			t.Fatalf("LastMinutes must publish latest observation %d, got %+v", minutes, got)
+		}
+		if got.RecoveryStage != 3 || !h.w.avoid.IsAvoided("chan") {
+			t.Fatalf("restoration at/below high-water must preserve recovery state and avoidance, got %+v", got)
+		}
+		h.w.mu.Lock()
+		if st.progressHighWater != 100 || st.pending == nil || !st.notifiedStalled {
+			t.Fatalf("restoration mutated private episode controls: %+v", st)
+		}
+		h.w.mu.Unlock()
+	}
+	if got := len(h.notifier.byKind("recovered")); got != 0 {
+		t.Fatalf("restoration must not notify recovered, got %d", got)
+	}
+	if got := recoveredEventCount(); got != beforeEvents {
+		t.Fatalf("restoration must not emit drop_recovered: before=%d after=%d", beforeEvents, got)
+	}
+
+	h.campaign.Drops[0].CurrentMinutesWatched = 101
+	h.tick(time.Minute, true, 0)
+	got := h.state(t)
+	if got.LastMinutes != 101 || got.RecoveryStage != 0 || got.Status != ProgressHealthy {
+		t.Fatalf("H+1 must perform normal recovery exactly once, got %+v", got)
+	}
+	if n := len(h.notifier.byKind("recovered")); n != 1 {
+		t.Fatalf("H+1 must notify exactly once, got %d", n)
+	}
+	if h.w.avoid.IsAvoided("chan") {
+		t.Fatal("genuine H+1 progress must clear the avoided channel")
+	}
+
+	// The state replacement in the progress branch must retain the new mark.
+	for _, minutes := range []int{40, 101} {
+		h.campaign.Drops[0].CurrentMinutesWatched = minutes
+		h.tick(time.Minute, true, 0)
+	}
+	if n := len(h.notifier.byKind("recovered")); n != 1 {
+		t.Fatalf("101 -> 40 -> 101 must not retrigger recovery, got %d notifications", n)
+	}
+	h.w.mu.Lock()
+	if st.progressHighWater != 101 || st.LastMinutes != 101 {
+		t.Fatalf("state replacement lost high-water: %+v", st)
+	}
+	h.w.mu.Unlock()
+}
+
+func TestWatchdogNewTrackedEpisodeSeedsIndependentProgressHighWater(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+
+	// Claimability is a real lifecycle exit from the tracked set.
+	h.campaign.Drops[0].IsClaimable = true
+	h.tick(time.Minute, true, 0)
+	if got := h.w.Snapshot().Drops; len(got) != 0 {
+		t.Fatalf("claimable drop must destroy tracked episode, got %+v", got)
+	}
+
+	h.campaign.Drops[0].IsClaimable = false
+	h.campaign.Drops[0].CurrentMinutesWatched = 40
+	h.tick(time.Minute, true, 0)
+	h.w.mu.Lock()
+	st := h.w.states["camp-1\x00drop-1"]
+	if st == nil || st.progressHighWater != 40 || st.LastMinutes != 40 {
+		t.Fatalf("new lower episode must seed its own high-water, got %+v", st)
+	}
+	h.w.mu.Unlock()
+
+	seededAt := h.state(t).LastProgressAt
+	h.campaign.Drops[0].CurrentMinutesWatched = 41
+	h.tick(time.Minute, true, 0)
+	if got := h.state(t); got.LastMinutes != 41 || !got.LastProgressAt.After(seededAt) {
+		t.Fatalf("new episode H+1 must be genuine progress, got %+v", got)
 	}
 }
 
