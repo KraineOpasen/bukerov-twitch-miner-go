@@ -1446,28 +1446,110 @@ func (m *Miner) pollBonuses() {
 	}
 }
 
-func (m *Miner) streamCheckLoop(ctx context.Context) {
-	interval := time.Duration(m.config.RateLimits.StreamCheckInterval) * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+type streamCheckTimer interface {
+	Chan() <-chan time.Time
+	Reset(time.Time) bool
+	Stop() bool
+}
 
-	m.mu.Lock()
-	m.nextStreamCheck = time.Now().Add(interval)
-	m.mu.Unlock()
+type realStreamCheckTimer struct {
+	timer *time.Timer
+}
+
+func (t *realStreamCheckTimer) Chan() <-chan time.Time { return t.timer.C }
+func (t *realStreamCheckTimer) Reset(deadline time.Time) bool {
+	return t.timer.Reset(time.Until(deadline))
+}
+func (t *realStreamCheckTimer) Stop() bool { return t.timer.Stop() }
+
+type streamCheckLoopDeps struct {
+	now                        func() time.Time
+	newTimer                   func(time.Time) streamCheckTimer
+	checkAll                   func()
+	checkUnchecked             func(time.Duration, time.Time)
+	beforeSelectedIntervalRead func()
+}
+
+func (m *Miner) streamCheckLoop(ctx context.Context) {
+	m.runStreamCheckLoop(ctx, streamCheckLoopDeps{
+		now: time.Now,
+		newTimer: func(deadline time.Time) streamCheckTimer {
+			return &realStreamCheckTimer{timer: time.NewTimer(time.Until(deadline))}
+		},
+		checkAll:       m.checkAllStreamers,
+		checkUnchecked: m.checkUncheckedStreamers,
+	})
+}
+
+func (m *Miner) runStreamCheckLoop(ctx context.Context, deps streamCheckLoopDeps) {
+	interval := m.currentStreamCheckInterval()
+	deadline := deps.now().Add(interval)
+	timer := deps.newTimer(deadline)
+	defer timer.Stop()
+
+	m.setNextStreamCheck(deadline)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			m.checkAllStreamers()
-			m.mu.Lock()
-			m.nextStreamCheck = time.Now().Add(interval)
-			m.mu.Unlock()
+		case <-timer.Chan():
+			if ctx.Err() != nil {
+				return
+			}
+			if deps.beforeSelectedIntervalRead != nil {
+				deps.beforeSelectedIntervalRead()
+			}
+			latest := m.currentStreamCheckInterval()
+			if ctx.Err() != nil {
+				return
+			}
+			if latest != interval {
+				interval = latest
+				m.resetStreamCheckTimer(timer, deps.now(), interval)
+				continue
+			}
+
+			deps.checkAll()
+			interval = m.currentStreamCheckInterval()
+			m.resetStreamCheckTimer(timer, deps.now(), interval)
 		case <-m.streamCheckTrigger:
-			m.checkUncheckedStreamers()
+			if ctx.Err() != nil {
+				return
+			}
+			if deps.beforeSelectedIntervalRead != nil {
+				deps.beforeSelectedIntervalRead()
+			}
+			latest := m.currentStreamCheckInterval()
+			if ctx.Err() != nil {
+				return
+			}
+			now := deps.now()
+			if latest != interval {
+				interval = latest
+				m.resetStreamCheckTimer(timer, now, interval)
+			}
+			deps.checkUnchecked(interval, now)
 		}
 	}
+}
+
+func (m *Miner) currentStreamCheckInterval() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return time.Duration(m.config.RateLimits.StreamCheckInterval) * time.Second
+}
+
+func (m *Miner) setNextStreamCheck(next time.Time) {
+	m.mu.Lock()
+	m.nextStreamCheck = next
+	m.mu.Unlock()
+}
+
+func (m *Miner) resetStreamCheckTimer(timer streamCheckTimer, now time.Time, interval time.Duration) {
+	deadline := now.Add(interval)
+	timer.Reset(deadline)
+	m.setNextStreamCheck(deadline)
 }
 
 // chatRosterMembership is the ChatManager.SetRosterMembership predicate
@@ -1505,10 +1587,7 @@ func (m *Miner) checkAllStreamers() {
 	}
 }
 
-func (m *Miner) checkUncheckedStreamers() {
-	interval := time.Duration(m.config.RateLimits.StreamCheckInterval) * time.Second
-	now := time.Now()
-
+func (m *Miner) checkUncheckedStreamers(interval time.Duration, now time.Time) {
 	for _, s := range m.streamers.All() {
 		lastChecked := s.GetLastChecked()
 		if lastChecked.IsZero() || now.Sub(lastChecked) >= interval {
@@ -2319,6 +2398,7 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 			return fmt.Errorf("settings apply rejected; no changes were made: persist config: %w", err)
 		}
 	}
+	streamCheckIntervalChanged := m.config.RateLimits.StreamCheckInterval != candidate.RateLimits.StreamCheckInterval
 	m.config = candidate
 	m.mu.Unlock()
 
@@ -2329,7 +2409,7 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.finishApply(ctx, coord, candidate, added, removed, changed, renamed)
+	m.finishApply(ctx, coord, candidate, added, removed, changed, renamed, streamCheckIntervalChanged)
 	return nil
 }
 
@@ -2444,6 +2524,7 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 			return fmt.Errorf("settings apply rejected; no changes were made: persist config: %w", err)
 		}
 	}
+	streamCheckIntervalChanged := m.config.RateLimits.StreamCheckInterval != candidate.RateLimits.StreamCheckInterval
 	m.config = candidate
 	for _, login := range removedLogins { // I4: atomic with the publish
 		delete(m.autoRedeemState, login)
@@ -2462,7 +2543,7 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, streamCheckIntervalChanged)
 	return nil
 }
 
@@ -2605,6 +2686,7 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 			return fmt.Errorf("rename transaction aborted: persisting config: %w", err)
 		}
 	}
+	streamCheckIntervalChanged := m.config.RateLimits.StreamCheckInterval != candidate.RateLimits.StreamCheckInterval
 	m.config = candidate
 	stateClashes := migrateAutoRedeemRuntimeState(m.autoRedeemState, plannedRenames) // C4: same section as the publish
 	for k := range stateClashes {
@@ -2630,7 +2712,7 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 
 	critB, cancelB := context.WithTimeout(context.WithoutCancel(ctx), purgeBudget)
 	defer cancelB()
-	m.finishApply(critB, coord, candidate, added, removed, changed, renamed)
+	m.finishApply(critB, coord, candidate, added, removed, changed, renamed, streamCheckIntervalChanged)
 	return nil
 }
 
@@ -2790,7 +2872,7 @@ func (m *Miner) snapshotConfigLocked() *config.Config {
 // this one apply — passed through to applyStreamerDeletions rather than
 // re-read from m.runCtx/m.streamerLifecycle here, so this function never
 // second-guesses the caller's own resolution of either value.
-func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent) {
+func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordinator, newConfig *config.Config, added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, streamCheckIntervalChanged bool) {
 	m.mu.Lock()
 	m.config = newConfig
 	migrateAutoRedeemRuntimeState(m.autoRedeemState, renamed)
@@ -2858,6 +2940,8 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 		if webServer != nil {
 			webServer.AttachStreamers(allStreamers)
 		}
+	}
+	if len(added) > 0 || len(removed) > 0 || streamCheckIntervalChanged {
 		m.triggerStreamCheck()
 	}
 
