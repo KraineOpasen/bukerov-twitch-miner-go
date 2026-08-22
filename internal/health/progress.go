@@ -143,6 +143,10 @@ type ProgressSnapshot struct {
 // campaignID+dropID). The embedded DropProgress is the published part.
 type dropState struct {
 	DropProgress
+	// progressHighWater is the greatest minutes value observed in this tracked
+	// episode. LastMinutes remains the latest (possibly regressed) value exposed
+	// to operators; only this private watermark decides whether progress is new.
+	progressHighWater int
 
 	// evidenceSince is when the current uninterrupted stall-evidence window
 	// began: the moment every confirmation gate started holding. Zero while any
@@ -680,6 +684,7 @@ func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, sync drops.SyncS
 			Status:         ProgressHealthy,
 			Detail:         "tracking started",
 		},
+			progressHighWater: drop.CurrentMinutesWatched,
 			// Seed the observation cursor so an inventory read that completed
 			// BEFORE tracking began can never count as the first no-progress
 			// observation.
@@ -755,7 +760,8 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 		st.ReportsSinceProgress = ev.stats.Successes - st.baselineReports
 	}
 
-	if drop.CurrentMinutesWatched > st.LastMinutes {
+	if drop.CurrentMinutesWatched > st.progressHighWater {
+		progressHighWater := drop.CurrentMinutesWatched
 		recovered := st.notifiedStalled
 		if recovered && w.notifier != nil {
 			w.notifier.NotifyDropRecovered(st.CampaignName, st.DropName, channel,
@@ -779,7 +785,8 @@ func (w *ProgressWatchdog) observeProgress(st *dropState, campaign *models.Campa
 			Status:         ProgressHealthy,
 			Detail:         fmt.Sprintf("progress advancing: %d/%d minutes", drop.CurrentMinutesWatched, drop.MinutesRequired),
 		},
-			statsChannel: channel,
+			progressHighWater: progressHighWater,
+			statsChannel:      channel,
 			// Seed the observation cursor so the very sync whose data showed
 			// this progress can never be re-counted as a no-progress
 			// observation of the fresh episode. The evidence window itself
