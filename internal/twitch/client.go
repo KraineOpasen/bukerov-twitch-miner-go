@@ -146,6 +146,9 @@ type TwitchClient struct {
 	clientVersion string
 	userAgent     string
 	client        *http.Client
+	// gqlRetrySleep is time.Sleep in production; tests replace it to exercise
+	// bounded retry/exhaustion deterministically without real backoff delays.
+	gqlRetrySleep func(time.Duration)
 
 	// gqlURL is the GraphQL endpoint. It defaults to constants.GQLURL in
 	// production and is only overridden by tests (setGQLEndpoint) to point at a
@@ -232,6 +235,7 @@ func NewTwitchClient(twitchAuth *auth.TwitchAuth, deviceID string) *TwitchClient
 		clientVersion:          constants.DefaultClientVersion,
 		userAgent:              constants.TVUserAgent,
 		client:                 &http.Client{Timeout: 30 * time.Second},
+		gqlRetrySleep:          time.Sleep,
 		gqlURL:                 constants.GQLURL,
 		defaultClientID:        constants.ClientIDTV,
 		opClientID:             make(map[string]string),
@@ -687,11 +691,12 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 
 // doGQLRequestWithRetry sends the given already-marshaled GQL request body
 // using the supplied client ID, retrying with exponential backoff on transient
-// failures: network-level errors (timeouts, connection resets) and HTTP 429/5xx
-// responses. A 429's Retry-After header, when present, is honored in place of
-// the computed backoff (see gql.RetryWait). Other HTTP errors (4xx auth/logic
-// errors) are returned immediately since retrying them would just reproduce the
-// same failure. A successful response never incurs a wait.
+// failures: network-level errors (timeouts, connection resets), response-body
+// I/O failures after a 2xx status, and HTTP 429/5xx responses. A 429's
+// Retry-After header, when present, is honored in place of the computed backoff
+// (see gql.RetryWait). Body-read failures do not broaden 3xx/4xx handling: those
+// statuses remain non-transient, while 5xx remains transient independently of
+// whether its body was readable. A successful response never incurs a wait.
 func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
 	var lastErr error
 
@@ -710,7 +715,9 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 
 		lastErr = err
 
-		transient := statusCode == 0 || gql.IsTransientStatus(statusCode)
+		var readErr *responseBodyReadError
+		transient := statusCode == 0 || gql.IsTransientStatus(statusCode) ||
+			(errors.As(err, &readErr) && statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices)
 		if !transient {
 			return nil, statusCode, err
 		}
@@ -729,7 +736,7 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 			"status", statusCode,
 			"error", lastErr,
 		)
-		time.Sleep(wait)
+		c.gqlRetrySleep(wait)
 	}
 
 	c.gqlFailures.mark(time.Now())
@@ -741,6 +748,16 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 
 	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
 }
+
+// responseBodyReadError distinguishes an incomplete response transport from an
+// authoritative HTTP response. The observed status is still returned
+// separately so only successful 2xx responses gain transport retry semantics.
+type responseBodyReadError struct{ err error }
+
+func (e *responseBodyReadError) Error() string {
+	return fmt.Sprintf("failed to read response: %v", e.err)
+}
+func (e *responseBodyReadError) Unwrap() error { return e.err }
 
 // doGQLOnce performs a single HTTP round trip. It returns the response body on
 // success, or an error with the observed status code (0 for network-level
@@ -755,7 +772,7 @@ func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, time.Duration,
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, 0, fmt.Errorf("failed to read response: %w", err)
+		return nil, resp.StatusCode, 0, &responseBodyReadError{err: err}
 	}
 
 	if gql.IsTransientStatus(resp.StatusCode) {

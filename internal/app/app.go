@@ -630,12 +630,19 @@ func (a lifecycleStatusAdapter) SetGeneration(gen uint64) {
 //
 // There is deliberately no fallible step in THIS function, so there is no
 // acquisition failure for it to fall back from. That is a statement about the
-// handoff, not a durability guarantee about what is handed over: the in-place
-// writers (ApplyCampaignPolicy, SetDropRule, and the owner-identity
-// reconciliation) only LOG a failed config.SaveConfig and keep the change
-// live, so a value that never reached disk is a value this handoff carries
-// forward. Miner.CurrentConfig documents that asymmetry at its source; closing
-// it means making those writers fail closed, which belongs with them.
+// handoff, not a durability guarantee about what is handed over — though the
+// gap between the two is now a single path: the config writers, in-place
+// (ApplyCampaignPolicy, SetDropRule, SetAutoRedeem) and candidate-publishing
+// alike, make persistence their commit point and roll back or discard a
+// value whose save failed, so an acknowledged mutation is durable at its
+// commit point (the applySettings clone-window residual noted at the end of
+// this comment still bounds what survives a concurrent removal/rename
+// apply — a separate, pre-existing residual). The
+// exception is the owner-identity reconciliation in Run, which only WARNS on
+// a failed config.SaveConfig and keeps the adopted login live (a documented
+// startup contract — retried on the next restart), so that one value can be
+// carried forward by this handoff without having reached disk.
+// Miner.CurrentConfig documents the same caveat at its source.
 //
 // In particular this does NOT reload
 // config.json: config.LoadConfig re-reads DISCORD_BOT_TOKEN from the

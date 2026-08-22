@@ -76,10 +76,10 @@ func applyConfigRenames(cfg *config.Config, renamed []streamer.RenameEvent) {
 // A privacy-safe warning is logged either way (only logins + ChannelID-free
 // context, matching I13's log budget in spirit even though this specific
 // warning is diagnostic, not the rename notice itself). [R5] When this runs
-// from the commit-point refresh (rewards.go), it runs under m.mu — slog.Warn
-// already runs under m.mu on other paths in this package (finishApply's
-// non-persisted SaveConfig branch, miner.go; policy.go via persistLocked;
-// health.go), so this is not a new pattern.
+// from the commit-point refresh (rewards.go), it runs under m.mu — a
+// bounded, rename-rare diagnostic write to the logger, accepted under the
+// lock rather than deferred, since handing it out of the commit section
+// would cost more machinery than the log line is worth.
 //
 // Returns true when the clash (destination-wins) branch fired, so a caller
 // tracking commit-time AutoRedeem generations (migrateAutoRedeemGenLocked)

@@ -2045,14 +2045,16 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 // ApplyHealthSettings in health.go) build a candidate and publish it into
 // m.config ONLY past their own commit point, so a candidate whose persistence
 // failed is never published and can never be observed here. The in-place
-// writers do not work that way: ApplyCampaignPolicy and SetDropRule (policy.go)
-// mutate m.config under m.mu and call persistLocked, which only LOGS a
-// config.SaveConfig failure, and the owner-identity reconciliation in Run
-// mutates it off m.mu entirely and only warns on a failed save. Their changes
-// are therefore live, and visible here, even when the write to disk failed.
-// That is this package's existing behavior, unchanged; this accessor reports
-// it faithfully rather than implying a stricter guarantee than the writers
-// provide.
+// writers now hold the same line from the other side: ApplyCampaignPolicy and
+// SetDropRule (policy.go) and SetAutoRedeem (rewards.go) mutate m.config
+// under m.mu, persist under that same lock, and on a config.SaveConfig
+// failure restore the exact pre-call state before unlocking — so a rejected
+// in-place write is never visible here either. The one remaining caveat is
+// the owner-identity reconciliation in Run, which mutates m.config off m.mu
+// entirely and only warns on a failed save (a documented startup contract:
+// the adopted canonical login is needed immediately and the save is retried
+// on the next restart) — that change stays live, and visible here, even when
+// the write to disk failed.
 //
 // It must return a SNAPSHOT rather than the live pointer, and it must keep
 // doing so even though the mutation fence now refuses the writes that first

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
@@ -52,11 +53,19 @@ type refreshCall struct {
 }
 
 type fakeWatchView struct {
-	mu        sync.Mutex
-	slots     []string
-	watching  map[string]bool
-	successes map[string]int
-	refreshes []refreshCall
+	mu       sync.Mutex
+	slots    []string
+	watching map[string]bool
+	// stats models the broker's per-slot delivery accounting in full — the same
+	// four fields watcher.ReportStats publishes, maintained the way
+	// MinuteWatcher.noteReportOutcome maintains them, so a test can express a
+	// channel that is failing (or has gone quiet) and not only one that is
+	// succeeding. now supplies the harness clock the delivery timestamps are
+	// stamped with; nil leaves them zero.
+	stats      map[string]watcher.ReportStats
+	now        func() time.Time
+	statsReads map[string]int // ReportStats calls per login, for the sample-coherence test
+	refreshes  []refreshCall
 	// outcomes is the last correlated refresh outcome per login, as the broker
 	// would publish it. outcomeMode selects how a staged request auto-resolves so
 	// tests can model the broker succeeding/failing/going stale/skipping/never
@@ -92,11 +101,23 @@ func (f *fakeWatchView) IsWatching(login string) bool {
 func (f *fakeWatchView) ReportStats(login string) (watcher.ReportStats, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	n, ok := f.successes[login]
+	if f.statsReads == nil {
+		f.statsReads = make(map[string]int)
+	}
+	f.statsReads[login]++
+	s, ok := f.stats[login]
 	if !ok {
 		return watcher.ReportStats{}, false
 	}
-	return watcher.ReportStats{Successes: n}, true
+	return s, true
+}
+
+// statsReadCount returns how many ReportStats reads a login has taken, so a test
+// can pin the one-coherent-sample-per-drop-per-pass invariant directly.
+func (f *fakeWatchView) statsReadCount(login string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statsReads[login]
 }
 func (f *fakeWatchView) RequestSessionRefresh(req watcher.SessionRefreshRequest) {
 	f.mu.Lock()
@@ -177,13 +198,87 @@ func (f *fakeWatchView) lastRequest(login string) watcher.SessionRefreshRequest 
 	defer f.mu.Unlock()
 	return f.lastReq[login]
 }
-func (f *fakeWatchView) addSuccesses(login string, n int) {
-	f.mu.Lock()
-	if f.successes == nil {
-		f.successes = make(map[string]int)
+
+// stamp returns the harness clock, or the zero time when none is wired. It is
+// deliberately read OUTSIDE f.mu: the clock is injected by the test, and calling
+// injected code under a non-reentrant mutex is how a fake deadlocks the first
+// time someone wires a clock that reads back through it.
+func (f *fakeWatchView) stamp() time.Time {
+	if f.now == nil {
+		return time.Time{}
 	}
-	f.successes[login] += n
-	f.mu.Unlock()
+	return f.now()
+}
+
+// mutateStats applies one delivery-accounting change for a login, creating the
+// entry if the login has none yet. Creating it without mutating is meaningful on
+// its own: it models a freshly slotted channel that has published stats
+// (ReportStats returns ok) but whose first send has not landed.
+func (f *fakeWatchView) mutateStats(login string, apply func(*watcher.ReportStats, time.Time)) {
+	at := f.stamp()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stats == nil {
+		f.stats = make(map[string]watcher.ReportStats)
+	}
+	s := f.stats[login]
+	apply(&s, at)
+	f.stats[login] = s
+}
+
+// addSuccesses records n DELIVERED minute-watched reports for a login, the way
+// the broker's noteReportOutcome does: the success counter rises and LastSuccess
+// is stamped now. n <= 0 only ensures the login has published stats at all,
+// without claiming a delivery.
+func (f *fakeWatchView) addSuccesses(login string, n int) {
+	f.mutateStats(login, func(s *watcher.ReportStats, at time.Time) {
+		if n > 0 {
+			s.Successes += n
+			s.LastSuccess = at
+		}
+	})
+}
+
+// addFailures records n FAILED minute-watched sends for a login, the mirror of
+// addSuccesses: the success counter is untouched and LastFailure moves past
+// LastSuccess. This is the beacon/spade failure family — the channel keeps its
+// slot and stays eligible, only delivery stops.
+func (f *fakeWatchView) addFailures(login string, n int) {
+	f.mutateStats(login, func(s *watcher.ReportStats, at time.Time) {
+		if n > 0 {
+			s.Failures += n
+			s.LastFailure = at
+		}
+	})
+}
+
+// dropStats removes a login's published delivery accounting, as
+// publishReportStats does when the login is no longer in the slot allocation:
+// ReportStats then reports the miss (ok == false).
+func (f *fakeWatchView) dropStats(login string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.stats, login)
+}
+
+// restartStatsTenure models the broker's delivery counters restarting for an
+// UNCHANGED login: publishReportStats prunes the entry when the login misses one
+// slot allocation (internal/watcher/session.go), or applyStreamerList deletes it
+// outright, and the next delivered report re-creates it from zero. The watchdog
+// never sees a channel change, so nothing re-baselines on its behalf.
+func (f *fakeWatchView) restartStatsTenure(login string, successes int) {
+	at := f.stamp()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stats == nil {
+		f.stats = make(map[string]watcher.ReportStats)
+	}
+	fresh := watcher.ReportStats{}
+	if successes > 0 {
+		fresh.Successes = successes
+		fresh.LastSuccess = at
+	}
+	f.stats[login] = fresh
 }
 func (f *fakeWatchView) refreshCalls() []refreshCall {
 	f.mu.Lock()
@@ -277,6 +372,14 @@ func newWatchdogHarness(t *testing.T) *watchdogHarness {
 		streamer: streamer,
 		now:      base,
 	}
+	// The fake broker stamps its delivery timestamps from the same injected
+	// clock the watchdog runs on, so LastSuccess/LastFailure advance with the
+	// test's timeline exactly as noteReportOutcome advances them in production.
+	h.watch.now = func() time.Time { return h.now }
+	// Seed a published-but-empty accounting so ReportStats reports ok. The real
+	// broker only creates an entry on a counted outcome, so an all-zero entry is
+	// a harness convenience for "slotted, nothing sent yet" rather than a state
+	// noteReportOutcome can produce.
 	h.watch.addSuccesses("chan", 0)
 
 	resolver := func(login string) *models.Streamer {
@@ -297,15 +400,32 @@ func newWatchdogHarness(t *testing.T) *watchdogHarness {
 	return h
 }
 
-// tick advances time, optionally records a clean observation and delivered
-// reports, and runs one evaluation.
-func (h *watchdogHarness) tick(advance time.Duration, observe bool, reports int) {
-	h.now = h.now.Add(advance)
+// advance moves the harness clock and optionally records one clean inventory
+// observation at the new time.
+func (h *watchdogHarness) advance(d time.Duration, observe bool) {
+	h.now = h.now.Add(d)
 	if observe {
 		h.drops.observe(h.now, "")
 	}
+}
+
+// tick advances time, optionally records a clean observation and delivered
+// reports, and runs one evaluation.
+func (h *watchdogHarness) tick(advance time.Duration, observe bool, reports int) {
+	h.advance(advance, observe)
 	if reports > 0 {
 		h.watch.addSuccesses("chan", reports)
+	}
+	h.w.evaluate(h.now)
+}
+
+// tickFailing is tick's mirror for a channel that keeps its slot and its
+// eligibility but whose minute-watched sends are REJECTED: the success counter
+// freezes and LastFailure moves past LastSuccess.
+func (h *watchdogHarness) tickFailing(advance time.Duration, observe bool, failures int) {
+	h.advance(advance, observe)
+	if failures > 0 {
+		h.watch.addFailures("chan", failures)
 	}
 	h.w.evaluate(h.now)
 }
@@ -367,6 +487,135 @@ func TestWatchdogHealthyWhileProgressAdvances(t *testing.T) {
 	}
 	if syncNow, triggered := h.drops.counts(); syncNow != 0 || triggered != 0 {
 		t.Fatalf("no recovery work while healthy, got syncNow=%d triggered=%d", syncNow, triggered)
+	}
+}
+
+func recoveredEventCount() int {
+	n := 0
+	for _, event := range events.Recent(200) {
+		if event.Type == events.TypeDropRecovered {
+			n++
+		}
+	}
+	return n
+}
+
+// This is the primary regression for the former LastMinutes comparison. On
+// the buggy implementation, 90 lowers LastMinutes and the restored 100 then
+// falsely enters the progress branch, resetting RecoveryStage to zero.
+func TestWatchdogRestoredDropMinutesAreNotProgress(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+	h.w.mu.Lock()
+	h.w.states["camp-1\x00drop-1"].RecoveryStage = 2
+	h.w.mu.Unlock()
+
+	h.campaign.Drops[0].CurrentMinutesWatched = 90
+	h.tick(time.Minute, true, 0)
+	h.campaign.Drops[0].CurrentMinutesWatched = 100
+	h.tick(time.Minute, true, 0)
+
+	if got := h.state(t); got.LastMinutes != 100 || got.RecoveryStage != 2 {
+		t.Fatalf("100 -> 90 -> 100 must not be progress, got %+v", got)
+	}
+}
+
+// A regressed inventory snapshot may later be repaired to its former value.
+// Neither observation is new progress: only a value above the episode's
+// private high-water may recover/reset the watchdog.
+func TestWatchdogDropProgressHighWaterRegressionRestorationAndRecovery(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now) // seed both latest=100 and high-water=100
+
+	h.w.mu.Lock()
+	st := h.w.states["camp-1\x00drop-1"]
+	st.Status = ProgressStalled
+	st.RecoveryStage = 3
+	st.RecoveryStageName = "stream info refresh"
+	st.pending = &pendingRecovery{requestID: "pending-restoration"}
+	st.avoidedChannel = "chan"
+	st.notifiedStalled = true
+	h.w.mu.Unlock()
+	h.w.avoid.Avoid("chan", h.now.Add(time.Hour), "test")
+
+	beforeEvents := recoveredEventCount()
+	for _, minutes := range []int{90, 100, 40, 80, 99, 100} {
+		h.campaign.Drops[0].CurrentMinutesWatched = minutes
+		h.tick(time.Minute, true, 0)
+		got := h.state(t)
+		if got.LastMinutes != minutes {
+			t.Fatalf("LastMinutes must publish latest observation %d, got %+v", minutes, got)
+		}
+		if got.RecoveryStage != 3 || !h.w.avoid.IsAvoided("chan") {
+			t.Fatalf("restoration at/below high-water must preserve recovery state and avoidance, got %+v", got)
+		}
+		h.w.mu.Lock()
+		if st.progressHighWater != 100 || st.pending == nil || !st.notifiedStalled {
+			t.Fatalf("restoration mutated private episode controls: %+v", st)
+		}
+		h.w.mu.Unlock()
+	}
+	if got := len(h.notifier.byKind("recovered")); got != 0 {
+		t.Fatalf("restoration must not notify recovered, got %d", got)
+	}
+	if got := recoveredEventCount(); got != beforeEvents {
+		t.Fatalf("restoration must not emit drop_recovered: before=%d after=%d", beforeEvents, got)
+	}
+
+	h.campaign.Drops[0].CurrentMinutesWatched = 101
+	h.tick(time.Minute, true, 0)
+	got := h.state(t)
+	if got.LastMinutes != 101 || got.RecoveryStage != 0 || got.Status != ProgressHealthy {
+		t.Fatalf("H+1 must perform normal recovery exactly once, got %+v", got)
+	}
+	if n := len(h.notifier.byKind("recovered")); n != 1 {
+		t.Fatalf("H+1 must notify exactly once, got %d", n)
+	}
+	if h.w.avoid.IsAvoided("chan") {
+		t.Fatal("genuine H+1 progress must clear the avoided channel")
+	}
+
+	// The state replacement in the progress branch must retain the new mark.
+	for _, minutes := range []int{40, 101} {
+		h.campaign.Drops[0].CurrentMinutesWatched = minutes
+		h.tick(time.Minute, true, 0)
+	}
+	if n := len(h.notifier.byKind("recovered")); n != 1 {
+		t.Fatalf("101 -> 40 -> 101 must not retrigger recovery, got %d notifications", n)
+	}
+	h.w.mu.Lock()
+	if st.progressHighWater != 101 || st.LastMinutes != 101 {
+		t.Fatalf("state replacement lost high-water: %+v", st)
+	}
+	h.w.mu.Unlock()
+}
+
+func TestWatchdogNewTrackedEpisodeSeedsIndependentProgressHighWater(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.w.evaluate(h.now)
+
+	// Claimability is a real lifecycle exit from the tracked set.
+	h.campaign.Drops[0].IsClaimable = true
+	h.tick(time.Minute, true, 0)
+	if got := h.w.Snapshot().Drops; len(got) != 0 {
+		t.Fatalf("claimable drop must destroy tracked episode, got %+v", got)
+	}
+
+	h.campaign.Drops[0].IsClaimable = false
+	h.campaign.Drops[0].CurrentMinutesWatched = 40
+	h.tick(time.Minute, true, 0)
+	h.w.mu.Lock()
+	st := h.w.states["camp-1\x00drop-1"]
+	if st == nil || st.progressHighWater != 40 || st.LastMinutes != 40 {
+		t.Fatalf("new lower episode must seed its own high-water, got %+v", st)
+	}
+	h.w.mu.Unlock()
+
+	seededAt := h.state(t).LastProgressAt
+	h.campaign.Drops[0].CurrentMinutesWatched = 41
+	h.tick(time.Minute, true, 0)
+	if got := h.state(t); got.LastMinutes != 41 || !got.LastProgressAt.After(seededAt) {
+		t.Fatalf("new episode H+1 must be genuine progress, got %+v", got)
 	}
 }
 
@@ -774,6 +1023,12 @@ func TestWatchdogObservationGating(t *testing.T) {
 
 // TestWatchdogReportThresholdGates: without enough delivered minute-watched
 // reports (we cannot prove we were watching) a stall must not confirm.
+//
+// The second phase is what isolates the report threshold. In the first phase
+// nothing is ever delivered, so LastSuccess stays zero and delivery currentness
+// blocks confirmation for a reason that has nothing to do with the count — the
+// clause this test is named after would go unguarded. Delivering a fresh but
+// SHORT batch makes the tally the single failing term.
 func TestWatchdogReportThresholdGates(t *testing.T) {
 	h := newWatchdogHarness(t)
 	h.w.evaluate(h.now)
@@ -781,6 +1036,20 @@ func TestWatchdogReportThresholdGates(t *testing.T) {
 		h.tick(10*time.Minute, true, 0) // observations but no delivered reports
 	}
 	assertNoRecovery(t, h, "")
+
+	// Delivery is now demonstrably current and every other threshold is long
+	// past, but one report short of stallMinReports.
+	h.tick(10*time.Minute, true, stallMinReports-1)
+	assertNoRecovery(t, h, "delivery current")
+	if st := h.state(t); st.ReportsSinceProgress != stallMinReports-1 {
+		t.Fatalf("expected exactly one report short of the threshold, got %+v", st)
+	}
+
+	// The report that reaches the threshold confirms the stall.
+	h.tick(10*time.Minute, true, 1)
+	if _, triggered := h.drops.counts(); triggered != 1 {
+		t.Fatalf("reaching stallMinReports with current delivery must confirm, got triggered=%d", triggered)
+	}
 }
 
 // TestWatchdogStallDelayGates: observations and reports alone are not enough

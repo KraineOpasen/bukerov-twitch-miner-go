@@ -109,8 +109,11 @@ type f3Policy struct {
 	mode      string
 	decisions []policy.Decision
 	rules     map[string]config.DropRule
-	// err, when set, makes both mutators fail closed without recording the
-	// change — the shape a retired miner generation presents.
+	// err, when set, makes both mutators return it verbatim without
+	// recording the change — used for the retired-generation shape
+	// (ErrShuttingDown, stale_generation_status_test.go) and for a
+	// live-generation persistence failure
+	// (policy_persistence_status_test.go).
 	err error
 }
 
