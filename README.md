@@ -75,6 +75,8 @@ Edit `~/twitch-miner/config/config.json` with your Twitch username and the strea
 
 ### Step 2: Run the container
 
+The independent stable line uses exact immutable SemVer image tags from the dedicated stable package. There is no `latest` tag on this package. The `0.1.0` image below is an example to use after that stable version has been published; replace it with the exact version or digest you intend to run.
+
 ```bash
 docker run -d \
   --name twitch-miner \
@@ -85,7 +87,7 @@ docker run -d \
   -v ~/twitch-miner/logs:/logs \
   -v ~/twitch-miner/database:/database \
   -p 5000:5000 \
-  ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
+  ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable:0.1.0
 ```
 
 > **Note:** dashboard credentials are **required** in containers. The image
@@ -124,22 +126,30 @@ at startup with an explanatory error:
 
 ### About the image
 
-The container image is published only to the GitHub Container Registry (GHCR); there is no Docker Hub image for this fork.
+The independent stable container image is published only to the dedicated GitHub Container Registry package `ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable`; there is no Docker Hub image and no stable `latest` tag. Use an exact SemVer tag after it is published, for example:
 
 ```bash
-docker pull ghcr.io/kraineopasen/bukerov-twitch-miner-go:latest
+docker pull ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable:0.1.0
+```
+
+For production, prefer the immutable OCI digest recorded by the Stable Release workflow:
+
+```text
+ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable@sha256:<digest>
 ```
 
 ### Using Docker Compose
 
-A ready-to-use [`docker-compose.yml`](docker-compose.yml) is included. It enables
-[Automatic Updates](#automatic-updates), sets `restart: unless-stopped` (required
-for updates to take effect), and excludes the container from Watchtower:
+The included [`docker-compose.yml`](docker-compose.yml) intentionally requires `TWITCH_MINER_IMAGE` so it cannot silently fall back to the modern package or a moving tag. Stable images use `AUTO_UPDATE=false`, do not consume the repository-wide GitHub Releases update feed, and remain excluded from Watchtower. Upgrades are operator-controlled by changing the exact stable image tag or digest. `restart: unless-stopped` remains the normal container restart policy; it is not a stable self-update mechanism.
 
 ```bash
-# From a directory containing docker-compose.yml and your config/ folder
+# From a directory containing docker-compose.yml and your config/ folder.
+# 0.1.0 is an example to use after that stable release has been published.
+export TWITCH_MINER_IMAGE=ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable:0.1.0
 docker compose up -d
 ```
+
+For production, set `TWITCH_MINER_IMAGE` to the exact `ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable@sha256:<digest>` recorded for the validated release.
 
 ---
 

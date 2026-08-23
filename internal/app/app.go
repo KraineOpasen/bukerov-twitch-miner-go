@@ -403,6 +403,7 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	upd := updater.New(updater.Options{
 		Repo:           version.Repo,
 		CurrentVersion: version.Version,
+		ReleaseChannel: version.Channel,
 		Enabled:        rc.AutoUpdateEnabled,
 		CheckInterval:  rc.AutoUpdateInterval,
 		Handoff:        updStore,
