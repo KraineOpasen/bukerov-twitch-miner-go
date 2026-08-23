@@ -41,13 +41,14 @@ RUN tailwindcss \
     -o internal/web/static/css/app.css \
     --minify
 
-# Build arguments for version injection
+# Build arguments for independent version and release-channel injection.
 ARG VERSION=dev
+ARG CHANNEL=stable
 
 # Build static binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath -buildvcs=false \
-    -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${VERSION} -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Channel=${CHANNEL}" \
     -o twitch-miner-go \
     ./cmd/miner
 
@@ -88,18 +89,13 @@ ENV CONFIG_PATH=/config/config.json
 ENV DASHBOARD_HOST=0.0.0.0
 EXPOSE 5000
 
-# Auto-update is enabled by default for the container image: this image is
-# excluded from Watchtower (label com.centurylinklabs.watchtower.enable=false),
-# so the miner keeps itself current by downloading new GitHub releases and
-# atomically replacing its own binary, then exiting 0 so the restart policy
-# (restart: unless-stopped) brings it back on the new version. Set
-# AUTO_UPDATE=false to opt out, or tune AUTO_UPDATE_CHECK_INTERVAL (Go duration
-# like "12h" or a bare number of hours) to change how often it checks.
-ENV AUTO_UPDATE=true
+# Stable images never consume the repository-wide GitHub Releases update feed.
+# Upgrades are operator-controlled changes to an exact stable image tag/digest.
+ENV AUTO_UPDATE=false
 ENV AUTO_UPDATE_CHECK_INTERVAL=8h
 
-# Exclude this container from Watchtower: the miner now updates itself between
-# releases, so Watchtower must not also try to recreate it.
+# Exclude this container from Watchtower so an exact stable selection cannot
+# be silently replaced.
 LABEL com.centurylinklabs.watchtower.enable=false
 
 # Liveness probe: the scratch image has no shell or curl, so the miner binary

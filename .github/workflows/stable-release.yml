@@ -1,0 +1,144 @@
+name: Stable Release
+
+on:
+  push:
+    tags:
+      - "stable-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validation-job:
+    runs-on: ubuntu-latest
+    outputs:
+      public-version: ${{ steps.version.outputs.public-version }}
+      release-line: ${{ steps.version.outputs.release-line }}
+      release-branch: ${{ steps.version.outputs.release-branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and derive release line
+        id: version
+        env:
+          SOURCE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_TAG" =~ ^stable-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Invalid stable release tag" >&2
+            exit 1
+          fi
+          public_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          release_line="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          release_branch="release/${release_line}"
+          {
+            echo "public-version=$public_version"
+            echo "release-line=$release_line"
+            echo "release-branch=$release_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prove tag ancestry in its release branch
+        env:
+          RELEASE_BRANCH: ${{ steps.version.outputs.release-branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse HEAD^{commit})"
+          git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          git merge-base --is-ancestor "$tag_commit" "refs/remotes/origin/${RELEASE_BRANCH}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+      - name: Verify dependencies
+        run: go mod verify
+      - name: Build
+        run: go build -v ./...
+      - name: Test
+        run: go test -v -race ./...
+
+  publish:
+    needs: validation-job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE_NAME: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
+      PUBLIC_VERSION: ${{ needs.validation-job.outputs.public-version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse an existing immutable version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          error_file="$(mktemp)"
+          trap 'rm -f "$error_file"' EXIT
+          if docker manifest inspect "${IMAGE_NAME}:${PUBLIC_VERSION}" >/dev/null 2>"$error_file"; then
+            echo "Refusing to overwrite existing image ${IMAGE_NAME}:${PUBLIC_VERSION}" >&2
+            exit 1
+          fi
+          if ! grep -Eqi 'no such manifest|manifest unknown' "$error_file"; then
+            echo "Registry inspection failed closed:" >&2
+            cat "$error_file" >&2
+            exit 1
+          fi
+      - name: Build and push exact stable image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.IMAGE_NAME }}:${{ env.PUBLIC_VERSION }}
+          build-args: |
+            VERSION=${{ env.PUBLIC_VERSION }}
+            CHANNEL=stable
+          sbom: true
+          provenance: false
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Record immutable release coordinates
+        env:
+          SOURCE_TAG: ${{ github.ref_name }}
+          RELEASE_BRANCH: ${{ needs.validation-job.outputs.release-branch }}
+          OCI_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            echo "## Stable image"
+            echo "- Public version: \`$PUBLIC_VERSION\`"
+            echo "- Source tag: \`$SOURCE_TAG\`"
+            echo "- Release branch: \`$RELEASE_BRANCH\`"
+            echo "- Image: \`$IMAGE_NAME\`"
+            echo "- OCI index digest: \`$OCI_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"

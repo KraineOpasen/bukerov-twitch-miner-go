@@ -3,6 +3,10 @@ package version
 // Version is set at build time via -ldflags "-X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=..."
 var Version = "dev"
 
+// Channel identifies the release stream independently of Version. Stable
+// images override this at build time; ordinary builds retain main behavior.
+var Channel = "main"
+
 // RepoURL is the GitHub repository URL
 const RepoURL = "https://github.com/KraineOpasen/bukerov-twitch-miner-go"
 

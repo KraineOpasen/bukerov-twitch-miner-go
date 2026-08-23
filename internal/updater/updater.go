@@ -81,6 +81,9 @@ type Options struct {
 	Repo string
 	// CurrentVersion is the version of the running binary (internal/version).
 	CurrentVersion string
+	// ReleaseChannel identifies the independently published release stream.
+	// The stable stream deliberately has no GitHub Releases auto-update feed.
+	ReleaseChannel string
 	// Enabled turns on automatic download + self-replacement. When false the
 	// updater only checks and logs/notifies that an update is available.
 	Enabled bool
@@ -265,6 +268,12 @@ func defaultHandoffError(stage string, err error) {
 // the context is cancelled. It never returns an error: everything is
 // best-effort and logged.
 func (u *Updater) Run(ctx context.Context) {
+	if u.opts.ReleaseChannel == "stable" {
+		slog.Info("Auto-update disabled: stable release channel uses operator-controlled image upgrades",
+			"version", u.opts.CurrentVersion)
+		u.setPhase(PhaseDormant)
+		return
+	}
 	if !isReleaseVersion(u.opts.CurrentVersion) {
 		// Dev/dirty builds ("dev", "v1.2.3-4-gabcdef", ...) have no meaningful
 		// release to compare against and must never be silently rolled back to
