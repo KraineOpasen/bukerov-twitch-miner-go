@@ -2,11 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
-    tags:
-      - "v*"
+    branches: [release/pr148]
   pull_request:
-    branches: [main]
+    branches: [release/pr148]
 
 # Read-only by default. This workflow runs on pull_request (including from
 # untrusted contributors): it must never hold write scopes, request an OIDC
