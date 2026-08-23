@@ -530,6 +530,17 @@ func (s *skipSnapshot) activeBenefit(benefitID, gameID string) []skipRow {
 	return out
 }
 
+// sameCampaignDifferentDrop reports a proven tier mismatch. Twitch permits one
+// Benefit/Reward ID to be reused across multiple Drops in the same Campaign,
+// so overlapping campaign windows cannot make that shared family ID override
+// two different, both-present Drop IDs. Missing campaign/drop fields are not a
+// conflict: the benefit tier remains the fail-open fallback for incomplete
+// identities, while exact instance and exact composite decisions stay above it.
+func sameCampaignDifferentDrop(r skipRow, c models.RewardIdentity) bool {
+	return r.campaignID != "" && c.CampaignID != "" && r.campaignID == c.CampaignID &&
+		r.dropID != "" && c.DropID != "" && r.dropID != c.DropID
+}
+
 // decide is the PURE, I/O-free ghost-skip decision (design doc "Decide(C) ->
 // SKIP | FARM"): candidate c (a drop's RewardIdentity) plus whether Twitch
 // currently authorizes claiming it (canClaim -- Drop.CanClaim() is on *Drop,
@@ -609,10 +620,18 @@ func (s *skipSnapshot) decide(c models.RewardIdentity, canClaim bool) (skip bool
 
 	// 3. BENEFIT
 	if c.BenefitID != "" {
+		crossTier := false
 		for _, r := range s.activeBenefit(c.BenefitID, c.GameID) {
+			if sameCampaignDifferentDrop(r, c) {
+				crossTier = true
+				continue
+			}
 			if r.window.Decidable() && c.Window.Decidable() && r.window.Overlaps(c.Window) {
 				return true, "same_benefit_overlapping_window"
 			}
+		}
+		if crossTier {
+			return false, "shared_benefit_different_drop"
 		}
 		return false, "benefit_window_undecidable"
 	}
@@ -805,8 +824,8 @@ func (l *SkipLedger) Reconcile(ctx context.Context, candidates []*models.Campaig
 }
 
 // reconcileIdentity applies SH1-SH4 to every ACTIVE row matched (by composite
-// or benefit, subject to the game-conflict filter) against candidate c, then
-// runs the positive-resolution step for c's composite key.
+// or compatible benefit identity) against candidate c, then runs the
+// positive-resolution step for c's composite key.
 func (l *SkipLedger) reconcileIdentity(tx *sql.Tx, c models.RewardIdentity, canClaim bool, nowMs int64) error {
 	rows, err := l.matchingActiveRows(tx, c)
 	if err != nil {
@@ -884,8 +903,10 @@ func reconcileTransition(c models.RewardIdentity, canClaim bool, r skipRow, hasI
 
 // matchingActiveRows returns the deduplicated, deterministically-ordered
 // union of this account's ACTIVE rows matched by composite (campaign_id +
-// drop_id) or by benefit_id, excluding any row that game-conflicts with c
-// (INVARIANT 4, applied before either match is returned).
+// drop_id) or by compatible benefit_id. Benefit-only matches cannot cross a
+// proven same-campaign Drop tier boundary; an exact non-empty InstanceID match
+// remains authoritative even across that boundary. Rows that game-conflict
+// with c are also excluded (INVARIANT 4).
 func (l *SkipLedger) matchingActiveRows(tx *sql.Tx, c models.RewardIdentity) ([]skipRow, error) {
 	byID := make(map[int64]skipRow)
 
@@ -912,6 +933,10 @@ func (l *SkipLedger) matchingActiveRows(tx *sql.Tx, c models.RewardIdentity) ([]
 			return nil, err
 		}
 		for _, r := range rows {
+			sameInstance := r.instanceID != "" && r.instanceID == c.InstanceID
+			if sameCampaignDifferentDrop(r, c) && !sameInstance {
+				continue
+			}
 			byID[r.id] = r
 		}
 	}

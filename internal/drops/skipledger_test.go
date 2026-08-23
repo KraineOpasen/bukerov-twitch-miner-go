@@ -49,6 +49,19 @@ func newTestSkipLedger(t *testing.T, accountKey string) *SkipLedger {
 	return ledger
 }
 
+// openPrivateSkipLedgerDB bypasses database.Open's process-wide singleton so
+// a test can close one SQLite connection and reopen the same file through a
+// genuinely fresh database.DB, matching a process restart.
+func openPrivateSkipLedgerDB(t *testing.T, path string) *database.DB {
+	t.Helper()
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open private skip-ledger db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	return &database.DB{DB: sqlDB}
+}
+
 // claimableDrop builds a Drop whose CanClaim() is true (a minted instance,
 // unclaimed, no precondition block) and which sits inside an active,
 // feasible window -- the shape eligibility.EvaluateDrops accepts (mirrors
@@ -1165,13 +1178,278 @@ func TestNewSkipLedgerMigrationFailureNoPartialState(t *testing.T) {
 	}
 }
 
+func TestSharedBenefitDoesNotCrossDropTiers(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "shared-benefit.db")
+	db1 := openPrivateSkipLedgerDB(t, dbPath)
+	t.Cleanup(func() { _ = db1.Close() })
+	accountKey := uniqueAccountKey(t)
+	ledger, err := NewSkipLedger(db1, accountKey)
+	if err != nil {
+		t.Fatalf("new skip ledger: %v", err)
+	}
+	ctx := context.Background()
+	window := models.EntitlementWindow{
+		Start:  time.Date(2031, 2, 1, 0, 0, 0, 0, time.UTC),
+		End:    time.Date(2031, 2, 2, 0, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign,
+		Known:  true,
+	}
+	tierA := models.NewRewardIdentity(
+		"game-shared", "benefit-shared", "", "drop-tier-a", "campaign-shared", "Tier A", 60, window,
+	)
+	tierB := models.NewRewardIdentity(
+		"game-shared", "benefit-shared", "", "drop-tier-b", "campaign-shared", "Tier B", 120, window,
+	)
+
+	before, err := ledger.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot before evidence: %v", err)
+	}
+	if skip, reason := before.decide(tierB, false); skip {
+		t.Fatalf("tier B before tier A evidence = SKIP (%s), want FARM", reason)
+	}
+
+	must(t, ledger.Observe(ctx, skipEvidence{
+		class:      evidenceClaimAccepted,
+		gameID:     "game-shared",
+		benefitID:  "benefit-shared",
+		campaignID: "campaign-shared",
+		dropID:     "drop-tier-a",
+		window:     window,
+	}))
+
+	snap, err := ledger.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	assertDecisions := func(t *testing.T, snap *skipSnapshot, candidates []models.RewardIdentity) {
+		t.Helper()
+		for _, candidate := range candidates {
+			skip, reason := snap.decide(candidate, false)
+			switch candidate.DropID {
+			case "drop-tier-a":
+				if !skip {
+					t.Fatalf("tier A = FARM (%s), want SKIP from its exact evidence", reason)
+				}
+			case "drop-tier-b":
+				if skip {
+					t.Fatalf("tier B = SKIP (%s), want FARM: shared BenefitID is not tier identity", reason)
+				}
+				if reason != "shared_benefit_different_drop" {
+					t.Fatalf("tier B reason = %q, want shared_benefit_different_drop", reason)
+				}
+			default:
+				t.Fatalf("unexpected test candidate %q", candidate.DropID)
+			}
+		}
+	}
+
+	// decide is pure: evaluating the two candidates in either order must not
+	// let tier A's decision leak into tier B's decision (or vice versa).
+	assertDecisions(t, snap, []models.RewardIdentity{tierA, tierB})
+	assertDecisions(t, snap, []models.RewardIdentity{tierB, tierA})
+
+	campaign := &models.Campaign{
+		ID: "campaign-shared", Game: &models.Game{ID: "game-shared"},
+		StartAt: window.Start, EndAt: window.End,
+		Drops: []*models.Drop{
+			{ID: "drop-tier-a", Name: "Tier A", BenefitID: "benefit-shared", MinutesRequired: 60},
+			{ID: "drop-tier-b", Name: "Tier B", BenefitID: "benefit-shared", MinutesRequired: 120},
+		},
+	}
+	view := brokerView(campaign, snap)
+	if len(view.Drops) != 1 || view.Drops[0].ID != "drop-tier-b" {
+		t.Fatalf("broker view drops = %+v, want only independent tier B", view.Drops)
+	}
+	if len(campaign.Drops) != 2 {
+		t.Fatalf("broker view mutated source campaign: got %d source drops, want 2", len(campaign.Drops))
+	}
+
+	// The corrected distinction is derived from durable row identity, not
+	// process-local state. Close the first SQLite handle, then reopen the same
+	// file through a genuinely fresh database.DB to cross a process-equivalent
+	// persistence boundary.
+	if err := db1.Close(); err != nil {
+		t.Fatalf("close first sqlite handle: %v", err)
+	}
+	db2 := openPrivateSkipLedgerDB(t, dbPath)
+	t.Cleanup(func() { _ = db2.Close() })
+	restarted, err := NewSkipLedger(db2, accountKey)
+	if err != nil {
+		t.Fatalf("new ledger after sqlite reopen: %v", err)
+	}
+	restartedSnap, err := restarted.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot after restart: %v", err)
+	}
+	assertDecisions(t, restartedSnap, []models.RewardIdentity{tierB, tierA})
+}
+
+func TestReconcileSharedBenefitDoesNotCrossDropTiers(t *testing.T) {
+	window := models.EntitlementWindow{
+		Start:  time.Date(2031, 2, 1, 0, 0, 0, 0, time.UTC),
+		End:    time.Date(2031, 2, 2, 0, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign,
+		Known:  true,
+	}
+	evidenceShapes := []struct {
+		name             string
+		tierAInstanceID  string
+		tierAStateReason string
+	}{
+		{name: "distinct_minted_instances", tierAInstanceID: "instance-tier-a", tierAStateReason: "new_minted_instance"},
+		{name: "instance_less_evidence", tierAStateReason: "minted_instance_over_composite_row"},
+	}
+	orders := []struct {
+		name    string
+		reverse bool
+	}{
+		{name: "tier_a_then_tier_b"},
+		{name: "tier_b_then_tier_a", reverse: true},
+	}
+
+	for _, shape := range evidenceShapes {
+		for _, order := range orders {
+			t.Run(shape.name+"/"+order.name, func(t *testing.T) {
+				ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+				ctx := context.Background()
+				must(t, ledger.Observe(ctx, skipEvidence{
+					class:      evidenceClaimAccepted,
+					gameID:     "game-reconcile-shared",
+					benefitID:  "benefit-reconcile-shared",
+					instanceID: shape.tierAInstanceID,
+					campaignID: "campaign-reconcile-shared",
+					dropID:     "drop-tier-a",
+					window:     window,
+				}))
+
+				tierA := &models.Drop{
+					ID: "drop-tier-a", Name: "Tier A", BenefitID: "benefit-reconcile-shared", MinutesRequired: 60,
+					StartAt: window.Start, EndAt: window.End,
+				}
+				if shape.tierAInstanceID != "" {
+					tierA.Update(map[string]interface{}{
+						"dropInstanceID": shape.tierAInstanceID,
+						"isClaimed":      true,
+					})
+				}
+				tierB := &models.Drop{
+					ID: "drop-tier-b", Name: "Tier B", BenefitID: "benefit-reconcile-shared", MinutesRequired: 120,
+					StartAt: window.Start, EndAt: window.End,
+				}
+				tierB.Update(map[string]interface{}{
+					"dropInstanceID": "instance-tier-b",
+					"isClaimable":    true,
+				})
+				drops := []*models.Drop{tierA, tierB}
+				if order.reverse {
+					drops = []*models.Drop{tierB, tierA}
+				}
+				campaign := &models.Campaign{
+					ID: "campaign-reconcile-shared", Game: &models.Game{ID: "game-reconcile-shared"},
+					StartAt: window.Start, EndAt: window.End, Drops: drops,
+				}
+
+				must(t, ledger.Reconcile(ctx, []*models.Campaign{campaign}))
+
+				row := skipRowByComposite(t, ledger, campaign.ID, tierA.ID, shape.tierAInstanceID)
+				if row.state != skipStateActive {
+					t.Fatalf("tier A row = %s (%s), want active: tier B matched it only by shared BenefitID", row.state, shape.tierAStateReason)
+				}
+				snap, err := ledger.Snapshot(ctx)
+				if err != nil {
+					t.Fatalf("snapshot after reconcile: %v", err)
+				}
+				if skip, reason := snap.decide(tierA.Identity(campaign.Game.ID, campaign.ID, window), false); !skip {
+					t.Fatalf("tier A after reconcile = FARM (%s), want SKIP from its exact evidence", reason)
+				}
+				if skip, reason := snap.decide(tierB.Identity(campaign.Game.ID, campaign.ID, window), tierB.CanClaim()); skip {
+					t.Fatalf("tier B after reconcile = SKIP (%s), want FARM", reason)
+				}
+			})
+		}
+	}
+}
+
+func TestReconcileSharedBenefitKeepsExactInstanceAuthority(t *testing.T) {
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	ctx := context.Background()
+	must(t, ledger.Observe(ctx, skipEvidence{
+		class: evidenceClaimAccepted, gameID: "game-instance-authority", benefitID: "benefit-instance-authority",
+		instanceID: "shared-instance", campaignID: "campaign-instance-authority", dropID: "drop-tier-a",
+	}))
+	tierB := &models.Drop{ID: "drop-tier-b", BenefitID: "benefit-instance-authority", MinutesRequired: 60}
+	tierB.Update(map[string]interface{}{"dropInstanceID": "shared-instance", "isClaimable": true})
+	campaign := &models.Campaign{
+		ID: "campaign-instance-authority", Game: &models.Game{ID: "game-instance-authority"}, Drops: []*models.Drop{tierB},
+	}
+
+	must(t, ledger.Reconcile(ctx, []*models.Campaign{campaign}))
+
+	row := skipRowByComposite(t, ledger, campaign.ID, "drop-tier-a", "shared-instance")
+	if row.state != skipStateConflicting {
+		t.Fatalf("exact shared instance row = %s, want conflicting from claimable_same_instance", row.state)
+	}
+}
+
+func TestEvidenceRankMonotoneAcrossObservationOrder(t *testing.T) {
+	orders := []struct {
+		name  string
+		first skipEvidenceClass
+		last  skipEvidenceClass
+	}{
+		{name: "strong_then_weak", first: evidenceClaimAccepted, last: evidenceInventoryClaimed},
+		{name: "weak_then_strong", first: evidenceInventoryClaimed, last: evidenceClaimAccepted},
+	}
+
+	for _, tt := range orders {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+			ctx := context.Background()
+			base := skipEvidence{
+				gameID:     "game-rank",
+				instanceID: "instance-rank",
+				campaignID: "campaign-rank",
+				dropID:     "drop-rank",
+			}
+			first, last := base, base
+			first.class = tt.first
+			last.class = tt.last
+			last.benefitID = "benefit-enriched-by-later-observation"
+
+			must(t, ledger.Observe(ctx, first))
+			must(t, ledger.Observe(ctx, last))
+
+			var class, benefitID string
+			var rank int
+			if err := ledger.db.QueryRow(`
+				SELECT evidence_class, evidence_rank, benefit_id
+				FROM drop_reward_skips
+				WHERE account_key = ? AND instance_id = ?`,
+				ledger.accountKey, base.instanceID,
+			).Scan(&class, &rank, &benefitID); err != nil {
+				t.Fatalf("read evidence rank: %v", err)
+			}
+			if class != string(evidenceClaimAccepted) || rank != evidenceClaimAccepted.rank() {
+				t.Fatalf("evidence = %s/rank %d, want %s/rank %d", class, rank, evidenceClaimAccepted, evidenceClaimAccepted.rank())
+			}
+			if benefitID != last.benefitID {
+				t.Fatalf("later evidence may enrich empty identity fields: benefitID = %q, want %q", benefitID, last.benefitID)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Benefit-tier decide() branches: a Benefit ID identifies a reward FAMILY, not
 // a specific occurrence, so tier 3 (BENEFIT) only ever returns SKIP when both
 // windows are decidable AND overlapping (same_benefit_overlapping_window).
-// Every other outcome in this tier -- either window unknown, provably
-// disjoint windows, or a game conflict that excludes the row from
-// activeBenefit before the window is ever consulted -- shares the same
+// A proven same-campaign/different-drop conflict fails open with
+// "shared_benefit_different_drop" before windows can conflate tiers. Every
+// other outcome in this tier -- either window unknown, provably disjoint
+// windows, or a game conflict that excludes the row from activeBenefit before
+// the window is ever consulted -- shares the same
 // "benefit_window_undecidable" fallthrough (fail open by default). Tier 1
 // (INSTANCE) separately consults activeBenefit, but only to prove a
 // DIFFERENT already-recorded instance makes the candidate a new occurrence
@@ -1194,7 +1472,10 @@ func TestSkipSnapshotDecideBenefitTierMatrix(t *testing.T) {
 		Source: models.WindowSourceCampaign, Known: true,
 	}
 	var windowUnknown models.EntitlementWindow // zero value: Known=false
-
+	windowMalformed := models.EntitlementWindow{
+		Start: time.Date(2031, 3, 2, 6, 0, 0, 0, time.UTC), End: time.Date(2031, 3, 2, 0, 0, 0, 0, time.UTC),
+		Source: models.WindowSourceCampaign, Known: true,
+	}
 	tests := []struct {
 		name           string
 		ledgerEvidence skipEvidence
@@ -1253,6 +1534,18 @@ func TestSkipSnapshotDecideBenefitTierMatrix(t *testing.T) {
 				campaignID: "camp-b4", dropID: "drop-b4", // window left zero-value (unknown)
 			},
 			candidate:  models.RewardIdentity{GameID: "game-b4", BenefitID: "ben-b4", Window: windowEarly},
+			wantSkip:   false,
+			wantReason: "benefit_window_undecidable",
+		},
+		{
+			// A Known flag cannot make inverted bounds authoritative: malformed
+			// occurrence evidence plus a matching BenefitID must still FARM.
+			name: "B4b_malformed_candidate_window_fails_open_to_farm",
+			ledgerEvidence: skipEvidence{
+				class: evidenceClaimAccepted, gameID: "game-b4b", benefitID: "ben-b4b",
+				campaignID: "camp-b4b", dropID: "drop-b4b", window: windowEarly,
+			},
+			candidate:  models.RewardIdentity{GameID: "game-b4b", BenefitID: "ben-b4b", Window: windowMalformed},
 			wantSkip:   false,
 			wantReason: "benefit_window_undecidable",
 		},
