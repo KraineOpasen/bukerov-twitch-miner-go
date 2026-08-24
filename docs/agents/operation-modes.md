@@ -1,9 +1,10 @@
 # Operation modes
 
-Four modes gate what an agent session may do to this repo. The active mode is set by the task contract (see
-`docs/agents/task-contract.md`); absent a contract, the mode is always `READ_ONLY`. A contract can only grant a
-mode — it can never grant capabilities the policy precedence in `CLAUDE.md` reserves for a direct user command
-(merge, release, deploy, production access).
+Four modes gate what an agent session may do to this repo — the repo-native elaboration of
+`GOVERNANCE_V3.md` §4. The active mode is set by the task contract (see `docs/agents/task-contract.md`);
+absent a contract, the mode is always `READ_ONLY`. A contract can only grant a mode — it can never grant
+the owner-gated actions `GOVERNANCE_V3.md` §4 reserves for a separate, direct owner command (marking a PR
+ready for review, merge/auto-merge, tag/release/deploy, workflow trigger/rerun, repo settings/secrets).
 
 ## READ_ONLY (default)
 
@@ -23,13 +24,14 @@ mode — it can never grant capabilities the policy precedence in `CLAUDE.md` re
 ## CHANGE
 
 - **Allowed**: `Edit`/`Write` on the task branch named in the contract; `git commit` on that branch.
-- **Forbidden**: `git push`; edits on `main`/`master`; merge, release, deploy, or any GitHub settings/secrets
-  mutation — always out of scope regardless of contract (see `CLAUDE.md` non-delegable prohibitions).
+- **Forbidden**: `git push`; edits on protected branches (`main`/`master`/`release/*`); merge, release,
+  deploy, or any GitHub settings/secrets mutation — always out of scope regardless of contract (see
+  `GOVERNANCE_V3.md` §4).
 
 ## PUBLISH_DRAFT
 
-- **Allowed**: `git push` to the task's non-main branch; opening a **Draft** PR, only when the contract's
-  capabilities explicitly authorize it.
+- **Allowed**: non-force `git push` of the task branch (never a protected branch); opening exactly one
+  **Draft** PR, only when the contract's capabilities explicitly authorize it.
 - **Forbidden**: marking the PR ready for review, enabling auto-merge, merging, releasing, or deploying — those
   require a separate direct user command, outside this policy's autonomous execution.
 
@@ -43,10 +45,12 @@ which mode it was in.
 
 - Repo switch (a tool targets a different repository than the contract names)
 - Unexpected branch (current branch != contract branch)
-- Main drift (main/master's HEAD SHA has moved since the contract's base SHA)
+- Base drift (the contract's base branch HEAD SHA has moved since the contract's `base_sha`)
 - Dirty worktree the contract didn't expect
 - A competing PR appears on the task branch
-- A quality gate fails (see `docs/agents/quality-gates.md`)
+- A repair strategy exhausted without an honestly passing final gate (an ordinary red test, build error, or
+  review finding is development feedback to repair inside the task, not an expiry trigger — see
+  `GOVERNANCE_V3.md` §5 and `docs/agents/quality-gates.md`)
 - Session end
 
 ## Drift handling

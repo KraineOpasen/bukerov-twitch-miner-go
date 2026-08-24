@@ -1,6 +1,8 @@
 # ADR-0001: Agent governance v2
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR-0002](0002-canonical-governance-v3.md) — `GOVERNANCE_V3.md` at the repo
+  root is now the single canonical governance authority; this ADR remains the historical record of the v2
+  foundation and of the mechanical layer it introduced.
 - **Date**: 2026-07-26
 
 ## Context

@@ -5,18 +5,18 @@ An explicit, machine-readable grant of capability for the current session. No co
 
 ## Schema
 
-The full envelope a task contract may specify. Every field is optional except `mode`, `repository`,
-`base_branch`, `base_sha`, `task_branch`, `single_writer`, and `authorized_by` — omitting an optional field
-means "not granted," not "unrestricted."
+The full envelope a task contract may specify — the machine-readable form of the contract minimum in
+`GOVERNANCE_V3.md` §3. Every field is optional except `mode`, `repository`, `base_branch`, `base_sha`,
+`task_branch`, and `authorized_by` — omitting an optional field means "not granted," not "unrestricted."
 
 ```yaml
 task_contract:
   task_id: "<short slug>"
   mode: READ_ONLY | PROTOTYPE | CHANGE | PUBLISH_DRAFT
   repository: "KraineOpasen/bukerov-twitch-miner-go"
-  base_branch: "main"
+  base_branch: "release/0.1"                  # the live active stable line — GOVERNANCE_V3.md §2
   base_sha: "<HEAD sha the task started from>"
-  task_branch: "<task branch name>"           # never main/master
+  task_branch: "<task branch name>"           # never a protected branch (main/master/release/*)
   allowed_paths: []                           # globs the session may touch; empty = repo-wide per mode's normal scope
   allowed_file_operations: []                 # subset of: read, edit, write, delete
   allowed_git_operations: []                  # subset of: branch, commit, push, rebase, merge_local
@@ -24,14 +24,15 @@ task_contract:
   quality_tier: Q0 | Q1 | Q2 | Q3              # see docs/agents/quality-gates.md
   agent_cap: <int>                             # max subagents this task may have alive at once
   max_concurrency: <int>                       # max subagents spawned in parallel in a single batch
-  single_writer: true                          # exactly one production-writer agent; always true, never relaxed
+  orchestration: skill_native | main_context_only   # default skill_native — GOVERNANCE_V3.md §10
   capabilities: []                             # named extra grants, e.g. write_research_docs, tracker_mutations
   forbidden: []                                # explicit call-outs beyond the always-forbidden list below
   authorized_by: "<human, explicitly>"
   # Never present, never contract-grantable, regardless of any field above: merge, auto_merge,
-  # release, deploy, production_access, workflow_trigger, github_settings, github_secrets,
-  # force_push, push_to_main — those require a separate direct user command outside this policy,
-  # and even then are not executed autonomously.
+  # release, deploy, production_access, workflow_trigger, github_settings, github_secrets — those
+  # require a separate direct user command outside this policy, and even then are not executed
+  # autonomously. Force push and any direct push to a protected branch (main/master/release/*)
+  # are always forbidden, with or without such a command (GOVERNANCE_V3.md §4).
 ```
 
 ## Field notes
@@ -45,9 +46,11 @@ task_contract:
   `docs/**`) without granting it repo-wide.
 - **`quality_tier`** states which gate this task must clear before it's considered done — not every task needs
   `Q3`; a documentation-only change may cap at `Q1`.
-- **`single_writer: true`** is not really optional in practice — it is the orchestration invariant from
-  `CLAUDE.md`'s governance section (one production writer, explicit role ledger) restated in machine-readable
-  form so a contract-reading agent can assert it rather than assume it.
+- **`orchestration`** defaults to `skill_native` (`GOVERNANCE_V3.md` §10): invoking an audited skill
+  authorizes the agent topology that skill documents, and the writer invariant is **no uncontrolled
+  competing writes** — deterministic ownership partitioning with reconciliation before the final gates —
+  not "one writer". `main_context_only` is a rare, explicit owner/task opt-out, never the default; every
+  child agent inherits the envelope (child ≤ parent at every delegation depth).
 - **`forbidden`** is for task-specific call-outs on top of the always-forbidden list (e.g. a task might add
   `forbidden: [schema_migration]` if this particular change must not touch `internal/database`'s migrations)
   — it narrows further, it never removes anything from the always-forbidden list.

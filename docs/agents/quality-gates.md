@@ -1,7 +1,11 @@
 # Quality gates
 
-Four gates, increasing in scope. A failed gate is an operation-mode expiry trigger (see
-`docs/agents/operation-modes.md`) — stop and report rather than pushing through.
+Four gates, increasing in scope — the repo-native elaboration of `GOVERNANCE_V3.md` §12. A finding from
+any gate is development feedback: diagnose and repair inside the same active task, rerun, and repeat until
+the gate honestly passes — a failure is never reported as a pass, and a test is never weakened, skipped,
+or narrowed to reach green. Only a repair strategy exhausted without an honestly passing final gate — an
+integrity/authority failure, not an ordinary red test — drops the session to `READ_ONLY` (see
+`GOVERNANCE_V3.md` §5 and `docs/agents/operation-modes.md`).
 
 ## Q0 — Compiles / parses
 
@@ -16,29 +20,26 @@ changes, the equivalent self-test passes (e.g. `python3 .claude/hooks/governance
 
 ## Q2 — Full regression
 
-The whole module's test suite passes with the race detector: `go test -v -race ./...`, plus `make lint`.
+Runs on the final candidate only, on the integrated tree, at the SHA being published (`GOVERNANCE_V3.md`
+§12): the whole module's test suite with the race detector — `TZ=UTC go test -race -count=1 ./...` (the
+final-gate form of the everyday `go test -v -race ./...` from `CLAUDE.md`/`.claude/rules/tests.md`, made
+deterministic with `-count=1` and a pinned timezone) — plus `go mod verify`, `go vet ./...`,
+`go build ./...`, `make lint`, and proof that only the intended paths changed. Development iteration does
+not re-run this full gate.
 
 ## Q3 — Review
 
-A `code-review`-style pass (Standards + Spec axes, read-only, findings reported not auto-fixed) before a
+Review axes per `GOVERNANCE_V3.md` §12 — Standards; Spec/domain compliance; differential/caller impact;
+security/concurrency; provenance; browser/a11y when UI is touched — run independently (a
+`code-review`-style pass covers the first two), read-only, findings reported not auto-fixed, before a
 change moves to PUBLISH_DRAFT.
 
-## This task (governance v2 config + vendored skills)
+## Governance/tooling change-sets
 
-This change-set touches only `CLAUDE.md`, `.claude/**`, `CONTEXT.md`, `docs/agents/**`, `docs/adr/**`,
-`scripts/validate-agent-governance.py`, and an append-only `.gitignore` edit — no `internal/**`, `cmd/**`,
-`go.mod`, or `go.sum`. Its Q0/Q1 are: `python3 -m json.tool` on every JSON file, the hook self-test, and the
-validator script. **Current quality tier: Q0 + confirmed Go regression** (race detection run as a confirmatory
-extra, not a hard Q0 requirement for a non-Go change-set). Even though no Go source changed, the Go regression
-was actually run — not assumed — to confirm this change-set didn't somehow disturb the build:
-
-- `go mod verify` — `all modules verified`, exit 0.
-- `go vet ./...` — clean, exit 0, no output.
-- `go build ./...` — exit 0, no output.
-- `go test -count=1 ./...` — 34 packages `ok` (2 packages report `[no test files]`: `internal/constants`,
-  `internal/version`), 0 failures, exit 0.
-- `go test -race -count=1 ./...` — same 34 packages `ok`, no data races reported, exit 0. (Race detection is
-  optional for a Q0-tier change since it's a governance/doc change-set, not a Go change — it was run anyway as
-  a stronger confirmation than the minimum this tier requires.)
-
-Mutation testing is not applicable to Markdown/governance content and is not required here.
+For a change-set that touches only the governance layer (`CLAUDE.md`, `GOVERNANCE_V3.md`, `.claude/**`,
+`CONTEXT.md`, `docs/agents/**`, `docs/adr/**`, `scripts/validate-agent-governance.py`) and no application
+paths, Q0/Q1 are: `python3 -m json.tool` on every touched JSON file, the hook self-test
+(`python3 .claude/hooks/governance-policy.py --self-test`), and the governance validator with its own
+fixture matrix (`python3 scripts/validate-agent-governance.py` and `--self-test`). The heavy Go gates
+apply only where changed-path analysis shows application paths are affected; mutation testing is not
+applicable to Markdown/governance content.

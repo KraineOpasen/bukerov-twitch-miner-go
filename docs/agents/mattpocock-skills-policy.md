@@ -70,10 +70,11 @@ tracker mutation, network fetch, auto-open, agent count) to match this project's
 
 ## Governance precedence
 
-Vendored skills sit **below** this project's own policy. Precedence (see `CLAUDE.md`'s
-"Claude Code Governance (v2)" section): (1) the active task contract, (2) `CLAUDE.md` + `.claude/rules/*.md`,
-(3) these vendored skills (as patched), (4) unpatched upstream skill defaults, (5) generic model behavior. A
-skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial.
+Vendored skills sit **below** this project's own policy. Authority precedence is defined solely by
+`GOVERNANCE_V3.md` (§1, §3): invoked audited skills — patched and unpatched vendored bytes alike, one
+tier — rank below the owner decision, the current task contract, the canonical governance document, and
+live active stable repository evidence. A skill instruction never overrides a `.claude/rules/*.md`
+constraint or a hook denial.
 
 ## No automatic updates
 

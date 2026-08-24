@@ -69,7 +69,7 @@
           "upstream_blob_sha": "65b3a402dbd09b8e83f9d637c6b553875189085c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "c9e7fe38cf33df7682263390eea10d9ee89ad543",
+          "vendored_blob_sha": "5a8b7411ec734f8bec697fa0693de4a7cc6f9150",
           "locally_modified": true,
           "patch_ids": [
             "skc-rename-vendored",

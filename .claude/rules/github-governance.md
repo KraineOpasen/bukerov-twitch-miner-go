@@ -7,6 +7,9 @@ paths:
 
 # GitHub / governance conventions
 
+- Canonical governance authority: `GOVERNANCE_V3.md` at the repo root — this rule file and the rest of the
+  repo-native layer elaborate it and may narrow, never widen; on conflict `GOVERNANCE_V3.md` §1 decides,
+  and the conflict is surfaced rather than silently reconciled.
 - Default mode is READ_ONLY (see `docs/agents/operation-modes.md`); tracker and GitHub mutations require an
   explicit task contract (see `docs/agents/task-contract.md`).
 - Never merge, mark ready-for-review, release/tag, deploy, trigger/rerun a workflow, or touch GitHub
