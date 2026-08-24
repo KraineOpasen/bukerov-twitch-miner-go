@@ -245,22 +245,6 @@
                 </div>
                 <input type="number" class="input-field w-28" id="connectionTimeoutMinutes" min="5" max="60">
             </div>
-
-            <div class="setting-row">
-                <div>
-                    <div class="setting-label">{{ t "set.ratelimits.rotation_min_label" }}</div>
-                    <div class="setting-description">{{ t "set.ratelimits.rotation_min_desc" }}</div>
-                </div>
-                <input type="number" class="input-field w-28" id="rotationIntervalMinMinutes" min="5" max="180">
-            </div>
-
-            <div class="setting-row">
-                <div>
-                    <div class="setting-label">{{ t "set.ratelimits.rotation_max_label" }}</div>
-                    <div class="setting-description">{{ t "set.ratelimits.rotation_max_desc" }}</div>
-                </div>
-                <input type="number" class="input-field w-28" id="rotationIntervalMaxMinutes" min="5" max="240">
-            </div>
         </div>
     </details>
 
@@ -637,8 +621,6 @@
         document.getElementById('reconnectDelay').value = settings.rateLimits.reconnectDelay;
         document.getElementById('streamCheckInterval').value = settings.rateLimits.streamCheckInterval;
         document.getElementById('connectionTimeoutMinutes').value = settings.rateLimits.connectionTimeoutMinutes;
-        document.getElementById('rotationIntervalMinMinutes').value = settings.rateLimits.rotationIntervalMinMinutes;
-        document.getElementById('rotationIntervalMaxMinutes').value = settings.rateLimits.rotationIntervalMaxMinutes;
 
         document.getElementById('consoleLevel').value = settings.logger.consoleLevel;
         document.getElementById('fileLevel').value = settings.logger.fileLevel;
@@ -1133,9 +1115,7 @@
                 requestDelay: parseFloat(document.getElementById('requestDelay').value),
                 reconnectDelay: parseInt(document.getElementById('reconnectDelay').value),
                 streamCheckInterval: parseInt(document.getElementById('streamCheckInterval').value),
-                connectionTimeoutMinutes: parseInt(document.getElementById('connectionTimeoutMinutes').value),
-                rotationIntervalMinMinutes: parseInt(document.getElementById('rotationIntervalMinMinutes').value),
-                rotationIntervalMaxMinutes: parseInt(document.getElementById('rotationIntervalMaxMinutes').value)
+                connectionTimeoutMinutes: parseInt(document.getElementById('connectionTimeoutMinutes').value)
             },
             logger: {
                 consoleLevel: document.getElementById('consoleLevel').value,

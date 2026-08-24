@@ -195,7 +195,7 @@ func TestSupportBundleCanaryScanEndToEnd(t *testing.T) {
 // T3: the typed allowlist, not pattern luck, is the primary boundary - a
 // field debug.Snapshot carries but buildSupportBundleInput never reads must
 // not appear even though nothing sanitizes it (it never had a copy path to
-// begin with). ActivePair/PairSince/NextRotationAt/PostponedSwapOuts and the
+// begin with). ActivePair/PairSince/PostponedSwapOuts and the
 // Discovery per-channel detail are exactly such fields (see the design's
 // §4 schema, which intentionally narrows debug.Snapshot's watching/discovery
 // views to just a few fields).

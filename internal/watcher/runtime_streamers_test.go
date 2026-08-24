@@ -107,7 +107,9 @@ func TestUpdateStreamersRemapsIndexStateByUsername(t *testing.T) {
 	w.rotation.hasPair = true
 	w.rotation.activePair = [2]int{1, 3} // b, d
 	w.rotation.lastWatched = map[int]time.Time{1: tb, 3: td}
-	w.rotation.deferredFor = map[int]bool{1: true}
+	w.rotation.deferUntil = time.Now().Add(time.Minute)
+	w.rotation.deferStreamer = 1
+	w.rotation.deferUsed = true
 	w.streakDiag = map[int]streakDiagState{3: {pursuing: true}}
 
 	a, b, d := w.streamers[0], w.streamers[1], w.streamers[3]
@@ -124,8 +126,9 @@ func TestUpdateStreamersRemapsIndexStateByUsername(t *testing.T) {
 	if got := w.rotation.lastWatched; len(got) != 2 || !got[1].Equal(tb) || !got[0].Equal(td) {
 		t.Fatalf("lastWatched not remapped: got %v", got)
 	}
-	if got := w.rotation.deferredFor; len(got) != 1 || !got[1] {
-		t.Fatalf("deferredFor not remapped: got %v", got)
+	if w.rotation.deferStreamer != 1 || w.rotation.deferUntil.IsZero() || !w.rotation.deferUsed {
+		t.Fatalf("explicit deferral not remapped: streamer=%d until=%v used=%v",
+			w.rotation.deferStreamer, w.rotation.deferUntil, w.rotation.deferUsed)
 	}
 	if got := w.streakDiag; len(got) != 1 || !got[0].pursuing {
 		t.Fatalf("streakDiag not remapped: got %v", got)

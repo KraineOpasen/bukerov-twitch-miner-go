@@ -71,9 +71,7 @@ func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
 			w.UpdateSettings([]config.Priority{config.PriorityDrops}, config.RateLimitSettings{
-				MinuteWatchedInterval:      1,
-				RotationIntervalMinMinutes: 1,
-				RotationIntervalMaxMinutes: 1,
+				MinuteWatchedInterval: 1,
 			})
 		}
 	}()
@@ -140,9 +138,7 @@ func TestConcurrentSettingsUpdateNoLostState(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 500; i++ {
 				w.UpdateSettings([]config.Priority{config.PriorityOrder}, config.RateLimitSettings{
-					MinuteWatchedInterval:      interval,
-					RotationIntervalMinMinutes: 1,
-					RotationIntervalMaxMinutes: 1,
+					MinuteWatchedInterval: interval,
 				})
 			}
 		}(30 + g)

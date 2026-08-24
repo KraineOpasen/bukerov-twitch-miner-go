@@ -122,16 +122,6 @@ type campaignSemanticSnapshot struct {
 	gameRanks  map[string]int
 }
 
-// classify assigns a reason code, human-readable reason, and best-effort
-// campaign name to a candidate. For configured channels it prefers the
-// per-tick reason already noted by the priority/rotation selection, falling
-// back to a generic one; discovery channels get a discovery-specific reason.
-// idx is the streamer's index for configured channels, or -1.
-func (w *MinuteWatcher) classify(s *models.Streamer, origin string, idx int) (reasonCode, reason, campaign string) {
-	facts, hasFacts := w.campaignPolicyForStreamer(s)
-	return w.classifyWithCampaignPolicy(s, origin, idx, facts, hasFacts)
-}
-
 func (w *MinuteWatcher) classifyWithCampaignPolicy(
 	s *models.Streamer,
 	origin string,
@@ -231,7 +221,7 @@ func defaultReason(reasonCode, origin string) string {
 	case ReasonDiscoveryFill:
 		return "discovered channel filling an otherwise-idle watch slot"
 	case ReasonFairRotation:
-		return "holds a fair-rotation watch slot (least accumulated watch time when the pair was last recomputed)"
+		return "holds a fair-rotation watch slot based on persisted accumulated watch time at this broker evaluation"
 	default:
 		return "holds a watch slot"
 	}
@@ -246,9 +236,8 @@ func defaultReason(reasonCode, origin string) string {
 //   - otherwise it may displace a configured occupant it strictly outranks by
 //     hard slot rank or, inside an equal drop class, Campaign Policy semantics;
 //     betterDisplaceVictim evicts the weakest semantic class before applying
-//     the existing recency tie-break,
-//     except one within minutes of completing a watch streak (which is never
-//     interrupted — mirrors applyPriorityBoost);
+//     the existing recency tie-break; continuity protection never inverts a
+//     strictly stronger hard reason class;
 //   - a channel already occupying a slot is never given a second one.
 //
 // With no external candidates this is a pure pass-through of the configured
@@ -348,8 +337,7 @@ func (w *MinuteWatcher) campaignPolicyForCandidate(candidate Candidate) (Candida
 
 // pickDisplaceable returns the index into slots of the configured occupant the
 // incoming candidate may displace: the one it strictly outranks that is the
-// best eviction target per betterDisplaceVictim, and is not protected by a
-// near-complete watch streak. Returns -1 if none. Discovery occupants are never
+// best eviction target per betterDisplaceVictim. Returns -1 if none. Discovery occupants are never
 // displaced (there is at most one, and it never out-prioritizes a configured
 // slot into a swap war).
 //
@@ -367,9 +355,6 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 	victim := -1
 	for i, s := range slots {
 		if s.origin != OriginConfigured {
-			continue
-		}
-		if s.idx >= 0 && w.nearStreakCompletion(s.idx) {
 			continue
 		}
 		if !w.slotStrictlyOutranks(incoming, s) {
@@ -453,9 +438,6 @@ func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 	tied := 0
 	for _, s := range slots {
 		if s.origin != OriginConfigured {
-			continue
-		}
-		if s.idx >= 0 && w.nearStreakCompletion(s.idx) {
 			continue
 		}
 		if slotRank(s.reasonCode) != slotRank(v.reasonCode) {

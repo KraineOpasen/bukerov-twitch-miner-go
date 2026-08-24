@@ -179,12 +179,10 @@ type WatchSlotView struct {
 
 // NowWatchingView feeds the pinned sidebar block.
 type NowWatchingView struct {
-	Slots            []WatchSlotView
-	QueuedNames      []string
-	HasNextRotation  bool
-	NextRotationUnix int64
-	Mode             string
-	Stale            bool
+	Slots       []WatchSlotView
+	QueuedNames []string
+	Mode        string
+	Stale       bool
 }
 
 // OverviewData is the top-level view model for the redesigned Overview page.
@@ -226,9 +224,9 @@ type OverviewData struct {
 // --- Provider view types (assembled by the miner from in-memory state) ---
 
 // WatchSlotsView is the live watch-selection state supplied by the miner:
-// which channels occupy the two watch slots (configured OR discovered), which
-// are queued, and when the next rotation is due. Built from the unified slot
-// broker's snapshot plus the watcher's debug state.
+// which channels occupy the two watch slots (configured OR discovered) and
+// which are queued. Built from the unified slot broker's snapshot plus the
+// watcher's debug state.
 type WatchSlotsView struct {
 	ActivePair []string
 	Watching   map[string]bool
@@ -239,10 +237,9 @@ type WatchSlotsView struct {
 	// Games maps a discovery-occupied channel to its game name (discovery
 	// channels are not in the configured streamer list, so the sidebar cannot
 	// look their game up there).
-	Games          map[string]string
-	Queued         []string
-	NextRotationAt time.Time
-	Mode           string
+	Games  map[string]string
+	Queued []string
+	Mode   string
 }
 
 // LivePredictionOutcome mirrors one prediction outcome for the board.

@@ -32,8 +32,8 @@ func TestDebugStateReportsRotationDecisions(t *testing.T) {
 	if len(st.ActivePair) != 2 {
 		t.Fatalf("expected an active pair of 2, got %v", st.ActivePair)
 	}
-	if st.NextRotationAt.Before(st.PairSince) {
-		t.Errorf("next rotation (%v) should not precede pair since (%v)", st.NextRotationAt, st.PairSince)
+	if st.PairSince.IsZero() {
+		t.Error("rotation mode must report when the actual pair membership began")
 	}
 	if len(st.Decisions) != 4 {
 		t.Fatalf("expected a decision per online streamer, got %d", len(st.Decisions))

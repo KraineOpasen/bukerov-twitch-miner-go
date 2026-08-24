@@ -674,9 +674,7 @@ Generate a sample config with all options:
     "requestDelay": 0.5,
     "reconnectDelay": 60,
     "streamCheckInterval": 600,
-    "connectionTimeoutMinutes": 15,
-    "rotationIntervalMinMinutes": 30,
-    "rotationIntervalMaxMinutes": 80
+    "connectionTimeoutMinutes": 15
   },
   "logger": {
     "save": true,
@@ -721,9 +719,11 @@ watch streaks, and fair rotation — only *proposes* channels; the broker
 decides who gets a slot and why. Priority order when they compete
 (high→low): a channel-restricted drop (only earnable on that exact channel) →
 an in-progress watch streak → an active drop → a fair-rotation/priority pick.
-A channel about to complete a watch streak is never bumped, and one channel
-can never hold both slots. The Overview "Now watching" block, the Drops page,
-and `/debug/snapshot` show which channel holds each slot and the reason.
+A strictly stronger class may replace a weaker one; otherwise continuity is
+preserved. Persisted least-watched fairness is evaluated on every ordinary
+broker tick, without a configurable rotation dwell timer. One channel can
+never hold both slots. The Overview "Now watching" block, the Drops page, and
+`/debug/snapshot` show which channel holds each slot and the reason.
 
 The one documented exception is the health canary (see *Health Center*): a rare,
 opt-in diagnostic beacon that never holds a slot and is not a candidate source.
@@ -985,8 +985,11 @@ Defaults are tuned to avoid Twitch rate limiting:
 | `reconnectDelay` | 60 | 30-300 | Seconds before reconnecting |
 | `streamCheckInterval` | 600 | 60-900 | Seconds between status checks |
 | `connectionTimeoutMinutes` | 15 | 5-60 | Minutes without any successful activity before the connection is flagged as lost |
-| `rotationIntervalMinMinutes` | 30 | 5-180 | Minimum minutes the watched pair dwells before rotating |
-| `rotationIntervalMaxMinutes` | 80 | 5-240 | Maximum minutes the watched pair dwells before rotating |
+
+Older `config.json` files may still contain the retired `rotationInterval`,
+`rotationIntervalMinMinutes`, or `rotationIntervalMaxMinutes` keys. They are
+accepted for compatibility, ignored by the scheduler, and omitted on the next
+save.
 
 ### Debug Endpoint
 

@@ -250,11 +250,17 @@ type rotationState struct {
 	activePair [2]int // streamer indexes currently occupying the watch slots
 	hasPair    bool   // whether activePair has been initialized yet
 
-	lastSwitch   time.Time     // when activePair last changed
-	nextInterval time.Duration // randomized dwell time chosen for the current activePair
+	lastSwitch time.Time // when activePair last actually changed
 
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
-	deferredFor map[int]bool      // streamers whose scheduled swap-out was already postponed once
+
+	// A near-streak swap-out may be deferred once for the current pair
+	// approach. deferUntil is the explicit, bounded deadline; deferUsed stays
+	// armed after expiry so repeated broker evaluations cannot extend it. Both
+	// reset only after an actual pair change.
+	deferUntil    time.Time
+	deferStreamer int
+	deferUsed     bool
 	// deficitMinutes is the persisted WatchTimeStore snapshot that produced the
 	// current base pair, keyed by login so a runtime streamer-list reorder needs
 	// no remap. It is evidence for equal-semantic-class arbitration, never a
@@ -271,16 +277,27 @@ type rotationState struct {
 	// yields immediately to a strictly higher-priority candidate (see
 	// strictlyHigherBoost), so a channel-restricted drop can still preempt it.
 	boostLatched bool
-	boostTarget  int // off-pair streamer index currently holding the boost seat
-	boostVictim  int // base-pair streamer index the boost displaced
+	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
+	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair
 }
 
 // clearBoostLatch drops any sticky boost so the next tick re-picks a boost seat
-// from scratch. Called whenever the base pair changes or rotation is left.
+// from scratch. Base-pair reconciliation deliberately does not call it: boost
+// continuity is independent of changes in the persisted-fairness base pair.
 func (r *rotationState) clearBoostLatch() {
 	r.boostLatched = false
 	r.boostTarget = -1
 	r.boostVictim = -1
+}
+
+func (r *rotationState) clearActiveDeferral() {
+	r.deferUntil = time.Time{}
+	r.deferStreamer = 0
+}
+
+func (r *rotationState) resetDeferralApproach() {
+	r.clearActiveDeferral()
+	r.deferUsed = false
 }
 
 // streakDiagState records which watch-streak pursuit log lines have already
@@ -586,14 +603,12 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 		}
 		w.rotation.lastWatched = remapped
 	}
-	if len(w.rotation.deferredFor) > 0 {
-		remapped := make(map[int]bool, len(w.rotation.deferredFor))
-		for oldIdx, deferred := range w.rotation.deferredFor {
-			if newIdx, ok := translate(oldIdx); ok {
-				remapped[newIdx] = deferred
-			}
+	if !w.rotation.deferUntil.IsZero() {
+		if newIdx, ok := translate(w.rotation.deferStreamer); ok {
+			w.rotation.deferStreamer = newIdx
+		} else {
+			w.rotation.clearActiveDeferral()
 		}
-		w.rotation.deferredFor = remapped
 	}
 	if len(w.streakDiag) > 0 {
 		remapped := make(map[int]streakDiagState, len(w.streakDiag))
@@ -614,12 +629,16 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 			// A pair member was removed: drop the pair (and the boost seat that
 			// references it) so this tick's selection recomputes both.
 			w.rotation.hasPair = false
+			w.rotation.resetDeferralApproach()
 			w.rotation.clearBoostLatch()
 		}
 	}
 	if w.rotation.boostLatched {
 		target, okT := translate(w.rotation.boostTarget)
-		victim, okV := translate(w.rotation.boostVictim)
+		victim, okV := -1, w.rotation.boostVictim == -1
+		if !okV {
+			victim, okV = translate(w.rotation.boostVictim)
+		}
 		if okT && okV {
 			w.rotation.boostTarget = target
 			w.rotation.boostVictim = victim
@@ -1058,6 +1077,7 @@ func (w *MinuteWatcher) selectStreamersToWatch(onlineIndexes []int) []int {
 		// Not enough online streamers to need rotation; drop any stale pair
 		// so a fresh one is computed next time we go above the limit.
 		w.rotation.hasPair = false
+		w.rotation.resetDeferralApproach()
 		w.rotation.clearBoostLatch()
 		w.selectionMode = ModeDirect
 		return w.selectByPriority(candidates)
@@ -1105,75 +1125,35 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 	return w.streamers[idx].GetSettings().Preference == models.PreferencePrefer
 }
 
-// selectRotating implements the fair watch-pair rotation for the case where
-// more streamers are online than fit in a watch slot.
+// selectRotating implements persisted-deficit fairness for the case where more
+// streamers are online than fit in the two watch slots.
 //
-// Weighted base pair (fairness guarantee):
-// Every RotationInterval (a duration randomized within
-// [RotationIntervalMinMinutes, RotationIntervalMaxMinutes], redrawn on every
-// actual switch so rotations don't settle into a single predictable
-// period), the pair is recomputed from scratch: online streamers are ranked
-// by their accumulated watch minutes over the trailing watchTimeWindow
-// (persisted in SQLite, see store.go), ascending, and the two with the
-// least get the slots. Ties (most commonly at cold start, when nobody has
-// any recorded watch time yet) are broken by in-memory recency
-// (least-recently-watched first) and finally by login for determinism under
-// candidate-list permutation.
+// The base pair is evaluated on every ordinary broker tick. Online streamers
+// are ranked by accumulated watch minutes over the trailing watchTimeWindow
+// (persisted in SQLite, see store.go), ascending. Ties use in-memory recency
+// and then login, giving a deterministic result under candidate permutations.
+// Whoever is watched accumulates minutes and becomes less owed, so every valid
+// contender progresses without a separate timer or queue.
 //
-// This is a deficit-based scheduler: whoever gets watched accumulates
-// minutes and becomes less eligible next time, so the ranking naturally
-// surfaces every other online channel over time regardless of the total
-// count or its parity - no even/odd special-casing is needed, unlike a
-// fixed round-robin schedule.
+// On top of that fair pair, one strictly stronger DROPS/STREAK candidate may
+// take one seat. Hard restricted/streak/drop classes come first; active-drop
+// candidates inside the same hard class use Campaign Policy's unitless
+// semantic class. Equal semantic facts remain governed by persisted deficit.
+// The boost latch is independent of base-pair changes, preserving continuous
+// viewing until eligibility ends or a strictly stronger contender appears.
 //
-// Semantic priority without replacing fairness:
-// On top of the ranked base pair, one strictly stronger DROPS/STREAK candidate
-// may take one seat. Hard restricted/streak/drop classes are compared first;
-// active-drop candidates inside the same hard class use Campaign Policy's
-// unitless semantic class. Equal semantic facts stay with the persisted-deficit
-// base pair. The victim is the weakest hard/semantic base member; equal campaign
-// facts retain the most-owed occupant by persisted deficit before recency/login
-// finish the tie. The displaced member ranks again at the next base-pair epoch,
-// preventing the semantic seat from becoming a second scheduler or consuming
-// both slots.
-//
-// Continuity latch: the boosted channel and the seat it displaces are held
-// across ticks (see applyPriorityBoost), NOT re-chosen every tick. A watch
-// streak (and unrestricted drop progress) is only credited for continuous
-// viewing, so the watched set must stay stable minute-over-minute for it to
-// accumulate. Re-picking the least-recently-watched eligible channel every
-// tick rotated the watched set on every tick whenever 3+ channels were
-// eligible, breaking that continuity so no streak ever completed; the latch
-// keeps the same channel boosted until it stops being eligible or a strictly
-// higher-priority candidate appears, then hands the seat off.
-//
-// Avoiding last-second interruptions:
-// When the base pair is about to rotate a streamer out, if that streamer is
-// still actively pursuing a watch streak (nearStreakCompletion / streakInProgress
-// — pending, watched, not exhausted), the swap is postponed by a short fixed
-// delay so it isn't yanked mid-pursuit. This is a best-effort heuristic based
-// only on watch-streak state - imminent drop-campaign completion isn't tracked
-// here (that would require deeper integration with the drops package) and can
-// still cause a mid-progress interruption; see PR description for this known
-// limitation.
-// Each streamer can only have its swap-out postponed once per approach, so
-// this can never stall the rotation indefinitely.
+// A fairness replacement that would interrupt an in-progress streak may use
+// one explicit deferUntil deadline for the current approach. Re-evaluation
+// cannot extend that deadline, and offline or no-longer-protected members leave
+// immediately.
 func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	now := time.Now()
-	w.refreshDeficitMinutes(onlineIndexes, now)
-
-	needsNewPair := !w.rotation.hasPair ||
-		!containsPair(onlineIndexes, w.rotation.activePair) ||
-		now.Sub(w.rotation.lastSwitch) >= w.rotation.nextInterval
-
-	if needsNewPair {
-		w.rotateToLeastWatchedPair(onlineIndexes, now)
-	}
+	w.reconcileLeastWatchedPair(onlineIndexes, now)
 
 	pair := w.applyPriorityBoost(w.rotation.activePair, onlineIndexes)
 
 	for _, idx := range pair {
-		w.noteSelectionIfEmpty(idx, "watched: holds a rotation slot (had the least accumulated watch time when the pair was last recomputed)")
+		w.noteSelectionIfEmpty(idx, "watched: holds a fair slot based on persisted accumulated watch time at this broker evaluation")
 	}
 
 	if w.rotation.lastWatched == nil {
@@ -1185,11 +1165,9 @@ func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	return []int{pair[0], pair[1]}
 }
 
-// streakDeferDelay is the short wait used to postpone a swap-out that would
-// otherwise interrupt a streamer actively pursuing its watch streak -
-// deliberately much shorter than the rotation interval itself, and applied at
-// most once per approach (see rotateToLeastWatchedPair), so it only bridges a
-// brief window and can never stall the rotation.
+// streakDeferDelay bounds the one explicit deferral used when an immediate
+// fairness replacement would interrupt a streamer actively pursuing its watch
+// streak. It is completion protection, not a scheduler cadence.
 const streakDeferDelay = 2 * time.Minute
 
 // preferenceWeightBiasMinutes is the fixed handicap (in accumulated watch
@@ -1199,10 +1177,9 @@ const streakDeferDelay = 2 * time.Minute
 // guarantee.
 const preferenceWeightBiasMinutes = 5.0
 
-// rotateToLeastWatchedPair recomputes the base pair from accumulated watch
-// time, unless doing so would interrupt a leaving streamer's near-complete
-// watch streak (see selectRotating's doc comment).
-func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.Time) {
+// reconcileLeastWatchedPair evaluates the persisted fairness ranking on every
+// broker tick, unless the one bounded streak-completion deferral is active.
+func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.Time) {
 	weights := w.watchWeights(onlineIndexes, now)
 
 	candidates := make([]int, len(onlineIndexes))
@@ -1231,45 +1208,59 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 	})
 	newPair := [2]int{candidates[0], candidates[1]}
 
-	// Only consider postponing the swap if the current pair is still fully
-	// online: if a member already went offline, there's nothing to protect
-	// (its streak is already lost) and it must not linger in activePair.
+	// Deferral is legal only while the current pair remains fully online. An
+	// offline/ineligible member must never linger in activePair.
 	if w.rotation.hasPair && containsPair(onlineIndexes, w.rotation.activePair) {
-		for _, idx := range w.rotation.activePair {
-			if idx == newPair[0] || idx == newPair[1] {
-				continue
-			}
-			if w.nearStreakCompletion(idx) && !w.rotation.deferredFor[idx] {
-				if w.rotation.deferredFor == nil {
-					w.rotation.deferredFor = make(map[int]bool)
-				}
-				w.rotation.deferredFor[idx] = true
-				w.rotation.lastSwitch = now
-				w.rotation.nextInterval = streakDeferDelay
-				w.noteSelection(idx, "watched: rotation swap-out postponed - within minutes of completing its watch streak")
-				return
-			}
+		if samePair(newPair, w.rotation.activePair) {
+			w.rotation.clearActiveDeferral()
+			w.captureDeficitMinutes(onlineIndexes, weights)
+			return
 		}
 
-		for _, idx := range newPair {
-			delete(w.rotation.deferredFor, idx)
+		if !w.rotation.deferUntil.IsZero() {
+			idx := w.rotation.deferStreamer
+			stillLeaving := idx != newPair[0] && idx != newPair[1]
+			if now.Before(w.rotation.deferUntil) && stillLeaving &&
+				containsIndex(onlineIndexes, idx) && w.nearStreakCompletion(idx) {
+				w.noteSelection(idx, "watched: fairness replacement deferred until the bounded watch-streak deadline")
+				w.captureDeficitMinutes(onlineIndexes, weights)
+				return
+			}
+			w.rotation.clearActiveDeferral()
+		}
+
+		if !w.rotation.deferUsed {
+			for _, idx := range w.rotation.activePair {
+				if idx == newPair[0] || idx == newPair[1] || !w.nearStreakCompletion(idx) {
+					continue
+				}
+				w.rotation.deferUsed = true
+				w.rotation.deferStreamer = idx
+				w.rotation.deferUntil = now.Add(streakDeferDelay)
+				w.noteSelection(idx, "watched: fairness replacement deferred once to finish an in-progress watch streak")
+				w.captureDeficitMinutes(onlineIndexes, weights)
+				return
+			}
 		}
 	}
 
 	oldPair := w.rotation.activePair
 	hadPair := w.rotation.hasPair
-	changed := !hadPair || newPair != oldPair
+	changed := !hadPair || !samePair(newPair, oldPair)
 
 	w.rotation.activePair = newPair
 	w.rotation.hasPair = true
-	w.rotation.lastSwitch = now
-	w.rotation.nextInterval = w.randomRotationInterval()
 	w.captureDeficitMinutes(onlineIndexes, weights)
 
 	if changed {
-		// A fresh base pair invalidates the sticky boost seat/victim, which
-		// referenced the previous pair; recompute the boost from scratch.
-		w.rotation.clearBoostLatch()
+		w.rotation.lastSwitch = now
+		w.rotation.resetDeferralApproach()
+		// Keep the continuity target, but reselect which member it displaces
+		// against the new fair pair. Carrying the old victim across pair changes
+		// would repeatedly evict the same most-owed channel and starve it.
+		if w.rotation.boostLatched {
+			w.rotation.boostVictim = -1
+		}
 		w.logPairChange(oldPair, hadPair, newPair)
 	}
 }
@@ -1353,25 +1344,6 @@ func (w *MinuteWatcher) watchWeights(onlineIndexes []int, now time.Time) map[int
 	return weights
 }
 
-// randomRotationInterval draws a dwell time uniformly from
-// [RotationIntervalMinMinutes, RotationIntervalMaxMinutes].
-func (w *MinuteWatcher) randomRotationInterval() time.Duration {
-	minMin := w.settings.RotationIntervalMinMinutes
-	maxMin := w.settings.RotationIntervalMaxMinutes
-	if minMin <= 0 {
-		minMin = 30
-	}
-	if maxMin < minMin {
-		maxMin = minMin
-	}
-
-	minutes := minMin
-	if span := maxMin - minMin; span > 0 {
-		minutes += rand.Intn(span + 1)
-	}
-	return time.Duration(minutes) * time.Minute
-}
-
 func containsPair(online []int, pair [2]int) bool {
 	var a, b bool
 	for _, idx := range online {
@@ -1385,14 +1357,18 @@ func containsPair(online []int, pair [2]int) bool {
 	return a && b
 }
 
+func samePair(a, b [2]int) bool {
+	return a == b || (a[0] == b[1] && a[1] == b[0])
+}
+
 // applyPriorityBoost lets one DROPS/STREAK-eligible online streamer take over a
 // base-pair seat for the current tick, without affecting the base ranking
-// computed by rotateToLeastWatchedPair.
+// computed by reconcileLeastWatchedPair.
 //
-// Continuity latch: the boosted channel (and the base-pair seat it displaces)
-// are held across ticks rather than re-picked every tick. A watch streak — and
-// unrestricted drop progress — is only credited for CONTINUOUS viewing, so the
-// watched set has to stay stable minute-over-minute for it to accumulate.
+// Continuity latch: the boosted channel is held across ticks rather than
+// re-picked every tick. Its victim is retained while base membership is stable
+// and reselected fairly when the base pair changes. A watch streak — and
+// unrestricted drop progress — is only credited for CONTINUOUS viewing.
 // Before the latch, the boost re-selected the least-recently-watched eligible
 // channel every tick, which (whenever 3+ channels were eligible) rotated the
 // watched set on every single tick: no channel was ever watched on consecutive
@@ -1403,18 +1379,14 @@ func containsPair(online []int, pair [2]int) bool {
 // point it hands the seat off and the previously-displaced base member is
 // re-evaluated so it is no longer starved.
 //
-// Hold duration is deliberately UNBOUNDED in time — a known, intentional
-// property, not a bug. The latch ends only on loss of eligibility
-// (isBoostEligible → false) or a strictly-higher candidate; base-pair rotation
-// clears it but immediately re-latches the same channel next tick if it is
-// still the best. A streak self-limits to ~7 minutes (crossing
-// watchStreakThresholdMinutes drops its eligibility), but a live drop campaign
-// (DropsCondition, no minute cap) can hold ONE of the two watch slots for as
+// Hold duration is deliberately driven by eligibility rather than a timer. The
+// latch ends on loss of eligibility (isBoostEligible → false) or a
+// strictly-higher candidate, and it survives base-pair reconciliation. A
+// streak self-limits through its bounded pursuit state, while a live drop
+// campaign (DropsCondition, no minute cap) can hold ONE of the two watch slots for as
 // long as it stays farmable. That does not starve the other online streamers:
-//   - the OTHER slot is the base pair, which keeps rotating normally via the
-//     deficit-based fair rotation (rotateToLeastWatchedPair runs on its own
-//     30-80 min timer, untouched by the boost), so the most-owed non-boosted
-//     channel is still surfaced each window;
+//   - the OTHER slot is reconciled from persisted deficit on every broker
+//     evaluation, so the most-owed non-boosted channel keeps surfacing;
 //   - the boosted channel records its own watch time (RecordMinutes), so the
 //     fair-rotation ranking naturally keeps it OUT of the base pair — no
 //     double-dipping — which de-starves the rest;
@@ -1427,20 +1399,28 @@ func containsPair(online []int, pair [2]int) bool {
 // of finishing a long drop campaign on the channel that needs it.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
 	best := w.selectBoostTarget(pair, onlineIndexes)
-	if best == -1 {
-		w.rotation.clearBoostLatch()
-		return pair
-	}
 
 	keepHeld := false
 	if w.rotation.boostLatched {
 		held := w.rotation.boostTarget
-		if held >= 0 && held != pair[0] && held != pair[1] &&
-			containsIndex(onlineIndexes, held) && w.isBoostEligible(held) &&
-			!w.strictlyHigherBoost(best, held) {
-			best = held
-			keepHeld = true
+		heldValid := held >= 0 && containsIndex(onlineIndexes, held) && w.isBoostEligible(held)
+		strongerOffPair := heldValid && best != -1 && w.strictlyHigherBoost(best, held)
+		if heldValid && !strongerOffPair {
+			if held == pair[0] || held == pair[1] {
+				// Persisted fairness brought the held channel into the base pair.
+				// It remains continuous without consuming an extra boost seat.
+				w.rotation.boostVictim = -1
+				return pair
+			}
+			if w.boostCanRemainAgainstPair(held, pair) {
+				best = held
+				keepHeld = true
+			}
 		}
+	}
+	if best == -1 {
+		w.rotation.clearBoostLatch()
+		return pair
 	}
 
 	// While the same channel is held, keep displacing the same base seat so the
@@ -1449,10 +1429,10 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 	// the whole previous boost gets its turn instead of staying starved.
 	var victim int
 	if keepHeld && (w.rotation.boostVictim == pair[0] || w.rotation.boostVictim == pair[1]) &&
-		!w.nearStreakCompletion(w.rotation.boostVictim) {
+		(!w.nearStreakCompletion(w.rotation.boostVictim) || w.strictlyHigherBoost(best, w.rotation.boostVictim)) {
 		victim = w.rotation.boostVictim
 	} else {
-		victim = w.selectBoostVictim(pair)
+		victim = w.selectBoostVictim(pair, best)
 	}
 	if victim == -1 {
 		w.rotation.clearBoostLatch()
@@ -1503,39 +1483,66 @@ func (w *MinuteWatcher) selectBoostTarget(pair [2]int, onlineIndexes []int) int 
 		return -1
 	}
 
-	baseBest := -1
+	if !w.boostCanDisplacePair(best, pair) {
+		return -1
+	}
+	return best
+}
+
+// boostCanDisplacePair preserves the existing semantic admission rule for a
+// new boost target. A strictly weaker target cannot override the strongest
+// boost-eligible base member; equal drop semantics remain with persisted
+// fairness rather than becoming a second scheduler.
+func (w *MinuteWatcher) boostCanDisplacePair(target int, pair [2]int) bool {
+	baseBest := w.strongestBoostEligible(pair)
+	if baseBest != -1 {
+		strict := w.compareStrictBoost(target, baseBest)
+		if strict < 0 {
+			return false
+		}
+		if strict == 0 && w.streamers[target].DropsCondition() && w.streamers[baseBest].DropsCondition() {
+			// Both seats are driven by equal campaign semantics. The base pair
+			// already contains the persisted-deficit winner, so an off-pair
+			// boost would invert the required tie-break.
+			return false
+		}
+	}
+	return true
+}
+
+// boostCanRemainAgainstPair applies the same hard/semantic ordering to an
+// already-latched target without reopening equal-class fairness on every base
+// reconciliation. Equality preserves continuity; only a strictly stronger
+// base contender may end the latch. New targets still use
+// boostCanDisplacePair, where equal drop semantics stay with persisted
+// fairness.
+func (w *MinuteWatcher) boostCanRemainAgainstPair(target int, pair [2]int) bool {
+	baseBest := w.strongestBoostEligible(pair)
+	return baseBest == -1 || w.compareStrictBoost(target, baseBest) >= 0
+}
+
+func (w *MinuteWatcher) strongestBoostEligible(pair [2]int) int {
+	best := -1
 	for _, idx := range pair {
 		if !w.isBoostEligible(idx) {
 			continue
 		}
-		if baseBest == -1 || w.betterBoostCandidate(idx, baseBest) {
-			baseBest = idx
-		}
-	}
-	if baseBest != -1 {
-		strict := w.compareStrictBoost(best, baseBest)
-		if strict < 0 {
-			return -1
-		}
-		if strict == 0 && w.streamers[best].DropsCondition() && w.streamers[baseBest].DropsCondition() {
-			// Both seats are driven by equal campaign semantics. The base pair
-			// already contains the persisted-deficit winner, so an off-pair
-			// boost would invert the required tie-break.
-			return -1
+		if best == -1 || w.betterBoostCandidate(idx, best) {
+			best = idx
 		}
 	}
 	return best
 }
 
-// selectBoostVictim returns the base-pair seat the boost should displace. A
-// protected in-progress streak is never a victim. Otherwise evict the weakest
-// hard/semantic member, then the one with more persisted watch minutes (the
-// less-owed member), then the most-recently-watched, then login. This leaves
-// the strongest/most-owed base member in the fair seat.
-func (w *MinuteWatcher) selectBoostVictim(pair [2]int) int {
+// selectBoostVictim returns the base-pair seat the boost should displace. An
+// in-progress streak is protected from an equal/weaker target, but not from a
+// strictly stronger contender such as a channel-restricted drop. Otherwise
+// evict the weakest hard/semantic member, then the less-owed member, recency,
+// and login.
+func (w *MinuteWatcher) selectBoostVictim(pair [2]int, target int) int {
 	victim := -1
 	for _, slot := range pair {
-		if w.nearStreakCompletion(slot) {
+		if w.nearStreakCompletion(slot) && !w.strictlyHigherBoost(target, slot) {
 			continue
 		}
 		if victim == -1 || w.betterBoostVictim(slot, victim) {

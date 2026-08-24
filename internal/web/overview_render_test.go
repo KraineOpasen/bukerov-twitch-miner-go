@@ -251,9 +251,7 @@ func TestRenderNowWatching(t *testing.T) {
 		Slots: []WatchSlotView{
 			{Name: "shroud", Points: "100,000", Game: "VALORANT", HasGain: true, GainPerHour: "1,200", StreakPending: true, StreakMinutes: 5, StreakCapMinutes: 20, StreakPercent: 25},
 		},
-		QueuedNames:      []string{"pokimane", "ninja"},
-		HasNextRotation:  true,
-		NextRotationUnix: 1234567890,
+		QueuedNames: []string{"pokimane", "ninja"},
 	}
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "now_watching", view); err != nil {
@@ -261,7 +259,7 @@ func TestRenderNowWatching(t *testing.T) {
 	}
 	out := buf.String()
 	// now_watching is localized (PR 0); testPartials renders the default language (RU).
-	for _, want := range []string{"shroud", "VALORANT", "1,200/h", "pokimane", "Следующая ротация", "data-countdown-to"} {
+	for _, want := range []string{"shroud", "VALORANT", "1,200/h", "pokimane"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("now_watching output missing %q", want)
 		}

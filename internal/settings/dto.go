@@ -81,9 +81,6 @@ type RateLimitSettings struct {
 	StreamCheckInterval      int     `json:"streamCheckInterval"`
 
 	ConnectionTimeoutMinutes int `json:"connectionTimeoutMinutes"`
-
-	RotationIntervalMinMinutes int `json:"rotationIntervalMinMinutes"`
-	RotationIntervalMaxMinutes int `json:"rotationIntervalMaxMinutes"`
 }
 
 // LoggerSettings contains logging configuration options.

@@ -13,9 +13,8 @@ import (
 var errPredictionsUnavailable = errors.New("predictions are not available yet")
 
 // WatchSlots implements web.OverviewProvider. It exposes the watcher's live
-// selection state (which streamers occupy the two watch slots, why, and when
-// the next rotation is due) as a web view type. Read-only snapshot of
-// in-memory state - no Twitch calls.
+// selection state (which streamers occupy the two watch slots and why) as a
+// web view type. Read-only snapshot of in-memory state - no Twitch calls.
 func (m *Miner) WatchSlots() web.WatchSlotsView {
 	view := web.WatchSlotsView{
 		Watching: make(map[string]bool),
@@ -29,7 +28,6 @@ func (m *Miner) WatchSlots() web.WatchSlotsView {
 
 	st := m.watcher.GetDebugState()
 	view.Mode = st.Mode
-	view.NextRotationAt = st.NextRotationAt
 	view.ActivePair = append([]string(nil), st.ActivePair...)
 
 	// The broker snapshot is the authoritative final slot allocation and is the

@@ -540,7 +540,6 @@ func TestCampaignPolicyKeepsFairSeatProgressingAcrossLowerClasses(t *testing.T) 
 	w.SetCampaignSemanticClasses(classes)
 	seen := make(map[string]int)
 	for tick := 0; tick < 40; tick++ {
-		forceRotate(w)
 		pair := w.selectRotating([]int{0, 1, 2, 3})
 		if len(pair) != 2 {
 			t.Fatalf("tick %d allocated %d configured slots, want 2", tick, len(pair))

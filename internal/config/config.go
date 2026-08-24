@@ -290,22 +290,6 @@ type RateLimitSettings struct {
 	// for this many minutes, the connection is considered lost (dashboard
 	// banner + Discord notification + ERROR log) until activity resumes.
 	ConnectionTimeoutMinutes int `json:"connectionTimeoutMinutes"`
-
-	// RotationIntervalMinMinutes/RotationIntervalMaxMinutes bound how long
-	// (in minutes) the watched pair dwells before rotating when more than
-	// constants.MaxSimultaneousStreams streamers are online: a new random
-	// duration within this range is drawn every time the pair actually
-	// changes, so rotations don't happen on one predictable fixed timer.
-	RotationIntervalMinMinutes int `json:"rotationIntervalMinMinutes"`
-	RotationIntervalMaxMinutes int `json:"rotationIntervalMaxMinutes"`
-
-	// RotationInterval is deprecated: superseded by RotationIntervalMinMinutes/
-	// RotationIntervalMaxMinutes above (a single fixed timer defeated the
-	// point of a *fair* rotation by making it fully predictable). It's kept
-	// only so config.json files written before this change still parse -
-	// LoadConfig migrates it into the new Min/Max fields when present and
-	// they're absent, then clears it. Never read anywhere else.
-	RotationInterval int `json:"rotationInterval,omitempty"`
 }
 
 type LoggerSettings struct {
@@ -592,14 +576,6 @@ func DefaultRateLimitSettings() RateLimitSettings {
 		ReconnectDelay:           60,
 		StreamCheckInterval:      600,
 		ConnectionTimeoutMinutes: 15,
-		// 30-80 minutes: long enough that a channel clears the ~7-minute
-		// watch-streak window and makes real drop progress before losing its
-		// slot; randomized (redrawn on every actual pair switch) so the
-		// rotation cadence isn't a single predictable timer; the spread still
-		// keeps a typical online lineup cycling within a few hours. See
-		// internal/watcher for the full rotation algorithm.
-		RotationIntervalMinMinutes: 30,
-		RotationIntervalMaxMinutes: 80,
 	}
 }
 
@@ -642,8 +618,6 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	migrateRotationInterval(data, &config)
-
 	LogPredictionRiskClamps(config.PredictionRisk, "config.json")
 	ValidateConfig(&config)
 	applyEnvOverrides(&config)
@@ -680,42 +654,6 @@ func tightenConfigPermissions(path string) {
 		return
 	}
 	slog.Info("Tightened config file permissions to 0600 (it may contain the Discord bot token)", "path", path)
-}
-
-// migrateRotationInterval provides backward compatibility for config.json
-// files written before rotationInterval was replaced by the randomized
-// rotationIntervalMinMinutes/rotationIntervalMaxMinutes range: if the old
-// field is present but the new range fields are absent, the old fixed value
-// (converted to minutes) becomes both bounds, preserving the previous fixed
-// interval until the user adopts the new fields. Presence is checked against
-// the raw JSON rather than the unmarshaled config, since DefaultConfig
-// already populates the new fields with non-zero defaults and a plain value
-// comparison couldn't tell "absent" from "explicitly set to the default".
-func migrateRotationInterval(data []byte, config *Config) {
-	var raw struct {
-		RateLimits struct {
-			RotationInterval           *int `json:"rotationInterval"`
-			RotationIntervalMinMinutes *int `json:"rotationIntervalMinMinutes"`
-			RotationIntervalMaxMinutes *int `json:"rotationIntervalMaxMinutes"`
-		} `json:"rateLimits"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return
-	}
-	if raw.RateLimits.RotationInterval == nil {
-		return
-	}
-	if raw.RateLimits.RotationIntervalMinMinutes != nil || raw.RateLimits.RotationIntervalMaxMinutes != nil {
-		return
-	}
-
-	minutes := *raw.RateLimits.RotationInterval / 60
-	if minutes < 1 {
-		minutes = 1
-	}
-	config.RateLimits.RotationIntervalMinMinutes = minutes
-	config.RateLimits.RotationIntervalMaxMinutes = minutes
-	config.RateLimits.RotationInterval = 0
 }
 
 func SaveConfig(path string, config *Config) error {
@@ -822,22 +760,6 @@ func ValidateConfig(config *Config) {
 		config.RateLimits.ConnectionTimeoutMinutes = 5
 	} else if config.RateLimits.ConnectionTimeoutMinutes > 60 {
 		config.RateLimits.ConnectionTimeoutMinutes = 60
-	}
-
-	if config.RateLimits.RotationIntervalMinMinutes < 5 {
-		config.RateLimits.RotationIntervalMinMinutes = 5
-	} else if config.RateLimits.RotationIntervalMinMinutes > 180 {
-		config.RateLimits.RotationIntervalMinMinutes = 180
-	}
-
-	if config.RateLimits.RotationIntervalMaxMinutes < 5 {
-		config.RateLimits.RotationIntervalMaxMinutes = 5
-	} else if config.RateLimits.RotationIntervalMaxMinutes > 240 {
-		config.RateLimits.RotationIntervalMaxMinutes = 240
-	}
-
-	if config.RateLimits.RotationIntervalMaxMinutes < config.RateLimits.RotationIntervalMinMinutes {
-		config.RateLimits.RotationIntervalMaxMinutes = config.RateLimits.RotationIntervalMinMinutes
 	}
 
 	if config.Debug.Port < 1 || config.Debug.Port > 65535 {

@@ -1,7 +1,6 @@
 package watcher
 
 import (
-	"fmt"
 	"log/slog"
 	"time"
 )
@@ -27,15 +26,13 @@ type DebugState struct {
 	EvaluatedAt time.Time
 	Mode        string
 
-	// ActivePair/PairSince/NextRotationAt describe the rotation state and
-	// are only populated in ModeRotation.
-	ActivePair     []string
-	PairSince      time.Time
-	NextRotationAt time.Time
+	// ActivePair/PairSince describe the current fair base pair and are only
+	// populated in ModeRotation. PairSince changes only with actual membership.
+	ActivePair []string
+	PairSince  time.Time
 
-	// PostponedSwapOuts lists pair members whose scheduled swap-out is
-	// currently deferred because they are within minutes of completing a
-	// watch streak. Only populated while such a deferral is active.
+	// PostponedSwapOuts lists pair members whose fairness replacement is
+	// currently deferred by the explicit streak-completion deadline.
 	PostponedSwapOuts []PostponedSwapOut
 
 	// Decisions holds one entry per online streamer with a human-readable
@@ -92,6 +89,11 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 	for _, idx := range watching {
 		watchingSet[idx] = true
 	}
+	if !w.rotation.deferUntil.IsZero() && !watchingSet[w.rotation.deferStreamer] {
+		idx := w.rotation.deferStreamer
+		w.rotation.clearActiveDeferral()
+		w.noteSelection(idx, "not watched this tick: a strictly stronger broker contender displaced the deferred streak seat")
+	}
 
 	st := DebugState{
 		EvaluatedAt:          time.Now(),
@@ -105,19 +107,14 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 			w.streamers[w.rotation.activePair[1]].GetUsername(),
 		}
 		st.PairSince = w.rotation.lastSwitch
-		st.NextRotationAt = w.rotation.lastSwitch.Add(w.rotation.nextInterval)
 
-		// nextInterval only ever equals streakDeferDelay while a swap-out
-		// deferral is in effect (real rotation intervals are minutes-scale
-		// and clamped well above it by config validation).
-		if w.rotation.nextInterval == streakDeferDelay {
-			for idx := range w.rotation.deferredFor {
-				if idx >= 0 && idx < len(w.streamers) {
-					st.PostponedSwapOuts = append(st.PostponedSwapOuts, PostponedSwapOut{
-						Username: w.streamers[idx].GetUsername(),
-						Until:    st.NextRotationAt,
-					})
-				}
+		if !w.rotation.deferUntil.IsZero() && time.Now().Before(w.rotation.deferUntil) {
+			idx := w.rotation.deferStreamer
+			if idx >= 0 && idx < len(w.streamers) {
+				st.PostponedSwapOuts = append(st.PostponedSwapOuts, PostponedSwapOut{
+					Username: w.streamers[idx].GetUsername(),
+					Until:    w.rotation.deferUntil,
+				})
 			}
 		}
 	}
@@ -132,8 +129,7 @@ func (w *MinuteWatcher) publishDebugState(watching []int, mode string) {
 			case watchingSet[idx]:
 				reason = "watched"
 			case mode == ModeRotation:
-				reason = fmt.Sprintf("waiting for its rotation turn (watched pair re-ranked by accumulated watch time around %s)",
-					st.NextRotationAt.Format("15:04"))
+				reason = "waiting: persisted accumulated watch time did not earn a fair slot at this broker evaluation"
 			default:
 				reason = "online but not matched by any configured priority - no watch slot assigned this tick"
 			}

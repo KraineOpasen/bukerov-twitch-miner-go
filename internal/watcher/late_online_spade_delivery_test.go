@@ -177,9 +177,7 @@ func newDeliveryLifecycleWatcher(t *testing.T, streamers []*models.Streamer) (w 
 		streamers:  streamers,
 		priorities: []config.Priority{config.PriorityOrder},
 		settings: config.RateLimitSettings{
-			MinuteWatchedInterval:      1,
-			RotationIntervalMinMinutes: 1,
-			RotationIntervalMaxMinutes: 1,
+			MinuteWatchedInterval: 1,
 		},
 		store:  store,
 		sender: adapter,
@@ -265,7 +263,7 @@ func TestMinuteWatchedDelivery_CoherentPairBothDeliver(t *testing.T) {
 // — broadcast and payload converge, spade URL never does. Watch time is
 // seeded so fair rotation's real ranking (ascending accumulated minutes)
 // deterministically selects {C, B} — least-watched first — evicting A, so the
-// pair is reached through the genuine selectRotating/rotateToLeastWatchedPair
+// pair is reached through the genuine selectRotating/fairness reconciliation
 // path rather than hand-placed.
 func lateOnlineFixture(t *testing.T) (w *MinuteWatcher, rt *recordingRT, adapter *recordingSenderAdapter, aLogin, bLogin, cLogin string) {
 	t.Helper()
@@ -306,7 +304,6 @@ func TestMinuteWatchedDelivery_LateOnlineNoSpadeNeverDelivers(t *testing.T) {
 	w, rt, adapter, _, bLogin, cLogin := lateOnlineFixture(t)
 
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 		requireCommittedPair(t, w, tick, cLogin, bLogin)
 
@@ -395,7 +392,6 @@ func TestMinuteWatchedDelivery_RetainedCompanionDeliversIndependently(t *testing
 	w, _, adapter, _, bLogin, cLogin := lateOnlineFixture(t)
 
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 		requireCommittedPair(t, w, tick, cLogin, bLogin)
 

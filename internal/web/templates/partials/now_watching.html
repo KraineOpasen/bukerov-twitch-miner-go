@@ -40,10 +40,4 @@
 </div>
 {{end}}
 
-{{if .HasNextRotation}}
-<div class="text-xs text-neutral-400 mt-3 flex items-center justify-between">
-    <span>{{ t "now.next_rotation" }}</span>
-    <span class="num text-neutral-100" data-countdown-to="{{.NextRotationUnix}}">--:--</span>
-</div>
-{{end}}
 {{end}}
