@@ -646,10 +646,11 @@ Fair rotation ────────┘
 
 Each tick the broker runs two phases:
 
-- **Phase A — configured selection** (unchanged): the priority/rotation logic
-  below picks up to two channels from the configured streamer list (direct
-  priority pick when ≤2 online, fair rotation with a DROPS/STREAK boost when
-  more).
+- **Phase A — configured selection**: the priority/rotation logic below picks
+  up to two channels from the configured streamer list (direct priority pick
+  when ≤2 online, fair rotation with a DROPS/STREAK boost when more). Hard
+  boost classes remain outermost; Campaign Policy semantic class orders
+  comparable drop contenders before persisted-deficit/recency tie-breaking.
 - **Phase B — cross-source arbitration**: candidate sources (directory
   discovery today) are layered on top. A candidate fills any free slot;
   otherwise it may displace the lowest-ranked configured occupant it strictly
@@ -657,7 +658,10 @@ Each tick the broker runs two phases:
   is never interrupted. A channel already holding a slot never gets a second
   one. Ranking (high→low): channel-restricted drop → in-progress watch streak
   → active drop → fair-rotation/priority pick. With no candidate sources
-  Phase B is a pure pass-through, so single-list behavior is unchanged.
+  Phase B is a pure pass-through, so single-list behavior is unchanged. Within
+  an equal drop class, Campaign Policy semantic class is compared before
+  persisted watch-time deficit; equal semantic facts retain deficit fairness
+  and the deterministic login tie-break.
 
 The broker publishes an immutable, explainable snapshot each tick
 (`BrokerSnapshot`: per-slot `channel`/`source`/`reasonCode`/`reason`/
@@ -768,8 +772,8 @@ allocated by the unified slot broker (see *Watch Slot Architecture*).
 **More than 2 online streamers:** a fixed priority pick would starve every other online channel indefinitely, so the watched pair instead rotates fairly across all online streamers. See `internal/watcher.selectRotating` (and `store.go` for persistence) for the full algorithm:
 
 - **Randomized dwell time:** every time the pair actually changes, the next dwell duration is drawn uniformly from `[rateLimits.rotationIntervalMinMinutes, rateLimits.rotationIntervalMaxMinutes]` (default 30-80 min) rather than using one fixed timer, so rotations don't happen on a single predictable period. (`rateLimits.rotationInterval`, a fixed-seconds field, is deprecated - kept only so pre-existing config.json files still parse; `LoadConfig` migrates it into the new min/max fields the first time it loads such a file.)
-- **Weighted base pair:** when the dwell time elapses (or a pair member goes offline), the pair is recomputed from each online streamer's accumulated watch minutes over the trailing 8-hour window - persisted in SQLite (`watch_time_events` table, module `watch_time`, survives container restarts) - and the two with the *least* accumulated time get the slots. Ties (e.g. cold start, nobody watched yet) are broken by in-memory recency, then index, for determinism. This is a deficit-based scheduler: whoever gets watched accumulates minutes and becomes less eligible next time, which surfaces every other online channel over time regardless of count or parity - no even/odd special-casing needed.
-- **Priority as a boost, not exclusivity:** on top of the weighted base pair, any online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat in the pair for the current tick only, without affecting the weighting above - increasing how often it's picked, never granting a permanent exclusive slot. The seat sacrificed is whichever base-pair member was watched most recently. Among competing boost candidates the seat goes, in order: to a channel-restricted drop campaign (its progress is only countable on that exact channel), then to a **watch streak already in progress, most-watched-first** (so the watcher finishes a streak it already started instead of alternating between several fresh pending-streak channels and completing none - a watch streak needs ~5-7 continuous watched minutes, so an interrupted pursuit earns nothing), then least-recently-watched.
+- **Weighted base pair:** when the dwell time elapses (or a pair member goes offline), the pair is recomputed from each online streamer's accumulated watch minutes over the trailing 8-hour window - persisted in SQLite (`watch_time_events` table, module `watch_time`, survives container restarts) - and the two with the *least* accumulated time get the slots. Ties (e.g. cold start, nobody watched yet) are broken by in-memory recency, then normalized login, for determinism under input permutation. This is a deficit-based scheduler: whoever gets watched accumulates minutes and becomes less eligible next time, which surfaces every other online channel over time regardless of count or parity - no even/odd special-casing needed.
+- **Priority as a boost, not exclusivity:** on top of the weighted base pair, an online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat without altering persisted weights. A continuity latch holds the same boost target/victim across ticks until the base pair changes, eligibility is lost, or a strictly stronger hard/semantic contender appears; this prevents per-tick churn but never grants a third slot. Hard restricted/streak/drop class is compared first. Comparable drop contenders then use Campaign Policy semantic class, and equal semantic facts retain the most-owed base occupant by persisted deficit; recency and normalized login finish the deterministic victim choice. Fresh-streak continuity remains protected by its existing bounded pursuit rules.
 - **Continuous-watch accounting:** `Stream.MinuteWatched` measures *continuous* watched minutes, not wall-clock elapsed time. Each successful minute-watched report credits the gap since the previous report only if that gap is within `2 × minuteWatchedInterval`; a larger gap means the streamer lost its watch slot (rotated out, a failed cycle) and, since Twitch resets its server-side watch-streak session on such a break, the local counter is **reset to zero** and the gap is credited as nothing. A brief offline blip is forgiven separately, at the online-detection level: `Streamer.SetOnline` re-arms the watch streak only when the streamer was offline for at least `watchStreakContinuityGrace` (2 minutes) — a shorter blip (an online-detection flap, e.g. a PubSub stream-down immediately followed by a viewcount re-check) counts as the same continuous broadcast and preserves the accumulated counter and pending-streak flag, with the per-report gap check above remaining the backstop for whether viewing was actually continuous. Without this, `MinuteWatched` would accumulate wall-clock time across rotation gaps, cross the streak threshold on phantom minutes the viewer never continuously watched, and - because the pursuit logic stops chasing a streamer once it passes the threshold - abandon a streak that was in fact never earned.
 - **Watch-streak pursuit diagnostics:** because a watch streak is only ever logged once *earned* (a `points-earned` PubSub event with `reason_code = WATCH_STREAK`, `~+300-450`), a streak that is never earned is otherwise invisible. The watcher therefore logs, per streak, one INFO when it starts pursuing a streamer's pending streak and one WARN if the streamer has been watched past the streak threshold (`watchStreakThresholdMinutes`, 7) *continuously* while the streak is still missing - the WARN distinguishes "not watched enough yet" (a scheduling problem) from "watched enough but Twitch never credited it" (an upstream/authorization/viewing problem).
 - **Avoiding last-second interruptions:** a scheduled swap-out is postponed once, by a short fixed delay (2 min), if the leaving streamer is within a few minutes of completing its watch streak - but only when both current pair members are still online (an offline member is dropped immediately, regardless of streak state). This doesn't extend to imminent drop-campaign completion.
@@ -1398,15 +1402,21 @@ pre-existing rank-based arbitration stands: a discovered channel farming an
 active drop (rank `active_drop`) can displace a configured streamer held only by
 points/fair-rotation priority (rank below `active_drop`). Either way, and
 regardless of the flag, a channel-restricted discovery drop keeps its normal
-rank because it can only be farmed on that one channel.
+rank because discovery carries the verified campaign-ID/ACL restricted fact in
+the same candidate snapshot the broker arbitrates.
 
 The optional `discoveryPreferSubscribed` flag (config key, also a checkbox in the
 Directory Discovery settings panel; default `false`) adds a *tertiary* key to the
 candidate comparator in `internal/discovery`, layered over the existing
 viewer-count sort: with it on, a subscribed channel floats above a non-subscribed
-one within a game (cross-game order still dominates via listing order), so the
-per-game pick — and thus `selectBest`, which takes the first eligible in pool
-order — prefers a subscribed channel. Subscription is a **proxy**: discovery has
+one within a game, so an otherwise equal per-game pick prefers a subscribed
+channel. Game-level policy ranks only pre-order directory fetches and bounded
+online checks. Final `selectBest` ordering uses each verified channel's exact
+advertised campaign IDs, active tracker intersection, restricted ACL and best
+campaign `SemanticClass`; configured game order and the existing stable
+subscription/viewer order break exact-class ties for a genuinely new choice. A
+valid current yields only to a strictly stronger hard/semantic candidate, so
+equal facts do not churn. Subscription is a **proxy**: discovery has
 no subscriptions GraphQL operation (no such persisted query exists in the
 canonical trackers), so instead a slow miner-side loop (`subscriptionProbeLoop`,
 base cadence 3 min ±20% jitter, deliberately separate from the 1-minute
@@ -1621,16 +1631,19 @@ candidates and produces an explainable decision per campaign. No opaque model.
 Per campaign: `timeUntilEnd`, `minutesToNextReward` (the lowest-threshold
 unmet drop's remaining), `minutesToCompleteAll` (the furthest milestone's
 remaining — the codebase's cumulative model), `canCompleteNextReward`,
-`canCompleteAll` (both against `timeUntilEnd − safetyReserve`), and a status:
-`SAFE` (finishes the chain with margin), `AT_RISK` (finishes but the margin is
-thin), `NEXT_REWARD_ONLY` (only the next reward is reachable), `IMPOSSIBLE`
-(not even the next reward, or already ended). The `NextRewardOnly` rule reduces
-the goal to just the next reward.
+`canCompleteAll` (both against `timeUntilEnd − safetyReserve`), `deadlineKnown`,
+and a status: `UNKNOWN` when Twitch supplied no real deadline, `SAFE` (finishes
+the chain with margin), `AT_RISK` (finishes but the margin is thin),
+`NEXT_REWARD_ONLY` (only the next reward is reachable), or `IMPOSSIBLE` (not
+even the next reward, or already ended). Within the same `HighPriority` class,
+ENDING_SOONEST orders known real deadlines before `UNKNOWN`; an absent deadline
+never becomes the earliest there. The `NextRewardOnly` rule reduces the goal to
+just the next reward.
 
 ### Modes
 
-`GAME_ORDER` (default, orders by configured game index — bit-identical to the
-pre-engine behavior), `ENDING_SOONEST`, `CLOSEST_TO_REWARD`, `LOW_AVAILABILITY`
+`GAME_ORDER` (default, preserves configured-game ordering), `ENDING_SOONEST`,
+`CLOSEST_TO_REWARD`, `LOW_AVAILABILITY`
 (fewest eligible live channels first), and `SMART`. `Normalize` upper-cases and
 falls back to `GAME_ORDER`; `ValidateConfig` canonicalizes the persisted value
 via the same validator (single source of the valid-mode set).
@@ -1667,13 +1680,26 @@ resets the rule.
 
 On the health-watchdog tick (no new goroutine, no Twitch calls — inputs come
 from already-synced state) the miner assembles inputs, ranks them, and
-publishes: per-login best scores to the watcher (`SetCampaignScores`, read
-lock-free) and per-game ranks to discovery (`SetGameRanks`). The watcher's
-`DROPS` priority orders competing drop streamers by score **within** its
-existing restricted-first passes — the channel-restricted-first invariant is
-never overridden — and discovery builds its cross-game pool in policy order.
-With no scores/ranks published (GAME_ORDER default, no rules) both paths are
-bit-identical to before. Config (`campaignPolicy`, `dropRules`) is
+publishes one immutable watcher snapshot (`SetCampaignSemanticPolicy`, read
+lock-free) containing each configured channel's best ordinal `SemanticClass`,
+the exact per-campaign classes, and the game-level directory pre-order. The
+discovery mirror (`SetCampaignPolicy`) remains an atomic compatibility/fallback
+seam; production discovery reads the broker-active snapshot through
+`DiscoveryCampaignPolicy`, so a concurrent refresh cannot mix policy
+generations between source selection and final arbitration. The watcher's hard eligibility and
+restricted/streak classes remain outermost; among otherwise comparable drop
+contenders, semantic class is applied before persisted watch-time deficit, and
+deficit remains the fairness authority for equal semantic facts. Discovery
+verifies each candidate's advertised campaign IDs and channel ACL, orders by
+that channel's best eligible class (never the game's aggregate best), and
+carries the exact eligible campaign IDs and restricted fact into the same
+broker tick; the broker resolves their class from that tick's immutable
+snapshot. It
+re-evaluates a still-valid current on each proposal, switching only for a
+strictly stronger hard/semantic candidate; equal facts preserve continuity.
+No raw policy points are added to watch minutes. Without published semantic
+facts, configured order and the pre-policy broker behavior are preserved.
+Config (`campaignPolicy`, `dropRules`) is
 runtime-updatable via the Drops page; the ranked decisions surface on the Drops
 page (feasibility badge + breakdown + per-drop controls) and in
 `/debug/snapshot` (`policy` section — mode, scores, factors; no secrets).

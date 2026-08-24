@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
 
 // mutableSource is a candidate source whose proposal list can be swapped
@@ -30,7 +31,8 @@ func (s *mutableSource) set(c []Candidate) { s.cand.Store(&c) }
 // patterns concurrently under -race: the loop goroutine (processWatching),
 // runtime settings updates (UpdateSettings), a source refreshing its proposals
 // (discovery), and dashboard/debug readers (BrokerSnapshot / GetDebugState /
-// IsWatching). It guards the broker's mu/atomic discipline.
+// IsWatching), and campaign-semantic publication from miner.refreshPolicy. It
+// guards the broker's mu/atomic discipline.
 func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 	sender := &countingSender{sent: make(chan string, 64)}
 	checker := &staticChecker{checked: make(chan string, 64)}
@@ -57,7 +59,7 @@ func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 
 	const iters = 3000
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 
 	go func() { // broker loop
 		defer wg.Done()
@@ -84,6 +86,25 @@ func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 			} else {
 				src.set(nil)
 			}
+		}
+	}()
+	go func() { // campaign policy refresh publication
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			if i%3 == 0 {
+				w.SetCampaignSemanticClasses(nil)
+				w.SetDiscoveryCandidatePolicy("", CandidateCampaignPolicy{})
+				continue
+			}
+			w.SetCampaignSemanticClasses(map[string]policy.SemanticClass{
+				"streamera": policy.SemanticClass(i % 4),
+				"streamerb": policy.SemanticClass((i + 1) % 4),
+				"disco":     0,
+			})
+			w.SetDiscoveryCandidatePolicy("disco2", CandidateCampaignPolicy{
+				SemanticClass: policy.SemanticClass(i % 4),
+				Ranked:        true,
+			})
 		}
 	}()
 	go func() { // dashboard/debug readers

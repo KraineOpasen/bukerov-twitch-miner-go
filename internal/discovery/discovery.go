@@ -32,6 +32,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/watcher"
 )
@@ -89,6 +90,21 @@ type SlotStatus interface {
 	// duplicate) from one the broker placed on discovery's own proposal (keep it),
 	// which IsWatching alone cannot distinguish.
 	WatchingOrigin(login string) string
+}
+
+// candidatePolicyPublisher is the optional same-tick semantic handoff exposed
+// by the Unified Slot Broker. Manager already receives that broker through
+// SetSlotStatus, so no second owner or wiring path is introduced.
+type candidatePolicyPublisher interface {
+	SetDiscoveryCandidatePolicy(string, watcher.CandidateCampaignPolicy)
+}
+
+// campaignPolicyProvider exposes the Unified Slot Broker's one immutable
+// semantic publication. In production the same watcher snapshot therefore
+// drives discovery's proposal and the final broker comparison; the local
+// SetCampaignPolicy snapshot remains the rank-only/test compatibility fallback.
+type campaignPolicyProvider interface {
+	DiscoveryCampaignPolicy() (map[string]int, map[string]policy.SemanticClass)
 }
 
 // TrackedLoginsProvider exposes the logins of the configured streamer list so
@@ -152,9 +168,13 @@ type Manager struct {
 	tracked    TrackedLoginsProvider
 	slotStatus SlotStatus
 	avoid      AvoidChecker
-	gameRanks  atomic.Pointer[map[string]int]
-	subscribed atomic.Pointer[map[string]bool] // lock-free published subscribed set; nil = none
-	settings   config.RateLimitSettings
+	// campaignPolicy is the immutable compatibility/fallback publication used
+	// when no Unified Slot Broker policy provider is wired (mainly focused tests).
+	// Production reads the broker's one active snapshot through slotStatus so
+	// source selection and final arbitration cannot mix policy generations.
+	campaignPolicy atomic.Pointer[campaignPolicySnapshot]
+	subscribed     atomic.Pointer[map[string]bool] // lock-free published subscribed set; nil = none
+	settings       config.RateLimitSettings
 
 	// mode selects candidacy: DiscoveryModeAll farms non-tracked directory
 	// channels (the default), DiscoveryModeTrackedOnly inverts the exclusion
@@ -228,17 +248,161 @@ func (m *Manager) SetAvoidChecker(a AvoidChecker) {
 	m.mu.Unlock()
 }
 
-// SetGameRanks publishes the campaign-policy engine's cross-game ordering
-// (keyed by lowercase game name; lower rank = higher priority) so the
-// discovered-channel pool is built in policy order rather than the raw
-// configured list order. nil (GAME_ORDER/disabled) preserves the configured
-// order exactly. Lock-free for the reader; safe for concurrent use.
-func (m *Manager) SetGameRanks(ranks map[string]int) {
-	if ranks == nil {
-		m.gameRanks.Store(nil)
+type campaignPolicySnapshot struct {
+	gameRanks       map[string]int
+	campaignClasses map[string]policy.SemanticClass
+}
+
+// SetCampaignPolicy atomically publishes the compatibility/fallback game-level
+// pre-order and exact per-campaign semantic classes. Both maps are copied and
+// immutable. With no broker policy provider, the next local current evaluation
+// sees them without directory I/O; exact candidate ordering is derived only
+// after that channel's advertised campaign IDs and channel ACL are verified.
+func (m *Manager) SetCampaignPolicy(gameRanks map[string]int, campaignClasses map[string]policy.SemanticClass) {
+	next := &campaignPolicySnapshot{
+		gameRanks:       cloneGameRanks(gameRanks),
+		campaignClasses: cloneCampaignClasses(campaignClasses),
+	}
+	current := m.campaignPolicy.Load()
+	if equalCampaignPolicy(current, next) {
 		return
 	}
-	m.gameRanks.Store(&ranks)
+	m.campaignPolicy.Store(next)
+}
+
+// SetGameRanks preserves the rank-only internal compatibility seam used by
+// older callers/tests. Production receives exact classes and game ranks from
+// the Unified Slot Broker snapshot; game aggregation is never mistaken for a
+// channel's exact campaign semantic class. nil restores GAME_ORDER behavior.
+func (m *Manager) SetGameRanks(ranks map[string]int) {
+	if len(ranks) == 0 {
+		m.campaignPolicy.Store(nil)
+		return
+	}
+	m.SetCampaignPolicy(ranks, nil)
+}
+
+func cloneGameRanks(source map[string]int) map[string]int {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]int, len(source))
+	for game, rank := range source {
+		cloned[game] = rank
+	}
+	return cloned
+}
+
+func cloneCampaignClasses(source map[string]policy.SemanticClass) map[string]policy.SemanticClass {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]policy.SemanticClass, len(source))
+	for campaignID, class := range source {
+		cloned[campaignID] = class
+	}
+	return cloned
+}
+
+func equalCampaignPolicy(current, next *campaignPolicySnapshot) bool {
+	if current == nil || next == nil {
+		return current == next
+	}
+	return equalGameRanks(current.gameRanks, next.gameRanks) &&
+		equalCampaignClasses(current.campaignClasses, next.campaignClasses)
+}
+
+func equalGameRanks(left, right map[string]int) bool {
+	if (left == nil) != (right == nil) {
+		return false
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for game, rank := range left {
+		if other, ok := right[game]; !ok || other != rank {
+			return false
+		}
+	}
+	return true
+}
+
+func equalCampaignClasses(left, right map[string]policy.SemanticClass) bool {
+	if (left == nil) != (right == nil) {
+		return false
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for campaignID, class := range left {
+		if other, ok := right[campaignID]; !ok || other != class {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) currentCampaignPolicy() *campaignPolicySnapshot {
+	m.mu.RLock()
+	status := m.slotStatus
+	m.mu.RUnlock()
+	if provider, ok := status.(campaignPolicyProvider); ok {
+		gameRanks, campaignClasses := provider.DiscoveryCampaignPolicy()
+		if gameRanks != nil || campaignClasses != nil {
+			return &campaignPolicySnapshot{
+				gameRanks:       gameRanks,
+				campaignClasses: campaignClasses,
+			}
+		}
+	}
+	return m.campaignPolicy.Load()
+}
+
+const unrankedGamePriority = 1 << 30
+
+type gamePolicyPriority struct {
+	semantic   int
+	configured int
+}
+
+type gamePolicyOrder struct {
+	ranks      map[string]int
+	configured map[string]int
+}
+
+func newGamePolicyOrder(games []string, ranks map[string]int) gamePolicyOrder {
+	order := gamePolicyOrder{
+		ranks:      ranks,
+		configured: make(map[string]int, len(games)),
+	}
+	for i, game := range games {
+		order.configured[strings.ToLower(game)] = i
+	}
+	return order
+}
+
+func (o gamePolicyOrder) priority(game string) gamePolicyPriority {
+	key := strings.ToLower(game)
+	configured := unrankedGamePriority
+	if index, ok := o.configured[key]; ok {
+		configured = index
+	}
+	semantic := configured
+	if o.ranks != nil {
+		semantic = unrankedGamePriority
+		if rank, ok := o.ranks[key]; ok {
+			semantic = rank
+		}
+	}
+	return gamePolicyPriority{semantic: semantic, configured: configured}
+}
+
+func (o gamePolicyOrder) less(left, right string) bool {
+	lp, rp := o.priority(left), o.priority(right)
+	if lp.semantic != rp.semantic {
+		return lp.semantic < rp.semantic
+	}
+	return lp.configured < rp.configured
 }
 
 // orderGamesByPolicy returns games reordered by the published policy ranks
@@ -246,21 +410,15 @@ func (m *Manager) SetGameRanks(ranks map[string]int) {
 // sorted after ranked ones). With no ranks published it returns games
 // unchanged, so the configured order is bit-identical.
 func (m *Manager) orderGamesByPolicy(games []string) []string {
-	ranksPtr := m.gameRanks.Load()
-	if ranksPtr == nil {
+	published := m.currentCampaignPolicy()
+	if published == nil || published.gameRanks == nil {
 		return games
 	}
-	ranks := *ranksPtr
-	rank := func(g string) int {
-		if r, ok := ranks[strings.ToLower(g)]; ok {
-			return r
-		}
-		return 1 << 30 // unranked games sort last, keeping their relative order
-	}
+	order := newGamePolicyOrder(games, published.gameRanks)
 	ordered := make([]string, len(games))
 	copy(ordered, games)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return rank(ordered[i]) < rank(ordered[j])
+		return order.less(ordered[i], ordered[j])
 	})
 	return ordered
 }
@@ -721,20 +879,29 @@ func (m *Manager) gameStillActive(gameID string) bool {
 
 // channelCarriesActiveCampaign reports whether at least one of the campaigns
 // Twitch lists as available on this channel (Stream.CampaignIDs) is a
-// tracker-active one: still unclaimed per the account's claim history, not
-// blacklisted (those never reach Campaigns()), and — for channel-restricted
-// campaigns — actually allowing this channel. This mirrors the intersection
-// updateStreamerCampaigns performs for tracked streamers; without it a
-// top-viewed channel carrying only an already-claimed recurring campaign
-// would hold the slot forever while a smaller channel runs the new one.
+// tracker-active one. It also publishes the exact eligible intersection on the
+// ephemeral Streamer, so broker hard classification sees an allowed restricted
+// campaign just as it does for a configured streamer.
 func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
+	eligible := m.eligibleCampaignsForChannel(ch)
+	ch.Streamer.Stream.SetCampaigns(eligible)
+	return len(eligible) > 0
+}
+
+// eligibleCampaignsForChannel mirrors the tracker intersection for an
+// ephemeral discovery streamer: still unclaimed, not blacklisted (those never
+// reach Campaigns()), exact advertised campaign ID, same game, and an allowed
+// channel ACL. AllowsChannel is the crediting gate for every ACL state: it
+// accepts unrestricted campaigns, checks restricted membership, and fails
+// closed when the allowlist is unknown.
+func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 	if m.campaigns == nil {
-		return false
+		return nil
 	}
 
 	ids := ch.Streamer.Stream.GetCampaignIDs()
 	if len(ids) == 0 {
-		return false
+		return nil
 	}
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -742,6 +909,7 @@ func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
 	}
 
 	_, gameID, _, _ := m.channelFacts(ch)
+	var eligible []*models.Campaign
 	for _, c := range m.campaigns.Campaigns() {
 		if c.Game == nil || c.Game.ID != gameID {
 			continue
@@ -752,12 +920,52 @@ func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
 		if !idSet[c.ID] {
 			continue
 		}
-		if c.IsChannelRestricted() && !c.AllowsChannel(ch.Streamer.ChannelID) {
+		if !c.AllowsChannel(ch.Streamer.ChannelID) {
 			continue
 		}
-		return true
+		eligible = append(eligible, c)
 	}
-	return false
+	return eligible
+}
+
+// candidatePolicyFacts derives the exact immutable facts carried with a
+// discovery proposal. Game-best ranks are intentionally absent here: only an
+// eligible campaign actually advertised by this channel may supply its class.
+func (m *Manager) candidatePolicyFacts(ch *Channel, published *campaignPolicySnapshot) (watcher.CandidateCampaignPolicy, bool) {
+	eligible := m.eligibleCampaignsForChannel(ch)
+	ch.Streamer.Stream.SetCampaigns(eligible)
+	if len(eligible) == 0 {
+		return watcher.CandidateCampaignPolicy{}, false
+	}
+
+	facts := watcher.CandidateCampaignPolicy{}
+	var named bool
+	for _, c := range eligible {
+		facts.CampaignIDs = append(facts.CampaignIDs, c.ID)
+		restricted := c.IsChannelRestricted()
+		if restricted {
+			facts.Restricted = true
+		}
+		class, ranked := policy.SemanticClass(0), false
+		if published != nil && published.campaignClasses != nil {
+			class, ranked = published.campaignClasses[c.ID]
+			if ranked && (!facts.Ranked || class < facts.SemanticClass) {
+				facts.SemanticClass = class
+				facts.Ranked = true
+			}
+		}
+
+		// Prefer a restricted campaign name when the hard restricted fact owns
+		// the slot explanation; otherwise prefer the strongest ranked campaign.
+		if !named || (restricted && facts.Restricted) || (ranked && class == facts.SemanticClass) {
+			facts.Campaign = c.Name
+			if facts.Campaign == "" {
+				facts.Campaign = c.ID
+			}
+			named = true
+		}
+	}
+	return facts, true
 }
 
 // findExistingLocked looks up a pool/current entry by login so its ephemeral
@@ -833,10 +1041,19 @@ func newEphemeralStreamer(login, channelID string) *models.Streamer {
 // verification with no lock held during the network calls; the sync loop and
 // State() coordinate with it through mu exactly as before.
 func (m *Manager) WatchCandidates() []watcher.Candidate {
-	ch := m.prepareCurrent()
+	published := m.currentCampaignPolicy()
+	ch := m.prepareCurrentWithPolicy(published)
 	if ch == nil {
+		m.publishCandidatePolicy("", watcher.CandidateCampaignPolicy{})
 		return nil
 	}
+	facts, eligible := m.candidatePolicyFacts(ch, published)
+	if !eligible {
+		m.publishCandidatePolicy("", watcher.CandidateCampaignPolicy{})
+		return nil
+	}
+	login := ch.Streamer.GetUsername()
+	m.publishCandidatePolicy(login, facts)
 	game, _, _, _ := m.channelFacts(ch)
 	return []watcher.Candidate{{
 		Streamer: ch.Streamer,
@@ -845,23 +1062,32 @@ func (m *Manager) WatchCandidates() []watcher.Candidate {
 	}}
 }
 
+func (m *Manager) publishCandidatePolicy(login string, facts watcher.CandidateCampaignPolicy) {
+	if publisher, ok := m.slotStatus.(candidatePolicyPublisher); ok {
+		publisher.SetDiscoveryCandidatePolicy(login, facts)
+	}
+}
+
 // prepareCurrent selects and validates the current best discovered channel and
 // returns it (or nil when nothing is watchable). It performs exactly the
 // selection, stale re-verification, and auto-switching the old watch loop did,
 // but never reports a watched minute — that is the slot broker's job once it
 // places the channel in a slot. Runs on the broker's loop goroutine.
 func (m *Manager) prepareCurrent() *Channel {
+	return m.prepareCurrentWithPolicy(m.currentCampaignPolicy())
+}
+
+func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *Channel {
 	games := m.getGames()
 	if len(games) == 0 {
 		return nil
 	}
-
 	m.mu.RLock()
 	current := m.current
 	m.mu.RUnlock()
 
 	if current == nil {
-		next := m.selectBest(nil)
+		next := m.selectBestWithPolicy(nil, published)
 		if next == nil {
 			m.logPoolEmpty(games)
 			// The pool exists but produced nothing watchable (candidates
@@ -877,7 +1103,7 @@ func (m *Manager) prepareCurrent() *Channel {
 			"channel", next.Streamer.GetUsername(),
 			"game", game,
 			"viewers", viewers,
-			"reason", "best available drops-enabled channel by viewer count")
+			"reason", "best available eligible channel under Campaign Policy and existing discovery tie-breaks")
 		events.Record(events.TypeDiscoverySelected, next.Streamer.GetUsername(),
 			"directory candidate: "+game)
 		current = next
@@ -899,7 +1125,7 @@ func (m *Manager) prepareCurrent() *Channel {
 			m.mu.Unlock()
 		}
 
-		next := m.selectBest(current)
+		next := m.selectBestWithPolicy(current, published)
 		if next == nil {
 			m.mu.Lock()
 			m.current = nil
@@ -922,6 +1148,28 @@ func (m *Manager) prepareCurrent() *Channel {
 			"reason", reason)
 		events.Record(events.TypeDiscoverySwitched, next.Streamer.GetUsername(),
 			"from "+current.Streamer.GetUsername()+": "+reason)
+		current = next
+	}
+
+	// A policy preference is not an ordinary invalidation: the existing channel
+	// may still be perfectly watchable while another known pool candidate is now
+	// semantically stronger. Reconsider only that strict relation on every
+	// proposal so a stronger candidate added by a later pool refresh can
+	// converge without another rank publication. Equal or weaker ranks retain
+	// current continuity, and the local pool is enough — no directory resync is
+	// required merely to apply Campaign Policy.
+	if next := m.selectStrictlyStrongerWithPolicy(current, published); next != nil {
+		previous := current
+		m.setCurrent(next)
+		game, _, viewers, _ := m.channelFacts(next)
+		slog.Info("Switching discovered channel",
+			"from", previous.Streamer.GetUsername(),
+			"to", next.Streamer.GetUsername(),
+			"game", game,
+			"viewers", viewers,
+			"reason", "Campaign Policy assigned a strictly stronger eligible campaign semantic class")
+		events.Record(events.TypeDiscoverySwitched, next.Streamer.GetUsername(),
+			"from "+previous.Streamer.GetUsername()+": stronger eligible Campaign Policy semantic class")
 		current = next
 	}
 
@@ -981,22 +1229,78 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	return "", false
 }
 
-// selectBest returns the best watchable candidate from the pool: candidates
-// are already ordered by configured game order then viewer count, so the
-// first one that verifies as online, still on its game, and carrying an
-// available drop campaign wins. exclude (may be nil) is the channel being
-// switched away from. At most maxCandidateChecksPerTick candidates are
-// brought online per call to bound the API burst; the rest wait for the next
-// tick.
+// selectBest returns the best watchable candidate from the pool under the
+// latest policy ordering. Game ranks are only a cheap directory/check pre-order:
+// final selection uses each verified channel's exact advertised campaign IDs,
+// active tracker campaigns and channel ACL. Within an equal exact semantic
+// class, configured game order and the pool's existing per-game
+// subscribed/viewer ordering remain stable. exclude (may be nil) is the
+// channel being switched away from. At most maxCandidateChecksPerTick
+// candidates are brought online per call to bound the API burst; the rest wait
+// for the next tick.
 func (m *Manager) selectBest(exclude *Channel) *Channel {
+	return m.selectBestWithPolicy(exclude, m.currentCampaignPolicy())
+}
+
+func (m *Manager) selectBestWithPolicy(exclude *Channel, published *campaignPolicySnapshot) *Channel {
+	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
+	return m.selectBestOrdered(exclude, order, published)
+}
+
+// selectStrictlyStrongerWithPolicy returns an eligible candidate only when its
+// exact hard restricted/semantic campaign priority is strictly stronger than
+// current's. Equal facts retain current continuity even if configured order,
+// viewer count or subscription preference would select the other channel from
+// scratch.
+func (m *Manager) selectStrictlyStrongerWithPolicy(current *Channel, published *campaignPolicySnapshot) *Channel {
+	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
+	next := m.selectBestOrdered(current, order, published)
+	if next == nil || !m.candidateStrictlyStronger(next, current, order, published) {
+		return nil
+	}
+	return next
+}
+
+func policyGameRanks(published *campaignPolicySnapshot) map[string]int {
+	if published == nil {
+		return nil
+	}
+	return published.gameRanks
+}
+
+type orderedCandidate struct {
+	channel  *Channel
+	priority gamePolicyPriority
+}
+
+type evaluatedCandidate struct {
+	orderedCandidate
+	facts watcher.CandidateCampaignPolicy
+}
+
+func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, published *campaignPolicySnapshot) *Channel {
 	m.mu.RLock()
-	pool := make([]*Channel, len(m.pool))
-	copy(pool, m.pool)
+	pool := make([]orderedCandidate, 0, len(m.pool))
+	for _, ch := range m.pool {
+		pool = append(pool, orderedCandidate{
+			channel:  ch,
+			priority: order.priority(ch.Game),
+		})
+	}
 	m.mu.RUnlock()
+	sort.SliceStable(pool, func(i, j int) bool {
+		left, right := pool[i].priority, pool[j].priority
+		if left.semantic != right.semantic {
+			return left.semantic < right.semantic
+		}
+		return left.configured < right.configured
+	})
 
 	trackedOnly := m.trackedOnly()
 	checks := 0
-	for _, ch := range pool {
+	var best *evaluatedCandidate
+	for _, candidate := range pool {
+		ch := candidate.channel
 		if ch == exclude {
 			continue
 		}
@@ -1039,7 +1343,7 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 		stale := online && ch.Streamer.Stream.UpdateElapsed() > staleStreamRecheck
 		if !online || stale {
 			if checks >= maxCandidateChecksPerTick {
-				return nil
+				break
 			}
 			checks++
 			m.client.CheckStreamerOnline(ch.Streamer)
@@ -1060,7 +1364,8 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 		if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {
 			continue
 		}
-		if !m.channelCarriesActiveCampaign(ch) {
+		facts, eligible := m.candidatePolicyFacts(ch, published)
+		if !eligible {
 			continue
 		}
 
@@ -1069,9 +1374,96 @@ func (m *Manager) selectBest(exclude *Channel) *Channel {
 			ch.Viewers = v
 			m.mu.Unlock()
 		}
-		return ch
+		candidate.priority = order.priority(game)
+		evaluated := evaluatedCandidate{orderedCandidate: candidate, facts: facts}
+		if best == nil || betterExactCandidate(evaluated, *best, published) {
+			copy := evaluated
+			best = &copy
+		}
 	}
-	return nil
+	if best == nil {
+		return nil
+	}
+	return best.channel
+}
+
+// candidateStrictlyStronger compares only scheduler semantics: restricted hard
+// class, then exact per-channel Campaign Policy class. Configured/viewer/
+// subscription ordering is deliberately excluded so equal semantic facts keep
+// the valid current proposal.
+func (m *Manager) candidateStrictlyStronger(
+	candidate, current *Channel,
+	order gamePolicyOrder,
+	published *campaignPolicySnapshot,
+) bool {
+	candidateFacts, candidateEligible := m.candidatePolicyFacts(candidate, published)
+	currentFacts, currentEligible := m.candidatePolicyFacts(current, published)
+	if !candidateEligible {
+		return false
+	}
+	if !currentEligible {
+		return true
+	}
+	candidateGame, _, _, _ := m.channelFacts(candidate)
+	currentGame, _, _, _ := m.channelFacts(current)
+	return compareCandidatePolicy(
+		candidateFacts, currentFacts,
+		order.priority(candidateGame), order.priority(currentGame),
+		published,
+	) < 0
+}
+
+func betterExactCandidate(candidate, current evaluatedCandidate, published *campaignPolicySnapshot) bool {
+	if cmp := compareCandidatePolicy(
+		candidate.facts, current.facts,
+		candidate.priority, current.priority,
+		published,
+	); cmp != 0 {
+		return cmp < 0
+	}
+	// Exact semantic equality is a genuine new-selection tie: retain the
+	// configured cross-game order and then the stable pool order, which already
+	// carries preferSubscribed/viewer ordering inside each game.
+	return candidate.priority.configured < current.priority.configured
+}
+
+// compareCandidatePolicy returns negative when left is semantically stronger.
+// With a production exact campaign map, game ranks never decide the result;
+// they are only a directory/check pre-order. The rank-only compatibility seam
+// falls back to game semantics, preserving historical GAME_ORDER tests.
+func compareCandidatePolicy(
+	left, right watcher.CandidateCampaignPolicy,
+	leftGame, rightGame gamePolicyPriority,
+	published *campaignPolicySnapshot,
+) int {
+	if left.Restricted != right.Restricted {
+		if left.Restricted {
+			return -1
+		}
+		return 1
+	}
+	if published != nil && published.campaignClasses != nil {
+		if left.Ranked != right.Ranked {
+			if left.Ranked {
+				return -1
+			}
+			return 1
+		}
+		if left.Ranked && left.SemanticClass != right.SemanticClass {
+			if left.SemanticClass < right.SemanticClass {
+				return -1
+			}
+			return 1
+		}
+		return 0
+	}
+	if leftGame.semantic < rightGame.semantic {
+		return -1
+	}
+	if leftGame.semantic > rightGame.semantic {
+		return 1
+	}
+	return 0
 }
 
 func (m *Manager) setCurrent(ch *Channel) {
