@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.7-alpine AS builder
 
 WORKDIR /build
 
@@ -41,16 +41,29 @@ RUN tailwindcss \
     -o internal/web/static/css/app.css \
     --minify
 
-# Build arguments for independent version and release-channel injection.
+# Build arguments. Stable builds derive Version and Channel from one exact,
+# platform-bound identity marker; main/dev builds keep the legacy variables.
 ARG VERSION=dev
-ARG CHANNEL=stable
+ARG CHANNEL=main
 
 # Build static binary
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -trimpath -buildvcs=false \
-    -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${VERSION} -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Channel=${CHANNEL}" \
-    -o twitch-miner-go \
-    ./cmd/miner
+RUN set -eu; \
+    if [ "$CHANNEL" = "stable" ]; then \
+        identity="BTM_STABLE_ARTIFACT_V1|VERSION=${VERSION}|CHANNEL=stable|GOOS=linux|GOARCH=${TARGETARCH}"; \
+        ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.ArtifactIdentity=${identity}"; \
+    else \
+        ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Version=${VERSION} -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.Channel=${CHANNEL}"; \
+    fi; \
+    CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build \
+        -trimpath -buildvcs=false \
+        -ldflags="$ldflags" \
+        -o twitch-miner-go \
+        ./cmd/miner; \
+    if [ "$CHANNEL" = "stable" ]; then \
+        marker_count="$(grep -aFo "$identity" twitch-miner-go | wc -l)"; \
+        all_stable_marker_count="$(grep -aEo 'BTM_STABLE_ARTIFACT_V1\|VERSION=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\|CHANNEL=stable\|GOOS=[a-z0-9]+\|GOARCH=[a-z0-9]+' twitch-miner-go | wc -l)"; \
+        [ "$marker_count" -eq 1 ] && [ "$all_stable_marker_count" -eq 1 ]; \
+    fi
 
 # Compress binary with UPX
 RUN upx --best --lzma twitch-miner-go
@@ -89,10 +102,12 @@ ENV CONFIG_PATH=/config/config.json
 ENV DASHBOARD_HOST=0.0.0.0
 EXPOSE 5000
 
-# Stable images never consume the repository-wide GitHub Releases update feed.
-# Upgrades are operator-controlled changes to an exact stable image tag/digest.
-ENV AUTO_UPDATE=false
-ENV AUTO_UPDATE_CHECK_INTERVAL=8h
+# Stable images discover only complete canonical stable-vX.Y.Z Releases. The
+# updater also caches each accepted binary under the existing persistent
+# /database volume so recreation from the pinned image cannot silently
+# downgrade the runtime. Set AUTO_UPDATE=false to opt out of future updates.
+ENV AUTO_UPDATE=true
+ENV AUTO_UPDATE_CHECK_INTERVAL=2h
 
 # Exclude this container from Watchtower so an exact stable selection cannot
 # be silently replaced.
