@@ -15,6 +15,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
@@ -175,13 +176,28 @@ type MinuteWatcher struct {
 	// snapshotted at the start of each tick.
 	avoid AvoidChecker
 
-	// campaignScores publishes the campaign-policy engine's per-login score
-	// (higher = higher priority). The DROPS priority picker reads it lock-free
-	// to break ties among competing drop streamers by the active policy mode;
-	// nil (or an absent login) means no policy preference, preserving the
-	// pre-policy order. Advisory only — it never overrides the slot cap or the
-	// restricted-drop-first rule.
+	// campaignScores is the pre-existing raw-score publication surface retained
+	// for source compatibility with session.go. Production allocation no longer
+	// reads it: raw policy points are not comparable across modes and must never
+	// be mixed with persisted watch minutes.
 	campaignScores atomic.Pointer[map[string]int]
+
+	// campaignSemanticPolicy publishes the policy engine's per-login configured
+	// projection and exact per-campaign ordinal classes as one immutable object.
+	// The broker captures one pointer at the start of each allocation tick; every
+	// configured/discovery comparison therefore belongs to the same decision set.
+	campaignSemanticPolicy atomic.Pointer[campaignSemanticSnapshot]
+	// activeCampaignSemanticPolicy is non-nil only while one processWatching
+	// allocation is in progress. Discovery's concurrent sync goroutine may read
+	// it too, so it is atomic; receiving the just-captured snapshot for that short
+	// interval is safe and keeps every current broker proposal on one generation.
+	activeCampaignSemanticPolicy atomic.Pointer[campaignSemanticSnapshot]
+	// discoveryCandidatePolicy is the exact source publication made inside the
+	// same WatchCandidates call that returns the proposal. It closes the window
+	// where a newly verified ephemeral channel was absent from the miner's prior
+	// per-login snapshot. Only cross-source arbitration reads it; configured and
+	// discovery ordinals are both resolved through campaignSemanticPolicy.
+	discoveryCandidatePolicy atomic.Pointer[discoveryCandidatePolicySnapshot]
 
 	// preferConfigured, when true, forbids a non-configured (discovery)
 	// candidate from displacing a configured streamer that already holds a slot,
@@ -239,6 +255,11 @@ type rotationState struct {
 
 	lastWatched map[int]time.Time // last tick each streamer index was actually watched (fairness tie-break + boost victim selection)
 	deferredFor map[int]bool      // streamers whose scheduled swap-out was already postponed once
+	// deficitMinutes is the persisted WatchTimeStore snapshot that produced the
+	// current base pair, keyed by login so a runtime streamer-list reorder needs
+	// no remap. It is evidence for equal-semantic-class arbitration, never a
+	// second fairness authority.
+	deficitMinutes map[string]float64
 
 	// Boost latch: keep the SAME channel in the ephemeral DROPS/STREAK boost
 	// seat (and displace the SAME base-pair member) across ticks, instead of
@@ -349,6 +370,81 @@ func (w *MinuteWatcher) AddSource(src CandidateSource) {
 	w.mu.Lock()
 	w.sources = append(w.sources, src)
 	w.mu.Unlock()
+}
+
+// SetCampaignSemanticClasses publishes immutable per-login ordinal facts from
+// Campaign Policy. Lower classes are stronger; pass nil to clear. The producer
+// may call this concurrently with the broker loop.
+func (w *MinuteWatcher) SetCampaignSemanticClasses(classes map[string]policy.SemanticClass) {
+	w.SetCampaignSemanticPolicy(classes, nil, nil)
+
+}
+
+// SetCampaignSemanticPolicy atomically publishes both source-owned projections
+// from one Campaign Policy evaluation. Inputs are cloned so the stored snapshot
+// stays immutable while refreshPolicy builds and publishes later evaluations.
+func (w *MinuteWatcher) SetCampaignSemanticPolicy(
+	byLogin map[string]policy.SemanticClass,
+	byCampaign map[string]policy.SemanticClass,
+	gameRanks map[string]int,
+) {
+	if byLogin == nil && byCampaign == nil && gameRanks == nil {
+		w.campaignSemanticPolicy.Store(nil)
+		return
+	}
+	w.campaignSemanticPolicy.Store(&campaignSemanticSnapshot{
+		byLogin:    cloneSemanticClasses(byLogin),
+		byCampaign: cloneSemanticClasses(byCampaign),
+		gameRanks:  cloneSemanticGameRanks(gameRanks),
+	})
+}
+
+func cloneSemanticClasses(source map[string]policy.SemanticClass) map[string]policy.SemanticClass {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]policy.SemanticClass, len(source))
+	for key, class := range source {
+		cloned[key] = class
+	}
+	return cloned
+}
+
+func cloneSemanticGameRanks(source map[string]int) map[string]int {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]int, len(source))
+	for key, rank := range source {
+		cloned[key] = rank
+	}
+	return cloned
+}
+
+// DiscoveryCampaignPolicy returns the immutable semantic snapshot that
+// discovery must use for candidate ordering. During WatchCandidates it is the
+// broker-active tick snapshot; outside a broker tick it is the latest complete
+// miner publication. Callers must treat both maps as read-only.
+func (w *MinuteWatcher) DiscoveryCampaignPolicy() (map[string]int, map[string]policy.SemanticClass) {
+	snapshot := w.campaignSemanticSnapshotForTick()
+	if snapshot == nil {
+		return nil, nil
+	}
+	return snapshot.gameRanks, snapshot.byCampaign
+}
+
+// SetDiscoveryCandidatePolicy publishes discovery's exact verified campaign
+// facts for the one proposal it is about to return. Clearing with an empty
+// login prevents stale proposal facts. Discovery calls this synchronously from
+// WatchCandidates on the broker loop goroutine; the atomic snapshot also keeps
+// tests and future caller order race-safe.
+func (w *MinuteWatcher) SetDiscoveryCandidatePolicy(login string, facts CandidateCampaignPolicy) {
+	if login == "" {
+		w.discoveryCandidatePolicy.Store(nil)
+		return
+	}
+	facts.CampaignIDs = append([]string(nil), facts.CampaignIDs...)
+	w.discoveryCandidatePolicy.Store(&discoveryCandidatePolicySnapshot{login: login, facts: facts})
 }
 
 // stopJoinTimeout bounds how long Stop waits for the watch loop to drain its
@@ -464,7 +560,9 @@ func (w *MinuteWatcher) applyPendingSettings() ([]CandidateSource, AvoidChecker)
 // state is reset so the next selection recomputes it from scratch; per-tick
 // scratch (selectionReasons) needs nothing, it is rebuilt every tick.
 // Username-keyed state (reportStats, pendingRefresh, lastConfiguredWatched,
-// WatchTimeStore rows) is index-free and intentionally untouched.
+// WatchTimeStore rows) is index-free and intentionally untouched. The
+// per-allocation deficit snapshot is discarded and rebuilt from WatchTimeStore
+// after the roster swap, so a removal/re-add cannot inherit stale evidence.
 func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 	oldList := w.streamers
 	newIndexByLogin := make(map[string]int, len(newList))
@@ -552,6 +650,11 @@ func (w *MinuteWatcher) applyStreamerList(newList []*models.Streamer) {
 		delete(w.slotResidence, login)
 	}
 	w.pruneRefreshOutcomes(newIndexByLogin)
+	// A pointer-preserving rename may already have changed GetUsername on both
+	// oldList and newList, so there is no reliable old key to remap here. Clearing
+	// is safe: every contested production selection refreshes this evidence from
+	// the persisted store before consulting it.
+	w.rotation.deficitMinutes = nil
 
 	w.streamers = newList
 }
@@ -642,6 +745,8 @@ func (w *MinuteWatcher) loop() {
 
 func (w *MinuteWatcher) processWatching() {
 	sources, avoid := w.applyPendingSettings()
+	w.activeCampaignSemanticPolicy.Store(w.campaignSemanticPolicy.Load())
+	defer w.activeCampaignSemanticPolicy.Store(nil)
 
 	w.selectionReasons = make(map[int]string)
 	w.selectionMode = ModeIdle
@@ -664,6 +769,13 @@ func (w *MinuteWatcher) processWatching() {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers)
 	}
 	extra := w.gatherCandidates(sources, avoid)
+	// Rotation refreshes this evidence itself. Direct mode normally needs no
+	// fairness comparison, but two configured occupants plus an external
+	// contender do: capture the same persisted deficit before cross-source
+	// displacement so equal semantic facts keep the most-owed configured seat.
+	if w.selectionMode != ModeRotation && len(configuredWatch) == constants.MaxSimultaneousStreams && len(extra) > 0 {
+		w.refreshDeficitMinutes(onlineStreamers, now)
+	}
 	slots, waiting := w.arbitrate(configuredWatch, extra, now)
 
 	// The per-streamer debug state reflects the FINAL configured-watched set
@@ -1005,7 +1117,8 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // (persisted in SQLite, see store.go), ascending, and the two with the
 // least get the slots. Ties (most commonly at cold start, when nobody has
 // any recorded watch time yet) are broken by in-memory recency
-// (least-recently-watched first) and finally by index for determinism.
+// (least-recently-watched first) and finally by login for determinism under
+// candidate-list permutation.
 //
 // This is a deficit-based scheduler: whoever gets watched accumulates
 // minutes and becomes less eligible next time, so the ranking naturally
@@ -1013,15 +1126,16 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // count or its parity - no even/odd special-casing is needed, unlike a
 // fixed round-robin schedule.
 //
-// Priority as weight, not exclusivity:
-// On top of the ranked base pair, any online streamer with an active drop
-// (DropsCondition) or a watch streak in progress (mirroring the existing
-// STREAK/DROPS priority conditions) can take over one seat in the pair -
-// without affecting the ranking above. The seat sacrificed is whichever of the
-// two base-pair members was watched most recently, so the other keeps its slot.
-// The displaced member simply ranks for its turn again next time the base pair
-// is recomputed, so no channel is permanently exclusive and no channel is ever
-// locked out.
+// Semantic priority without replacing fairness:
+// On top of the ranked base pair, one strictly stronger DROPS/STREAK candidate
+// may take one seat. Hard restricted/streak/drop classes are compared first;
+// active-drop candidates inside the same hard class use Campaign Policy's
+// unitless semantic class. Equal semantic facts stay with the persisted-deficit
+// base pair. The victim is the weakest hard/semantic base member; equal campaign
+// facts retain the most-owed occupant by persisted deficit before recency/login
+// finish the tie. The displaced member ranks again at the next base-pair epoch,
+// preventing the semantic seat from becoming a second scheduler or consuming
+// both slots.
 //
 // Continuity latch: the boosted channel and the seat it displaces are held
 // across ticks (see applyPriorityBoost), NOT re-chosen every tick. A watch
@@ -1046,6 +1160,7 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // this can never stall the rotation indefinitely.
 func (w *MinuteWatcher) selectRotating(onlineIndexes []int) []int {
 	now := time.Now()
+	w.refreshDeficitMinutes(onlineIndexes, now)
 
 	needsNewPair := !w.rotation.hasPair ||
 		!containsPair(onlineIndexes, w.rotation.activePair) ||
@@ -1112,7 +1227,7 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 		if !la.Equal(lb) {
 			return la.Before(lb)
 		}
-		return a < b
+		return w.streamers[a].GetUsername() < w.streamers[b].GetUsername()
 	})
 	newPair := [2]int{candidates[0], candidates[1]}
 
@@ -1149,6 +1264,7 @@ func (w *MinuteWatcher) rotateToLeastWatchedPair(onlineIndexes []int, now time.T
 	w.rotation.hasPair = true
 	w.rotation.lastSwitch = now
 	w.rotation.nextInterval = w.randomRotationInterval()
+	w.captureDeficitMinutes(onlineIndexes, weights)
 
 	if changed {
 		// A fresh base pair invalidates the sticky boost seat/victim, which
@@ -1366,7 +1482,10 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 }
 
 // selectBoostTarget returns the highest-priority off-pair boost-eligible
-// streamer per betterBoostCandidate, or -1 if none is eligible.
+// streamer. For campaign-driven candidates it must strictly outrank every
+// boost-eligible base member; equal campaign classes stay with the
+// persisted-deficit base pair. Existing equal fresh-streak boost behavior is
+// preserved because that continuity state has no Campaign Policy semantics.
 func (w *MinuteWatcher) selectBoostTarget(pair [2]int, onlineIndexes []int) int {
 	best := -1
 	for _, idx := range onlineIndexes {
@@ -1380,48 +1499,221 @@ func (w *MinuteWatcher) selectBoostTarget(pair [2]int, onlineIndexes []int) int 
 			best = idx
 		}
 	}
+	if best == -1 {
+		return -1
+	}
+
+	baseBest := -1
+	for _, idx := range pair {
+		if !w.isBoostEligible(idx) {
+			continue
+		}
+		if baseBest == -1 || w.betterBoostCandidate(idx, baseBest) {
+			baseBest = idx
+		}
+	}
+	if baseBest != -1 {
+		strict := w.compareStrictBoost(best, baseBest)
+		if strict < 0 {
+			return -1
+		}
+		if strict == 0 && w.streamers[best].DropsCondition() && w.streamers[baseBest].DropsCondition() {
+			// Both seats are driven by equal campaign semantics. The base pair
+			// already contains the persisted-deficit winner, so an off-pair
+			// boost would invert the required tie-break.
+			return -1
+		}
+	}
 	return best
 }
 
-// selectBoostVictim returns the base-pair seat the boost should displace: the
-// most-recently-watched member not seconds from completing its streak (so the
-// least-recently-watched member keeps its slot), or -1 when both members are
-// protected.
+// selectBoostVictim returns the base-pair seat the boost should displace. A
+// protected in-progress streak is never a victim. Otherwise evict the weakest
+// hard/semantic member, then the one with more persisted watch minutes (the
+// less-owed member), then the most-recently-watched, then login. This leaves
+// the strongest/most-owed base member in the fair seat.
 func (w *MinuteWatcher) selectBoostVictim(pair [2]int) int {
 	victim := -1
 	for _, slot := range pair {
 		if w.nearStreakCompletion(slot) {
 			continue
 		}
-		if victim == -1 || w.rotation.lastWatched[slot].After(w.rotation.lastWatched[victim]) {
+		if victim == -1 || w.betterBoostVictim(slot, victim) {
 			victim = slot
 		}
 	}
 	return victim
 }
 
-// strictlyHigherBoost reports whether candidate cand belongs to a strictly
-// higher boost tier than the currently-held boost target held. It mirrors
-// betterBoostCandidate's priority tiers WITHOUT its least-recently-watched
-// tiebreak: a channel-restricted drop outranks everything, and between two
-// streaks-in-progress the one with more banked minutes wins. Same-tier
-// candidates are NOT strictly higher, so the continuity latch keeps holding the
-// current channel instead of thrashing to an equal-priority alternative.
+func (w *MinuteWatcher) betterBoostVictim(candidate, current int) bool {
+	if cmp := w.compareStrictBoost(candidate, current); cmp != 0 {
+		return cmp < 0
+	}
+	if w.streamers[candidate].DropsCondition() && w.streamers[current].DropsCondition() {
+		cw := w.effectiveDeficitMinutes(candidate)
+		bw := w.effectiveDeficitMinutes(current)
+		if cw != bw {
+			return cw > bw
+		}
+	}
+	cl := w.rotation.lastWatched[candidate]
+	bl := w.rotation.lastWatched[current]
+	if !cl.Equal(bl) {
+		return cl.After(bl)
+	}
+	return w.streamers[candidate].GetUsername() > w.streamers[current].GetUsername()
+}
+
+// strictlyHigherBoost reports whether cand has strictly stronger hard or
+// campaign-semantic facts than held. Persisted deficit, recency, and login are
+// deliberately excluded: equal-class fairness chooses the initial seat, but
+// cannot churn a continuity latch every tick.
 func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
-	cr := w.streamers[cand].HasChannelRestrictedCampaign()
-	hr := w.streamers[held].HasChannelRestrictedCampaign()
-	if cr != hr {
-		return cr
+	return w.compareStrictBoost(cand, held) > 0
+}
+
+// compareStrictBoost returns positive when a is strictly preferred to b under
+// the non-fairness part of broker precedence:
+//
+//	channel-restricted drop
+//	> in-progress streak (then more banked streak minutes)
+//	> Campaign Policy class when both candidates carry active drops
+//
+// A plain active drop and a fresh pending streak deliberately remain equal at
+// this strict layer, preserving the pre-change rotation contract (recency picks
+// between them). Semantic class remains an ordinal comparison, never a weighted
+// sum with watch minutes.
+func (w *MinuteWatcher) compareStrictBoost(a, b int) int {
+	ar := w.streamers[a].HasChannelRestrictedCampaign()
+	br := w.streamers[b].HasChannelRestrictedCampaign()
+	if ar != br {
+		if ar {
+			return 1
+		}
+		return -1
 	}
-	cp := w.streakInProgress(cand)
-	hp := w.streakInProgress(held)
-	if cp != hp {
-		return cp
+
+	ap := w.streakInProgress(a)
+	bp := w.streakInProgress(b)
+	if ap != bp {
+		if ap {
+			return 1
+		}
+		return -1
 	}
-	if cp && hp {
-		return w.streamers[cand].Stream.GetMinuteWatched() > w.streamers[held].Stream.GetMinuteWatched()
+	if ap && bp {
+		am := w.streamers[a].Stream.GetMinuteWatched()
+		bm := w.streamers[b].Stream.GetMinuteWatched()
+		if am != bm {
+			if am > bm {
+				return 1
+			}
+			return -1
+		}
 	}
-	return false
+
+	ad := w.streamers[a].DropsCondition()
+	bd := w.streamers[b].DropsCondition()
+	if ad && bd {
+		if cmp := w.compareCampaignSemanticClass(a, b); cmp != 0 {
+			return cmp
+		}
+	}
+	return 0
+}
+
+// compareCampaignSemanticClass returns positive when a has the better
+// published class. A ranked campaign beats an absent/unranked one; lower class
+// numbers are better. Campaign-ID presentation ties never reach this boundary.
+func (w *MinuteWatcher) compareCampaignSemanticClass(a, b int) int {
+	return w.compareCampaignSemanticStreamers(w.streamers[a], w.streamers[b])
+}
+
+func (w *MinuteWatcher) compareCampaignSemanticStreamers(a, b *models.Streamer) int {
+	ca, oka := w.campaignSemanticClassForStreamer(a)
+	cb, okb := w.campaignSemanticClassForStreamer(b)
+	if oka != okb {
+		if oka {
+			return 1
+		}
+		return -1
+	}
+	if !oka || ca == cb {
+		return 0
+	}
+	if ca < cb {
+		return 1
+	}
+	return -1
+}
+
+func (w *MinuteWatcher) campaignSemanticClassForStreamer(s *models.Streamer) (policy.SemanticClass, bool) {
+	snapshot := w.campaignSemanticSnapshotForTick()
+	if snapshot == nil || snapshot.byLogin == nil {
+		return 0, false
+	}
+	class, ok := snapshot.byLogin[s.GetUsername()]
+	return class, ok
+}
+
+func (w *MinuteWatcher) campaignSemanticSnapshotForTick() *campaignSemanticSnapshot {
+	if active := w.activeCampaignSemanticPolicy.Load(); active != nil {
+		return active
+	}
+	return w.campaignSemanticPolicy.Load()
+}
+
+// orderByCampaignSemanticClass returns a copy ordered by the best published
+// class carried by each streamer (known before absent, lower first), then login
+// for a deterministic known equal-class tie. With no semantic facts published,
+// the pre-policy configured/input order is preserved exactly.
+func (w *MinuteWatcher) orderByCampaignSemanticClass(indexes []int) []int {
+	if w.campaignSemanticSnapshotForTick() == nil {
+		return indexes
+	}
+	ordered := append([]int(nil), indexes...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		ca, oka := w.campaignSemanticClassForStreamer(w.streamers[a])
+		cb, okb := w.campaignSemanticClassForStreamer(w.streamers[b])
+		if oka != okb {
+			return oka
+		}
+		if oka && ca != cb {
+			return ca < cb
+		}
+		if !oka {
+			return false
+		}
+		return w.streamers[a].GetUsername() < w.streamers[b].GetUsername()
+	})
+	return ordered
+}
+
+// refreshDeficitMinutes captures persisted WatchTimeStore evidence for the
+// current allocation tick. Refreshing before every contested broker decision
+// makes rename/removal lifecycle changes converge immediately and keeps this
+// map evidence rather than an independent fairness authority.
+func (w *MinuteWatcher) refreshDeficitMinutes(indexes []int, now time.Time) {
+	w.captureDeficitMinutes(indexes, w.watchWeights(indexes, now))
+}
+
+func (w *MinuteWatcher) captureDeficitMinutes(indexes []int, weights map[int]float64) {
+	w.rotation.deficitMinutes = make(map[string]float64, len(indexes))
+	for _, idx := range indexes {
+		w.rotation.deficitMinutes[w.streamers[idx].GetUsername()] = weights[idx]
+	}
+}
+
+// effectiveDeficitMinutes returns the persisted fairness evidence captured
+// for the current contested allocation, including the existing bounded
+// PreferencePrefer handicap. Lower means the channel is owed more watch time.
+func (w *MinuteWatcher) effectiveDeficitMinutes(idx int) float64 {
+	minutes := w.rotation.deficitMinutes[w.streamers[idx].GetUsername()]
+	if w.isPreferred(idx) {
+		minutes -= preferenceWeightBiasMinutes
+	}
+	return minutes
 }
 
 // containsIndex reports whether idx is present in the online index slice.
@@ -1483,38 +1775,33 @@ func (w *MinuteWatcher) streakInProgress(idx int) bool {
 		!w.streakPursuitExhausted(idx)
 }
 
-// betterBoostCandidate reports whether off-pair streamer cand should take the
-// single boost seat over the current best. The ranking, highest priority first:
-//
-//  1. A channel-restricted drop campaign - its progress can only ever be earned
-//     by watching this exact channel, so it can't wait for a rotation turn.
-//  2. A watch streak already in progress, most-watched first - finish a streak
-//     the bot already started (converges) rather than starting a new one and
-//     leaving both unfinished (thrashes).
-//  3. Least-recently-watched - the original fairness tie-break.
+// betterBoostCandidate reports whether cand should take the single prioritized
+// seat over best. Hard/continuity and semantic facts are compared first;
+// persisted deficit decides only inside an equal semantic class, followed by
+// recency and login for a deterministic total order.
 func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
-	cr := w.streamers[cand].HasChannelRestrictedCampaign()
-	br := w.streamers[best].HasChannelRestrictedCampaign()
-	if cr != br {
-		return cr
+	if cmp := w.compareStrictBoost(cand, best); cmp != 0 {
+		return cmp > 0
 	}
 
-	cp := w.streakInProgress(cand)
-	bp := w.streakInProgress(best)
-	if cp != bp {
-		return cp
-	}
-	if cp && bp {
-		// Both mid-streak: prefer the one with the most watch time banked so the
-		// pursuit converges on a single streamer instead of alternating.
-		cm := w.streamers[cand].Stream.GetMinuteWatched()
-		bm := w.streamers[best].Stream.GetMinuteWatched()
-		if cm != bm {
-			return cm > bm
+	// Persisted deficit is the fairness tie-break only when both candidates
+	// belong to an equal campaign semantic class. Fresh-streak/drop arbitration
+	// had no campaign semantics before this change and keeps its recency rule.
+	if w.streamers[cand].DropsCondition() && w.streamers[best].DropsCondition() {
+		cw := w.effectiveDeficitMinutes(cand)
+		bw := w.effectiveDeficitMinutes(best)
+		if cw != bw {
+			return cw < bw
 		}
 	}
 
-	return w.rotation.lastWatched[cand].Before(w.rotation.lastWatched[best])
+	cl := w.rotation.lastWatched[cand]
+	bl := w.rotation.lastWatched[best]
+	if !cl.Equal(bl) {
+		return cl.Before(bl)
+	}
+
+	return w.streamers[cand].GetUsername() < w.streamers[best].GetUsername()
 }
 
 // nearStreakCompletion reports whether the streamer is actively pursuing a watch
@@ -1675,14 +1962,14 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 
 		case config.PriorityDrops:
 			// Within each DROPS pass, order competing streamers by the campaign
-			// policy engine's score (highest first) so the active mode
+			// policy engine's semantic class (lowest first) so the active mode
 			// (SMART/ENDING_SOONEST/…) decides between several farmable
-			// campaigns. With no policy scores published (GAME_ORDER/disabled)
+			// campaigns. With no policy classes published
 			// this is a no-op and the configured order is preserved. The
 			// restricted-first pass below is kept regardless, so the
 			// "channel-restricted drop only progresses here" invariant holds in
 			// every mode.
-			dropsOrder := w.orderByCampaignScore(onlineIndexes)
+			dropsOrder := w.orderByCampaignSemanticClass(onlineIndexes)
 			for _, idx := range dropsOrder {
 				if w.streamers[idx].DropsCondition() && w.streamers[idx].HasChannelRestrictedCampaign() {
 					if !watching[idx] {

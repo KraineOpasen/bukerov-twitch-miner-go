@@ -357,6 +357,9 @@ func TestHighPriorityFloatsToTopInEveryMode(t *testing.T) {
 		if ranked[0].CampaignID != "hp" {
 			t.Errorf("mode %s: high-priority campaign must rank first, got %s", mode, ranked[0].CampaignID)
 		}
+		if ranked[0].SemanticClass != 0 || ranked[1].SemanticClass != 1 {
+			t.Errorf("mode %s: HighPriority semantic classes = [%d %d], want [0 1]", mode, ranked[0].SemanticClass, ranked[1].SemanticClass)
+		}
 	}
 }
 
@@ -380,6 +383,11 @@ func TestModeOrderings(t *testing.T) {
 
 	order := func(mode Mode) []string {
 		ds := Rank(mode, in, base)
+		for i, d := range ds {
+			if d.SemanticClass != SemanticClass(i) {
+				t.Fatalf("mode %s position %d semantic class = %d, want %d for distinct policy facts", mode, i, d.SemanticClass, i)
+			}
+		}
 		ids := make([]string, len(ds))
 		for i, d := range ds {
 			ids[i] = d.CampaignID
@@ -399,6 +407,34 @@ func TestModeOrderings(t *testing.T) {
 	if got := order(ModeLowAvailability); got[0] != "B" { // only 1 eligible channel
 		t.Errorf("LOW_AVAILABILITY first = %s, want B", got[0])
 	}
+	if got := order(ModeSmart); got[0] != "B" {
+		t.Errorf("SMART first = %s, want B", got[0])
+	}
+}
+
+func TestEqualPolicyFactsShareSemanticClassInEveryMode(t *testing.T) {
+	mk := func(id string) CampaignInput {
+		return CampaignInput{
+			CampaignID:           id,
+			GameOrderIndex:       1,
+			EndAt:                base.Add(12 * time.Hour),
+			Drops:                chain([2]int{60, 20}),
+			EligibleLiveChannels: 2,
+			ChannelStability:     1,
+			StabilitySamples:     minStabilitySamples,
+		}
+	}
+	for _, mode := range []Mode{ModeGameOrder, ModeEndingSoonest, ModeClosestToReward, ModeLowAvailability, ModeSmart} {
+		ds := Rank(mode, []CampaignInput{mk("c"), mk("a"), mk("b")}, base)
+		if got := strings.Join(ids(ds), ","); got != "a,b,c" {
+			t.Fatalf("mode %s deterministic presentation order = %s, want a,b,c", mode, got)
+		}
+		for _, d := range ds {
+			if d.SemanticClass != 0 {
+				t.Fatalf("mode %s equal facts split by campaign ID: %s class=%d", mode, d.CampaignID, d.SemanticClass)
+			}
+		}
+	}
 }
 
 func TestEndingSoonestRanksKnownDeadlineBeforeUnknownWithinPriorityClass(t *testing.T) {
@@ -409,6 +445,9 @@ func TestEndingSoonestRanksKnownDeadlineBeforeUnknownWithinPriorityClass(t *test
 		ds := Rank(ModeEndingSoonest, inputs, base)
 		if got := ids(ds); got[0] != "known" || got[1] != "unknown" {
 			t.Fatalf("ENDING_SOONEST order = %v, want [known unknown]", got)
+		}
+		if ds[0].SemanticClass != 0 || ds[1].SemanticClass != 1 {
+			t.Fatalf("ENDING_SOONEST known/unknown semantic classes = [%d %d], want [0 1]", ds[0].SemanticClass, ds[1].SemanticClass)
 		}
 		if ds[1].Status != StatusUnknown || ds[1].Excluded {
 			t.Fatalf("unknown decision = %+v", ds[1])
