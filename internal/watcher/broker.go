@@ -1,12 +1,14 @@
 package watcher
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
 
 // Reason codes explaining why a channel holds (or is waiting for) a watch
@@ -76,13 +78,48 @@ type BrokerSnapshot struct {
 // slot during arbitration. idx is the index into w.streamers for configured
 // channels, or -1 for external (discovery) candidates.
 type slotOccupant struct {
-	streamer   *models.Streamer
-	origin     string
-	idx        int
-	reasonCode string
-	reason     string
-	campaign   string
-	selectedAt time.Time
+	streamer          *models.Streamer
+	origin            string
+	idx               int
+	reasonCode        string
+	reason            string
+	campaign          string
+	campaignPolicy    CandidateCampaignPolicy
+	hasCampaignPolicy bool
+	selectedAt        time.Time
+}
+
+// CandidateCampaignPolicy is a source-published scheduling fact snapshot, not
+// a slot decision. Discovery derives it only after exact campaign-ID and ACL
+// verification; the broker remains sole slot owner and compares the unitless
+// ordinal only after hard reason classes. Ranked=false is an authoritative
+// unranked fact, distinct from no source publication.
+type CandidateCampaignPolicy struct {
+	SemanticClass policy.SemanticClass
+	Ranked        bool
+	Restricted    bool
+	Campaign      string
+	// CampaignIDs is the exact eligible advertised-ID/ACL intersection carried
+	// by a discovery proposal. The broker resolves these IDs against its own
+	// per-tick Campaign Policy snapshot, so a concurrent policy refresh can never
+	// compare discovery's new ordinal with configured channels' old ordinals.
+	CampaignIDs []string
+}
+
+type discoveryCandidatePolicySnapshot struct {
+	login string
+	facts CandidateCampaignPolicy
+}
+
+// campaignSemanticSnapshot is one immutable miner publication. Configured
+// channels use byLogin; discovery carries exact campaign IDs and the broker
+// resolves them through byCampaign. Keeping both projections in one atomic
+// object makes every ordinal compared during a broker tick belong to the same
+// Campaign Policy decision set.
+type campaignSemanticSnapshot struct {
+	byLogin    map[string]policy.SemanticClass
+	byCampaign map[string]policy.SemanticClass
+	gameRanks  map[string]int
 }
 
 // classify assigns a reason code, human-readable reason, and best-effort
@@ -91,7 +128,18 @@ type slotOccupant struct {
 // back to a generic one; discovery channels get a discovery-specific reason.
 // idx is the streamer's index for configured channels, or -1.
 func (w *MinuteWatcher) classify(s *models.Streamer, origin string, idx int) (reasonCode, reason, campaign string) {
-	restricted := s.HasChannelRestrictedCampaign()
+	facts, hasFacts := w.campaignPolicyForStreamer(s)
+	return w.classifyWithCampaignPolicy(s, origin, idx, facts, hasFacts)
+}
+
+func (w *MinuteWatcher) classifyWithCampaignPolicy(
+	s *models.Streamer,
+	origin string,
+	idx int,
+	facts CandidateCampaignPolicy,
+	hasFacts bool,
+) (reasonCode, reason, campaign string) {
+	restricted := s.HasChannelRestrictedCampaign() || (hasFacts && facts.Restricted)
 	switch {
 	case restricted:
 		reasonCode = ReasonRestrictedDrop
@@ -113,6 +161,9 @@ func (w *MinuteWatcher) classify(s *models.Streamer, origin string, idx int) (re
 	}
 
 	campaign = campaignName(s, restricted)
+	if hasFacts && facts.Campaign != "" {
+		campaign = facts.Campaign
+	}
 
 	if origin == OriginConfigured && idx >= 0 {
 		if noted := w.selectionReasons[idx]; noted != "" {
@@ -122,7 +173,30 @@ func (w *MinuteWatcher) classify(s *models.Streamer, origin string, idx int) (re
 	if reason == "" {
 		reason = defaultReason(reasonCode, origin)
 	}
+	if reasonCode == ReasonRestrictedDrop || reasonCode == ReasonActiveDrop {
+		class, ranked := facts.SemanticClass, hasFacts && facts.Ranked
+		if !hasFacts {
+			class, ranked = w.campaignSemanticClassForStreamer(s)
+		}
+		if ranked {
+			reason += fmt.Sprintf(" (Campaign Policy semantic class %d; lower is stronger)", class)
+		}
+	}
 	return reasonCode, reason, campaign
+}
+
+func (w *MinuteWatcher) campaignPolicyForStreamer(s *models.Streamer) (CandidateCampaignPolicy, bool) {
+	class, ranked := w.campaignSemanticClassForStreamer(s)
+	restricted := s.HasChannelRestrictedCampaign()
+	if !ranked && !restricted {
+		return CandidateCampaignPolicy{}, false
+	}
+	return CandidateCampaignPolicy{
+		SemanticClass: class,
+		Ranked:        ranked,
+		Restricted:    restricted,
+		Campaign:      campaignName(s, restricted),
+	}, true
 }
 
 // campaignName returns the name of the campaign driving a drop-based slot: the
@@ -169,9 +243,10 @@ func defaultReason(reasonCode, origin string) string {
 // constants.MaxSimultaneousStreams cap:
 //
 //   - a candidate fills any free slot;
-//   - otherwise it may displace a configured occupant it strictly outranks,
-//     picking the eviction target by betterDisplaceVictim (lowest rank, then
-//     most-recently-watched among equals — a stable, order-independent choice),
+//   - otherwise it may displace a configured occupant it strictly outranks by
+//     hard slot rank or, inside an equal drop class, Campaign Policy semantics;
+//     betterDisplaceVictim evicts the weakest semantic class before applying
+//     the existing recency tie-break,
 //     except one within minutes of completing a watch streak (which is never
 //     interrupted — mirrors applyPriorityBoost);
 //   - a channel already occupying a slot is never given a second one.
@@ -184,10 +259,12 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 
 	for _, idx := range configuredWatch {
 		s := w.streamers[idx]
-		rc, reason, camp := w.classify(s, OriginConfigured, idx)
+		facts, hasFacts := w.campaignPolicyForStreamer(s)
+		rc, reason, camp := w.classifyWithCampaignPolicy(s, OriginConfigured, idx, facts, hasFacts)
 		slots = append(slots, slotOccupant{
 			streamer: s, origin: OriginConfigured, idx: idx,
-			reasonCode: rc, reason: reason, campaign: camp, selectedAt: now,
+			reasonCode: rc, reason: reason, campaign: camp,
+			campaignPolicy: facts, hasCampaignPolicy: hasFacts, selectedAt: now,
 		})
 		seen[s.GetUsername()] = true
 	}
@@ -203,10 +280,12 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 			// channel that is also on the configured list).
 			continue
 		}
-		rc, reason, camp := w.classify(c.Streamer, c.Origin, -1)
+		facts, hasFacts := w.campaignPolicyForCandidate(c)
+		rc, reason, camp := w.classifyWithCampaignPolicy(c.Streamer, c.Origin, -1, facts, hasFacts)
 		incoming := slotOccupant{
 			streamer: c.Streamer, origin: c.Origin, idx: -1,
-			reasonCode: rc, reason: reason, campaign: camp, selectedAt: now,
+			reasonCode: rc, reason: reason, campaign: camp,
+			campaignPolicy: facts, hasCampaignPolicy: hasFacts, selectedAt: now,
 		}
 
 		if len(slots) < constants.MaxSimultaneousStreams {
@@ -244,6 +323,29 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 	return slots, waiting
 }
 
+func (w *MinuteWatcher) campaignPolicyForCandidate(candidate Candidate) (CandidateCampaignPolicy, bool) {
+	if candidate.Origin == OriginDiscovery {
+		if published := w.discoveryCandidatePolicy.Load(); published != nil && published.login == candidate.Streamer.GetUsername() {
+			facts := published.facts
+			if snapshot := w.campaignSemanticSnapshotForTick(); snapshot != nil && snapshot.byCampaign != nil {
+				// Source-computed ordinals are useful for discovery's own exact
+				// candidate choice, but the broker must compare only ordinals from
+				// the immutable snapshot captured for this allocation tick.
+				facts.Ranked = false
+				for _, campaignID := range facts.CampaignIDs {
+					class, ok := snapshot.byCampaign[campaignID]
+					if ok && (!facts.Ranked || class < facts.SemanticClass) {
+						facts.SemanticClass = class
+						facts.Ranked = true
+					}
+				}
+			}
+			return facts, true
+		}
+	}
+	return w.campaignPolicyForStreamer(candidate.Streamer)
+}
+
 // pickDisplaceable returns the index into slots of the configured occupant the
 // incoming candidate may displace: the one it strictly outranks that is the
 // best eviction target per betterDisplaceVictim, and is not protected by a
@@ -262,7 +364,6 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 	if incoming.origin != OriginConfigured && w.preferConfigured.Load() {
 		return -1
 	}
-	incomingRank := slotRank(incoming.reasonCode)
 	victim := -1
 	for i, s := range slots {
 		if s.origin != OriginConfigured {
@@ -271,7 +372,7 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 		if s.idx >= 0 && w.nearStreakCompletion(s.idx) {
 			continue
 		}
-		if incomingRank <= slotRank(s.reasonCode) {
+		if !w.slotStrictlyOutranks(incoming, s) {
 			continue
 		}
 		if victim < 0 || w.betterDisplaceVictim(s, slots[victim]) {
@@ -287,6 +388,53 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 	return victim
 }
 
+// slotStrictlyOutranks keeps the broker's hard reason classes outermost. Only
+// equal active/restricted-drop occupants consult Campaign Policy semantics;
+// equal classes do not displace and therefore retain the existing configured /
+// discovery and persisted-fairness ownership.
+func (w *MinuteWatcher) slotStrictlyOutranks(incoming, occupant slotOccupant) bool {
+	ir := slotRank(incoming.reasonCode)
+	or := slotRank(occupant.reasonCode)
+	if ir != or {
+		return ir > or
+	}
+	if incoming.reasonCode != occupant.reasonCode {
+		return false
+	}
+	return w.compareSlotCampaignSemantics(incoming, occupant) > 0
+}
+
+func (w *MinuteWatcher) compareSlotCampaignSemantics(a, b slotOccupant) int {
+	if a.reasonCode != b.reasonCode {
+		return 0
+	}
+	if a.reasonCode != ReasonRestrictedDrop && a.reasonCode != ReasonActiveDrop {
+		return 0
+	}
+	ca, oka := slotCampaignPolicyClass(a)
+	cb, okb := slotCampaignPolicyClass(b)
+	if oka != okb {
+		if oka {
+			return 1
+		}
+		return -1
+	}
+	if !oka || ca == cb {
+		return 0
+	}
+	if ca < cb {
+		return 1
+	}
+	return -1
+}
+
+func slotCampaignPolicyClass(s slotOccupant) (policy.SemanticClass, bool) {
+	if !s.hasCampaignPolicy || !s.campaignPolicy.Ranked {
+		return 0, false
+	}
+	return s.campaignPolicy.SemanticClass, true
+}
+
 // coldStartTie reports whether the chosen victim was decided by the cold-start
 // alternation branch: it has no rotation recency and at least one other
 // eligible configured occupant shares its rank and (zero) recency. Only then is
@@ -294,6 +442,11 @@ func (w *MinuteWatcher) pickDisplaceable(slots []slotOccupant, incoming slotOccu
 // victim, or a lone eligible occupant, must not perturb the parity.
 func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 	v := slots[victim]
+	if slotUsesCampaignSemantics(v) {
+		// Campaign-semantic ties have a deterministic persisted-deficit/login
+		// order; they never use the legacy cold-start alternation branch.
+		return false
+	}
 	if !w.rotation.lastWatched[v.idx].IsZero() {
 		return false
 	}
@@ -306,6 +459,9 @@ func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 			continue
 		}
 		if slotRank(s.reasonCode) != slotRank(v.reasonCode) {
+			continue
+		}
+		if w.compareSlotCampaignSemantics(s, v) != 0 {
 			continue
 		}
 		if !w.rotation.lastWatched[s.idx].IsZero() {
@@ -325,11 +481,15 @@ func (w *MinuteWatcher) coldStartTie(slots []slotOccupant, victim int) bool {
 // most-evictable first:
 //
 //  1. lowest rank — evict the least-valuable pick (unchanged cross-rank rule);
-//  2. among equal ranks with real rotation recency, most-recently-watched — so
+//  2. among equal drop ranks, weakest Campaign Policy semantic class;
+//  3. among equal campaign classes, greater persisted watch minutes — so the
+//     most-owed configured occupant keeps the fair seat;
+//  4. among equal ranks/classes with real rotation recency, most-recently-watched — so
 //     the least-recently-watched keeps its slot, mirroring applyPriorityBoost's
 //     fair-rotation victim rule (rotation recency lives in
 //     w.rotation.lastWatched);
-//  3. cold-start tie (equal rank, no recorded recency at all — e.g. the bot
+//  5. campaign-semantic total tie: login, independent of candidate/index order;
+//  6. non-campaign cold-start tie (equal rank, no recorded recency — e.g. the bot
 //     never enters rotation because configured streamers are always ≤2 online):
 //     alternate the victim between the tied channels across displacements via
 //     displaceParity, so neither is pinned for the whole uptime. Within a single
@@ -342,9 +502,23 @@ func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
 	if ra, rb := slotRank(a.reasonCode), slotRank(b.reasonCode); ra != rb {
 		return ra < rb
 	}
+	if cmp := w.compareSlotCampaignSemantics(a, b); cmp != 0 {
+		return cmp < 0 // evict the semantically weaker occupant
+	}
+	campaignTie := slotUsesCampaignSemantics(a) && slotUsesCampaignSemantics(b)
+	if campaignTie {
+		aw := w.effectiveDeficitMinutes(a.idx)
+		bw := w.effectiveDeficitMinutes(b.idx)
+		if aw != bw {
+			return aw > bw // evict the less-owed occupant
+		}
+	}
 	la, lb := w.rotation.lastWatched[a.idx], w.rotation.lastWatched[b.idx]
 	if !la.Equal(lb) {
 		return la.After(lb)
+	}
+	if campaignTie {
+		return a.streamer.GetUsername() > b.streamer.GetUsername()
 	}
 	if !la.IsZero() {
 		// Equal, real recency (rotation mode): deterministic, no alternation.
@@ -355,6 +529,10 @@ func (w *MinuteWatcher) betterDisplaceVictim(a, b slotOccupant) bool {
 		return a.idx < b.idx
 	}
 	return a.idx > b.idx
+}
+
+func slotUsesCampaignSemantics(s slotOccupant) bool {
+	return s.reasonCode == ReasonRestrictedDrop || s.reasonCode == ReasonActiveDrop
 }
 
 // publishBrokerSnapshot stores the immutable slot allocation for the dashboard,

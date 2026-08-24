@@ -176,17 +176,25 @@ type Factor struct {
 	Points int    `json:"points"`
 }
 
+// SemanticClass is the ordinal policy class assigned by Rank. Lower classes
+// are preferred. Decisions with identical policy facts share one class even
+// though CampaignID still provides a deterministic presentation order inside
+// that class. The value is intentionally unitless: it must never be added to
+// watch minutes or any other broker fairness measure.
+type SemanticClass uint32
+
 // Decision is the engine's explainable verdict for one campaign.
 type Decision struct {
-	CampaignID    string      `json:"campaignId"`
-	Name          string      `json:"name"`
-	Mode          Mode        `json:"mode"`
-	Total         int         `json:"total"`
-	Factors       []Factor    `json:"factors,omitempty"`
-	Feasibility   Feasibility `json:"feasibility"`
-	Status        FeasStatus  `json:"status"`
-	Excluded      bool        `json:"excluded,omitempty"`
-	ExcludeReason string      `json:"excludeReason,omitempty"`
+	CampaignID    string        `json:"campaignId"`
+	Name          string        `json:"name"`
+	Mode          Mode          `json:"mode"`
+	Total         int           `json:"total"`
+	SemanticClass SemanticClass `json:"semanticClass"`
+	Factors       []Factor      `json:"factors,omitempty"`
+	Feasibility   Feasibility   `json:"feasibility"`
+	Status        FeasStatus    `json:"status"`
+	Excluded      bool          `json:"excluded,omitempty"`
+	ExcludeReason string        `json:"excludeReason,omitempty"`
 }
 
 // nextReward returns the remaining watched minutes to the lowest-threshold
@@ -374,9 +382,10 @@ func modeDecision(mode Mode, in CampaignInput, f Feasibility, d Decision) Decisi
 }
 
 // Rank scores every input under mode and returns the decisions ordered
-// best-first. Excluded campaigns (Skip / impossible) sort last. The ordering
-// is deterministic: ties break on campaign ID, so identical inputs always
-// produce identical output.
+// best-first. It also assigns SemanticClass: equal policy facts share a class,
+// while CampaignID only orders presentation inside that class. Excluded
+// campaigns (Skip / impossible) sort last. The ordering is deterministic, so
+// identical inputs always produce identical output.
 func Rank(mode Mode, inputs []CampaignInput, now time.Time) []Decision {
 	mode = Normalize(string(mode))
 
@@ -396,44 +405,81 @@ func Rank(mode Mode, inputs []CampaignInput, now time.Time) []Decision {
 		return i
 	}
 
-	sort.SliceStable(items, func(i, j int) bool {
-		a, b := items[i], items[j]
+	// compareSemantics compares only policy facts. CampaignID is deliberately
+	// excluded: it is a deterministic tie-break, not a semantic preference.
+	compareSemantics := func(a, b ranked) int {
 		if a.d.Excluded != b.d.Excluded {
-			return !a.d.Excluded // excluded last
+			if !a.d.Excluded {
+				return -1 // excluded last
+			}
+			return 1
 		}
 		if a.in.HighPriority != b.in.HighPriority {
-			return a.in.HighPriority // high priority first, in every mode
+			if a.in.HighPriority {
+				return -1 // high priority first, in every mode
+			}
+			return 1
 		}
 		switch mode {
 		case ModeSmart:
 			if a.d.Total != b.d.Total {
-				return a.d.Total > b.d.Total
+				if a.d.Total > b.d.Total {
+					return -1
+				}
+				return 1
 			}
 		case ModeEndingSoonest:
 			if a.d.Feasibility.DeadlineKnown != b.d.Feasibility.DeadlineKnown {
-				return a.d.Feasibility.DeadlineKnown // real deadlines before unknown ones
+				if a.d.Feasibility.DeadlineKnown {
+					return -1 // real deadlines before unknown ones
+				}
+				return 1
 			}
 			if a.d.Feasibility.DeadlineKnown && !a.in.EndAt.Equal(b.in.EndAt) {
-				return a.in.EndAt.Before(b.in.EndAt)
+				if a.in.EndAt.Before(b.in.EndAt) {
+					return -1
+				}
+				return 1
 			}
 		case ModeClosestToReward:
 			if a.d.Feasibility.MinutesToNextReward != b.d.Feasibility.MinutesToNextReward {
-				return a.d.Feasibility.MinutesToNextReward < b.d.Feasibility.MinutesToNextReward
+				if a.d.Feasibility.MinutesToNextReward < b.d.Feasibility.MinutesToNextReward {
+					return -1
+				}
+				return 1
 			}
 		case ModeLowAvailability:
 			if a.in.EligibleLiveChannels != b.in.EligibleLiveChannels {
-				return a.in.EligibleLiveChannels < b.in.EligibleLiveChannels
+				if a.in.EligibleLiveChannels < b.in.EligibleLiveChannels {
+					return -1
+				}
+				return 1
 			}
 		default: // ModeGameOrder
 			if ai, bi := gameIdx(a.in.GameOrderIndex), gameIdx(b.in.GameOrderIndex); ai != bi {
-				return ai < bi
+				if ai < bi {
+					return -1
+				}
+				return 1
 			}
 		}
-		return a.in.CampaignID < b.in.CampaignID // deterministic tie-break
+		return 0
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if cmp := compareSemantics(items[i], items[j]); cmp != 0 {
+			return cmp < 0
+		}
+		return items[i].in.CampaignID < items[j].in.CampaignID // deterministic tie-break
 	})
 
 	out := make([]Decision, len(items))
+	var class SemanticClass
 	for i := range items {
+		if i > 0 && compareSemantics(items[i-1], items[i]) != 0 {
+			class++
+		}
+		items[i].d.SemanticClass = class
 		out[i] = items[i].d
 	}
 	return out

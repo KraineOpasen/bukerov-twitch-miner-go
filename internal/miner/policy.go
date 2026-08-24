@@ -19,27 +19,33 @@ type policySnapshot struct {
 }
 
 // refreshPolicy re-ranks the tracked campaigns under the configured mode and
-// publishes the result to the watcher (DROPS tie-break), discovery (cross-game
-// ordering), and its own snapshot (UI/debug). It runs on the existing
+// publishes the result to the watcher (semantic class before persisted
+// fairness), discovery (cross-game ordering), and its own snapshot (UI/debug).
+// It runs on the existing
 // health-watchdog tick, so it adds no goroutine and makes no Twitch calls —
-// every input is derived from already-synced state.
+// every input is derived from already-synced state. m.mu serializes the config
+// snapshot through the three local publications: an ApplyCampaignPolicy /
+// SetDropRule refresh can therefore never be overwritten by an older concurrent
+// watchdog refresh. No network or persistence I/O occurs while this lock is
+// held.
 func (m *Miner) refreshPolicy(now time.Time) {
 	if m.dropsTracker == nil {
 		return
 	}
 
-	m.mu.RLock()
-	mode := policy.Normalize(m.config.CampaignPolicy)
-	games := m.config.DirectoryGames
-	m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	// A COPY of the rules map, not the shared reference: buildPolicyInputs reads
-	// it lock-free (below), while SetDropRule mutates m.config.DropRules under
-	// the lock from another goroutine. Sharing the map reference here would be a
-	// concurrent map read/write (a fatal runtime error). games is a slice whose
-	// backing array is never mutated in place (writers replace the whole slice
-	// under the lock), so capturing its header under RLock is safe as-is.
-	rules := m.snapshotDropRules()
+	mode := policy.Normalize(m.config.CampaignPolicy)
+	games := append([]string(nil), m.config.DirectoryGames...)
+
+	// Private copies keep the pure ranker independent of later caller-side slice
+	// or map replacement and document that no shared config reference escapes the
+	// serialized refresh.
+	rules := make(map[string]config.DropRule, len(m.config.DropRules))
+	for key, rule := range m.config.DropRules {
+		rules[key] = rule
+	}
 
 	campaigns := m.dropsTracker.Campaigns()
 	inputs := m.buildPolicyInputs(campaigns, rules, games, now)
@@ -49,12 +55,14 @@ func (m *Miner) refreshPolicy(now time.Time) {
 	for _, d := range decisions {
 		byID[d.CampaignID] = d
 	}
+	gameRanks := policyGameRanks(decisions, campaigns)
+	campaignClasses := policyCampaignClasses(decisions)
 
 	if m.watcher != nil {
-		m.watcher.SetCampaignScores(m.policyScoresByLogin(byID))
+		m.watcher.SetCampaignSemanticPolicy(m.policyClassesByLogin(byID, campaigns), campaignClasses, gameRanks)
 	}
 	if m.discovery != nil {
-		m.discovery.SetGameRanks(policyGameRanks(decisions, campaigns))
+		m.discovery.SetCampaignPolicy(gameRanks, campaignClasses)
 	}
 	m.policySnap.Store(&policySnapshot{Mode: mode, Decisions: decisions, byID: byID})
 }
@@ -77,7 +85,8 @@ func (m *Miner) buildPolicyInputs(campaigns []*models.Campaign, rules map[string
 		}
 		var gameID, gameName string
 		if c.Game != nil {
-			gameID, gameName = c.Game.ID, c.Game.Name
+			gameID = c.Game.ID
+			gameName = campaignPolicyGameName(c.Game, gameIndex)
 		}
 
 		in := policy.CampaignInput{
@@ -136,7 +145,16 @@ func (m *Miner) eligibleLiveChannels(c *models.Campaign) int {
 	}
 	if m.discovery != nil && c.Game != nil {
 		for _, ch := range m.discovery.State().Channels {
-			if ch.Status != "offline" && strings.EqualFold(ch.Game, c.Game.Name) {
+			if ch.Status == "offline" || !campaignMatchesGame(c.Game, ch.Game) {
+				continue
+			}
+			s := m.discovery.StreamerFor(ch.Login)
+			// Directory-level DROPS_ENABLED is game-wide evidence, not proof
+			// that this exact channel advertises this exact campaign. Count
+			// only the verified ID+ACL intersection discovery publishes on its
+			// ephemeral Streamer; unknown candidates do not fabricate
+			// LOW_AVAILABILITY capacity.
+			if s != nil && streamerCarriesCampaign(s, c.ID) {
 				n++
 			}
 		}
@@ -163,56 +181,168 @@ func (m *Miner) channelStability(login string) (stability float64, samples int) 
 	return float64(stats.Successes) / float64(samples), samples
 }
 
-// policyScoresByLogin maps each configured streamer to the best (highest) score
-// among the non-excluded campaigns it carries, for the watcher's DROPS
-// tie-break. Logins with no scored campaign are omitted.
-func (m *Miner) policyScoresByLogin(byID map[string]policy.Decision) map[string]int {
-	if m.streamers == nil {
-		return nil
-	}
-	scores := make(map[string]int)
-	for _, s := range m.streamers.All() {
-		best, has := 0, false
-		for _, cc := range s.Stream.GetCampaigns() {
-			if d, ok := byID[cc.ID]; ok && !d.Excluded {
-				if !has || d.Total > best {
-					best, has = d.Total, true
-				}
+// policyClassesByLogin projects Campaign Policy's unitless ordinal onto each
+// candidate using the eligibility evidence owned by that source. Configured
+// streamers use tracker-assigned campaigns (the authoritative eligible set),
+// while discovery uses its exact advertised campaign IDs plus the same channel
+// ACL check as discovery.channelCarriesActiveCampaign. A game's best campaign
+// is never assigned wholesale to every channel in that game.
+func (m *Miner) policyClassesByLogin(byID map[string]policy.Decision, campaigns []*models.Campaign) map[string]policy.SemanticClass {
+	classes := make(map[string]policy.SemanticClass)
+	configured := make(map[string]bool)
+	if m.streamers != nil {
+		for _, s := range m.streamers.All() {
+			login := s.GetUsername()
+			configured[strings.ToLower(login)] = true
+			if class, ok := bestAssignedPolicyClass(s.Stream.GetCampaigns(), byID); ok {
+				classes[login] = class
 			}
 		}
-		if has {
-			scores[s.GetUsername()] = best
+	}
+	if m.discovery == nil {
+		return classes
+	}
+
+	campaignByID := make(map[string]*models.Campaign, len(campaigns))
+	for _, c := range campaigns {
+		campaignByID[c.ID] = c
+	}
+	for _, ch := range m.discovery.State().Channels {
+		if ch.Status == "offline" || configured[strings.ToLower(ch.Login)] {
+			continue
+		}
+		s := m.discovery.StreamerFor(ch.Login)
+		if s == nil {
+			continue
+		}
+		if class, ok := bestDiscoveredPolicyClass(s, byID, campaignByID); ok {
+			classes[ch.Login] = class
 		}
 	}
-	return scores
+	return classes
 }
 
-// policyGameRanks assigns each game its first-appearance rank in the ranked
-// decision order (lower = higher priority), for the discovery cross-game
-// ordering. Keyed by lowercase game name.
-func policyGameRanks(decisions []policy.Decision, campaigns []*models.Campaign) map[string]int {
-	gameOf := make(map[string]string, len(campaigns))
+func bestAssignedPolicyClass(campaigns []*models.Campaign, byID map[string]policy.Decision) (policy.SemanticClass, bool) {
+	var best policy.SemanticClass
+	found := false
 	for _, c := range campaigns {
-		if c.Game != nil {
-			gameOf[c.ID] = strings.ToLower(c.Game.Name)
+		d, ok := byID[c.ID]
+		if !ok || d.Excluded || c.CurrentDrop() == nil {
+			continue
+		}
+		if !found || d.SemanticClass < best {
+			best, found = d.SemanticClass, true
+		}
+	}
+	return best, found
+}
+
+func bestDiscoveredPolicyClass(s *models.Streamer, byID map[string]policy.Decision, campaigns map[string]*models.Campaign) (policy.SemanticClass, bool) {
+	var best policy.SemanticClass
+	found := false
+	for _, id := range s.Stream.GetCampaignIDs() {
+		d, ok := byID[id]
+		c := campaigns[id]
+		if !ok || d.Excluded || c == nil || len(c.Drops) == 0 || c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
+			continue
+		}
+		if !c.AllowsChannel(s.ChannelID) {
+			continue
+		}
+		if !found || d.SemanticClass < best {
+			best, found = d.SemanticClass, true
+		}
+	}
+	return best, found
+}
+
+// policyGameRanks maps each game to its best campaign semantic class (lower =
+// higher priority) for discovery's directory/check pre-order. It is never the
+// final class of every channel in that game: verified candidate selection uses
+// policyCampaignClasses plus exact advertised IDs and ACL. Campaign-ID ties do
+// not manufacture different game ranks.
+func policyGameRanks(decisions []policy.Decision, campaigns []*models.Campaign) map[string]int {
+	gameOf := make(map[string][]string, len(campaigns))
+	for _, c := range campaigns {
+		for _, name := range campaignGameNames(c.Game) {
+			gameOf[c.ID] = append(gameOf[c.ID], strings.ToLower(name))
 		}
 	}
 	ranks := make(map[string]int)
-	next := 0
 	for _, d := range decisions {
 		if d.Excluded {
 			continue
 		}
-		g := gameOf[d.CampaignID]
-		if g == "" {
-			continue
-		}
-		if _, seen := ranks[g]; !seen {
-			ranks[g] = next
-			next++
+		for _, game := range gameOf[d.CampaignID] {
+			rank := int(d.SemanticClass)
+			if old, seen := ranks[game]; !seen || rank < old {
+				ranks[game] = rank
+			}
 		}
 	}
 	return ranks
+}
+
+// policyCampaignClasses is the exact campaign-ID semantic publication for
+// discovery. Excluded decisions remain valid presentation records but never
+// gain semantic preference in candidate selection.
+func policyCampaignClasses(decisions []policy.Decision) map[string]policy.SemanticClass {
+	classes := make(map[string]policy.SemanticClass, len(decisions))
+	for _, d := range decisions {
+		if !d.Excluded {
+			classes[d.CampaignID] = d.SemanticClass
+		}
+	}
+	return classes
+}
+
+// campaignGameNames returns every Twitch name by which discovery may know a
+// campaign's game. DisplayName-only campaigns are production-reachable (the
+// drops tracker and discovery already accept them), while Name and DisplayName
+// may also be distinct aliases for the same game.
+func campaignGameNames(game *models.Game) []string {
+	if game == nil {
+		return nil
+	}
+	names := make([]string, 0, 2)
+	for _, name := range []string{game.Name, game.DisplayName} {
+		if name == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range names {
+			if strings.EqualFold(existing, name) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func campaignPolicyGameName(game *models.Game, configured map[string]int) string {
+	names := campaignGameNames(game)
+	for _, name := range names {
+		if _, ok := configured[strings.ToLower(name)]; ok {
+			return name
+		}
+	}
+	if len(names) > 0 {
+		return names[0]
+	}
+	return ""
+}
+
+func campaignMatchesGame(game *models.Game, candidate string) bool {
+	for _, name := range campaignGameNames(game) {
+		if strings.EqualFold(name, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistLocked writes the current config to disk if a path is configured.
