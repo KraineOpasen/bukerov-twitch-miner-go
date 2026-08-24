@@ -1259,9 +1259,10 @@ func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recove
 func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign, dashboardTotal int, err error) {
 	// Fetch every campaign the dashboard lists (a single ViewerDropsDashboard
 	// call, no status filter) so not-yet-started (UPCOMING) campaigns reach the
-	// date-window classification below instead of being dropped at the source;
-	// the active farm set is still gated by DateMatch, so this changes nothing
-	// about what gets farmed — it only additionally surfaces the upcoming ones.
+	// date-window classification below instead of being dropped at the source.
+	// A complete window remains authoritative; when a boundary is missing, the
+	// response's explicit ACTIVE status is the only signal that may keep the
+	// campaign in the current farm set.
 	dashboardCampaigns, err := d.getDropsDashboard("")
 	if err != nil {
 		return nil, nil, 0, err
@@ -1329,6 +1330,11 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 				"campaign", campaign.Name, "campaignID", campaign.ID,
 				"dropsFromDetails", dropsFromDetails)
 			continue
+		case skipCurrentStateUnknown:
+			slog.Debug("Drops sync: campaign date window is incomplete and current state is not established, skipping",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"status", campaign.Status, "startAt", campaign.StartAt, "endAt", campaign.EndAt)
+			continue
 		}
 
 		campaigns = append(campaigns, campaign)
@@ -1348,13 +1354,15 @@ const (
 	skipNone campaignSkipReason = iota
 	skipOutsideDateWindow
 	skipNoActiveDrops
+	skipCurrentStateUnknown
 )
 
 // buildTrackedCampaign merges a ViewerDropsDashboard summary with its
 // DropCampaignDetails response into a tracked Campaign and decides whether it
 // should be tracked. The details response is authoritative (it's the only
 // source of timeBasedDrops and their per-drop dates); the summary is used only
-// to backfill fields details occasionally omits (id, name, game). It returns
+// to backfill fields details occasionally omits (id, name, game, status and
+// date boundaries). It returns
 // the built campaign, how many drops details supplied (for diagnostics), and a
 // skip reason. Kept free of the API client so the merge/filter behavior can be
 // unit-tested directly.
@@ -1371,6 +1379,9 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 	if campaign.Game == nil && summaryCampaign.Game != nil {
 		campaign.Game = summaryCampaign.Game
 	}
+	if campaign.Status == "" {
+		campaign.Status = summaryCampaign.Status
+	}
 
 	// Backfill the tri-state account-connection status from the dashboard summary
 	// only when the details response did not authoritatively carry it. This never
@@ -1383,30 +1394,51 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 		campaign.AccountConnection = summaryCampaign.AccountConnection
 	}
 
-	// Backfill the campaign-level date window from the summary when the details
-	// response omits it. The ViewerDropsDashboard summary always carries the
-	// campaign's startAt/endAt; a details response that doesn't would otherwise
-	// leave DateMatch false and get the campaign silently skipped as "outside
-	// its date window" even while it's actively running - the exact class of
-	// silent filtering that leaves the Drops page empty during live farming.
-	// DateMatch is then recomputed from whatever dates we end up with, so a
-	// details response that genuinely places the campaign outside its window
-	// (non-zero dates) is preserved rather than overridden by the summary.
+	// Backfill each campaign-level date boundary from the summary when details
+	// omits it. A real details boundary still wins. Missing or malformed values
+	// remain zero: zero is the explicit UNKNOWN representation, never a synthetic
+	// date or proof that the campaign is outside its window.
 	if campaign.StartAt.IsZero() && !summaryCampaign.StartAt.IsZero() {
 		campaign.StartAt = summaryCampaign.StartAt
 	}
 	if campaign.EndAt.IsZero() && !summaryCampaign.EndAt.IsZero() {
 		campaign.EndAt = summaryCampaign.EndAt
 	}
-	if !campaign.StartAt.IsZero() && !campaign.EndAt.IsZero() {
-		now := time.Now()
-		campaign.DateMatch = campaign.StartAt.Before(now) && campaign.EndAt.After(now)
-	}
-
 	dropsFromDetails := len(campaign.Drops)
 
-	if !campaign.DateMatch {
+	// Preserve the complete-window behavior exactly. For an incomplete window,
+	// known boundaries remain authoritative (a future start is upcoming; a real
+	// past end is expired), while an explicit ACTIVE status from the current
+	// dashboard/details response may keep the campaign trackable. DateMatch stays
+	// false in that case so no caller can mistake incomplete timing evidence for
+	// a known in-window fact. Any other incomplete state is neither declared
+	// active nor mislabeled outside-window.
+	now := time.Now()
+	startKnown := !campaign.StartAt.IsZero()
+	endKnown := !campaign.EndAt.IsZero()
+	// NewCampaignFromGQL's legacy DateMatch expression treats a zero StartAt as
+	// before every real now. Clear that derived bit whenever either boundary is
+	// unknown; only the complete-window branch below may assert DateMatch=true.
+	if !startKnown || !endKnown {
+		campaign.DateMatch = false
+	}
+	switch {
+	case startKnown && endKnown:
+		campaign.DateMatch = campaign.StartAt.Before(now) && campaign.EndAt.After(now)
+		if !campaign.DateMatch {
+			return campaign, dropsFromDetails, skipOutsideDateWindow
+		}
+	case startKnown && campaign.StartAt.After(now):
 		return campaign, dropsFromDetails, skipOutsideDateWindow
+	case endKnown && !campaign.EndAt.After(now):
+		return campaign, dropsFromDetails, skipOutsideDateWindow
+	case campaign.Status == models.CampaignActive:
+		// Current-state evidence is sufficient to retain the campaign, but not to
+		// manufacture a known date window.
+	case campaign.Status == models.CampaignExpired:
+		return campaign, dropsFromDetails, skipOutsideDateWindow
+	default:
+		return campaign, dropsFromDetails, skipCurrentStateUnknown
 	}
 
 	campaign.ClearClaimedDrops()

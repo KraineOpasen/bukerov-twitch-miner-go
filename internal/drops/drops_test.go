@@ -1,9 +1,13 @@
 package drops
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 func rfc3339(t time.Time) string {
@@ -256,6 +260,316 @@ func TestBuildTrackedCampaignOutsideDateWindow(t *testing.T) {
 	_, _, skip := buildTrackedCampaign(detail, detail)
 	if skip != skipOutsideDateWindow {
 		t.Fatalf("expected skipOutsideDateWindow for an ended campaign, got %v", skip)
+	}
+}
+
+// TestBuildTrackedCampaignUnknownEndIsNotOutsideDateWindow is the behavioral
+// RED for a dashboard/details campaign whose authoritative current response
+// says ACTIVE but omits endAt. Missing deadline evidence must not be converted
+// into the positive claim that the campaign is outside its date window.
+func TestBuildTrackedCampaignUnknownEndIsNotOutsideDateWindow(t *testing.T) {
+	now := time.Now()
+	summary := map[string]interface{}{
+		"id":      "campaign-unknown-end",
+		"name":    "Current Campaign With Unknown End",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail := map[string]interface{}{
+		"id":      "campaign-unknown-end",
+		"name":    "Current Campaign With Unknown End",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-unknown-end", "Reward", 60),
+		},
+	}
+
+	campaign, _, skip := buildTrackedCampaign(summary, detail)
+	if skip != skipNone {
+		t.Fatalf("ACTIVE campaign with unknown EndAt was discarded: skip=%v start=%v end=%v status=%q", skip, campaign.StartAt, campaign.EndAt, campaign.Status)
+	}
+	if !campaign.EndAt.IsZero() {
+		t.Fatalf("unknown EndAt must remain zero, got %v", campaign.EndAt)
+	}
+}
+
+// TestSyncCampaignsTracksCurrentUnknownEndWithoutInventory is the production-
+// pipeline RED: inventory recovery cannot save a current dashboard campaign
+// that has not appeared in dropCampaignsInProgress yet, so the full sync must
+// preserve it from ViewerDropsDashboard + DropCampaignDetails on current-state
+// evidence alone.
+func TestSyncCampaignsTracksCurrentUnknownEndWithoutInventory(t *testing.T) {
+	now := time.Now()
+	summary := map[string]interface{}{
+		"id":      "campaign-unknown-end",
+		"name":    "Current Campaign With Unknown End",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail := map[string]interface{}{
+		"id":      "campaign-unknown-end",
+		"name":    "Current Campaign With Unknown End",
+		"status":  "ACTIVE",
+		"startAt": rfc3339(now.Add(-2 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-unknown-end", "Reward", 60),
+		},
+	}
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(summary),
+		inventory: emptyInventoryResponse(),
+		details:   map[string]map[string]interface{}{"campaign-unknown-end": detail},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+
+	tracker.syncCampaigns()
+
+	got := tracker.Campaigns()
+	if len(got) != 1 {
+		t.Fatalf("current unknown-deadline campaign vanished before inventory recovery: tracked=%d campaigns=%+v", len(got), got)
+	}
+	if got[0].ID != "campaign-unknown-end" || !got[0].EndAt.IsZero() {
+		t.Fatalf("unexpected tracked campaign: %+v", got[0])
+	}
+}
+
+func TestBuildTrackedCampaignDateEvidenceMatrix(t *testing.T) {
+	now := time.Now()
+	pastStart := rfc3339(now.Add(-2 * time.Hour))
+	pastEnd := rfc3339(now.Add(-time.Hour))
+	futureStart := rfc3339(now.Add(2 * time.Hour))
+	futureEnd := rfc3339(now.Add(24 * time.Hour))
+
+	type fixture struct {
+		status         string
+		startAt        interface{}
+		endAt          interface{}
+		windowlessDrop bool
+		wantSkip       campaignSkipReason
+		wantDateMatch  bool
+		wantStartZero  bool
+		wantEndZero    bool
+	}
+	cases := map[string]fixture{
+		"known active window": {
+			status: "ACTIVE", startAt: pastStart, endAt: futureEnd,
+			wantSkip: skipNone, wantDateMatch: true,
+		},
+		"known expired window": {
+			status: "ACTIVE", startAt: pastStart, endAt: pastEnd,
+			wantSkip: skipOutsideDateWindow,
+		},
+		"known future start and known end": {
+			status: "ACTIVE", startAt: futureStart, endAt: futureEnd,
+			wantSkip: skipOutsideDateWindow,
+		},
+		"known future start and unknown end": {
+			status: "ACTIVE", startAt: futureStart,
+			wantSkip: skipOutsideDateWindow, wantEndZero: true,
+		},
+		"started with unknown end and current status": {
+			status: "ACTIVE", startAt: pastStart,
+			wantSkip: skipNone, wantEndZero: true,
+		},
+		"both dates unknown with current status": {
+			status:   "ACTIVE",
+			wantSkip: skipNone, wantStartZero: true, wantEndZero: true,
+		},
+		"both campaign and drop windows unknown with current status": {
+			status: "ACTIVE", windowlessDrop: true,
+			wantSkip: skipNone, wantStartZero: true, wantEndZero: true,
+		},
+		"both dates unknown without current evidence": {
+			wantSkip: skipCurrentStateUnknown, wantStartZero: true, wantEndZero: true,
+		},
+		"unknown start and known future end with current status": {
+			status: "ACTIVE", endAt: futureEnd,
+			wantSkip: skipNone, wantStartZero: true,
+		},
+		"unknown start and known future end without current evidence": {
+			endAt:    futureEnd,
+			wantSkip: skipCurrentStateUnknown, wantStartZero: true,
+		},
+		"malformed end remains unknown": {
+			status: "ACTIVE", startAt: pastStart, endAt: "not-rfc3339",
+			wantSkip: skipNone, wantEndZero: true,
+		},
+		"explicit expired status with unknown dates": {
+			status:   "EXPIRED",
+			wantSkip: skipOutsideDateWindow, wantStartZero: true, wantEndZero: true,
+		},
+		"known past end overrides current status": {
+			status: "ACTIVE", endAt: pastEnd,
+			wantSkip: skipOutsideDateWindow, wantStartZero: true,
+		},
+		"unknown dates and upcoming status lack timing proof": {
+			status:   "UPCOMING",
+			wantSkip: skipCurrentStateUnknown, wantStartZero: true, wantEndZero: true,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			drop := map[string]interface{}{
+				"id": "drop-" + name, "name": "Reward", "requiredMinutesWatched": 60,
+			}
+			if !tc.windowlessDrop {
+				drop = activeDrop("drop-"+name, "Reward", 60)
+			}
+			detail := map[string]interface{}{
+				"id":             "campaign-" + name,
+				"name":           name,
+				"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+				"timeBasedDrops": []interface{}{drop},
+			}
+			if tc.status != "" {
+				detail["status"] = tc.status
+			}
+			if tc.startAt != nil {
+				detail["startAt"] = tc.startAt
+			}
+			if tc.endAt != nil {
+				detail["endAt"] = tc.endAt
+			}
+
+			campaign, _, skip := buildTrackedCampaign(detail, detail)
+			if skip != tc.wantSkip {
+				t.Fatalf("skip=%v, want %v (status=%q start=%v end=%v)", skip, tc.wantSkip, campaign.Status, campaign.StartAt, campaign.EndAt)
+			}
+			if campaign.DateMatch != tc.wantDateMatch {
+				t.Errorf("DateMatch=%t, want %t", campaign.DateMatch, tc.wantDateMatch)
+			}
+			if campaign.StartAt.IsZero() != tc.wantStartZero {
+				t.Errorf("StartAt.IsZero=%t, want %t (StartAt=%v)", campaign.StartAt.IsZero(), tc.wantStartZero, campaign.StartAt)
+			}
+			if campaign.EndAt.IsZero() != tc.wantEndZero {
+				t.Errorf("EndAt.IsZero=%t, want %t (EndAt=%v)", campaign.EndAt.IsZero(), tc.wantEndZero, campaign.EndAt)
+			}
+			if skip == skipNone && (campaign.StartAt.IsZero() || campaign.EndAt.IsZero()) && campaign.DateMatch {
+				t.Error("an incomplete date window must not masquerade as DateMatch=true")
+			}
+		})
+	}
+}
+
+func TestBuildTrackedCampaignBackfillsCurrentStatusFromSummary(t *testing.T) {
+	summary := map[string]interface{}{
+		"id": "campaign-summary-status", "name": "Summary Status", "status": "ACTIVE",
+		"startAt": rfc3339(time.Now().Add(-2 * time.Hour)),
+	}
+	detail := map[string]interface{}{
+		"id": "campaign-summary-status", "name": "Summary Status",
+		"startAt": rfc3339(time.Now().Add(-2 * time.Hour)),
+		"timeBasedDrops": []interface{}{
+			activeDrop("drop-summary-status", "Reward", 60),
+		},
+	}
+
+	campaign, _, skip := buildTrackedCampaign(summary, detail)
+	if skip != skipNone || campaign.Status != "ACTIVE" {
+		t.Fatalf("summary ACTIVE evidence was not retained: skip=%v status=%q", skip, campaign.Status)
+	}
+	if !campaign.EndAt.IsZero() || campaign.DateMatch {
+		t.Fatalf("status backfill must not manufacture date knowledge: end=%v DateMatch=%t", campaign.EndAt, campaign.DateMatch)
+	}
+}
+
+func TestSyncCampaignsUnknownDateClassificationIsDeterministic(t *testing.T) {
+	now := time.Now()
+	makePair := func(id, status string, startAt, endAt interface{}) (map[string]interface{}, map[string]interface{}) {
+		summary := map[string]interface{}{
+			"id": id, "name": id, "status": status,
+			"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		}
+		detail := map[string]interface{}{
+			"id": id, "name": id, "status": status,
+			"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+			"timeBasedDrops": []interface{}{activeDrop("drop-"+id, "Reward", 60)},
+		}
+		if startAt != nil {
+			summary["startAt"], detail["startAt"] = startAt, startAt
+		}
+		if endAt != nil {
+			summary["endAt"], detail["endAt"] = endAt, endAt
+		}
+		return summary, detail
+	}
+	startedSummary, startedDetail := makePair("unknown-started", "ACTIVE", rfc3339(now.Add(-2*time.Hour)), nil)
+	undatedSummary, undatedDetail := makePair("unknown-both", "ACTIVE", nil, nil)
+	futureSummary, futureDetail := makePair("future-unknown-end", "UPCOMING", rfc3339(now.Add(2*time.Hour)), nil)
+	expiredSummary, expiredDetail := makePair("expired-known", "EXPIRED", rfc3339(now.Add(-4*time.Hour)), rfc3339(now.Add(-time.Hour)))
+	unprovenSummary, unprovenDetail := makePair("unknown-unproven", "", nil, nil)
+	details := map[string]map[string]interface{}{
+		"unknown-started":    startedDetail,
+		"unknown-both":       undatedDetail,
+		"future-unknown-end": futureDetail,
+		"expired-known":      expiredDetail,
+		"unknown-unproven":   unprovenDetail,
+	}
+	orders := [][]map[string]interface{}{
+		{startedSummary, undatedSummary, futureSummary, expiredSummary, unprovenSummary},
+		{unprovenSummary, expiredSummary, futureSummary, undatedSummary, startedSummary},
+	}
+
+	for i, order := range orders {
+		client := &fakeDropsClient{
+			dashboard: dashboardResponse(order...),
+			inventory: emptyInventoryResponse(),
+			details:   details,
+		}
+		tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+		tracker.syncCampaigns()
+
+		active := keptIDs(tracker.Campaigns())
+		upcoming := keptIDs(tracker.UpcomingCampaigns())
+		if len(active) != 2 || !active["unknown-started"] || !active["unknown-both"] {
+			t.Fatalf("order %d active set=%v, want exactly the two current UNKNOWN campaigns", i, active)
+		}
+		if len(upcoming) != 1 || !upcoming["future-unknown-end"] {
+			t.Fatalf("order %d upcoming set=%v, want only future-unknown-end", i, upcoming)
+		}
+		for id := range active {
+			if upcoming[id] {
+				t.Fatalf("order %d campaign %q appeared in both active and upcoming sets", i, id)
+			}
+		}
+		if active["expired-known"] || active["unknown-unproven"] || upcoming["expired-known"] || upcoming["unknown-unproven"] {
+			t.Fatalf("order %d expired/unproven campaign leaked into a published set: active=%v upcoming=%v", i, active, upcoming)
+		}
+	}
+}
+
+func TestBuildTrackedCampaignDoesNotMutateSourceMaps(t *testing.T) {
+	summary := map[string]interface{}{
+		"id": "campaign-immutable", "name": "Immutable", "status": "ACTIVE",
+		"startAt": rfc3339(time.Now().Add(-2 * time.Hour)),
+		"game":    map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+	}
+	detail := map[string]interface{}{
+		"id": "campaign-immutable", "name": "Immutable",
+		"timeBasedDrops": []interface{}{activeDrop("drop-immutable", "Reward", 60)},
+	}
+	beforeSummary, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDetail, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, skip := buildTrackedCampaign(summary, detail); skip != skipNone {
+		t.Fatalf("precondition: current campaign should be tracked, got skip=%v", skip)
+	}
+	afterSummary, _ := json.Marshal(summary)
+	afterDetail, _ := json.Marshal(detail)
+	if !bytes.Equal(beforeSummary, afterSummary) || !bytes.Equal(beforeDetail, afterDetail) {
+		t.Fatalf("buildTrackedCampaign mutated its source maps\nsummary before=%s\nsummary after=%s\ndetail before=%s\ndetail after=%s", beforeSummary, afterSummary, beforeDetail, afterDetail)
 	}
 }
 

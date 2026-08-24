@@ -744,6 +744,127 @@ func TestWatchdogSkipsClaimableClaimedAndEnded(t *testing.T) {
 	}
 }
 
+func TestWatchdogUnknownCampaignDeadlineIsNotEnded(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.campaign.EndAt = time.Time{}
+
+	h.w.evaluate(h.now)
+
+	if snap := h.w.Snapshot(); len(snap.Drops) != 1 {
+		t.Fatalf("zero campaign EndAt removed an otherwise active drop from the watchdog: %+v", snap.Drops)
+	}
+}
+
+func TestWatchdogWindowlessInventoryDropIsActive(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.campaign.InInventory = true
+	h.campaign.Drops[0].StartAt = time.Time{}
+	h.campaign.Drops[0].EndAt = time.Time{}
+
+	h.w.evaluate(h.now)
+
+	if snap := h.w.Snapshot(); len(snap.Drops) != 1 {
+		t.Fatalf("windowless inventory drop was discarded despite current inventory evidence: %+v", snap.Drops)
+	}
+}
+
+func TestWatchdogInventoryRecoveredUnknownWindowRetainsEscalatedState(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.driveToStall(t)
+	h.driveToExhaustion(t)
+	if len(h.notifier.byKind("stalled")) != 1 {
+		t.Fatal("setup: expected an escalated watchdog episode")
+	}
+
+	// Inventory recovery can replace a dashboard/details campaign with a
+	// server-proven current snapshot that has no status or date windows.
+	h.campaign.Status = ""
+	h.campaign.InInventory = true
+	h.campaign.StartAt = time.Time{}
+	h.campaign.EndAt = time.Time{}
+	h.campaign.Drops[0].StartAt = time.Time{}
+	h.campaign.Drops[0].EndAt = time.Time{}
+	h.tick(time.Minute, true, 0)
+
+	snap := h.w.Snapshot()
+	if recovered := h.notifier.byKind("recovered"); len(recovered) != 0 {
+		t.Fatalf("unknown window falsely closed the watchdog episode: drops=%+v reason=%q", snap.Drops, recovered[0].detail)
+	}
+	if len(snap.Drops) != 1 {
+		t.Fatalf("unknown window deleted the existing watchdog state: %+v", snap.Drops)
+	}
+}
+
+func TestWatchdogInventoryRecoveredUnknownWindowCanReachRecovery(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.campaign.Status = ""
+	h.campaign.InInventory = true
+	h.campaign.StartAt = time.Time{}
+	h.campaign.EndAt = time.Time{}
+	h.campaign.Drops[0].StartAt = time.Time{}
+	h.campaign.Drops[0].EndAt = time.Time{}
+
+	h.w.evaluate(h.now)
+	if st := h.state(t); st.Status != ProgressHealthy {
+		t.Fatalf("unknown dates alone created a watchdog failure: %+v", st)
+	}
+	if syncNow, triggered := h.drops.counts(); syncNow != 0 || triggered != 0 {
+		t.Fatalf("unknown dates alone started recovery: syncNow=%d triggered=%d", syncNow, triggered)
+	}
+
+	h.driveToStall(t)
+}
+
+func TestWatchdogKnownExpiredDropWindowRemainsExcluded(t *testing.T) {
+	h := newWatchdogHarness(t)
+	h.campaign.Drops[0].StartAt = h.now.Add(-2 * time.Hour)
+	h.campaign.Drops[0].EndAt = h.now.Add(-time.Hour)
+
+	h.w.evaluate(h.now)
+
+	if snap := h.w.Snapshot(); len(snap.Drops) != 0 {
+		t.Fatalf("drop with a known expired window must not be tracked: %+v", snap.Drops)
+	}
+}
+
+func TestWatchdogKnownUnknownWindowTransitionsRetainSingleState(t *testing.T) {
+	for _, sequence := range [][]bool{
+		{false, true, false},
+		{true, false, true},
+	} {
+		h := newWatchdogHarness(t)
+		knownStart := h.campaign.StartAt
+		knownEnd := h.campaign.EndAt
+		dropKnownStart := h.campaign.Drops[0].StartAt
+		dropKnownEnd := h.campaign.Drops[0].EndAt
+
+		for _, unknown := range sequence {
+			if unknown {
+				h.campaign.Status = ""
+				h.campaign.InInventory = true
+				h.campaign.StartAt = time.Time{}
+				h.campaign.EndAt = time.Time{}
+				h.campaign.Drops[0].StartAt = time.Time{}
+				h.campaign.Drops[0].EndAt = time.Time{}
+			} else {
+				h.campaign.Status = models.CampaignActive
+				h.campaign.InInventory = false
+				h.campaign.StartAt = knownStart
+				h.campaign.EndAt = knownEnd
+				h.campaign.Drops[0].StartAt = dropKnownStart
+				h.campaign.Drops[0].EndAt = dropKnownEnd
+			}
+			h.tick(time.Minute, true, 0)
+			if snap := h.w.Snapshot(); len(snap.Drops) != 1 {
+				t.Fatalf("sequence %v leaked or removed watchdog state at unknown=%v: %+v", sequence, unknown, snap.Drops)
+			}
+		}
+		if recovered := h.notifier.byKind("recovered"); len(recovered) != 0 {
+			t.Fatalf("sequence %v falsely closed an active episode: %+v", sequence, recovered)
+		}
+	}
+}
+
 // TestWatchdogObservationGating: without NEW successful inventory
 // observations the no-progress counter must not advance — neither on a stale
 // timestamp nor on a failed observation — so a stall can never confirm on
