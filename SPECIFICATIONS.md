@@ -909,8 +909,10 @@ Drop
 ### Drop Claiming Flow
 
 ```
-1. Sync Campaigns (every 60 minutes)
-   ├── GET ViewerDropsDashboard (status: ACTIVE)
+1. Sync Campaigns (startup; every 60 minutes by default; manual/config wake;
+   or the nearest relevant known future Campaign.StartAt)
+   ├── GET ViewerDropsDashboard (all listed statuses, so upcoming campaigns
+   │   and their authoritative StartAt boundaries are observable)
    ├── GET DropCampaignDetails for each
    ├── Backfill campaign date window (startAt/endAt) from the dashboard
    │   summary when the details response omits it, then recompute the
@@ -973,14 +975,47 @@ Drop
        unfiltered set
 ```
 
+### Full campaign-discovery scheduling
+
+`DropsTracker.loop` remains the sole background owner of full campaign-sync
+wakes. After every successful authoritative full sync it filters the current
+upcoming snapshot through the same game-identity relevance contract used by
+the Upcoming view, finds the nearest non-zero `StartAt` that is still in the
+future at that snapshot's observation point, and plans exactly one timer for
+the earlier of that boundary and the unchanged `campaignSyncInterval`. There
+are no per-campaign timers, persisted timer state, timer heap, accelerated
+polling cadence, or second sync loop.
+
+When the boundary is due, that owner requests the same full discovery pipeline
+used by startup, the ordinary interval, manual/config wakes, and `SyncNow`.
+All paths remain serialized by `fullSyncMu`; a pending manual/config wake is
+folded into a timer-owned run, equal deadlines share one wake, and a snapshot
+generation check discards a stale timer after another successful full sync has
+replaced the upcoming set. The campaign start boundary is inclusive, so a full
+sync observing `now == StartAt` may publish the campaign as active.
+
+The next deadline is derived afresh only after a successful full sync. A
+`StartAt` already past at the snapshot's observation point, or a zero/UNKNOWN
+value, never arms a wake. If a boundary was future when observed but crosses
+while that full sync is in flight, it is retained for one immediate catch-up
+sync; otherwise the tracker could publish the campaign as upcoming with no
+wake. A due deadline is consumed before its covering attempt so a failed
+request cannot create a zero-delay storm; the existing last-known-good snapshot
+remains published and recovery uses the normal interval or an existing
+manual/config/`SyncNow` trigger rather than a private retry cadence.
+Cancellation stops the pending timer, and restart reconstructs the deadline
+naturally from the startup authoritative sync.
+
 ### Lightweight progress sync
 
-The full sync above runs only every `campaignSyncInterval` minutes (60 by
-default) because it is expensive: a `ViewerDropsDashboard` listing plus one
-`DropCampaignDetails` fetch per active campaign plus several `Inventory`
-reads. On its own that leaves the dashboard/Drops-page progress up to a full
-interval stale — a campaign shown at 58% (140/240 min) while Twitch already
-credits ~69%.
+The ordinary full-sync cadence above remains `campaignSyncInterval` minutes
+(60 by default) because a full sync is expensive: a
+`ViewerDropsDashboard` listing plus one
+`DropCampaignDetails` fetch per listed campaign plus several `Inventory`
+reads. A known relevant future `StartAt` may add one coalesced boundary sync,
+but does not globally shorten that cadence. On its own the ordinary full sync
+would leave dashboard/Drops-page progress up to a full interval stale — a
+campaign shown at 58% (140/240 min) while Twitch already credits ~69%.
 
 To keep the displayed progress within a minute or two of Twitch's real
 progress, `DropsTracker` runs a second, much cheaper loop
@@ -1001,7 +1036,10 @@ Progress sync (dropProgressSyncInterval, or on demand)
 
 It never discovers, claims, or filters campaigns — those stay with the full
 sync — it only advances the watched-minute counters of campaigns the full
-sync already published (a new campaign still appears at the next full sync).
+sync already published. A newly seen campaign still requires a full sync for
+discovery; if that full sync establishes a relevant future `StartAt`, the full-
+sync owner wakes at that boundary instead of waiting for the next ordinary
+interval.
 The watcher calls `DropsTracker.TriggerProgressSync` after every successfully
 reported watched minute, so a watched minute is reflected on the Drops page
 within seconds rather than waiting out the interval.
@@ -1048,18 +1086,19 @@ write path for a drop's `currentMinutesWatched`/claimability is
 depends on fails, returns no response, or does not decode to a usable
 inventory object, those freshly-built objects never receive that update; the
 sync aborts before publishing and keeps the previously published campaign
-pool, `Revision`, `BackendUpdatedAt`, and `UpdateSource` unchanged. This
-exemption does not cover `upcomingCampaigns`: the upcoming set
-`getActiveCampaigns` returns is written unconditionally as soon as the
-dashboard/details listing succeeds, before `syncWithInventory` is even
-attempted, so a subsequent Inventory-merge failure can still leave a fresher
-`upcomingCampaigns` in place from that successful listing — only
-`notifyUpcoming` is skipped, not the field update. The sync *attempt* itself
-is still recorded — `SyncStatus.LastSyncAt`/`Runs`/
+pool, upcoming pool, `Revision`, `BackendUpdatedAt`, `UpdateSource`, and
+any undelivered future next-`StartAt` schedule unchanged. The one exception is
+a deadline already consumed by its covering StartAt attempt: it stays consumed
+on failure so the same past boundary cannot storm. Active campaigns, upcoming
+campaigns, and any recomputed nearest deadline are published atomically only
+after the authoritative inventory merge succeeds. The sync *attempt* itself is
+still recorded — `SyncStatus.LastSyncAt`/`Runs`/
 `DashboardCampaigns`/`LastError` update exactly like a dashboard/details-
 listing failure (`LastSuccessAt` does not advance) — so the failure is
-visible without the stale pool ever being replaced. This applies only to the
-acquisition
+visible without the last-known-good snapshot ever being replaced. A failed
+StartAt-triggered attempt consumes that already-due deadline (preventing an
+immediate retry storm) while preserving the published snapshot; it does not
+invent a retry interval. This applies only to the acquisition
 `syncWithInventory` itself performs — `claimAllDropsFromInventory` and
 `applyClaimHistory` make their own independent `Inventory` requests and keep
 their pre-existing failure handling (best-effort, non-fatal to the sync).
