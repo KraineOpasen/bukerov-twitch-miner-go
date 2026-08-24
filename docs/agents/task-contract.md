@@ -26,13 +26,13 @@ task_contract:
   max_concurrency: <int>                       # max subagents spawned in parallel in a single batch
   orchestration: skill_native | main_context_only   # default skill_native — GOVERNANCE_V3.md §10
   capabilities: []                             # named extra grants, e.g. write_research_docs, tracker_mutations
-  forbidden: []                                # explicit call-outs beyond the always-forbidden list below
+  forbidden: []                                # explicit call-outs beyond the never-grantable list below
   authorized_by: "<human, explicitly>"
   # Never present, never contract-grantable, regardless of any field above: merge, auto_merge,
-  # release, deploy, production_access, workflow_trigger, github_settings, github_secrets — those
-  # require a separate direct user command outside this policy, and even then are not executed
-  # autonomously. Force push and any direct push to a protected branch (main/master/release/*)
-  # are always forbidden, with or without such a command (GOVERNANCE_V3.md §4).
+  # release, deploy, production_access, workflow_trigger, github_settings, github_secrets — owner-gated
+  # actions: only a separate, direct owner command may authorize one specific such action, after a
+  # fresh live preflight (GOVERNANCE_V3.md §4). Force push and any direct push to a protected branch
+  # (main/master/release/*) are always forbidden, even with such a command.
 ```
 
 ## Field notes
@@ -51,9 +51,10 @@ task_contract:
   competing writes** — deterministic ownership partitioning with reconciliation before the final gates —
   not "one writer". `main_context_only` is a rare, explicit owner/task opt-out, never the default; every
   child agent inherits the envelope (child ≤ parent at every delegation depth).
-- **`forbidden`** is for task-specific call-outs on top of the always-forbidden list (e.g. a task might add
+- **`forbidden`** is for task-specific call-outs on top of the never-grantable list (e.g. a task might add
   `forbidden: [schema_migration]` if this particular change must not touch `internal/database`'s migrations)
-  — it narrows further, it never removes anything from the always-forbidden list.
+  — it narrows further; it never removes anything from the never-grantable list (owner-gated and
+  always-forbidden actions alike, `GOVERNANCE_V3.md` §4).
 
 ## What it means in practice
 
@@ -62,8 +63,10 @@ granting `CHANGE` doesn't imply `PUBLISH_DRAFT`; granting `tracker_mutations` do
 contract narrowly: if a capability isn't listed, treat it as not granted.
 
 A contract can never authorize merge, auto-merge, release/tag, deploy/production/TrueNAS access, workflow
-trigger/rerun, or GitHub settings/secrets changes — those always require a separate, direct user command, and
-even then this policy does not execute them autonomously.
+trigger/rerun, or GitHub settings/secrets changes — those are owner-gated: they always require a separate,
+direct owner command, and such a command authorizes exactly one specific gated action after a fresh live
+preflight; authority does not carry from one gated action to another and is not reusable in later turns
+(`GOVERNANCE_V3.md` §4).
 
 ## Mandatory re-check points
 

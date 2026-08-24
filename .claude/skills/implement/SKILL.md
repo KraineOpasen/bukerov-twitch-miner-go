@@ -13,8 +13,9 @@ Run typechecking regularly, single test files regularly, and the full test suite
 Once done, use /code-review to review the work.
 
 <!-- bukerov-local-patch: implement-commit-envelope -->
-Commit only when the active task contract allows commits, and only on the task branch — never on main.
-Push only under a PUBLISH_DRAFT envelope. Open a Draft PR only when the contract authorizes it. Never
-Ready-for-review, merge, release, or deploy — those require a separate explicit user command and are not
-executed autonomously under this policy.
+Commit only when the active task contract allows commits, and only on the task branch — never on a
+protected branch (main/master/release/*). Push only under a PUBLISH_DRAFT envelope (non-force). Open a
+Draft PR only when the contract authorizes it. Ready-for-review, merge, release, and deploy are
+owner-gated: forbidden without a separate, direct owner command, which authorizes exactly one specific
+gated action after a fresh live preflight (GOVERNANCE_V3.md §4).
 <!-- /bukerov-local-patch: implement-commit-envelope -->

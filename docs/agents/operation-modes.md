@@ -25,15 +25,17 @@ ready for review, merge/auto-merge, tag/release/deploy, workflow trigger/rerun, 
 
 - **Allowed**: `Edit`/`Write` on the task branch named in the contract; `git commit` on that branch.
 - **Forbidden**: `git push`; edits on protected branches (`main`/`master`/`release/*`); merge, release,
-  deploy, or any GitHub settings/secrets mutation — always out of scope regardless of contract (see
-  `GOVERNANCE_V3.md` §4).
+  deploy, or any GitHub settings/secrets mutation — never grantable by a contract: merge/release/deploy
+  and settings/secrets are owner-gated, and protected-branch writes are always forbidden
+  (`GOVERNANCE_V3.md` §4).
 
 ## PUBLISH_DRAFT
 
 - **Allowed**: non-force `git push` of the task branch (never a protected branch); opening exactly one
   **Draft** PR, only when the contract's capabilities explicitly authorize it.
-- **Forbidden**: marking the PR ready for review, enabling auto-merge, merging, releasing, or deploying — those
-  require a separate direct user command, outside this policy's autonomous execution.
+- **Forbidden**: marking the PR ready for review, enabling auto-merge, merging, releasing, or deploying —
+  owner-gated actions: they require a separate, direct owner command, and such a command authorizes
+  exactly one specific gated action after a fresh live preflight (`GOVERNANCE_V3.md` §4).
 
 ## Transitions
 

@@ -103,13 +103,17 @@ Repo identity: `KraineOpasen/bukerov-twitch-miner-go`. Before any GitHub-facing 
 repo, branch, base SHA, current HEAD SHA, PR state, and CI state live (`GOVERNANCE_V3.md` §2, §5) — a
 previous turn's verification does not carry forward past the re-check points.
 
-The always-forbidden set — merge/ready-for-review/auto-merge, release/tag/deploy, triggering or rerunning
-a workflow, GitHub settings/secrets changes, force push, and any direct push to a protected branch
-(`main`/`master`/`release/*`) — is defined in `GOVERNANCE_V3.md` §4. `.claude/settings.json` and the
-PreToolUse hook mechanically enforce a subset of it (force push, `main`/`master` pushes, `gh` mutations,
-infra restarts); direct pushes to `release/*` are forbidden at the policy level but not yet hook-gated —
-extending the hook is an owner-side follow-up, since the enforcement layer is edit-denied for agent
-sessions. Secrets handling and production/log reporting rules: `GOVERNANCE_V3.md` §15.
+Owner-gated actions — marking a PR ready for review, merge/auto-merge, tag, release, image publication,
+deploy/restart or any runtime mutation, triggering or rerunning a CI workflow, and GitHub
+settings/secrets changes — are forbidden without a separate, direct owner command; no task contract,
+skill, or child agent can grant them, and a direct owner command authorizes exactly one specific gated
+action after a fresh live preflight (`GOVERNANCE_V3.md` §4). Always forbidden regardless of any such
+command: force push and any direct push to a protected branch (`main`/`master`/`release/*`) —
+protected-branch changes land only through the normal task-branch/PR path. `.claude/settings.json` and
+the PreToolUse hook mechanically enforce a subset of this (force push, `main`/`master` pushes, `gh`
+mutations, infra restarts); direct pushes to `release/*` are forbidden at the policy level but not yet
+hook-gated — extending the hook is an owner-side follow-up, since the enforcement layer is edit-denied
+for agent sessions. Secrets handling and production/log reporting rules: `GOVERNANCE_V3.md` §15.
 
 ### Skills
 

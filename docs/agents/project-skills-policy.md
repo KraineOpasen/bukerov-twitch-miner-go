@@ -207,8 +207,9 @@ skill installation is a separate, later PR. The enforcement layer must exist and
 content it polices exists — a validator that ships in the same diff as the skill it's meant to check can never
 prove it would have caught a problem in that skill.
 
-## Human-only merge; no automatic updates
+## Owner-gated merge; no automatic updates
 
-Same as both vendored policies: an agent never merges its own work here (see the owner-gated actions in
-`GOVERNANCE_V3.md` §4). There is no CI job, scheduled task, or plugin mechanism that re-syncs or
-auto-updates a first-party skill — every change is a deliberate, human-reviewed PR.
+Same as both vendored policies: an agent does not merge its own work here — merge is an owner-gated
+action requiring a separate, direct owner command (`GOVERNANCE_V3.md` §4). There is no CI job, scheduled
+task, or plugin mechanism that re-syncs or auto-updates a first-party skill — every change is a
+deliberate, human-reviewed PR.
