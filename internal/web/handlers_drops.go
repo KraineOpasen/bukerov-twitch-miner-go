@@ -370,7 +370,12 @@ func buildDropCampaignViews(campaigns []*models.Campaign, healthByID map[string]
 			return ap > bp
 		}
 
-		if !a.EndAt.Equal(b.EndAt) {
+		aDeadlineKnown := !a.EndAt.IsZero()
+		bDeadlineKnown := !b.EndAt.IsZero()
+		if aDeadlineKnown != bDeadlineKnown {
+			return aDeadlineKnown
+		}
+		if aDeadlineKnown && !a.EndAt.Equal(b.EndAt) {
 			return a.EndAt.Before(b.EndAt)
 		}
 		return a.Name < b.Name

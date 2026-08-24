@@ -566,11 +566,15 @@ func (w *ProgressWatchdog) evaluate(now time.Time) {
 // trackDrop finds (or creates) the watchdog state for the campaign's current
 // drop. Returns nil when the campaign has nothing the watchdog should track.
 func (w *ProgressWatchdog) trackDrop(campaign *models.Campaign, sync drops.SyncStatus, now time.Time) (*dropState, string, *models.Drop) {
-	if campaign.Status != models.CampaignActive || now.After(campaign.EndAt) {
+	// Inventory recovery is authoritative current-farming evidence even when
+	// Twitch omits the campaign status and date window from that response.
+	active := campaign.Status == models.CampaignActive ||
+		(campaign.Status == "" && campaign.InInventory)
+	if !active || (!campaign.EndAt.IsZero() && now.After(campaign.EndAt)) {
 		return nil, "", nil
 	}
 	drop := campaign.CurrentDrop()
-	if drop == nil || drop.IsClaimed || drop.IsClaimable || !drop.DateTimeMatch() {
+	if drop == nil || drop.IsClaimed || drop.IsClaimable || !drop.InActiveWindow() {
 		// Claimable means fully progressed — claiming is the claim flow's job,
 		// not a stall.
 		return nil, "", nil

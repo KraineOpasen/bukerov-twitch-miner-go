@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,135 @@ func TestBuildDropCampaignViewsOrdering(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected order: got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestBuildDropCampaignViewsKnownDeadlineBeforeUnknown(t *testing.T) {
+	known := &models.Campaign{
+		ID:    "known",
+		Name:  "Known",
+		EndAt: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC),
+	}
+	unknown := &models.Campaign{ID: "unknown", Name: "Unknown"}
+
+	for _, tc := range []struct {
+		name  string
+		input []*models.Campaign
+	}{
+		{name: "known then unknown", input: []*models.Campaign{known, unknown}},
+		{name: "unknown then known", input: []*models.Campaign{unknown, known}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			views := buildDropCampaignViews(tc.input, nil, nil, enTR(t))
+			if got := []string{views[0].ID, views[1].ID}; got[0] != "known" || got[1] != "unknown" {
+				t.Fatalf("deadline order = %v, want [known unknown]", got)
+			}
+		})
+	}
+}
+
+func TestBuildDropCampaignViewsDeadlineTieBreaks(t *testing.T) {
+	early := &models.Campaign{
+		ID: "early", Name: "Zulu",
+		EndAt: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC),
+	}
+	later := &models.Campaign{
+		ID: "later", Name: "Alpha",
+		EndAt: early.EndAt.Add(time.Hour),
+	}
+	alphaUnknown := &models.Campaign{ID: "alpha-unknown", Name: "Alpha"}
+	zuluUnknown := &models.Campaign{ID: "zulu-unknown", Name: "Zulu"}
+
+	for _, tc := range []struct {
+		name  string
+		input []*models.Campaign
+		want  []string
+	}{
+		{name: "known earlier then later", input: []*models.Campaign{early, later}, want: []string{"early", "later"}},
+		{name: "known later then earlier", input: []*models.Campaign{later, early}, want: []string{"early", "later"}},
+		{name: "unknown alpha then zulu", input: []*models.Campaign{alphaUnknown, zuluUnknown}, want: []string{"alpha-unknown", "zulu-unknown"}},
+		{name: "unknown zulu then alpha", input: []*models.Campaign{zuluUnknown, alphaUnknown}, want: []string{"alpha-unknown", "zulu-unknown"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			views := buildDropCampaignViews(tc.input, nil, nil, enTR(t))
+			got := []string{views[0].ID, views[1].ID}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("deadline tie-break order = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildDropCampaignViewsDeadlineDoesNotOverrideEarlierPriorities(t *testing.T) {
+	knownEnd := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		known     *models.Campaign
+		unknown   *models.Campaign
+		wantFirst string
+	}{
+		{
+			name:      "unclaimed before claimed",
+			known:     &models.Campaign{ID: "claimed-known", Name: "Claimed known", EndAt: knownEnd, ClaimStatus: models.CampaignClaimStatusAlreadyClaimed},
+			unknown:   &models.Campaign{ID: "unclaimed-unknown", Name: "Unclaimed unknown"},
+			wantFirst: "unclaimed-unknown",
+		},
+		{
+			name:      "restricted before unrestricted",
+			known:     &models.Campaign{ID: "unrestricted-known", Name: "Unrestricted known", EndAt: knownEnd},
+			unknown:   &models.Campaign{ID: "restricted-unknown", Name: "Restricted unknown", Channels: []string{"channel"}},
+			wantFirst: "restricted-unknown",
+		},
+		{
+			name:      "higher progress before lower progress",
+			known:     &models.Campaign{ID: "lower-known", Name: "Lower known", EndAt: knownEnd, Drops: []*models.Drop{{MinutesRequired: 100, CurrentMinutesWatched: 20}}},
+			unknown:   &models.Campaign{ID: "higher-unknown", Name: "Higher unknown", Drops: []*models.Drop{{MinutesRequired: 100, CurrentMinutesWatched: 90}}},
+			wantFirst: "higher-unknown",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, input := range [][]*models.Campaign{{tc.known, tc.unknown}, {tc.unknown, tc.known}} {
+				views := buildDropCampaignViews(input, nil, nil, enTR(t))
+				if views[0].ID != tc.wantFirst {
+					t.Fatalf("first campaign = %q, want %q", views[0].ID, tc.wantFirst)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildDropCampaignViewsPreservesUnknownPolicyAndSources(t *testing.T) {
+	now := time.Date(2029, time.January, 2, 3, 4, 5, 0, time.UTC)
+	unknown := &models.Campaign{
+		ID: "unknown", Name: "Unknown",
+		Drops: []*models.Drop{{Name: "Reward", MinutesRequired: 60}},
+	}
+	known := &models.Campaign{
+		ID: "known", Name: "Known", EndAt: now.Add(24 * time.Hour),
+		Drops: []*models.Drop{{Name: "Reward", MinutesRequired: 60}},
+	}
+	decision := policy.Decide(policy.ModeEndingSoonest, policy.CampaignInput{
+		CampaignID: unknown.ID,
+		Drops:      []policy.DropStep{{MinutesRequired: 60}},
+	}, now)
+	if decision.Status != policy.StatusUnknown || decision.Feasibility.DeadlineKnown || decision.Excluded {
+		t.Fatalf("policy decision = %+v, want explicit non-excluded UNKNOWN", decision)
+	}
+
+	input := []*models.Campaign{unknown, known}
+	inputBefore := append([]*models.Campaign(nil), input...)
+	unknownBefore, knownBefore := *unknown, *known
+	policyByID := buildDropPolicyByCampaign(input, []policy.Decision{decision}, nil, enTR(t))
+	views := buildDropCampaignViews(input, nil, policyByID, enTR(t))
+
+	if views[0].ID != "known" || views[1].ID != "unknown" {
+		t.Fatalf("web order = [%s %s], want [known unknown]", views[0].ID, views[1].ID)
+	}
+	if views[1].Policy == nil || views[1].Policy.Status != string(policy.StatusUnknown) || views[1].Policy.Excluded {
+		t.Fatalf("unknown policy projection = %+v", views[1].Policy)
+	}
+	if !reflect.DeepEqual(input, inputBefore) || !reflect.DeepEqual(*unknown, unknownBefore) || !reflect.DeepEqual(*known, knownBefore) {
+		t.Fatal("sorting/rendering mutated the source campaigns or input order")
 	}
 }
 

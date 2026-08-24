@@ -60,6 +60,7 @@ func Normalize(s string) Mode {
 type FeasStatus string
 
 const (
+	StatusUnknown        FeasStatus = "UNKNOWN"          // deadline absent; feasibility cannot be decided
 	StatusSafe           FeasStatus = "SAFE"             // can finish the whole campaign with margin
 	StatusAtRisk         FeasStatus = "AT_RISK"          // can finish all, but the margin is thin
 	StatusNextRewardOnly FeasStatus = "NEXT_REWARD_ONLY" // can finish the next reward but not the chain
@@ -157,6 +158,9 @@ type CampaignInput struct {
 
 // Feasibility is the estimate (never a guarantee) of what can still be earned.
 type Feasibility struct {
+	// DeadlineKnown must be checked before treating TimeUntilEnd or either
+	// CanComplete boolean as a deadline-derived fact.
+	DeadlineKnown         bool          `json:"deadlineKnown"`
 	TimeUntilEnd          time.Duration `json:"timeUntilEnd"`
 	MinutesToNextReward   int           `json:"minutesToNextReward"`
 	MinutesToCompleteAll  int           `json:"minutesToCompleteAll"`
@@ -221,10 +225,15 @@ func completeAllRemaining(drops []DropStep) int {
 
 // ComputeFeasibility estimates what the campaign can still earn before it ends.
 func ComputeFeasibility(in CampaignInput, now time.Time) Feasibility {
-	f := Feasibility{SafetyReserveMinutes: safetyReserveMin}
-	f.TimeUntilEnd = in.EndAt.Sub(now)
-	if f.TimeUntilEnd < 0 {
-		f.TimeUntilEnd = 0
+	f := Feasibility{
+		DeadlineKnown:        !in.EndAt.IsZero(),
+		SafetyReserveMinutes: safetyReserveMin,
+	}
+	if f.DeadlineKnown {
+		f.TimeUntilEnd = in.EndAt.Sub(now)
+		if f.TimeUntilEnd < 0 {
+			f.TimeUntilEnd = 0
+		}
 	}
 
 	nr, hasNext := nextReward(in.Drops)
@@ -239,15 +248,20 @@ func ComputeFeasibility(in CampaignInput, now time.Time) Feasibility {
 		goalAll = nr
 	}
 
-	availMin := int(f.TimeUntilEnd/time.Minute) - safetyReserveMin
-	f.CanCompleteNextReward = hasNext && availMin >= nr
-	f.CanCompleteAll = availMin >= goalAll
+	availMin := 0
+	if f.DeadlineKnown {
+		availMin = int(f.TimeUntilEnd/time.Minute) - safetyReserveMin
+		f.CanCompleteNextReward = hasNext && availMin >= nr
+		f.CanCompleteAll = availMin >= goalAll
+	}
 
 	switch {
-	case !in.EndAt.IsZero() && !in.EndAt.After(now):
+	case f.DeadlineKnown && !in.EndAt.After(now):
 		f.Status = StatusImpossible
 	case !hasNext && f.MinutesToCompleteAll == 0:
 		f.Status = StatusSafe // nothing left to earn
+	case !f.DeadlineKnown:
+		f.Status = StatusUnknown
 	case !f.CanCompleteNextReward:
 		f.Status = StatusImpossible
 	case !f.CanCompleteAll:
@@ -296,7 +310,9 @@ func smartDecision(in CampaignInput, f Feasibility, d Decision) Decision {
 	if in.Restricted {
 		add("channel-restricted campaign", smartRestricted)
 	}
-	if !in.EndAt.IsZero() && f.TimeUntilEnd > 0 && f.TimeUntilEnd < endingSoonWindow {
+	if !f.DeadlineKnown {
+		d.Factors = append(d.Factors, Factor{Label: "campaign deadline unknown"})
+	} else if f.TimeUntilEnd > 0 && f.TimeUntilEnd < endingSoonWindow {
 		add(fmt.Sprintf("ends in under %dh", int(endingSoonWindow/time.Hour)), smartEndingSoonBonus)
 	}
 	if pts := rewardCloseness(f.MinutesToNextReward); pts != 0 {
@@ -342,7 +358,11 @@ func modeDecision(mode Mode, in CampaignInput, f Feasibility, d Decision) Decisi
 	}
 	switch mode {
 	case ModeEndingSoonest:
-		d.Factors = append(d.Factors, Factor{Label: fmt.Sprintf("ends in %s", f.TimeUntilEnd.Round(time.Minute))})
+		label := "campaign deadline unknown"
+		if f.DeadlineKnown {
+			label = fmt.Sprintf("ends in %s", f.TimeUntilEnd.Round(time.Minute))
+		}
+		d.Factors = append(d.Factors, Factor{Label: label})
 	case ModeClosestToReward:
 		d.Factors = append(d.Factors, Factor{Label: fmt.Sprintf("next reward in %d min", f.MinutesToNextReward)})
 	case ModeLowAvailability:
@@ -390,7 +410,10 @@ func Rank(mode Mode, inputs []CampaignInput, now time.Time) []Decision {
 				return a.d.Total > b.d.Total
 			}
 		case ModeEndingSoonest:
-			if !a.in.EndAt.Equal(b.in.EndAt) {
+			if a.d.Feasibility.DeadlineKnown != b.d.Feasibility.DeadlineKnown {
+				return a.d.Feasibility.DeadlineKnown // real deadlines before unknown ones
+			}
+			if a.d.Feasibility.DeadlineKnown && !a.in.EndAt.Equal(b.in.EndAt) {
 				return a.in.EndAt.Before(b.in.EndAt)
 			}
 		case ModeClosestToReward:
