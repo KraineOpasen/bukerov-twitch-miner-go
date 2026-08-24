@@ -68,7 +68,6 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 		EvaluatedAt:          watcherState.EvaluatedAt,
 		ActivePair:           watcherState.ActivePair,
 		PairSince:            watcherState.PairSince,
-		NextRotationAt:       watcherState.NextRotationAt,
 		WatchTimeWindowHours: watcherState.WatchTimeWindowHours,
 	}
 	if snap.Watching.Mode == "" {

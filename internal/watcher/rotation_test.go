@@ -28,19 +28,9 @@ func newTestWatcher(n int) (*MinuteWatcher, []int) {
 	w := &MinuteWatcher{
 		streamers:  streamers,
 		priorities: []config.Priority{config.PriorityOrder},
-		settings: config.RateLimitSettings{
-			RotationIntervalMinMinutes: 1,
-			RotationIntervalMaxMinutes: 1,
-		},
+		settings:   config.RateLimitSettings{},
 	}
 	return w, online
-}
-
-// forceRotate pushes lastSwitch far into the past so the next selectRotating
-// call is guaranteed to recompute the base pair, regardless of the
-// (randomized) dwell time picked last time.
-func forceRotate(w *MinuteWatcher) {
-	w.rotation.lastSwitch = time.Now().Add(-24 * time.Hour)
 }
 
 // openWatchTimeStore opens an independent SQLite file directly (bypassing
@@ -82,7 +72,6 @@ func TestSelectRotatingCoversEveryoneOverManyTicks(t *testing.T) {
 
 		watchedCount := make(map[int]int)
 		for tick := 0; tick < n*2; tick++ {
-			forceRotate(w)
 			pair := w.selectRotating(online)
 			if len(pair) != 2 {
 				t.Fatalf("n=%d tick=%d: expected 2 streamers selected, got %d", n, tick, len(pair))
@@ -130,7 +119,6 @@ func TestWeightedSelectionPrefersLowerAccumulatedTime(t *testing.T) {
 	watchedCount := make(map[int]int)
 	const ticks = 10
 	for i := 0; i < ticks; i++ {
-		forceRotate(w)
 		pair := w.selectRotating(online)
 		for _, idx := range pair {
 			watchedCount[idx]++
@@ -191,7 +179,6 @@ func TestAvoidExcludedFromSelectionWhenOthersOnline(t *testing.T) {
 	w.streamers[1].Settings.Preference = models.PreferenceAvoid
 
 	for tick := 0; tick < 10; tick++ {
-		forceRotate(w)
 		got := w.selectStreamersToWatch(online)
 		for _, idx := range got {
 			if idx == 1 {
@@ -227,7 +214,6 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 	watchedCount := make(map[int]int)
 	const ticks = 20
 	for i := 0; i < ticks; i++ {
-		forceRotate(w)
 		pair := w.selectRotating(online)
 		for _, idx := range pair {
 			watchedCount[idx]++
@@ -310,7 +296,6 @@ func TestRotateDropsOfflineStreamerEvenIfNearStreakCompletion(t *testing.T) {
 	w, _ := newTestWatcher(4)
 	w.rotation.hasPair = true
 	w.rotation.activePair = [2]int{0, 1}
-	w.rotation.deferredFor = make(map[int]bool)
 	// Make streamer 1 look recently watched so it ranks worse than 2 and 3
 	// (whose lastWatched is still zero) and gets excluded from the newly
 	// computed pair - i.e. it becomes a "leaving" candidate alongside the
@@ -324,7 +309,7 @@ func TestRotateDropsOfflineStreamerEvenIfNearStreakCompletion(t *testing.T) {
 	w.streamers[1].Stream.MinuteWatched = 6.5
 
 	stillOnline := []int{1, 2, 3}
-	w.rotateToLeastWatchedPair(stillOnline, time.Now())
+	w.reconcileLeastWatchedPair(stillOnline, time.Now())
 
 	if w.rotation.activePair[0] == 0 || w.rotation.activePair[1] == 0 {
 		t.Fatalf("offline streamer 0 should never remain in activePair, got %v", w.rotation.activePair)

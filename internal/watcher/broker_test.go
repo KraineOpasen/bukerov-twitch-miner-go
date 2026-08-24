@@ -168,10 +168,9 @@ func TestArbitratePreferConfiguredStillFillsIdleSlot(t *testing.T) {
 	}
 }
 
-// TestArbitrateDoesNotDisplaceNearStreakCompletion covers acceptance criterion
-// #5: a channel within minutes of finishing its watch streak is never
-// displaced, even by a channel-restricted discovery drop.
-func TestArbitrateProtectsNearStreakCompletion(t *testing.T) {
+// A channel-restricted drop strictly outranks an in-progress streak under the
+// broker's hard classes, so continuity protection cannot invert precedence.
+func TestArbitrateRestrictedDropPreemptsNearStreak(t *testing.T) {
 	w, _ := newTestWatcher(2)
 	// Both configured picks are seconds from completing a watch streak.
 	for _, s := range w.streamers {
@@ -183,8 +182,8 @@ func TestArbitrateProtectsNearStreakCompletion(t *testing.T) {
 	extra := []Candidate{{Streamer: restricted, Origin: OriginDiscovery}}
 
 	slots, _ := w.arbitrate([]int{0, 1}, extra, time.Now())
-	if loginsOf(slots)["restricted_disco"] {
-		t.Fatalf("a near-complete watch streak must not be displaced, got %v", loginsOf(slots))
+	if !loginsOf(slots)["restricted_disco"] {
+		t.Fatalf("strictly stronger restricted drop did not preempt a weaker streak: %v", loginsOf(slots))
 	}
 }
 
@@ -458,9 +457,7 @@ func newLoopWatcher(n int, sender minuteReporter, checker onlineChecker) (*Minut
 		streamers:  streamers,
 		priorities: []config.Priority{config.PriorityOrder},
 		settings: config.RateLimitSettings{
-			MinuteWatchedInterval:      1,
-			RotationIntervalMinMinutes: 1,
-			RotationIntervalMaxMinutes: 1,
+			MinuteWatchedInterval: 1,
 		},
 		sender: sender,
 		// No real inter-send pauses in tests.
@@ -587,9 +584,7 @@ func TestUpdateSettingsAppliedNextTick(t *testing.T) {
 	w, _ := newLoopWatcher(2, sender, checker)
 
 	w.UpdateSettings([]config.Priority{config.PriorityPointsDescending}, config.RateLimitSettings{
-		MinuteWatchedInterval:      2,
-		RotationIntervalMinMinutes: 1,
-		RotationIntervalMaxMinutes: 1,
+		MinuteWatchedInterval: 2,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

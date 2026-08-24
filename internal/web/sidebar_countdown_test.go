@@ -19,22 +19,17 @@ func readEmbeddedTemplate(t *testing.T, name string) string {
 	return string(b)
 }
 
-// TestCountdownTimerIsSharedAcrossPages guards the fix that moved the
-// client-side countdown (pad/fmtDuration/tickCountdowns + setInterval + the
-// htmx:afterSwap re-run) out of the Overview-only {{define "scripts"}} block and
-// into base.html, which wraps every page. Before the move, the pinned sidebar
-// "Next rotation" timer ticked only on Overview and stayed frozen at "--:--" on
-// Drops/Logs/Statistics/Health/Settings, because those pages never loaded the
-// updater JS.
-func TestCountdownTimerIsSharedAcrossPages(t *testing.T) {
+// TestPredictionCountdownTimerRemainsSharedAcrossPages proves retiring the
+// scheduler projection did not remove the unrelated prediction-window timer.
+func TestPredictionCountdownTimerRemainsSharedAcrossPages(t *testing.T) {
 	base := readEmbeddedTemplate(t, "templates/base.html")
 	overview := readEmbeddedTemplate(t, "templates/overview.html")
 
-	// base.html renders into EVERY page, so it must define and start the
-	// countdown (and re-run it after each htmx swap so a freshly-loaded sidebar
-	// updates at once).
+	// base.html renders into every page, so it defines and starts the shared
+	// prediction countdown and re-runs it after htmx swaps.
 	for _, want := range []string{
 		"function tickCountdowns()",
+		"[data-window-end]",
 		"setInterval(tickCountdowns, 1000)",
 		"addEventListener('htmx:afterSwap', tickCountdowns)",
 	} {
@@ -55,21 +50,17 @@ func TestCountdownTimerIsSharedAcrossPages(t *testing.T) {
 		}
 	}
 
-	// The sidebar timer element the shared JS drives still ships in the shared
-	// partial (its markup is untouched), so there is something to update.
+	// Scheduler timing is no longer projected into the sidebar.
 	partial := readEmbeddedTemplate(t, "templates/partials/now_watching.html")
-	if !strings.Contains(partial, "data-countdown-to") {
-		t.Error("now_watching partial must still emit data-countdown-to for the shared timer to update")
+	if strings.Contains(partial, "data-countdown-to") {
+		t.Error("now_watching partial still emits the retired scheduler countdown")
 	}
 }
 
 // TestCountdownJSDeliveredOnNonOverviewPages renders full pages through the real
-// server (base layout + content) and asserts the shared countdown updater ships
-// in the HTML of pages OTHER than Overview. This is the end-to-end half of the
-// fix: the sidebar timer element arrives via the htmx-loaded /api/now-watching
-// partial (covered by the now_watching render tests), and the JS that keeps it
-// ticking must arrive on every page — which before the fix it did not.
-func TestCountdownJSDeliveredOnNonOverviewPages(t *testing.T) {
+// server and asserts the unrelated prediction countdown helper remains part of
+// the shared base layout.
+func TestPredictionCountdownJSDeliveredOnNonOverviewPages(t *testing.T) {
 	srv := newStatsTestServer(t)
 	for _, path := range []string{"/health", "/logs", "/statistics"} {
 		rec := httptest.NewRecorder()
@@ -78,7 +69,7 @@ func TestCountdownJSDeliveredOnNonOverviewPages(t *testing.T) {
 			t.Fatalf("GET %s = %d, want 200; body=%q", path, rec.Code, rec.Body.String())
 		}
 		if !strings.Contains(rec.Body.String(), "setInterval(tickCountdowns, 1000)") {
-			t.Errorf("GET %s: shared countdown JS not delivered; the sidebar \"Next rotation\" timer would stay frozen at --:--", path)
+			t.Errorf("GET %s: shared prediction countdown JS not delivered", path)
 		}
 	}
 }

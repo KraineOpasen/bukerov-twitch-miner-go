@@ -778,10 +778,6 @@ func (s *Server) buildNowWatching(
 		view.QueuedNames = append(view.QueuedNames, st.GetUsername())
 	}
 
-	if !slots.NextRotationAt.IsZero() && len(view.Slots) > 0 {
-		view.HasNextRotation = true
-		view.NextRotationUnix = slots.NextRotationAt.Unix()
-	}
 	return view
 }
 

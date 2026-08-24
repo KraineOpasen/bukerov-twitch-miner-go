@@ -163,17 +163,15 @@ type WatchingInfo struct {
 	// ActivePair is the base rotation pair (ranked by least accumulated
 	// watch time). A DROPS/STREAK boost can override one seat for a tick -
 	// the per-streamer reasons show when that happens.
-	ActivePair     []string  `json:"activePair,omitempty"`
-	PairSince      time.Time `json:"pairSince,omitzero"`
-	NextRotationAt time.Time `json:"nextRotationAt,omitzero"`
+	ActivePair []string  `json:"activePair,omitempty"`
+	PairSince  time.Time `json:"pairSince,omitzero"`
 
 	// WatchTimeWindowHours is the trailing window over which per-streamer
 	// watchedMinutesWindow accumulates for rotation fairness ranking.
 	WatchTimeWindowHours float64 `json:"watchTimeWindowHours,omitempty"`
 
-	// PostponedSwapOuts lists channels whose rotation swap-out is currently
-	// deferred (e.g. about to complete a watch streak) - the closest thing
-	// the rotation has to a "temporarily pinned/benched" list.
+	// PostponedSwapOuts lists channels whose fairness replacement is currently
+	// deferred by the explicit streak-completion deadline.
 	PostponedSwapOuts []PostponedSwapOut `json:"postponedSwapOuts,omitempty"`
 
 	// Slots is the unified slot broker's final allocation: which channel holds

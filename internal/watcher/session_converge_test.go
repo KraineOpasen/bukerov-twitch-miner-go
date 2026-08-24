@@ -80,7 +80,7 @@ func TestSessionConverge_IncompleteThenCompleteDelivers(t *testing.T) {
 		t.Fatal("tick 0: a failed convergence attempt must never mark the streamer offline")
 	}
 
-	// Force the retry past the backoff window (mirrors forceRotate's idiom)
+	// Force the retry past the backoff window.
 	// and let the refresher succeed this time.
 	st := w.sessionConverge[cLogin]
 	if st == nil {
@@ -120,7 +120,6 @@ func TestSessionConverge_CommittedSlotsMatchActualSends(t *testing.T) {
 	const ticks = 5
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 
 		snap := w.BrokerSnapshot()
@@ -184,7 +183,6 @@ func TestSessionConverge_CommittedSnapshotReflectsBoostDisplacement(t *testing.T
 		t.Fatalf("failed to seed watch time: %v", err)
 	}
 
-	forceRotate(w)
 	w.processWatching()
 
 	wantBase := map[string]bool{a.GetUsername(): true, b.GetUsername(): true}
@@ -320,14 +318,12 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	seed(b.GetUsername(), 20)
 	seed(c.GetUsername(), 3000)
 	seed(d.GetUsername(), 6000)
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 1, a.GetUsername(), b.GetUsername())
 
 	// Tick 2: push A above C -> {C, B}. C's convergence attempt is staged and
 	// FAILS (perLoginFailRefresher), so C never delivers this tick.
 	seed(a.GetUsername(), 6000)
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 2, c.GetUsername(), b.GetUsername())
 
@@ -335,7 +331,6 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	// ever succeeded; D's own (independent) convergence now stages and,
 	// unlike C's, SUCCEEDS.
 	seed(c.GetUsername(), 6000)
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 3, d.GetUsername(), b.GetUsername())
 
@@ -458,7 +453,6 @@ func TestSessionConverge_NoDuplicateOwnerPerTick(t *testing.T) {
 	const ticks = 6
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 		all := adapter.allCalls()
 		batch := all[prevLen:]
@@ -484,7 +478,6 @@ func TestSessionConverge_NeverExceedsSlotCap(t *testing.T) {
 	const ticks = 6
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 		all := adapter.allCalls()
 		batch := all[prevLen:]
@@ -561,7 +554,6 @@ func TestSessionConverge_BrokerAndDebugSnapshotsAgree(t *testing.T) {
 
 	const ticks = 6
 	for tick := 0; tick < ticks; tick++ {
-		forceRotate(w)
 		w.processWatching()
 
 		snap := w.BrokerSnapshot()
@@ -630,7 +622,6 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 	}()
 
 	for tick := 0; tick < 6; tick++ {
-		forceRotate(w)
 		w.processWatching()
 	}
 
@@ -649,7 +640,6 @@ func TestSessionConverge_DoesNotAlterSelection(t *testing.T) {
 	w, _, _, aLogin, bLogin, cLogin := lateOnlineFixture(t)
 	online := []int{0, 1, 2} // a, b, c in lateOnlineFixture's construction order
 
-	forceRotate(w)
 	pairBefore := append([]int(nil), w.selectStreamersToWatch(online)...)
 
 	usernames := []string{aLogin, bLogin, cLogin}
@@ -670,7 +660,6 @@ func TestSessionConverge_DoesNotAlterSelection(t *testing.T) {
 		t.Fatalf("convergence must never touch the watch-time store, got before=%v after=%v", weightsBefore, weightsAfter)
 	}
 
-	forceRotate(w)
 	pairAfter := append([]int(nil), w.selectStreamersToWatch(online)...)
 
 	if !reflect.DeepEqual(pairBefore, pairAfter) {
@@ -815,7 +804,6 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	ref := &fakeRefresher{spadeErr: errors.New("spade unavailable")}
 	w.refresher = ref
 
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 0, cLogin, bLogin)
 	if st := w.sessionConverge[cLogin]; st == nil || st.attempts != 1 {
@@ -826,7 +814,6 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(cLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 1, aLogin, bLogin)
 
@@ -839,7 +826,6 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(aLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
-	forceRotate(w)
 	w.processWatching()
 	requireCommittedPair(t, w, 2, cLogin, bLogin)
 

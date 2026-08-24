@@ -11,7 +11,7 @@ import (
 // half of BKM-006 invariant I (slot/watch continuity): a config-driven
 // rename reconciles the SAME *models.Streamer object in place (only its
 // Username changes), so applyStreamerList's index-keyed rotation/fairness
-// state (activePair, lastWatched, deferredFor, boost latch) must translate
+// state (activePair, lastWatched, explicit deferral, boost latch) must translate
 // cleanly by the streamer's CURRENT login — proving no slot release/
 // reacquire happens, even in the defensive case where UpdateStreamers IS
 // invoked across a rename (the miner normally never calls it for a PURE
@@ -29,7 +29,9 @@ func TestApplyStreamerList_RenameInPlacePreservesRotationState(t *testing.T) {
 	w.rotation.activePair = [2]int{0, 1}
 	w.rotation.hasPair = true
 	w.rotation.lastWatched = map[int]time.Time{0: time.Now().Add(-time.Minute), 1: time.Now().Add(-2 * time.Minute)}
-	w.rotation.deferredFor = map[int]bool{2: true}
+	w.rotation.deferUntil = time.Now().Add(time.Minute)
+	w.rotation.deferStreamer = 2
+	w.rotation.deferUsed = true
 	w.rotation.boostLatched = true
 	w.rotation.boostTarget = 2
 	w.rotation.boostVictim = 1
@@ -71,8 +73,8 @@ func TestApplyStreamerList_RenameInPlacePreservesRotationState(t *testing.T) {
 	if _, ok := w.rotation.lastWatched[1]; !ok {
 		t.Fatal("lastWatched fairness state for the renamed streamer's index was lost")
 	}
-	if !w.rotation.deferredFor[2] {
-		t.Fatal("unrelated deferredFor state for another index was lost by the rename's remap")
+	if w.rotation.deferStreamer != 2 || w.rotation.deferUntil.IsZero() || !w.rotation.deferUsed {
+		t.Fatal("explicit deferral state for another index was lost by the rename remap")
 	}
 	if !w.rotation.boostLatched || w.rotation.boostTarget != 2 || w.rotation.boostVictim != 1 {
 		t.Fatalf("boost latch state corrupted by the rename: latched=%v target=%d victim=%d",
