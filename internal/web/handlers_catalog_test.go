@@ -8,30 +8,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
-
-func TestStartsInLabel(t *testing.T) {
-	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
-	cases := []struct {
-		start time.Time
-		want  string
-	}{
-		{time.Time{}, ""},
-		{now.Add(30 * time.Minute), "starts in 30m"},
-		{now.Add(5 * time.Hour), "starts in 5h"},
-		{now.Add(-time.Minute), "starting now"},
-	}
-	for _, tc := range cases {
-		if got := startsInLabel(tc.start, now, time.UTC, enTR(t)); got != tc.want {
-			t.Errorf("startsInLabel(%v) = %q, want %q", tc.start, got, tc.want)
-		}
-	}
-	// A multi-day-out start renders a date.
-	if got := startsInLabel(now.Add(72*time.Hour), now, time.UTC, enTR(t)); !strings.HasPrefix(got, "starts ") {
-		t.Errorf("far-future start should render a date, got %q", got)
-	}
-}
 
 func TestBuildPastGroupsGroupsByKey(t *testing.T) {
 	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -63,23 +40,10 @@ func TestBuildPastGroupsGroupsByKey(t *testing.T) {
 }
 
 // fakeCatalogProvider satisfies web.DropCatalogProvider for endpoint tests.
-// relevantUpcoming (falling back to upcoming) is what the Upcoming tab reads;
-// syncStatus drives the honest-state classification.
 type fakeCatalogProvider struct {
-	upcoming         []*models.Campaign
-	relevantUpcoming []*models.Campaign
-	syncStatus       drops.SyncStatus
-	past             []drops.CatalogRecord
+	past []drops.CatalogRecord
 }
 
-func (f *fakeCatalogProvider) UpcomingCampaigns() []*models.Campaign { return f.upcoming }
-func (f *fakeCatalogProvider) RelevantUpcomingCampaigns() []*models.Campaign {
-	if f.relevantUpcoming != nil {
-		return f.relevantUpcoming
-	}
-	return f.upcoming
-}
-func (f *fakeCatalogProvider) CampaignSyncStatus() drops.SyncStatus          { return f.syncStatus }
 func (f *fakeCatalogProvider) PastCampaigns() ([]drops.CatalogRecord, error) { return f.past, nil }
 
 func TestDropsPastEndpointRenders(t *testing.T) {
@@ -113,27 +77,5 @@ func TestDropsPastEndpointEmptyState(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Прошедших кампаний пока нет") {
 		t.Errorf("empty past tab must show the empty state, got:\n%s", rec.Body.String())
-	}
-}
-
-func TestDropsUpcomingEndpointRenders(t *testing.T) {
-	srv := newStatsTestServer(t)
-	c := models.NewCampaignFromGQL(map[string]interface{}{
-		"id": "u1", "name": "Upcoming Campaign",
-		"game": map[string]interface{}{"id": "g", "name": "Game"},
-	})
-	c.StartAt = time.Now().Add(48 * time.Hour)
-	srv.SetDropCatalogProvider(&fakeCatalogProvider{
-		upcoming:   []*models.Campaign{c},
-		syncStatus: drops.SyncStatus{LastSyncAt: time.Now(), LastSuccessAt: time.Now()},
-	})
-
-	rec := httptest.NewRecorder()
-	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/drops/upcoming", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "Upcoming Campaign") {
-		t.Errorf("upcoming tab must render the campaign, got:\n%s", rec.Body.String())
 	}
 }

@@ -30,9 +30,7 @@
                     {{if $c.ChannelRestricted}}
                     <span class="drop-exclusive-badge" title="{{ t "drops.badge.channel_only_title" }}">{{ t "drops.badge.channel_only" }}</span>
                     {{end}}
-                    {{if $c.Upcoming}}
-                    <span class="status-pill status-pill-progress" title="{{ t "drops.badge.upcoming_title" }}"><span aria-hidden="true">⏳ </span>{{if $c.StartsInLabel}}{{$c.StartsInLabel}}{{else}}{{ t "drops.tab.upcoming" }}{{end}}</span>
-                    {{else if $c.Claimed}}
+                    {{if $c.Claimed}}
                     <span class="status-pill status-pill-claimed"><span aria-hidden="true">✓ </span>{{$c.StatusLabel}}</span>
                     {{else}}
                     <span class="status-pill status-pill-progress"><span aria-hidden="true">● </span>{{$c.StatusLabel}}</span>

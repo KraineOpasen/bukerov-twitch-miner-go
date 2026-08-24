@@ -824,13 +824,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 
 	m.initNotificationManager(ctx)
 
-	// Resolve the dashboard/notification display time zone once (from the logger
-	// config; production sets Asia/Jerusalem) and share it, so absolute times on
-	// the Drops "Upcoming" tab and in the upcoming-campaign alert match. Standard
-	// time.Location handles DST; an empty/invalid zone falls back to local time.
-	// initNotificationManager already resolved and pushed the same location into
-	// the notifications manager itself, before publishing it (I8) — only the web
-	// side still needs it here.
+	// Resolve the dashboard display time zone once (from the logger config;
+	// production sets Asia/Jerusalem). Standard time.Location handles DST; an
+	// empty or invalid zone falls back to local time.
 	if m.webServer != nil {
 		m.webServer.SetDisplayLocation(resolveDisplayLocation(m.config.Logger.TimeZone))
 	}
@@ -922,13 +918,6 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	// Seed the drop-campaign game filter before the sync loops start, so the very
 	// first sync already tracks only the allowed games.
 	m.dropsTracker.UpdateGameFilter(m.config.DropCampaignGameIDs, m.config.DropCampaignGames)
-
-	// Alert (opt-in, off by default) when Twitch first reports a new relevant
-	// upcoming campaign. The adapter reads the write-once notification manager
-	// via the shared accessor at call time, and the manager owns the opt-in
-	// gate + durable dedupe, so no alert is ever sent unless the operator
-	// enabled the event.
-	m.dropsTracker.SetUpcomingNotifier(minerUpcomingNotifier{m})
 
 	// Durably record each drop claim (under a hidden analytics bucket) so the
 	// daily summary can count claims across restarts, not just from the
@@ -1103,9 +1092,9 @@ func (m *Miner) NotificationManager() *notifications.Manager {
 // being off) — so a LATER runtime enable (finishApply's UpdateDiscordConfig
 // call) never needs to create or replace the pointer, only reconfigure the
 // one that already exists; there is no more create-or-rebuild branch at
-// runtime at all. Points tracking and the display time zone are both set
-// BEFORE publication, so a reader that observes a non-nil manager never sees
-// one with stale/zero-value tracking state. Web wiring order matters too:
+// runtime at all. Points tracking is set BEFORE publication, so a reader that
+// observes a non-nil manager never sees one with stale/zero-value tracking
+// state. Web wiring order matters too:
 // SetNotificationManager always runs before SetDiscordEnabled, and
 // SetDiscordEnabled is only ever true when a manager actually exists — so the
 // dashboard can never believe Discord is live while there is no manager
@@ -1129,7 +1118,6 @@ func (m *Miner) initNotificationManager(ctx context.Context) {
 
 	if notifMgr != nil {
 		notifMgr.InitializePointsTracking(m.streamers.PointsMap())
-		notifMgr.SetDisplayLocation(resolveDisplayLocation(m.config.Logger.TimeZone))
 
 		m.mu.Lock()
 		m.notifications = notifMgr

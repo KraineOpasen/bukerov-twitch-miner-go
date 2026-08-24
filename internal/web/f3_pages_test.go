@@ -2,9 +2,9 @@ package web
 
 // F3 "Pages Evolution" regression tests: the six evolved pages (drops,
 // statistics, health, logs, settings, notifications) render correctly in
-// both languages, keep every polling interval and API endpoint literal
-// unchanged, and carry the new accessibility/behavior additions the design
-// mandated. Fixtures are the shared f3_harness_test.go fakes so this file
+// both languages, keep the polling and API contracts expected by each task,
+// and carry the accessibility/behavior additions the design mandated. Fixtures
+// are the shared f3_harness_test.go fakes so this file
 // stays a thin assertion layer over the same deterministic data the browser
 // harness serves.
 
@@ -60,7 +60,7 @@ func buildF3PageServer(t *testing.T) *Server {
 
 	srv := NewServer(config.AnalyticsSettings{Host: "127.0.0.1", Port: 0, Refresh: 5, DaysAgo: 30}, f3PageUsername, workDir, svc, streamers)
 	srv.SetCampaignsProvider(&f3Campaigns{campaigns: f3BuildCampaigns()})
-	srv.SetDropCatalogProvider(&f3Catalog{upcoming: f3BuildUpcoming(), past: f3BuildPast()})
+	srv.SetDropCatalogProvider(&f3Catalog{past: f3BuildPast()})
 	srv.SetDiscoveryProvider(f3Discovery{})
 	srv.SetHealthProvider(&f3Health{settings: config.HealthSettings{
 		CanaryEnabled: true, CanaryChannel: "canary_chan", CanaryIntervalMinutes: 120, CanaryMaxStalenessHours: 12,
@@ -147,21 +147,21 @@ func TestF3PollIntervalLiteralsUnchanged(t *testing.T) {
 		if !strings.Contains(drops, "load, every 30s") {
 			t.Errorf("drops page (lang=%s) missing the unchanged \"load, every 30s\" poll literal", lang)
 		}
-		if n := strings.Count(drops, "every 1m"); n != 2 {
-			t.Errorf("drops page (lang=%s) has %d occurrences of \"every 1m\", want exactly 2 (upcoming + discovery)", lang, n)
+		if n := strings.Count(drops, "every 1m"); n != 1 {
+			t.Errorf("drops page (lang=%s) has %d occurrences of \"every 1m\", want exactly 1 (discovery)", lang, n)
 		}
 	}
 }
 
-// TestF3EndpointLiteralsUnchanged pins every API endpoint string this task
-// was forbidden from changing, wherever it appears (a bare page load, or a
-// partial only reachable via its own htmx poll).
-func TestF3EndpointLiteralsUnchanged(t *testing.T) {
+// TestF3PreservedEndpointLiterals pins the API endpoints outside the removed
+// product surface, wherever they appear (a bare page load, or a partial only
+// reachable via its own htmx poll).
+func TestF3PreservedEndpointLiterals(t *testing.T) {
 	srv := buildF3PageServer(t)
 	for _, lang := range f3Langs {
 		drops := f3GetPage(t, srv, "/drops", lang)
 		for _, want := range []string{
-			"/api/drops", "/api/drops/sync", "/api/drops/upcoming", "/api/drops/past",
+			"/api/drops", "/api/drops/sync", "/api/drops/past",
 			"/api/discovery", "/api/policy/mode",
 		} {
 			if !strings.Contains(drops, want) {
@@ -479,20 +479,46 @@ func TestF3DropsTabsHaveRovingTabindexAndAria(t *testing.T) {
 	if !strings.Contains(body, `role="tablist"`) {
 		t.Error("drops page missing role=\"tablist\"")
 	}
-	if n := strings.Count(body, `role="tab"`); n != 3 {
-		t.Errorf(`role="tab"`+" count = %d, want 3", n)
+	if n := strings.Count(body, `role="tab"`); n != 2 {
+		t.Errorf(`role="tab"`+" count = %d, want 2", n)
 	}
-	if n := strings.Count(body, `role="tabpanel"`); n != 3 {
-		t.Errorf(`role="tabpanel"`+" count = %d, want 3", n)
+	if n := strings.Count(body, `role="tabpanel"`); n != 2 {
+		t.Errorf(`role="tabpanel"`+" count = %d, want 2", n)
 	}
 	for _, want := range []string{
-		`aria-controls="tab-current"`, `aria-controls="tab-upcoming"`, `aria-controls="tab-past"`,
-		`aria-labelledby="drops-tab-current"`, `aria-labelledby="drops-tab-upcoming"`, `aria-labelledby="drops-tab-past"`,
+		`aria-controls="tab-current"`, `aria-controls="tab-past"`,
+		`aria-labelledby="drops-tab-current"`, `aria-labelledby="drops-tab-past"`,
 		`tabindex="0"`, `tabindex="-1"`,
 		"window.__dropsTabs", "ArrowRight", "ArrowLeft",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("drops page missing tab a11y literal %q", want)
+		}
+	}
+	for _, removed := range []string{
+		`data-tab="upcoming"`, `aria-controls="tab-upcoming"`,
+		`aria-labelledby="drops-tab-upcoming"`, `/api/drops/upcoming`,
+	} {
+		if strings.Contains(body, removed) {
+			t.Errorf("drops page retained removed Upcoming surface %q", removed)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/drops/upcoming", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api/drops/upcoming = %d, want 404 after product-surface removal", rec.Code)
+	}
+}
+
+func TestF3NotificationsOmitsRetiredDropsSetting(t *testing.T) {
+	srv := buildF3PageServer(t)
+	for _, lang := range f3Langs {
+		body := f3GetPage(t, srv, "/notifications", lang)
+		for _, removed := range []string{"notif-drops", "upcoming-drops-enabled", "upcomingDropsEnabled", "notif.drops."} {
+			if strings.Contains(body, removed) {
+				t.Errorf("notifications page (lang=%s) retained removed Drops setting %q", lang, removed)
+			}
 		}
 	}
 }

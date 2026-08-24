@@ -49,15 +49,9 @@ func (f *f3Campaigns) RequestManualSync() drops.ManualSyncResult {
 }
 
 type f3Catalog struct {
-	upcoming []*models.Campaign
-	past     []drops.CatalogRecord
+	past []drops.CatalogRecord
 }
 
-func (f *f3Catalog) UpcomingCampaigns() []*models.Campaign         { return f.upcoming }
-func (f *f3Catalog) RelevantUpcomingCampaigns() []*models.Campaign { return f.upcoming }
-func (f *f3Catalog) CampaignSyncStatus() drops.SyncStatus {
-	return drops.SyncStatus{LastSyncAt: time.Now().Add(-3 * time.Minute), LastSuccessAt: time.Now().Add(-3 * time.Minute), Runs: 7}
-}
 func (f *f3Catalog) PastCampaigns() ([]drops.CatalogRecord, error) { return f.past, nil }
 
 type f3Discovery struct{}
@@ -161,17 +155,6 @@ func f3BuildCampaigns() []*models.Campaign {
 		mk("c2", "Winter Event", "Rust", []*models.Drop{
 			{ID: "d3", Name: "Snow Jacket", Benefit: "Snow Jacket", MinutesRequired: 120, CurrentMinutesWatched: 120, PercentageProgress: 100, IsClaimed: true},
 		}, true),
-	}
-}
-
-func f3BuildUpcoming() []*models.Campaign {
-	now := time.Now()
-	return []*models.Campaign{
-		{
-			ID: "u1", Name: "Spring Marathon", Game: &models.Game{ID: "gu1", Name: "World of Warships", DisplayName: "World of Warships"},
-			StartAt: now.Add(26 * time.Hour), EndAt: now.Add(6 * 24 * time.Hour),
-			Drops: []*models.Drop{{ID: "ud1", Name: "Camo Pack", Benefit: "Camo Pack", MinutesRequired: 60}},
-		},
 	}
 }
 
@@ -279,7 +262,7 @@ func TestF3EvidenceHarness(t *testing.T) {
 	srv := NewServer(config.AnalyticsSettings{Host: "127.0.0.1", Port: 0, Refresh: 5, DaysAgo: 30}, username, workDir, svc, streamers)
 	srv.SetDiscordEnabled(true)
 	srv.SetCampaignsProvider(&f3Campaigns{campaigns: f3BuildCampaigns()})
-	srv.SetDropCatalogProvider(&f3Catalog{upcoming: f3BuildUpcoming(), past: f3BuildPast()})
+	srv.SetDropCatalogProvider(&f3Catalog{past: f3BuildPast()})
 	srv.SetDiscoveryProvider(f3Discovery{})
 	srv.SetHealthProvider(&f3Health{settings: config.HealthSettings{CanaryEnabled: true, CanaryChannel: "canary_chan", CanaryIntervalMinutes: 120, CanaryMaxStalenessHours: 12, WatchdogEnabled: true, WatchdogStallDelayMinutes: 30, WatchdogStallConfirmations: 3, WatchdogRecoveryCooldownMinutes: 10, WatchdogAvoidTTLMinutes: 60, WatchdogRearmHours: 6}})
 	srv.SetDropProgressProvider(f3Progress{})

@@ -13,7 +13,6 @@
 
 <div class="flex gap-1 border-b border-neutral-700 mb-5" role="tablist" aria-label="{{ t "drops.tablist_aria" }}">
     <button type="button" id="drops-tab-current" class="drops-tab is-active" data-tab="current" role="tab" aria-selected="true" aria-controls="tab-current" tabindex="0">{{ t "drops.tab.current" }}</button>
-    <button type="button" id="drops-tab-upcoming" class="drops-tab" data-tab="upcoming" role="tab" aria-selected="false" aria-controls="tab-upcoming" tabindex="-1">{{ t "drops.tab.upcoming" }}</button>
     <button type="button" id="drops-tab-past" class="drops-tab" data-tab="past" role="tab" aria-selected="false" aria-controls="tab-past" tabindex="-1">{{ t "drops.tab.past" }}</button>
 </div>
 
@@ -66,21 +65,6 @@
     </section>
 </div>
 
-<!-- Upcoming -->
-<div id="tab-upcoming" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-upcoming" tabindex="-1">
-    <p class="text-neutral-400 text-sm mb-4">{{ t "drops.upcoming.subtitle" }}</p>
-    <!--
-        Re-reads the backend snapshot every minute so a new campaign surfaced by a
-        full sync (scheduled or manual "Sync Drops now") appears without a full
-        page reload. This only re-renders the upcoming set the server already holds
-        in memory — it never triggers a Twitch sync. One section, one trigger: tab
-        switching just toggles visibility, so no extra polling loops are created.
-    -->
-    <section id="drops-upcoming" hx-get="/api/drops/upcoming" hx-trigger="load, every 1m" hx-swap="innerHTML">
-        <div class="animate-pulse text-neutral-400">{{ t "drops.loading.upcoming" }}</div>
-    </section>
-</div>
-
 <!-- Past -->
 <div id="tab-past" class="drops-panel hidden" role="tabpanel" aria-labelledby="drops-tab-past" tabindex="-1">
     <p class="text-neutral-400 text-sm mb-4">{{ t "drops.past.subtitle" }}</p>
@@ -95,7 +79,7 @@
     // __dropsTabs owns tab switching (roving tabindex + arrow-key navigation)
     // and the drop-card modal dialogs (open/close + focus restore to the
     // opening card). Single IIFE, re-init guarded: htmx only ever swaps the
-    // panel CONTENTS (#drops-queue, #drops-upcoming, #drops-past), never the
+    // panel CONTENTS (#drops-queue, #drops-past), never the
     // tab buttons or panel wrappers themselves, so these listeners are
     // attached exactly once for the page's lifetime.
     (function () {
@@ -105,7 +89,6 @@
         const tabs = Array.from(document.querySelectorAll('.drops-tab'));
         const panels = {
             current: document.getElementById('tab-current'),
-            upcoming: document.getElementById('tab-upcoming'),
             past: document.getElementById('tab-past'),
         };
         const tablistEl = tabs.length ? tabs[0].closest('[role="tablist"]') : null;

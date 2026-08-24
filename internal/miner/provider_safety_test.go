@@ -56,10 +56,8 @@ import (
 //     CurrentHealthSettings, ApplyHealthSettings) is.
 //   - dropsTracker.RequestManualSync (web.CampaignsProvider, bound directly to
 //     m.dropsTracker, not a Miner method) forces an immediate real campaign
-//     sync. Not exercised for the same reason; the Miner-method drop-catalog
-//     providers (UpcomingCampaigns/RelevantUpcomingCampaigns/
-//     CampaignSyncStatus/PastCampaigns), which only ever read already-synced
-//     in-memory/db state, ARE exercised.
+//     sync. Not exercised for the same reason; the Miner-method PastCampaigns
+//     provider, which only reads already-synced database state, IS exercised.
 //
 // Every other F12 provider listed in the contract is exercised for real
 // below, either by construction (an empty/never-added streamer roster makes
@@ -206,9 +204,6 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 			}
 		}},
 		{"TrackedUsernames", func(*testing.T) { m.TrackedUsernames() }},
-		{"UpcomingCampaigns", func(*testing.T) { m.UpcomingCampaigns() }},
-		{"RelevantUpcomingCampaigns", func(*testing.T) { m.RelevantUpcomingCampaigns() }},
-		{"CampaignSyncStatus", func(*testing.T) { m.CampaignSyncStatus() }},
 		{"PastCampaigns", func(*testing.T) { _, _ = m.PastCampaigns() }},
 		{"DropProgress", func(*testing.T) { m.DropProgress() }},
 		{"PolicySnapshot", func(*testing.T) { m.PolicySnapshot() }},

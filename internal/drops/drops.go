@@ -29,34 +29,6 @@ type twitchClient interface {
 	ClaimDrop(drop *models.Drop) (twitch.ClaimStatus, error)
 }
 
-// campaignSchedulerClock is the time/timer seam for the single full campaign-
-// sync loop. Production uses the system clock; tests replace it so StartAt
-// wakeups and collisions can be exercised without sleeps. It is intentionally
-// separate from d.clock, which owns drop-eligibility evaluation semantics.
-type campaignSchedulerClock interface {
-	Now() time.Time
-	NewTimer(time.Duration) campaignSchedulerTimer
-}
-
-type campaignSchedulerTimer interface {
-	C() <-chan time.Time
-	Stop() bool
-}
-
-type realCampaignSchedulerClock struct{}
-
-func (realCampaignSchedulerClock) Now() time.Time { return time.Now() }
-func (realCampaignSchedulerClock) NewTimer(delay time.Duration) campaignSchedulerTimer {
-	return realCampaignSchedulerTimer{timer: time.NewTimer(delay)}
-}
-
-type realCampaignSchedulerTimer struct {
-	timer *time.Timer
-}
-
-func (t realCampaignSchedulerTimer) C() <-chan time.Time { return t.timer.C }
-func (t realCampaignSchedulerTimer) Stop() bool          { return t.timer.Stop() }
-
 // SyncStatus is a snapshot of the most recent campaign sync. It exists so the
 // debug snapshot (and any future health check) can tell whether the sync ran,
 // what Twitch's dashboard returned, how many campaigns were recovered from the
@@ -129,14 +101,8 @@ type DropsTracker struct {
 
 	campaigns []*models.Campaign
 
-	// upcomingCampaigns holds campaigns Twitch's dashboard returned that have not
-	// started yet (start_at in the future). They are display-only for the Drops
-	// page "Upcoming" tab and NEVER enter the active farm set — they cannot be
-	// farmed before their official start. Guarded by mu.
-	upcomingCampaigns []*models.Campaign
-
-	// catalog, when set, durably records every observed campaign (current +
-	// upcoming) so the "Past" tab can show campaigns that have since expired.
+	// catalog, when set, durably records every campaign actually observed in the
+	// current/in-progress pipeline so the "Past" tab can show it after expiry.
 	// Set once at wiring time before the loops start; nil disables cataloging.
 	catalog *CampaignCatalog
 
@@ -226,22 +192,6 @@ type DropsTracker struct {
 	// campaign the current tracked set is missing without waiting a full interval.
 	campaignResync chan struct{}
 
-	// campaignScheduleChanged wakes the existing full-sync owner only to re-plan
-	// its one timer after another serialized full sync (notably SyncNow) publishes
-	// a different upcoming snapshot. It never starts a sync itself. Buffered to 1
-	// because only the newest authoritative schedule matters.
-	campaignScheduleChanged chan struct{}
-	// nextCampaignStartAt is the nearest StartAt observed as future among the
-	// current relevant upcoming snapshot. It may be due by publication time when
-	// a full sync crosses the boundary. campaignScheduleGeneration changes when a
-	// successful full sync republishes that snapshot and when a due StartAt is
-	// consumed before its covering attempt. Both are guarded by mu.
-	nextCampaignStartAt        time.Time
-	campaignScheduleGeneration uint64
-	// campaignClock creates the full-sync loop's sole timer. Set at construction;
-	// tests may replace it before Start.
-	campaignClock campaignSchedulerClock
-
 	// lastManualSyncAt gates the manual "Sync Drops now" action so it can't be
 	// spammed into a request storm; guarded by mu.
 	lastManualSyncAt time.Time
@@ -275,12 +225,6 @@ type DropsTracker struct {
 	// once at wiring time before the loops start; read lock-free.
 	onDropClaimed func(dropName string)
 
-	// upcomingNotifier, when set, is alerted once per newly-observed RELEVANT
-	// upcoming campaign on the edge of a SUCCESSFUL full sync (a display/opt-in
-	// concern; the notifier owns durable dedupe). Set once at wiring time before
-	// the loops start; read lock-free. nil disables upcoming-campaign alerts.
-	upcomingNotifier UpcomingNotifier
-
 	// intervalUnit scales the configured sync intervals (minutes in
 	// production). Set once at construction and never mutated, so both loops
 	// read it without the lock; tests set it to a sub-second unit to exercise
@@ -297,15 +241,13 @@ func NewDropsTracker(
 	dropBlacklist []string,
 ) *DropsTracker {
 	return &DropsTracker{
-		client:                  client,
-		streamers:               streamers,
-		settings:                settings,
-		dropBlacklist:           dropBlacklist,
-		resync:                  make(chan struct{}, 1),
-		campaignResync:          make(chan struct{}, 1),
-		campaignScheduleChanged: make(chan struct{}, 1),
-		campaignClock:           realCampaignSchedulerClock{},
-		intervalUnit:            time.Minute,
+		client:         client,
+		streamers:      streamers,
+		settings:       settings,
+		dropBlacklist:  dropBlacklist,
+		resync:         make(chan struct{}, 1),
+		campaignResync: make(chan struct{}, 1),
+		intervalUnit:   time.Minute,
 	}
 }
 
@@ -452,63 +394,6 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 	return campaigns
 }
 
-// UpcomingCampaigns returns a snapshot of the campaigns Twitch's dashboard
-// listed that have not started yet (display-only; never farmed).
-func (d *DropsTracker) UpcomingCampaigns() []*models.Campaign {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	out := make([]*models.Campaign, len(d.upcomingCampaigns))
-	copy(out, d.upcomingCampaigns)
-	return out
-}
-
-// UpcomingNotifier is the drops tracker's hook for alerting on a newly-observed
-// RELEVANT upcoming campaign. It is invoked once per relevant upcoming campaign
-// on the edge of a SUCCESSFUL full sync, OUTSIDE the tracker's state mutex, so
-// an implementation may perform bounded network I/O and durable dedupe without
-// stalling readers or the active-drops pipeline. Implementations MUST be
-// idempotent per campaign (durable dedupe) so repeated syncs, restarts, and
-// reordered responses never re-notify. nil disables upcoming-campaign alerts.
-type UpcomingNotifier interface {
-	NotifyUpcomingCampaign(ctx context.Context, c *models.Campaign)
-}
-
-// SetUpcomingNotifier wires the upcoming-campaign alert hook. Set once before
-// the sync loops start (read lock-free); nil disables the alert.
-func (d *DropsTracker) SetUpcomingNotifier(n UpcomingNotifier) {
-	d.upcomingNotifier = n
-}
-
-// filterRelevantUpcoming keeps only the upcoming campaigns whose game passes the
-// operator's game filter, reusing the exact active game-identity contract
-// (resolveAllowedGameIDs + gameIDAllowed). Fail-open exactly like the active
-// filter: nothing configured, or a name-only filter that resolved to no IDs this
-// cycle, keeps everything; a campaign with no game ID is kept. Pure and silent —
-// upcoming relevance is a display/notification concern that never touches active
-// counters, blacklist, claim history, or the active-filter logs.
-func (d *DropsTracker) filterRelevantUpcoming(up []*models.Campaign) []*models.Campaign {
-	allowed, configured := d.resolveAllowedGameIDs(up)
-	if !configured || len(allowed) == 0 {
-		return up
-	}
-	out := make([]*models.Campaign, 0, len(up))
-	for _, c := range up {
-		if gameIDAllowed(allowed, c) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// RelevantUpcomingCampaigns returns the upcoming campaigns that pass the
-// operator's game filter — the display-only relevance the Drops "Upcoming" tab
-// and the upcoming-campaign notification use. It never enters the active farm
-// set and never changes active filtering behavior, counters, or logs.
-func (d *DropsTracker) RelevantUpcomingCampaigns() []*models.Campaign {
-	return d.filterRelevantUpcoming(d.UpcomingCampaigns())
-}
-
 // SetCatalog wires the durable campaign catalog. Set once before the sync loops
 // start; when nil, cataloging is a no-op.
 func (d *DropsTracker) SetCatalog(catalog *CampaignCatalog) {
@@ -543,10 +428,9 @@ func (d *DropsTracker) SkipLedgerEnabled() bool {
 var skipLedgerOpTimeout = 15 * time.Second
 
 // skipLedgerCtx builds a bounded context for one skip-ledger DB operation,
-// derived from the tracker's lifecycle ctx exactly like notifyUpcoming's base
-// context (upcomingNotifyTimeout, above) -- falls back to context.Background()
-// before Start (or in tests that never set d.ctx). The caller must call the
-// returned cancel.
+// derived from the tracker's lifecycle ctx. It falls back to
+// context.Background() before Start (or in tests that never set d.ctx). The
+// caller must call the returned cancel.
 func (d *DropsTracker) skipLedgerCtx() (context.Context, context.CancelFunc) {
 	base := context.Background()
 	d.mu.RLock()
@@ -774,143 +658,29 @@ func (d *DropsTracker) loop() {
 	d.syncCampaigns()
 
 	for {
-		// A successful loop-owned sync signals the same schedule-change channel
-		// used by a concurrent SyncNow. Its state is already reflected in the plan
-		// read below, so discard only that stale notification. A later publication
-		// either lands before the snapshot (making the snapshot current) or after
-		// it (leaving a notification for the select), so no update can be lost.
-		drainSignal(d.campaignScheduleChanged)
-
-		// Keep exactly one timer: the earlier of the unchanged ordinary cadence
-		// and the nearest relevant known future StartAt from the last successful
-		// authoritative full sync. Every full sync starts a fresh cadence cycle,
-		// preserving the pre-existing interval/load behavior.
-		plan := d.planCampaignWake()
-		timer := d.campaignSchedulerClock().NewTimer(plan.delay)
+		// Re-read the interval each cycle (fresh timer per iteration) so a
+		// runtime UpdateSettings change to CampaignSyncInterval is adopted on the
+		// next sync, instead of being pinned to the value read once at startup.
+		// This mirrors progressLoop below and the "snapshot the current settings
+		// at the start of each cycle" pattern the watcher (applyPendingSettings)
+		// and the health loops already use. A fixed time.Ticker created once at
+		// startup — the previous implementation — silently ignored the change,
+		// contradicting UpdateSettings' documented contract.
+		timer := time.NewTimer(d.campaignSyncInterval())
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C():
-			// The generation check under fullSyncMu discards a stale timer when a
-			// direct SyncNow replaced the snapshot while this owner was waiting.
-			// A pending manual/config trigger is consumed by the same run, so a
-			// ticker/StartAt collision never creates a duplicate full sync.
-			d.syncCampaignsFromWake(&plan)
+		case <-timer.C:
+			d.syncCampaigns()
 		case <-d.campaignResync:
 			// Early wake: a Drops filter/blacklist change or a manual "Sync now".
 			// Stop the pending timer so the next iteration starts a fresh one at
 			// the current interval (a resync must not shorten the steady cadence).
 			timer.Stop()
-			d.syncCampaignsFromWake(nil)
-		case <-d.campaignScheduleChanged:
-			// Another serialized full-sync caller published a newer upcoming
-			// snapshot. Re-plan the one timer; publication itself already did the
-			// work, so this wake never launches a second sync.
-			timer.Stop()
+			d.syncCampaigns()
 		}
 	}
-}
-
-type campaignWakePlan struct {
-	delay      time.Duration
-	generation uint64
-	startAt    time.Time
-}
-
-func (d *DropsTracker) campaignSchedulerClock() campaignSchedulerClock {
-	if d.campaignClock != nil {
-		return d.campaignClock
-	}
-	return realCampaignSchedulerClock{}
-}
-
-// planCampaignWake snapshots the current authoritative StartAt schedule and
-// chooses the earlier of it and the ordinary interval. A due StartAt gets a
-// zero delay; it is consumed only after its timer wins and the plan is rechecked
-// under fullSyncMu (see syncCampaignsFromWake).
-func (d *DropsTracker) planCampaignWake() campaignWakePlan {
-	plan := campaignWakePlan{delay: d.campaignSyncInterval()}
-	now := d.campaignSchedulerClock().Now()
-
-	d.mu.RLock()
-	plan.generation = d.campaignScheduleGeneration
-	next := d.nextCampaignStartAt
-	d.mu.RUnlock()
-
-	if next.IsZero() {
-		return plan
-	}
-	delay := next.Sub(now)
-	if delay < 0 {
-		delay = 0
-	}
-	if delay <= plan.delay {
-		plan.delay = delay
-		plan.startAt = next
-	}
-	return plan
-}
-
-func drainSignal(ch <-chan struct{}) {
-	if ch == nil {
-		return
-	}
-	select {
-	case <-ch:
-	default:
-	}
-}
-
-// syncCampaignsFromWake is the existing background full-sync owner. It folds
-// any already-pending manual/config trigger into this one run, validates timer
-// generations after acquiring the same fullSyncMu used by SyncNow, and consumes
-// a due StartAt before the attempt so a failed request cannot immediately
-// re-arm a zero-delay storm. Triggers arriving after the drain describe newer
-// operator intent and remain queued for the next iteration.
-func (d *DropsTracker) syncCampaignsFromWake(plan *campaignWakePlan) {
-	d.fullSyncMu.Lock()
-	defer d.fullSyncMu.Unlock()
-
-	// The select may have chosen a due timer/manual wake just before shutdown,
-	// then waited behind a direct SyncNow holding fullSyncMu. Re-check context
-	// after acquiring the owner lock so a queued wake cannot start fresh network
-	// work after cancellation. A sync that passed this point is already in flight
-	// and Stop joins it under the existing bounded lifecycle contract.
-	d.mu.RLock()
-	ctx := d.ctx
-	d.mu.RUnlock()
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-	}
-
-	if plan != nil {
-		d.mu.Lock()
-		if d.campaignScheduleGeneration != plan.generation {
-			d.mu.Unlock()
-			return
-		}
-		if !plan.startAt.IsZero() {
-			now := d.campaignSchedulerClock().Now()
-			if d.nextCampaignStartAt != plan.startAt || now.Before(plan.startAt) {
-				d.mu.Unlock()
-				return
-			}
-			d.nextCampaignStartAt = time.Time{}
-			d.campaignScheduleGeneration++
-		}
-		d.mu.Unlock()
-	}
-
-	// Drain only after a timed plan is accepted. If it is stale (or a wall-clock
-	// jump makes a StartAt timer early), a pending manual/config request must stay
-	// queued rather than being discarded with the invalid timer wake.
-	drainSignal(d.campaignResync)
-	d.syncCampaignsLocked()
 }
 
 // triggerCampaignResync asks the full-sync loop to run an immediate campaign
@@ -1162,20 +932,12 @@ func (d *DropsTracker) syncCampaigns() {
 	// campaign-pool swaps, and claim attempts.
 	d.fullSyncMu.Lock()
 	defer d.fullSyncMu.Unlock()
-	d.syncCampaignsLocked()
-}
-
-// syncCampaignsLocked runs the authoritative discovery pipeline. Callers must
-// hold fullSyncMu; keeping the network/publish body behind that one owner lock
-// lets timer, StartAt, manual/config, and direct SyncNow paths share exactly the
-// same serialized implementation.
-func (d *DropsTracker) syncCampaignsLocked() {
 
 	start := time.Now()
 
 	d.claimAllDropsFromInventory()
 
-	campaigns, upcoming, dashboardCount, err := d.getActiveCampaigns()
+	campaigns, dashboardCount, err := d.getActiveCampaigns()
 	if err != nil {
 		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch; keeping previously tracked campaigns", "error", err)
 		// dashboardCount is non-zero when the dashboard listing succeeded and
@@ -1213,10 +975,10 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	campaigns = d.applyClaimHistory(campaigns)
 	afterClaimHistory := len(campaigns)
 
-	// Record every observed campaign (claim-enriched active set + upcoming) into
-	// the durable catalog for the "Past" tab. Done before the blacklist filter so
+	// Record every campaign observed in the current/in-progress pipeline into the
+	// durable catalog for the "Past" tab. Done before the blacklist filter so
 	// blacklisted-but-real campaigns are still catalogued as having existed.
-	d.recordCatalog(campaigns, upcoming)
+	d.recordCatalog(campaigns)
 
 	// Self-heal the skip ledger against this sync's full (still unfiltered)
 	// candidate set. Runs on raw campaigns/drops, same as recordCatalog above:
@@ -1295,21 +1057,10 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.mu.RUnlock()
 	reconcileCampaignACLs(previous, campaigns)
 
-	// Publish active, upcoming, and the one derived StartAt deadline as one
-	// authoritative snapshot. A failed pipeline never reaches this point, so it
-	// preserves the complete LKG (including upcoming state). Recompute only from
-	// relevant campaigns classified as upcoming in this very sync. Each one was
-	// observed with a future StartAt; if that boundary crossed while later work
-	// was in flight, retaining it produces one immediate catch-up sync.
-	nextStartAt := d.nearestRelevantUpcomingStartAt(upcoming)
 	d.mu.Lock()
 	d.campaigns = campaigns
-	d.upcomingCampaigns = upcoming
-	d.nextCampaignStartAt = nextStartAt
-	d.campaignScheduleGeneration++
 	d.bumpRevisionLocked(updateSourceFullSync)
 	d.mu.Unlock()
-	d.signalCampaignScheduleChanged()
 
 	// One concise summary per sync so a production deployment - which runs without
 	// -debug - can confirm the sync ran and see what it found. Detailed
@@ -1365,77 +1116,6 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, time.Since(start), nil)
 
 	d.updateStreamerCampaigns()
-
-	// Edge effect of a SUCCESSFUL full sync only: alert on any newly-announced
-	// relevant upcoming campaign. Runs last (active farming is already set up),
-	// outside d.mu, and is bounded — a notification never rolls back the
-	// published snapshot and never stalls the loop. The lightweight progress
-	// sync never reaches here, so it can never notify.
-	d.notifyUpcoming(upcoming)
-}
-
-// nearestRelevantUpcomingStartAt returns exactly one deadline from the fresh
-// upcoming classification. Same-time campaigns naturally share it. A campaign
-// reaches this slice only when its non-zero StartAt was future at observation;
-// if it crosses during the rest of the sync, the past absolute deadline makes
-// the next plan run once immediately rather than disappear.
-func (d *DropsTracker) nearestRelevantUpcomingStartAt(upcoming []*models.Campaign) time.Time {
-	var nearest time.Time
-	for _, campaign := range d.filterRelevantUpcoming(upcoming) {
-		if campaign == nil || campaign.StartAt.IsZero() {
-			continue
-		}
-		if nearest.IsZero() || campaign.StartAt.Before(nearest) {
-			nearest = campaign.StartAt
-		}
-	}
-	return nearest
-}
-
-func (d *DropsTracker) signalCampaignScheduleChanged() {
-	if d.campaignScheduleChanged == nil {
-		return
-	}
-	select {
-	case d.campaignScheduleChanged <- struct{}{}:
-	default:
-	}
-}
-
-// upcomingNotifyTimeout bounds the per-sync upcoming-campaign notification pass
-// so a slow/failed notifier can never stall the full-sync loop for long.
-// Package variable so tests can shrink it.
-var upcomingNotifyTimeout = 15 * time.Second
-
-// notifyUpcoming fires the opt-in upcoming-campaign alert for each RELEVANT
-// upcoming campaign. The notifier owns durable dedupe, so calling it every sync
-// is safe — only a genuinely new relevant campaign produces an alert. Runs
-// OUTSIDE d.mu with a bounded context, so a slow or failing Discord send can
-// neither block campaign readers nor stall the sync loop, and never mutates the
-// published snapshot. A nil notifier (or no relevant upcoming campaigns) is a
-// no-op.
-func (d *DropsTracker) notifyUpcoming(upcoming []*models.Campaign) {
-	notifier := d.upcomingNotifier
-	if notifier == nil || len(upcoming) == 0 {
-		return
-	}
-	relevant := d.filterRelevantUpcoming(upcoming)
-	if len(relevant) == 0 {
-		return
-	}
-
-	base := context.Background()
-	d.mu.RLock()
-	if d.ctx != nil {
-		base = d.ctx
-	}
-	d.mu.RUnlock()
-
-	ctx, cancel := context.WithTimeout(base, upcomingNotifyTimeout)
-	defer cancel()
-	for _, c := range relevant {
-		notifier.NotifyUpcomingCampaign(ctx, c)
-	}
 }
 
 // syncSummaryFingerprint is a deterministic semantic signature of a completed
@@ -1459,16 +1139,15 @@ func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recove
 		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink)
 }
 
-func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign, dashboardTotal int, err error) {
-	// Fetch every campaign the dashboard lists (a single ViewerDropsDashboard
-	// call, no status filter) so not-yet-started (UPCOMING) campaigns reach the
-	// date-window classification below instead of being dropped at the source.
-	// A complete window remains authoritative; when a boundary is missing, the
-	// response's explicit ACTIVE status is the only signal that may keep the
-	// campaign in the current farm set.
-	dashboardCampaigns, err := d.getDropsDashboard("")
+func (d *DropsTracker) getActiveCampaigns() (active []*models.Campaign, dashboardTotal int, err error) {
+	// Current farming rejects dashboard rows Twitch explicitly reports as
+	// non-active. A missing summary status fails open to the detail/window checks
+	// below so a partial response cannot hide a real current campaign. A complete
+	// window remains authoritative; when a boundary is missing, explicit ACTIVE
+	// detail/summary status is the only signal that may keep it in the farm set.
+	dashboardCampaigns, err := d.getDropsDashboard(string(models.CampaignActive))
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, 0, err
 	}
 	dashboardCount := len(dashboardCampaigns)
 
@@ -1476,12 +1155,11 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 		"dashboardCount", dashboardCount)
 
 	var campaigns []*models.Campaign
-	var upcomingCampaigns []*models.Campaign
 	// Preserve the established single dashboard-snapshot boundary: evaluate all
 	// campaign details against a fresh time captured after the dashboard listing,
 	// not against full-sync start (which may precede claim/network work by many
-	// seconds). The scheduler retains any upcoming boundary that crosses later.
-	now := d.campaignSchedulerClock().Now()
+	// seconds).
+	now := time.Now()
 	for _, summary := range dashboardCampaigns {
 		campaignID, _ := summary["id"].(string)
 		summaryName, _ := summary["name"].(string)
@@ -1501,7 +1179,7 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 			// walk per campaign. Abort the sync instead: the caller keeps the
 			// previously tracked campaigns, exactly like a dashboard-level error.
 			if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
-				return nil, nil, dashboardCount, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
+				return nil, dashboardCount, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
 			}
 			// Any other error is campaign-specific (campaign gone, malformed
 			// response) — skip just this one and keep syncing the rest.
@@ -1518,19 +1196,9 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 		campaign, dropsFromDetails, skip := buildTrackedCampaignAt(summary, detail, now)
 		switch skip {
 		case skipOutsideDateWindow:
-			// A campaign outside its window is either upcoming (start in the
-			// future) or already ended. Upcoming ones are kept for the display-
-			// only "Upcoming" tab; they never enter the active farm set.
-			if !campaign.StartAt.IsZero() && campaign.StartAt.After(now) {
-				upcomingCampaigns = append(upcomingCampaigns, campaign)
-				slog.Debug("Drops sync: campaign is upcoming (not yet started)",
-					"campaign", campaign.Name, "campaignID", campaign.ID,
-					"startAt", campaign.StartAt)
-			} else {
-				slog.Debug("Drops sync: skipping campaign outside its active date window",
-					"campaign", campaign.Name, "campaignID", campaign.ID,
-					"startAt", campaign.StartAt, "endAt", campaign.EndAt)
-			}
+			slog.Debug("Drops sync: skipping campaign outside its active date window",
+				"campaign", campaign.Name, "campaignID", campaign.ID,
+				"startAt", campaign.StartAt, "endAt", campaign.EndAt)
 			continue
 		case skipNoActiveDrops:
 			slog.Debug("Drops sync: skipping campaign with no active unclaimed drops",
@@ -1548,9 +1216,9 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 	}
 
 	slog.Debug("Drops sync: active campaigns after detail fetch and filtering",
-		"trackedCount", len(campaigns), "upcomingCount", len(upcomingCampaigns))
+		"trackedCount", len(campaigns))
 
-	return campaigns, upcomingCampaigns, dashboardCount, nil
+	return campaigns, dashboardCount, nil
 }
 
 // campaignSkipReason explains why buildTrackedCampaign declined to track a
@@ -1578,8 +1246,8 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 }
 
 // buildTrackedCampaignAt is buildTrackedCampaign with an explicit observation
-// time so the full-sync scheduler and date-window classifier use one boundary.
-// The wrapper above preserves the existing helper API for focused unit tests.
+// time so one full sync evaluates every campaign against one boundary. The
+// wrapper above preserves the existing helper API for focused unit tests.
 func buildTrackedCampaignAt(summary, detail map[string]interface{}, now time.Time) (*models.Campaign, int, campaignSkipReason) {
 	campaign := models.NewCampaignFromGQL(detail)
 	summaryCampaign := models.NewCampaignFromGQL(summary)
@@ -1621,8 +1289,8 @@ func buildTrackedCampaignAt(summary, detail map[string]interface{}, now time.Tim
 	dropsFromDetails := len(campaign.Drops)
 
 	// Preserve the complete-window behavior exactly. For an incomplete window,
-	// known boundaries remain authoritative (a future start is upcoming; a real
-	// past end is expired), while an explicit ACTIVE status from the current
+	// known boundaries remain authoritative (a future start is outside the active
+	// set; a real past end is expired), while an explicit ACTIVE status from the current
 	// dashboard/details response may keep the campaign trackable. DateMatch stays
 	// false in that case so no caller can mistake incomplete timing evidence for
 	// a known in-window fact. Any other incomplete state is neither declared
@@ -1637,8 +1305,7 @@ func buildTrackedCampaignAt(summary, detail map[string]interface{}, now time.Tim
 	}
 	switch {
 	case startKnown && endKnown:
-		// StartAt is inclusive: a wake that fires exactly on the published
-		// boundary must be able to discover the campaign in that same full sync.
+		// Campaign windows are start-inclusive and end-exclusive.
 		campaign.DateMatch = !now.Before(campaign.StartAt) && campaign.EndAt.After(now)
 		if !campaign.DateMatch {
 			return campaign, dropsFromDetails, skipOutsideDateWindow
@@ -2284,8 +1951,7 @@ func (d *DropsTracker) applyGameFilter(campaigns []*models.Campaign) (kept []*mo
 		if !gameIDAllowed(allowed, c) {
 			// Per-campaign filter decisions stay at DEBUG (PR #103) so a routine
 			// sync does not spam INFO; the shared gameIDAllowed helper (PR #104) is
-			// the single game-identity decision reused by the upcoming/notification
-			// relevance path.
+			// the single game-identity decision for campaign filtering.
 			slog.Debug("Skipping drop campaign: game not in configured drop-campaign game list",
 				"campaign", c.Name, "campaignID", c.ID, "gameID", gameID, "gameName", gameName,
 				"reason", "game_not_allowed", "configuredGameIDs", cfgIDs, "configuredGameNames", cfgNames)
@@ -2373,11 +2039,10 @@ func (d *DropsTracker) applyAccountLinkFilter(campaigns []*models.Campaign) (kep
 // an ALREADY-resolved allowed-ID set: a campaign with no game ID is kept (its
 // identity is unknown, never proof it is foreign — the fail-open policy),
 // otherwise it is kept iff its exact, opaque game ID is in allowed. It is the
-// single per-campaign game-identity decision, shared verbatim by the active
-// filter (applyGameFilter) and the display-only upcoming/notification relevance
-// path so both honor one contract — strict opaque ID equality, never substring,
-// regex, or numeric coercion. Set-level cases (nothing configured, a name-only
-// filter that resolved to no IDs) are the caller's to handle.
+// single per-campaign game-identity decision used by the active filter
+// (applyGameFilter): strict opaque ID equality, never substring, regex, or
+// numeric coercion. Set-level cases (nothing configured, a name-only filter
+// that resolved to no IDs) are the caller's to handle.
 func gameIDAllowed(allowed map[string]struct{}, c *models.Campaign) bool {
 	if c == nil || c.Game == nil || c.Game.ID == "" {
 		return true

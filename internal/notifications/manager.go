@@ -70,18 +70,6 @@ type Manager struct {
 	// are never blocked on Discord network I/O.
 	discordLifecycleMu sync.Mutex
 
-	// upcomingMu serializes the read-decide-send-record cycle of the
-	// upcoming-campaign alert so a campaign is delivered at most once even if
-	// two full-sync results are published concurrently. It is a notifications-
-	// internal lock (never the drops mutex) and is held across the bounded send,
-	// which is safe because the send has a hard context timeout.
-	upcomingMu sync.Mutex
-
-	// displayLoc is the time zone operator-facing alerts render absolute times
-	// in (set from config LoggerSettings.TimeZone via SetDisplayLocation, so the
-	// Discord message matches the dashboard). nil falls back to UTC.
-	displayLoc *time.Location
-
 	// stopOnce makes Stop idempotent (M4, I5): the miner's stop() and a
 	// caller-driven test can both end up calling Stop on the same Manager
 	// (e.g. a shutdown racing an already-stopped path), and without this
@@ -193,25 +181,6 @@ func (m *Manager) drainDispatch() error {
 			"timeout", dispatchDrainTimeout)
 		return fmt.Errorf("%w after %s", errDispatchDrainTimeout, dispatchDrainTimeout)
 	}
-}
-
-// SetDisplayLocation sets the time zone operator-facing notifications render
-// absolute times in (the same location the dashboard uses). Safe to call at
-// wiring time before Start.
-func (m *Manager) SetDisplayLocation(loc *time.Location) {
-	m.mu.Lock()
-	m.displayLoc = loc
-	m.mu.Unlock()
-}
-
-func (m *Manager) displayLocation() *time.Location {
-	m.mu.RLock()
-	loc := m.displayLoc
-	m.mu.RUnlock()
-	if loc == nil {
-		return time.UTC
-	}
-	return loc
 }
 
 // defaultDiscordFactory is the production Discord provider factory: it returns
