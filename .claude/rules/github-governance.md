@@ -7,10 +7,16 @@ paths:
 
 # GitHub / governance conventions
 
+- Canonical governance authority: `GOVERNANCE_V3.md` at the repo root — this rule file and the rest of the
+  repo-native layer elaborate it and may narrow, never widen; on conflict `GOVERNANCE_V3.md` §1 decides,
+  and the conflict is surfaced rather than silently reconciled.
 - Default mode is READ_ONLY (see `docs/agents/operation-modes.md`); tracker and GitHub mutations require an
   explicit task contract (see `docs/agents/task-contract.md`).
-- Never merge, mark ready-for-review, release/tag, deploy, trigger/rerun a workflow, or touch GitHub
-  settings/secrets — those need a direct, separate user command and are never executed autonomously.
+- Merge, mark ready-for-review, release/tag, deploy, trigger/rerun a workflow, and GitHub
+  settings/secrets changes are owner-gated: forbidden without a separate, direct owner command; such a
+  command may authorize exactly one specific gated action after a fresh live preflight, and no task
+  contract or skill can grant them (`GOVERNANCE_V3.md` §4). Force push and any direct push to a
+  protected branch (`main`/`master`/`release/*`) are always forbidden, even with such a command.
 - `.claude/hooks/governance-policy.py` and `.claude/settings.json` are the mechanical enforcement layer; do not
   edit them to work around a permission — if a rule seems wrong, say so and let the user change it outside
   Claude Code.

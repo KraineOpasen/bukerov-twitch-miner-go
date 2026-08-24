@@ -23,7 +23,8 @@ Single-context repo (this repo):
 /
 ├── CONTEXT.md
 ├── docs/adr/
-│   └── 0001-agent-governance-v2.md
+│   ├── 0001-agent-governance-v2.md
+│   └── 0002-canonical-governance-v3.md
 └── internal/ ...
 ```
 

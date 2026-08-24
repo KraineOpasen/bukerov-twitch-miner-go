@@ -9,7 +9,7 @@ disable-model-invocation: true
 This vendored copy is explicit-invocation-only (`/skill-creator-anthropic`). A plain "create a skill"
 request belongs to the built-in skill-creator, not this copy.
 
-Bukerov governance (v2) applies on top of everything below:
+Bukerov governance (canonical: `GOVERNANCE_V3.md` at the repo root) applies on top of everything below:
 - All workspaces, evals, benchmark reports, and packaged `.skill` files live ONLY under `/tmp` or a
   gitignored `.scratch/` directory — never inside the repository.
 - Never write into tracked `.claude/skills/**` or `.claude/commands/**` unless the session is in

@@ -20,12 +20,12 @@ other reviewed change to this repository — write it, review it, merge it, and 
 containing `upstream` anywhere in a project entry is a schema violation (enforced by `project-manifest-valid`):
 a first-party entry must never assert provenance it doesn't have.
 
-## Governance v2 precedence
+## Governance precedence
 
-Nothing here changes `CLAUDE.md`'s policy precedence order: (1) an explicit task contract, (2) `CLAUDE.md` +
-`.claude/rules/*.md`, (3) vendored skills (patched) — and, at the same tier, this project's own first-party
-skills — (4) unpatched upstream skill defaults, (5) generic model behavior. A first-party skill instruction never
-overrides a `.claude/rules/*.md` constraint or a hook denial, exactly like a vendored one.
+Nothing here changes authority precedence, which is defined solely by `GOVERNANCE_V3.md` (§1, §3):
+first-party skills sit at the same invoked-audited-skill tier as the vendored sets (patched and unpatched
+bytes alike, one tier). A first-party skill instruction never overrides a `.claude/rules/*.md` constraint
+or a hook denial, exactly like a vendored one.
 
 ## Allowed invocation modes
 
@@ -46,7 +46,7 @@ Every entry declares `mutation_capability`: `read-only` or `mutation-capable`. *
 evidence, not a capability boundary.** A `read-only` classification is a deterministic proxy the validator can
 check (it requires `scripts: []` and `hooks: []` — no scripts, no hooks), and it records what the reviewer
 concluded when the skill was last read end-to-end. It grants nothing by itself. Actual mutation authority — the
-ability to edit, commit, push, or touch the tracker — comes only from Governance v2's operation modes
+ability to edit, commit, push, or touch the tracker — comes only from the operation modes
 (`docs/agents/operation-modes.md`) and an active task contract (`docs/agents/task-contract.md`), the same as for
 every other skill, vendored or not. A skill marked `mutation-capable` in the manifest still cannot commit or push
 outside an active contract that grants it; a skill marked `read-only` is not itself what stops a determined
@@ -72,8 +72,8 @@ independent comparator judging the outputs), not a self-report from the same ses
 Every first-party skill install or update goes through the same two-lens review this repository uses elsewhere
 (`code-review` skill): a **Standards** review (does it follow this repo's conventions, minimal footprint, no
 unjustified scripts/hooks) and a **Spec** review (does it do what it claims, does its eval evidence actually
-support the claim). Both reviewers are read-only — see "Agent orchestration" in `CLAUDE.md`: the agent that
-writes the skill is never the agent that approves it.
+support the claim). Both reviewers are read-only — see `GOVERNANCE_V3.md` §10 (orchestration) and Q3 in
+`docs/agents/quality-gates.md`: the agent that writes the skill is never the agent that approves it.
 
 ## Manifest integrity rules
 
@@ -146,7 +146,8 @@ per entry); `origin` is always the literal string `"project"` — any key contai
 entry is rejected outright (see "Distinction from vendored upstream skills"); `blob_sha` values are real
 `git hash-object` output (40 hex characters) — the placeholders above are shape examples only, never usable
 values; `eval_evidence.path` must be a tracked, repository-relative file (see "Evaluation requirement before
-installation"); `reviewed_base_sha` is the 40-hex `main` SHA the approving review ran against, and `reviewed_at`
+installation"); `reviewed_base_sha` is the 40-hex SHA of the active development-line commit the approving review ran
+against (the live stable `release/X.Y` base — `GOVERNANCE_V3.md` §2), and `reviewed_at`
 is that review's `YYYY-MM-DD` date.
 
 ## Scripts and hooks policy
@@ -206,8 +207,9 @@ skill installation is a separate, later PR. The enforcement layer must exist and
 content it polices exists — a validator that ships in the same diff as the skill it's meant to check can never
 prove it would have caught a problem in that skill.
 
-## Human-only merge; no automatic updates
+## Owner-gated merge; no automatic updates
 
-Same as both vendored policies: an agent never merges its own work here (see `CLAUDE.md`'s non-delegable
-prohibitions). There is no CI job, scheduled task, or plugin mechanism that re-syncs or auto-updates a first-party
-skill — every change is a deliberate, human-reviewed PR.
+Same as both vendored policies: an agent does not merge its own work here — merge is an owner-gated
+action requiring a separate, direct owner command (`GOVERNANCE_V3.md` §4). There is no CI job, scheduled
+task, or plugin mechanism that re-syncs or auto-updates a first-party skill — every change is a
+deliberate, human-reviewed PR.

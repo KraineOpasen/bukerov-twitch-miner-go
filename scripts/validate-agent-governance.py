@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """validate-agent-governance.py — offline, read-only consistency checks for the
-Claude Code Governance v2 layer (.claude/**, docs/agents/**, docs/adr/**).
+repo-native governance layer (.claude/**, docs/agents/**, docs/adr/**) that elaborates the canonical
+GOVERNANCE_V3.md at the repo root.
 
 Stdlib only, no network access, deterministic. Exits 0 if every check passes,
 1 if any check fails. Diagnostics print as `[FAIL] check-name: detail` /
@@ -261,12 +262,13 @@ def parse_frontmatter_value(path, key):
 
 def check_required_files():
     required = [
-        "CLAUDE.md", "CONTEXT.md", ".gitignore",
+        "CLAUDE.md", "GOVERNANCE_V3.md", "CONTEXT.md", ".gitignore",
         ".claude/settings.json", ".claude/hooks/governance-policy.py", ".claude/skills/LICENSE",
         "docs/agents/operation-modes.md", "docs/agents/task-contract.md", "docs/agents/quality-gates.md",
         "docs/agents/issue-tracker.md", "docs/agents/domain.md", "docs/agents/triage-labels.md",
         "docs/agents/mattpocock-skills-manifest.json", "docs/agents/mattpocock-skills-patches.md",
         "docs/agents/mattpocock-skills-policy.md", "docs/adr/0001-agent-governance-v2.md",
+        "docs/adr/0002-canonical-governance-v3.md",
         "scripts/validate-agent-governance.py",
         "docs/agents/anthropic-skills-manifest.json", "docs/agents/anthropic-skills-patches.md",
         "docs/agents/anthropic-skills-policy.md",
@@ -1247,10 +1249,11 @@ def validate_project_manifest(manifest, repo_root, require_tracked=True):
         scripts = entry.get("scripts")
         hooks = entry.get("hooks")
         # mutation_capability is REVIEWED METADATA / review evidence only -- it is not a
-        # mechanical capability boundary. Actual mutation authority comes solely from Governance
-        # v2's operation modes and an active task contract (see project-skills-policy.md); the
-        # "read-only requires empty scripts/hooks" rule below is a deterministic proxy the
-        # validator can check, not the thing that grants or denies write access.
+        # mechanical capability boundary. Actual mutation authority comes solely from the
+        # operation modes (GOVERNANCE_V3.md section 4) and an active task contract (see
+        # project-skills-policy.md); the "read-only requires empty scripts/hooks" rule below is a
+        # deterministic proxy the validator can check, not the thing that grants or denies write
+        # access.
         if mutation_capability not in ("read-only", "mutation-capable"):
             details.append("%s: mutation_capability must be \"read-only\" or \"mutation-capable\", got %r" % (
                 label, mutation_capability))
