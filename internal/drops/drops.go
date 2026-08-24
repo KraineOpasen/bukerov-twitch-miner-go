@@ -29,6 +29,34 @@ type twitchClient interface {
 	ClaimDrop(drop *models.Drop) (twitch.ClaimStatus, error)
 }
 
+// campaignSchedulerClock is the time/timer seam for the single full campaign-
+// sync loop. Production uses the system clock; tests replace it so StartAt
+// wakeups and collisions can be exercised without sleeps. It is intentionally
+// separate from d.clock, which owns drop-eligibility evaluation semantics.
+type campaignSchedulerClock interface {
+	Now() time.Time
+	NewTimer(time.Duration) campaignSchedulerTimer
+}
+
+type campaignSchedulerTimer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type realCampaignSchedulerClock struct{}
+
+func (realCampaignSchedulerClock) Now() time.Time { return time.Now() }
+func (realCampaignSchedulerClock) NewTimer(delay time.Duration) campaignSchedulerTimer {
+	return realCampaignSchedulerTimer{timer: time.NewTimer(delay)}
+}
+
+type realCampaignSchedulerTimer struct {
+	timer *time.Timer
+}
+
+func (t realCampaignSchedulerTimer) C() <-chan time.Time { return t.timer.C }
+func (t realCampaignSchedulerTimer) Stop() bool          { return t.timer.Stop() }
+
 // SyncStatus is a snapshot of the most recent campaign sync. It exists so the
 // debug snapshot (and any future health check) can tell whether the sync ran,
 // what Twitch's dashboard returned, how many campaigns were recovered from the
@@ -198,6 +226,22 @@ type DropsTracker struct {
 	// campaign the current tracked set is missing without waiting a full interval.
 	campaignResync chan struct{}
 
+	// campaignScheduleChanged wakes the existing full-sync owner only to re-plan
+	// its one timer after another serialized full sync (notably SyncNow) publishes
+	// a different upcoming snapshot. It never starts a sync itself. Buffered to 1
+	// because only the newest authoritative schedule matters.
+	campaignScheduleChanged chan struct{}
+	// nextCampaignStartAt is the nearest StartAt observed as future among the
+	// current relevant upcoming snapshot. It may be due by publication time when
+	// a full sync crosses the boundary. campaignScheduleGeneration changes when a
+	// successful full sync republishes that snapshot and when a due StartAt is
+	// consumed before its covering attempt. Both are guarded by mu.
+	nextCampaignStartAt        time.Time
+	campaignScheduleGeneration uint64
+	// campaignClock creates the full-sync loop's sole timer. Set at construction;
+	// tests may replace it before Start.
+	campaignClock campaignSchedulerClock
+
 	// lastManualSyncAt gates the manual "Sync Drops now" action so it can't be
 	// spammed into a request storm; guarded by mu.
 	lastManualSyncAt time.Time
@@ -253,13 +297,15 @@ func NewDropsTracker(
 	dropBlacklist []string,
 ) *DropsTracker {
 	return &DropsTracker{
-		client:         client,
-		streamers:      streamers,
-		settings:       settings,
-		dropBlacklist:  dropBlacklist,
-		resync:         make(chan struct{}, 1),
-		campaignResync: make(chan struct{}, 1),
-		intervalUnit:   time.Minute,
+		client:                  client,
+		streamers:               streamers,
+		settings:                settings,
+		dropBlacklist:           dropBlacklist,
+		resync:                  make(chan struct{}, 1),
+		campaignResync:          make(chan struct{}, 1),
+		campaignScheduleChanged: make(chan struct{}, 1),
+		campaignClock:           realCampaignSchedulerClock{},
+		intervalUnit:            time.Minute,
 	}
 }
 
@@ -728,29 +774,143 @@ func (d *DropsTracker) loop() {
 	d.syncCampaigns()
 
 	for {
-		// Re-read the interval each cycle (fresh timer per iteration) so a
-		// runtime UpdateSettings change to CampaignSyncInterval is adopted on the
-		// next sync, instead of being pinned to the value read once at startup.
-		// This mirrors progressLoop below and the "snapshot the current settings
-		// at the start of each cycle" pattern the watcher (applyPendingSettings)
-		// and the health loops already use. A fixed time.Ticker created once at
-		// startup — the previous implementation — silently ignored the change,
-		// contradicting UpdateSettings' documented contract.
-		timer := time.NewTimer(d.campaignSyncInterval())
+		// A successful loop-owned sync signals the same schedule-change channel
+		// used by a concurrent SyncNow. Its state is already reflected in the plan
+		// read below, so discard only that stale notification. A later publication
+		// either lands before the snapshot (making the snapshot current) or after
+		// it (leaving a notification for the select), so no update can be lost.
+		drainSignal(d.campaignScheduleChanged)
+
+		// Keep exactly one timer: the earlier of the unchanged ordinary cadence
+		// and the nearest relevant known future StartAt from the last successful
+		// authoritative full sync. Every full sync starts a fresh cadence cycle,
+		// preserving the pre-existing interval/load behavior.
+		plan := d.planCampaignWake()
+		timer := d.campaignSchedulerClock().NewTimer(plan.delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
-			d.syncCampaigns()
+		case <-timer.C():
+			// The generation check under fullSyncMu discards a stale timer when a
+			// direct SyncNow replaced the snapshot while this owner was waiting.
+			// A pending manual/config trigger is consumed by the same run, so a
+			// ticker/StartAt collision never creates a duplicate full sync.
+			d.syncCampaignsFromWake(&plan)
 		case <-d.campaignResync:
 			// Early wake: a Drops filter/blacklist change or a manual "Sync now".
 			// Stop the pending timer so the next iteration starts a fresh one at
 			// the current interval (a resync must not shorten the steady cadence).
 			timer.Stop()
-			d.syncCampaigns()
+			d.syncCampaignsFromWake(nil)
+		case <-d.campaignScheduleChanged:
+			// Another serialized full-sync caller published a newer upcoming
+			// snapshot. Re-plan the one timer; publication itself already did the
+			// work, so this wake never launches a second sync.
+			timer.Stop()
 		}
 	}
+}
+
+type campaignWakePlan struct {
+	delay      time.Duration
+	generation uint64
+	startAt    time.Time
+}
+
+func (d *DropsTracker) campaignSchedulerClock() campaignSchedulerClock {
+	if d.campaignClock != nil {
+		return d.campaignClock
+	}
+	return realCampaignSchedulerClock{}
+}
+
+// planCampaignWake snapshots the current authoritative StartAt schedule and
+// chooses the earlier of it and the ordinary interval. A due StartAt gets a
+// zero delay; it is consumed only after its timer wins and the plan is rechecked
+// under fullSyncMu (see syncCampaignsFromWake).
+func (d *DropsTracker) planCampaignWake() campaignWakePlan {
+	plan := campaignWakePlan{delay: d.campaignSyncInterval()}
+	now := d.campaignSchedulerClock().Now()
+
+	d.mu.RLock()
+	plan.generation = d.campaignScheduleGeneration
+	next := d.nextCampaignStartAt
+	d.mu.RUnlock()
+
+	if next.IsZero() {
+		return plan
+	}
+	delay := next.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	if delay <= plan.delay {
+		plan.delay = delay
+		plan.startAt = next
+	}
+	return plan
+}
+
+func drainSignal(ch <-chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+	}
+}
+
+// syncCampaignsFromWake is the existing background full-sync owner. It folds
+// any already-pending manual/config trigger into this one run, validates timer
+// generations after acquiring the same fullSyncMu used by SyncNow, and consumes
+// a due StartAt before the attempt so a failed request cannot immediately
+// re-arm a zero-delay storm. Triggers arriving after the drain describe newer
+// operator intent and remain queued for the next iteration.
+func (d *DropsTracker) syncCampaignsFromWake(plan *campaignWakePlan) {
+	d.fullSyncMu.Lock()
+	defer d.fullSyncMu.Unlock()
+
+	// The select may have chosen a due timer/manual wake just before shutdown,
+	// then waited behind a direct SyncNow holding fullSyncMu. Re-check context
+	// after acquiring the owner lock so a queued wake cannot start fresh network
+	// work after cancellation. A sync that passed this point is already in flight
+	// and Stop joins it under the existing bounded lifecycle contract.
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+
+	if plan != nil {
+		d.mu.Lock()
+		if d.campaignScheduleGeneration != plan.generation {
+			d.mu.Unlock()
+			return
+		}
+		if !plan.startAt.IsZero() {
+			now := d.campaignSchedulerClock().Now()
+			if d.nextCampaignStartAt != plan.startAt || now.Before(plan.startAt) {
+				d.mu.Unlock()
+				return
+			}
+			d.nextCampaignStartAt = time.Time{}
+			d.campaignScheduleGeneration++
+		}
+		d.mu.Unlock()
+	}
+
+	// Drain only after a timed plan is accepted. If it is stale (or a wall-clock
+	// jump makes a StartAt timer early), a pending manual/config request must stay
+	// queued rather than being discarded with the invalid timer wake.
+	drainSignal(d.campaignResync)
+	d.syncCampaignsLocked()
 }
 
 // triggerCampaignResync asks the full-sync loop to run an immediate campaign
@@ -1002,6 +1162,14 @@ func (d *DropsTracker) syncCampaigns() {
 	// campaign-pool swaps, and claim attempts.
 	d.fullSyncMu.Lock()
 	defer d.fullSyncMu.Unlock()
+	d.syncCampaignsLocked()
+}
+
+// syncCampaignsLocked runs the authoritative discovery pipeline. Callers must
+// hold fullSyncMu; keeping the network/publish body behind that one owner lock
+// lets timer, StartAt, manual/config, and direct SyncNow paths share exactly the
+// same serialized implementation.
+func (d *DropsTracker) syncCampaignsLocked() {
 
 	start := time.Now()
 
@@ -1016,10 +1184,6 @@ func (d *DropsTracker) syncCampaigns() {
 		d.recordSync(dashboardCount, 0, 0, 0, 0, time.Since(start), err)
 		return
 	}
-
-	d.mu.Lock()
-	d.upcomingCampaigns = upcoming
-	d.mu.Unlock()
 
 	// Campaigns produced by the dashboard -> DropCampaignDetails path, before
 	// syncWithInventory folds in any in-progress campaign that path missed.
@@ -1131,10 +1295,21 @@ func (d *DropsTracker) syncCampaigns() {
 	d.mu.RUnlock()
 	reconcileCampaignACLs(previous, campaigns)
 
+	// Publish active, upcoming, and the one derived StartAt deadline as one
+	// authoritative snapshot. A failed pipeline never reaches this point, so it
+	// preserves the complete LKG (including upcoming state). Recompute only from
+	// relevant campaigns classified as upcoming in this very sync. Each one was
+	// observed with a future StartAt; if that boundary crossed while later work
+	// was in flight, retaining it produces one immediate catch-up sync.
+	nextStartAt := d.nearestRelevantUpcomingStartAt(upcoming)
 	d.mu.Lock()
 	d.campaigns = campaigns
+	d.upcomingCampaigns = upcoming
+	d.nextCampaignStartAt = nextStartAt
+	d.campaignScheduleGeneration++
 	d.bumpRevisionLocked(updateSourceFullSync)
 	d.mu.Unlock()
+	d.signalCampaignScheduleChanged()
 
 	// One concise summary per sync so a production deployment - which runs without
 	// -debug - can confirm the sync ran and see what it found. Detailed
@@ -1197,6 +1372,34 @@ func (d *DropsTracker) syncCampaigns() {
 	// published snapshot and never stalls the loop. The lightweight progress
 	// sync never reaches here, so it can never notify.
 	d.notifyUpcoming(upcoming)
+}
+
+// nearestRelevantUpcomingStartAt returns exactly one deadline from the fresh
+// upcoming classification. Same-time campaigns naturally share it. A campaign
+// reaches this slice only when its non-zero StartAt was future at observation;
+// if it crosses during the rest of the sync, the past absolute deadline makes
+// the next plan run once immediately rather than disappear.
+func (d *DropsTracker) nearestRelevantUpcomingStartAt(upcoming []*models.Campaign) time.Time {
+	var nearest time.Time
+	for _, campaign := range d.filterRelevantUpcoming(upcoming) {
+		if campaign == nil || campaign.StartAt.IsZero() {
+			continue
+		}
+		if nearest.IsZero() || campaign.StartAt.Before(nearest) {
+			nearest = campaign.StartAt
+		}
+	}
+	return nearest
+}
+
+func (d *DropsTracker) signalCampaignScheduleChanged() {
+	if d.campaignScheduleChanged == nil {
+		return
+	}
+	select {
+	case d.campaignScheduleChanged <- struct{}{}:
+	default:
+	}
 }
 
 // upcomingNotifyTimeout bounds the per-sync upcoming-campaign notification pass
@@ -1274,7 +1477,11 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 
 	var campaigns []*models.Campaign
 	var upcomingCampaigns []*models.Campaign
-	now := time.Now()
+	// Preserve the established single dashboard-snapshot boundary: evaluate all
+	// campaign details against a fresh time captured after the dashboard listing,
+	// not against full-sync start (which may precede claim/network work by many
+	// seconds). The scheduler retains any upcoming boundary that crosses later.
+	now := d.campaignSchedulerClock().Now()
 	for _, summary := range dashboardCampaigns {
 		campaignID, _ := summary["id"].(string)
 		summaryName, _ := summary["name"].(string)
@@ -1308,7 +1515,7 @@ func (d *DropsTracker) getActiveCampaigns() (active, upcoming []*models.Campaign
 			continue
 		}
 
-		campaign, dropsFromDetails, skip := buildTrackedCampaign(summary, detail)
+		campaign, dropsFromDetails, skip := buildTrackedCampaignAt(summary, detail, now)
 		switch skip {
 		case skipOutsideDateWindow:
 			// A campaign outside its window is either upcoming (start in the
@@ -1367,6 +1574,13 @@ const (
 // skip reason. Kept free of the API client so the merge/filter behavior can be
 // unit-tested directly.
 func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campaign, int, campaignSkipReason) {
+	return buildTrackedCampaignAt(summary, detail, time.Now())
+}
+
+// buildTrackedCampaignAt is buildTrackedCampaign with an explicit observation
+// time so the full-sync scheduler and date-window classifier use one boundary.
+// The wrapper above preserves the existing helper API for focused unit tests.
+func buildTrackedCampaignAt(summary, detail map[string]interface{}, now time.Time) (*models.Campaign, int, campaignSkipReason) {
 	campaign := models.NewCampaignFromGQL(detail)
 	summaryCampaign := models.NewCampaignFromGQL(summary)
 
@@ -1413,7 +1627,6 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 	// false in that case so no caller can mistake incomplete timing evidence for
 	// a known in-window fact. Any other incomplete state is neither declared
 	// active nor mislabeled outside-window.
-	now := time.Now()
 	startKnown := !campaign.StartAt.IsZero()
 	endKnown := !campaign.EndAt.IsZero()
 	// NewCampaignFromGQL's legacy DateMatch expression treats a zero StartAt as
@@ -1424,7 +1637,9 @@ func buildTrackedCampaign(summary, detail map[string]interface{}) (*models.Campa
 	}
 	switch {
 	case startKnown && endKnown:
-		campaign.DateMatch = campaign.StartAt.Before(now) && campaign.EndAt.After(now)
+		// StartAt is inclusive: a wake that fires exactly on the published
+		// boundary must be able to discover the campaign in that same full sync.
+		campaign.DateMatch = !now.Before(campaign.StartAt) && campaign.EndAt.After(now)
 		if !campaign.DateMatch {
 			return campaign, dropsFromDetails, skipOutsideDateWindow
 		}
