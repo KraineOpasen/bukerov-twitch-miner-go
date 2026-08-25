@@ -183,6 +183,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
     env:
       IMAGE_NAME: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
       PUBLIC_VERSION: ${{ needs.validation-job.outputs.public-version }}
