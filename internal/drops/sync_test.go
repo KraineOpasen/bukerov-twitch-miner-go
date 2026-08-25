@@ -48,6 +48,58 @@ type fakeDropsClient struct {
 	inventoryGate *inventoryGate
 }
 
+// cadenceActivationClient changes only its dashboard's current-state response,
+// under a mutex, so the background full-sync loop can prove it discovers a
+// campaign after Twitch begins reporting it ACTIVE without any auxiliary wake.
+type cadenceActivationClient struct {
+	mu     sync.RWMutex
+	active bool
+	now    time.Time
+}
+
+func (c *cadenceActivationClient) setActive() {
+	c.mu.Lock()
+	c.active = true
+	c.mu.Unlock()
+}
+
+func (c *cadenceActivationClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
+	switch op.OperationName {
+	case "ViewerDropsDashboard":
+		c.mu.RLock()
+		active := c.active
+		c.mu.RUnlock()
+		status := "UPCOMING"
+		startAt := c.now.Add(time.Hour)
+		if active {
+			status = "ACTIVE"
+			startAt = c.now.Add(-time.Hour)
+		}
+		return dashboardResponse(map[string]interface{}{
+			"id": "cadence-active", "name": "Cadence Active", "status": status,
+			"startAt": rfc3339(startAt), "endAt": rfc3339(c.now.Add(2 * time.Hour)),
+			"game": map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		}), nil
+	case "Inventory":
+		return emptyInventoryResponse(), nil
+	default:
+		return map[string]interface{}{}, nil
+	}
+}
+
+func (c *cadenceActivationClient) GetDropCampaignDetails(string) (map[string]interface{}, error) {
+	return map[string]interface{}{
+		"id": "cadence-active", "name": "Cadence Active", "status": "ACTIVE",
+		"startAt": rfc3339(c.now.Add(-time.Hour)), "endAt": rfc3339(c.now.Add(2 * time.Hour)),
+		"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{activeDrop("cadence-drop", "Cadence Reward", 60)},
+	}, nil
+}
+
+func (*cadenceActivationClient) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
+	return twitch.ClaimStatusRejected, nil
+}
+
 // inventoryGate lets a test deterministically hold ONE in-flight Inventory
 // PostGQL call open while a second, concurrent caller (a full sync) runs to
 // completion unblocked -- the exact interleaving the F1 staleness tests need
@@ -386,6 +438,43 @@ func TestStartRunsImmediateInitialSync(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not run an immediate initial full sync before the first interval")
 	}
+}
+
+func TestOrdinaryCampaignCadenceDiscoversNewlyActiveCampaign(t *testing.T) {
+	client := &cadenceActivationClient{now: time.Now()}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{
+		CampaignSyncInterval:     40,
+		DropProgressSyncInterval: 100_000,
+	}, nil)
+	tracker.intervalUnit = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	tracker.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		tracker.Stop()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for tracker.SyncStatus().Runs < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if runs := tracker.SyncStatus().Runs; runs < 1 {
+		t.Fatalf("initial full sync did not complete: runs=%d", runs)
+	}
+	if got := tracker.Campaigns(); len(got) != 0 {
+		t.Fatalf("non-active dashboard response entered the Current set: %+v", got)
+	}
+
+	client.setActive()
+	for time.Now().Before(deadline) {
+		got := tracker.Campaigns()
+		if len(got) == 1 && got[0].ID == "cadence-active" && tracker.SyncStatus().Runs >= 2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("ordinary CampaignSyncInterval did not discover newly active campaign: status=%+v campaigns=%+v",
+		tracker.SyncStatus(), tracker.Campaigns())
 }
 
 // TestUpdateGameFilterTriggersImmediateResync pins §8.3: a Drops game-filter

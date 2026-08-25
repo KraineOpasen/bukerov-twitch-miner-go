@@ -1,7 +1,6 @@
 package miner
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -51,8 +50,8 @@ func (m *Miner) resolveStreamer(login string) *models.Streamer {
 	return nil
 }
 
-// resolveDisplayLocation loads the time zone the dashboard and operator alerts
-// render absolute times in, from the logger config's time-zone name (production
+// resolveDisplayLocation loads the time zone the dashboard renders absolute
+// times in, from the logger config's time-zone name (production
 // sets "Asia/Jerusalem"). An empty or unloadable name falls back to the process
 // local time rather than failing — the standard time.Location it returns handles
 // daylight-saving transitions.
@@ -96,21 +95,6 @@ func (n minerDropNotifier) NotifyDropStalled(campaign, drop, channel, detail str
 func (n minerDropNotifier) NotifyDropRecovered(campaign, drop, channel, detail string) {
 	if mgr := n.m.notificationManager(); mgr != nil {
 		mgr.NotifyDropRecovered(campaign, drop, channel, detail)
-	}
-}
-
-// minerUpcomingNotifier adapts the write-once notification manager to
-// drops.UpcomingNotifier, so the drops tracker can alert on a newly-announced
-// relevant upcoming campaign through the existing notification system. It
-// reads the manager via the shared accessor at call time and does nothing
-// when none exists (no database, or a failed startup construction — see
-// minerHealthNotifier's doc comment above) — the manager itself owns the
-// opt-in gate and durable dedupe.
-type minerUpcomingNotifier struct{ m *Miner }
-
-func (n minerUpcomingNotifier) NotifyUpcomingCampaign(ctx context.Context, c *models.Campaign) {
-	if mgr := n.m.notificationManager(); mgr != nil {
-		mgr.NotifyUpcomingDropCampaign(ctx, c)
 	}
 }
 

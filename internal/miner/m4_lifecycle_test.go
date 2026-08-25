@@ -51,18 +51,17 @@ func TestInitNotificationManagerPublishesFullyConstructedManager(t *testing.T) {
 // notificationManager() and, whenever it observes a non-nil manager,
 // immediately calls two of its methods (NotifyPointsReached and IsEnabled —
 // both touch Manager-internal, mutex-guarded state) concurrently with
-// initNotificationManager's own post-construction
-// InitializePointsTracking/SetDisplayLocation calls. -race is the assertion
-// (it must stay silent: publication happens only after those calls
+// initNotificationManager's own post-construction InitializePointsTracking
+// call. -race is the assertion (it must stay silent: publication happens only after it
 // complete, and every Manager method involved takes Manager's own mutex).
 //
 // NOTE for the reviewer: this test alone does NOT distinguish "publish
 // happens after init" from "publish happens before init" — verified
 // empirically by temporarily reordering the two in initNotificationManager
-// (publish moved above InitializePointsTracking/SetDisplayLocation) and
+// (publish moved above InitializePointsTracking) and
 // re-running this test at -race -count=30: it still passed. The reordering
-// is not a data race because InitializePointsTracking, SetDisplayLocation,
-// NotifyPointsReached, and IsEnabled all serialize through Manager's OWN
+// is not a data race because InitializePointsTracking, NotifyPointsReached,
+// and IsEnabled all serialize through Manager's OWN
 // mutex regardless of call order — the defect is a pure ordering/visibility
 // bug (a reader could observe zero-value tracking state), not an
 // unsynchronized memory access. This test is kept anyway as a general
@@ -104,11 +103,10 @@ func TestInitNotificationManagerNeverPublishesPartiallyInitializedManager(t *tes
 
 // TestInitNotificationManagerPublishesBeforeInitCallSiteOrder is the
 // deterministic killer for MUT-M4-04 (publication reordered above
-// InitializePointsTracking/SetDisplayLocation): it parses miner.go and
+// InitializePointsTracking): it parses miner.go and
 // asserts, by source position within initNotificationManager's body, that
-// both notifMgr.InitializePointsTracking(...) and
-// notifMgr.SetDisplayLocation(...) appear BEFORE the `m.notifications =
-// notifMgr` publication. A source-position pin is the right tool here (not
+// notifMgr.InitializePointsTracking(...) appears BEFORE the `m.notifications
+// = notifMgr` publication. A source-position pin is the right tool here (not
 // -race — see the doc comment on
 // TestInitNotificationManagerNeverPublishesPartiallyInitializedManager for
 // why the reorder is not a detectable data race): I8 is an ordering
@@ -132,7 +130,7 @@ func TestInitNotificationManagerPublishesBeforeInitCallSiteOrder(t *testing.T) {
 		t.Fatal("initNotificationManager not found in miner.go")
 	}
 
-	var initPointsPos, displayLocPos token.Pos
+	var initPointsPos token.Pos
 	var publishPositions []token.Pos
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
@@ -141,8 +139,6 @@ func TestInitNotificationManagerPublishesBeforeInitCallSiteOrder(t *testing.T) {
 				switch sel.Sel.Name {
 				case "InitializePointsTracking":
 					initPointsPos = v.Pos()
-				case "SetDisplayLocation":
-					displayLocPos = v.Pos()
 				}
 			}
 		case *ast.AssignStmt:
@@ -164,9 +160,8 @@ func TestInitNotificationManagerPublishesBeforeInitCallSiteOrder(t *testing.T) {
 		return true
 	})
 
-	if initPointsPos == token.NoPos || displayLocPos == token.NoPos {
-		t.Fatalf("could not locate InitializePointsTracking/SetDisplayLocation call sites in initNotificationManager: initPoints=%v displayLoc=%v",
-			initPointsPos, displayLocPos)
+	if initPointsPos == token.NoPos {
+		t.Fatalf("could not locate InitializePointsTracking call site in initNotificationManager: initPoints=%v", initPointsPos)
 	}
 	if len(publishPositions) != 1 {
 		t.Fatalf("expected exactly 1 `m.notifications = ...` assignment inside initNotificationManager, found %d at byte offsets %v — I1 requires a SINGLE write-once publication, not merely a correctly-ordered one",
@@ -182,10 +177,6 @@ func TestInitNotificationManagerPublishesBeforeInitCallSiteOrder(t *testing.T) {
 	if initPointsPos >= publishPos {
 		t.Errorf("InitializePointsTracking must run BEFORE m.notifications is published (I8); found at byte offsets init=%d publish=%d",
 			initPointsPos, publishPos)
-	}
-	if displayLocPos >= publishPos {
-		t.Errorf("SetDisplayLocation must run BEFORE m.notifications is published (I8); found at byte offsets displayLoc=%d publish=%d",
-			displayLocPos, publishPos)
 	}
 }
 

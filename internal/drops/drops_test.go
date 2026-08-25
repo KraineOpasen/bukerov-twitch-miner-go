@@ -407,7 +407,7 @@ func TestBuildTrackedCampaignDateEvidenceMatrix(t *testing.T) {
 			status: "ACTIVE", endAt: pastEnd,
 			wantSkip: skipOutsideDateWindow, wantStartZero: true,
 		},
-		"unknown dates and upcoming status lack timing proof": {
+		"unknown dates and non-active status lack timing proof": {
 			status:   "UPCOMING",
 			wantSkip: skipCurrentStateUnknown, wantStartZero: true, wantEndZero: true,
 		},
@@ -526,21 +526,33 @@ func TestSyncCampaignsUnknownDateClassificationIsDeterministic(t *testing.T) {
 		tracker.syncCampaigns()
 
 		active := keptIDs(tracker.Campaigns())
-		upcoming := keptIDs(tracker.UpcomingCampaigns())
 		if len(active) != 2 || !active["unknown-started"] || !active["unknown-both"] {
 			t.Fatalf("order %d active set=%v, want exactly the two current UNKNOWN campaigns", i, active)
 		}
-		if len(upcoming) != 1 || !upcoming["future-unknown-end"] {
-			t.Fatalf("order %d upcoming set=%v, want only future-unknown-end", i, upcoming)
-		}
-		for id := range active {
-			if upcoming[id] {
-				t.Fatalf("order %d campaign %q appeared in both active and upcoming sets", i, id)
+		for _, id := range []string{"future-unknown-end", "expired-known", "unknown-unproven"} {
+			if active[id] {
+				t.Fatalf("order %d non-active campaign %q leaked into the active set: %v", i, id, active)
 			}
 		}
-		if active["expired-known"] || active["unknown-unproven"] || upcoming["expired-known"] || upcoming["unknown-unproven"] {
-			t.Fatalf("order %d expired/unproven campaign leaked into a published set: active=%v upcoming=%v", i, active, upcoming)
-		}
+	}
+}
+
+func TestCampaignStartBoundaryIsInclusive(t *testing.T) {
+	startAt := time.Now().UTC().Truncate(time.Second)
+	summary := map[string]interface{}{
+		"id": "equal", "name": "Equal", "status": "ACTIVE",
+		"startAt": rfc3339(startAt), "endAt": rfc3339(startAt.Add(time.Hour)),
+		"game": map[string]interface{}{"id": "game", "name": "Game"},
+	}
+	detail := map[string]interface{}{
+		"id": "equal", "name": "Equal", "status": "ACTIVE",
+		"startAt": rfc3339(startAt), "endAt": rfc3339(startAt.Add(time.Hour)),
+		"game":           map[string]interface{}{"id": "game", "name": "Game"},
+		"timeBasedDrops": []interface{}{activeDrop("equal-drop", "Reward", 60)},
+	}
+	campaign, _, skip := buildTrackedCampaignAt(summary, detail, startAt)
+	if skip != skipNone || !campaign.DateMatch {
+		t.Fatalf("campaign at exact StartAt: skip=%v DateMatch=%v, want active", skip, campaign.DateMatch)
 	}
 }
 

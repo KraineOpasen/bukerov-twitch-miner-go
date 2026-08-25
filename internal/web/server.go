@@ -48,18 +48,9 @@ type CampaignsProvider interface {
 	RequestManualSync() drops.ManualSyncResult
 }
 
-// DropCatalogProvider exposes the Drops-page catalog tabs: upcoming campaigns
-// (display-only, not-yet-started) and the durable "past" catalog of expired
+// DropCatalogProvider exposes the Drops page's durable catalog of expired
 // campaigns. Satisfied by the miner.
 type DropCatalogProvider interface {
-	UpcomingCampaigns() []*models.Campaign
-	// RelevantUpcomingCampaigns returns the not-yet-started campaigns filtered to
-	// the operator's game filter (display-only relevance) — foreign upcoming
-	// campaigns are hidden from the tab.
-	RelevantUpcomingCampaigns() []*models.Campaign
-	// CampaignSyncStatus reports the last full-sync bookkeeping so the Upcoming
-	// tab can render honest never-synced / empty / stale states.
-	CampaignSyncStatus() drops.SyncStatus
 	PastCampaigns() ([]drops.CatalogRecord, error)
 }
 
@@ -671,7 +662,6 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/drops", s.handleDropsPage)
 	mux.HandleFunc("/api/drops", s.handleAPIDrops)
 	mux.HandleFunc("/api/drops/sync", s.handleAPIDropsSync)
-	mux.HandleFunc("/api/drops/upcoming", s.handleAPIDropsUpcoming)
 	mux.HandleFunc("/api/drops/past", s.handleAPIDropsPast)
 	mux.HandleFunc("/api/discovery", s.handleAPIDiscovery)
 	mux.HandleFunc("/api/policy/mode", s.handleAPIPolicyMode)

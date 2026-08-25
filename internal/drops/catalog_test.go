@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 )
 
@@ -155,6 +156,53 @@ func TestCatalogRecurringInstancesGroupedByKeyNewestFirst(t *testing.T) {
 	}
 	if idx2 > idx1 {
 		t.Errorf("newest-ended instance (wk-2) must come first: idx2=%d idx1=%d", idx2, idx1)
+	}
+}
+
+func TestSyncCatalogRecordsCurrentButNotFutureDashboardEntries(t *testing.T) {
+	cat := newTestCatalog(t)
+	now := time.Now()
+	pair := func(id, status string, startAt, endAt time.Time) (map[string]interface{}, map[string]interface{}) {
+		summary := map[string]interface{}{
+			"id": id, "name": id, "status": status,
+			"startAt": rfc3339(startAt), "endAt": rfc3339(endAt),
+			"game": map[string]interface{}{"id": "game", "name": "Game"},
+		}
+		detail := map[string]interface{}{
+			"id": id, "name": id, "status": status,
+			"startAt": rfc3339(startAt), "endAt": rfc3339(endAt),
+			"game":           map[string]interface{}{"id": "game", "name": "Game"},
+			"timeBasedDrops": []interface{}{activeDrop("drop-"+id, "Reward", 60)},
+		}
+		return summary, detail
+	}
+	activeSummary, activeDetail := pair("catalog-active", "ACTIVE", now.Add(-time.Hour), now.Add(time.Hour))
+	futureSummary, futureDetail := pair("catalog-future", "UPCOMING", now.Add(time.Hour), now.Add(2*time.Hour))
+	client := &fakeDropsClient{
+		dashboard: dashboardResponse(activeSummary, futureSummary),
+		inventory: emptyInventoryResponse(),
+		details: map[string]map[string]interface{}{
+			"catalog-active": activeDetail,
+			"catalog-future": futureDetail,
+		},
+	}
+	tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
+	tracker.SetCatalog(cat)
+	tracker.syncCampaigns()
+
+	var activeRows int
+	if err := cat.db.QueryRow("SELECT COUNT(*) FROM drop_campaigns WHERE campaign_id = ?", "catalog-active").Scan(&activeRows); err != nil {
+		t.Fatalf("count active catalog row: %v", err)
+	}
+	if activeRows != 1 {
+		t.Fatalf("active campaign rows = %d, want 1", activeRows)
+	}
+	var futureRows int
+	if err := cat.db.QueryRow("SELECT COUNT(*) FROM drop_campaigns WHERE campaign_id = ?", "catalog-future").Scan(&futureRows); err != nil {
+		t.Fatalf("count non-active catalog row: %v", err)
+	}
+	if futureRows != 0 {
+		t.Fatalf("non-active campaign rows = %d, want 0", futureRows)
 	}
 }
 

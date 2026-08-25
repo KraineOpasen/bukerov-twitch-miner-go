@@ -10,9 +10,9 @@ import (
 )
 
 // CampaignCatalog is the durable record of every drop campaign the miner has
-// observed (current and upcoming), so the Drops page can show a "Past" tab of
-// campaigns that have since expired and dropped off Twitch's dashboard (which
-// only returns active + upcoming). One row per campaign INSTANCE, keyed by the
+// actually observed in the current/in-progress pipeline, so the Drops page can
+// show a "Past" tab after campaigns expire and drop off Twitch's current data.
+// One row per campaign INSTANCE, keyed by the
 // Twitch campaign id; a recurring campaign therefore accumulates one row per
 // occurrence, grouped in the UI by campaign_key (game + campaign name). The
 // table is deliberately excluded from the retention sweep — the catalog's whole
@@ -151,10 +151,10 @@ func (c *CampaignCatalog) Past() ([]CatalogRecord, error) {
 	return out, rows.Err()
 }
 
-// recordCatalog upserts every observed campaign (the claim-enriched active set
-// plus the upcoming set) into the durable catalog. A nil catalog is a no-op;
-// individual write errors are logged and never disrupt the sync.
-func (d *DropsTracker) recordCatalog(active, upcoming []*models.Campaign) {
+// recordCatalog upserts every observed campaign in the claim-enriched current
+// and inventory-recovered set into the durable catalog. A nil catalog is a
+// no-op; individual write errors are logged and never disrupt the sync.
+func (d *DropsTracker) recordCatalog(active []*models.Campaign) {
 	if d.catalog == nil {
 		return
 	}
@@ -169,7 +169,6 @@ func (d *DropsTracker) recordCatalog(active, upcoming []*models.Campaign) {
 		}
 	}
 	record(active)
-	record(upcoming)
 }
 
 // catalogRecordFromCampaign builds a CatalogRecord from an observed campaign.
