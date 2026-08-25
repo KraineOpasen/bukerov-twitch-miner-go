@@ -134,7 +134,7 @@ type DropsTracker struct {
 	// summary at DEBUG instead of spamming an identical INFO block every cycle.
 	// An INFO summary is (re)published only on the first sync, on a genuine
 	// change of this fingerprint, or on recovery from a real sync error. Guarded
-	// by mu; only ever written from the fullSyncMu-serialized syncCampaigns.
+	// by mu; only ever written from the fullSyncMu-serialized full-sync pipeline.
 	lastSummaryFingerprint string
 	// lastGameFilterFailOpenKey remembers the name-only, nothing-resolved
 	// fail-open condition already warned about (a signature of the unresolved
@@ -156,9 +156,9 @@ type DropsTracker struct {
 	progressLastSyncAt time.Time
 	progressLastErr    string
 
-	// fullSyncMu serializes syncCampaigns between the background loop and
-	// SyncNow (the progress watchdog's forced-resync recovery stage), so two
-	// full syncs never interleave their network calls and campaign swaps.
+	// fullSyncMu serializes the background full-sync owner and SyncNow (the
+	// progress watchdog's forced-resync recovery stage), so two full syncs never
+	// interleave their network calls and campaign swaps.
 	fullSyncMu sync.Mutex
 
 	// dropBlacklist holds case-insensitive keywords; a campaign is skipped
@@ -356,7 +356,7 @@ func (d *DropsTracker) TriggerProgressSync() {
 // same logic on each tick; this exposes it so a caller (the progress
 // watchdog's forced-resync recovery stage, or a test) can force an immediate
 // refresh without waiting out the sync interval. Serialized against the
-// background loop via fullSyncMu inside syncCampaigns.
+// background loop via their shared fullSyncMu owner lock.
 func (d *DropsTracker) SyncNow() {
 	d.syncCampaigns()
 }
@@ -672,22 +672,57 @@ func (d *DropsTracker) loop() {
 			timer.Stop()
 			return
 		case <-timer.C:
-			d.syncCampaigns()
+			d.syncCampaignsFromBackground(true)
 		case <-d.campaignResync:
 			// Early wake: a Drops filter/blacklist change or a manual "Sync now".
 			// Stop the pending timer so the next iteration starts a fresh one at
 			// the current interval (a resync must not shorten the steady cadence).
 			timer.Stop()
-			d.syncCampaigns()
+			d.syncCampaignsFromBackground(false)
 		}
 	}
+}
+
+// syncCampaignsFromBackground runs one full-sync wake accepted by loop(). It
+// re-checks the tracker lifecycle after acquiring the shared owner lock so a
+// timer or manual/config wake queued before shutdown cannot begin fresh work
+// afterwards. Direct SyncNow deliberately does not use this lifecycle gate and
+// retains its synchronous semantics through syncCampaigns.
+//
+// A timer wake covers any campaignResync already pending at this exact owner
+// point. A resync arriving after the non-blocking drain remains queued for the
+// next loop iteration, preserving genuinely newer operator/config intent. The
+// campaignResync-selected path has already consumed its own wake and therefore
+// does not drain a possibly newer one.
+func (d *DropsTracker) syncCampaignsFromBackground(coalescePendingResync bool) {
+	d.fullSyncMu.Lock()
+	defer d.fullSyncMu.Unlock()
+
+	d.mu.RLock()
+	ctx := d.ctx
+	d.mu.RUnlock()
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+
+	if coalescePendingResync {
+		select {
+		case <-d.campaignResync:
+		default:
+		}
+	}
+	d.syncCampaignsLocked()
 }
 
 // triggerCampaignResync asks the full-sync loop to run an immediate campaign
 // sync instead of waiting out CampaignSyncInterval. Non-blocking and coalescing
 // (buffered-to-1 channel): concurrent triggers collapse into a single extra run,
-// and syncCampaigns' fullSyncMu still serializes it against the scheduled sync,
-// so this never launches a parallel sync. A trigger sent before Start is
+// and the shared fullSyncMu still serializes it against the scheduled sync, so
+// this never launches a parallel sync. A trigger sent before Start is
 // buffered and consumed once the loop begins.
 func (d *DropsTracker) triggerCampaignResync() {
 	select {
@@ -932,6 +967,13 @@ func (d *DropsTracker) syncCampaigns() {
 	// campaign-pool swaps, and claim attempts.
 	d.fullSyncMu.Lock()
 	defer d.fullSyncMu.Unlock()
+	d.syncCampaignsLocked()
+}
+
+// syncCampaignsLocked runs the authoritative discovery pipeline. Callers must
+// hold fullSyncMu so background wakes and direct SyncNow share one serialized
+// implementation without applying background lifecycle policy to direct calls.
+func (d *DropsTracker) syncCampaignsLocked() {
 
 	start := time.Now()
 
