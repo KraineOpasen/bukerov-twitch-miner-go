@@ -96,6 +96,9 @@ func TestVersionsEqual(t *testing.T) {
 }
 
 func TestParseCheckInterval(t *testing.T) {
+	if DefaultCheckInterval != 2*time.Hour {
+		t.Fatalf("DefaultCheckInterval = %s, want production cadence 2h", DefaultCheckInterval)
+	}
 	tests := []struct {
 		raw  string
 		want time.Duration
@@ -114,42 +117,30 @@ func TestParseCheckInterval(t *testing.T) {
 	}
 }
 
-func TestStableChannelRemainsDormantWithoutNetworkOrReplacement(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("enabled_%t", enabled), func(t *testing.T) {
-			var requests atomic.Int32
-			var notifications atomic.Int32
-			var updates atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				http.Error(w, "stable updater must not make a request", http.StatusInternalServerError)
-			}))
-			defer srv.Close()
+func TestStableChannelChecksAtStartup(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/repos/owner/repo/releases" {
+			t.Errorf("request path = %q, want paginated releases collection", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]release{completeStableRelease("stable-v0.1.0")})
+	}))
+	defer srv.Close()
 
-			u := New(Options{
-				Repo: "owner/repo", CurrentVersion: "0.1.0", ReleaseChannel: "stable", Enabled: enabled,
-				apiBaseURL: srv.URL, httpClient: srv.Client(),
-				Notify:        func(_, _, _ string) { notifications.Add(1) },
-				NotifyFailure: func(_, _, _ string) { notifications.Add(1) },
-				OnUpdate:      func() { updates.Add(1) },
-			})
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-			u.Run(ctx)
+	u := New(Options{
+		Repo: "owner/repo", CurrentVersion: "0.1.0", ReleaseChannel: "stable", Enabled: true,
+		apiBaseURL: srv.URL, httpClient: srv.Client(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	u.Run(ctx)
 
-			if got := requests.Load(); got != 0 {
-				t.Fatalf("HTTP requests = %d, want 0", got)
-			}
-			if got := notifications.Load(); got != 0 {
-				t.Fatalf("notifications = %d, want 0", got)
-			}
-			if got := updates.Load(); got != 0 {
-				t.Fatalf("replacement callbacks = %d, want 0", got)
-			}
-			if got := u.Snapshot().Phase; got != PhaseDormant {
-				t.Fatalf("phase = %q, want %q", got, PhaseDormant)
-			}
-		})
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("startup HTTP requests = %d, want 1", got)
+	}
+	if got := u.Snapshot().LastOutcome; got != OutcomeUpToDate {
+		t.Fatalf("startup outcome = %q, want %q", got, OutcomeUpToDate)
 	}
 }
 

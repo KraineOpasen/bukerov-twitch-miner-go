@@ -14,6 +14,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/runtimeconfig"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/updater"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version"
 )
 
@@ -44,6 +45,17 @@ func main() {
 		GenerateConfig: *genConfig,
 		Healthcheck:    *healthcheck,
 	}, runtimeconfig.OSLookup)
+
+	// A recreated stable container starts with the originally pinned image
+	// binary. Before health checks, config access, database wiring, or mining,
+	// replay any newer artifact that was already accepted into the persistent
+	// /database cache and re-exec this same argv/env. AUTO_UPDATE=false stops
+	// future discovery; it never silently downgrades an accepted runtime floor.
+	if restored, err := updater.RecoverStable(version.Version, version.Channel, updater.DefaultStableCacheDir); err != nil {
+		setupBasicLogger(rc.Debug)
+		slog.Error("Stable update recovery failed", "executableRestored", restored, "error", err)
+		os.Exit(1)
+	}
 
 	if *healthcheck {
 		os.Exit(runHealthcheck(rc.ConfigPath, rc.Dashboard))

@@ -11,7 +11,9 @@
 // the miner keeps running on its current version. Installation itself is
 // fail-closed: a binary is only ever swapped in after its sha256 has been
 // verified against the release's checksums.txt — a release without usable
-// checksums is refused, never installed unverified. When self-update is
+// checksums is refused, never installed unverified. Stable also verifies the
+// exact producer/tag/commit and binary subjects in signed Sigstore/SLSA
+// provenance before cache or swap. When self-update is
 // disabled it still checks and logs/notifies that an update is available, so
 // operators who have opted out of automatic replacement are not left in the
 // dark.
@@ -45,7 +47,7 @@ const (
 	// configured. A container can run for weeks without a restart, so a single
 	// startup check is not enough - but releases are infrequent, so there is
 	// no point hammering the API either.
-	DefaultCheckInterval = 8 * time.Hour
+	DefaultCheckInterval = 2 * time.Hour
 
 	// minCheckInterval clamps absurdly small intervals so a misconfiguration
 	// can't turn the updater into an API-rate-limit magnet.
@@ -82,8 +84,12 @@ type Options struct {
 	// CurrentVersion is the version of the running binary (internal/version).
 	CurrentVersion string
 	// ReleaseChannel identifies the independently published release stream.
-	// The stable stream deliberately has no GitHub Releases auto-update feed.
+	// Stable uses strict stable-vX.Y.Z collection discovery; main retains the
+	// legacy repository-wide latest-release path.
 	ReleaseChannel string
+	// StableCacheDir is the durable recovery cache used only by the stable
+	// channel. Stable applies fail closed when this path is empty or unwritable.
+	StableCacheDir string
 	// Enabled turns on automatic download + self-replacement. When false the
 	// updater only checks and logs/notifies that an update is available.
 	Enabled bool
@@ -147,6 +153,11 @@ type Options struct {
 	// failure deterministically via a plain callback. Production code always
 	// leaves this nil so New installs defaultHandoffError.
 	onHandoffError func(stage string, err error)
+
+	// provenanceVerifier is a test seam for stable Sigstore/SLSA verification.
+	// New installs the production verifier after all HTTP/cache defaults have
+	// been resolved. Main never calls it.
+	provenanceVerifier stableProvenanceVerifier
 }
 
 // Handoff is the durable apply-intent/apply-success/clear sink an Updater
@@ -190,16 +201,20 @@ type Updater struct {
 
 // release/asset mirror the subset of the GitHub Releases API the updater uses.
 type release struct {
-	TagName    string  `json:"tag_name"`
-	HTMLURL    string  `json:"html_url"`
-	Draft      bool    `json:"draft"`
-	Prerelease bool    `json:"prerelease"`
-	Assets     []asset `json:"assets"`
+	TagName       string  `json:"tag_name"`
+	PublicVersion string  `json:"-"`
+	HTMLURL       string  `json:"html_url"`
+	Draft         bool    `json:"draft"`
+	Prerelease    bool    `json:"prerelease"`
+	Assets        []asset `json:"assets"`
 }
 
 type asset struct {
-	Name string `json:"name"`
-	URL  string `json:"browser_download_url"`
+	Name   string `json:"name"`
+	URL    string `json:"browser_download_url"`
+	State  string `json:"state"`
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
 }
 
 // New builds an Updater, applying defaults for any unset option.
@@ -227,6 +242,19 @@ func New(opts Options) *Updater {
 	}
 	if opts.onHandoffError == nil {
 		opts.onHandoffError = defaultHandoffError
+	}
+	if opts.provenanceVerifier == nil {
+		client := opts.httpClient
+		apiBaseURL := opts.apiBaseURL
+		repo := opts.Repo
+		cacheDir := opts.StableCacheDir
+		opts.provenanceVerifier = func(
+			ctx context.Context,
+			rel *release,
+			assetName, digest string,
+		) (stableProvenanceEvidence, error) {
+			return verifyStableProvenance(ctx, client, apiBaseURL, repo, cacheDir, rel, assetName, digest)
+		}
 	}
 
 	u := &Updater{opts: opts}
@@ -268,9 +296,9 @@ func defaultHandoffError(stage string, err error) {
 // the context is cancelled. It never returns an error: everything is
 // best-effort and logged.
 func (u *Updater) Run(ctx context.Context) {
-	if u.opts.ReleaseChannel == "stable" {
-		slog.Info("Auto-update disabled: stable release channel uses operator-controlled image upgrades",
-			"version", u.opts.CurrentVersion)
+	if u.opts.ReleaseChannel != "" && u.opts.ReleaseChannel != "main" && u.opts.ReleaseChannel != "stable" {
+		slog.Error("Auto-update disabled: unknown release channel",
+			"version", u.opts.CurrentVersion, "channel", u.opts.ReleaseChannel)
 		u.setPhase(PhaseDormant)
 		return
 	}
@@ -321,34 +349,35 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 		return
 	}
 
-	cmp, ok := compareVersions(u.opts.CurrentVersion, rel.TagName)
+	target := rel.publicVersion()
+	cmp, ok := compareVersions(u.opts.CurrentVersion, target)
 	if !ok {
 		slog.Debug("Auto-update: could not compare versions",
-			"current", u.opts.CurrentVersion, "latest", rel.TagName)
+			"current", u.opts.CurrentVersion, "latest", target)
 		u.setIdleOutcome(OutcomeCheckFailed, fmt.Sprintf(
-			"could not compare versions: current=%q latest=%q", u.opts.CurrentVersion, rel.TagName))
+			"could not compare versions: current=%q latest=%q", u.opts.CurrentVersion, target))
 		return
 	}
 	if cmp >= 0 {
 		slog.Debug("Auto-update: already up to date",
-			"current", u.opts.CurrentVersion, "latest", rel.TagName)
+			"current", u.opts.CurrentVersion, "latest", target)
 		u.setIdleOutcome(OutcomeUpToDate, "")
 		return
 	}
 
 	slog.Info("Auto-update: newer release available",
-		"current", u.opts.CurrentVersion, "latest", rel.TagName, "url", rel.HTMLURL)
-	u.setLatest(rel.TagName, rel.HTMLURL)
+		"current", u.opts.CurrentVersion, "latest", target, "tag", rel.TagName, "url", rel.HTMLURL)
+	u.setLatest(target, rel.HTMLURL)
 
 	// Notify once per distinct latest version, whether or not self-update is on.
-	if u.opts.Notify != nil && u.notifiedVersion != rel.TagName {
-		u.notifiedVersion = rel.TagName
-		u.opts.Notify(u.opts.CurrentVersion, rel.TagName, rel.HTMLURL)
+	if u.opts.Notify != nil && u.notifiedVersion != target {
+		u.notifiedVersion = target
+		u.opts.Notify(u.opts.CurrentVersion, target, rel.HTMLURL)
 	}
 
 	if !u.opts.Enabled {
 		slog.Info("Auto-update is disabled; not replacing the binary. Enable it with -auto-update or AUTO_UPDATE=true.",
-			"latest", rel.TagName)
+			"latest", target)
 		u.setIdleOutcome(OutcomeUpdateAvailable, "")
 		return
 	}
@@ -358,10 +387,10 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	// Gate is treated as "no opinion", preserving pre-Gate behavior.
 	if u.opts.Gate != nil && !u.opts.Gate() {
 		slog.Info("Auto-update: available update withheld by lifecycle gate",
-			"current", u.opts.CurrentVersion, "latest", rel.TagName)
-		if u.gateBlockedVersion != rel.TagName {
-			u.gateBlockedVersion = rel.TagName
-			u.opts.onGateBlocked(u.opts.CurrentVersion, rel.TagName)
+			"current", u.opts.CurrentVersion, "latest", target)
+		if u.gateBlockedVersion != target {
+			u.gateBlockedVersion = target
+			u.opts.onGateBlocked(u.opts.CurrentVersion, target)
 		}
 		u.setIdleOutcome(OutcomeGateBlocked, "")
 		return
@@ -373,7 +402,7 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	// failed write is reported via onHandoffError and the apply proceeds
 	// regardless.
 	if u.opts.Handoff != nil {
-		if herr := u.opts.Handoff.RecordApplying(ctx, u.opts.CurrentVersion, rel.TagName, rel.HTMLURL); herr != nil {
+		if herr := u.opts.Handoff.RecordApplying(ctx, u.opts.CurrentVersion, target, rel.HTMLURL); herr != nil {
 			u.opts.onHandoffError("record_applying", herr)
 		}
 	}
@@ -383,10 +412,10 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 		// other failure must not take the miner down - log, notify once per
 		// version, and carry on with the current version.
 		slog.Error("Auto-update: failed to apply update, continuing on current version",
-			"current", u.opts.CurrentVersion, "latest", rel.TagName, "error", err)
-		if u.opts.NotifyFailure != nil && u.failedVersion != rel.TagName {
-			u.failedVersion = rel.TagName
-			u.opts.NotifyFailure(u.opts.CurrentVersion, rel.TagName, err.Error())
+			"current", u.opts.CurrentVersion, "latest", target, "error", err)
+		if u.opts.NotifyFailure != nil && u.failedVersion != target {
+			u.failedVersion = target
+			u.opts.NotifyFailure(u.opts.CurrentVersion, target, err.Error())
 		}
 		// Mandatory terminalization: no stale 'applying' row may survive a
 		// failed cycle, on ANY failure class.
@@ -400,14 +429,14 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 	}
 
 	if u.opts.Handoff != nil {
-		if rerr := u.opts.Handoff.RecordApplied(ctx, u.opts.CurrentVersion, rel.TagName); rerr != nil {
+		if rerr := u.opts.Handoff.RecordApplied(ctx, u.opts.CurrentVersion, target); rerr != nil {
 			u.opts.onHandoffError("record_applied", rerr)
 		}
 	}
 
-	u.setAppliedOutcome(rel.TagName)
+	u.setAppliedOutcome(target)
 	slog.Info("Auto-update: binary replaced successfully, restarting to load the new version",
-		"from", u.opts.CurrentVersion, "to", rel.TagName)
+		"from", u.opts.CurrentVersion, "to", target, "tag", rel.TagName)
 	// RecordApplied -> setAppliedOutcome -> this slog line -> OnUpdate, in
 	// that exact program order: RecordApplied strictly precedes OnUpdate, and
 	// therefore precedes controller.UpdateApplied, which internal/app's
@@ -420,6 +449,9 @@ func (u *Updater) checkAndMaybeUpdate(ctx context.Context) {
 
 // latestRelease fetches the newest non-draft, non-prerelease release.
 func (u *Updater) latestRelease(ctx context.Context) (*release, error) {
+	if u.opts.ReleaseChannel == "stable" {
+		return u.latestStableRelease(ctx)
+	}
 	url := fmt.Sprintf("%s/repos/%s/releases/latest", strings.TrimRight(u.opts.apiBaseURL, "/"), u.opts.Repo)
 
 	var rel release
@@ -432,7 +464,15 @@ func (u *Updater) latestRelease(ctx context.Context) (*release, error) {
 	if rel.TagName == "" {
 		return nil, fmt.Errorf("latest release has no tag name")
 	}
+	rel.PublicVersion = rel.TagName
 	return &rel, nil
+}
+
+func (r *release) publicVersion() string {
+	if r.PublicVersion != "" {
+		return r.PublicVersion
+	}
+	return r.TagName
 }
 
 // getJSON GETs url and decodes the JSON body into v, retrying transient
@@ -448,7 +488,7 @@ func (u *Updater) getJSON(ctx context.Context, url string, v any) error {
 			}
 		}
 
-		body, err := u.get(ctx, url, apiTimeout)
+		body, err := u.getBounded(ctx, url, apiTimeout, maxStableAPIResponseSize)
 		if err != nil {
 			lastErr = err
 			slog.Debug("Auto-update: request failed, will retry", "attempt", attempt, "url", url, "error", err)
@@ -465,6 +505,16 @@ func (u *Updater) getJSON(ctx context.Context, url string, v any) error {
 
 // get performs a single GET and returns the body for a 2xx response.
 func (u *Updater) get(ctx context.Context, url string, timeout time.Duration) ([]byte, error) {
+	return u.getBounded(ctx, url, timeout, maxStableBinarySize)
+}
+
+// getBounded performs a single GET and refuses a body larger than maxBytes
+// before it can become an unbounded allocation. Stable callers use the exact
+// server-declared asset size as this limit and verify equality afterward.
+func (u *Updater) getBounded(ctx context.Context, url string, timeout time.Duration, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("invalid response size limit %d", maxBytes)
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -481,9 +531,12 @@ func (u *Updater) get(ctx context.Context, url string, timeout time.Duration) ([
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes for %s", maxBytes, url)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("unexpected status %d for %s", resp.StatusCode, url)
@@ -497,6 +550,16 @@ func (u *Updater) get(ctx context.Context, url string, timeout time.Duration) ([
 func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 	name := assetName()
 	a := findAsset(rel, name)
+	if u.opts.ReleaseChannel == "stable" {
+		if !stablePlatform(runtime.GOOS, runtime.GOARCH) {
+			return fmt.Errorf("stable native updates do not support %s/%s", runtime.GOOS, runtime.GOARCH)
+		}
+		var err error
+		a, err = findUniqueAsset(rel, name)
+		if err != nil {
+			return err
+		}
+	}
 	if a == nil {
 		return fmt.Errorf("release %s has no asset %q for this platform", rel.TagName, name)
 	}
@@ -508,7 +571,12 @@ func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 
 	u.setPhase(PhaseDownloading)
 	slog.Info("Auto-update: downloading new binary", "asset", name, "version", rel.TagName)
-	data, err := u.get(ctx, a.URL, downloadTimeout)
+	var data []byte
+	if u.opts.ReleaseChannel == "stable" {
+		data, err = u.getBounded(ctx, a.URL, downloadTimeout, a.Size)
+	} else {
+		data, err = u.get(ctx, a.URL, downloadTimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
@@ -516,6 +584,24 @@ func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 	u.setPhase(PhaseVerifying)
 	if err := u.verifyChecksum(ctx, rel, name, data); err != nil {
 		return err
+	}
+	if u.opts.ReleaseChannel == "stable" {
+		if err := verifyStableArtifactIdentity(data, rel.publicVersion(), runtime.GOOS, runtime.GOARCH); err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		digest := hex.EncodeToString(sum[:])
+		evidence, err := u.opts.provenanceVerifier(ctx, rel, name, digest)
+		if err != nil {
+			return fmt.Errorf("verify stable build provenance: %w", err)
+		}
+		slog.Debug("Auto-update: stable build provenance verified",
+			"asset", name, "tag", rel.TagName, "sourceCommit", evidence.SourceCommit)
+		if err := stageStableCandidate(
+			u.opts.StableCacheDir, rel, name, data, digest, evidence.SourceCommit,
+		); err != nil {
+			return fmt.Errorf("persist stable recovery candidate: %w", err)
+		}
 	}
 
 	u.setPhase(PhaseSwapping)
@@ -531,16 +617,40 @@ func (u *Updater) applyUpdate(ctx context.Context, rel *release) error {
 // a tampered/broken release or a network failure (and the next check retries).
 func (u *Updater) verifyChecksum(ctx context.Context, rel *release, name string, data []byte) error {
 	sums := findAsset(rel, "checksums.txt")
+	if u.opts.ReleaseChannel == "stable" {
+		var err error
+		sums, err = findUniqueAsset(rel, "checksums.txt")
+		if err != nil {
+			return err
+		}
+	}
 	if sums == nil {
 		return fmt.Errorf("release %s has no checksums.txt asset; refusing to install unverified binary", rel.TagName)
 	}
 
-	body, err := u.get(ctx, sums.URL, apiTimeout)
+	var (
+		body []byte
+		err  error
+	)
+	if u.opts.ReleaseChannel == "stable" {
+		body, err = u.getBounded(ctx, sums.URL, apiTimeout, sums.Size)
+	} else {
+		body, err = u.get(ctx, sums.URL, apiTimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("fetch checksums.txt for %s: %w; refusing to install unverified binary", rel.TagName, err)
 	}
 
+	if u.opts.ReleaseChannel == "stable" {
+		if _, err := verifyStableAssetDigest(sums, body); err != nil {
+			return fmt.Errorf("verify checksums.txt API digest: %w", err)
+		}
+	}
+
 	want, ok := checksumFor(string(body), name)
+	if u.opts.ReleaseChannel == "stable" {
+		want, ok = strictChecksumFor(string(body), name)
+	}
 	if !ok {
 		return fmt.Errorf("checksums.txt of %s has no entry for %s; refusing to install unverified binary", rel.TagName, name)
 	}
@@ -549,6 +659,15 @@ func (u *Updater) verifyChecksum(ctx context.Context, rel *release, name string,
 	got := hex.EncodeToString(sum[:])
 	if !strings.EqualFold(got, want) {
 		return fmt.Errorf("checksum mismatch for %s: got %s want %s", name, got, want)
+	}
+	if u.opts.ReleaseChannel == "stable" {
+		binaryAsset, err := findUniqueAsset(rel, name)
+		if err != nil {
+			return err
+		}
+		if _, err := verifyStableAssetDigest(binaryAsset, data); err != nil {
+			return fmt.Errorf("verify %s API digest: %w", name, err)
+		}
 	}
 	slog.Debug("Auto-update: checksum verified", "asset", name)
 	return nil
@@ -586,8 +705,12 @@ func replaceExecutable(execPath string, data []byte) error {
 // "twitch-miner-go-linux-amd64" or "twitch-miner-go-windows-amd64.exe",
 // matching the Release workflow's naming.
 func assetName() string {
-	name := fmt.Sprintf("%s-%s-%s", binaryBaseName, runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
+	return assetNameFor(runtime.GOOS, runtime.GOARCH)
+}
+
+func assetNameFor(goos, goarch string) string {
+	name := fmt.Sprintf("%s-%s-%s", binaryBaseName, goos, goarch)
+	if goos == "windows" {
 		name += ".exe"
 	}
 	return name
