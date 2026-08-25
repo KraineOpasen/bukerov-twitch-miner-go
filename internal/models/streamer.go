@@ -509,7 +509,32 @@ func (s *Streamer) SetStreamUpTime(t time.Time) {
 	s.StreamUpTime = t
 }
 
+// ApplyWatchStreakGrant is the only History admission path for WATCH_STREAK.
+// Stream.AcceptWatchStreakGrant linearizes exact replay/binding first; only the
+// goroutine receiving a newly accepted result may increment History. The locks
+// are deliberately not nested: Stream.mu is released before Streamer.mu.
+func (s *Streamer) ApplyWatchStreakGrant(event WatchStreakGrantEvent, earned int) WatchStreakGrantResult {
+	result := s.Stream.AcceptWatchStreakGrant(event)
+	if !result.NewlyAccepted() {
+		return result
+	}
+
+	s.mu.Lock()
+	if _, exists := s.History["WATCH_STREAK"]; !exists {
+		s.History["WATCH_STREAK"] = &HistoryEntry{}
+	}
+	s.History["WATCH_STREAK"].Counter++
+	s.History["WATCH_STREAK"].Amount += earned
+	s.mu.Unlock()
+	return result
+}
+
 func (s *Streamer) UpdateHistory(reasonCode string, earned int) {
+	// WATCH_STREAK requires an opaque event identity and an explicit binding
+	// proof; the generic history API has neither and therefore cannot admit it.
+	if reasonCode == "WATCH_STREAK" {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -518,13 +543,6 @@ func (s *Streamer) UpdateHistory(reasonCode string, earned int) {
 	}
 	s.History[reasonCode].Counter++
 	s.History[reasonCode].Amount += earned
-
-	if reasonCode == "WATCH_STREAK" {
-		// Recorded via the Stream's own lock — this field is owned by
-		// Stream.mu, never written under the Streamer mutex (that split
-		// ownership was a data race with the watcher loop's readers).
-		s.Stream.MarkStreakEarned(s.Stream.GetBroadcastID())
-	}
 }
 
 func (s *Streamer) UpdateHistoryWithCounter(reasonCode string, earned, counter int) {

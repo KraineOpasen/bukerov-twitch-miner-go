@@ -16,7 +16,7 @@ func onlineStreamerWithBroadcast(bid string) *Streamer {
 // re-arms — unchanged historical behavior.
 func TestStreakBlipUnderGraceKeepsGrant(t *testing.T) {
 	s := onlineStreamerWithBroadcast("bid-1")
-	s.UpdateHistory("WATCH_STREAK", 300) // grant on bid-1
+	applyBoundStreakForTest(t, s, "grant-1", "bid-1", 300)
 
 	s.SetConfirmedOffline()
 	s.SetConfirmedOnline() // seconds later: same broadcast, no re-arm
@@ -34,7 +34,7 @@ func TestStreakBlipUnderGraceKeepsGrant(t *testing.T) {
 // broadcast binding is preserved throughout.
 func TestStreakLongBlipSameBroadcastDoesNotRePursue(t *testing.T) {
 	s := onlineStreamerWithBroadcast("bid-1")
-	s.UpdateHistory("WATCH_STREAK", 300)
+	applyBoundStreakForTest(t, s, "grant-1", "bid-1", 300)
 
 	s.SetConfirmedOffline()
 	s.OfflineAt = time.Now().Add(-3 * time.Minute) // blip > 2min grace
@@ -54,7 +54,7 @@ func TestStreakLongBlipSameBroadcastDoesNotRePursue(t *testing.T) {
 // T3: a NEW broadcast ID re-arms via Stream.Update and the pursuit is on.
 func TestStreakNewBroadcastRePursues(t *testing.T) {
 	s := onlineStreamerWithBroadcast("bid-1")
-	s.UpdateHistory("WATCH_STREAK", 300)
+	applyBoundStreakForTest(t, s, "grant-1", "bid-1", 300)
 	if s.Stream.StreakPending() {
 		t.Fatal("precondition: granted broadcast must not be pending")
 	}
@@ -79,7 +79,13 @@ func TestStreakEmptyBroadcastFallback(t *testing.T) {
 	}
 
 	hydrated := NewStreamer("hydrated", DefaultStreamerSettings())
-	hydrated.Stream.HydrateStreakGrant("bid-1", time.Now())
+	hydrated.Stream.HydrateWatchStreak(WatchStreakPersistence{
+		Revision: 1,
+		Grants: []WatchStreakGrantFact{{
+			EventID: "persisted-grant", Binding: WatchStreakGrantBound,
+			BroadcastID: "bid-1", AcceptedAt: time.Now(),
+		}},
+	})
 	hydrated.SetConfirmedOnline()
 	if hydrated.Stream.StreakPending() {
 		t.Fatal("remembered grant + unidentified broadcast must DEFER pursuit until the broadcast is identified")

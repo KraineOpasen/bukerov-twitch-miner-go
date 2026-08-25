@@ -10,20 +10,19 @@ import (
 )
 
 // TestWatchStreakFieldOwnershipRace drives the three REAL production paths
-// that touch Stream.WatchStreakMissing concurrently, so `go test -race`
-// proves the field has a single owner:
+// that touch the Stream-owned streak transition state concurrently, so
+// `go test -race` proves the state has one lock/owner:
 //
 //   - the watcher loop's boost predicates (isBoostEligible/streakInProgress),
 //     which historically read the field bare, without any lock;
-//   - the PubSub points-earned path (UpdateHistory("WATCH_STREAK")), which
-//     wrote it under the STREAMER mutex (a different lock);
-//   - the online-transition re-arm (InitWatchStreak), which writes it under
-//     the STREAM mutex.
+//   - the PubSub points-earned path (ApplyWatchStreakGrant), which atomically
+//     admits an unbound authoritative grant under Stream.mu before History;
+//   - the online-transition re-arm (InitWatchStreak), which resets only
+//     session-local evidence under Stream.mu.
 //
-// Two different mutexes plus a bare read is a data race even when tests
-// happen to pass: this test makes -race exercise all three paths at once. It
-// fails with WARNING: DATA RACE on the pre-fix code and must stay clean once
-// the field is owned exclusively by Stream.mu.
+// This test keeps those transitions interleaved and must stay clean under the
+// race detector now that the grant ledger, timeout and evidence are owned
+// exclusively by Stream.mu.
 func TestWatchStreakFieldOwnershipRace(t *testing.T) {
 	s := models.NewStreamer("racer", models.DefaultStreamerSettings())
 	s.SetConfirmedOnline()
@@ -81,16 +80,19 @@ func TestWatchStreakFieldOwnershipRace(t *testing.T) {
 		}
 	}()
 
-	// PubSub points-earned writer (grant clears the flag).
+	// PubSub points-earned writer. The exact event is accepted once as unbound;
+	// every replay still exercises the Stream-owned domain admission lock without
+	// mutating the current broadcast pursuit.
 	go func() {
 		defer wg.Done()
+		event := models.WatchStreakGrantEvent{EventID: "race-unbound", AcceptedAt: time.Now()}
 		for {
 			select {
 			case <-stop:
 				return
 			default:
 			}
-			s.UpdateHistory("WATCH_STREAK", 300)
+			s.ApplyWatchStreakGrant(event, 300)
 		}
 	}()
 

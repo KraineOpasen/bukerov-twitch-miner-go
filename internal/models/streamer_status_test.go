@@ -104,7 +104,7 @@ func TestOnlineToUnknownPreservesEverything(t *testing.T) {
 	s.SetConfirmedOnline()
 	s.Stream.Update("bid-9", "title", &Game{ID: "g", Name: "G"}, nil, 100)
 	s.Stream.MinuteWatched = 7
-	s.Stream.WatchStreakMissing = false
+	acceptBoundStreakForTest(t, s.Stream, "grant-bid-9", "bid-9")
 	onlineAt := s.GetOnlineAt()
 
 	tr := s.SetUnknown(ReasonTimeout)
@@ -142,7 +142,7 @@ func TestUnknownRecoveryDoesNotResetStreak(t *testing.T) {
 	s.SetConfirmedOnline()
 	s.Stream.Update("bid-1", "t", &Game{ID: "g", Name: "G"}, nil, 10)
 	s.Stream.MinuteWatched = 4
-	s.Stream.WatchStreakMissing = false
+	acceptBoundStreakForTest(t, s.Stream, "grant-bid-1", "bid-1")
 
 	s.SetUnknown(ReasonTransportError)
 	tr := s.SetConfirmedOnline() // recovery on the same broadcast
@@ -277,7 +277,6 @@ func TestOfflineToOnlineWithinAndBeyondGrace(t *testing.T) {
 		s := NewStreamer("g1", DefaultStreamerSettings())
 		s.SetConfirmedOnline()
 		s.Stream.MinuteWatched = 5
-		s.Stream.WatchStreakMissing = false
 		s.SetConfirmedOffline() // OfflineAt ~ now (within grace)
 		s.SetConfirmedOnline()
 		if got := s.Stream.GetMinuteWatched(); got != 5 {
@@ -288,7 +287,6 @@ func TestOfflineToOnlineWithinAndBeyondGrace(t *testing.T) {
 		s := NewStreamer("g2", DefaultStreamerSettings())
 		s.SetConfirmedOnline()
 		s.Stream.MinuteWatched = 5
-		s.Stream.WatchStreakMissing = false
 		s.SetConfirmedOffline()
 		s.OfflineAt = time.Now().Add(-watchStreakContinuityGrace - time.Minute)
 		s.SetConfirmedOnline()

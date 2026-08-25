@@ -17,6 +17,8 @@ import (
 // fresh candidates and finishing none.
 func TestBoostFinishesStreakInProgressInsteadOfThrashing(t *testing.T) {
 	w, online := newTestWatcher(4)
+	w.streamers[2].Stream.Update("b2", "t", nil, nil, 1)
+	w.streamers[3].Stream.Update("b3", "t", nil, nil, 1)
 	// Base pair is {0,1}; 2 and 3 are off-pair, both streak-eligible.
 	// Streamer 2 is part-way through its streak; streamer 3 just started.
 	w.streamers[2].Stream.MinuteWatched = 4 // in progress
@@ -42,6 +44,8 @@ func TestBoostFinishesStreakInProgressInsteadOfThrashing(t *testing.T) {
 // progress, because that drop progress can only ever be earned here.
 func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 	w, online := newTestWatcher(4)
+	w.streamers[2].Stream.Update("b2", "t", nil, nil, 1)
+	w.streamers[3].SetConfirmedOnline()
 	w.streamers[2].Stream.MinuteWatched = 6 // streak nearly done
 	w.streamers[3].Stream.SetCampaignIDs([]string{"restricted"})
 	w.streamers[3].Stream.Campaigns = []*models.Campaign{
@@ -71,6 +75,7 @@ func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
+	s.Stream.Update("b1", "t", nil, nil, 1)
 
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -86,7 +91,7 @@ func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 	w.noteStreakProgress(0)
 	s.Stream.NoteWatchPointsEvent()
 	s.Stream.NoteWatchPointsEvent()
-	s.Stream.MinuteWatched = watchStreakThresholdMinutes + 1 // 8 min: past 7, still pursuing
+	s.Stream.MinuteWatched = 8 // past the historical 7m cutoff, still pursuing
 	w.noteStreakProgress(0)
 
 	if got := strings.Count(buf.String(), "Pursuing watch streak"); got != 1 {
@@ -126,7 +131,7 @@ func TestNoteStreakProgressLogsPursuitOnceAndReleaseOnce(t *testing.T) {
 
 	// Earning the streak clears the pursuit state so the next fresh broadcast
 	// reports again from scratch.
-	s.Stream.WatchStreakMissing = false
+	acceptBoundStreakForWatcherTest(t, s.Stream, "grant-b1", "b1")
 	w.noteStreakProgress(0)
 	if _, ok := w.streakDiag[0]; ok {
 		t.Errorf("streak diagnostics state should be cleared once the streak is earned")
@@ -152,7 +157,7 @@ func TestBoostStaysEligiblePastSevenMinutes(t *testing.T) {
 	}
 
 	// The real grant ends eligibility (StreakPending -> false), not a timer.
-	s.Stream.MarkStreakEarned("b1")
+	acceptBoundStreakForWatcherTest(t, s.Stream, "grant-b1", "b1")
 	if w.isBoostEligible(0) {
 		t.Error("once the WATCH_STREAK grant lands, the streamer is no longer boost-eligible")
 	}
@@ -258,7 +263,7 @@ func TestSatisfiedBroadcastNotBoostEligible(t *testing.T) {
 	s := w.streamers[0]
 	// Restart: the cache hydrated a grant for broadcast b1; the streamer comes
 	// online on that same broadcast.
-	s.Stream.HydrateStreakGrant("b1", time.Now())
+	hydrateBoundStreakForWatcherTest(s.Stream, "persisted-b1", "b1")
 	s.Stream.Update("b1", "t", nil, nil, 10)
 
 	if s.Stream.StreakPending() {
@@ -294,7 +299,7 @@ func TestNoStreakStarvationWithThreeCandidates(t *testing.T) {
 	}
 
 	// The chosen candidate's streak is granted → it releases the seat.
-	w.streamers[first].Stream.MarkStreakEarned("b" + string(rune('0'+first)))
+	acceptBoundStreakForWatcherTest(t, w.streamers[first].Stream, "grant-first", "b"+string(rune('0'+first)))
 	if w.isBoostEligible(first) {
 		t.Fatalf("granted streamer %d must release the seat", first)
 	}

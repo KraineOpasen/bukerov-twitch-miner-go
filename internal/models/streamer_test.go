@@ -69,13 +69,14 @@ func TestActiveCampaignProgressPicksFurthestAlong(t *testing.T) {
 // reset watch-streak progress — it is the same continuous broadcast.
 func TestSetOnlineGracePreservesStreakOnBlip(t *testing.T) {
 	s := NewStreamer("blipper", DefaultStreamerSettings())
+	s.Stream.Update("bid-blip", "t", nil, nil, 1)
 
 	if !s.SetConfirmedOnline().OnlineConfirmed {
 		t.Fatal("first SetConfirmedOnline should report an online transition")
 	}
 	// Progress banked on this broadcast: 5 watched minutes, streak already earned.
 	s.Stream.MinuteWatched = 5
-	s.Stream.WatchStreakMissing = false
+	acceptBoundStreakForTest(t, s.Stream, "grant-blip", "bid-blip")
 
 	// Brief flap: offline then immediately back online (OfflineAt ≈ now).
 	s.SetConfirmedOffline()
@@ -96,12 +97,13 @@ func TestSetOnlineGracePreservesStreakOnBlip(t *testing.T) {
 // as before — MinuteWatched back to 0 and the streak marked missing.
 func TestSetOnlineReArmsStreakOnNewBroadcast(t *testing.T) {
 	s := NewStreamer("returner", DefaultStreamerSettings())
+	s.Stream.Update("bid-old", "t", nil, nil, 1)
 
 	if !s.SetConfirmedOnline().OnlineConfirmed {
 		t.Fatal("first SetConfirmedOnline should report a transition")
 	}
 	s.Stream.MinuteWatched = 6
-	s.Stream.WatchStreakMissing = false
+	acceptBoundStreakForTest(t, s.Stream, "grant-old", "bid-old")
 
 	s.SetConfirmedOffline()
 	// Simulate a new broadcast: offline well beyond the grace window.
@@ -110,6 +112,9 @@ func TestSetOnlineReArmsStreakOnNewBroadcast(t *testing.T) {
 	if !s.SetConfirmedOnline().OnlineConfirmed {
 		t.Fatal("re-online should report a transition")
 	}
+	// Offline age is not broadcast identity. Only a genuinely changed non-empty
+	// BroadcastID re-arms the broadcast-specific pursuit.
+	s.Stream.Update("bid-new", "t", nil, nil, 1)
 	if got := s.Stream.GetMinuteWatched(); got != 0 {
 		t.Errorf("a new broadcast must re-arm the streak (MinuteWatched=0), got %v", got)
 	}

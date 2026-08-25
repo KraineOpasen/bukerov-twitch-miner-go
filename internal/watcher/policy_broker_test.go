@@ -486,7 +486,7 @@ func TestCampaignPolicyPreservesFreshStreakBoostAgainstActiveDrop(t *testing.T) 
 	activeDrop.Stream.SetCampaignIDs([]string{"campaign-active"})
 	freshStreak := w.streamers[2]
 	freshStreak.Settings.WatchStreak = true
-	freshStreak.Stream.WatchStreakMissing = true
+	freshStreak.Stream.Update("fresh-streak-broadcast", "t", nil, nil, 1)
 	freshStreak.Stream.MinuteWatched = 0
 	w.rotation.lastWatched = map[int]time.Time{
 		0: time.Now(),

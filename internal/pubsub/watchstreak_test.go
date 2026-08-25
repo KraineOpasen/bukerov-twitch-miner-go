@@ -1,12 +1,15 @@
 package pubsub
 
 import (
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
-// TestPointsEarnedWatchStreakCreditedAndLogged feeds a realistic
+// TestPointsEarnedWatchStreakCreditedAndLoggedUnbound feeds a realistic
 // community-points-user-v1 points-earned message carrying
 // point_gain.reason_code = WATCH_STREAK through the real parse -> route ->
 // handle path and asserts it is credited and classified. This is the shape the
@@ -15,7 +18,7 @@ import (
 // that the Go handler processes an identical payload correctly. A missing
 // WATCH_STREAK in production therefore means the event never arrived (the
 // streak was never earned), not that it arrived and was dropped here.
-func TestPointsEarnedWatchStreakCreditedAndLogged(t *testing.T) {
+func TestPointsEarnedWatchStreakCreditedAndLoggedUnbound(t *testing.T) {
 	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
 	streamer.ChannelID = "123456"
 	// A fresh broadcast starts with the streak pending.
@@ -74,9 +77,31 @@ func TestPointsEarnedWatchStreakCreditedAndLogged(t *testing.T) {
 	if entry.Amount != 450 || entry.Counter != 1 {
 		t.Errorf("WATCH_STREAK history = %+v, want {Counter:1 Amount:450}", entry)
 	}
-	if streamer.Stream.GetWatchStreakMissing() {
-		t.Errorf("WatchStreakMissing should be cleared once the streak is credited")
+	if !streamer.Stream.GetWatchStreakMissing() {
+		t.Error("an unbound WATCH_STREAK must not be guessed onto an unidentified/current broadcast")
 	}
+	persisted := streamer.Stream.WatchStreakPersistence()
+	if len(persisted.Grants) != 1 || persisted.Grants[0].Binding != models.WatchStreakGrantUnbound || persisted.Grants[0].BroadcastID != "" {
+		t.Fatalf("grant ledger = %+v, want one explicit GRANTED_UNBOUND fact", persisted.Grants)
+	}
+}
+
+func parsedWatch(t *testing.T, timestamp string, balance int) *PubSubMessage {
+	t.Helper()
+	raw := fmt.Sprintf(`{
+		"type":"points-earned",
+		"data":{
+			"timestamp":%q,
+			"channel_id":"123456",
+			"point_gain":{"total_points":10,"reason_code":"WATCH"},
+			"balance":{"channel_id":"123456","balance":%d}
+		}
+	}`, timestamp, balance)
+	msg, err := ParsePubSubMessage(&WSData{Topic: "community-points-user-v1.999", Message: raw})
+	if err != nil {
+		t.Fatalf("ParsePubSubMessage: %v", err)
+	}
+	return msg
 }
 
 // TestPointsEarnedPlainWatchStillCredited guards that ordinary passive WATCH
@@ -113,5 +138,123 @@ func TestPointsEarnedPlainWatchStillCredited(t *testing.T) {
 	// A plain WATCH must not clear the streak-pending flag.
 	if !streamer.Stream.GetWatchStreakMissing() {
 		t.Errorf("plain WATCH should not clear the pending watch streak")
+	}
+}
+
+func parsedWatchStreak(t *testing.T, timestamp string, balance int) *PubSubMessage {
+	t.Helper()
+	raw := fmt.Sprintf(`{
+		"type":"points-earned",
+		"data":{
+			"timestamp":%q,
+			"channel_id":"123456",
+			"point_gain":{"total_points":350,"reason_code":"WATCH_STREAK"},
+			"balance":{"channel_id":"123456","balance":%d}
+		}
+	}`, timestamp, balance)
+	msg, err := ParsePubSubMessage(&WSData{Topic: "community-points-user-v1.999", Message: raw})
+	if err != nil {
+		t.Fatalf("ParsePubSubMessage: %v", err)
+	}
+	return msg
+}
+
+// Domain idempotency is independent of the transport replay window: an exact
+// WATCH_STREAK replay reaching the pool must not count history twice.
+func TestWatchStreakExactReplayCountsHistoryOnce(t *testing.T) {
+	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
+	streamer.ChannelID = "123456"
+	streamer.Stream.Update("broadcast-1", "title", nil, nil, 1)
+	pool := &WebSocketPool{streamers: []*models.Streamer{streamer}}
+	msg := parsedWatchStreak(t, "2026-08-25T09:00:00Z", 1000)
+
+	pool.handleMessage(msg)
+	pool.handleMessage(msg)
+
+	entry := streamer.History["WATCH_STREAK"]
+	if entry == nil || entry.Counter != 1 || entry.Amount != 350 {
+		t.Fatalf("exact replay history = %+v, want one +350 grant", entry)
+	}
+}
+
+func TestWatchStreakReplayCannotRollbackNewerBalance(t *testing.T) {
+	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
+	streamer.ChannelID = "123456"
+	pool := &WebSocketPool{streamers: []*models.Streamer{streamer}}
+	streak := parsedWatchStreak(t, "2026-08-25T09:00:00Z", 1000)
+
+	pool.handleMessage(streak)
+	pool.handleMessage(parsedWatch(t, "2026-08-25T09:01:00Z", 1010))
+	pool.handleMessage(streak)
+
+	if got := streamer.GetChannelPoints(); got != 1010 {
+		t.Fatalf("stale streak replay rolled balance back to %d, want 1010", got)
+	}
+	if entry := streamer.History["WATCH_STREAK"]; entry == nil || entry.Counter != 1 {
+		t.Fatalf("streak history after replay=%+v, want one", entry)
+	}
+}
+
+func TestWatchStreakConcurrentExactReplayCountsOnce(t *testing.T) {
+	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
+	streamer.ChannelID = "123456"
+	pool := &WebSocketPool{streamers: []*models.Streamer{streamer}}
+	msg := parsedWatchStreak(t, "2026-08-25T09:00:00Z", 1000)
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			pool.handleMessage(msg)
+		}()
+	}
+	wg.Wait()
+
+	if entry := streamer.History["WATCH_STREAK"]; entry == nil || entry.Counter != 1 || entry.Amount != 350 {
+		t.Fatalf("concurrent replay history=%+v, want one +350", entry)
+	}
+	if got := streamer.Stream.WatchStreakPersistence(); got.Revision != 1 || len(got.Grants) != 1 {
+		t.Fatalf("concurrent replay ledger=%+v, want one revision/fact", got)
+	}
+}
+
+func TestOrdinaryWatchCannotCreateGrantFact(t *testing.T) {
+	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
+	streamer.ChannelID = "123456"
+	streamer.Stream.Update("b1", "t", nil, nil, 1)
+	pool := &WebSocketPool{streamers: []*models.Streamer{streamer}}
+
+	pool.handleMessage(parsedWatch(t, "2026-08-25T09:00:00Z", 1000))
+
+	if state := streamer.Stream.WatchStreakPersistence(); state.Revision != 0 || len(state.Grants) != 0 || state.Timeout != nil {
+		t.Fatalf("ordinary WATCH manufactured streak terminal state: %+v", state)
+	}
+	if decision := streamer.Stream.EvaluateWatchStreak(time.Now()); !decision.PursuitEligible || decision.State != models.WatchStreakEligible {
+		t.Fatalf("ordinary WATCH ended current pursuit: %+v", decision)
+	}
+}
+
+// Timestamp/arrival order cannot bind a delayed WATCH_STREAK to whichever
+// broadcast happens to be current when it arrives. It is a real unbound grant,
+// while the newly observed broadcast remains independently pursuable.
+func TestDelayedUnboundWatchStreakDoesNotBindCurrentBroadcast(t *testing.T) {
+	streamer := models.NewStreamer("skill4ltu", models.DefaultStreamerSettings())
+	streamer.ChannelID = "123456"
+	streamer.Stream.Update("new-broadcast", "title", nil, nil, 1)
+	pool := &WebSocketPool{streamers: []*models.Streamer{streamer}}
+
+	pool.handleMessage(parsedWatchStreak(t, "2026-08-24T09:00:00Z", 1000))
+
+	if !streamer.Stream.StreakPending() {
+		t.Fatal("unbound delayed grant was guessed onto the current broadcast and ended its pursuit")
+	}
+	if bid, _ := streamer.Stream.StreakEarnedGrant(); bid != "" {
+		t.Fatalf("unbound delayed grant acquired invented BroadcastID %q", bid)
+	}
+	entry := streamer.History["WATCH_STREAK"]
+	if entry == nil || entry.Counter != 1 {
+		t.Fatalf("authoritative unbound grant must still be counted once, got %+v", entry)
 	}
 }

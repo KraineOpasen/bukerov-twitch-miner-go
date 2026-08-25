@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // T7: after a grant on THIS broadcast, a re-armed pursuit (blip/restart) must
@@ -17,15 +20,17 @@ func TestNoteStreakProgressSilentAfterGrantOnSameBroadcast(t *testing.T) {
 	s.SetConfirmedOnline()
 
 	s.Stream.Update("bid-1", "t", nil, nil, 1)
-	s.UpdateHistory("WATCH_STREAK", 300) // grant lands on bid-1
-	s.Stream.InitWatchStreak()           // blip/restart re-arm on the SAME broadcast
+	s.ApplyWatchStreakGrant(models.WatchStreakGrantEvent{
+		EventID: "grant-bid-1", AcceptedAt: time.Now(), ProvenBroadcastID: "bid-1",
+	}, 300)
+	s.Stream.InitWatchStreak() // blip/restart re-arm on the SAME broadcast
 
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	s.Stream.MinuteWatched = watchStreakThresholdMinutes + 1
+	s.Stream.MinuteWatched = 8
 	w.noteStreakProgress(0)
 
 	if strings.Contains(buf.String(), "Pursuing watch streak") {

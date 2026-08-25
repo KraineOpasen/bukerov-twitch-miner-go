@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // captureLogs redirects slog to a buffer for the duration of the test.
@@ -175,7 +178,17 @@ func TestLateGrantAfterPursuitTimeoutRecordedOnce(t *testing.T) {
 	}
 
 	// A late authoritative WATCH_STREAK arrives on the real recording path.
-	s.UpdateHistory("WATCH_STREAK", 350)
+	grant := models.WatchStreakGrantEvent{
+		EventID: "late-grant-b1", AcceptedAt: time.Now(), ProvenBroadcastID: "b1",
+	}
+	result := s.ApplyWatchStreakGrant(grant, 350)
+	if !result.NewlyAccepted() {
+		t.Fatalf("late authoritative grant admission=%s, want newly accepted", result.Admission)
+	}
+	duplicate := s.ApplyWatchStreakGrant(grant, 350)
+	if duplicate.Admission != models.WatchStreakGrantDuplicate {
+		t.Fatalf("late grant replay admission=%s, want duplicate", duplicate.Admission)
+	}
 
 	if e := s.History["WATCH_STREAK"]; e == nil || e.Counter != 1 || e.Amount != 350 {
 		t.Fatalf("the late grant must be recorded exactly once, got %+v", s.History["WATCH_STREAK"])

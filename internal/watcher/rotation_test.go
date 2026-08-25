@@ -230,6 +230,7 @@ func TestPreferBiasesRotationTowardPreferredStreamer(t *testing.T) {
 func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 	w, online := newTestWatcher(3)
 	// streamer 2 has an active drop campaign but isn't in the base pair.
+	w.streamers[2].SetConfirmedOnline()
 	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-1"})
 
 	pair := [2]int{0, 1}
@@ -251,6 +252,8 @@ func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 // watched more recently than the unrestricted-campaign candidate.
 func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 	w, online := newTestWatcher(4)
+	w.streamers[2].SetConfirmedOnline()
+	w.streamers[3].SetConfirmedOnline()
 	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-unrestricted"})
 	w.streamers[3].Stream.SetCampaignIDs([]string{"campaign-restricted"})
 	w.streamers[3].Stream.Campaigns = []*models.Campaign{
