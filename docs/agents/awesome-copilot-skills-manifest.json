@@ -1,6 +1,17 @@
 {
   "upstream_repo": "https://github.com/github/awesome-copilot",
-  "upstream_commit": "83561bd7d8a46fcda0581aedabdf8eac7cb196b6",
+  "upstream_commit": "d0d9d9f014abb27bf0d8321851867500a3a46bba",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "83561bd7d8a46fcda0581aedabdf8eac7cb196b6",
+    "target_commit": "d0d9d9f014abb27bf0d8321851867500a3a46bba",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "83561bd7d8a46fcda0581aedabdf8eac7cb196b6",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward"
+  },
   "upstream_tree": {
     "github-actions-efficiency": "a9041cbe0a768c8c11c26c2524e3a780035988f5",
     "github-actions-hardening": "25d75a622f5f8c034be5b25bf6585850d6f7fcd7",
@@ -8,7 +19,7 @@
     "threat-model-analyst": "4c51abac7859b9529f721ae5043fffc2f9812b5a",
     "web-design-reviewer": "eded2bc5a7d38261501a76b2e4913b703cc547ec"
   },
-  "upstream_current_head": "83561bd7d8a46fcda0581aedabdf8eac7cb196b6",
+  "upstream_current_head": "d0d9d9f014abb27bf0d8321851867500a3a46bba",
   "drift": "none",
   "reviewed_at": "2026-08-22T08:12:34Z",
   "reviewed_by": "Codex deliberate supply-chain/provenance audit under owner task contract for Draft PR #206. Verified the reviewed ref main and fast-forward ancestry 318066d2213b510e89b500ed0d53506c54093ddc..83561bd7d8a46fcda0581aedabdf8eac7cb196b6; the five installed upstream trees and all 32 upstream-origin file blobs/modes are unchanged; all five local LICENSE copies still match the upstream root LICENSE; selected inventory, per-skill inventory, frontmatter/authority surface, patch mapping, dependency/reference closure, and scripts attestations are unchanged; no symlink, submodule, executable, vendored byte, or EVAL_REQUIRED surface changed. The upstream delta added repo-standardizer and resx-source-generator-migration outside the selected set; neither was installed. Candidate was integrated with live main 480da9c99b2b015646b880bc3e4b04928a8f93ed by a clean normal merge before this attestation.",
