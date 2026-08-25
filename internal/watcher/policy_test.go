@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,15 @@ func TestLegacyCampaignScoreCompatibilityIsAllocationInactive(t *testing.T) {
 	actual := w.orderByCampaignSemanticClass([]int{2, 1, 0})
 	if len(actual) != 3 || actual[0] != 0 || actual[1] != 1 || actual[2] != 2 {
 		t.Fatalf("actual semantic ordering was influenced by raw scores: %v", actual)
+	}
+}
+
+func TestCampaignPolicyFinalLoginTieIsNormalizedAndDeterministic(t *testing.T) {
+	if cmp := compareNormalizedLogins(" StreamerB ", "streamera"); cmp <= 0 {
+		t.Fatalf("normalized login order cmp=%d, want streamera before StreamerB", cmp)
+	}
+	if cmp := compareNormalizedLogins("Streamer", "streamer"); cmp == 0 {
+		t.Fatal("case-variant malformed logins lost deterministic raw fallback")
 	}
 }
 
@@ -182,6 +192,178 @@ func TestCampaignPolicyEqualClassUsesPersistedDeficit(t *testing.T) {
 	}
 }
 
+// TestCampaignPolicyEqualPrimaryPrefersOneAdditionalCampaign is the
+// executable regression for PR-06. Persisted fairness deliberately disfavors
+// streamer A, so the base implementation (which publishes only one primary
+// SemanticClass per login) treats all four channels as equal and leaves A out.
+// A bounded secondary campaign fact must break that semantic tie before
+// fairness without changing the two-slot cap.
+func TestCampaignPolicyEqualPrimaryPrefersOneAdditionalCampaign(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	now := time.Now()
+	overlap := w.streamers[0]
+	extra := &models.Campaign{
+		ID: "campaign-extra",
+		Drops: []*models.Drop{{
+			ID:                 "drop-extra",
+			Name:               "Extra Reward",
+			MinutesRequired:    30,
+			PercentageProgress: 10,
+			Claimability:       models.ClaimabilityKnownFalse,
+		}},
+	}
+	overlap.Stream.SetCampaignIDs([]string{"campaign-a", extra.ID})
+	overlap.Stream.SetCampaigns(append(overlap.Stream.GetCampaigns(), extra))
+
+	byLogin := make(map[string]policy.SemanticUtility, len(w.streamers))
+	byCampaign := make(map[string]policy.CampaignSemantic, len(w.streamers)+1)
+	for i, s := range w.streamers {
+		primaryID := "campaign-" + string(rune('a'+i))
+		byLogin[s.GetUsername()] = policy.SemanticUtility{
+			SemanticClass:     0,
+			PrimaryCampaignID: primaryID,
+		}
+		byCampaign[primaryID] = policy.CampaignSemantic{SemanticClass: 0, SecondaryEligible: true}
+	}
+	byLogin[overlap.GetUsername()] = policy.SemanticUtility{
+		SemanticClass:          0,
+		SecondarySemanticClass: 2,
+		HasSecondary:           true,
+		PrimaryCampaignID:      "campaign-a",
+		SecondaryCampaignID:    extra.ID,
+	}
+	byCampaign[extra.ID] = policy.CampaignSemantic{SemanticClass: 2, SecondaryEligible: true}
+	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
+
+	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
+	w.processWatching()
+
+	snap := w.BrokerSnapshot()
+	if len(snap.Slots) != 2 {
+		t.Fatalf("bounded overlap allocation used %d slots, want hard cap 2: %v", len(snap.Slots), brokerChannels(snap))
+	}
+	if !brokerHasChannel(snap, overlap.GetUsername()) {
+		t.Fatalf("equal primary semantics with one additional distinct campaign allocated %v; want overlap channel %q before persisted fairness", brokerChannels(snap), overlap.GetUsername())
+	}
+	for _, slot := range snap.Slots {
+		if slot.Channel == overlap.GetUsername() && !strings.Contains(slot.Reason, "bounded secondary semantic class 2") {
+			t.Fatalf("overlap winner reason does not expose bounded secondary utility: %q", slot.Reason)
+		}
+	}
+}
+
+// TestCampaignPolicyFullBoundedUtilityTieUsesPersistedDeficit protects the
+// final semantic-tie boundary: equal primary and equal best-secondary facts
+// must still fall through to the existing persisted fairness mechanism.
+func TestCampaignPolicyFullBoundedUtilityTieUsesPersistedDeficit(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	now := time.Now()
+	byLogin := make(map[string]policy.SemanticUtility, len(w.streamers))
+	byCampaign := make(map[string]policy.CampaignSemantic, len(w.streamers)*2)
+	for i, s := range w.streamers {
+		primaryID := "campaign-" + string(rune('a'+i))
+		secondaryID := "secondary-" + string(rune('a'+i))
+		extra := &models.Campaign{
+			ID: secondaryID,
+			Drops: []*models.Drop{{
+				ID:                 "secondary-drop-" + string(rune('a'+i)),
+				MinutesRequired:    30,
+				PercentageProgress: 10,
+				Claimability:       models.ClaimabilityKnownFalse,
+			}},
+		}
+		s.Stream.SetCampaignIDs([]string{primaryID, secondaryID})
+		s.Stream.SetCampaigns(append(s.Stream.GetCampaigns(), extra))
+		byLogin[s.GetUsername()] = policy.SemanticUtility{
+			SemanticClass:          0,
+			SecondarySemanticClass: 2,
+			HasSecondary:           true,
+			PrimaryCampaignID:      primaryID,
+			SecondaryCampaignID:    secondaryID,
+		}
+		byCampaign[primaryID] = policy.CampaignSemantic{SemanticClass: 0, SecondaryEligible: true}
+		byCampaign[secondaryID] = policy.CampaignSemantic{SemanticClass: 2, SecondaryEligible: true}
+	}
+	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
+
+	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
+	w.processWatching()
+
+	snap := w.BrokerSnapshot()
+	if len(snap.Slots) != 2 {
+		t.Fatalf("full semantic tie allocated %d slots, want hard cap 2: %v", len(snap.Slots), brokerChannels(snap))
+	}
+	for _, idx := range []int{1, 2} {
+		if !brokerHasChannel(snap, w.streamers[idx].GetUsername()) {
+			t.Fatalf("full primary+secondary tie allocation %v; want persisted-deficit pair [%s %s]", brokerChannels(snap), w.streamers[1].GetUsername(), w.streamers[2].GetUsername())
+		}
+	}
+}
+
+func TestConfiguredCampaignUtilityReprojectsCurrentRemainingWork(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	s := w.streamers[0]
+	primary := s.Stream.GetCampaigns()[0]
+	secondary := &models.Campaign{
+		ID: "secondary-live",
+		Drops: []*models.Drop{{
+			ID:                    "secondary-live-drop",
+			MinutesRequired:       30,
+			CurrentMinutesWatched: 10,
+		}},
+	}
+	s.Stream.SetCampaignIDs([]string{primary.ID, secondary.ID})
+	s.Stream.SetCampaigns([]*models.Campaign{primary, secondary})
+	w.SetCampaignSemanticPolicy(
+		map[string]policy.SemanticUtility{
+			s.GetUsername(): {
+				SemanticClass:          0,
+				SecondarySemanticClass: 2,
+				HasSecondary:           true,
+				PrimaryCampaignID:      primary.ID,
+				SecondaryCampaignID:    secondary.ID,
+			},
+		},
+		map[string]policy.CampaignSemantic{
+			primary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+			secondary.ID: {SemanticClass: 2, SecondaryEligible: true},
+		},
+		nil,
+	)
+	if utility, ok := w.campaignSemanticUtilityForStreamer(s); !ok || !utility.HasSecondary {
+		t.Fatalf("test setup utility = %+v, ranked=%v, want live secondary", utility, ok)
+	}
+
+	secondary.Drops[0].CurrentMinutesWatched = secondary.Drops[0].MinutesRequired
+	if utility, ok := w.campaignSemanticUtilityForStreamer(s); !ok || utility.HasSecondary {
+		t.Fatalf("completed assigned campaign retained stale secondary utility: utility=%+v ranked=%v", utility, ok)
+	}
+
+	secondary.Drops[0].CurrentMinutesWatched = 10
+	s.Stream.SetCampaigns([]*models.Campaign{primary})
+	if utility, ok := w.campaignSemanticUtilityForStreamer(s); !ok || utility.HasSecondary {
+		t.Fatalf("removed assigned campaign retained stale secondary utility: utility=%+v ranked=%v", utility, ok)
+	}
+}
+
+func TestCampaignSemanticEvidenceFailsClosedAcrossDuplicateCampaignID(t *testing.T) {
+	primary := &models.Campaign{ID: "primary", Drops: []*models.Drop{{ID: "primary-drop", MinutesRequired: 30}}}
+	secondaryLive := &models.Campaign{ID: "secondary", Drops: []*models.Drop{{ID: "live", MinutesRequired: 30}}}
+	secondaryCompleted := &models.Campaign{ID: "secondary", Drops: []*models.Drop{{
+		ID:                    "completed",
+		MinutesRequired:       30,
+		CurrentMinutesWatched: 30,
+	}}}
+	ids, remaining := CampaignSemanticEvidence([]*models.Campaign{primary, secondaryLive, secondaryCompleted})
+	utility, ok := policy.BuildSemanticUtilityWithRemainingWork(ids, remaining, map[string]policy.CampaignSemantic{
+		primary.ID:       {SemanticClass: 0, SecondaryEligible: true},
+		secondaryLive.ID: {SemanticClass: 2, SecondaryEligible: true},
+	})
+	if !ok || utility.HasSecondary {
+		t.Fatalf("conflicting duplicate CampaignID retained secondary utility: ids=%v remaining=%v utility=%+v ranked=%v", ids, remaining, utility, ok)
+	}
+}
+
 func newPolicyBrokerWatcher(t *testing.T) *MinuteWatcher {
 	t.Helper()
 	sender := &countingSender{sent: make(chan string, 16)}
@@ -231,6 +413,15 @@ func brokerHasChannel(snap BrokerSnapshot, login string) bool {
 		}
 	}
 	return false
+}
+
+func brokerReason(snap BrokerSnapshot, login string) string {
+	for _, slot := range snap.Slots {
+		if slot.Channel == login {
+			return slot.Reason
+		}
+	}
+	return ""
 }
 
 func brokerChannels(snap BrokerSnapshot) []string {

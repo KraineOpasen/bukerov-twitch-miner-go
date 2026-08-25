@@ -19,8 +19,9 @@ type policySnapshot struct {
 }
 
 // refreshPolicy re-ranks the tracked campaigns under the configured mode and
-// publishes the result to the watcher (semantic class before persisted
-// fairness), discovery (cross-game ordering), and its own snapshot (UI/debug).
+// publishes the result to the watcher (bounded semantic utility before
+// persisted fairness), discovery (cross-game ordering), and its own snapshot
+// (UI/debug).
 // It runs on the existing
 // health-watchdog tick, so it adds no goroutine and makes no Twitch calls —
 // every input is derived from already-synced state. m.mu serializes the config
@@ -56,13 +57,13 @@ func (m *Miner) refreshPolicy(now time.Time) {
 		byID[d.CampaignID] = d
 	}
 	gameRanks := policyGameRanks(decisions, campaigns)
-	campaignClasses := policyCampaignClasses(decisions)
+	campaignSemantics := policyCampaignSemantics(decisions)
 
 	if m.watcher != nil {
-		m.watcher.SetCampaignSemanticPolicy(m.policyClassesByLogin(byID, campaigns), campaignClasses, gameRanks)
+		m.watcher.SetCampaignSemanticPolicy(m.policyUtilitiesByLogin(campaignSemantics, campaigns), campaignSemantics, gameRanks)
 	}
 	if m.discovery != nil {
-		m.discovery.SetCampaignPolicy(gameRanks, campaignClasses)
+		m.discovery.SetCampaignPolicy(gameRanks, campaignSemantics)
 	}
 	m.policySnap.Store(&policySnapshot{Mode: mode, Decisions: decisions, byID: byID})
 }
@@ -181,30 +182,34 @@ func (m *Miner) channelStability(login string) (stability float64, samples int) 
 	return float64(stats.Successes) / float64(samples), samples
 }
 
-// policyClassesByLogin projects Campaign Policy's unitless ordinal onto each
+// policyUtilitiesByLogin projects Campaign Policy's bounded semantic utility
+// onto each
 // candidate using the eligibility evidence owned by that source. Configured
 // streamers use tracker-assigned campaigns (the authoritative eligible set),
 // while discovery uses its exact advertised campaign IDs plus the same channel
 // ACL check as discovery.channelCarriesActiveCampaign. A game's best campaign
 // is never assigned wholesale to every channel in that game.
-func (m *Miner) policyClassesByLogin(byID map[string]policy.Decision, campaigns []*models.Campaign) map[string]policy.SemanticClass {
-	classes := make(map[string]policy.SemanticClass)
+func (m *Miner) policyUtilitiesByLogin(facts map[string]policy.CampaignSemantic, campaigns []*models.Campaign) map[string]policy.SemanticUtility {
+	utilities := make(map[string]policy.SemanticUtility)
 	configured := make(map[string]bool)
 	if m.streamers != nil {
 		for _, s := range m.streamers.All() {
 			login := s.GetUsername()
 			configured[strings.ToLower(login)] = true
-			if class, ok := bestAssignedPolicyClass(s.Stream.GetCampaigns(), byID); ok {
-				classes[login] = class
+			if utility, ok := bestAssignedPolicyUtility(s.Stream.GetCampaigns(), facts); ok {
+				utilities[login] = utility
 			}
 		}
 	}
 	if m.discovery == nil {
-		return classes
+		return utilities
 	}
 
 	campaignByID := make(map[string]*models.Campaign, len(campaigns))
 	for _, c := range campaigns {
+		if c == nil {
+			continue
+		}
 		campaignByID[c.ID] = c
 	}
 	for _, ch := range m.discovery.State().Channels {
@@ -215,51 +220,43 @@ func (m *Miner) policyClassesByLogin(byID map[string]policy.Decision, campaigns 
 		if s == nil {
 			continue
 		}
-		if class, ok := bestDiscoveredPolicyClass(s, byID, campaignByID); ok {
-			classes[ch.Login] = class
+		if utility, ok := bestDiscoveredPolicyUtility(s, facts, campaignByID); ok {
+			utilities[ch.Login] = utility
 		}
 	}
-	return classes
+	return utilities
 }
 
-func bestAssignedPolicyClass(campaigns []*models.Campaign, byID map[string]policy.Decision) (policy.SemanticClass, bool) {
-	var best policy.SemanticClass
-	found := false
+func bestAssignedPolicyUtility(campaigns []*models.Campaign, facts map[string]policy.CampaignSemantic) (policy.SemanticUtility, bool) {
+	ids := make([]string, 0, len(campaigns))
 	for _, c := range campaigns {
-		d, ok := byID[c.ID]
-		if !ok || d.Excluded || c.CurrentDrop() == nil {
+		if c == nil || c.CurrentDrop() == nil {
 			continue
 		}
-		if !found || d.SemanticClass < best {
-			best, found = d.SemanticClass, true
-		}
+		ids = append(ids, c.ID)
 	}
-	return best, found
+	return policy.BuildSemanticUtility(ids, facts)
 }
 
-func bestDiscoveredPolicyClass(s *models.Streamer, byID map[string]policy.Decision, campaigns map[string]*models.Campaign) (policy.SemanticClass, bool) {
-	var best policy.SemanticClass
-	found := false
+func bestDiscoveredPolicyUtility(s *models.Streamer, facts map[string]policy.CampaignSemantic, campaigns map[string]*models.Campaign) (policy.SemanticUtility, bool) {
+	ids := make([]string, 0, len(s.Stream.GetCampaignIDs()))
 	for _, id := range s.Stream.GetCampaignIDs() {
-		d, ok := byID[id]
 		c := campaigns[id]
-		if !ok || d.Excluded || c == nil || len(c.Drops) == 0 || c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
+		if c == nil || len(c.Drops) == 0 || c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
 			continue
 		}
 		if !c.AllowsChannel(s.ChannelID) {
 			continue
 		}
-		if !found || d.SemanticClass < best {
-			best, found = d.SemanticClass, true
-		}
+		ids = append(ids, id)
 	}
-	return best, found
+	return policy.BuildSemanticUtility(ids, facts)
 }
 
 // policyGameRanks maps each game to its best campaign semantic class (lower =
 // higher priority) for discovery's directory/check pre-order. It is never the
 // final class of every channel in that game: verified candidate selection uses
-// policyCampaignClasses plus exact advertised IDs and ACL. Campaign-ID ties do
+// policyCampaignSemantics plus exact advertised IDs and ACL. Campaign-ID ties do
 // not manufacture different game ranks.
 func policyGameRanks(decisions []policy.Decision, campaigns []*models.Campaign) map[string]int {
 	gameOf := make(map[string][]string, len(campaigns))
@@ -283,17 +280,19 @@ func policyGameRanks(decisions []policy.Decision, campaigns []*models.Campaign) 
 	return ranks
 }
 
-// policyCampaignClasses is the exact campaign-ID semantic publication for
-// discovery. Excluded decisions remain valid presentation records but never
-// gain semantic preference in candidate selection.
-func policyCampaignClasses(decisions []policy.Decision) map[string]policy.SemanticClass {
-	classes := make(map[string]policy.SemanticClass, len(decisions))
+// policyCampaignSemantics is the exact campaign-ID semantic publication for
+// configured and discovery channel projections. Excluded decisions remain
+// valid presentation records but never gain semantic preference; unknown and
+// completed decisions retain primary semantics while failing closed as a
+// secondary.
+func policyCampaignSemantics(decisions []policy.Decision) map[string]policy.CampaignSemantic {
+	facts := make(map[string]policy.CampaignSemantic, len(decisions))
 	for _, d := range decisions {
-		if !d.Excluded {
-			classes[d.CampaignID] = d.SemanticClass
+		if fact, ok := policy.CampaignSemanticFromDecision(d); ok {
+			facts[d.CampaignID] = fact
 		}
 	}
-	return classes
+	return facts
 }
 
 // campaignGameNames returns every Twitch name by which discovery may know a

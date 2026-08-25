@@ -36,36 +36,43 @@ func TestPolicyGameRanks(t *testing.T) {
 	}
 }
 
-func TestPolicyCampaignClassesPublishExactNonExcludedIDs(t *testing.T) {
-	classes := policyCampaignClasses([]policy.Decision{
-		{CampaignID: "urgent", SemanticClass: 0},
-		{CampaignID: "weak", SemanticClass: 4},
-		{CampaignID: "excluded", SemanticClass: 1, Excluded: true},
+func TestPolicyCampaignSemanticsPublishExactFailClosedFacts(t *testing.T) {
+	facts := policyCampaignSemantics([]policy.Decision{
+		{CampaignID: "urgent", SemanticClass: 0, Status: policy.StatusSafe, Feasibility: policy.Feasibility{MinutesToNextReward: 10}},
+		{CampaignID: "weak", SemanticClass: 4, Status: policy.StatusAtRisk, Feasibility: policy.Feasibility{MinutesToNextReward: 20}},
+		{CampaignID: "unknown", SemanticClass: 2, Status: policy.StatusUnknown, Feasibility: policy.Feasibility{MinutesToNextReward: 10}},
+		{CampaignID: "completed", SemanticClass: 3, Status: policy.StatusSafe},
+		{CampaignID: "excluded", SemanticClass: 1, Status: policy.StatusImpossible, Excluded: true},
 	})
-	if len(classes) != 2 || classes["urgent"] != 0 || classes["weak"] != 4 {
-		t.Fatalf("exact campaign class publication = %v", classes)
+	if len(facts) != 4 || facts["urgent"].SemanticClass != 0 || facts["weak"].SemanticClass != 4 {
+		t.Fatalf("exact campaign semantic publication = %v", facts)
 	}
-	if _, ok := classes["excluded"]; ok {
-		t.Fatal("excluded campaign gained a published semantic class")
+	if !facts["urgent"].SecondaryEligible || !facts["weak"].SecondaryEligible {
+		t.Fatalf("known feasible remaining work was not secondary-eligible: %v", facts)
+	}
+	if facts["unknown"].SecondaryEligible || facts["completed"].SecondaryEligible {
+		t.Fatalf("UNKNOWN/completed campaign gained secondary utility: %v", facts)
+	}
+	if _, ok := facts["excluded"]; ok {
+		t.Fatal("Skip/IMPOSSIBLE campaign gained a published semantic fact")
 	}
 }
 
-func TestBestAssignedPolicyClassUsesEligibleAssignmentsNotRawTotals(t *testing.T) {
-	class, ok := bestAssignedPolicyClass([]*models.Campaign{
+func TestBestAssignedPolicyUtilityUsesEligibleAssignmentsNotRawTotals(t *testing.T) {
+	utility, ok := bestAssignedPolicyUtility([]*models.Campaign{
 		{ID: "slow", Drops: []*models.Drop{{ID: "slow-drop", MinutesRequired: 30}}},
 		{ID: "best", Drops: []*models.Drop{{ID: "best-drop", MinutesRequired: 30}}},
 		{ID: "excluded", Drops: []*models.Drop{{ID: "excluded-drop", MinutesRequired: 30}}},
-	}, map[string]policy.Decision{
-		"slow":     {CampaignID: "slow", Total: 999, SemanticClass: 4},
-		"best":     {CampaignID: "best", Total: -999, SemanticClass: 1},
-		"excluded": {CampaignID: "excluded", SemanticClass: 0, Excluded: true},
+	}, map[string]policy.CampaignSemantic{
+		"slow": {SemanticClass: 4, SecondaryEligible: true},
+		"best": {SemanticClass: 1, SecondaryEligible: true},
 	})
-	if !ok || class != 1 {
-		t.Fatalf("best assigned class = %d, ok=%v, want semantic class 1 rather than raw Total or excluded class", class, ok)
+	if !ok || utility.SemanticClass != 1 || !utility.HasSecondary || utility.SecondarySemanticClass != 4 {
+		t.Fatalf("assigned utility = %+v, ok=%v, want primary class 1 plus one secondary class 4", utility, ok)
 	}
 }
 
-func TestBestDiscoveredPolicyClassUsesExactAdvertisedAndAllowedCampaign(t *testing.T) {
+func TestBestDiscoveredPolicyUtilityUsesExactAdvertisedAndAllowedCampaign(t *testing.T) {
 	s := models.NewStreamer("disco", models.StreamerSettings{ClaimDrops: true})
 	s.ChannelID = "allowed-channel"
 	s.Stream.SetCampaignIDs([]string{"urgent-disallowed", "weak-allowed", "excluded"})
@@ -74,17 +81,16 @@ func TestBestDiscoveredPolicyClassUsesExactAdvertisedAndAllowedCampaign(t *testi
 		"weak-allowed":      {ID: "weak-allowed", Drops: []*models.Drop{{ID: "weak-drop", MinutesRequired: 30}}},
 		"excluded":          {ID: "excluded", Drops: []*models.Drop{{ID: "excluded-drop", MinutesRequired: 30}}},
 	}
-	class, ok := bestDiscoveredPolicyClass(s, map[string]policy.Decision{
-		"urgent-disallowed": {CampaignID: "urgent-disallowed", SemanticClass: 0},
-		"weak-allowed":      {CampaignID: "weak-allowed", SemanticClass: 2},
-		"excluded":          {CampaignID: "excluded", SemanticClass: 1, Excluded: true},
+	utility, ok := bestDiscoveredPolicyUtility(s, map[string]policy.CampaignSemantic{
+		"urgent-disallowed": {SemanticClass: 0, SecondaryEligible: true},
+		"weak-allowed":      {SemanticClass: 2, SecondaryEligible: true},
 	}, campaigns)
-	if !ok || class != 2 {
-		t.Fatalf("discovery class = %d, ok=%v, want exact carried+allowed class 2", class, ok)
+	if !ok || utility.SemanticClass != 2 || utility.HasSecondary {
+		t.Fatalf("discovery utility = %+v, ok=%v, want exact carried+allowed primary class 2", utility, ok)
 	}
 }
 
-func TestBestDiscoveredPolicyClassFailsClosedOnUnknownCampaignACL(t *testing.T) {
+func TestBestDiscoveredPolicyUtilityFailsClosedOnUnknownCampaignACL(t *testing.T) {
 	s := models.NewStreamer("disco", models.StreamerSettings{ClaimDrops: true})
 	s.ChannelID = "channel"
 	s.Stream.SetCampaignIDs([]string{"unknown", "allowed"})
@@ -96,12 +102,51 @@ func TestBestDiscoveredPolicyClassFailsClosedOnUnknownCampaignACL(t *testing.T) 
 		},
 		"allowed": {ID: "allowed", Drops: []*models.Drop{{ID: "allowed-drop", MinutesRequired: 30}}},
 	}
-	class, ok := bestDiscoveredPolicyClass(s, map[string]policy.Decision{
-		"unknown": {CampaignID: "unknown", SemanticClass: 0},
-		"allowed": {CampaignID: "allowed", SemanticClass: 2},
+	utility, ok := bestDiscoveredPolicyUtility(s, map[string]policy.CampaignSemantic{
+		"unknown": {SemanticClass: 0, SecondaryEligible: true},
+		"allowed": {SemanticClass: 2, SecondaryEligible: true},
 	}, campaigns)
-	if !ok || class != 2 {
-		t.Fatalf("discovery class = %d, ok=%v, want allowed class 2 after ACLUnknown fails closed", class, ok)
+	if !ok || utility.SemanticClass != 2 || utility.HasSecondary {
+		t.Fatalf("discovery utility = %+v, ok=%v, want allowed primary class 2 after ACLUnknown fails closed", utility, ok)
+	}
+}
+
+func TestAssignedPolicyUtilityDeduplicatesCampaignAndTiers(t *testing.T) {
+	campaign := &models.Campaign{
+		ID: "one-campaign",
+		Drops: []*models.Drop{
+			{ID: "tier-one", MinutesRequired: 30},
+			{ID: "tier-two", MinutesRequired: 60},
+		},
+	}
+	utility, ok := bestAssignedPolicyUtility(
+		[]*models.Campaign{campaign, campaign},
+		map[string]policy.CampaignSemantic{
+			campaign.ID: {SemanticClass: 0, SecondaryEligible: true},
+		},
+	)
+	if !ok || utility.HasSecondary {
+		t.Fatalf("duplicate CampaignID or two reward tiers manufactured overlap: utility=%+v ranked=%v", utility, ok)
+	}
+}
+
+func TestConfiguredAndDiscoveredPolicyUtilitiesMatch(t *testing.T) {
+	primary := &models.Campaign{ID: "primary", Drops: []*models.Drop{{ID: "primary-drop", MinutesRequired: 30}}}
+	secondary := &models.Campaign{ID: "secondary", Drops: []*models.Drop{{ID: "secondary-drop", MinutesRequired: 60}}}
+	facts := map[string]policy.CampaignSemantic{
+		primary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		secondary.ID: {SemanticClass: 3, SecondaryEligible: true},
+	}
+	configured, configuredOK := bestAssignedPolicyUtility([]*models.Campaign{primary, secondary}, facts)
+
+	discoveredStreamer := models.NewStreamer("disco", models.StreamerSettings{ClaimDrops: true})
+	discoveredStreamer.ChannelID = "channel"
+	discoveredStreamer.Stream.SetCampaignIDs([]string{primary.ID, secondary.ID})
+	discovered, discoveredOK := bestDiscoveredPolicyUtility(discoveredStreamer, facts, map[string]*models.Campaign{
+		primary.ID: primary, secondary.ID: secondary,
+	})
+	if !configuredOK || !discoveredOK || configured != discovered {
+		t.Fatalf("configured/discovered semantic projection diverged: configured=%+v (%v) discovered=%+v (%v)", configured, configuredOK, discovered, discoveredOK)
 	}
 }
 
