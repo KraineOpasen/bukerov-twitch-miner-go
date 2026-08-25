@@ -968,6 +968,12 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	// to refresh its lightweight progress view promptly so the Drops page stays
 	// within seconds of Twitch instead of lagging up to a full sync interval.
 	m.watcher.SetOnMinuteWatched(m.dropsTracker.TriggerProgressSync)
+	// Persist the exact immutable timeout snapshot returned by Stream's atomic
+	// transition. The callback runs outside Stream/watcher locks and never
+	// reconstructs a BroadcastID from later mutable state.
+	m.watcher.SetOnWatchStreakTransition(func(s *models.Streamer, state models.WatchStreakPersistence) {
+		m.streamers.RecordWatchStreak(s, state)
+	})
 
 	// The discovery manager is always constructed (so the Settings page can
 	// enable it at runtime), but it stays dormant — no API calls, no watch
@@ -1490,7 +1496,7 @@ func (m *Miner) GetNextStreamCheck() time.Time {
 	return m.nextStreamCheck
 }
 
-func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streamer) {
+func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streamer, outcome pubsub.MessageOutcome) {
 	switch msg.Topic.Type {
 	case pubsub.TopicCommunityPointsUser:
 		switch msg.Type {
@@ -1498,13 +1504,17 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 			if data := msg.Data; data != nil {
 				if pointGain, ok := data["point_gain"].(map[string]interface{}); ok {
 					if reasonCode, ok := pointGain["reason_code"].(string); ok {
-						// Persist the grant->broadcast binding regardless of
-						// analytics being enabled; runs on the pubsub handler
-						// goroutine, outside any pool/watcher lock. The
-						// in-memory MarkStreakEarned already happened in
-						// UpdateHistory on the pool's own handling path.
-						if reasonCode == "WATCH_STREAK" && m.streamers != nil {
-							m.streamers.RecordStreakGrant(s.GetUsername())
+						if reasonCode == "WATCH_STREAK" {
+							// Pool/Stream admission is the linearization point for every
+							// streak side effect. An exact domain replay still reaches this
+							// callback when transport dedup did not catch it, but may not
+							// write cache/analytics/notifications a second time.
+							if !outcome.WatchStreak.NewlyAccepted() {
+								return
+							}
+							if m.streamers != nil {
+								m.streamers.RecordWatchStreak(s, outcome.WatchStreak.Persistence)
+							}
 						}
 
 						if m.analyticsSvc != nil {

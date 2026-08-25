@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 // TestOverviewStreakBadgeHonorsBroadcastBinding pins the render semantics of
@@ -32,7 +35,12 @@ func TestOverviewStreakBadgeHonorsBroadcastBinding(t *testing.T) {
 	// Grant on the current broadcast, then a same-broadcast re-arm
 	// (blip/restart): the badge must disappear even though the raw missing
 	// flag is armed again.
-	online.UpdateHistory("WATCH_STREAK", 300)
+	result := online.ApplyWatchStreakGrant(models.WatchStreakGrantEvent{
+		EventID: "grant-b1", AcceptedAt: time.Now(), ProvenBroadcastID: online.Stream.GetBroadcastID(),
+	}, 300)
+	if !result.NewlyAccepted() {
+		t.Fatalf("grant admission=%s, want newly accepted", result.Admission)
+	}
 	online.Stream.InitWatchStreak()
 	if strings.Contains(fetch(), `bar-streak`) {
 		t.Fatal("badge shown for a broadcast whose streak is already granted (phantom moved from logs to UI)")

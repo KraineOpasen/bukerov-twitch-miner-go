@@ -228,6 +228,10 @@ type MinuteWatcher struct {
 	// it to refresh drop progress promptly (a watched minute means real progress
 	// was just made) instead of waiting out its sync interval. Guarded by mu.
 	onMinuteWatched func()
+	// onWatchStreakTransition persists the immutable Stream snapshot returned by
+	// the one atomic timeout transition. It is copied under mu and invoked after
+	// Stream.mu has been released.
+	onWatchStreakTransition func(*models.Streamer, models.WatchStreakPersistence)
 
 	// lostMiningMinutes accumulates estimated "idle slot" watch time for the
 	// daily summary: per tick, wall-clock minutes for slots that were fillable
@@ -303,56 +307,23 @@ func (r *rotationState) resetDeferralApproach() {
 // streakDiagState records which watch-streak pursuit log lines have already
 // been emitted for a streamer's current (still-missing) streak.
 type streakDiagState struct {
-	pursuing bool // "Pursuing watch streak" already logged
-	released bool // "released the boost seat (evidence/bounded window)" already logged
+	broadcastID string
+	pursuing    bool // "Pursuing watch streak" already logged
+	released    bool // Stream-owned 20m bounded-timeout release already logged
 }
-
-// watchStreakThresholdMinutes is the rough number of watched minutes by which
-// Twitch usually grants a watch streak. It is NO LONGER a pursuit cutoff — a
-// streak is confirmed only by the real WATCH_STREAK points event (see
-// isBoostEligible / streakPursuitExhausted), because Twitch does not promise the
-// grant at exactly seven minutes and often delivers it later. It survives only
-// as a diagnostic reference for the streak progress display.
-const watchStreakThresholdMinutes = 7.0
 
 // streakExpectedGrantMinutes is roughly how many CONTINUOUSLY-watched minutes it
 // normally takes Twitch to grant a still-earnable watch streak. It is a
-// DIAGNOSTIC reference only, never a release trigger on its own: Twitch does not
-// promise the grant at a fixed minute and frequently delivers it later. The boost
-// seat is released only by the authoritative WATCH_STREAK grant or the bounded
-// hard cap below (see streakPursuitExhausted).
+// DIAGNOSTIC reference only and causes no state transition.
 const streakExpectedGrantMinutes = 15.0
 
-// streakDeliveryGraceMinutes is the extra continuous-watch time the seat is held
-// PAST the expected grant point, so a WATCH_STREAK notice that Twitch triggers on
-// (or just after) the expected minute is still captured while the channel is
-// actually being watched. The notice arrives asynchronously on the best-effort
-// PubSub websocket, decoupled from the minute-watched HTTP report, so the very
-// report that pushes the counter to the expected minute can be the one that makes
-// Twitch grant the streak — releasing exactly there risks un-watching the channel
-// the tick before the grant lands. This grace is our own conservative policy (NOT
-// a documented Twitch timing), chosen because capturing the 300-450 streak reward
-// outranks rotation speed. It stays bounded: it is continuous-watch time, which
-// Stream.UpdateMinuteWatched / ResetWatchContinuity reset to zero on any break.
-const streakDeliveryGraceMinutes = 5.0
-
-// streakPursuitCapMinutes is the bounded HARD CAP that releases the streak boost
-// seat when Twitch has still not granted the streak — the expected grant point
-// plus the delivery grace. It is measured in CONTINUOUSLY-watched minutes
-// (Stream.UpdateMinuteWatched resets on a viewing break; ResetWatchContinuity
-// resets on a real slot loss), so it can only be reached by genuinely watching the
-// channel that long without interruption — well past Twitch's ~10-minute stream
-// minimum and the typical grant point. The authoritative WATCH_STREAK grant
-// (StreakPending -> false) is the primary, faster release; this cap only bounds
-// the "streak will never come" cases (first stream of the series, opted out,
-// already earned, or a view Twitch isn't counting at all). Releasing only frees
-// the seat: StreakPending stays true, so a LATE real WATCH_STREAK is still accepted
-// and recorded exactly once.
-const streakPursuitCapMinutes = streakExpectedGrantMinutes + streakDeliveryGraceMinutes
+// streakPursuitCapMinutes is an alias of the Stream owner's single behavioral
+// hard cap. It is not reconstructed from diagnostic timing references.
+const streakPursuitCapMinutes = models.WatchStreakPursuitCapMinutes
 
 // StreakPursuitCapMinutes is the UI-facing hard pursuit cap, in continuously
-// watched minutes: the bounded window (expected grant + delivery grace) after
-// which the streak boost seat is released even when Twitch never granted. The web
+// watched minutes: the Stream-owned bounded window after which the streak boost
+// seat is released with outcome UNKNOWN. The web
 // dashboard reads it as the watch-streak progress-bar denominator, so the UI and
 // the watcher share one 20-minute source of truth instead of a hardcoded copy. It
 // is the pursuit/watch window, NOT a promise that a reward is delivered at minute
@@ -509,6 +480,14 @@ func (w *MinuteWatcher) Stop() {
 func (w *MinuteWatcher) SetOnMinuteWatched(fn func()) {
 	w.mu.Lock()
 	w.onMinuteWatched = fn
+	w.mu.Unlock()
+}
+
+// SetOnWatchStreakTransition registers the existing cache owner's persistence
+// adapter for terminal streak transitions. Pass nil to clear it.
+func (w *MinuteWatcher) SetOnWatchStreakTransition(fn func(*models.Streamer, models.WatchStreakPersistence)) {
+	w.mu.Lock()
+	w.onWatchStreakTransition = fn
 	w.mu.Unlock()
 }
 
@@ -1735,51 +1714,52 @@ func containsIndex(online []int, idx int) bool {
 
 func (w *MinuteWatcher) isBoostEligible(idx int) bool {
 	s := w.streamers[idx]
+	decision, streakAdmitted := w.watchStreakDecision(idx)
 	if s.DropsCondition() {
 		return true
 	}
-	return s.GetSettings().WatchStreak &&
-		s.Stream.StreakPending() &&
-		(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-		!w.streakPursuitExhausted(idx)
+	return streakAdmitted && decision.PursuitEligible
 }
 
-// streakPursuitExhausted reports whether the streak boost seat should be RELEASED
-// even though Twitch has not granted the streak. The release trigger is the
-// CONTINUOUSLY-watched minutes reaching streakPursuitCapMinutes — and, crucially,
-// once reached it LATCHES per-broadcast (Stream.StreakPursuitExhausted), so a real
-// slot loss that resets the continuous-minute counter can NOT re-open a fresh
-// pursuit window for the same broadcast. The authoritative WATCH_STREAK grant is
-// handled separately (StreakPending -> false makes isBoostEligible false
-// immediately, the primary and fastest release).
-//
-// It deliberately does NOT release on WATCH-points evidence. Twitch pays a watch
-// streak only while the channel is actually being watched, and nothing proves the
-// grant lands at or before the second WATCH credit; releasing there would trade
-// streak reliability for faster rotation and could drop the channel just before
-// Twitch pays. The evidence is also unreliable as a trigger: the points-earned
-// subscription is account-wide, so a WATCH credit can be produced by an external
-// browser tab or arrive late from a prior broadcast on the same channel. So a
-// pending streak holds the seat until Twitch grants it or the bounded continuous
-// window elapses (then stays released for that broadcast) — maximizing 300-450
-// capture while staying bounded. Releasing only frees the seat: StreakPending stays
-// true, so a LATE real WATCH_STREAK is still accepted and recorded exactly once.
+// watchStreakDecision is the sole watcher adapter around the Stream owner. The
+// two external admission gates (user setting and existing offline-age policy)
+// are shared by direct selection, broker protection and diagnostics. The Stream
+// atomically owns eligibility, state and timeout; persistence is invoked only
+// after its lock is released. Evaluate before the Drops short-circuit so an
+// active Drop cannot accidentally keep a 20-minute streak timeout unlatched.
+func (w *MinuteWatcher) watchStreakDecision(idx int) (models.WatchStreakDecision, bool) {
+	s := w.streamers[idx]
+	if !s.GetSettings().WatchStreak || (!s.GetOfflineAt().IsZero() && time.Since(s.GetOfflineAt()) <= 30*time.Minute) {
+		return models.WatchStreakDecision{}, false
+	}
+	decision := s.Stream.EvaluateWatchStreak(time.Now())
+	if decision.Transitioned {
+		w.mu.RLock()
+		hook := w.onWatchStreakTransition
+		w.mu.RUnlock()
+		if hook != nil {
+			hook(s, decision.Persistence)
+		}
+	}
+	return decision, true
+}
+
+// streakPursuitExhausted is a compatibility wrapper for focused tests and
+// diagnostics; it consumes the same owner verdict and reconstructs no state.
 func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
-	return w.streamers[idx].Stream.StreakPursuitExhausted(streakPursuitCapMinutes)
+	decision, admitted := w.watchStreakDecision(idx)
+	return admitted && decision.State == models.WatchStreakTimedOutUnknown
 }
 
 // streakInProgress reports whether a boost-eligible streamer is actively
 // pursuing its watch streak: some watch time banked, streak still missing, and
-// the evidence-based pursuit not yet exhausted. Preferring these when picking the
+// the Stream-owned bounded pursuit not yet timed out. Preferring these when picking the
 // boost seat lets the watcher finish a streak it already started instead of
 // alternating between several fresh pending-streak streamers each tick and
 // completing none of them.
 func (w *MinuteWatcher) streakInProgress(idx int) bool {
-	s := w.streamers[idx]
-	return s.GetSettings().WatchStreak &&
-		s.Stream.StreakPending() &&
-		s.Stream.GetMinuteWatched() > 0 &&
-		!w.streakPursuitExhausted(idx)
+	decision, admitted := w.watchStreakDecision(idx)
+	return admitted && decision.State == models.WatchStreakPursuing
 }
 
 // betterBoostCandidate reports whether cand should take the single prioritized
@@ -1815,7 +1795,7 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 // streak that has neither been earned nor exhausted, so an in-flight rotation
 // swap-out or a boost displacement should avoid interrupting it. With the
 // event-driven model there is no fixed "minutes-to-completion" line any more
-// (the pursuit ends on the WATCH_STREAK grant or evidence-based exhaustion), so
+// (the pursuit ends on the WATCH_STREAK grant or the Stream-owned 20m cap), so
 // this mirrors streakInProgress. The swap-out deferral it feeds is bounded
 // (once per approach), so it can never stall the rotation.
 func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
@@ -1824,19 +1804,15 @@ func (w *MinuteWatcher) nearStreakCompletion(idx int) bool {
 
 // noteStreakProgress logs watch-streak pursuit for a streamer that just had a
 // minute-watched successfully reported. It emits at most one "Pursuing watch
-// streak" INFO and one "past the threshold" WARN per streak, so the operator
+// streak" INFO and one outcome-neutral bounded-timeout line per streak, so the operator
 // can both see the bot actively chasing streaks (previously invisible - the
 // only streak log was the earned "Points earned" line, which never appears
 // when streaks aren't being credited) and, crucially, tell apart "not watched
 // enough yet" from "watched enough but Twitch never granted it".
 func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	s := w.streamers[idx]
-	if !s.GetSettings().WatchStreak || !s.Stream.StreakPending() {
-		// Streak disabled, already earned for THIS broadcast (including a
-		// re-armed pursuit on the same broadcast after a blip or restart), or
-		// deferred until the broadcast is identified: drop any pursuit state
-		// so the next genuinely fresh broadcast reports again from scratch.
-		// This is what silences the misleading threshold WARN after a grant.
+	decision, admitted := w.watchStreakDecision(idx)
+	if !admitted || decision.State == models.WatchStreakGranted || decision.State == models.WatchStreakUnidentified {
 		delete(w.streakDiag, idx)
 		return
 	}
@@ -1845,8 +1821,11 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 		w.streakDiag = make(map[int]streakDiagState)
 	}
 	state := w.streakDiag[idx]
-	mw := s.Stream.GetMinuteWatched()
-	evidence := s.Stream.StreakWatchEvidence()
+	if state.broadcastID != decision.BroadcastID {
+		state = streakDiagState{broadcastID: decision.BroadcastID}
+	}
+	mw := decision.ContinuousMinutes
+	evidence := decision.WatchEvidence
 
 	if !state.pursuing {
 		state.pursuing = true
@@ -1854,7 +1833,7 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 			"streamer", s.GetUsername(),
 			"continuousWatchedMinutes", mw,
 			"watchEvents", evidence,
-			"broadcastID", s.Stream.GetBroadcastID())
+			"broadcastID", decision.BroadcastID)
 	}
 
 	// Log the bounded-window release exactly once, as an OUTCOME-NEUTRAL
@@ -1868,11 +1847,11 @@ func (w *MinuteWatcher) noteStreakProgress(idx int) {
 	// only inference drawn from it is the narrow, non-outcome hint that ZERO WATCH
 	// credits for the whole broadcast may point at a transport/authorization problem
 	// worth checking (a counted view normally produces WATCH credits).
-	if w.streakPursuitExhausted(idx) && !state.released {
+	if decision.State == models.WatchStreakTimedOutUnknown && !state.released {
 		state.released = true
 		attrs := []any{
 			"streamer", s.GetUsername(),
-			"broadcastID", s.Stream.GetBroadcastID(),
+			"broadcastID", decision.BroadcastID,
 			"continuousWatchedMinutes", mw,
 			"watchEvents", evidence,
 			"releaseReason", "bounded_timeout",
@@ -1952,11 +1931,8 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 
 		case config.PriorityStreak:
 			for _, idx := range onlineIndexes {
-				s := w.streamers[idx]
-				if s.GetSettings().WatchStreak &&
-					s.Stream.StreakPending() &&
-					(s.GetOfflineAt().IsZero() || time.Since(s.GetOfflineAt()) > 30*time.Minute) &&
-					s.Stream.GetMinuteWatched() < watchStreakThresholdMinutes {
+				decision, admitted := w.watchStreakDecision(idx)
+				if admitted && decision.PursuitEligible {
 					if !watching[idx] {
 						watching[idx] = true
 						w.noteSelection(idx, "watched: selected by STREAK priority - watch streak not yet earned this stream")

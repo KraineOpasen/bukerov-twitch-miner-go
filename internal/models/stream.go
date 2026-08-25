@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/base64"
 	"encoding/json"
+	"sort"
 	"sync"
 	"time"
 )
@@ -40,18 +41,7 @@ type Stream struct {
 	campaignUnknownSince    time.Time
 	campaignLastKnownAt     time.Time
 
-	WatchStreakMissing bool
-	// streakEarnedBroadcastID remembers WHICH broadcast the last watch-streak
-	// grant belonged to, and streakEarnedAt when it was granted. Twitch (by
-	// all observed data — never two grants on one broadcast) pays a streak at
-	// most once per broadcast, so pursuing one again on the same BroadcastID
-	// only burns the boost slot and emits misleading WARNs. Both fields are
-	// owned by mu like every other Stream field; they survive an
-	// InitWatchStreak re-arm on purpose (a blip must not forget the grant)
-	// and are only ever overwritten by MarkStreakEarned/HydrateStreakGrant.
-	streakEarnedBroadcastID string
-	streakEarnedAt          time.Time
-	MinuteWatched           float64
+	MinuteWatched float64
 
 	// streakWatchEvents counts the real "WATCH" points-earned events Twitch has
 	// delivered for the CURRENT broadcast. It is evidence (not proof of a grant)
@@ -60,23 +50,21 @@ type Stream struct {
 	// rdavydov/Twitch-Channel-Points-Miner-v2#782). Session-local: reset to 0 by
 	// armWatchStreakLocked whenever the streak re-arms (new broadcast / fresh
 	// online), so it never carries across broadcasts and a restart starts it at
-	// zero. It only ever RELEASES the streak boost seat — it never records a
-	// 300-450 grant (that stays exclusively the WATCH_STREAK points event).
+	// zero. It is diagnostic delivery evidence only: it never releases pursuit
+	// and never records a 300-450 grant (that stays exclusively the
+	// WATCH_STREAK points event).
 	streakWatchEvents int
 
-	// streakPursuitTimedOut latches once the bounded streak-pursuit window (the
-	// hard cap of CONTINUOUSLY-watched minutes) elapsed for the CURRENT broadcast
-	// with no authoritative WATCH_STREAK grant. It is what stops the watcher from
-	// re-opening a fresh pursuit window for the same broadcast after a real slot
-	// loss resets the continuous-minute counter (ResetWatchContinuity): without it,
-	// exhaustion is measured only by MinuteWatched, which the slot-loss reset zeroes,
-	// so the same broadcast would cycle 20-minute pursuit windows forever. Set the
-	// first time StreakPursuitExhausted observes the cap; deliberately NOT cleared by
-	// ResetWatchContinuity or by WATCH evidence; cleared only on re-arm (a genuinely
-	// new broadcast, via armWatchStreakLocked). It never awards points and never
-	// substitutes for the WATCH_STREAK grant — a late real grant is still accepted
-	// and recorded once (StreakPending is unaffected by this field).
-	streakPursuitTimedOut bool
+	// Watch-streak terminal facts and exact event identities are owned by this
+	// Stream and guarded by mu. The timeout is bound to one exact BroadcastID;
+	// grants form a persisted ledger keyed by the canonical PubSub event
+	// fingerprint. Facts do not expire by wall-clock age: only an exact
+	// BroadcastID replacement may re-arm pursuit, and exact replay identity must
+	// survive restart. Keeping facts rather than a process-local boolean makes
+	// restart, slot loss and broadcast replacement derive the same verdict.
+	streakTimeout  *WatchStreakTimeout
+	streakGrants   map[string]WatchStreakGrantFact
+	streakRevision uint64
 
 	// spadeURL is written by the api client (stream bring-up, session refresh)
 	// and read by the minute sender and health probes on other goroutines —
@@ -118,10 +106,99 @@ type MinuteWatchedEvent struct {
 	Properties map[string]interface{} `json:"properties"`
 }
 
+// WatchStreakPursuitCapMinutes is the single behavioral pursuit cap. It is
+// continuous successfully-delivered watch evidence for one exact BroadcastID;
+// neither the historical seven-minute hint nor the fifteen-minute diagnostic
+// reference participates in state transitions.
+const WatchStreakPursuitCapMinutes = 20.0
+
+// WatchStreakState is the active pursuit state for the current BroadcastID.
+// GRANTED_UNBOUND is intentionally not a current-broadcast state: it is a grant
+// ledger fact that cannot change a pursuit whose BroadcastID was not proven.
+type WatchStreakState string
+
+const (
+	WatchStreakUnidentified    WatchStreakState = "UNIDENTIFIED"
+	WatchStreakEligible        WatchStreakState = "ELIGIBLE"
+	WatchStreakPursuing        WatchStreakState = "PURSUING"
+	WatchStreakGranted         WatchStreakState = "GRANTED"
+	WatchStreakTimedOutUnknown WatchStreakState = "TIMED_OUT_UNKNOWN"
+)
+
+type WatchStreakGrantBinding string
+
+const (
+	WatchStreakGrantBound   WatchStreakGrantBinding = "GRANTED"
+	WatchStreakGrantUnbound WatchStreakGrantBinding = "GRANTED_UNBOUND"
+)
+
+// WatchStreakGrantFact is one accepted authoritative WATCH_STREAK event.
+// EventID is an opaque canonical payload fingerprint used only for exact replay
+// admission. AcceptedAt is local admission time; it is never used to infer a
+// BroadcastID. BroadcastID is non-empty only when an independent source proved
+// the binding.
+type WatchStreakGrantFact struct {
+	EventID     string                  `json:"eventId"`
+	Binding     WatchStreakGrantBinding `json:"binding"`
+	BroadcastID string                  `json:"broadcastId,omitempty"`
+	AcceptedAt  time.Time               `json:"acceptedAt"`
+}
+
+type WatchStreakTimeout struct {
+	BroadcastID string    `json:"broadcastId"`
+	TimedOutAt  time.Time `json:"timedOutAt"`
+}
+
+// WatchStreakPersistence is an immutable, caller-owned full snapshot of every
+// restart-relevant streak fact. Grants are sorted by EventID for deterministic
+// cache bytes.
+type WatchStreakPersistence struct {
+	Revision uint64                 `json:"revision"`
+	Timeout  *WatchStreakTimeout    `json:"timeout,omitempty"`
+	Grants   []WatchStreakGrantFact `json:"grants,omitempty"`
+}
+
+// WatchStreakDecision is one atomic verdict for every selection/protection and
+// diagnostic caller. Transitioned is true only for the call that first latches
+// the current broadcast's 20-minute timeout; Persistence is then the exact
+// under-lock snapshot that must be written by the existing cache owner.
+type WatchStreakDecision struct {
+	State             WatchStreakState
+	BroadcastID       string
+	ContinuousMinutes float64
+	WatchEvidence     int
+	PursuitEligible   bool
+	Transitioned      bool
+	Persistence       WatchStreakPersistence
+}
+
+type WatchStreakGrantEvent struct {
+	EventID           string
+	AcceptedAt        time.Time
+	ProvenBroadcastID string
+}
+
+type WatchStreakGrantAdmission string
+
+const (
+	WatchStreakGrantNewBound   WatchStreakGrantAdmission = "NEW_BOUND"
+	WatchStreakGrantNewUnbound WatchStreakGrantAdmission = "NEW_UNBOUND"
+	WatchStreakGrantDuplicate  WatchStreakGrantAdmission = "DUPLICATE"
+	WatchStreakGrantInvalid    WatchStreakGrantAdmission = "INVALID"
+)
+
+type WatchStreakGrantResult struct {
+	Admission   WatchStreakGrantAdmission
+	Decision    WatchStreakDecision
+	Persistence WatchStreakPersistence
+}
+
+func (r WatchStreakGrantResult) NewlyAccepted() bool {
+	return r.Admission == WatchStreakGrantNewBound || r.Admission == WatchStreakGrantNewUnbound
+}
+
 func NewStream() *Stream {
-	return &Stream{
-		WatchStreakMissing: true,
-	}
+	return &Stream{}
 }
 
 func (s *Stream) Update(broadcastID, title string, game *Game, tags []Tag, viewersCount int) {
@@ -340,15 +417,11 @@ func (s *Stream) InitWatchStreak() {
 	s.armWatchStreakLocked()
 }
 
-// armWatchStreakLocked is the shared re-arm primitive (caller holds mu). It
-// deliberately does NOT touch streakEarnedBroadcastID/streakEarnedAt: a
-// re-arm caused by a blip on the SAME broadcast must not forget that the
-// streak was already granted there — that amnesia was exactly the phantom-
-// pursuit bug. StreakPending compares the remembered grant against the
-// current BroadcastID, so a grant from a previous broadcast never blocks a
-// genuinely new one.
+// armWatchStreakLocked resets only current-session evidence (caller holds mu).
+// Broadcast-bound terminal facts and accepted grant identities deliberately
+// survive: exact-ID matching makes a genuinely new broadcast eligible while a
+// same-broadcast blip/restart cannot erase GRANTED or TIMED_OUT_UNKNOWN.
 func (s *Stream) armWatchStreakLocked() {
-	s.WatchStreakMissing = true
 	s.MinuteWatched = 0
 	s.minuteWatchedUpdated = time.Time{}
 	// The WATCH-evidence counter is session-local to one broadcast's pursuit, so
@@ -357,66 +430,192 @@ func (s *Stream) armWatchStreakLocked() {
 	// pursuit, and, symmetrically, a reset that forgot it would let the counter
 	// keep growing across broadcasts).
 	s.streakWatchEvents = 0
-	// The pursuit-timeout latch is bound to one broadcast: a genuinely new
-	// broadcast is a fresh streak worth pursuing, so clear it here (the ONLY place
-	// it clears). It is intentionally NOT cleared on a mere continuity reset.
-	s.streakPursuitTimedOut = false
 }
 
-// MarkStreakEarned records a live watch-streak grant: the streak is no longer
-// missing, and it belongs to the given broadcast (empty when the broadcast
-// was not yet identified — then only the missing flag is cleared and the next
-// re-arm falls back to the old time-based behavior).
-func (s *Stream) MarkStreakEarned(broadcastID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.WatchStreakMissing = false
-	s.streakEarnedBroadcastID = broadcastID
-	s.streakEarnedAt = time.Now()
-}
-
-// HydrateStreakGrant seeds a persisted grant (streak cache) into a freshly
-// created Stream at startup. It intentionally leaves WatchStreakMissing true:
-// the block is enforced by StreakPending comparing broadcast IDs, so if the
-// channel is meanwhile on a NEW broadcast the pursuit starts normally.
-func (s *Stream) HydrateStreakGrant(broadcastID string, grantedAt time.Time) {
-	if broadcastID == "" {
-		return
+func (s *Stream) watchStreakPersistenceLocked() WatchStreakPersistence {
+	p := WatchStreakPersistence{Revision: s.streakRevision}
+	if s.streakTimeout != nil {
+		timeout := *s.streakTimeout
+		p.Timeout = &timeout
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.streakEarnedBroadcastID = broadcastID
-	s.streakEarnedAt = grantedAt
+	if len(s.streakGrants) > 0 {
+		p.Grants = make([]WatchStreakGrantFact, 0, len(s.streakGrants))
+		for _, grant := range s.streakGrants {
+			p.Grants = append(p.Grants, grant)
+		}
+		sort.Slice(p.Grants, func(i, j int) bool { return p.Grants[i].EventID < p.Grants[j].EventID })
+	}
+	return p
 }
 
-// StreakEarnedGrant returns the remembered grant (broadcast ID + time), for
-// the persistence layer. Empty ID means no identified grant.
-func (s *Stream) StreakEarnedGrant() (string, time.Time) {
+func (s *Stream) WatchStreakPersistence() WatchStreakPersistence {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.streakEarnedBroadcastID, s.streakEarnedAt
+	return s.watchStreakPersistenceLocked()
 }
 
-// StreakPending reports whether a watch streak is still worth pursuing on the
-// CURRENT broadcast. It is the single predicate the watcher uses (under mu,
-// racefree):
-//   - streak not missing -> false (granted and no re-arm since);
-//   - broadcast identified -> pending only if the remembered grant belongs to
-//     a DIFFERENT (or no) broadcast;
-//   - broadcast not identified yet -> if a grant is remembered, pursuit is
-//     DEFERRED until the broadcast is identified (never burn the boost slot
-//     blind right after a restart); with no remembered grant this degrades to
-//     the historical behavior and pursues.
+func (s *Stream) hasBoundGrantLocked(broadcastID string) bool {
+	if broadcastID == "" {
+		return false
+	}
+	for _, grant := range s.streakGrants {
+		if grant.Binding == WatchStreakGrantBound && grant.BroadcastID == broadcastID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Stream) hasAnyBoundGrantLocked() bool {
+	for _, grant := range s.streakGrants {
+		if grant.Binding == WatchStreakGrantBound && grant.BroadcastID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Stream) watchStreakDecisionLocked(now time.Time, allowTimeout bool) WatchStreakDecision {
+	d := WatchStreakDecision{
+		BroadcastID:       s.BroadcastID,
+		ContinuousMinutes: s.MinuteWatched,
+		WatchEvidence:     s.streakWatchEvents,
+	}
+
+	switch {
+	case s.BroadcastID == "":
+		d.State = WatchStreakUnidentified
+	case s.hasBoundGrantLocked(s.BroadcastID):
+		d.State = WatchStreakGranted
+	case s.streakTimeout != nil && s.streakTimeout.BroadcastID == s.BroadcastID:
+		d.State = WatchStreakTimedOutUnknown
+	case allowTimeout && s.MinuteWatched >= WatchStreakPursuitCapMinutes:
+		if now.IsZero() {
+			now = time.Now()
+		}
+		s.streakTimeout = &WatchStreakTimeout{BroadcastID: s.BroadcastID, TimedOutAt: now}
+		s.streakRevision++
+		d.State = WatchStreakTimedOutUnknown
+		d.Transitioned = true
+		d.Persistence = s.watchStreakPersistenceLocked()
+	case s.MinuteWatched > 0:
+		d.State = WatchStreakPursuing
+		d.PursuitEligible = true
+	default:
+		d.State = WatchStreakEligible
+		d.PursuitEligible = true
+	}
+	return d
+}
+
+// EvaluateWatchStreak is the single mutating eligibility/timeout verdict used
+// by every production selection and protection path. At exactly 20 delivered
+// continuous minutes it atomically latches TIMED_OUT_UNKNOWN to the current
+// exact BroadcastID and returns the persistence snapshot from that transition.
+func (s *Stream) EvaluateWatchStreak(now time.Time) WatchStreakDecision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchStreakDecisionLocked(now, true)
+}
+
+// AcceptWatchStreakGrant atomically admits an authoritative grant event. An
+// empty ProvenBroadcastID is always GRANTED_UNBOUND; the current BroadcastID is
+// never substituted. Exact EventID replay is a no-op across every downstream
+// side effect because only one caller can receive a newly-accepted result.
+func (s *Stream) AcceptWatchStreakGrant(event WatchStreakGrantEvent) WatchStreakGrantResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if event.EventID == "" {
+		return WatchStreakGrantResult{
+			Admission: WatchStreakGrantInvalid,
+			Decision:  s.watchStreakDecisionLocked(event.AcceptedAt, false),
+		}
+	}
+	if _, exists := s.streakGrants[event.EventID]; exists {
+		return WatchStreakGrantResult{
+			Admission: WatchStreakGrantDuplicate,
+			Decision:  s.watchStreakDecisionLocked(event.AcceptedAt, false),
+		}
+	}
+	if event.AcceptedAt.IsZero() {
+		event.AcceptedAt = time.Now()
+	}
+	if s.streakGrants == nil {
+		s.streakGrants = make(map[string]WatchStreakGrantFact)
+	}
+
+	fact := WatchStreakGrantFact{
+		EventID:    event.EventID,
+		AcceptedAt: event.AcceptedAt,
+	}
+	admission := WatchStreakGrantNewUnbound
+	if event.ProvenBroadcastID != "" {
+		fact.Binding = WatchStreakGrantBound
+		fact.BroadcastID = event.ProvenBroadcastID
+		admission = WatchStreakGrantNewBound
+	} else {
+		fact.Binding = WatchStreakGrantUnbound
+	}
+	s.streakGrants[event.EventID] = fact
+	s.streakRevision++
+	persistence := s.watchStreakPersistenceLocked()
+	return WatchStreakGrantResult{
+		Admission:   admission,
+		Decision:    s.watchStreakDecisionLocked(event.AcceptedAt, false),
+		Persistence: persistence,
+	}
+}
+
+// HydrateWatchStreak restores only validated cache facts. It never manufactures
+// success: malformed bindings are skipped and the maximum persisted revision is
+// retained for stale-write rejection.
+func (s *Stream) HydrateWatchStreak(p WatchStreakPersistence) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streakRevision = p.Revision
+	s.streakTimeout = nil
+	if p.Timeout != nil && p.Timeout.BroadcastID != "" && !p.Timeout.TimedOutAt.IsZero() {
+		timeout := *p.Timeout
+		s.streakTimeout = &timeout
+	}
+	s.streakGrants = make(map[string]WatchStreakGrantFact, len(p.Grants))
+	for _, grant := range p.Grants {
+		validBound := grant.Binding == WatchStreakGrantBound && grant.BroadcastID != ""
+		validUnbound := grant.Binding == WatchStreakGrantUnbound && grant.BroadcastID == ""
+		if grant.EventID == "" || grant.AcceptedAt.IsZero() || (!validBound && !validUnbound) {
+			continue
+		}
+		s.streakGrants[grant.EventID] = grant
+	}
+}
+
+// StreakPending is a compatibility diagnostic: true means the current outcome
+// remains unresolved, including TIMED_OUT_UNKNOWN. Behavioral selection never
+// calls it; EvaluateWatchStreak owns pursuit eligibility.
 func (s *Stream) StreakPending() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !s.WatchStreakMissing {
-		return false
+	if s.BroadcastID == "" {
+		return !s.hasAnyBoundGrantLocked()
 	}
-	if s.BroadcastID != "" {
-		return s.streakEarnedBroadcastID == "" || s.BroadcastID != s.streakEarnedBroadcastID
+	return !s.hasBoundGrantLocked(s.BroadcastID)
+}
+
+// StreakEarnedGrant returns the newest proven bound grant for compatibility
+// diagnostics. Unbound grants deliberately return no invented BroadcastID.
+func (s *Stream) StreakEarnedGrant() (string, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var bid string
+	var at time.Time
+	for _, grant := range s.streakGrants {
+		if grant.Binding == WatchStreakGrantBound && grant.AcceptedAt.After(at) {
+			bid, at = grant.BroadcastID, grant.AcceptedAt
+		}
 	}
-	return s.streakEarnedBroadcastID == ""
+	return bid, at
 }
 
 // NoteWatchPointsEvent records that Twitch delivered a real "WATCH" points-earned
@@ -492,12 +691,8 @@ func (s *Stream) UpdateMinuteWatched(maxGap time.Duration) float64 {
 // It complements UpdateMinuteWatched's own gap>maxGap reset: that catches a missed
 // report while the slot is still HELD; this catches the slot itself being lost and
 // regained within maxGap, which the timestamp gap alone cannot distinguish from
-// continuous viewing. The streak IDENTITY is deliberately left intact —
-// WatchStreakMissing, streakEarnedBroadcastID/At, the streakWatchEvents evidence
-// counter, and the streakPursuitTimedOut latch are untouched — so StreakPending is
-// unchanged (a late real WATCH_STREAK is still accepted), a mere rotation never
-// re-arms the pursuit, and a broadcast that already timed out is NOT handed a fresh
-// pursuit window just because its continuous minutes were reset.
+// continuous viewing. Grant identities and the broadcast-bound timeout are left
+// intact, so a mere rotation never creates another 20-minute window.
 func (s *Stream) ResetWatchContinuity() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -505,38 +700,12 @@ func (s *Stream) ResetWatchContinuity() {
 	s.minuteWatchedUpdated = time.Time{}
 }
 
-// StreakPursuitExhausted reports whether the bounded streak-pursuit window has
-// elapsed for the current broadcast, LATCHING that timed-out state the first time
-// the continuously-watched minutes reach capMinutes. The latch is what makes the
-// decision survive the continuity reset a slot loss triggers: once a broadcast has
-// burned its bounded window it is never granted a fresh one (StreakPursuitExhausted
-// keeps returning true even after MinuteWatched is reset to zero), until a genuinely
-// new broadcast re-arms via armWatchStreakLocked. Setting the latch is done here,
-// atomically with the exhaustion decision the watcher's isBoostEligible consults, so
-// there is no separate "release" call to keep in sync. capMinutes is passed in so
-// the watcher owns the policy constant; a non-positive cap disables the
-// minutes-based trigger (the latch, once set, still holds). It awards no points and
-// never marks the streak earned — that stays exclusively the WATCH_STREAK grant.
-func (s *Stream) StreakPursuitExhausted(capMinutes float64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.streakPursuitTimedOut {
-		return true
-	}
-	if capMinutes > 0 && s.MinuteWatched >= capMinutes {
-		s.streakPursuitTimedOut = true
-		return true
-	}
-	return false
-}
-
-// StreakPursuitTimedOut reports whether the bounded pursuit window has already
-// latched timed-out for the current broadcast (see streakPursuitTimedOut). Pure
-// read; it neither sets the latch nor consults the minute counter.
+// StreakPursuitTimedOut is a compatibility diagnostic. It is a pure exact-ID
+// read; only EvaluateWatchStreak can create the timeout transition.
 func (s *Stream) StreakPursuitTimedOut() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.streakPursuitTimedOut
+	return s.BroadcastID != "" && s.streakTimeout != nil && s.streakTimeout.BroadcastID == s.BroadcastID
 }
 
 func (s *Stream) GetMinuteWatched() float64 {
@@ -549,8 +718,10 @@ func (s *Stream) GetMinuteWatched() float64 {
 func (s *Stream) GetWatchStreakMissing() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	return s.WatchStreakMissing
+	if s.BroadcastID == "" {
+		return !s.hasAnyBoundGrantLocked()
+	}
+	return !s.hasBoundGrantLocked(s.BroadcastID)
 }
 
 func (s *Stream) GetTitle() string {

@@ -130,7 +130,7 @@ func TestHandlePubSubMessageConcurrentWithDiscordToggle(t *testing.T) {
 	}
 
 	raceApplyAgainst(t, m, rsOn, rsOff, func() {
-		m.handlePubSubMessage(msg, s)
+		m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
 	})
 }
 

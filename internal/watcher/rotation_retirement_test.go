@@ -17,6 +17,7 @@ func newRotationRetirementWatcher(n int, store *WatchTimeStore) (*MinuteWatcher,
 	online := make([]int, n)
 	for i := range streamers {
 		streamers[i] = models.NewStreamer("streamer"+string(rune('a'+i)), models.DefaultStreamerSettings())
+		streamers[i].Stream.Update("rotation-broadcast-"+streamers[i].GetUsername(), "t", nil, nil, 1)
 		streamers[i].SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 		streamers[i].SetConfirmedOnline()
 		online[i] = i
@@ -131,7 +132,6 @@ func TestBoostContinuitySurvivesBasePairReconciliation(t *testing.T) {
 	w, streamers, online := newRotationRetirementWatcher(5, nil)
 	for _, streamer := range streamers {
 		streamer.Settings.WatchStreak = true
-		streamer.Stream.WatchStreakMissing = true
 	}
 
 	basePairs := make(map[string]bool)
@@ -193,14 +193,13 @@ func TestBoostHandsOffWhenTargetNoLongerEligible(t *testing.T) {
 	w, streamers, online := newRotationRetirementWatcher(4, nil)
 	for _, streamer := range streamers {
 		streamer.Settings.WatchStreak = true
-		streamer.Stream.WatchStreakMissing = true
 	}
 
 	runSelectionTick(w, online)
 	if !watchedLogins(w.GetDebugState())["streamerc"] {
 		t.Fatalf("precondition: expected streamerc to hold the continuity seat: %+v", w.GetDebugState().Decisions)
 	}
-	streamers[2].Stream.WatchStreakMissing = false
+	acceptBoundStreakForWatcherTest(t, streamers[2].Stream, "grant-c", streamers[2].Stream.GetBroadcastID())
 
 	runSelectionTick(w, online)
 	state := w.GetDebugState()
@@ -216,7 +215,6 @@ func TestStrictlyStrongerRestrictedDropPreemptsProtectedStreak(t *testing.T) {
 	w, streamers, online := newRotationRetirementWatcher(3, nil)
 	for _, idx := range []int{0, 1} {
 		streamers[idx].Settings.WatchStreak = true
-		streamers[idx].Stream.WatchStreakMissing = true
 		streamers[idx].Stream.MinuteWatched = 5
 	}
 	streamers[2].Settings.WatchStreak = false
@@ -245,7 +243,6 @@ func TestStreakDeferralHasOneNonExtendingDeadline(t *testing.T) {
 	initial := w.GetDebugState()
 
 	streamers[0].Settings.WatchStreak = true
-	streamers[0].Stream.WatchStreakMissing = true
 	streamers[0].Stream.MinuteWatched = 5
 	for _, login := range initial.ActivePair {
 		if err := store.RecordMinutes(login, 100, time.Now()); err != nil {
@@ -297,7 +294,10 @@ func TestDeferredStreamerLeavesImmediatelyWhenOfflineOrIneligible(t *testing.T) 
 		{
 			name: "streak no longer pending",
 			leave: func(streamer *models.Streamer) {
-				streamer.Stream.WatchStreakMissing = false
+				streamer.Stream.AcceptWatchStreakGrant(models.WatchStreakGrantEvent{
+					EventID: "grant-deferred", AcceptedAt: time.Now(),
+					ProvenBroadcastID: streamer.Stream.GetBroadcastID(),
+				})
 			},
 			online: []int{0, 1, 2, 3},
 		},
@@ -314,7 +314,6 @@ func TestDeferredStreamerLeavesImmediatelyWhenOfflineOrIneligible(t *testing.T) 
 			initial := w.GetDebugState()
 
 			streamers[0].Settings.WatchStreak = true
-			streamers[0].Stream.WatchStreakMissing = true
 			streamers[0].Stream.MinuteWatched = 5
 			for _, login := range initial.ActivePair {
 				if err := store.RecordMinutes(login, 100, time.Now()); err != nil {

@@ -36,13 +36,14 @@ type Manager struct {
 	client   twitchClient
 	defaults models.StreamerSettings
 
-	// streakCache persists watch-streak grants across restarts;
+	// streakCache persists Stream-owned watch-streak terminal snapshots across restarts;
 	// streakHydration is its snapshot loaded once before streamers are
 	// created, applied to each new Streamer's Stream. Both may be nil
 	// (feature off / library use) — everything degrades to the historical
 	// re-pursue behavior.
 	streakCache     *StreakCache
-	streakHydration map[string]StreakGrant
+	streakHydration map[string]models.WatchStreakPersistence
+	streakPersistMu sync.Mutex
 
 	streamers []*models.Streamer
 	// byID maps a streamer's stable ChannelID to its runtime object. Never
@@ -59,9 +60,13 @@ type Manager struct {
 // before LoadFromConfig so hydration covers the initial roster; runtime-added
 // streamers hydrate from the same snapshot.
 func (m *Manager) SetStreakCache(c *StreakCache) {
+	m.streakPersistMu.Lock()
+	defer m.streakPersistMu.Unlock()
 	m.streakCache = c
 	if c != nil {
 		m.streakHydration = c.Load(time.Now())
+	} else {
+		m.streakHydration = nil
 	}
 }
 
@@ -71,33 +76,57 @@ func (m *Manager) SetStreakCache(c *StreakCache) {
 // required for safety, but is used for consistency with every other external
 // reader.
 func (m *Manager) hydrateStreak(s *models.Streamer) {
-	if g, ok := m.streakHydration[s.GetUsername()]; ok {
-		s.Stream.HydrateStreakGrant(g.BroadcastID, g.GrantedAt)
+	if state, ok := m.streakHydration[s.GetUsername()]; ok {
+		s.Stream.HydrateWatchStreak(state)
 	}
 }
 
-// RecordStreakGrant persists the just-granted watch streak for username, so a
-// restart mid-broadcast does not re-pursue it. No-op without a cache or when
-// the broadcast was never identified.
-func (m *Manager) RecordStreakGrant(username string) {
-	if m.streakCache == nil {
-		return
-	}
-	s := m.Get(username)
+// RecordWatchStreak persists the immutable snapshot returned by the atomic
+// Stream transition. It never re-reads a mutable BroadcastID and serializes
+// writes with deletion, so a delayed write cannot resurrect a removed entry.
+func (m *Manager) RecordWatchStreak(s *models.Streamer, state models.WatchStreakPersistence) bool {
 	if s == nil {
-		return
+		return false
 	}
-	bid, at := s.Stream.StreakEarnedGrant()
-	m.streakCache.Record(s.GetUsername(), bid, at)
+	m.streakPersistMu.Lock()
+	defer m.streakPersistMu.Unlock()
+
+	// A PubSub callback may finish after settings reconciliation retired this
+	// object and ForgetStreak removed its cache entry. Reject that stale
+	// pointer before writing: otherwise the delayed callback could resurrect a
+	// terminal snapshot for a streamer that is no longer in the live roster.
+	// Holding streakPersistMu makes the check linearizable with ForgetStreak;
+	// if removal happens after this check, its subsequent ForgetStreak waits
+	// for this write and removes it last.
+	m.mu.RLock()
+	tracked := s.ChannelID != "" && m.byID[s.ChannelID] == s
+	login := s.GetUsername()
+	m.mu.RUnlock()
+	if !tracked {
+		return false
+	}
+
+	if m.streakCache == nil || !m.streakCache.Record(login, state, time.Now()) {
+		return false
+	}
+	m.mu.Lock()
+	if m.streakHydration == nil {
+		m.streakHydration = make(map[string]models.WatchStreakPersistence)
+	}
+	m.streakHydration[strings.ToLower(login)] = state
+	m.mu.Unlock()
+	return true
 }
 
 // ForgetStreak drops a deleted streamer's watch-streak grant from BOTH the
 // persisted cache and the in-memory startup hydration snapshot, so the grant
-// cannot outlive the streamer (a restart within the 48h TTL, or re-adding the
+// cannot outlive the streamer (including across a restart or re-adding the
 // same login within this process) and re-inherit stale streak state via
 // hydrateStreak. Safe for a login with no grant. Takes Manager.mu only (no
 // Streamer lock), preserving the strict Manager.mu -> Streamer.mu order.
 func (m *Manager) ForgetStreak(login string) {
+	m.streakPersistMu.Lock()
+	defer m.streakPersistMu.Unlock()
 	if m.streakCache != nil {
 		m.streakCache.Remove(login)
 	}
@@ -108,6 +137,38 @@ func (m *Manager) ForgetStreak(login string) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+// migrateStreakRenames keeps the existing login-keyed cache aligned with an
+// identity-preserving runtime rename. It runs only after CommitPlan releases
+// Manager.mu, and serializes with RecordWatchStreak/ForgetStreak so cache and
+// hydration cannot expose a torn old/new key pair to those writers.
+func (m *Manager) migrateStreakRenames(renames []RenameEvent) {
+	for _, rename := range renames {
+		oldLogin := strings.ToLower(rename.OldLogin)
+		newLogin := strings.ToLower(rename.NewLogin)
+		if oldLogin == "" || newLogin == "" || oldLogin == newLogin {
+			continue
+		}
+
+		m.streakPersistMu.Lock()
+		ownerState := rename.Streamer.Stream.WatchStreakPersistence()
+		if m.streakCache != nil && !m.streakCache.Rename(oldLogin, newLogin, ownerState, time.Now()) {
+			slog.Warn("Failed to migrate watch-streak cache after streamer rename",
+				"oldLogin", oldLogin, "newLogin", newLogin, "channelID", rename.ChannelID)
+		}
+		m.mu.Lock()
+		delete(m.streakHydration, oldLogin)
+		delete(m.streakHydration, newLogin)
+		if ownerState.Timeout != nil || len(ownerState.Grants) > 0 {
+			if m.streakHydration == nil {
+				m.streakHydration = make(map[string]models.WatchStreakPersistence)
+			}
+			m.streakHydration[newLogin] = ownerState
+		}
+		m.mu.Unlock()
+		m.streakPersistMu.Unlock()
+	}
 }
 
 // twitchClient is the slice of the Twitch API the manager needs to resolve a
@@ -656,6 +717,7 @@ func (m *Manager) CommitPlan(plan *ReconcilePlan) (added, removed []*models.Stre
 	m.streamers = kept
 
 	m.mu.Unlock()
+	m.migrateStreakRenames(renamed)
 
 	// Phase C: hydrate channel-points context for genuinely new streamers
 	// only, outside any lock. A failure here is non-fatal — the streamer is

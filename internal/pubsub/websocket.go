@@ -141,9 +141,8 @@ type WebSocketClient struct {
 	// read-error reconnect path uses it as an anti-flap guard: only a link
 	// that had been up for at least one reconnectDelay earns an immediate
 	// redial (see readErrorReconnectDelay).
-	lastConnectedAt time.Time
-	lastMsgTime     time.Time
-	lastMsgID       string
+	lastConnectedAt       time.Time
+	recentMsgFingerprints map[string]time.Time
 
 	onMessage   func(*PubSubMessage)
 	onError     func(error)
@@ -1034,15 +1033,23 @@ func (ws *WebSocketClient) handleMessageForGen(msg WSMessage, readerGen uint64) 
 			return
 		}
 
-		msgID := pubsubMsg.Type + "." + pubsubMsg.Topic.String() + "." + pubsubMsg.ChannelID
-
+		now := time.Now()
 		ws.mu.Lock()
-		if ws.lastMsgID == msgID && time.Since(ws.lastMsgTime) < time.Second {
+		if ws.recentMsgFingerprints == nil {
+			ws.recentMsgFingerprints = make(map[string]time.Time)
+		}
+		for fingerprint, admittedAt := range ws.recentMsgFingerprints {
+			if now.Sub(admittedAt) >= time.Second {
+				delete(ws.recentMsgFingerprints, fingerprint)
+			}
+		}
+		if admittedAt, replay := ws.recentMsgFingerprints[pubsubMsg.EventFingerprint]; pubsubMsg.EventFingerprint != "" && replay && now.Sub(admittedAt) < time.Second {
 			ws.mu.Unlock()
 			return
 		}
-		ws.lastMsgID = msgID
-		ws.lastMsgTime = time.Now()
+		if pubsubMsg.EventFingerprint != "" {
+			ws.recentMsgFingerprints[pubsubMsg.EventFingerprint] = now
+		}
 		ws.mu.Unlock()
 
 		if ws.onMessage != nil {

@@ -150,7 +150,7 @@ func TestMarkStreakEarnedAcceptedRegardlessOfMinutes(t *testing.T) {
 		if !s.StreakPending() {
 			t.Fatalf("mins=%v: expected pending before the grant", mins)
 		}
-		s.MarkStreakEarned("b1")
+		acceptBoundStreakForTest(t, s, "grant", "b1")
 		if s.StreakPending() {
 			t.Errorf("mins=%v: a WATCH_STREAK grant must be accepted and end the pursuit", mins)
 		}
@@ -173,7 +173,7 @@ func TestLateGrantAfterEvidenceStillEndsPursuit(t *testing.T) {
 		t.Fatal("WATCH evidence must never mark the streak earned; pursuit must stay pending")
 	}
 	// The late real grant is accepted.
-	s.MarkStreakEarned("b1")
+	acceptBoundStreakForTest(t, s, "grant", "b1")
 	if s.StreakPending() {
 		t.Error("a late WATCH_STREAK after the evidence fallback must still be accepted")
 	}
@@ -187,7 +187,7 @@ func TestUpdateHistoryRecordsWatchStreakOnce(t *testing.T) {
 	s := NewStreamer("chan", DefaultStreamerSettings())
 	s.Stream.Update("b1", "t", nil, nil, 10)
 
-	s.UpdateHistory("WATCH_STREAK", 350)
+	applyBoundStreakForTest(t, s, "grant", "b1", 350)
 	if e := s.History["WATCH_STREAK"]; e == nil || e.Counter != 1 || e.Amount != 350 {
 		t.Fatalf("one WATCH_STREAK event must record exactly once, got %+v", s.History["WATCH_STREAK"])
 	}

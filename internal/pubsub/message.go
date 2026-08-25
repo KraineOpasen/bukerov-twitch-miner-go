@@ -1,6 +1,8 @@
 package pubsub
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 )
@@ -26,6 +28,12 @@ type PubSubMessage struct {
 	Message   map[string]interface{}
 	Timestamp time.Time
 	ChannelID string
+
+	// EventFingerprint is an opaque exact-domain-event identity: SHA-256 of
+	// the topic and canonical complete inner JSON message. It is used for
+	// transport replay suppression and Stream-owned WATCH_STREAK idempotency,
+	// never as broadcast attribution. Derived/fallback Timestamp is excluded.
+	EventFingerprint string
 }
 
 func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
@@ -40,9 +48,10 @@ func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
 	}
 
 	msg := &PubSubMessage{
-		Topic:     topic,
-		Message:   message,
-		ChannelID: topic.ChannelID,
+		Topic:            topic,
+		Message:          message,
+		ChannelID:        topic.ChannelID,
+		EventFingerprint: fingerprintPubSubEvent(topic, message),
 	}
 
 	if msgType, ok := message["type"].(string); ok {
@@ -60,6 +69,19 @@ func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
 	}
 
 	return msg, nil
+}
+
+func fingerprintPubSubEvent(topic Topic, message map[string]interface{}) string {
+	canonical, err := json.Marshal(message)
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	_, _ = h.Write([]byte("twitch-pubsub-v1\x00"))
+	_, _ = h.Write([]byte(topic.String()))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(canonical)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
 func extractTimestamp(message, data map[string]interface{}) time.Time {

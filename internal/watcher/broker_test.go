@@ -175,7 +175,7 @@ func TestArbitrateRestrictedDropPreemptsNearStreak(t *testing.T) {
 	// Both configured picks are seconds from completing a watch streak.
 	for _, s := range w.streamers {
 		s.Settings.WatchStreak = true
-		s.Stream.WatchStreakMissing = true
+		s.Stream.Update("broker-broadcast-"+s.GetUsername(), "t", nil, nil, 1)
 		s.Stream.MinuteWatched = 6.5
 	}
 	restricted := discoveryStreamer("restricted_disco", true)

@@ -63,7 +63,11 @@ func manualBetGateError(d eligibility.Decision) error {
 	}
 }
 
-type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer)
+type MessageOutcome struct {
+	WatchStreak models.WatchStreakGrantResult
+}
+
+type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer, outcome MessageOutcome)
 
 // StatusHandler is notified of an authoritative streamer status transition. It
 // carries the typed tri-state status (never a bool), so 'unknown' is never
@@ -730,9 +734,10 @@ func (p *WebSocketPool) handleMessage(msg *PubSubMessage) {
 		return
 	}
 
+	var outcome MessageOutcome
 	switch msg.Topic.Type {
 	case TopicCommunityPointsUser:
-		p.handleCommunityPointsUser(msg, streamer)
+		outcome = p.handleCommunityPointsUser(msg, streamer)
 	case TopicVideoPlaybackByID:
 		p.handleVideoPlayback(msg, streamer)
 	case TopicRaid:
@@ -748,20 +753,16 @@ func (p *WebSocketPool) handleMessage(msg *PubSubMessage) {
 	}
 
 	if p.onMessage != nil {
-		p.onMessage(msg, streamer)
+		p.onMessage(msg, streamer, outcome)
 	}
 }
 
-func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *models.Streamer) {
+func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *models.Streamer) MessageOutcome {
+	var outcome MessageOutcome
 	switch msg.Type {
 	case "points-earned", "points-spent":
 		if msg.Data == nil {
-			return
-		}
-		if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
-			if bal, ok := balance["balance"].(float64); ok {
-				streamer.SetChannelPoints(int(bal))
-			}
+			return outcome
 		}
 
 		if msg.Type == "points-earned" {
@@ -774,12 +775,34 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				if rc, ok := pointGain["reason_code"].(string); ok {
 					reasonCode = rc
 				}
+
+				// WATCH_STREAK has no provable BroadcastID in this payload. Admit it
+				// atomically as GRANTED_UNBOUND before ANY downstream side effect;
+				// exact domain replay then cannot roll balance back or double-count
+				// History/events/cache/analytics/notifications.
+				if reasonCode == "WATCH_STREAK" {
+					outcome.WatchStreak = streamer.ApplyWatchStreakGrant(models.WatchStreakGrantEvent{
+						EventID:    msg.EventFingerprint,
+						AcceptedAt: time.Now(),
+					}, earned)
+					if !outcome.WatchStreak.NewlyAccepted() {
+						return outcome
+					}
+				}
+
+				if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+					if bal, ok := balance["balance"].(float64); ok {
+						streamer.SetChannelPoints(int(bal))
+					}
+				}
 				slog.Info("Points earned",
 					"streamer", streamer.GetUsername(),
 					"points", earned,
 					"reason", reasonCode,
 				)
-				streamer.UpdateHistory(reasonCode, earned)
+				if reasonCode != "WATCH_STREAK" {
+					streamer.UpdateHistory(reasonCode, earned)
+				}
 
 				// Passive WATCH gains arrive every few minutes per streamer
 				// and would drown everything else in the ring buffer, so only
@@ -788,18 +811,26 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				if reasonCode != "WATCH" {
 					events.Record(events.TypePointsEarned, streamer.GetUsername(), fmt.Sprintf("+%d (%s)", earned, reasonCode))
 				} else {
-					// A real WATCH credit is evidence Twitch is counting this
-					// view. The watcher uses two of them as the reliable,
-					// non-timer signal to release the streak boost seat; it never
-					// records a streak grant (only the WATCH_STREAK event does).
+					// A real WATCH credit is diagnostic delivery evidence only. It
+					// never grants, completes, times out or releases a pursuit.
 					streamer.Stream.NoteWatchPointsEvent()
 				}
+			} else if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+				// Preserve the pre-existing balance update for malformed/partial
+				// non-streak earned frames that carry no point_gain object.
+				if bal, ok := balance["balance"].(float64); ok {
+					streamer.SetChannelPoints(int(bal))
+				}
+			}
+		} else if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+			if bal, ok := balance["balance"].(float64); ok {
+				streamer.SetChannelPoints(int(bal))
 			}
 		}
 
 	case "claim-available":
 		if msg.Data == nil {
-			return
+			return outcome
 		}
 		if claim, ok := msg.Data["claim"].(map[string]interface{}); ok {
 			if claimID, ok := claim["id"].(string); ok {
@@ -807,7 +838,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 				// are confirmed disabled or merely unknown (fail safe).
 				if d := pointsEligibility.EvaluatePointsTask(streamer, eligibility.TaskBonusClaim); !d.Eligible {
 					logSkippedPointsAction(streamer, "bonus claim", d)
-					return
+					return outcome
 				}
 				if err := p.actor.ClaimBonus(streamer, claimID); err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
@@ -817,6 +848,7 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 			}
 		}
 	}
+	return outcome
 }
 
 func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models.Streamer) {

@@ -2,58 +2,59 @@ package watcher
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
-// TestStreakCapConstantsSplit (Q1) pins the split hard cap: the pursuit cap is the
-// expected grant point PLUS a positive delivery grace, and the grace genuinely
-// extends the hold past the expected minute. Collapsing the grace to zero (or
-// folding the cap back to a single 15-minute constant) fails here.
-func TestStreakCapConstantsSplit(t *testing.T) {
+// The 20m Stream-owned cap is the only behavioral boundary. Fifteen minutes is
+// retained solely as diagnostics and causes no transition.
+func TestStreakCapOwnedByStream(t *testing.T) {
 	if streakExpectedGrantMinutes <= 0 {
 		t.Fatalf("expected-grant reference must be positive, got %v", streakExpectedGrantMinutes)
 	}
-	if streakDeliveryGraceMinutes <= 0 {
-		t.Fatalf("delivery grace must be positive, got %v", streakDeliveryGraceMinutes)
+	if streakPursuitCapMinutes != models.WatchStreakPursuitCapMinutes {
+		t.Fatalf("watcher cap=%v model cap=%v, want one exact 20m owner", streakPursuitCapMinutes, models.WatchStreakPursuitCapMinutes)
 	}
-	if streakPursuitCapMinutes != streakExpectedGrantMinutes+streakDeliveryGraceMinutes {
-		t.Fatalf("hard cap must equal expected+grace: cap=%v expected=%v grace=%v",
-			streakPursuitCapMinutes, streakExpectedGrantMinutes, streakDeliveryGraceMinutes)
-	}
-	// The grace must actually push the release past the expected grant point —
-	// otherwise the seat would drop exactly at the minute the async WATCH_STREAK is
-	// most likely to be triggered, the very boundary the grace exists to cover.
-	if streakPursuitCapMinutes <= streakExpectedGrantMinutes {
-		t.Fatalf("hard cap %v must exceed the expected grant point %v", streakPursuitCapMinutes, streakExpectedGrantMinutes)
+	if streakPursuitCapMinutes != 20 {
+		t.Fatalf("hard cap=%v, want exact 20m", streakPursuitCapMinutes)
 	}
 }
 
-// TestBoostHeldThroughGraceReleasedAtHardCap (Q1) proves the release boundary: a
-// pending streak is held at the expected grant point and all through the delivery
-// grace, and released only when the continuous-watch minutes reach the hard cap.
-// This is the mutation anchor for the 15/19/20 split.
-func TestBoostHeldThroughGraceReleasedAtHardCap(t *testing.T) {
+func TestBoostVerdictBoundaries(t *testing.T) {
+	for _, minutes := range []float64{0, 7, 8, 15, 19} {
+		t.Run(fmt.Sprintf("%.0fm", minutes), func(t *testing.T) {
+			w, _ := newTestWatcher(1)
+			s := w.streamers[0]
+			s.Stream.Update("b1", "t", nil, nil, 10)
+			s.Stream.MinuteWatched = minutes
+			if !w.isBoostEligible(0) {
+				t.Fatalf("%.0fm must remain pursuit-eligible", minutes)
+			}
+			decision := s.Stream.EvaluateWatchStreak(time.Now())
+			want := models.WatchStreakPursuing
+			if minutes == 0 {
+				want = models.WatchStreakEligible
+			}
+			if decision.State != want || decision.Transitioned {
+				t.Fatalf("%.0fm decision=%+v, want %s without transition", minutes, decision, want)
+			}
+		})
+	}
+
 	w, _ := newTestWatcher(1)
 	s := w.streamers[0]
 	s.Stream.Update("b1", "t", nil, nil, 10)
-
-	// At the expected grant point: NOT released — the grace begins here so a grant
-	// triggered by this very minute can still land while we keep watching.
-	s.Stream.MinuteWatched = streakExpectedGrantMinutes
-	if !w.isBoostEligible(0) {
-		t.Errorf("at the expected grant point (%.0f min) the seat must be held through the grace", streakExpectedGrantMinutes)
-	}
-	// Upper edge of the grace (just under the hard cap): still held.
-	s.Stream.MinuteWatched = streakPursuitCapMinutes - 1
-	if !w.isBoostEligible(0) {
-		t.Errorf("just under the hard cap (%.0f min) the seat must still be held", streakPursuitCapMinutes-1)
-	}
-	// Hard cap reached: released.
-	s.Stream.MinuteWatched = streakPursuitCapMinutes
+	s.Stream.MinuteWatched = 20
 	if w.isBoostEligible(0) {
-		t.Errorf("at the hard cap (%.0f min) the seat must be released", streakPursuitCapMinutes)
+		t.Fatal("exactly 20m must release pursuit priority")
+	}
+	if got := s.Stream.EvaluateWatchStreak(time.Now()).State; got != models.WatchStreakTimedOutUnknown {
+		t.Fatalf("exactly 20m state=%s, want TIMED_OUT_UNKNOWN", got)
 	}
 }
 
@@ -69,7 +70,7 @@ func TestStreakGrantDuringGraceReleasesImmediately(t *testing.T) {
 	if !w.isBoostEligible(0) {
 		t.Fatal("a pending streak inside the delivery grace must stay boost-eligible")
 	}
-	s.Stream.MarkStreakEarned("b1") // the real grant lands mid-grace
+	acceptBoundStreakForWatcherTest(t, s.Stream, "grant-b1", "b1")
 	if w.isBoostEligible(0) {
 		t.Error("the authoritative WATCH_STREAK grant must release the seat immediately, before the hard cap")
 	}
