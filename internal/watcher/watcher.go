@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,7 +184,7 @@ type MinuteWatcher struct {
 	campaignScores atomic.Pointer[map[string]int]
 
 	// campaignSemanticPolicy publishes the policy engine's per-login configured
-	// projection and exact per-campaign ordinal classes as one immutable object.
+	// projection and exact per-campaign semantic facts as one immutable object.
 	// The broker captures one pointer at the start of each allocation tick; every
 	// configured/discovery comparison therefore belongs to the same decision set.
 	campaignSemanticPolicy atomic.Pointer[campaignSemanticSnapshot]
@@ -364,16 +365,23 @@ func (w *MinuteWatcher) AddSource(src CandidateSource) {
 // Campaign Policy. Lower classes are stronger; pass nil to clear. The producer
 // may call this concurrently with the broker loop.
 func (w *MinuteWatcher) SetCampaignSemanticClasses(classes map[string]policy.SemanticClass) {
-	w.SetCampaignSemanticPolicy(classes, nil, nil)
-
+	if classes == nil {
+		w.SetCampaignSemanticPolicy(nil, nil, nil)
+		return
+	}
+	utilities := make(map[string]policy.SemanticUtility, len(classes))
+	for login, class := range classes {
+		utilities[login] = policy.SemanticUtility{SemanticClass: class}
+	}
+	w.SetCampaignSemanticPolicy(utilities, nil, nil)
 }
 
 // SetCampaignSemanticPolicy atomically publishes both source-owned projections
 // from one Campaign Policy evaluation. Inputs are cloned so the stored snapshot
 // stays immutable while refreshPolicy builds and publishes later evaluations.
 func (w *MinuteWatcher) SetCampaignSemanticPolicy(
-	byLogin map[string]policy.SemanticClass,
-	byCampaign map[string]policy.SemanticClass,
+	byLogin map[string]policy.SemanticUtility,
+	byCampaign map[string]policy.CampaignSemantic,
 	gameRanks map[string]int,
 ) {
 	if byLogin == nil && byCampaign == nil && gameRanks == nil {
@@ -381,19 +389,30 @@ func (w *MinuteWatcher) SetCampaignSemanticPolicy(
 		return
 	}
 	w.campaignSemanticPolicy.Store(&campaignSemanticSnapshot{
-		byLogin:    cloneSemanticClasses(byLogin),
-		byCampaign: cloneSemanticClasses(byCampaign),
+		byLogin:    cloneSemanticUtilities(byLogin),
+		byCampaign: cloneCampaignSemantics(byCampaign),
 		gameRanks:  cloneSemanticGameRanks(gameRanks),
 	})
 }
 
-func cloneSemanticClasses(source map[string]policy.SemanticClass) map[string]policy.SemanticClass {
+func cloneSemanticUtilities(source map[string]policy.SemanticUtility) map[string]policy.SemanticUtility {
 	if source == nil {
 		return nil
 	}
-	cloned := make(map[string]policy.SemanticClass, len(source))
-	for key, class := range source {
-		cloned[key] = class
+	cloned := make(map[string]policy.SemanticUtility, len(source))
+	for key, utility := range source {
+		cloned[key] = utility
+	}
+	return cloned
+}
+
+func cloneCampaignSemantics(source map[string]policy.CampaignSemantic) map[string]policy.CampaignSemantic {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]policy.CampaignSemantic, len(source))
+	for key, fact := range source {
+		cloned[key] = fact
 	}
 	return cloned
 }
@@ -413,7 +432,7 @@ func cloneSemanticGameRanks(source map[string]int) map[string]int {
 // discovery must use for candidate ordering. During WatchCandidates it is the
 // broker-active tick snapshot; outside a broker tick it is the latest complete
 // miner publication. Callers must treat both maps as read-only.
-func (w *MinuteWatcher) DiscoveryCampaignPolicy() (map[string]int, map[string]policy.SemanticClass) {
+func (w *MinuteWatcher) DiscoveryCampaignPolicy() (map[string]int, map[string]policy.CampaignSemantic) {
 	snapshot := w.campaignSemanticSnapshotForTick()
 	if snapshot == nil {
 		return nil, nil
@@ -432,6 +451,7 @@ func (w *MinuteWatcher) SetDiscoveryCandidatePolicy(login string, facts Candidat
 		return
 	}
 	facts.CampaignIDs = append([]string(nil), facts.CampaignIDs...)
+	facts.RemainingWorkCampaignIDs = append([]string(nil), facts.RemainingWorkCampaignIDs...)
 	w.discoveryCandidatePolicy.Store(&discoveryCandidatePolicySnapshot{login: login, facts: facts})
 }
 
@@ -743,7 +763,7 @@ func (w *MinuteWatcher) loop() {
 
 func (w *MinuteWatcher) processWatching() {
 	sources, avoid := w.applyPendingSettings()
-	w.activeCampaignSemanticPolicy.Store(w.campaignSemanticPolicy.Load())
+	w.activeCampaignSemanticPolicy.Store(w.captureCampaignSemanticSnapshot())
 	defer w.activeCampaignSemanticPolicy.Store(nil)
 
 	w.selectionReasons = make(map[int]string)
@@ -1116,8 +1136,8 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 //
 // On top of that fair pair, one strictly stronger DROPS/STREAK candidate may
 // take one seat. Hard restricted/streak/drop classes come first; active-drop
-// candidates inside the same hard class use Campaign Policy's unitless
-// semantic class. Equal semantic facts remain governed by persisted deficit.
+// candidates inside the same hard class use Campaign Policy's unitless bounded
+// semantic utility. Equal full utilities remain governed by persisted deficit.
 // The boost latch is independent of base-pair changes, preserving continuous
 // viewing until eligibility ends or a strictly stronger contender appears.
 //
@@ -1183,7 +1203,7 @@ func (w *MinuteWatcher) reconcileLeastWatchedPair(onlineIndexes []int, now time.
 		if !la.Equal(lb) {
 			return la.Before(lb)
 		}
-		return w.streamers[a].GetUsername() < w.streamers[b].GetUsername()
+		return compareNormalizedLogins(w.streamers[a].GetUsername(), w.streamers[b].GetUsername()) < 0
 	})
 	newPair := [2]int{candidates[0], candidates[1]}
 
@@ -1442,7 +1462,7 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 
 // selectBoostTarget returns the highest-priority off-pair boost-eligible
 // streamer. For campaign-driven candidates it must strictly outrank every
-// boost-eligible base member; equal campaign classes stay with the
+// boost-eligible base member; equal bounded campaign utilities stay with the
 // persisted-deficit base pair. Existing equal fresh-streak boost behavior is
 // preserved because that continuity state has no Campaign Policy semantics.
 func (w *MinuteWatcher) selectBoostTarget(pair [2]int, onlineIndexes []int) int {
@@ -1547,13 +1567,13 @@ func (w *MinuteWatcher) betterBoostVictim(candidate, current int) bool {
 	if !cl.Equal(bl) {
 		return cl.After(bl)
 	}
-	return w.streamers[candidate].GetUsername() > w.streamers[current].GetUsername()
+	return compareNormalizedLogins(w.streamers[candidate].GetUsername(), w.streamers[current].GetUsername()) > 0
 }
 
 // strictlyHigherBoost reports whether cand has strictly stronger hard or
 // campaign-semantic facts than held. Persisted deficit, recency, and login are
-// deliberately excluded: equal-class fairness chooses the initial seat, but
-// cannot churn a continuity latch every tick.
+// deliberately excluded: equal bounded-utility fairness chooses the initial
+// seat, but cannot churn a continuity latch every tick.
 func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
 	return w.compareStrictBoost(cand, held) > 0
 }
@@ -1563,12 +1583,12 @@ func (w *MinuteWatcher) strictlyHigherBoost(cand, held int) bool {
 //
 //	channel-restricted drop
 //	> in-progress streak (then more banked streak minutes)
-//	> Campaign Policy class when both candidates carry active drops
+//	> Campaign Policy bounded utility when both candidates carry active drops
 //
 // A plain active drop and a fresh pending streak deliberately remain equal at
 // this strict layer, preserving the pre-change rotation contract (recency picks
-// between them). Semantic class remains an ordinal comparison, never a weighted
-// sum with watch minutes.
+// between them). Semantic utility remains a lexicographic ordinal comparison,
+// never a weighted sum with watch minutes.
 func (w *MinuteWatcher) compareStrictBoost(a, b int) int {
 	ar := w.streamers[a].HasChannelRestrictedCampaign()
 	br := w.streamers[b].HasChannelRestrictedCampaign()
@@ -1601,45 +1621,138 @@ func (w *MinuteWatcher) compareStrictBoost(a, b int) int {
 	ad := w.streamers[a].DropsCondition()
 	bd := w.streamers[b].DropsCondition()
 	if ad && bd {
-		if cmp := w.compareCampaignSemanticClass(a, b); cmp != 0 {
+		if cmp := w.compareCampaignSemanticUtility(a, b); cmp != 0 {
 			return cmp
 		}
 	}
 	return 0
 }
 
-// compareCampaignSemanticClass returns positive when a has the better
-// published class. A ranked campaign beats an absent/unranked one; lower class
-// numbers are better. Campaign-ID presentation ties never reach this boundary.
-func (w *MinuteWatcher) compareCampaignSemanticClass(a, b int) int {
+// compareCampaignSemanticUtility returns positive when a has the better
+// published bounded utility. A ranked campaign beats an absent/unranked one;
+// primary then at most one secondary class are compared lexicographically.
+// Campaign IDs never reach this boundary.
+func (w *MinuteWatcher) compareCampaignSemanticUtility(a, b int) int {
 	return w.compareCampaignSemanticStreamers(w.streamers[a], w.streamers[b])
 }
 
 func (w *MinuteWatcher) compareCampaignSemanticStreamers(a, b *models.Streamer) int {
-	ca, oka := w.campaignSemanticClassForStreamer(a)
-	cb, okb := w.campaignSemanticClassForStreamer(b)
+	ua, oka := w.campaignSemanticUtilityForStreamer(a)
+	ub, okb := w.campaignSemanticUtilityForStreamer(b)
 	if oka != okb {
 		if oka {
 			return 1
 		}
 		return -1
 	}
-	if !oka || ca == cb {
+	if !oka {
 		return 0
 	}
-	if ca < cb {
-		return 1
-	}
-	return -1
+	return policy.CompareSemanticUtility(ua, ub)
 }
 
-func (w *MinuteWatcher) campaignSemanticClassForStreamer(s *models.Streamer) (policy.SemanticClass, bool) {
-	snapshot := w.campaignSemanticSnapshotForTick()
-	if snapshot == nil || snapshot.byLogin == nil {
-		return 0, false
+func (w *MinuteWatcher) campaignSemanticUtilityForStreamer(s *models.Streamer) (policy.SemanticUtility, bool) {
+	if active := w.activeCampaignSemanticPolicy.Load(); active != nil {
+		if active.byLogin == nil {
+			return policy.SemanticUtility{}, false
+		}
+		utility, ok := active.byLogin[s.GetUsername()]
+		return utility, ok
 	}
-	class, ok := snapshot.byLogin[s.GetUsername()]
-	return class, ok
+
+	snapshot := w.campaignSemanticPolicy.Load()
+	if snapshot != nil && snapshot.byCampaign != nil {
+		return currentCampaignSemanticUtility(s, snapshot.byCampaign)
+	}
+	if snapshot == nil || snapshot.byLogin == nil {
+		return policy.SemanticUtility{}, false
+	}
+	utility, ok := snapshot.byLogin[s.GetUsername()]
+	return utility, ok
+}
+
+// captureCampaignSemanticSnapshot freezes both the published policy generation
+// and current configured campaign assignments at the start of one broker tick.
+// A non-nil exact-empty sentinel represents "captured before first policy": it
+// prevents a first publication made between Phase A and discovery arbitration
+// from entering only the second half of that tick.
+func (w *MinuteWatcher) captureCampaignSemanticSnapshot() *campaignSemanticSnapshot {
+	published := w.campaignSemanticPolicy.Load()
+	if published == nil {
+		return &campaignSemanticSnapshot{
+			byLogin:    map[string]policy.SemanticUtility{},
+			byCampaign: map[string]policy.CampaignSemantic{},
+			gameRanks:  map[string]int{},
+		}
+	}
+	if published.byCampaign == nil {
+		return published
+	}
+
+	byLogin := make(map[string]policy.SemanticUtility, len(w.streamers))
+	for _, s := range w.streamers {
+		if utility, ok := currentCampaignSemanticUtility(s, published.byCampaign); ok {
+			byLogin[s.GetUsername()] = utility
+		}
+	}
+	return &campaignSemanticSnapshot{
+		byLogin:    byLogin,
+		byCampaign: published.byCampaign,
+		gameRanks:  published.gameRanks,
+	}
+}
+
+// currentCampaignSemanticUtility reprojects the exact tracker-assigned
+// campaigns through the shared bounded builder. Published feasibility can only
+// be downgraded here: a removed, claimed, or locally completed campaign cannot
+// retain stale positive secondary utility before the next policy refresh.
+func currentCampaignSemanticUtility(s *models.Streamer, published map[string]policy.CampaignSemantic) (policy.SemanticUtility, bool) {
+	ids, remainingWorkIDs := CampaignSemanticEvidence(s.Stream.GetCampaigns())
+	return policy.BuildSemanticUtilityWithRemainingWork(ids, remainingWorkIDs, published)
+}
+
+// CampaignSemanticEvidence extracts exact CampaignID evidence from one
+// channel's current tracker-assigned campaign snapshot. Duplicate IDs are
+// retained for the policy builder to deduplicate, while current remaining-work
+// eligibility is fail-closed across duplicates: every copy of an ID must still
+// contain real unclaimed work before that ID can provide secondary utility.
+func CampaignSemanticEvidence(campaigns []*models.Campaign) (campaignIDs, remainingWorkCampaignIDs []string) {
+	remainingByID := make(map[string]bool, len(campaigns))
+	seen := make(map[string]bool, len(campaigns))
+	for _, campaign := range campaigns {
+		if campaign == nil || campaign.ID == "" || campaign.CurrentDrop() == nil {
+			continue
+		}
+		campaignIDs = append(campaignIDs, campaign.ID)
+		remaining := campaignHasRemainingUnclaimedWork(campaign)
+		if seen[campaign.ID] {
+			remainingByID[campaign.ID] = remainingByID[campaign.ID] && remaining
+		} else {
+			seen[campaign.ID] = true
+			remainingByID[campaign.ID] = remaining
+		}
+	}
+
+	emitted := make(map[string]bool, len(remainingByID))
+	for _, id := range campaignIDs {
+		if remainingByID[id] && !emitted[id] {
+			remainingWorkCampaignIDs = append(remainingWorkCampaignIDs, id)
+			emitted[id] = true
+		}
+	}
+	return campaignIDs, remainingWorkCampaignIDs
+}
+
+func campaignHasRemainingUnclaimedWork(campaign *models.Campaign) bool {
+	if campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
+		return false
+	}
+	for _, drop := range campaign.Drops {
+		if drop != nil && !drop.IsClaimed && drop.CurrentMinutesWatched < drop.MinutesRequired {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *MinuteWatcher) campaignSemanticSnapshotForTick() *campaignSemanticSnapshot {
@@ -1649,10 +1762,10 @@ func (w *MinuteWatcher) campaignSemanticSnapshotForTick() *campaignSemanticSnaps
 	return w.campaignSemanticPolicy.Load()
 }
 
-// orderByCampaignSemanticClass returns a copy ordered by the best published
-// class carried by each streamer (known before absent, lower first), then login
-// for a deterministic known equal-class tie. With no semantic facts published,
-// the pre-policy configured/input order is preserved exactly.
+// orderByCampaignSemanticClass returns a copy ordered by each streamer's
+// published bounded utility (known before absent, stronger first), then login
+// for a deterministic full-utility tie. With no semantic facts published, the
+// pre-policy configured/input order is preserved exactly.
 func (w *MinuteWatcher) orderByCampaignSemanticClass(indexes []int) []int {
 	if w.campaignSemanticSnapshotForTick() == nil {
 		return indexes
@@ -1660,18 +1773,20 @@ func (w *MinuteWatcher) orderByCampaignSemanticClass(indexes []int) []int {
 	ordered := append([]int(nil), indexes...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
-		ca, oka := w.campaignSemanticClassForStreamer(w.streamers[a])
-		cb, okb := w.campaignSemanticClassForStreamer(w.streamers[b])
+		ua, oka := w.campaignSemanticUtilityForStreamer(w.streamers[a])
+		ub, okb := w.campaignSemanticUtilityForStreamer(w.streamers[b])
 		if oka != okb {
 			return oka
 		}
-		if oka && ca != cb {
-			return ca < cb
+		if oka {
+			if cmp := policy.CompareSemanticUtility(ua, ub); cmp != 0 {
+				return cmp > 0
+			}
 		}
 		if !oka {
 			return false
 		}
-		return w.streamers[a].GetUsername() < w.streamers[b].GetUsername()
+		return compareNormalizedLogins(w.streamers[a].GetUsername(), w.streamers[b].GetUsername()) < 0
 	})
 	return ordered
 }
@@ -1764,7 +1879,7 @@ func (w *MinuteWatcher) streakInProgress(idx int) bool {
 
 // betterBoostCandidate reports whether cand should take the single prioritized
 // seat over best. Hard/continuity and semantic facts are compared first;
-// persisted deficit decides only inside an equal semantic class, followed by
+// persisted deficit decides only inside equal bounded semantic utility, followed by
 // recency and login for a deterministic total order.
 func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 	if cmp := w.compareStrictBoost(cand, best); cmp != 0 {
@@ -1772,7 +1887,7 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 	}
 
 	// Persisted deficit is the fairness tie-break only when both candidates
-	// belong to an equal campaign semantic class. Fresh-streak/drop arbitration
+	// have equal bounded campaign semantic utility. Fresh-streak/drop arbitration
 	// had no campaign semantics before this change and keeps its recency rule.
 	if w.streamers[cand].DropsCondition() && w.streamers[best].DropsCondition() {
 		cw := w.effectiveDeficitMinutes(cand)
@@ -1788,7 +1903,28 @@ func (w *MinuteWatcher) betterBoostCandidate(cand, best int) bool {
 		return cl.Before(bl)
 	}
 
-	return w.streamers[cand].GetUsername() < w.streamers[best].GetUsername()
+	return compareNormalizedLogins(w.streamers[cand].GetUsername(), w.streamers[best].GetUsername()) < 0
+}
+
+// compareNormalizedLogins provides the broker's final deterministic identity
+// order. Twitch logins are case-insensitive; a raw-string fallback keeps a
+// total order even for malformed case variants of the same login.
+func compareNormalizedLogins(a, b string) int {
+	na := strings.ToLower(strings.TrimSpace(a))
+	nb := strings.ToLower(strings.TrimSpace(b))
+	if na < nb {
+		return -1
+	}
+	if na > nb {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }
 
 // nearStreakCompletion reports whether the streamer is actively pursuing a watch
@@ -1945,9 +2081,9 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 
 		case config.PriorityDrops:
 			// Within each DROPS pass, order competing streamers by the campaign
-			// policy engine's semantic class (lowest first) so the active mode
+			// policy engine's bounded semantic utility so the active mode
 			// (SMART/ENDING_SOONEST/…) decides between several farmable
-			// campaigns. With no policy classes published
+			// campaigns. With no policy facts published
 			// this is a no-op and the configured order is preserved. The
 			// restricted-first pass below is kept regardless, so the
 			// "channel-restricted drop only progresses here" invariant holds in

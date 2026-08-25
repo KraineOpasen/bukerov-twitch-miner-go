@@ -13,12 +13,12 @@ import (
 // implementation falls back to game-wide ranks and fails the exact-channel
 // assertions below; the fixed production seam publishes both maps atomically.
 type campaignPolicyPublisher interface {
-	SetCampaignPolicy(map[string]int, map[string]policy.SemanticClass)
+	SetCampaignPolicy(map[string]int, map[string]policy.CampaignSemantic)
 }
 
 func publishCampaignPolicy(m *Manager, gameRanks map[string]int, campaignClasses map[string]policy.SemanticClass) {
 	if publisher, ok := any(m).(campaignPolicyPublisher); ok {
-		publisher.SetCampaignPolicy(gameRanks, campaignClasses)
+		publisher.SetCampaignPolicy(gameRanks, testCampaignSemantics(campaignClasses))
 		return
 	}
 	m.SetGameRanks(gameRanks)
@@ -30,6 +30,18 @@ type recordingCandidatePolicy struct {
 	facts           watcher.CandidateCampaignPolicy
 	gameRanks       map[string]int
 	campaignClasses map[string]policy.SemanticClass
+	campaignFacts   map[string]policy.CampaignSemantic
+}
+
+func testCampaignSemantics(classes map[string]policy.SemanticClass) map[string]policy.CampaignSemantic {
+	if classes == nil {
+		return nil
+	}
+	facts := make(map[string]policy.CampaignSemantic, len(classes))
+	for id, class := range classes {
+		facts[id] = policy.CampaignSemantic{SemanticClass: class, SecondaryEligible: true}
+	}
+	return facts
 }
 
 func (r *recordingCandidatePolicy) SetDiscoveryCandidatePolicy(login string, facts watcher.CandidateCampaignPolicy) {
@@ -37,8 +49,11 @@ func (r *recordingCandidatePolicy) SetDiscoveryCandidatePolicy(login string, fac
 	r.facts = facts
 }
 
-func (r *recordingCandidatePolicy) DiscoveryCampaignPolicy() (map[string]int, map[string]policy.SemanticClass) {
-	return r.gameRanks, r.campaignClasses
+func (r *recordingCandidatePolicy) DiscoveryCampaignPolicy() (map[string]int, map[string]policy.CampaignSemantic) {
+	if r.campaignFacts != nil {
+		return r.gameRanks, r.campaignFacts
+	}
+	return r.gameRanks, testCampaignSemantics(r.campaignClasses)
 }
 
 // TestOrderGamesByPolicy verifies the campaign-policy cross-game ordering:
@@ -73,9 +88,9 @@ func TestSetCampaignPolicyDistinguishesExactEmptyFromRankOnlySnapshot(t *testing
 	m := &Manager{}
 	ranks := map[string]int{"game one": 0}
 	m.SetGameRanks(ranks)
-	m.SetCampaignPolicy(ranks, map[string]policy.SemanticClass{})
+	m.SetCampaignPolicy(ranks, map[string]policy.CampaignSemantic{})
 	published := m.campaignPolicy.Load()
-	if published == nil || published.campaignClasses == nil {
+	if published == nil || published.campaignSemantics == nil {
 		t.Fatal("exact empty campaign-class publication was collapsed into rank-only fallback")
 	}
 }
@@ -145,7 +160,7 @@ func TestWatchCandidatesUsesExactCarriedCampaignClassAcrossGames(t *testing.T) {
 	if len(got) != 1 || got[0].Streamer != gameTwo.Streamer {
 		t.Fatalf("exact carried-campaign proposal = %v, want [game_two_middle]", candidateLogins(got))
 	}
-	if published.login != gameTwo.Streamer.GetUsername() || !published.facts.Ranked || published.facts.SemanticClass != 1 {
+	if published.login != gameTwo.Streamer.GetUsername() || !published.facts.Ranked || published.facts.Utility.SemanticClass != 1 {
 		t.Fatalf("same-tick broker publication = login %q facts %+v, want game_two_middle class 1", published.login, published.facts)
 	}
 	m.mu.Lock()
@@ -179,6 +194,87 @@ func TestWatchCandidatesReevaluatesExactCampaignClassWithinOneGame(t *testing.T)
 	got := m.WatchCandidates()
 	if len(got) != 1 || got[0].Streamer != strongChannel.Streamer {
 		t.Fatalf("same-game exact semantic reevaluation = %v, want [strong_candidate]", candidateLogins(got))
+	}
+}
+
+func TestWatchCandidatesUsesBoundedSecondaryAfterEqualPrimary(t *testing.T) {
+	currentPrimary := activeCampaign("g1", "Game One")
+	currentPrimary.ID = "current-primary"
+	overlapPrimary := activeCampaign("g2", "Game Two")
+	overlapPrimary.ID = "overlap-primary"
+	overlapSecondary := activeCampaign("g2", "Game Two")
+	overlapSecondary.ID = "overlap-secondary"
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{currentPrimary, overlapPrimary, overlapSecondary}}
+	m := newTestManager([]string{"Game One", "Game Two"}, provider, &fakeClient{})
+
+	current := onlineCandidate("current_channel", "1", "Game One", "g1", 9000)
+	current.Streamer.Stream.SetCampaignIDs([]string{currentPrimary.ID})
+	overlap := onlineCandidate("overlap_channel", "2", "Game Two", "g2", 10)
+	overlap.Streamer.Stream.SetCampaignIDs([]string{overlapPrimary.ID, overlapSecondary.ID})
+	m.current = current
+	m.pool = []*Channel{current, overlap}
+	published := &recordingCandidatePolicy{}
+	m.SetSlotStatus(published)
+
+	ranks := map[string]int{"game one": 0, "game two": 0}
+	m.SetCampaignPolicy(ranks, map[string]policy.CampaignSemantic{
+		currentPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		overlapPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		overlapSecondary.ID: {SemanticClass: 4},
+	})
+	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != current.Streamer {
+		t.Fatalf("ineligible secondary changed equal-primary continuity: %v", candidateLogins(got))
+	}
+
+	// The only changed fact is fail-closed secondary eligibility. The snapshot
+	// equality check must observe it, and exact candidate comparison must then
+	// prefer the overlap without a directory/API refresh.
+	m.SetCampaignPolicy(ranks, map[string]policy.CampaignSemantic{
+		currentPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		overlapPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		overlapSecondary.ID: {SemanticClass: 4, SecondaryEligible: true},
+	})
+	got := m.WatchCandidates()
+	if len(got) != 1 || got[0].Streamer != overlap.Streamer {
+		t.Fatalf("equal-primary overlap proposal = %v, want [overlap_channel]", candidateLogins(got))
+	}
+	if published.login != overlap.Streamer.GetUsername() || !published.facts.Ranked ||
+		!published.facts.Utility.HasSecondary || published.facts.Utility.SecondarySemanticClass != 4 {
+		t.Fatalf("bounded secondary publication = login %q facts %+v", published.login, published.facts)
+	}
+}
+
+func TestWatchCandidatesCompletedSecondaryProvidesNoUtility(t *testing.T) {
+	currentPrimary := activeCampaign("g1", "Game One")
+	currentPrimary.ID = "current-primary"
+	overlapPrimary := activeCampaign("g2", "Game Two")
+	overlapPrimary.ID = "overlap-primary"
+	completedSecondary := activeCampaign("g2", "Game Two")
+	completedSecondary.ID = "completed-secondary"
+	completedSecondary.Drops[0].CurrentMinutesWatched = completedSecondary.Drops[0].MinutesRequired
+	provider := &fakeCampaigns{campaigns: []*models.Campaign{currentPrimary, overlapPrimary, completedSecondary}}
+	m := newTestManager([]string{"Game One", "Game Two"}, provider, &fakeClient{})
+
+	current := onlineCandidate("current_channel", "1", "Game One", "g1", 9000)
+	current.Streamer.Stream.SetCampaignIDs([]string{currentPrimary.ID})
+	overlap := onlineCandidate("completed_overlap", "2", "Game Two", "g2", 10)
+	overlap.Streamer.Stream.SetCampaignIDs([]string{overlapPrimary.ID, completedSecondary.ID})
+	m.current = current
+	m.pool = []*Channel{current, overlap}
+	published := &recordingCandidatePolicy{}
+	m.SetSlotStatus(published)
+
+	m.SetCampaignPolicy(map[string]int{"game one": 0, "game two": 0}, map[string]policy.CampaignSemantic{
+		currentPrimary.ID:     {SemanticClass: 0, SecondaryEligible: true},
+		overlapPrimary.ID:     {SemanticClass: 0, SecondaryEligible: true},
+		completedSecondary.ID: {SemanticClass: 4, SecondaryEligible: true},
+	})
+	got := m.WatchCandidates()
+	if len(got) != 1 || got[0].Streamer != current.Streamer {
+		t.Fatalf("completed secondary changed equal-primary continuity: %v", candidateLogins(got))
+	}
+	if published.login != current.Streamer.GetUsername() || published.facts.Utility.HasSecondary {
+		t.Fatalf("completed secondary retained positive discovery utility: login=%q facts=%+v", published.login, published.facts)
 	}
 }
 
@@ -444,7 +540,7 @@ func TestWatchCandidatesCarriesClassFromSameTickVerification(t *testing.T) {
 	if len(got) != 1 || got[0].Streamer != late.Streamer {
 		t.Fatalf("same-tick verified proposal = %v, want [strong_late]", candidateLogins(got))
 	}
-	if published.login != late.Streamer.GetUsername() || !published.facts.Ranked || published.facts.SemanticClass != 0 {
+	if published.login != late.Streamer.GetUsername() || !published.facts.Ranked || published.facts.Utility.SemanticClass != 0 {
 		t.Fatalf("same-tick verified publication = login %q facts %+v, want strong_late class 0", published.login, published.facts)
 	}
 	if len(client.checked) != 1 || client.checked[0] != late.Streamer.GetUsername() {
@@ -470,7 +566,7 @@ func TestWatchCandidatesUsesBrokerSemanticSnapshotAsProductionOwner(t *testing.T
 	// broker-owned snapshot exposed through SetSlotStatus, not this mirror.
 	m.SetCampaignPolicy(
 		map[string]int{"game one": 0, "game two": 1},
-		map[string]policy.SemanticClass{weak.ID: 0, strong.ID: 2},
+		testCampaignSemantics(map[string]policy.SemanticClass{weak.ID: 0, strong.ID: 2}),
 	)
 	published := &recordingCandidatePolicy{
 		gameRanks:       map[string]int{"game one": 1, "game two": 0},
@@ -482,7 +578,7 @@ func TestWatchCandidatesUsesBrokerSemanticSnapshotAsProductionOwner(t *testing.T
 	if len(got) != 1 || got[0].Streamer != better.Streamer {
 		t.Fatalf("broker-owned semantic proposal = %v, want [strong_broker]", candidateLogins(got))
 	}
-	if published.login != better.Streamer.GetUsername() || !published.facts.Ranked || published.facts.SemanticClass != 0 {
+	if published.login != better.Streamer.GetUsername() || !published.facts.Ranked || published.facts.Utility.SemanticClass != 0 {
 		t.Fatalf("broker-owned semantic publication = login %q facts %+v, want strong_broker class 0", published.login, published.facts)
 	}
 	if len(published.facts.CampaignIDs) != 1 || published.facts.CampaignIDs[0] != strong.ID {

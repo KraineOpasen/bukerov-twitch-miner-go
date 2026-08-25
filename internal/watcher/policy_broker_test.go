@@ -28,8 +28,8 @@ type discoveryPolicySwapSource struct {
 	w              *MinuteWatcher
 	candidate      Candidate
 	facts          CandidateCampaignPolicy
-	nextByLogin    map[string]policy.SemanticClass
-	nextByCampaign map[string]policy.SemanticClass
+	nextByLogin    map[string]policy.SemanticUtility
+	nextByCampaign map[string]policy.CampaignSemantic
 }
 
 func (s *discoveryPolicySwapSource) SourceName() string { return OriginDiscovery }
@@ -37,6 +37,17 @@ func (s *discoveryPolicySwapSource) WatchCandidates() []Candidate {
 	s.w.SetDiscoveryCandidatePolicy(s.candidate.Streamer.GetUsername(), s.facts)
 	s.w.SetCampaignSemanticPolicy(s.nextByLogin, s.nextByCampaign, nil)
 	return []Candidate{s.candidate}
+}
+
+type campaignAssignmentSwapSource struct {
+	streamer *models.Streamer
+	next     []*models.Campaign
+}
+
+func (s *campaignAssignmentSwapSource) SourceName() string { return "campaign-assignment-swap-test" }
+func (s *campaignAssignmentSwapSource) WatchCandidates() []Candidate {
+	s.streamer.Stream.SetCampaigns(s.next)
+	return nil
 }
 
 func TestAllCampaignPolicyModesReachBrokerAllocation(t *testing.T) {
@@ -295,6 +306,97 @@ func TestCampaignPolicySemanticClassArbitratesConfiguredAndDiscovery(t *testing.
 	}
 }
 
+func TestCampaignPolicyBoundedUtilityArbitratesConfiguredAndDiscovery(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	byLogin := map[string]policy.SemanticUtility{
+		w.streamers[0].GetUsername(): {SemanticClass: 0, PrimaryCampaignID: "campaign-a"},
+		w.streamers[1].GetUsername(): {SemanticClass: 0, PrimaryCampaignID: "campaign-b"},
+	}
+	discoveryPrimary := "discovery-primary"
+	discoverySecondary := "discovery-secondary"
+	byCampaign := map[string]policy.CampaignSemantic{
+		"campaign-a":       {SemanticClass: 0, SecondaryEligible: true},
+		"campaign-b":       {SemanticClass: 0, SecondaryEligible: true},
+		discoveryPrimary:   {SemanticClass: 0, SecondaryEligible: true},
+		discoverySecondary: {SemanticClass: 4, SecondaryEligible: true},
+	}
+	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
+
+	disco := discoveryStreamer("overlap_discovery", false)
+	disco.Stream.SetCampaignIDs([]string{discoveryPrimary, discoverySecondary})
+	w.SetDiscoveryCandidatePolicy(disco.GetUsername(), CandidateCampaignPolicy{
+		CampaignIDs:              []string{discoveryPrimary, discoverySecondary},
+		RemainingWorkCampaignIDs: []string{discoveryPrimary, discoverySecondary},
+	})
+	slots, _ := w.arbitrate([]int{0, 1}, []Candidate{{Streamer: disco, Origin: OriginDiscovery}}, time.Now())
+	if len(slots) != 2 || !loginsOf(slots)[disco.GetUsername()] {
+		t.Fatalf("equal-primary discovery overlap allocation = %v, want discovery at hard cap 2", loginsOf(slots))
+	}
+}
+
+func TestCampaignPolicyStrongerPrimaryBlocksManyDiscoverySecondaries(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	byLogin := map[string]policy.SemanticUtility{
+		w.streamers[0].GetUsername(): {SemanticClass: 0, PrimaryCampaignID: "campaign-a"},
+		w.streamers[1].GetUsername(): {SemanticClass: 0, PrimaryCampaignID: "campaign-b"},
+	}
+	byCampaign := map[string]policy.CampaignSemantic{
+		"campaign-a":   {SemanticClass: 0, SecondaryEligible: true},
+		"campaign-b":   {SemanticClass: 0, SecondaryEligible: true},
+		"weak-primary": {SemanticClass: 1, SecondaryEligible: true},
+	}
+	ids := []string{"weak-primary"}
+	for i := 0; i < 20; i++ {
+		id := "weak-extra-" + string(rune('a'+i))
+		ids = append(ids, id)
+		byCampaign[id] = policy.CampaignSemantic{SemanticClass: policy.SemanticClass(2 + i), SecondaryEligible: true}
+	}
+	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
+
+	disco := discoveryStreamer("many_weak_discovery", false)
+	disco.Stream.SetCampaignIDs(ids)
+	w.SetDiscoveryCandidatePolicy(disco.GetUsername(), CandidateCampaignPolicy{
+		CampaignIDs:              ids,
+		RemainingWorkCampaignIDs: ids,
+	})
+	slots, _ := w.arbitrate([]int{0, 1}, []Candidate{{Streamer: disco, Origin: OriginDiscovery}}, time.Now())
+	if len(slots) != 2 || loginsOf(slots)[disco.GetUsername()] {
+		t.Fatalf("twenty weak discovery campaigns overpowered stronger configured primary: %v", loginsOf(slots))
+	}
+}
+
+func TestDiscoveryCompletedSecondaryCannotReappearAtBroker(t *testing.T) {
+	w := newPolicyBrokerWatcher(t)
+	byCampaign := map[string]policy.CampaignSemantic{
+		"campaign-a":        {SemanticClass: 0, SecondaryEligible: true},
+		"campaign-b":        {SemanticClass: 0, SecondaryEligible: true},
+		"discovery-primary": {SemanticClass: 0, SecondaryEligible: true},
+		"completed-extra":   {SemanticClass: 2, SecondaryEligible: true},
+	}
+	w.SetCampaignSemanticPolicy(nil, byCampaign, nil)
+
+	disco := discoveryStreamer("completed_secondary_discovery", false)
+	primary := &models.Campaign{ID: "discovery-primary", Drops: []*models.Drop{{ID: "primary-drop", MinutesRequired: 30}}}
+	completed := &models.Campaign{ID: "completed-extra", Drops: []*models.Drop{{
+		ID:                    "completed-drop",
+		MinutesRequired:       30,
+		CurrentMinutesWatched: 30,
+	}}}
+	disco.Stream.SetCampaignIDs([]string{primary.ID, completed.ID})
+	disco.Stream.SetCampaigns([]*models.Campaign{primary, completed})
+	w.SetDiscoveryCandidatePolicy(disco.GetUsername(), CandidateCampaignPolicy{
+		Utility:                  policy.SemanticUtility{SemanticClass: 0, PrimaryCampaignID: primary.ID},
+		Ranked:                   true,
+		CampaignIDs:              []string{primary.ID, completed.ID},
+		RemainingWorkCampaignIDs: []string{primary.ID},
+	})
+
+	slots, _ := w.arbitrate([]int{0, 1}, []Candidate{{Streamer: disco, Origin: OriginDiscovery}}, time.Now())
+	if loginsOf(slots)[disco.GetUsername()] {
+		t.Fatalf("broker resurrected completed discovery secondary from stale policy facts: %v", loginsOf(slots))
+	}
+}
+
 // TestCampaignPolicyBrokerTickUsesOneSemanticSnapshot forces a policy refresh
 // at the real production boundary between configured Phase A and candidate
 // arbitration. One broker allocation must be wholly explained by the snapshot
@@ -351,24 +453,33 @@ func TestCampaignPolicyBrokerTickUsesOneSnapshotAcrossDiscovery(t *testing.T) {
 
 	disco := discoveryStreamer("same_tick_discovery", false)
 	discoCampaignID := "camp-" + disco.GetUsername()
-	initialByLogin := map[string]policy.SemanticClass{
+	initialByLogin := semanticUtilities(map[string]policy.SemanticClass{
 		"streamera": 1,
 		"streamerb": 2,
-	}
-	initialByCampaign := map[string]policy.SemanticClass{discoCampaignID: 0}
-	nextByLogin := map[string]policy.SemanticClass{
+	})
+	initialByCampaign := campaignSemantics(map[string]policy.SemanticClass{
+		"configured-a":  1,
+		"configured-b":  2,
+		discoCampaignID: 0,
+	})
+	nextByLogin := semanticUtilities(map[string]policy.SemanticClass{
 		"streamera": 0,
 		"streamerb": 1,
-	}
-	nextByCampaign := map[string]policy.SemanticClass{discoCampaignID: 3}
+	})
+	nextByCampaign := campaignSemantics(map[string]policy.SemanticClass{
+		"configured-a":  0,
+		"configured-b":  1,
+		discoCampaignID: 3,
+	})
 	w.SetCampaignSemanticPolicy(initialByLogin, initialByCampaign, nil)
 	w.AddSource(&discoveryPolicySwapSource{
 		w:         w,
 		candidate: Candidate{Streamer: disco, Origin: OriginDiscovery},
 		facts: CandidateCampaignPolicy{
-			SemanticClass: 0,
-			Ranked:        true,
-			CampaignIDs:   []string{discoCampaignID},
+			Utility:                  policy.SemanticUtility{SemanticClass: 0},
+			Ranked:                   true,
+			CampaignIDs:              []string{discoCampaignID},
+			RemainingWorkCampaignIDs: []string{discoCampaignID},
 		},
 		nextByLogin:    nextByLogin,
 		nextByCampaign: nextByCampaign,
@@ -395,6 +506,96 @@ func TestCampaignPolicyBrokerTickUsesOneSnapshotAcrossDiscovery(t *testing.T) {
 	}
 }
 
+func TestCampaignPolicyFirstPublicationWaitsForNextBrokerTick(t *testing.T) {
+	sender := &countingSender{sent: make(chan string, 16)}
+	w, _ := newLoopWatcher(2, sender, &staticChecker{checked: make(chan string, 16)})
+	w.priorities = []config.Priority{config.PriorityDrops}
+	byLogin := make(map[string]policy.SemanticUtility, len(w.streamers))
+	byCampaign := make(map[string]policy.CampaignSemantic, len(w.streamers)+1)
+	for i, s := range w.streamers {
+		s.Settings.ClaimDrops = true
+		s.Settings.WatchStreak = false
+		id := "configured-" + string(rune('a'+i))
+		s.Stream.SetCampaignIDs([]string{id})
+		s.Stream.SetCampaigns([]*models.Campaign{{ID: id, Drops: []*models.Drop{{ID: "drop", MinutesRequired: 30}}}})
+		byLogin[s.GetUsername()] = policy.SemanticUtility{SemanticClass: policy.SemanticClass(1 + i), PrimaryCampaignID: id}
+		byCampaign[id] = policy.CampaignSemantic{SemanticClass: policy.SemanticClass(1 + i), SecondaryEligible: true}
+	}
+
+	disco := discoveryStreamer("first_policy_discovery", false)
+	discoID := "first-policy-campaign"
+	disco.Stream.SetCampaignIDs([]string{discoID})
+	byCampaign[discoID] = policy.CampaignSemantic{SemanticClass: 0, SecondaryEligible: true}
+	w.AddSource(&discoveryPolicySwapSource{
+		w:         w,
+		candidate: Candidate{Streamer: disco, Origin: OriginDiscovery},
+		facts: CandidateCampaignPolicy{
+			Utility:                  policy.SemanticUtility{SemanticClass: 0, PrimaryCampaignID: discoID},
+			Ranked:                   true,
+			CampaignIDs:              []string{discoID},
+			RemainingWorkCampaignIDs: []string{discoID},
+		},
+		nextByLogin:    byLogin,
+		nextByCampaign: byCampaign,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w.ctx = ctx
+
+	w.processWatching()
+	first := w.BrokerSnapshot()
+	if brokerHasChannel(first, disco.GetUsername()) {
+		t.Fatalf("first publication entered the broker tick that captured no policy: %v", brokerChannels(first))
+	}
+
+	w.processWatching()
+	second := w.BrokerSnapshot()
+	if !brokerHasChannel(second, disco.GetUsername()) {
+		t.Fatalf("next broker tick did not consume the first complete policy publication: %v", brokerChannels(second))
+	}
+}
+
+func TestCampaignPolicyBrokerTickFreezesConfiguredAssignments(t *testing.T) {
+	sender := &countingSender{sent: make(chan string, 16)}
+	w, _ := newLoopWatcher(2, sender, &staticChecker{checked: make(chan string, 16)})
+	w.priorities = []config.Priority{config.PriorityDrops}
+	primary := &models.Campaign{ID: "configured-primary", Drops: []*models.Drop{{ID: "primary-drop", MinutesRequired: 30}}}
+	secondary := &models.Campaign{ID: "configured-secondary", Drops: []*models.Drop{{ID: "secondary-drop", MinutesRequired: 30}}}
+	other := &models.Campaign{ID: "other-primary", Drops: []*models.Drop{{ID: "other-drop", MinutesRequired: 30}}}
+	for _, s := range w.streamers {
+		s.Settings.ClaimDrops = true
+		s.Settings.WatchStreak = false
+	}
+	w.streamers[0].Stream.SetCampaigns([]*models.Campaign{primary, secondary})
+	w.streamers[0].Stream.SetCampaignIDs([]string{primary.ID, secondary.ID})
+	w.streamers[1].Stream.SetCampaigns([]*models.Campaign{other})
+	w.streamers[1].Stream.SetCampaignIDs([]string{other.ID})
+	w.SetCampaignSemanticPolicy(nil, map[string]policy.CampaignSemantic{
+		primary.ID:   {SemanticClass: 0, SecondaryEligible: true},
+		secondary.ID: {SemanticClass: 2, SecondaryEligible: true},
+		other.ID:     {SemanticClass: 0, SecondaryEligible: true},
+	}, nil)
+	w.AddSource(&campaignAssignmentSwapSource{
+		streamer: w.streamers[0],
+		next:     []*models.Campaign{primary},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w.ctx = ctx
+
+	w.processWatching()
+	first := w.BrokerSnapshot()
+	if reason := brokerReason(first, w.streamers[0].GetUsername()); !strings.Contains(reason, "bounded secondary semantic class 2") {
+		t.Fatalf("in-flight assignment mutation changed captured utility: reason=%q", reason)
+	}
+
+	w.processWatching()
+	second := w.BrokerSnapshot()
+	if reason := brokerReason(second, w.streamers[0].GetUsername()); strings.Contains(reason, "bounded secondary") {
+		t.Fatalf("next tick retained removed secondary campaign: reason=%q", reason)
+	}
+}
+
 // TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation is
 // the broker half of discovery's production integration seam. The discovery
 // package regression proves SetGameRanks changes WatchCandidates from the
@@ -416,7 +617,7 @@ func TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation(t *t
 	strong := discoveryStreamer("discovery_game_two", false)
 	source := &mutableSource{}
 	source.set([]Candidate{{Streamer: weak, Origin: OriginDiscovery}})
-	w.SetDiscoveryCandidatePolicy(weak.GetUsername(), CandidateCampaignPolicy{SemanticClass: 3, Ranked: true})
+	w.SetDiscoveryCandidatePolicy(weak.GetUsername(), CandidateCampaignPolicy{Utility: policy.SemanticUtility{SemanticClass: 3}, Ranked: true})
 	w.AddSource(source)
 	w.SetCampaignSemanticClasses(map[string]policy.SemanticClass{
 		"streamera": 1,
@@ -433,7 +634,7 @@ func TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation(t *t
 	}
 
 	source.set([]Candidate{{Streamer: strong, Origin: OriginDiscovery}})
-	w.SetDiscoveryCandidatePolicy(strong.GetUsername(), CandidateCampaignPolicy{SemanticClass: 0, Ranked: true})
+	w.SetDiscoveryCandidatePolicy(strong.GetUsername(), CandidateCampaignPolicy{Utility: policy.SemanticUtility{SemanticClass: 0}, Ranked: true})
 	w.processWatching()
 	final := w.BrokerSnapshot()
 	if len(final.Slots) != 2 {
@@ -458,10 +659,10 @@ func TestDiscoveryCandidateRestrictedFactKeepsHardBrokerPrecedence(t *testing.T)
 	})
 	restricted := discoveryStreamer("restricted_discovery", false)
 	w.SetDiscoveryCandidatePolicy(restricted.GetUsername(), CandidateCampaignPolicy{
-		SemanticClass: 9,
-		Ranked:        true,
-		Restricted:    true,
-		Campaign:      "Allowed restricted campaign",
+		Utility:    policy.SemanticUtility{SemanticClass: 9},
+		Ranked:     true,
+		Restricted: true,
+		Campaign:   "Allowed restricted campaign",
 	})
 	slots, _ := w.arbitrate([]int{0, 1}, []Candidate{{Streamer: restricted, Origin: OriginDiscovery}}, time.Now())
 	if len(slots) != 2 || !loginsOf(slots)[restricted.GetUsername()] {
@@ -630,4 +831,20 @@ func seedPolicyBrokerWeightsByLogin(t *testing.T, w *MinuteWatcher, now time.Tim
 			t.Fatalf("seed watch-time deficit for %s: %v", login, err)
 		}
 	}
+}
+
+func semanticUtilities(classes map[string]policy.SemanticClass) map[string]policy.SemanticUtility {
+	utilities := make(map[string]policy.SemanticUtility, len(classes))
+	for key, class := range classes {
+		utilities[key] = policy.SemanticUtility{SemanticClass: class}
+	}
+	return utilities
+}
+
+func campaignSemantics(classes map[string]policy.SemanticClass) map[string]policy.CampaignSemantic {
+	facts := make(map[string]policy.CampaignSemantic, len(classes))
+	for key, class := range classes {
+		facts[key] = policy.CampaignSemantic{SemanticClass: class, SecondaryEligible: true}
+	}
+	return facts
 }

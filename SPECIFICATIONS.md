@@ -651,8 +651,9 @@ Each tick the broker runs two phases:
 - **Phase A — configured selection**: the priority/rotation logic below picks
   up to two channels from the configured streamer list (direct priority pick
   when ≤2 online, fair rotation with a DROPS/STREAK boost when more). Hard
-  boost classes remain outermost; Campaign Policy semantic class orders
-  comparable drop contenders before persisted-deficit/recency tie-breaking.
+  boost classes remain outermost; Campaign Policy bounded semantic utility
+  orders comparable drop contenders before persisted-deficit/recency
+  tie-breaking.
 - **Phase B — cross-source arbitration**: candidate sources (directory
   discovery today) are layered on top. A candidate fills any free slot;
   otherwise it may displace the lowest-ranked configured occupant it strictly
@@ -661,9 +662,10 @@ Each tick the broker runs two phases:
   (high→low): channel-restricted drop → in-progress watch streak
   → active drop → fair-rotation/priority pick. With no candidate sources
   Phase B is a pure pass-through, so single-list behavior is unchanged. Within
-  an equal drop class, Campaign Policy semantic class is compared before
-  persisted watch-time deficit; equal semantic facts retain deficit fairness
-  and the deterministic login tie-break.
+  an equal drop class, Campaign Policy compares the primary semantic class,
+  then at most one best distinct feasible secondary campaign, before persisted
+  watch-time deficit; equal bounded utility retains deficit fairness and the
+  deterministic login tie-break.
 
 The broker publishes an immutable, explainable snapshot each tick
 (`BrokerSnapshot`: per-slot `channel`/`source`/`reasonCode`/`reason`/
@@ -774,7 +776,7 @@ allocated by the unified slot broker (see *Watch Slot Architecture*).
 **More than 2 online streamers:** a fixed priority pick would starve every other online channel indefinitely, so the watched pair instead rotates fairly across all online streamers. See `internal/watcher.selectRotating` (and `store.go` for persistence) for the full algorithm:
 
 - **Persisted fairness on the broker tick:** every ordinary broker evaluation ranks each online streamer by accumulated watch minutes over the trailing 8-hour window, persisted in SQLite (`watch_time_events`, module `watch_time`, survives container restarts), and gives the base slots to the two with the *least* accumulated time. There is no randomized or fixed rotation residence timer. Ties (including cold start) use in-memory recency and then normalized login, so candidate permutation cannot change the result. Whoever is watched accumulates minutes and becomes less owed, surfacing every valid contender without an in-memory cursor or parity special case.
-- **Priority as a boost, not exclusivity:** on top of the weighted base pair, an online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat without altering persisted weights. The continuity latch keeps the same eligible boost target across base-pair reconciliations; when the fair pair changes, only the victim is reselected so the most-owed ordinary contender cannot be repeatedly displaced. The latch ends on lost eligibility or a strictly stronger hard/semantic contender, preventing boost-target oscillation without granting a third slot. Hard restricted/streak/drop class is compared first. Comparable drop contenders then use Campaign Policy semantic class, and equal semantic facts retain persisted-deficit fairness; recency and normalized login finish deterministic ties.
+- **Priority as a boost, not exclusivity:** on top of the weighted base pair, an online streamer with an active drop (`DROPS`) or an in-progress watch streak (`STREAK`) can take over one seat without altering persisted weights. The continuity latch keeps the same eligible boost target across base-pair reconciliations; when the fair pair changes, only the victim is reselected so the most-owed ordinary contender cannot be repeatedly displaced. The latch ends on lost eligibility or a strictly stronger hard/semantic contender, preventing boost-target oscillation without granting a third slot. Hard restricted/streak/drop class is compared first. Comparable drop contenders then compare Campaign Policy utility lexicographically: primary `SemanticClass`, presence of at most one qualifying distinct secondary campaign, then that secondary's `SemanticClass`. A full bounded-utility tie retains persisted-deficit fairness; recency and normalized login finish deterministic ties.
 - **Continuous-watch accounting:** `Stream.MinuteWatched` measures *continuous successfully delivered* watched minutes for one exact non-empty `BroadcastID`, not broadcast age, uptime, discovery age, scheduler ticks, failed reports, or wall-clock dwell. A real slot loss resets only the continuous counter and its report anchor. It preserves the grant ledger, broadcast binding, and same-broadcast timeout latch, so reacquiring a timed-out broadcast never opens a second 20-minute window. A transient status blip with the same `BroadcastID` is not a new broadcast; only a genuinely changed non-empty `BroadcastID` re-arms a broadcast-specific pursuit.
 - **Single watch-streak owner:** `Stream` derives every direct-selection and broker-protection verdict from the same state: `ELIGIBLE → PURSUING → GRANTED | TIMED_OUT_UNKNOWN`. Zero, 7, 8, 15, and 19 delivered minutes remain eligible/pursuing; 15 minutes is diagnostic only and causes no transition. Exactly 20 minutes without a proven bound grant latches `TIMED_OUT_UNKNOWN`, releases streak priority, and persists that outcome through the existing atomic streak cache. Timeout means outcome unknown, never failed, missed, impossible, or inactive. A bound authoritative grant dominates timeout; a late grant is accepted once without reopening pursuit.
 - **Grant attribution and replay:** ordinary `WATCH` is delivery evidence only and can never grant a streak. An authoritative `WATCH_STREAK` is admitted exactly once by its canonical PubSub event fingerprint. When independent evidence proves a `BroadcastID`, the grant is `GRANTED` for that broadcast; otherwise it is persisted and counted explicitly as `GRANTED_UNBOUND`, never guessed onto the currently observed broadcast and never allowed to end, re-arm, or time out that broadcast's pursuit. Terminal broadcast facts and exact replay identities do not expire by wall-clock age; a proven new `BroadcastID` is the only re-arm signal. WebSocket replay suppression uses the full canonical topic+payload fingerprint, so distinct back-to-back point events are not collapsed.
@@ -1429,11 +1431,12 @@ viewer-count sort: with it on, a subscribed channel floats above a non-subscribe
 one within a game, so an otherwise equal per-game pick prefers a subscribed
 channel. Game-level policy ranks only pre-order directory fetches and bounded
 online checks. Final `selectBest` ordering uses each verified channel's exact
-advertised campaign IDs, active tracker intersection, restricted ACL and best
-campaign `SemanticClass`; configured game order and the existing stable
-subscription/viewer order break exact-class ties for a genuinely new choice. A
-valid current yields only to a strictly stronger hard/semantic candidate, so
-equal facts do not churn. Subscription is a **proxy**: discovery has
+advertised campaign IDs, active tracker intersection, restricted ACL and bounded
+Campaign Policy utility: primary `SemanticClass`, then at most one best
+qualifying distinct secondary campaign. Configured game order and the existing
+stable subscription/viewer order break full bounded-utility ties for a genuinely
+new choice. A valid current yields only to a strictly stronger hard/semantic
+candidate, so equal facts do not churn. Subscription is a **proxy**: discovery has
 no subscriptions GraphQL operation (no such persisted query exists in the
 canonical trackers), so instead a slow miner-side loop (`subscriptionProbeLoop`,
 base cadence 3 min ±20% jitter, deliberately separate from the 1-minute
@@ -1698,23 +1701,37 @@ resets the rule.
 On the health-watchdog tick (no new goroutine, no Twitch calls — inputs come
 from already-synced state) the miner assembles inputs, ranks them, and
 publishes one immutable watcher snapshot (`SetCampaignSemanticPolicy`, read
-lock-free) containing each configured channel's best ordinal `SemanticClass`,
-the exact per-campaign classes, and the game-level directory pre-order. The
+lock-free) containing each configured channel's bounded semantic utility, the
+exact per-campaign semantic/feasibility facts, and the game-level directory
+pre-order. A channel's existing best ordinal `SemanticClass` is always primary.
+Only when primary classes are equal may the best one additional distinct
+campaign contribute a secondary class. That secondary campaign must have a
+non-empty distinct campaign ID, be eligible on that exact channel, have a
+positive `minutesToNextReward`, and be `SAFE`, `AT_RISK`, or
+`NEXT_REWARD_ONLY`; `UNKNOWN`, `IMPOSSIBLE`, Skip, completed campaigns,
+duplicate IDs, and multiple reward tiers of one campaign contribute no
+secondary utility. The tuple is compared lexicographically — campaign counts
+and classes are never summed — so 2, 5, or 20 weak campaigns cannot overpower
+a strictly stronger primary or accumulate more utility than the single best
+secondary. The
 discovery mirror (`SetCampaignPolicy`) remains an atomic compatibility/fallback
 seam; production discovery reads the broker-active snapshot through
 `DiscoveryCampaignPolicy`, so a concurrent refresh cannot mix policy
 generations between source selection and final arbitration. The watcher's hard eligibility and
 restricted/streak classes remain outermost; among otherwise comparable drop
-contenders, semantic class is applied before persisted watch-time deficit, and
-deficit remains the fairness authority for equal semantic facts. Discovery
+contenders, bounded semantic utility is applied before persisted watch-time
+deficit, and deficit remains the fairness authority for a full primary+secondary
+tie. Discovery
 verifies each candidate's advertised campaign IDs and channel ACL, orders by
-that channel's best eligible class (never the game's aggregate best), and
-carries the exact eligible campaign IDs and restricted fact into the same
-broker tick; the broker resolves their class from that tick's immutable
-snapshot. It
+that channel's bounded exact utility (never the game's aggregate best), and
+carries the exact eligible campaign IDs, their current real-remaining-work
+subset, and the restricted fact into the same broker tick; the broker intersects
+that fail-closed evidence with the tick's immutable policy snapshot before
+resolving utility. It
 re-evaluates a still-valid current on each proposal, switching only for a
 strictly stronger hard/semantic candidate; equal facts preserve continuity.
-No raw policy points are added to watch minutes. Without published semantic
+No raw policy points, campaign counts, or semantic classes are added to watch
+minutes. Without published semantic
 facts, configured order and the pre-policy broker behavior are preserved.
 Config (`campaignPolicy`, `dropRules`) is
 runtime-updatable via the Drops page; the ranked decisions surface on the Drops

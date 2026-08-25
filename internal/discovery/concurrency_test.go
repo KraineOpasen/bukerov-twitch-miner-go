@@ -152,17 +152,17 @@ func TestConcurrentSetGameRanksWatchCandidates(t *testing.T) {
 			case 0:
 				m.SetCampaignPolicy(
 					map[string]int{"game one": 0, "game two": 1},
-					map[string]policy.SemanticClass{"camp-g1": 0, "camp-g2": 1},
+					testCampaignSemantics(map[string]policy.SemanticClass{"camp-g1": 0, "camp-g2": 1}),
 				)
 			case 1:
 				m.SetCampaignPolicy(
 					map[string]int{"game one": 1, "game two": 0},
-					map[string]policy.SemanticClass{"camp-g1": 1, "camp-g2": 0},
+					testCampaignSemantics(map[string]policy.SemanticClass{"camp-g1": 1, "camp-g2": 0}),
 				)
 			case 2:
 				m.SetCampaignPolicy(
 					map[string]int{"game one": 0, "game two": 0},
-					map[string]policy.SemanticClass{"camp-g1": 0, "camp-g2": 0},
+					testCampaignSemantics(map[string]policy.SemanticClass{"camp-g1": 0, "camp-g2": 0}),
 				)
 			default:
 				m.SetGameRanks(nil)

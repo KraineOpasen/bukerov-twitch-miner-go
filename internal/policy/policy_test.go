@@ -2,6 +2,7 @@ package policy
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -561,6 +562,237 @@ func TestRankPermutationDeterminismWithUnknownDeadlines(t *testing.T) {
 			if got := strings.Join(ids(Rank(mode, inputs, base)), ","); got != "a,b,c" {
 				t.Fatalf("mode %s permutation %d = %s, want a,b,c", mode, i, got)
 			}
+		}
+	}
+}
+
+func TestSemanticUtilityUsesOneBoundedDistinctSecondary(t *testing.T) {
+	facts := map[string]CampaignSemantic{
+		"primary":   {SemanticClass: 0, SecondaryEligible: true},
+		"secondary": {SemanticClass: 4, SecondaryEligible: true},
+	}
+	one, ok := BuildSemanticUtility([]string{"primary"}, facts)
+	if !ok {
+		t.Fatal("single primary campaign was not ranked")
+	}
+	overlap, ok := BuildSemanticUtility([]string{"primary", "secondary"}, facts)
+	if !ok || !overlap.HasSecondary || overlap.SecondarySemanticClass != 4 {
+		t.Fatalf("overlap utility = %+v, ranked=%v", overlap, ok)
+	}
+	if CompareSemanticUtility(overlap, one) <= 0 {
+		t.Fatalf("bounded overlap utility %+v did not beat equal primary %+v", overlap, one)
+	}
+
+	for _, additional := range []int{2, 5, 20} {
+		ids := []string{"primary", "secondary"}
+		manyFacts := map[string]CampaignSemantic{
+			"primary":   facts["primary"],
+			"secondary": facts["secondary"],
+		}
+		for i := 1; i < additional; i++ {
+			id := fmt.Sprintf("weak-%02d", i)
+			ids = append(ids, id)
+			manyFacts[id] = CampaignSemantic{SemanticClass: SemanticClass(10 + i), SecondaryEligible: true}
+		}
+		many, ranked := BuildSemanticUtility(ids, manyFacts)
+		if !ranked {
+			t.Fatalf("%d additional campaigns were not ranked", additional)
+		}
+		if cmp := CompareSemanticUtility(many, overlap); cmp != 0 {
+			t.Fatalf("%d additional campaigns accumulated utility: many=%+v one=%+v cmp=%d", additional, many, overlap, cmp)
+		}
+	}
+}
+
+func TestSemanticUtilityPrimaryAlwaysPrecedesSecondary(t *testing.T) {
+	strong, ok := BuildSemanticUtility([]string{"strong"}, map[string]CampaignSemantic{
+		"strong": {SemanticClass: 0, SecondaryEligible: true},
+	})
+	if !ok {
+		t.Fatal("strong primary campaign was not ranked")
+	}
+	for _, additional := range []int{2, 5, 20} {
+		facts := map[string]CampaignSemantic{
+			"weak-primary": {SemanticClass: 1, SecondaryEligible: true},
+		}
+		ids := []string{"weak-primary"}
+		for i := 0; i < additional; i++ {
+			id := fmt.Sprintf("weak-extra-%02d", i)
+			ids = append(ids, id)
+			facts[id] = CampaignSemantic{SemanticClass: SemanticClass(2 + i), SecondaryEligible: true}
+		}
+		weak, ranked := BuildSemanticUtility(ids, facts)
+		if !ranked {
+			t.Fatalf("weak overlap with %d additions was not ranked", additional)
+		}
+		if cmp := CompareSemanticUtility(strong, weak); cmp <= 0 {
+			t.Fatalf("strong primary %+v lost to %d weaker campaigns %+v (cmp=%d)", strong, additional, weak, cmp)
+		}
+	}
+}
+
+func TestSemanticUtilityPreservesPrimaryOrderingInEveryMode(t *testing.T) {
+	for _, mode := range []Mode{ModeGameOrder, ModeEndingSoonest, ModeClosestToReward, ModeLowAvailability, ModeSmart} {
+		t.Run(string(mode), func(t *testing.T) {
+			decisions := Rank(mode, []CampaignInput{
+				{
+					CampaignID: "strong", HighPriority: true, GameOrderIndex: 9,
+					EndAt: base.Add(48 * time.Hour), Drops: chain([2]int{120, 0}), EligibleLiveChannels: 9,
+				},
+				{
+					CampaignID: "weak", GameOrderIndex: 0,
+					EndAt: base.Add(2 * time.Hour), Drops: chain([2]int{30, 29}), EligibleLiveChannels: 1,
+				},
+				{
+					CampaignID: "extra", GameOrderIndex: 5,
+					EndAt: base.Add(10 * time.Hour), Drops: chain([2]int{60, 0}), EligibleLiveChannels: 5,
+				},
+			}, base)
+			facts := make(map[string]CampaignSemantic, len(decisions))
+			for _, decision := range decisions {
+				fact, ok := CampaignSemanticFromDecision(decision)
+				if !ok {
+					t.Fatalf("mode %s decision unexpectedly unpublished: %+v", mode, decision)
+				}
+				facts[decision.CampaignID] = fact
+			}
+			strong, strongOK := BuildSemanticUtility([]string{"strong"}, facts)
+			weakOverlap, weakOK := BuildSemanticUtility([]string{"weak", "extra"}, facts)
+			if !strongOK || !weakOK || CompareSemanticUtility(strong, weakOverlap) <= 0 {
+				t.Fatalf("mode %s primary ordering lost: strong=%+v (%v) weak overlap=%+v (%v)", mode, strong, strongOK, weakOverlap, weakOK)
+			}
+		})
+	}
+}
+
+func TestSemanticUtilityDeduplicatesCampaignIDAndIgnoresIneligibleSecondary(t *testing.T) {
+	facts := map[string]CampaignSemantic{
+		"primary":    {SemanticClass: 0, SecondaryEligible: true},
+		"eligible":   {SemanticClass: 3, SecondaryEligible: true},
+		"unknown":    {SemanticClass: 1},
+		"impossible": {SemanticClass: 1},
+		"skipped":    {SemanticClass: 1},
+		"completed":  {SemanticClass: 1},
+	}
+	single, ok := BuildSemanticUtility([]string{"primary"}, facts)
+	if !ok {
+		t.Fatal("single campaign was not ranked")
+	}
+	duplicates, ok := BuildSemanticUtility([]string{"primary", "primary", "primary"}, facts)
+	if !ok || duplicates.HasSecondary || CompareSemanticUtility(duplicates, single) != 0 {
+		t.Fatalf("duplicate CampaignID manufactured secondary utility: single=%+v duplicates=%+v", single, duplicates)
+	}
+
+	failClosed, ok := BuildSemanticUtility(
+		[]string{"primary", "unknown", "impossible", "skipped", "completed"},
+		facts,
+	)
+	if !ok || failClosed.HasSecondary || CompareSemanticUtility(failClosed, single) != 0 {
+		t.Fatalf("ineligible campaigns manufactured secondary utility: single=%+v failClosed=%+v", single, failClosed)
+	}
+
+	eligible, ok := BuildSemanticUtility([]string{"primary", "eligible"}, facts)
+	if !ok || !eligible.HasSecondary || CompareSemanticUtility(eligible, single) <= 0 {
+		t.Fatalf("distinct eligible campaign did not provide bounded secondary utility: %+v", eligible)
+	}
+}
+
+func TestSemanticUtilityIntersectsCurrentRemainingWork(t *testing.T) {
+	facts := map[string]CampaignSemantic{
+		"primary":   {SemanticClass: 0, SecondaryEligible: true},
+		"secondary": {SemanticClass: 2, SecondaryEligible: true},
+	}
+	live, ok := BuildSemanticUtilityWithRemainingWork(
+		[]string{"primary", "secondary"},
+		[]string{"primary", "secondary"},
+		facts,
+	)
+	if !ok || !live.HasSecondary {
+		t.Fatalf("live secondary utility = %+v, ranked=%v", live, ok)
+	}
+
+	completed, ok := BuildSemanticUtilityWithRemainingWork(
+		[]string{"primary", "secondary"},
+		[]string{"primary"},
+		facts,
+	)
+	if !ok || completed.SemanticClass != live.SemanticClass || completed.HasSecondary {
+		t.Fatalf("completed secondary was not downgraded without changing primary: live=%+v completed=%+v ranked=%v", live, completed, ok)
+	}
+}
+
+func TestCampaignSemanticFromDecisionFailsClosedForSecondary(t *testing.T) {
+	cases := []struct {
+		name          string
+		decision      Decision
+		wantPublished bool
+		wantEligible  bool
+	}{
+		{name: "safe", decision: Decision{CampaignID: "safe", Status: StatusSafe, Feasibility: Feasibility{MinutesToNextReward: 10}}, wantPublished: true, wantEligible: true},
+		{name: "at risk", decision: Decision{CampaignID: "risk", Status: StatusAtRisk, Feasibility: Feasibility{MinutesToNextReward: 10}}, wantPublished: true, wantEligible: true},
+		{name: "next reward only", decision: Decision{CampaignID: "next", Status: StatusNextRewardOnly, Feasibility: Feasibility{MinutesToNextReward: 10}}, wantPublished: true, wantEligible: true},
+		{name: "unknown", decision: Decision{CampaignID: "unknown", Status: StatusUnknown, Feasibility: Feasibility{MinutesToNextReward: 10}}, wantPublished: true},
+		{name: "impossible", decision: Decision{CampaignID: "impossible", Status: StatusImpossible, Feasibility: Feasibility{MinutesToNextReward: 10}}},
+		{name: "completed", decision: Decision{CampaignID: "completed", Status: StatusSafe, Feasibility: Feasibility{MinutesToNextReward: 0}}, wantPublished: true},
+		{name: "skip", decision: Decision{CampaignID: "skip", Status: StatusSafe, Excluded: true, ExcludeReason: "per-drop rule: Skip"}},
+		{name: "empty ID", decision: Decision{Status: StatusSafe, Feasibility: Feasibility{MinutesToNextReward: 10}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fact, published := CampaignSemanticFromDecision(tc.decision)
+			if published != tc.wantPublished {
+				t.Fatalf("published=%v, want %v (fact=%+v)", published, tc.wantPublished, fact)
+			}
+			if fact.SecondaryEligible != tc.wantEligible {
+				t.Fatalf("secondary eligible=%v, want %v (fact=%+v)", fact.SecondaryEligible, tc.wantEligible, fact)
+			}
+		})
+	}
+}
+
+func TestSemanticUtilityEqualPrimaryClassDoesNotLetUnknownManufactureOverlap(t *testing.T) {
+	oneEligible := map[string]CampaignSemantic{
+		"eligible": {SemanticClass: 0, SecondaryEligible: true},
+		"unknown":  {SemanticClass: 0},
+	}
+	utility, ok := BuildSemanticUtility([]string{"unknown", "eligible"}, oneEligible)
+	if !ok || utility.PrimaryCampaignID != "eligible" || utility.HasSecondary {
+		t.Fatalf("equal-class UNKNOWN manufactured overlap: utility=%+v ranked=%v", utility, ok)
+	}
+
+	twoEligible := map[string]CampaignSemantic{
+		"eligible-a": {SemanticClass: 0, SecondaryEligible: true},
+		"eligible-b": {SemanticClass: 0, SecondaryEligible: true},
+	}
+	utility, ok = BuildSemanticUtility([]string{"eligible-b", "eligible-a"}, twoEligible)
+	if !ok || utility.PrimaryCampaignID != "eligible-a" || !utility.HasSecondary ||
+		utility.SecondaryCampaignID != "eligible-b" || utility.SecondarySemanticClass != 0 {
+		t.Fatalf("two equal-class feasible campaigns did not form one bounded overlap: utility=%+v ranked=%v", utility, ok)
+	}
+}
+
+func TestSemanticUtilityIsDeterministicUnderInputPermutations(t *testing.T) {
+	facts := map[string]CampaignSemantic{
+		"primary-b": {SemanticClass: 0, SecondaryEligible: true},
+		"weak":      {SemanticClass: 3, SecondaryEligible: true},
+		"primary-a": {SemanticClass: 0, SecondaryEligible: true},
+	}
+	permutations := [][]string{
+		{"primary-b", "weak", "primary-a"},
+		{"primary-b", "primary-a", "weak"},
+		{"weak", "primary-b", "primary-a"},
+		{"weak", "primary-a", "primary-b"},
+		{"primary-a", "primary-b", "weak"},
+		{"primary-a", "weak", "primary-b"},
+	}
+	want, ok := BuildSemanticUtility(permutations[0], facts)
+	if !ok {
+		t.Fatal("reference permutation was not ranked")
+	}
+	for i, ids := range permutations[1:] {
+		got, ranked := BuildSemanticUtility(ids, facts)
+		if !ranked || got != want {
+			t.Fatalf("permutation %d utility = %+v, ranked=%v, want %+v", i+1, got, ranked, want)
 		}
 	}
 }

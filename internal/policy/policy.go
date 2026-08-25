@@ -183,6 +183,28 @@ type Factor struct {
 // watch minutes or any other broker fairness measure.
 type SemanticClass uint32
 
+// CampaignSemantic is the immutable per-campaign fact published to channel
+// projections. SemanticClass remains the existing primary policy ordinal.
+// SecondaryEligible is deliberately narrower: only a campaign with known
+// feasible remaining work may contribute as the one bounded overlap fact.
+type CampaignSemantic struct {
+	SemanticClass     SemanticClass
+	SecondaryEligible bool
+}
+
+// SemanticUtility is the bounded lexicographic projection for one channel.
+// SemanticClass is the existing primary class. At most one distinct campaign
+// contributes SecondarySemanticClass; campaign IDs make the projection
+// explainable and deterministic but never participate in cross-channel
+// preference.
+type SemanticUtility struct {
+	SemanticClass          SemanticClass
+	SecondarySemanticClass SemanticClass
+	HasSecondary           bool
+	PrimaryCampaignID      string
+	SecondaryCampaignID    string
+}
+
 // Decision is the engine's explainable verdict for one campaign.
 type Decision struct {
 	CampaignID    string        `json:"campaignId"`
@@ -195,6 +217,136 @@ type Decision struct {
 	Status        FeasStatus    `json:"status"`
 	Excluded      bool          `json:"excluded,omitempty"`
 	ExcludeReason string        `json:"excludeReason,omitempty"`
+}
+
+// CampaignSemanticFromDecision converts a ranked policy decision into the
+// richer fact needed by channel projections. Excluded and identity-less
+// decisions are not published at all. UNKNOWN and completed campaigns retain
+// their existing primary semantics but fail closed for secondary utility;
+// IMPOSSIBLE fails closed even if a malformed caller omitted Excluded.
+func CampaignSemanticFromDecision(d Decision) (CampaignSemantic, bool) {
+	if d.CampaignID == "" || d.Excluded || d.Status == StatusImpossible {
+		return CampaignSemantic{}, false
+	}
+	secondaryEligible := d.Feasibility.MinutesToNextReward > 0
+	if secondaryEligible {
+		switch d.Status {
+		case StatusSafe, StatusAtRisk, StatusNextRewardOnly:
+		default:
+			secondaryEligible = false
+		}
+	}
+	return CampaignSemantic{
+		SemanticClass:     d.SemanticClass,
+		SecondaryEligible: secondaryEligible,
+	}, true
+}
+
+// BuildSemanticUtility projects the exact campaign IDs carried by a channel
+// into one primary class plus at most the best one distinct eligible secondary
+// class. IDs are deduplicated before selection; absent and empty IDs provide no
+// fact. If primary-class campaigns tie, an eligible one is consumed as primary
+// first so an UNKNOWN/completed peer cannot manufacture overlap utility.
+func BuildSemanticUtility(campaignIDs []string, facts map[string]CampaignSemantic) (SemanticUtility, bool) {
+	unique := make(map[string]CampaignSemantic, len(campaignIDs))
+	for _, id := range campaignIDs {
+		if id == "" {
+			continue
+		}
+		fact, ok := facts[id]
+		if !ok {
+			continue
+		}
+		unique[id] = fact
+	}
+
+	var utility SemanticUtility
+	found := false
+	primaryEligible := false
+	for id, fact := range unique {
+		if !found || fact.SemanticClass < utility.SemanticClass ||
+			(fact.SemanticClass == utility.SemanticClass && fact.SecondaryEligible && !primaryEligible) ||
+			(fact.SemanticClass == utility.SemanticClass && fact.SecondaryEligible == primaryEligible && id < utility.PrimaryCampaignID) {
+			utility.SemanticClass = fact.SemanticClass
+			utility.PrimaryCampaignID = id
+			primaryEligible = fact.SecondaryEligible
+			found = true
+		}
+	}
+	if !found {
+		return SemanticUtility{}, false
+	}
+
+	for id, fact := range unique {
+		if id == utility.PrimaryCampaignID || !fact.SecondaryEligible {
+			continue
+		}
+		if !utility.HasSecondary || fact.SemanticClass < utility.SecondarySemanticClass ||
+			(fact.SemanticClass == utility.SecondarySemanticClass && id < utility.SecondaryCampaignID) {
+			utility.SecondarySemanticClass = fact.SemanticClass
+			utility.SecondaryCampaignID = id
+			utility.HasSecondary = true
+		}
+	}
+	return utility, true
+}
+
+// BuildSemanticUtilityWithRemainingWork intersects a previously published
+// policy decision set with current per-channel progress evidence. Primary
+// semantics stay authoritative, while a campaign may contribute secondary
+// utility only when its exact CampaignID is present in remainingWorkCampaignIDs.
+// The final projection still delegates to BuildSemanticUtility, preserving its
+// CampaignID deduplication and one-secondary bound.
+func BuildSemanticUtilityWithRemainingWork(
+	campaignIDs []string,
+	remainingWorkCampaignIDs []string,
+	facts map[string]CampaignSemantic,
+) (SemanticUtility, bool) {
+	remaining := make(map[string]bool, len(remainingWorkCampaignIDs))
+	for _, id := range remainingWorkCampaignIDs {
+		if id != "" {
+			remaining[id] = true
+		}
+	}
+
+	currentFacts := make(map[string]CampaignSemantic, len(campaignIDs))
+	for _, id := range campaignIDs {
+		fact, ok := facts[id]
+		if !ok {
+			continue
+		}
+		if !remaining[id] {
+			fact.SecondaryEligible = false
+		}
+		currentFacts[id] = fact
+	}
+	return BuildSemanticUtility(campaignIDs, currentFacts)
+}
+
+// CompareSemanticUtility returns positive when a is preferred to b. Primary
+// policy semantics always dominate; only equal primaries consult secondary
+// presence and then the single best secondary class. Campaign counts and IDs
+// are intentionally absent from the comparator.
+func CompareSemanticUtility(a, b SemanticUtility) int {
+	if a.SemanticClass != b.SemanticClass {
+		if a.SemanticClass < b.SemanticClass {
+			return 1
+		}
+		return -1
+	}
+	if a.HasSecondary != b.HasSecondary {
+		if a.HasSecondary {
+			return 1
+		}
+		return -1
+	}
+	if !a.HasSecondary || a.SecondarySemanticClass == b.SecondarySemanticClass {
+		return 0
+	}
+	if a.SecondarySemanticClass < b.SecondarySemanticClass {
+		return 1
+	}
+	return -1
 }
 
 // nextReward returns the remaining watched minutes to the lowest-threshold

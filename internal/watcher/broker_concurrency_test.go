@@ -100,8 +100,10 @@ func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 				"disco":     0,
 			})
 			w.SetDiscoveryCandidatePolicy("disco2", CandidateCampaignPolicy{
-				SemanticClass: policy.SemanticClass(i % 4),
-				Ranked:        true,
+				Utility: policy.SemanticUtility{
+					SemanticClass: policy.SemanticClass(i % 4),
+				},
+				Ranked: true,
 			})
 		}
 	}()
