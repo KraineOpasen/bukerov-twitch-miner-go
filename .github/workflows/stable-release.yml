@@ -15,31 +15,52 @@ concurrency:
 jobs:
   validation-job:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       public-version: ${{ steps.version.outputs.public-version }}
+      source-tag: ${{ steps.version.outputs.source-tag }}
       release-line: ${{ steps.version.outputs.release-line }}
       release-branch: ${{ steps.version.outputs.release-branch }}
+      release-id: ${{ steps.release.outputs.release-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate tag and derive release line
         id: version
         env:
           SOURCE_TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$SOURCE_TAG" =~ ^stable-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Invalid stable release tag" >&2
+          if [[ ! "$SOURCE_TAG" =~ ^stable-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid canonical stable release tag" >&2
             exit 1
           fi
-          public_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          release_line="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          patch="${BASH_REMATCH[3]}"
+          python3 - "$major" "$minor" "$patch" <<'PY'
+          import sys
+
+          max_component = 2**63 - 1
+          if any(int(value) > max_component for value in sys.argv[1:]):
+              raise SystemExit("Stable version component exceeds signed 64-bit consumer range")
+          PY
+          tag_commit="$(git rev-parse "refs/tags/${SOURCE_TAG}^{commit}")"
+          if [[ "$tag_commit" != "$EVENT_SHA" ]]; then
+            echo "Tag commit $tag_commit does not match event SHA $EVENT_SHA" >&2
+            exit 1
+          fi
+          public_version="${major}.${minor}.${patch}"
+          release_line="${major}.${minor}"
           release_branch="release/${release_line}"
           {
             echo "public-version=$public_version"
+            echo "source-tag=$SOURCE_TAG"
             echo "release-line=$release_line"
             echo "release-branch=$release_branch"
           } >> "$GITHUB_OUTPUT"
@@ -54,12 +75,42 @@ jobs:
           git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
           git merge-base --is-ancestor "$tag_commit" "refs/remotes/origin/${RELEASE_BRANCH}"
 
+      - name: Require an existing public empty exact-tag Release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.version.outputs.source-tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$(mktemp)"
+          trap 'rm -f "$release_json"' EXIT
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${SOURCE_TAG}" > "$release_json"
+          jq -e --arg tag "$SOURCE_TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            .prerelease == false and
+            .immutable == false and
+            (.assets | length) == 0
+          ' "$release_json" >/dev/null
+
+          latest_tag="$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" == "$SOURCE_TAG" ]]; then
+            echo "Stable Release must be created with make_latest=false" >&2
+            exit 1
+          fi
+          echo "release-id=$(jq -r .id "$release_json")" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
         with:
           version: v2.12.2
       - name: Verify dependencies
@@ -69,25 +120,28 @@ jobs:
       - name: Test
         run: go test -v -race ./...
 
-  publish:
+  publish-image:
     needs: validation-job
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      oci-digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     env:
       IMAGE_NAME: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
       PUBLIC_VERSION: ${{ needs.validation-job.outputs.public-version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -109,7 +163,7 @@ jobs:
           fi
       - name: Build and push exact stable image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -120,18 +174,40 @@ jobs:
             CHANNEL=stable
           sbom: true
           provenance: false
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+
+  attest-image:
+    needs: [validation-job, publish-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE_NAME: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
+      PUBLIC_VERSION: ${{ needs.validation-job.outputs.public-version }}
+      OCI_DIGEST: ${{ needs.publish-image.outputs.oci-digest }}
+    steps:
+      # Keep signing in its own job: if registry attestation has a transient
+      # failure after the immutable image push, retrying failed jobs cannot
+      # rebuild or overwrite the exact version tag.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest image build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ env.OCI_DIGEST }}
           push-to-registry: true
           create-storage-record: false
-      - name: Record immutable release coordinates
+      - name: Record immutable image coordinates
         env:
-          SOURCE_TAG: ${{ github.ref_name }}
+          SOURCE_TAG: ${{ needs.validation-job.outputs.source-tag }}
           RELEASE_BRANCH: ${{ needs.validation-job.outputs.release-branch }}
-          OCI_DIGEST: ${{ steps.build.outputs.digest }}
         shell: bash
         run: |
           {
@@ -142,3 +218,177 @@ jobs:
             echo "- Image: \`$IMAGE_NAME\`"
             echo "- OCI index digest: \`$OCI_DIGEST\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-update-assets:
+    needs: [validation-job, attest-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      PUBLIC_VERSION: ${{ needs.validation-job.outputs.public-version }}
+      SOURCE_TAG: ${{ needs.validation-job.outputs.source-tag }}
+      RELEASE_ID: ${{ needs.validation-job.outputs.release-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Revalidate the exact Release before building assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            | jq -e --arg tag "$SOURCE_TAG" --arg id "$RELEASE_ID" '
+              (.id | tostring) == $id and
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == false and
+              .immutable == false and
+              ([.assets[].name] | unique | length) == (.assets | length) and
+              ([.assets[] | select(
+                (.name != "twitch-miner-go-linux-amd64" and
+                 .name != "twitch-miner-go-linux-arm64" and
+                 .name != "checksums.txt") or
+                .state != "uploaded" or
+                .size <= 0 or
+                ((.digest | type) != "string") or
+                (.digest | test("^sha256:[0-9a-f]{64}$") | not)
+              )] | length) == 0
+            ' >/dev/null
+
+      - name: Build exact stable updater artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            asset="twitch-miner-go-linux-${arch}"
+            identity="BTM_STABLE_ARTIFACT_V1|VERSION=${PUBLIC_VERSION}|CHANNEL=stable|GOOS=linux|GOARCH=${arch}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -trimpath -buildvcs=false \
+              -ldflags="-s -w -X github.com/KraineOpasen/bukerov-twitch-miner-go/internal/version.ArtifactIdentity=${identity}" \
+              -o "dist/${asset}" ./cmd/miner
+            python3 - "dist/${asset}" "$identity" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          artifact = pathlib.Path(sys.argv[1]).read_bytes()
+          identity = sys.argv[2].encode()
+          marker = re.compile(
+              rb"BTM_STABLE_ARTIFACT_V1\|VERSION=(0|[1-9][0-9]*)\."
+              rb"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\|CHANNEL=stable\|"
+              rb"GOOS=[a-z0-9]+\|GOARCH=[a-z0-9]+"
+          )
+          markers = [match.group(0) for match in marker.finditer(artifact)]
+          if markers != [identity] or artifact.count(identity) != 1:
+              raise SystemExit(f"{sys.argv[1]} does not contain exactly one expected stable identity")
+          PY
+          done
+          (
+            cd dist
+            sha256sum \
+              twitch-miner-go-linux-amd64 \
+              twitch-miner-go-linux-arm64 > checksums.txt
+          )
+
+      - name: Attest stable binary provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Upload missing assets without overwrite
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets_json="$(mktemp)"
+          trap 'rm -f "$assets_json"' EXIT
+          gh api --method GET --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            | jq 'add' > "$assets_json"
+
+          missing=()
+          for name in twitch-miner-go-linux-amd64 twitch-miner-go-linux-arm64 checksums.txt; do
+            local_digest="sha256:$(sha256sum "dist/${name}" | awk '{print $1}')"
+            local_size="$(stat -c '%s' "dist/${name}")"
+            count="$(jq --arg name "$name" '[.[] | select(.name == $name)] | length' "$assets_json")"
+            if [[ "$count" == "0" ]]; then
+              missing+=("dist/${name}")
+              continue
+            fi
+            if [[ "$count" != "1" ]]; then
+              echo "Release has duplicate asset $name" >&2
+              exit 1
+            fi
+            jq -e --arg name "$name" --arg digest "$local_digest" --argjson size "$local_size" '
+              [ .[] | select(
+                .name == $name and
+                .state == "uploaded" and
+                .size == $size and
+                .digest == $digest
+              ) ] | length == 1
+            ' "$assets_json" >/dev/null
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            gh release upload "$SOURCE_TAG" "${missing[@]}" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Verify the complete server-side asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets_json="$(mktemp)"
+          trap 'rm -f "$assets_json"' EXIT
+          gh api --method GET --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            | jq 'add' > "$assets_json"
+
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            | jq -e --arg tag "$SOURCE_TAG" --arg id "$RELEASE_ID" '
+              (.id | tostring) == $id and
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == false and
+              .immutable == false
+            ' >/dev/null
+
+          latest_tag="$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" == "$SOURCE_TAG" ]]; then
+            echo "Stable Release became repository-wide latest; refusing cross-channel publication" >&2
+            exit 1
+          fi
+
+          jq -e 'length == 3' "$assets_json" >/dev/null
+          for name in twitch-miner-go-linux-amd64 twitch-miner-go-linux-arm64 checksums.txt; do
+            local_digest="sha256:$(sha256sum "dist/${name}" | awk '{print $1}')"
+            local_size="$(stat -c '%s' "dist/${name}")"
+            jq -e --arg name "$name" --arg digest "$local_digest" --argjson size "$local_size" '
+              [ .[] | select(
+                .name == $name and
+                .state == "uploaded" and
+                .size == $size and
+                .digest == $digest
+              ) ] | length == 1
+            ' "$assets_json" >/dev/null
+          done

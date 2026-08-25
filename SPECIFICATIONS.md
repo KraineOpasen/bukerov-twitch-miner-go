@@ -241,8 +241,10 @@ internal/
 │   └── logger.go               # Structured logging setup
 │
 ├── updater/                    # Binary self-update (see "Auto-Update Integrity")
-│   ├── updater.go              # Release check, fail-closed checksum verify, binary swap
-│   └── version.go              # Release/version comparison helpers
+│   ├── updater.go              # Release check, fail-closed verification, binary swap
+│   ├── stable.go               # Strict stable release/asset/identity policy
+│   ├── provenance.go           # Sigstore/SLSA producer and source verification
+│   └── recovery.go             # Durable two-slot stable recovery and re-exec
 │
 └── version/                    # Version info
     └── version.go              # Build version, injected at compile
@@ -2580,6 +2582,53 @@ surfaced once per version via the Discord system channel
 (`Options.NotifyFailure` → `Manager.NotifyUpdateFailed`), and mining continues
 on the current version. The Release workflow publishes `checksums.txt`
 (sha256sum over all binaries) with every release.
+
+Stable is a closed, independent channel. Its selector exhausts the paginated
+GitHub Releases collection and accepts only canonical
+`stable-vMAJOR.MINOR.PATCH` public, non-prerelease Releases with the exact
+Linux amd64/arm64 binary set plus `checksums.txt`. It maps that tag explicitly
+to public `MAJOR.MINOR.PATCH`; generic/main `v*` values never enter candidate
+ordering. Each stable download must match both the strict checksum file and
+GitHub's server-side `sha256:` asset digest, and must contain exactly one
+platform-bound `BTM_STABLE_ARTIFACT_V1` marker with the same `VERSION` and
+`CHANNEL=stable`. Stable build initialization derives its runtime Version and
+Channel from that single marker.
+
+Before cache or swap, stable resolves the exact Git tag (including bounded
+annotated-tag indirection) to a commit and queries GitHub artifact attestations
+by the downloaded sha256. Verification uses Sigstore's TUF-distributed
+public-good trust root and requires the Fulcio certificate signature, SCT,
+Rekor transparency inclusion/observer timestamp, exact GitHub Actions OIDC
+issuer, public hosted-runner build, this repository, the exact stable workflow
+at the exact tag ref, and the resolved commit in the source/build signer
+extensions. The verified in-toto statement must be SLSA provenance v1 and must
+bind exactly both controlled binary names/digests, the same workflow inputs,
+builder identity, tag ref, and Git dependency commit. Absence, ambiguity, trust
+root failure, signature failure, or any claim mismatch refuses apply.
+
+Before the live swap, the stable updater must atomically activate the verified
+candidate in a bounded two-slot cache at
+`database/.updater/stable/<goos>-<goarch>`. Cache failure blocks apply. At the
+cache boundary, a candidate below the already accepted version is refused and
+the same public version may never change digest/source identity; a failed live
+swap therefore cannot expose the durable floor to a later regression. At the
+next process start, before healthcheck/config/application work, stable-only
+bootstrap validates the strict manifest, binary hash, tag/version/channel,
+platform, asset name, API digest binding, verified source-commit shape, and
+embedded marker. The cache contains only a candidate that already passed the
+live Sigstore/SLSA gate; TUF metadata is kept in a sibling persistent cache. A
+cached version newer than the pinned executable is restored atomically and
+re-executed; a same/older version is ignored, so ordinary container recreation
+cannot cause a silent downgrade. `AUTO_UPDATE=false` disables future
+acceptance but not replay of a previously accepted floor. This bootstrap is
+deterministic recovery, not a second discovery/updater state machine.
+
+The stable producer keeps the immutable GHCR image, SBOM, and OCI provenance,
+and additionally builds the exact two raw updater binaries, checksums, and a
+GitHub build-provenance attestation. It uploads them without overwrite only to
+an already existing exact-tag public Release after the image succeeds. The
+scratch runtime verifies that cryptographic attestation in-process as described
+above; the producer's OCI image attestation remains independently auditable.
 
 The container image also defines a `HEALTHCHECK` executing
 `/twitch-miner-go -healthcheck` (scratch has no shell): it loads the same

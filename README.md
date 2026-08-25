@@ -140,7 +140,17 @@ ghcr.io/kraineopasen/bukerov-twitch-miner-go-stable@sha256:<digest>
 
 ### Using Docker Compose
 
-The included [`docker-compose.yml`](docker-compose.yml) intentionally requires `TWITCH_MINER_IMAGE` so it cannot silently fall back to the modern package or a moving tag. Stable images use `AUTO_UPDATE=false`, do not consume the repository-wide GitHub Releases update feed, and remain excluded from Watchtower. Upgrades are operator-controlled by changing the exact stable image tag or digest. `restart: unless-stopped` remains the normal container restart policy; it is not a stable self-update mechanism.
+The included [`docker-compose.yml`](docker-compose.yml) intentionally requires
+`TWITCH_MINER_IMAGE`, so it cannot silently fall back to the modern package or
+a moving tag. The exact stable image remains pinned and excluded from
+Watchtower, while its native updater checks only complete `stable-vX.Y.Z`
+Releases. `AUTO_UPDATE=true` and a two-hour cadence are the image defaults;
+set `AUTO_UPDATE=false` to opt out. Accepted binaries are cached under the
+existing `/database` mount before the live executable is swapped, so an
+ordinary container recreation from the original image restores the accepted
+version before the healthcheck or miner starts. `restart: unless-stopped`
+performs the clean process restart after an apply; it does not pull or replace
+the pinned image.
 
 ```bash
 # From a directory containing docker-compose.yml and your config/ folder.
@@ -266,7 +276,7 @@ Once authenticated, the dashboard shows all your streamers, points, and earnings
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.26.7 or later
 - Git
 - Make (optional, for using Makefile targets)
 
@@ -322,7 +332,10 @@ make docker
 The miner can keep itself up to date by checking the project's GitHub Releases,
 downloading the binary for its platform, atomically replacing its own
 executable, and exiting `0` so its supervisor (Docker restart policy or systemd)
-restarts it on the new version.
+restarts it on the new version. Stable builds use an independent, exhaustively
+paginated selector: only an exact public `stable-vMAJOR.MINOR.PATCH` Release
+with the complete stable asset set can qualify. Generic `v*`, drafts,
+prereleases, lookalikes, and main versions never enter stable ordering.
 
 > **Watchtower note:** the Docker image is deliberately excluded from
 > [Watchtower](https://containrrr.dev/watchtower/) via the
@@ -350,6 +363,23 @@ Both are equivalent; the flag takes precedence. When enabled the miner:
   An unverified binary is never swapped in. (Every release built by the
   Release workflow ships `checksums.txt`, so a refusal means a broken or
   tampered release, or a transient network failure — the next check retries.)
+- For stable builds, additionally requires GitHub's server-side sha256 digest
+  for every controlled asset and exactly one platform-bound marker containing
+  `VERSION=X.Y.Z` and `CHANNEL=stable`. The producer emits Linux amd64 and
+  arm64 updater binaries; other stable native platforms fail closed.
+- Stable then verifies the artifact's signed SLSA provenance with Sigstore's
+  public-good trust root and transparency log. Both the signing certificate
+  and the signed statement must name this repository, the exact
+  `.github/workflows/stable-release.yml` producer at the exact stable tag, the
+  tag's resolved Git commit, and both controlled binary names/digests. A
+  checksum backed only by mutable Release metadata is not sufficient.
+- For stable containers, durably writes the verified candidate to a two-slot
+  cache under `/database/.updater/stable` before replacing
+  `/twitch-miner-go`. On container recreation or host recovery, bootstrap
+  validates that cache and re-execs a newer candidate before any other mode or
+  service starts. The accepted cache floor itself cannot regress or change
+  digest within one version, and a same/older cache is ignored, so recovery
+  never downgrades.
 - **Never crashes on failure.** If the install is refused or the binary swap
   fails (for example a read-only filesystem), it logs the error, sends a
   Discord *system* notification (once per version, when configured), and keeps
@@ -357,14 +387,19 @@ Both are equivalent; the flag takes precedence. When enabled the miner:
 
 If auto-update is **disabled** but a newer release is found, the miner just logs
 it once per check interval (and sends a Discord *system* notification if Discord
-notifications are configured) instead of updating.
+notifications are configured) instead of accepting it. `AUTO_UPDATE=false`
+does not erase or roll back a stable version that was already accepted into
+the durable cache; this prevents a recreated container from silently
+downgrading. An intentional rollback therefore requires stopping the
+container, explicitly clearing that cache, and selecting the desired immutable
+image.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTO_UPDATE` | `true` (image) / unset (binary) | `true`/`1` enables self-update; equivalent to `-auto-update` |
-| `AUTO_UPDATE_CHECK_INTERVAL` | `8h` | How often to check for a new release. Go duration (`12h`, `6h30m`) or a bare number of hours (`12`). Minimum 15m |
+| `AUTO_UPDATE_CHECK_INTERVAL` | `2h` | How often to check for a new release. Go duration (`12h`, `6h30m`) or a bare number of hours (`12`). Minimum 15m |
 
 ### Requirements
 
@@ -372,29 +407,39 @@ notifications are configured) instead of updating.
   required — after applying an update the process exits so the supervisor can
   restart it on the new binary. The included [`docker-compose.yml`](docker-compose.yml)
   already sets this.
-- The container's filesystem must be writable (the default). If you run with
-  `--read-only`, the swap fails gracefully and the miner keeps running on the
-  current version.
+- The container's root filesystem and `/database` mount must be writable by
+  the process (the default image runs as root). A cache-write failure blocks
+  the live swap. A root swap failure is reported and the current process keeps
+  running, but a later stable recovery also fails closed rather than starting
+  the older pinned binary. Read-only-root and non-root deployments therefore
+  require operator-managed exact image replacement and are not supported by
+  native stable recovery.
 - **The GitHub release must ship the exact platform asset and `checksums.txt`.**
-  The updater downloads the asset named `twitch-miner-go-<os>-<arch>` (e.g.
-  `twitch-miner-go-linux-amd64`; Windows adds `.exe`) and verifies it against
-  the release's `checksums.txt`. A release missing either file is refused
-  fail-closed — nothing is installed and the miner keeps running. Releases
-  built by this repo's Release workflow always include both; this matters
-  mainly for forks and manually assembled releases.
+  The stable updater requires exactly `twitch-miner-go-linux-amd64`,
+  `twitch-miner-go-linux-arm64`, and `checksums.txt`; a partial or unexpected
+  set is not a candidate. The main updater retains its historical
+  `twitch-miner-go-<os>-<arch>` naming. Missing or mismatching data is refused
+  fail-closed — nothing is installed.
+- Stable apply requires outbound HTTPS to the GitHub API/release asset hosts
+  and Sigstore's public-good TUF repository. Verified TUF trust metadata is
+  cached below `/database/.updater/stable/tuf-public-good`; a missing,
+  unverifiable, or unavailable attestation refuses that cycle without touching
+  the executable.
 
 ### Verifying manually
 
-1. Build and publish a test release with a **higher** tag than the running
-   version (e.g. tag `v9.9.9`) so the Release workflow uploads
-   `twitch-miner-go-linux-amd64` and `checksums.txt`.
+1. For stable, follow the release procedure: create the exact public
+   `stable-vX.Y.Z` Release with `make_latest=false`, then push the matching tag
+   on its `release/X.Y` branch. The Stable Release workflow refuses to create,
+   patch, delete, or overwrite a Release and uploads the exact binary set only
+   after the immutable image succeeds.
 2. Start the container with `AUTO_UPDATE=true` and a short interval, e.g.
    `AUTO_UPDATE_CHECK_INTERVAL=15m`, and `restart: unless-stopped`.
 3. Watch the logs: within the interval you'll see
    `Auto-update: newer release available`, then `binary replaced successfully,
    restarting to load the new version`, and the container restarts.
-4. Confirm the new version in the startup log line
-   `Twitch Channel Points Miner version=v9.9.9` (or the dashboard footer).
+4. Confirm the public version in the startup log line and verify the persisted
+   cache survives a remove/recreate using the same `/database` mount.
 
 ---
 
@@ -1272,9 +1317,12 @@ panel.
   `X-Frame-Options`, `Referrer-Policy` and a Content-Security-Policy; the
   HTTP server enforces header/idle timeouts against slow-client exhaustion.
 - **Auto-update is fail-closed:** a downloaded binary is installed only after
-  its sha256 is verified against the release's `checksums.txt`; a release
-  without usable checksums is refused and reported, never installed
-  unverified (see [Automatic Updates](#automatic-updates)).
+  its sha256 is verified against the release's `checksums.txt`; stable also
+  requires the GitHub API asset digest, exact stable tag/public-version
+  mapping, embedded stable identity, cryptographically verified Sigstore/SLSA
+  provenance for the exact producer/tag/commit and both binaries, and durable
+  cache activation before the executable swap. A broken release is refused and
+  reported, never installed unverified (see [Automatic Updates](#automatic-updates)).
 - **Config file:** `config.json` (which may contain the Discord bot token) is
   saved atomically (temp file + rename, a crash mid-save can't truncate it)
   with owner-only `0600` permissions. A pre-existing `0644` file is tightened
@@ -1290,8 +1338,9 @@ panel.
   app's user/group setting in the TrueNAS SCALE / unraid UI) **and** `chown`
   the mounted `config/`, `cookies/`, `logs/`, `database/` directories to that
   UID on the host. Note: as non-root the self-updater cannot replace the
-  root-owned binary — it will refuse gracefully and keep running; update by
-  pulling a new image instead (e.g. re-enable Watchtower for this container).
+  root-owned binary; use an explicit immutable image replacement for this
+  hardened deployment. No Docker socket, Watchtower, or host updater helper is
+  required or used by the supported default.
 - **Container healthcheck:** the image ships a `HEALTHCHECK` that runs
   `/twitch-miner-go -healthcheck` (the scratch image has no shell/curl): it
   probes the dashboard's `/api/status`, attaching Basic Auth credentials from

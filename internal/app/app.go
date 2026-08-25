@@ -404,6 +404,7 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		Repo:           version.Repo,
 		CurrentVersion: version.Version,
 		ReleaseChannel: version.Channel,
+		StableCacheDir: updater.DefaultStableCacheDir,
 		Enabled:        rc.AutoUpdateEnabled,
 		CheckInterval:  rc.AutoUpdateInterval,
 		Handoff:        updStore,
