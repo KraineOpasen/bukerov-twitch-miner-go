@@ -273,14 +273,15 @@ type rotationState struct {
 	deficitMinutes map[string]float64
 
 	// Boost latch: keep the SAME channel in the ephemeral DROPS/STREAK boost
-	// seat (and displace the SAME base-pair member) across ticks, instead of
-	// re-picking the least-recently-watched eligible channel every tick. Without
-	// it, whenever 3+ online channels are boost-eligible the boost churned the
-	// watched set on every tick, so no channel was ever watched on consecutive
-	// ticks; the continuous viewing a watch streak (and drop progress) needs
-	// never accumulated and MinuteWatched was perpetually reset to 0. The latch
-	// yields immediately to a strictly higher-priority candidate (see
-	// strictlyHigherBoost), so a channel-restricted drop can still preempt it.
+	// seat (and displace the SAME base-pair member) across ticks when continuity
+	// is functionally required. A streak that is ELIGIBLE (so it can bootstrap
+	// its first delivered minute) or PURSUING may survive an equal-class base-pair
+	// reconciliation so MinuteWatched is not reset before the grant or bounded
+	// timeout. An ordinary drop may remain only while its
+	// current hard/semantic facts strictly outrank the fair pair; equality returns
+	// ownership to persisted-deficit fairness. The latch yields immediately to a
+	// strictly higher-priority candidate (see strictlyHigherBoost), so a
+	// channel-restricted drop can still preempt it.
 	boostLatched bool
 	boostTarget  int // eligible streamer held for continuity; it may later enter the fair base pair
 	boostVictim  int // displaced base member, or -1 while target itself belongs to the base pair
@@ -1138,8 +1139,11 @@ func (w *MinuteWatcher) isPreferred(idx int) bool {
 // take one seat. Hard restricted/streak/drop classes come first; active-drop
 // candidates inside the same hard class use Campaign Policy's unitless bounded
 // semantic utility. Equal full utilities remain governed by persisted deficit.
-// The boost latch is independent of base-pair changes, preserving continuous
-// viewing until eligibility ends or a strictly stronger contender appears.
+// The boost latch is independent of base-pair changes only while a watch streak
+// remains pursuit-eligible (including its zero-minute bootstrap). Ordinary
+// equal-semantic drops converge to the
+// persisted-deficit base pair; a strictly stronger hard/semantic contender may
+// still take a seat.
 //
 // A fairness replacement that would interrupt an in-progress streak may use
 // one explicit deferUntil deadline for the current approach. Re-evaluation
@@ -1364,26 +1368,25 @@ func samePair(a, b [2]int) bool {
 // base-pair seat for the current tick, without affecting the base ranking
 // computed by reconcileLeastWatchedPair.
 //
-// Continuity latch: the boosted channel is held across ticks rather than
-// re-picked every tick. Its victim is retained while base membership is stable
-// and reselected fairly when the base pair changes. A watch streak — and
-// unrestricted drop progress — is only credited for CONTINUOUS viewing.
+// Continuity latch: a pursuit-eligible watch streak is held across ticks rather
+// than re-picked every tick. This includes the zero-minute bootstrap needed to
+// receive its first delivered interval. Its victim is retained while base
+// membership is stable and reselected fairly when the base pair changes.
 // Before the latch, the boost re-selected the least-recently-watched eligible
 // channel every tick, which (whenever 3+ channels were eligible) rotated the
 // watched set on every single tick: no channel was ever watched on consecutive
 // ticks, MinuteWatched was perpetually reset to 0, and no streak ever
-// completed. The latch keeps the same channel in the boost seat until it stops
-// being eligible (streak earned, drop done, went offline) or a STRICTLY
+// completed. The latch keeps that pursuit-eligible channel in the boost seat
+// until the streak is granted, reaches its bounded timeout, goes offline, or a STRICTLY
 // higher-priority candidate appears (e.g. a channel-restricted drop), at which
 // point it hands the seat off and the previously-displaced base member is
 // re-evaluated so it is no longer starved.
 //
-// Hold duration is deliberately driven by eligibility rather than a timer. The
-// latch ends on loss of eligibility (isBoostEligible → false) or a
-// strictly-higher candidate, and it survives base-pair reconciliation. A
-// streak self-limits through its bounded pursuit state, while a live drop
-// campaign (DropsCondition, no minute cap) can hold ONE of the two watch slots for as
-// long as it stays farmable. That does not starve the other online streamers:
+// Hold duration is deliberately driven by the Stream-owned pursuit state rather
+// than a scheduler timer. A pursuing streak self-limits through its bounded
+// state. An ordinary drop has no continuity exception: it may hold a seat only
+// while its current hard/semantic facts win, and a full tie returns to persisted
+// fairness. That does not starve the other online streamers:
 //   - the OTHER slot is reconciled from persisted deficit on every broker
 //     evaluation, so the most-owed non-boosted channel keeps surfacing;
 //   - the boosted channel records its own watch time (RecordMinutes), so the
@@ -1393,9 +1396,8 @@ func samePair(a, b [2]int) bool {
 //     deliberately the LESS-owed of the two base-pair members, and its identity
 //     moves as the base pair recomputes, so no single channel is locked out.
 //
-// The cost is throughput: while one slot is held long-term, the remaining
-// channels share the single rotating slot instead of two — the accepted price
-// of finishing a long drop campaign on the channel that needs it.
+// The bounded cost is throughput while a real streak pursuit holds one seat:
+// the remaining channels temporarily share the other rotating slot.
 func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]int {
 	best := w.selectBoostTarget(pair, onlineIndexes)
 
@@ -1403,8 +1405,9 @@ func (w *MinuteWatcher) applyPriorityBoost(pair [2]int, onlineIndexes []int) [2]
 	if w.rotation.boostLatched {
 		held := w.rotation.boostTarget
 		heldValid := held >= 0 && containsIndex(onlineIndexes, held) && w.isBoostEligible(held)
-		strongerOffPair := heldValid && best != -1 && w.strictlyHigherBoost(best, held)
-		if heldValid && !strongerOffPair {
+		heldNeedsContinuity := heldValid && w.streakNeedsContinuity(held)
+		strongerOffPair := heldNeedsContinuity && best != -1 && w.strictlyHigherBoost(best, held)
+		if heldNeedsContinuity && !strongerOffPair {
 			if held == pair[0] || held == pair[1] {
 				// Persisted fairness brought the held channel into the base pair.
 				// It remains continuous without consuming an extra boost seat.
@@ -1510,14 +1513,21 @@ func (w *MinuteWatcher) boostCanDisplacePair(target int, pair [2]int) bool {
 }
 
 // boostCanRemainAgainstPair applies the same hard/semantic ordering to an
-// already-latched target without reopening equal-class fairness on every base
-// reconciliation. Equality preserves continuity; only a strictly stronger
-// base contender may end the latch. New targets still use
-// boostCanDisplacePair, where equal drop semantics stay with persisted
-// fairness.
+// already-latched target. Only a pursuit-eligible watch streak has a functional
+// continuity requirement (including the zero-minute bootstrap needed to become
+// PURSUING). Ordinary active or restricted drops return to fresh target/victim
+// selection every tick, so an old latch cannot bypass current policy utility or
+// persisted-deficit fairness even when the drop still strictly outranks the base
+// pair. A strictly stronger base contender still ends streak continuity.
 func (w *MinuteWatcher) boostCanRemainAgainstPair(target int, pair [2]int) bool {
+	if !w.streakNeedsContinuity(target) {
+		return false
+	}
 	baseBest := w.strongestBoostEligible(pair)
-	return baseBest == -1 || w.compareStrictBoost(target, baseBest) >= 0
+	if baseBest == -1 {
+		return true
+	}
+	return w.compareStrictBoost(target, baseBest) >= 0
 }
 
 func (w *MinuteWatcher) strongestBoostEligible(pair [2]int) int {
@@ -1875,6 +1885,14 @@ func (w *MinuteWatcher) streakPursuitExhausted(idx int) bool {
 func (w *MinuteWatcher) streakInProgress(idx int) bool {
 	decision, admitted := w.watchStreakDecision(idx)
 	return admitted && decision.State == models.WatchStreakPursuing
+}
+
+// streakNeedsContinuity includes ELIGIBLE so a newly selected streak can bank
+// the first delivered minute needed to become PURSUING. Both terminal states
+// make PursuitEligible false, so a bound grant or exact timeout ends continuity.
+func (w *MinuteWatcher) streakNeedsContinuity(idx int) bool {
+	decision, admitted := w.watchStreakDecision(idx)
+	return admitted && decision.PursuitEligible
 }
 
 // betterBoostCandidate reports whether cand should take the single prioritized

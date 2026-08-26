@@ -10,6 +10,7 @@ import (
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
 )
 
 func newRotationRetirementWatcher(n int, store *WatchTimeStore) (*MinuteWatcher, []*models.Streamer, []int) {
@@ -148,7 +149,7 @@ func TestBoostContinuitySurvivesBasePairReconciliation(t *testing.T) {
 	}
 }
 
-func TestEqualActiveDropDoesNotChurnHeldBoostAcrossBaseReconciliation(t *testing.T) {
+func TestEqualActiveDropLatchYieldsToFairPairAfterReconciliation(t *testing.T) {
 	store, sqlDB := openWatchTimeStore(t, filepath.Join(t.TempDir(), "watch.db"))
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	w, streamers, online := newRotationRetirementWatcher(5, store)
@@ -157,13 +158,16 @@ func TestEqualActiveDropDoesNotChurnHeldBoostAcrossBaseReconciliation(t *testing
 	}
 	for idx, minutes := range map[int]float64{2: 10, 3: 20, 4: 30} {
 		streamers[idx].Settings.ClaimDrops = true
-		if idx == 2 || idx == 3 {
-			streamers[idx].Stream.SetCampaignIDs([]string{"equal-drop"})
-		}
+		streamers[idx].Stream.SetCampaignIDs([]string{"equal-drop"})
 		if err := store.RecordMinutes(streamers[idx].GetUsername(), minutes, time.Now()); err != nil {
 			t.Fatalf("seed initial fairness for %s: %v", streamers[idx].GetUsername(), err)
 		}
 	}
+	w.SetCampaignSemanticClasses(map[string]policy.SemanticClass{
+		streamers[2].GetUsername(): 1,
+		streamers[3].GetUsername(): 1,
+		streamers[4].GetUsername(): 1,
+	})
 
 	runSelectionTick(w, online)
 	first := w.GetDebugState()
@@ -184,8 +188,14 @@ func TestEqualActiveDropDoesNotChurnHeldBoostAcrossBaseReconciliation(t *testing
 	if got := sortedPair(second.ActivePair); len(got) != 2 || got[0] != "streamerd" || got[1] != "streamere" {
 		t.Fatalf("test did not reconcile onto the equal-drop base contender: got %v", got)
 	}
-	if !watchedLogins(second)["streamerc"] {
-		t.Fatalf("equal active-drop contender churned a still-eligible held target: %+v", second.Decisions)
+	final := watchedLogins(second)
+	if final["streamerc"] {
+		t.Fatalf("stale equal active-drop latch diverged from the fair pair: base=%v final=%v decisions=%+v", second.ActivePair, final, second.Decisions)
+	}
+	for _, login := range []string{"streamerd", "streamere"} {
+		if !final[login] {
+			t.Fatalf("final selection did not converge to the fair pair: base=%v final=%v decisions=%+v", second.ActivePair, final, second.Decisions)
+		}
 	}
 }
 
