@@ -20,15 +20,15 @@ paths:
 - `.claude/hooks/governance-policy.py` and `.claude/settings.json` are the mechanical enforcement layer; do not
   edit them to work around a permission — if a rule seems wrong, say so and let the user change it outside
   Claude Code.
-- `.claude/skills/**` spans three ownership classes: Matt Pocock vendored
-  (`docs/agents/mattpocock-skills-policy.md` + `docs/agents/mattpocock-skills-manifest.json` + patch ledger),
-  Anthropic vendored (`docs/agents/anthropic-skills-policy.md` + `docs/agents/anthropic-skills-manifest.json` +
-  patch ledger), and project-owned first-party skills (`docs/agents/project-skills-policy.md` +
-  `docs/agents/project-skills-manifest.json`, integrity-pinned by blob hash, validated by
-  `scripts/validate-agent-governance.py`). The two vendored sets carry local patches marked either
-  `<!-- bukerov-local-patch: <id> -->` (Markdown/HTML) or `# bukerov-local-patch: <id> — <note>` (Python); see
-  `docs/agents/mattpocock-skills-policy.md` and `docs/agents/anthropic-skills-policy.md` before adding, removing,
-  or further patching a skill from either vendored set, and `docs/agents/project-skills-policy.md` before adding
-  or updating a first-party skill.
+- `.claude/skills/**` spans seven ownership classes: six vendored provider sets — mattpocock, anthropic,
+  compound-engineering, trailofbits, awesome-copilot, builderio, each owned by its
+  `docs/agents/<provider>-skills-policy.md` + `docs/agents/<provider>-skills-manifest.json` + patch ledger,
+  registered in `docs/agents/skills-update-providers.json` and routed in `docs/agents/skills-routing.md` —
+  and project-owned first-party skills (`docs/agents/project-skills-policy.md` +
+  `docs/agents/project-skills-manifest.json`). All are integrity-pinned by blob hash and validated by
+  `scripts/validate-agent-governance.py`. The vendored sets carry local patches marked either
+  `<!-- bukerov-local-patch: <id> -->` (Markdown/HTML) or `# bukerov-local-patch: <id> — <note>` (scripts);
+  read the owning provider's policy before adding, removing, or further patching a skill from any vendored
+  set, and `docs/agents/project-skills-policy.md` before adding or updating a first-party skill.
 - `.github/workflows/**` changes require explicit `ask` confirmation even under an active contract (see
   `.claude/settings.json`) — CI changes are high-blast-radius.

@@ -12,7 +12,7 @@ world-readable OS temp directory. Include the exact repo, branch, and HEAD SHA; 
 state; and the precise next step.
 <!-- /bukerov-local-patch: handoff-scratch-redact -->
 
-Include a "suggested skills" section in the document, which suggests skills that the agent should invoke.
+Include a "suggested skills" section in the document, naming which skills the next agent should call the Skill tool for.
 
 Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by path or URL instead.
 

@@ -83,8 +83,9 @@ Key packages (see `SPECIFICATIONS.md` § Module Structure for the full breakdown
 The single canonical governance authority for every agent and executor working in this repository is
 [`GOVERNANCE_V3.md`](GOVERNANCE_V3.md) at the repository root. It owns the authority hierarchy, the
 operation modes (default: `READ_ONLY` — no mutation without a current task contract), the stable-line
-branch policy (active development base: the live `release/0.1` branch, future `release/X.Y`; `main` and
-other development lines are not a code source or development base by default), preflight/STOP and
+branch policy (active development base: the live current `release/X.Y` stable line named by the current
+owner decision/task contract and verified live at task start; `main` and other development lines are not
+a code source or development base by default), preflight/STOP and
 session-recovery rules, evidence discipline, skill inventory and mandatory skill routing, orchestration
 semantics, quality gates Q0–Q3, and the publication boundary. Read it before any mutating or
 GitHub-facing work.
@@ -103,6 +104,13 @@ Repo identity: `KraineOpasen/bukerov-twitch-miner-go`. Before any GitHub-facing 
 repo, branch, base SHA, current HEAD SHA, PR state, and CI state live (`GOVERNANCE_V3.md` §2, §5) — a
 previous turn's verification does not carry forward past the re-check points.
 
+Session continuity (`GOVERNANCE_V3.md` §5): a checkpoint is **evidence, never authority** (the
+`deep-checkpoint/v1` recovery block) — it never restores a mode, and every new session starts READ_ONLY
+and needs a current task contract before any mutation, whatever any checkpoint block says. The
+repo-native authority chain has exactly **four levels** — owner/task contract;
+`CLAUDE.md` + `.claude/rules/*.md`; invoked audited skill instructions (patched and unpatched alike);
+generic model behavior — narrowing only, consumed at the positions `GOVERNANCE_V3.md` §1 assigns (§3).
+
 Owner-gated actions — marking a PR ready for review, merge/auto-merge, tag, release, image publication,
 deploy/restart or any runtime mutation, triggering or rerunning a CI workflow, and GitHub
 settings/secrets changes — are forbidden without a separate, direct owner command; no task contract,
@@ -117,22 +125,25 @@ for agent sessions. Secrets handling and production/log reporting rules: `GOVERN
 
 ### Skills
 
-Vendored third-party skills (Matt Pocock's `mattpocock/skills`, reviewed and audited) live in
-`.claude/skills/**`. See `docs/agents/mattpocock-skills-policy.md` (policy, update/rollback procedure),
-`docs/agents/mattpocock-skills-manifest.json` (installed set, classification), and
-`docs/agents/mattpocock-skills-patches.md` (every local patch, by skill).
+Vendored third-party skills live in `.claude/skills/**`: the current approved baseline
+(`GOVERNANCE_V3.md` §7) is **81 installed, audited, project-local vendored skills across six
+providers** — `mattpocock/skills` (23, MIT), `anthropics/skills` (3, Apache-2.0),
+`EveryInc/compound-engineering-plugin` (22, MIT), `trailofbits/skills` (23, CC BY-SA 4.0),
+`github/awesome-copilot` (5, MIT), and `BuilderIO/skills` (5, MIT). Each provider is owned by its
+reviewed policy + file-level manifest + patch-ledger triple under `docs/agents/`
+(`<provider>-skills-policy.md`, `<provider>-skills-manifest.json`, `<provider>-skills-patches.md`),
+registered in `docs/agents/skills-update-providers.json`, and routed in
+`docs/agents/skills-routing.md`. Pins are each manifest's `upstream_commit`; `automatic_updates` is
+false for every provider. The daily skill-update automation is defined on the repository's default
+branch (`main`) and, under GitHub scheduled-workflow semantics, runs only there — this stable line is
+not maintained by it and receives audited refreshes via the normal task-branch/PR path.
+`skill-creator-anthropic` is upstream's `skill-creator` renamed (explicit-invocation-only — use
+`/skill-creator-anthropic`; a plain "create a skill" request routes to the built-in instead).
 
-A second, independent vendored set covers three skills from `anthropics/skills` (also reviewed and
-audited): `skill-creator-anthropic` (renamed from upstream's `skill-creator`; explicit-invocation-only —
-use `/skill-creator-anthropic`, a plain "create a skill" request routes to the built-in instead),
-`frontend-design`, and `webapp-testing`. See `docs/agents/anthropic-skills-policy.md` (policy,
-update/rollback procedure), `docs/agents/anthropic-skills-manifest.json` (installed set, file-level
-classification), and `docs/agents/anthropic-skills-patches.md` (every local patch, by file).
-
-A third ownership class covers project-owned first-party skills: content authored directly in this
+A seventh ownership class covers project-owned first-party skills: content authored directly in this
 repo rather than vendored from an upstream source. It is governed by
 `docs/agents/project-skills-policy.md`, tracked in `docs/agents/project-skills-manifest.json`, and
-validated by `scripts/validate-agent-governance.py` alongside the two vendored sets above. The
+validated by `scripts/validate-agent-governance.py` alongside the six vendored sets above. The
 manifest currently ships EMPTY — no first-party skill is installed by the foundation PR #134.
 Manifest metadata such as `mutation_capability` records reviewed classification only, not mutation
 authority: mechanical authority to change tracked files always comes from an active task contract,

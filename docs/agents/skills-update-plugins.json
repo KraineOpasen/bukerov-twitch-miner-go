@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "notes": "Monitoring inventory for native Claude Code marketplace plugins. It ships EMPTY and no plugin is installed by the task that added it: `plugins` is [] and every check over it is a no-op. The schema exists so that adopting a plugin later is a reviewed data change rather than monitoring invented under time pressure. Read by scripts/skill_updates/plugins.py and documented in docs/agents/skills-update-automation.md on the repository's default branch (main), where the update automation is defined and runs; on this stable line the file is consumed by scripts/validate-agent-governance.py (--self-test) as the canonical empty plugin inventory.",
+  "surfaces": {
+    "A_project_skills": "Repo-vendored skills under .claude/skills/**, governed by docs/agents/<provider>-skills-manifest.json and updated by the candidate flow. This is the surface the update bot acts on.",
+    "B_native_plugins": "Marketplace plugins installed by Claude Code into a user cache OUTSIDE this repository. This file monitors them. The bot never runs `claude plugin update`, never installs Claude Code in CI, and never mutates a real plugin cache.",
+    "C_claudeai_zip_skills": "Custom skills packaged as a ZIP and uploaded through the claude.ai web interface. There is no documented programmatic upload, so this project treats surface C as documentation and package output only. Nothing is automated for it."
+  },
+  "version_precedence": [
+    "plugin.json version",
+    "marketplace.json version",
+    "git source commit sha",
+    "unknown"
+  ],
+  "auto_update_policy": "Anthropic's own marketplaces auto-update by default; third-party marketplaces default to auto-update OFF. An updated plugin is not live in a running session until /reload-plugins or a new session — the session keeps whatever it loaded at startup. For any project-governed audited plugin, native silent auto-update should be DISABLED so changes arrive through the monitored candidate flow and get a human audit, exactly as vendored skills do.",
+  "audit_required_on": [
+    "any version change, from any precedence source",
+    "an unchanged version over a changed source commit (the dangerous direction: the label proves nothing about the bytes)",
+    "source repository, source ref, or marketplace change",
+    "any component-surface change: skills, agents, hooks, mcp_servers, lsp_servers, monitors, bin, settings, dependencies",
+    "a change in projected context cost",
+    "a plugin installed but absent from this inventory"
+  ],
+  "plugins": []
+}

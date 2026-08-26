@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "notes": "Deterministic registry for the automated skill-update bot (.github/workflows/skills-update.yml, scripts/skill_updates/). It records ONE fact each provider manifest deliberately omits: the upstream branch a human reviewed and agreed is the right place to look for the next candidate. The manifest still owns the pin (upstream_commit, a 40-hex sha); this file owns only the ref. Nothing here widens trust -- the bot resolves the ref to a concrete sha, proves it, and proposes THAT sha for review. No floating ref ever enters the vendored tree. The bot and its workflow are defined on the repository's default branch (main) and, under GitHub scheduled-workflow semantics, run only there; this stable line is not maintained by that automation and receives audited refreshes via the normal task-branch/PR path. On this line the registry is consumed by scripts/validate-agent-governance.py as the canonical provider set and reviewed-ref record. Full automation detail: docs/agents/skills-update-automation.md on the default branch.",
+  "providers": [
+    {
+      "key": "mattpocock",
+      "upstream_repo": "https://github.com/mattpocock/skills",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/mattpocock-skills-manifest.json",
+      "policy": "docs/agents/mattpocock-skills-policy.md",
+      "patches": "docs/agents/mattpocock-skills-patches.md",
+      "notes": "23 installed skills, MIT, shared licence notice at .claude/skills/LICENSE. Upstream organizes skills by category (skills/<category>/<name>); agents/openai.yaml is deliberately never vendored (Codex sidecar, see the policy)."
+    },
+    {
+      "key": "anthropic",
+      "upstream_repo": "https://github.com/anthropics/skills",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/anthropic-skills-manifest.json",
+      "policy": "docs/agents/anthropic-skills-policy.md",
+      "patches": "docs/agents/anthropic-skills-patches.md",
+      "notes": "3 installed skills, Apache-2.0, per-skill LICENSE.txt. skill-creator is vendored under the renamed directory skill-creator-anthropic to avoid a built-in name collision."
+    },
+    {
+      "key": "compound-engineering",
+      "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/compound-engineering-skills-manifest.json",
+      "policy": "docs/agents/compound-engineering-skills-policy.md",
+      "patches": "docs/agents/compound-engineering-skills-patches.md",
+      "notes": "22 installed skills, MIT, per-skill LICENSE."
+    },
+    {
+      "key": "trailofbits",
+      "upstream_repo": "https://github.com/trailofbits/skills",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/trailofbits-skills-manifest.json",
+      "policy": "docs/agents/trailofbits-skills-policy.md",
+      "patches": "docs/agents/trailofbits-skills-patches.md",
+      "notes": "23 installed skills, CC BY-SA 4.0, per-skill LICENSE. Section 3(a)(1) requires the licence notice to travel with every distributed copy."
+    },
+    {
+      "key": "awesome-copilot",
+      "upstream_repo": "https://github.com/github/awesome-copilot",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/awesome-copilot-skills-manifest.json",
+      "policy": "docs/agents/awesome-copilot-skills-policy.md",
+      "patches": "docs/agents/awesome-copilot-skills-patches.md",
+      "notes": "5 installed skills, MIT, per-skill LICENSE."
+    },
+    {
+      "key": "builderio",
+      "upstream_repo": "https://github.com/BuilderIO/skills",
+      "upstream_ref": "main",
+      "manifest": "docs/agents/builderio-skills-manifest.json",
+      "policy": "docs/agents/builderio-skills-policy.md",
+      "patches": "docs/agents/builderio-skills-patches.md",
+      "notes": "5 installed skills, MIT, per-skill LICENSE."
+    },
+    {
+      "key": "builder-agent-skills",
+      "upstream_repo": "https://github.com/BuilderIO/builder-agent-skills",
+      "upstream_ref": "main",
+      "monitor_only": true,
+      "baseline_commit": "3366b3527706cad45434f97bcd1feda6359af6eb",
+      "watch_paths": [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "LICENCE",
+        "COPYING",
+        "NOTICE",
+        "hallmark/LICENSE"
+      ],
+      "watch_baseline": {
+        "LICENSE": null,
+        "LICENSE.md": null,
+        "LICENSE.txt": null,
+        "LICENCE": null,
+        "COPYING": null,
+        "NOTICE": null,
+        "hallmark/LICENSE": "f4bfc53d8d773d3b10d95c2d58a5773dd4e2f3aa"
+      },
+      "notes": "AUDIT-ONLY MONITOR -- nothing from this repository is vendored and the bot will never prepare a candidate for it. It was reviewed and rejected on provenance grounds: at the baseline commit there is no root licence, and the tree's only licence file is an MIT hallmark/LICENSE held by 'Hallmark contributors', which by directory convention plausibly covers hallmark/ alone (see docs/agents/builderio-skills-policy.md). The null baselines are the reviewed finding, so a root licence APPEARING is the signal worth reporting -- that is the condition under which the exclusion decision would be worth revisiting, by a human, in a separate review."
+    }
+  ]
+}
