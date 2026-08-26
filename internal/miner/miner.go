@@ -79,6 +79,10 @@ var (
 )
 
 type Miner struct {
+	// config is private to this Miner generation. App snapshots it only after
+	// Run has returned (and the config-write drain has completed) before
+	// constructing the next generation, so different Miner locks never guard
+	// the same mutable maps/slices.
 	config     *config.Config
 	configPath string
 	// dashboard is the immutable, environment-derived dashboard exposure/auth
@@ -253,7 +257,8 @@ type Miner struct {
 	mu sync.RWMutex
 
 	// coordinatorMu serializes the WHOLE fail-closed settings-apply pipeline
-	// (BKM-006 Corrective Pass 1, C2): resolve+plan, durable persist
+	// and the scalar policy/health writers whose values a settings candidate
+	// snapshots: resolve+plan, durable persist
 	// (analytics + config.json) for any rename, and the runtime commit. It is
 	// acquired BEFORE mu (lock order: coordinatorMu -> mu -> streamer.Manager.mu
 	// -> models.Streamer.mu) and held across the durable-persist I/O — but mu,
@@ -263,12 +268,13 @@ type Miner struct {
 	// file, and analytics history disagreeing about a streamer's identity.
 	coordinatorMu sync.Mutex
 
-	// applyMu/applyWG/applyDraining are the shutdown/settings-apply interlock
-	// (M1): beginApply refuses a NEW apply once applyDraining is set or
+	// applyMu/applyWG/applyDraining are the generation config-write interlock.
+	// beginConfigWrite refuses a NEW writer once applyDraining is set or
 	// m.runCtx is already cancelled, and registers an accepted one in
-	// applyWG; endApply (deferred by every accepted apply) removes it. stop()
-	// sets applyDraining and calls applyWG.Wait() BEFORE any other teardown,
-	// so no apply is ever in flight when the DB is later closed (App.Shutdown
+	// applyWG; endConfigWrite removes it. stop() sets applyDraining and calls
+	// applyWG.Wait() BEFORE any other teardown, so no config writer is in flight
+	// when the DB is later closed or lifecycle constructs the next generation
+	// (App.Shutdown
 	// closes it only after Run — and therefore stop() — returns). applyMu
 	// makes "check draining, then Add(1)" atomic with "set draining, then
 	// Wait()" — without it, an apply could observe draining=false and call
@@ -364,6 +370,23 @@ type Miner struct {
 	// yet). Lets a test deterministically interleave a SYNCHRONOUS
 	// SetAutoRedeem call inside either window without goroutines/sleeps.
 	applyCommitBarrier func(applyCommitPhase)
+
+	// saveConfigFn is the tests-only seam over config.SaveConfig. Production
+	// leaves it nil and saveConfig calls config.SaveConfig directly. A
+	// per-Miner seam lets generation-overlap tests freeze one generation's
+	// already-snapshotted bytes before the atomic replace without a package-
+	// global hook or timing-dependent filesystem tricks.
+	saveConfigFn func(path string, cfg *config.Config) error
+	// configWriteBarrier is a tests-only method-entry barrier for generation
+	// fencing tests. Production leaves it nil. Before the repair, stale
+	// provider calls can pause here without teardown knowing they exist; after
+	// the repair every writer invokes it only after successful admission.
+	configWriteBarrier func()
+	// configDrainStarted is a tests-only observer invoked after teardown has
+	// atomically fenced new config writers and immediately before it waits for
+	// admitted writers. Production leaves it nil. It lets lifecycle tests prove
+	// the generation ordering with channel barriers instead of elapsed time.
+	configDrainStarted func()
 }
 
 // applyCommitPhase identifies which side of an apply's commit section
@@ -401,6 +424,23 @@ func New(cfg *config.Config, configPath string) *Miner {
 		autoRedeemGen:      make(map[string]uint64),
 		healthJournal:      journal.New[journal.HealthEvent](healthJournalCapacity, nil),
 	}
+}
+
+func (m *Miner) saveConfig(path string, cfg *config.Config) error {
+	if m.saveConfigFn != nil {
+		return m.saveConfigFn(path, cfg)
+	}
+	return config.SaveConfig(path, cfg)
+}
+
+// ConfigSnapshot returns a deep, generation-independent copy for App's
+// lifecycle handoff. The lifecycle controller calls the next factory only after
+// this generation's Run has returned, but the read lock also keeps direct test
+// and diagnostic callers race-safe.
+func (m *Miner) ConfigSnapshot() *config.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config.Clone()
 }
 
 // SetDashboardConfig injects the resolved, immutable dashboard exposure/auth
@@ -548,8 +588,8 @@ func (m *Miner) runNewSkipLedger(db *database.DB, accountKey string) (*drops.Ski
 // cleanup and joined (errors.Join) with the cleanup error otherwise.
 func (m *Miner) failStartup(startupErr error) error {
 	// Cancel the run context FIRST, mirroring the normal shutdown path
-	// (there ctx is already done by the time stop() runs): beginApply starts
-	// refusing new settings applies, and every ctx-bound helper (auth
+	// (there ctx is already done by the time stop() runs): beginConfigWrite
+	// starts refusing new config writes, and every ctx-bound helper (auth
 	// recovery flights, notification dispatch, the reconcile sweeps) observes
 	// shutdown before the teardown below joins it.
 	if m.shutdownFn != nil {
@@ -658,7 +698,7 @@ func (m *Miner) authenticate(ctx context.Context) error {
 		slog.Info("Pinned the Twitch owner identity for rename-tolerant startups")
 	}
 	if res.changed() && m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
+		if err := m.saveConfig(m.configPath, m.config); err != nil {
 			slog.Warn("Failed to persist owner-identity reconciliation; will retry on the next restart", "error", err)
 		}
 	}
@@ -1883,7 +1923,7 @@ func (m *Miner) stop() error {
 // below may call back into stop(): a re-entrant call would deadlock on the
 // once guard.
 func (m *Miner) teardown() error {
-	// Drain in-flight settings applies FIRST, before anything else tears
+	// Drain in-flight config writes FIRST, before anything else tears
 	// down: App.Shutdown closes the DB only after Run (and therefore this
 	// function) returns, so once applyWG.Wait() returns here no apply can
 	// still be mid-flight when that close happens (M1: closes the same race
@@ -1891,6 +1931,9 @@ func (m *Miner) teardown() error {
 	m.applyMu.Lock()
 	m.applyDraining = true
 	m.applyMu.Unlock()
+	if m.configDrainStarted != nil {
+		m.configDrainStarted()
+	}
 	m.applyWG.Wait()
 
 	var drainErrs []error
@@ -1995,14 +2038,13 @@ func (m *Miner) GetDefaultSettings() settings.RuntimeSettings {
 	return settings.BuildDefaultSettings(currentStreamers)
 }
 
-// beginApply registers the caller as an in-flight settings apply, refusing
-// (false) once the miner has started draining (Stop, in progress or done) or
-// its run context is already cancelled — the latter closes the same window
-// the cancelled-runCtx hazard exploited: a POST arriving after runCtx.Done()
-// fires but before the web listener is actually closed (web.Server.Stop is a
-// hard Close, not a graceful Shutdown; nothing else joins an in-flight apply —
-// see the M1 design manifest). Every accepted apply MUST defer endApply.
-func (m *Miner) beginApply() bool {
+// beginConfigWrite registers a generation-scoped config writer, refusing
+// once the Miner has started draining or its run context is cancelled. The
+// process-owned web server may retain or hand out an old provider pointer, so
+// this is the authoritative stale-generation fence: an accepted writer is
+// drained before Run returns; a later call through that pointer is refused.
+// Every accepted writer MUST defer endConfigWrite.
+func (m *Miner) beginConfigWrite() bool {
 	m.applyMu.Lock()
 	defer m.applyMu.Unlock()
 	if m.applyDraining {
@@ -2015,9 +2057,8 @@ func (m *Miner) beginApply() bool {
 	return true
 }
 
-// endApply releases the registration beginApply made. Always deferred
-// immediately after a successful beginApply.
-func (m *Miner) endApply() {
+// endConfigWrite releases the registration beginConfigWrite made.
+func (m *Miner) endConfigWrite() {
 	m.applyWG.Done()
 }
 
@@ -2042,7 +2083,7 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // applySettings is the fail-closed settings-apply coordinator (BKM-006
 // Corrective Pass 1, C2; extended by M1's Streamer Removal Admission
 // Protocol, SRAP, for any apply that removes a streamer). It gates on
-// beginApply (refusing with ErrShuttingDown before touching anything if the
+// beginConfigWrite (refusing with ErrShuttingDown before touching anything if the
 // miner is draining or already shut down), captures the streamer-deletion
 // coordinator ONCE for the whole apply (m.streamerLifecycle is built once at
 // startup and — since M4 removed finishApply's runtime create-or-rebuild
@@ -2085,17 +2126,15 @@ func (m *Miner) ApplySettings(ctx context.Context, s settings.RuntimeSettings) e
 // during THIS apply's earlier unlocked I/O (durable admission, analytics
 // rename) is never silently overwritten (D1), and a removed or renamed
 // login's consent can never resurrect after the commit (D2). This guarantee
-// is scoped to AutoRedeem: ApplyHealthSettings (health.go:424-434) and
-// ApplyCampaignPolicy (policy.go:281-287) still mutate live VALUE fields that
-// cloneConfigLocked's shallow copy already snapshotted by the time this
-// function took m.mu above, so an edit to either landing inside an apply's
-// own unlocked window is still silently overwritten by that apply's publish
-// — a known residual of the same defect class, NOT fixed by this pass.
+// remains specific to AutoRedeem's map merge. ApplyHealthSettings and
+// ApplyCampaignPolicy instead join coordinatorMu for their whole scalar
+// mutation/persistence sequence, so neither can land inside this pipeline's
+// unlocked candidate window and then be overwritten by its later publish.
 func (m *Miner) applySettings(ctx context.Context, s settings.RuntimeSettings) error {
-	if !m.beginApply() {
+	if !m.beginConfigWrite() {
 		return ErrShuttingDown
 	}
-	defer m.endApply()
+	defer m.endConfigWrite()
 
 	m.coordinatorMu.Lock()
 	defer m.coordinatorMu.Unlock()
@@ -2171,8 +2210,8 @@ func (m *Miner) applySettingsNoRename(s settings.RuntimeSettings, plan *streamer
 //     rebuilds candidate.AutoRedeem from the CURRENT live map and applies
 //     this apply's own removal deletions (I2 — a SetAutoRedeem committed
 //     during step 2's unlocked admission I/O is never lost, D1); then
-//     config.SaveConfig(candidate) runs; on success publish m.config =
-//     candidate AND, in THE SAME critical section, delete
+//     config.SaveConfig(candidate) runs; on success publish candidate into the
+//     process-owned m.config value AND, in THE SAME critical section, delete
 //     m.autoRedeemState[login] and bump its generation for every committed
 //     removal (I4 — atomic with the publish, so a removed streamer's
 //     consent can never resurrect, D2) — closing the lost-update window
@@ -2238,7 +2277,7 @@ func (m *Miner) applySettingsWithRemovals(ctx context.Context, s settings.Runtim
 	m.mu.Lock()
 	m.refreshCandidateAutoRedeemLocked(candidate, nil, removedLogins)
 	if configPath != "" {
-		if err := config.SaveConfig(configPath, candidate); err != nil {
+		if err := m.saveConfig(configPath, candidate); err != nil {
 			m.mu.Unlock()
 			m.abortAdmittedRemovals(coord, admittedLogins, "config.json persistence failed")
 			return fmt.Errorf("settings apply rejected; no changes were made: persist config: %w", err)
@@ -2382,7 +2421,7 @@ func (m *Miner) applySettingsWithRename(ctx context.Context, s settings.RuntimeS
 	m.mu.Lock()
 	clashes := m.refreshCandidateAutoRedeemLocked(candidate, plannedRenames, removedLogins)
 	if configPath != "" {
-		if err := config.SaveConfig(configPath, candidate); err != nil {
+		if err := m.saveConfig(configPath, candidate); err != nil {
 			m.mu.Unlock()
 			rollback() // reverse the committed analytics renames (off-lock)
 			m.abortAdmittedRemovals(coord, admittedLogins, "config.json persistence failed")
@@ -2630,7 +2669,7 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	if !persisted {
 		m.mu.Lock()
 		if m.configPath != "" {
-			if err := config.SaveConfig(m.configPath, m.config); err != nil {
+			if err := m.saveConfig(m.configPath, m.config); err != nil {
 				slog.Error("Failed to save config", "error", err)
 			} else {
 				slog.Info("Settings saved to config file")

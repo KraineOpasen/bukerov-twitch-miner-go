@@ -327,7 +327,22 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 	// closes them — App does), so ownership is single and unambiguous no
 	// matter how many generations come and go.
 	app.minerFactory = func() *miner.Miner {
-		m := f.newMiner(cfg, rc.ConfigPath)
+		// The controller calls this factory only after the prior Runner.Run has
+		// returned. Miner.teardown drains/fences its admitted config writes before
+		// that return, so this snapshot is the process-generation handoff point:
+		// every N commit is settled before N+1 receives independent config memory.
+		app.currentMinerMu.Lock()
+		previous := app.currentMiner
+		processConfig := app.cfg
+		app.currentMinerMu.Unlock()
+		var generationConfig *config.Config
+		if previous != nil {
+			generationConfig = previous.ConfigSnapshot()
+		} else {
+			generationConfig = processConfig.Clone()
+		}
+
+		m := f.newMiner(generationConfig, rc.ConfigPath)
 		// The miner's fallback web build (used only when App does not inject
 		// a web server) reads the same immutable dashboard snapshot rather
 		// than the env.
@@ -344,6 +359,7 @@ func buildWith(ctx context.Context, cfg *config.Config, rc runtimeconfig.Runtime
 		// currentMinerMu to resolve "the live generation's notifications
 		// manager, else nil", and must never observe a half-wired miner.
 		app.currentMinerMu.Lock()
+		app.cfg = generationConfig
 		app.currentMiner = m
 		app.currentMinerMu.Unlock()
 		return m

@@ -1,8 +1,11 @@
 package models
 
 import (
+	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Claimability is the authoritative, server-derived claim state of a drop. It
@@ -325,4 +328,51 @@ func (d *Drop) RewardKey(gameID string) string {
 // non-authoritative bucket (see Drop.RewardKey) — never a claim-history proof.
 func NormalizeRewardKey(gameID, name string) string {
 	return strings.ToLower(strings.TrimSpace(gameID)) + "::" + strings.ToLower(strings.TrimSpace(name))
+}
+
+// ErrInvalidRewardKey reports a composite reward key that cannot be produced
+// by NormalizeRewardKey. Callers must reject it instead of persisting an
+// unreachable alternate key.
+var ErrInvalidRewardKey = errors.New("invalid reward key")
+
+// maxRewardKeyInputBytes matches net/http's default application/x-www-form-
+// urlencoded body ceiling. It bounds direct callers too, so an HTTP-controlled
+// key cannot consume unbounded normalization work even if the handler's form
+// parsing limit changes independently.
+const maxRewardKeyInputBytes = 10 << 20
+
+// NormalizeRewardKeyInput normalizes the case and outer whitespace accepted by
+// the Drop Policy API, then verifies that the result belongs to the exact output
+// space of NormalizeRewardKey. The producer permits empty components and
+// unescaped "::" within either component. A delimiter is a valid component
+// boundary exactly when neither adjacent component has trim-space at that
+// boundary; checking that condition in one byte scan and invoking the owner once
+// keeps work O(len(input)) while preserving every legitimately producible key.
+func NormalizeRewardKeyInput(input string) (string, error) {
+	if len(input) > maxRewardKeyInputBytes {
+		return "", ErrInvalidRewardKey
+	}
+	candidate := strings.ToLower(strings.TrimSpace(input))
+	for i := 0; i+1 < len(candidate); i++ {
+		if candidate[i:i+2] != "::" {
+			continue
+		}
+		if i > 0 {
+			leftLast, _ := utf8.DecodeLastRuneInString(candidate[:i])
+			if unicode.IsSpace(leftLast) {
+				continue
+			}
+		}
+		if i+2 < len(candidate) {
+			rightFirst, _ := utf8.DecodeRuneInString(candidate[i+2:])
+			if unicode.IsSpace(rightFirst) {
+				continue
+			}
+		}
+		canonical := NormalizeRewardKey(candidate[:i], candidate[i+2:])
+		if canonical == candidate {
+			return canonical, nil
+		}
+	}
+	return "", ErrInvalidRewardKey
 }

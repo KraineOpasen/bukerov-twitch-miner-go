@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +126,10 @@ func TestBuildMinerFactoryProducesFreshMinerEveryCall(t *testing.T) {
 	if tracked1 != m1 {
 		t.Fatal("currentMiner was not published to the miner the factory just built")
 	}
+	firstRule := config.DropRule{Skip: true}
+	if err := m1.SetDropRule("game::first", firstRule); err != nil {
+		t.Fatalf("first generation SetDropRule: %v", err)
+	}
 
 	m2 := app.minerFactory()
 	if m2 == m1 {
@@ -134,6 +140,54 @@ func TestBuildMinerFactoryProducesFreshMinerEveryCall(t *testing.T) {
 	app.currentMinerMu.Unlock()
 	if tracked2 != m2 {
 		t.Fatal("currentMiner was not updated to the SECOND generation's miner")
+	}
+
+	_, secondRules := m2.CurrentCampaignPolicy()
+	if secondRules["game::first"] != firstRule {
+		t.Fatalf("second generation did not inherit committed config: %+v", secondRules)
+	}
+	if err := m2.SetDropRule("game::second", config.DropRule{HighPriority: true}); err != nil {
+		t.Fatalf("second generation SetDropRule: %v", err)
+	}
+	_, retiredRules := m1.CurrentCampaignPolicy()
+	if _, shared := retiredRules["game::second"]; shared {
+		t.Fatalf("fresh generation shares mutable config memory with retired provider: %+v", retiredRules)
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 200 {
+			_, _ = m1.CurrentCampaignPolicy()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range 200 {
+			if err := m2.SetDropRule(fmt.Sprintf("game::new-%d", i), config.DropRule{HighPriority: true}); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatalf("second generation concurrent write: %v", err)
+	default:
+	}
+	_, retiredRules = m1.CurrentCampaignPolicy()
+	if len(retiredRules) != 1 || retiredRules["game::first"] != firstRule {
+		t.Fatalf("retired provider observed fresh-generation mutations: %+v", retiredRules)
 	}
 }
 

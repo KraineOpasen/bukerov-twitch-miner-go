@@ -68,7 +68,7 @@ import (
 // PolicySnapshot, CurrentCampaignPolicy, HealthSnapshot, BuildDebugSnapshot,
 // resourceSampler.Latest) or a persist-only local write (ApplyCampaignPolicy,
 // SetDropRule, ApplyHealthSettings) or fails closed before touching anything
-// (ApplySettings, via beginApply once the miner is draining).
+// (ApplySettings, via beginConfigWrite once the miner is draining).
 func TestProvidersSafeAfterTeardown(t *testing.T) {
 	m, db := newStartupCleanupMiner(t)
 	stubAuthenticate(m)
@@ -199,8 +199,8 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		}},
 		{"GetAutoRedeem", func(*testing.T) { m.GetAutoRedeem("not-a-tracked-streamer") }},
 		{"SetAutoRedeem", func(t *testing.T) {
-			if err := m.SetAutoRedeem("not-a-tracked-streamer", config.AutoRedeemConfig{}); err == nil {
-				t.Error("SetAutoRedeem for an untracked streamer should return an error, not nil")
+			if err := m.SetAutoRedeem("not-a-tracked-streamer", config.AutoRedeemConfig{}); !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("SetAutoRedeem after teardown = %v, want ErrShuttingDown", err)
 			}
 		}},
 		{"TrackedUsernames", func(*testing.T) { m.TrackedUsernames() }},
@@ -209,7 +209,11 @@ func TestProvidersSafeAfterTeardown(t *testing.T) {
 		{"PolicySnapshot", func(*testing.T) { m.PolicySnapshot() }},
 		{"CurrentCampaignPolicy", func(*testing.T) { m.CurrentCampaignPolicy() }},
 		{"ApplyCampaignPolicy", func(*testing.T) { m.ApplyCampaignPolicy("balanced") }},
-		{"SetDropRule", func(*testing.T) { m.SetDropRule("some-reward-key", config.DropRule{}) }},
+		{"SetDropRule", func(t *testing.T) {
+			if err := m.SetDropRule("g::some-reward-key", config.DropRule{Skip: true}); !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("SetDropRule after teardown = %v, want ErrShuttingDown", err)
+			}
+		}},
 		{"HealthSnapshot", func(*testing.T) { m.HealthSnapshot() }},
 		{"CurrentHealthSettings", func(*testing.T) { m.CurrentHealthSettings() }},
 		{"ApplyHealthSettings", func(*testing.T) { m.ApplyHealthSettings(m.CurrentHealthSettings()) }},

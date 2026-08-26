@@ -160,6 +160,13 @@ func configHasStreamerLocked(cfg *config.Config, login string) bool {
 // touched ONLY after a successful save.
 func (m *Miner) SetAutoRedeem(username string, cfg config.AutoRedeemConfig) error {
 	key := strings.ToLower(username)
+	if !m.beginConfigWrite() {
+		return ErrShuttingDown
+	}
+	defer m.endConfigWrite()
+	if m.configWriteBarrier != nil {
+		m.configWriteBarrier()
+	}
 
 	m.mu.Lock()
 	if m.streamers == nil || m.streamers.Get(key) == nil {
@@ -188,7 +195,7 @@ func (m *Miner) SetAutoRedeem(username string, cfg config.AutoRedeemConfig) erro
 	// isn't mutated by another goroutine mid-marshal.
 	var saveErr error
 	if m.configPath != "" {
-		saveErr = config.SaveConfig(m.configPath, m.config)
+		saveErr = m.saveConfig(m.configPath, m.config)
 	}
 	if saveErr != nil {
 		// Restore exactly, so a failed save leaves memory matching the

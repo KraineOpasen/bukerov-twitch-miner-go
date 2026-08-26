@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -486,6 +488,57 @@ func (c *Config) StorageKey() string {
 		return key
 	}
 	return c.Username
+}
+
+// Clone returns a fully independent configuration value. It preserves nil
+// maps/slices and process-only fields such as DiscordTokenFromEnv while copying
+// every nested reference. App uses it only at a lifecycle generation boundary,
+// after the previous Miner has drained, so retired provider reads and the next
+// generation's writes never share mutable config memory under different locks.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	clone.Priority = slices.Clone(c.Priority)
+	clone.StreamerSettings = cloneStreamerSettings(c.StreamerSettings)
+	clone.Streamers = slices.Clone(c.Streamers)
+	for i := range clone.Streamers {
+		if c.Streamers[i].Settings != nil {
+			settings := cloneStreamerSettings(*c.Streamers[i].Settings)
+			clone.Streamers[i].Settings = &settings
+		}
+	}
+	clone.DropBlacklist = slices.Clone(c.DropBlacklist)
+	clone.DropCampaignGameIDs = slices.Clone(c.DropCampaignGameIDs)
+	clone.DropCampaignGames = slices.Clone(c.DropCampaignGames)
+	clone.DirectoryGames = slices.Clone(c.DirectoryGames)
+	clone.AutoRedeem = maps.Clone(c.AutoRedeem)
+	for key, autoRedeem := range clone.AutoRedeem {
+		autoRedeem.RewardIDs = slices.Clone(autoRedeem.RewardIDs)
+		clone.AutoRedeem[key] = autoRedeem
+	}
+	clone.DropRules = maps.Clone(c.DropRules)
+	clone.Notifications.Batching.ImmediateEvents = slices.Clone(c.Notifications.Batching.ImmediateEvents)
+	clone.Notifications.ProviderBatching = maps.Clone(c.Notifications.ProviderBatching)
+	for provider, batching := range clone.Notifications.ProviderBatching {
+		batching.ImmediateEvents = slices.Clone(batching.ImmediateEvents)
+		clone.Notifications.ProviderBatching[provider] = batching
+	}
+	return &clone
+}
+
+func cloneStreamerSettings(source models.StreamerSettings) models.StreamerSettings {
+	clone := source
+	if source.ChatLogs != nil {
+		chatLogs := *source.ChatLogs
+		clone.ChatLogs = &chatLogs
+	}
+	if source.Bet.FilterCondition != nil {
+		filter := *source.Bet.FilterCondition
+		clone.Bet.FilterCondition = &filter
+	}
+	return clone
 }
 
 func DefaultConfig() Config {

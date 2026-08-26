@@ -1,12 +1,14 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/settings"
 )
 
 // policyStatusDisplay maps a feasibility status to a label and inline color
@@ -118,7 +120,7 @@ func (s *Server) handleAPIPolicyDropRule(w http.ResponseWriter, r *http.Request)
 	s.mu.RUnlock()
 
 	key := r.FormValue("rewardKey")
-	if provider != nil && key != "" {
+	if provider != nil {
 		var rule config.DropRule // "reset" → zero value clears
 		if r.FormValue("reset") == "" {
 			rule = config.DropRule{
@@ -129,7 +131,17 @@ func (s *Server) handleAPIPolicyDropRule(w http.ResponseWriter, r *http.Request)
 				IgnoreSubscriberOnly: checked(r, "ignoreSubscriberOnly"),
 			}
 		}
-		provider.SetDropRule(key, rule)
+		if err := provider.SetDropRule(key, rule); err != nil {
+			switch {
+			case errors.Is(err, models.ErrInvalidRewardKey):
+				writeBadRequest(w, "Invalid drop rule key; no changes were made")
+			case errors.Is(err, settings.ErrShuttingDown):
+				writeServiceUnavailable(w, "Drop rule could not be saved; no changes were made")
+			default:
+				writeInternalError(w, "Drop rule could not be saved; no changes were made")
+			}
+			return
+		}
 	}
 	s.renderDropsList(w, r)
 }

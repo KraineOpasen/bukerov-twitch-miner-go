@@ -108,8 +108,11 @@ func (f *f3Policy) PolicySnapshot() (policy.Mode, []policy.Decision) {
 func (f *f3Policy) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 	return f.mode, f.rules
 }
-func (f *f3Policy) ApplyCampaignPolicy(mode string)                    { f.mode = mode }
-func (f *f3Policy) SetDropRule(rewardKey string, rule config.DropRule) { f.rules[rewardKey] = rule }
+func (f *f3Policy) ApplyCampaignPolicy(mode string) { f.mode = mode }
+func (f *f3Policy) SetDropRule(rewardKey string, rule config.DropRule) error {
+	f.rules[rewardKey] = rule
+	return nil
+}
 
 type f3Settings struct{ rt settings.RuntimeSettings }
 
