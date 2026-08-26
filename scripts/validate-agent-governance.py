@@ -1,44 +1,70 @@
 #!/usr/bin/env python3
 """validate-agent-governance.py — offline, read-only consistency checks for the
-repo-native governance layer (.claude/**, docs/agents/**, docs/adr/**) that elaborates the canonical
-GOVERNANCE_V3.md at the repo root.
+Claude Code Governance v3 layer (CLAUDE.md, CONTEXT.md, README.md, .claude/**, docs/agents/**,
+docs/adr/**), plus a repo-wide tracked-file scan for the forbidden host-OS token and the
+application-path guard over go.mod/go.sum/Dockerfile/docker-compose/.github/workflows/.
+
+Governance v3 is defined by the canonical GOVERNANCE_V3.md at the repository root (owner-approved
+rev 3.1; adoption record: docs/adr/0002-canonical-governance-v3.md). The checks named
+`governance-v3-*` below enforce that the prose
+layer stays mechanically consistent with it: the v3 docs exist, `CLAUDE.md` declares v3, no
+Governance-v2 orchestration mandate survives as current policy, `docs/agents/task-contract.md` reads
+as an authority envelope rather than an orchestration recipe, no host operating-system name is
+used as governance vocabulary anywhere in the tree (modulo HOST_OS_PREEXISTING_BUDGET -- a frozen,
+counted exemption for pre-existing occurrences in application files this stable line's governance
+authority cannot touch), and GOVERNANCE_V3.md section 7's approved skill inventory, the provider
+manifests, the on-disk tree and docs/agents/skills-routing.md all agree exactly.
 
 Stdlib only, no network access, deterministic. Exits 0 if every check passes,
 1 if any check fails. Diagnostics print as `[FAIL] check-name: detail` /
 `[PASS] check-name` lines.
 
-This script covers TWO independently vendored, non-overlapping skill sets, each with its own
-manifest/ledger pair (see the MANIFESTS registry below):
-  - mattpocock/skills  -> docs/agents/mattpocock-skills-manifest.json / -patches.md (skill-level:
-    one upstream_blob_sha per skill's SKILL.md).
-  - anthropics/skills  -> docs/agents/anthropic-skills-manifest.json / -patches.md (file-level:
-    one upstream_blob_sha per vendored file, since two of its three skills ship real scripts).
+This script covers every independently vendored skill provider through ONE registry (MANIFESTS,
+below). Each entry names that provider's manifest/ledger/policy trio and its `schema`, which selects
+the blob-hash granularity: "skill-level" (one upstream_blob_sha per skill's SKILL.md -- mattpocock's
+original format) or "file-level" (one upstream_blob_sha plus vendored_blob_sha per vendored FILE).
+Every provider added after anthropic uses "file-level": it is the only granularity that can prove a
+complete file inventory in both directions. Adding a provider means appending a registry entry, not
+adding a conditional inside a check -- the provider-aware checks all iterate the registry.
 
 Usage:
     python3 scripts/validate-agent-governance.py
     python3 scripts/validate-agent-governance.py --self-test-hook
     python3 scripts/validate-agent-governance.py --self-test
-        Runs ONLY this script's own offline fixture matrix (G1-G12, N1-N16) -- no network, no
-        sleeps, fully deterministic. Most fixtures build synthetic, never-committed trees under
-        tempfile.TemporaryDirectory; a couple (G11, G12) instead read the real repository
-        read-only, to check the vendored MANIFESTS registry's shape and to validate the real
-        (empty) project manifest. The guarantee this flag makes is "this run never WRITES to the
-        repo" -- not "every fixture is synthetic-only". Prints "N/N self-test fixtures passed"
-        and exits 1 on any fixture failure, 0 otherwise. Independent of --self-test-hook and of
-        the default run.
+        Runs ONLY this script's own offline fixture matrix -- no network, no sleeps, fully
+        deterministic. `_self_test_fixtures()` is the single source of truth for which fixtures
+        exist and what each one covers; that list is expected to grow, so it is deliberately not
+        duplicated as an id range here. Families, by id prefix: G* positive/structural cases,
+        N* negative cases (one per distinct violation class in project-skills-policy.md's schema),
+        V* the Governance-v3 prose checks, P* provider-registry cases, and I*/R* the approved
+        inventory / routing-universe contract.
+
+        Fixtures come in two flavours, and BOTH are normal. Most build a synthetic, never-committed
+        tree under tempfile.TemporaryDirectory. The rest read the REAL repository, read-only, to
+        assert facts about actual repo state -- the vendored MANIFESTS registry's shape, the real
+        (empty) project manifest, and each Governance-v3 prose invariant against the real documents.
+        The guarantee this flag makes is "this run never WRITES to the repo", not "every fixture is
+        synthetic-only".
+
+        Every V* fixture calls the same production helper its corresponding check calls
+        (`*_details()`), so a self-test pass means the production logic passed -- the fixtures never
+        re-implement a check's conditions. Prints "N/N self-test fixtures passed" and exits 1 on any
+        fixture failure, 0 otherwise. Independent of --self-test-hook and of the default run.
 
 Env vars (all optional, all make specific checks stricter, never required):
-    GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK  path to a read-only clone of mattpocock/skills; when set,
-                                        the mattpocock blob-hash check verifies against it directly.
-    GOVERNANCE_UPSTREAM_DIR             legacy fallback for the above, kept for compatibility with
-                                        scripts/CI that pre-date the anthropic skill set.
-    GOVERNANCE_UPSTREAM_DIR_ANTHROPIC   path to a read-only clone of anthropics/skills; when set,
-                                        the anthropic (file-level) blob-hash check verifies against
-                                        it directly, for every file in every skill's files[].
+    GOVERNANCE_UPSTREAM_DIR_<LABEL>     path to a read-only clone of that provider's upstream at
+                                        the pinned commit; when set, that provider's blob-hash check
+                                        additionally verifies each unmodified file byte-for-byte
+                                        against the clone instead of only against the recorded hash.
+                                        <LABEL> is the registry label upper-cased with '-' -> '_':
+                                        _MATTPOCOCK, _ANTHROPIC, _COMPOUND_ENGINEERING,
+                                        _TRAILOFBITS, _AWESOME_COPILOT, _BUILDERIO.
+    GOVERNANCE_UPSTREAM_DIR             legacy fallback for _MATTPOCOCK only, kept for compatibility
+                                        with scripts/CI that pre-date the multi-provider registry.
     GOVERNANCE_BASE_SHA                 a git ref; when set, the "application paths untouched"
                                         check diffs against it instead of the working tree.
 
-A blob-hash mismatch on a file whose skill has `scripts_audited: true` in the anthropic manifest
+A blob-hash mismatch on a file whose skill has `scripts_audited: true` in ANY provider's manifest
 means more than "content drifted": it means a script that was read end-to-end during the last
 review no longer matches what was reviewed, so re-audit (not just re-hash) is required before
 trusting it again.
@@ -63,7 +89,7 @@ MANIFEST_PATH = os.path.join(DOCS_AGENTS_DIR, "mattpocock-skills-manifest.json")
 PATCHES_PATH = os.path.join(DOCS_AGENTS_DIR, "mattpocock-skills-patches.md")
 ANTHROPIC_MANIFEST_PATH = os.path.join(DOCS_AGENTS_DIR, "anthropic-skills-manifest.json")
 ANTHROPIC_PATCHES_PATH = os.path.join(DOCS_AGENTS_DIR, "anthropic-skills-patches.md")
-# Third ownership class: project-owned first-party skills. Deliberately NOT added to the
+# Seventh ownership class: project-owned first-party skills. Deliberately NOT added to the
 # MANIFESTS registry below -- that registry drives vendored-only logic (excluded-skill keys,
 # patch ledgers, upstream blob-hash schemas), none of which apply to first-party content. See
 # docs/agents/project-skills-policy.md and check_project_manifest()/validate_project_manifest().
@@ -72,35 +98,145 @@ PROJECT_OWNERSHIP_CLASS = "project-first-party"
 SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
 HOOK_PATH = os.path.join(CLAUDE_DIR, "hooks", "governance-policy.py")
 
-# Registry of every vendored-skill manifest/ledger pair this script knows about. "schema" records
-# which blob-hash granularity that manifest uses: "skill-level" (one upstream_blob_sha per skill's
-# SKILL.md, mattpocock's format) or "file-level" (one upstream_blob_sha per vendored file, in a
-# per-skill files[] array -- anthropic's format, since two of its three skills ship real scripts).
+# --------------------------------------------------------------------------
+# Provider registry
+# --------------------------------------------------------------------------
+#
+# ONE registry describes every vendored-skill provider this script knows about, and every
+# provider-aware check below is written against the registry rather than against a named provider.
+# Adding a provider means appending an entry here (plus its manifest/ledger/policy documents) --
+# not adding a conditional inside a check. The two original providers (mattpocock, anthropic) keep
+# exactly the guarantees they had before the registry was generalized; the generic checks are the
+# same logic with the provider hard-coding lifted out.
+#
+# Per-entry fields:
+#   label                  short provider id, used as the prefix on every diagnostic and as the
+#                          ownership-partition key.
+#   manifest/patches/policy repo-absolute paths to the three documents every provider must ship.
+#   upstream_repo          the canonical upstream URL, cross-checked against the manifest.
+#   upstream_env           env var naming a read-only clone of the upstream at the pinned commit;
+#                          when set, blob hashes are additionally verified against it directly.
+#   legacy_upstream_env    older env-var spelling kept working for scripts that predate the rename.
+#   schema                 blob-hash granularity. "skill-level" = one upstream_blob_sha per skill's
+#                          SKILL.md (mattpocock's original format). "file-level" = one
+#                          upstream_blob_sha + vendored_blob_sha per vendored FILE, in a per-skill
+#                          files[] array. Every provider added after anthropic uses "file-level":
+#                          it is the only granularity that can prove a complete file inventory.
+#   excluded_key           manifest key holding the non-installed candidates' verdict list.
+#   extra_frontmatter_keys frontmatter keys this provider's upstream legitimately uses on top of
+#                          ALLOWED_SKILL_KEYS. Upstream frontmatter is PRESERVED, not deleted, so
+#                          the allowlist is widened per provider rather than the skill being
+#                          rewritten (see docs/agents/*-skills-policy.md).
+#   license                {"spdx": ..., "layout": "per-skill"|"shared", ...}. "per-skill" requires
+#                          `filename` present in every one of that provider's skill dirs; "shared"
+#                          requires the single repo-relative `path` to exist.
+LICENSE_SHARED_MATTPOCOCK = os.path.join(".claude", "skills", "LICENSE")
+
 MANIFESTS = [
     {
         "label": "mattpocock",
         "manifest": MANIFEST_PATH,
         "patches": PATCHES_PATH,
+        "policy": os.path.join(DOCS_AGENTS_DIR, "mattpocock-skills-policy.md"),
+        "upstream_repo": "https://github.com/mattpocock/skills",
         "upstream_env": "GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK",
         "legacy_upstream_env": "GOVERNANCE_UPSTREAM_DIR",
-        "schema": "skill-level",
+        # Migrated from "skill-level" to "file-level": every one of the 42 files in the 23
+        # vendored directories now carries its own upstream/vendored hash pair, closing the
+        # 17-files-with-no-recorded-hash gap this policy's "Known limitations" documented. All
+        # six providers are now file-level, which check_all_providers_file_level enforces.
+        "schema": "file-level",
         "excluded_key": "excluded",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "shared", "path": LICENSE_SHARED_MATTPOCOCK},
     },
     {
         "label": "anthropic",
         "manifest": ANTHROPIC_MANIFEST_PATH,
         "patches": ANTHROPIC_PATCHES_PATH,
+        "policy": os.path.join(DOCS_AGENTS_DIR, "anthropic-skills-policy.md"),
+        "upstream_repo": "https://github.com/anthropics/skills",
         "upstream_env": "GOVERNANCE_UPSTREAM_DIR_ANTHROPIC",
         "legacy_upstream_env": None,
         "schema": "file-level",
         "excluded_key": "excluded_skills",
+        # frontend-design and webapp-testing both carry `license: Complete terms in LICENSE.txt`.
+        "extra_frontmatter_keys": frozenset({"license"}),
+        "license": {"spdx": "Apache-2.0", "layout": "per-skill", "filename": "LICENSE.txt"},
+    },
+    {
+        "label": "compound-engineering",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "compound-engineering-skills-policy.md"),
+        "upstream_repo": "https://github.com/EveryInc/compound-engineering-plugin",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_COMPOUND_ENGINEERING",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        # `allowed-tools` is a real Claude Code key that NARROWS a skill's tool surface, so it is
+        # preserved rather than stripped (ce-resolve-pr-feedback uses it).
+        "extra_frontmatter_keys": frozenset({"allowed-tools"}),
+        # MIT requires the notice to accompany all copies, so each vendored skill dir carries its own.
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "trailofbits",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "trailofbits-skills-policy.md"),
+        "upstream_repo": "https://github.com/trailofbits/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_TRAILOFBITS",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        # `allowed-tools` narrows the tool surface; `type` is Trail of Bits' own skill-kind marker.
+        "extra_frontmatter_keys": frozenset({"allowed-tools", "type"}),
+        # CC BY-SA 4.0 §3(a)(1) requires the licence notice with every distributed copy.
+        "license": {"spdx": "CC-BY-SA-4.0", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "awesome-copilot",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "awesome-copilot-skills-policy.md"),
+        "upstream_repo": "https://github.com/github/awesome-copilot",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_AWESOME_COPILOT",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
+    },
+    {
+        "label": "builderio",
+        "manifest": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-manifest.json"),
+        "patches": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-patches.md"),
+        "policy": os.path.join(DOCS_AGENTS_DIR, "builderio-skills-policy.md"),
+        "upstream_repo": "https://github.com/BuilderIO/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_BUILDERIO",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset(),
+        "license": {"spdx": "MIT", "layout": "per-skill", "filename": "LICENSE"},
     },
 ]
 
+# Top-level manifest fields every provider manifest must carry, whatever its schema.
+REQUIRED_MANIFEST_FIELDS = (
+    "upstream_repo", "upstream_commit", "reviewed_at", "reviewed_by",
+    "installation_mode", "automatic_updates", "skills",
+)
+REQUIRED_INSTALLATION_MODE = "project-local-vendored-copy"
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+# Verdicts an entry in a provider's excluded_key list may carry. HOLD means "valuable but blocked"
+# (a mandatory hosted service, an unpinned CLI, a missing redistribution grant); EXCLUDE means
+# "reviewed and not wanted". Both must state a reason -- a bare name with no verdict is exactly the
+# silent omission the audit process exists to prevent.
+ALLOWED_EXCLUSION_STATUSES = {"EXCLUDE", "HOLD"}
+
 ALLOWED_SKILL_KEYS = {"name", "description", "disable-model-invocation", "argument-hint"}
-# anthropic-owned skill dirs additionally allow "license" (skill-creator-anthropic doesn't use it,
-# but frontend-design and webapp-testing both carry `license: Complete terms in LICENSE.txt`).
-ALLOWED_SKILL_KEYS_ANTHROPIC = ALLOWED_SKILL_KEYS | {"license"}
 # project-owned first-party skill dirs: an explicit, independent copy of the base set (not the
 # same object -- set(...) so a future in-place mutation of one can never leak into the other),
 # selected explicitly by ownership in check_frontmatter_keys/validate_project_manifest, never
@@ -110,6 +246,17 @@ ALLOWED_RULE_KEYS = {"paths"}
 FORBIDDEN_VENDOR_NAMES = {".github", ".claude-plugin", "package.json", "package-lock.json", "openai.yaml"}
 APPLICATION_PATH_PREFIXES = ("internal/", "cmd/")
 APPLICATION_PATH_EXACT_PREFIXES = ("go.mod", "go.sum", "Dockerfile", "docker-compose", ".github/workflows/")
+
+# Workflows that ARE part of the governance layer rather than the application's build/release
+# pipeline, and are therefore editable by a governance task. Deliberately an exact-path
+# allowlist, not a prefix: `.github/workflows/` stays forbidden as a whole, so ci.yml and
+# release.yml remain untouchable and a NEW workflow cannot be introduced by adding a file --
+# it has to be added to this list, in a diff a reviewer sees.
+# No workflow is governance-owned on the stable line: the skills-update automation is defined and
+# scheduled on the repository's default branch (main) only, and this line deliberately carries no
+# copy of it. With the allowlist empty, ANY .github/workflows/** change fails the application-path
+# guard -- CI changes on the stable line are always their own explicitly-confirmed concern.
+GOVERNANCE_OWNED_WORKFLOWS = ()
 
 # Skill names Claude Code (or another first-party surface) already provides. No vendored skill dir
 # name and no manifest skill name may collide with one of these -- that's exactly the problem the
@@ -170,6 +317,68 @@ def anthropic_skill_dir_names():
 def mattpocock_skill_dir_names():
     """Directory names (under .claude/skills/) the mattpocock manifest claims to own."""
     return {s["name"] for s in load_manifest().get("skills", [])}
+
+
+# --- generic provider accessors (every provider-aware check goes through these) --------------
+
+def provider_manifest(entry):
+    """The parsed manifest for one registry entry. Raises on unreadable/invalid JSON -- that is
+    already reported by check_json_validity, and a check that swallowed it would report a
+    misleading PASS."""
+    return load_manifest(entry["manifest"])
+
+
+def provider_skills(entry):
+    """The skills[] list for one registry entry, defensively defaulted so a structurally broken
+    manifest degrades to "claims nothing" instead of aborting the whole run (the same fail-closed
+    shape project_skill_names() uses)."""
+    try:
+        manifest = provider_manifest(entry)
+    except Exception:
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    skills = manifest.get("skills", [])
+    return skills if isinstance(skills, list) else []
+
+
+def provider_skill_dir_names(entry):
+    """Directory names (under .claude/skills/) one registry entry claims to own."""
+    return {s["name"] for s in provider_skills(entry) if isinstance(s, dict) and "name" in s}
+
+
+def file_level_providers():
+    """Registry entries whose manifest records one hash per vendored FILE. These are the only
+    providers whose complete on-disk inventory can be proven, so the inventory/mode/scripts-audited
+    /patch-coverage checks all iterate exactly this subset."""
+    return [e for e in MANIFESTS if e["schema"] == "file-level"]
+
+
+def provider_upstream_dir(entry):
+    """Path to a read-only upstream clone for this provider, from its env var (or the legacy
+    spelling), or None when unset. Optional everywhere: setting it makes hash checks STRICTER
+    (they additionally compare against the clone), never required."""
+    val = os.environ.get(entry["upstream_env"])
+    if not val and entry.get("legacy_upstream_env"):
+        val = os.environ.get(entry["legacy_upstream_env"])
+    return val or None
+
+
+def allowed_frontmatter_keys_by_dir():
+    """{skill dir name -> allowed frontmatter key set}, resolved by OWNERSHIP from the registry
+    plus the project manifest. Upstream providers legitimately use keys the original two-provider
+    allowlist never saw (`allowed-tools`, `type`, `effort`, `metadata`, `compatibility`, ...); the
+    policy is to PRESERVE that frontmatter and widen the allowlist per provider, never to delete
+    legitimate upstream frontmatter because an older allowlist did not recognise it. A dir claimed
+    by no source is not in the map and falls back to the base set at the call site."""
+    by_dir = {}
+    for entry in MANIFESTS:
+        allowed = ALLOWED_SKILL_KEYS | set(entry.get("extra_frontmatter_keys", ()))
+        for name in provider_skill_dir_names(entry):
+            by_dir[name] = allowed
+    for name in project_skill_names():
+        by_dir[name] = ALLOWED_SKILL_KEYS_PROJECT
+    return by_dir
 
 
 def project_skill_names():
@@ -262,31 +471,131 @@ def parse_frontmatter_value(path, key):
 
 def check_required_files():
     required = [
-        "CLAUDE.md", "GOVERNANCE_V3.md", "CONTEXT.md", ".gitignore",
-        ".claude/settings.json", ".claude/hooks/governance-policy.py", ".claude/skills/LICENSE",
+        "CLAUDE.md", "CONTEXT.md", ".gitignore",
+        ".claude/settings.json", ".claude/hooks/governance-policy.py",
         "docs/agents/operation-modes.md", "docs/agents/task-contract.md", "docs/agents/quality-gates.md",
         "docs/agents/issue-tracker.md", "docs/agents/domain.md", "docs/agents/triage-labels.md",
-        "docs/agents/mattpocock-skills-manifest.json", "docs/agents/mattpocock-skills-patches.md",
-        "docs/agents/mattpocock-skills-policy.md", "docs/adr/0001-agent-governance-v2.md",
+        "docs/adr/0001-agent-governance-v2.md",
+        "GOVERNANCE_V3.md",
         "docs/adr/0002-canonical-governance-v3.md",
+        "docs/agents/skills-routing.md",
+        "docs/agents/skills-update-providers.json",
+        "docs/agents/skills-update-plugins.json",
         "scripts/validate-agent-governance.py",
-        "docs/agents/anthropic-skills-manifest.json", "docs/agents/anthropic-skills-patches.md",
-        "docs/agents/anthropic-skills-policy.md",
         "docs/agents/project-skills-manifest.json", "docs/agents/project-skills-policy.md",
     ]
+    # Every registered provider's three documents are required by construction, so adding a
+    # provider to the registry cannot leave its manifest/ledger/policy unlisted here.
+    for entry in MANIFESTS:
+        required += [rel(entry["manifest"]), rel(entry["patches"]), rel(entry["policy"])]
     missing = [p for p in required if not os.path.isfile(os.path.join(REPO_ROOT, p))]
     report("required-files-exist", not missing, ["missing %s" % p for p in missing])
 
 
 def check_json_validity():
     details = []
-    for p in (SETTINGS_PATH, MANIFEST_PATH, ANTHROPIC_MANIFEST_PATH, PROJECT_MANIFEST_PATH):
+    paths = [SETTINGS_PATH, PROJECT_MANIFEST_PATH] + [e["manifest"] for e in MANIFESTS]
+    for p in paths:
         try:
             with open(p) as f:
                 json.load(f)
         except Exception as e:
             details.append("%s: %s" % (rel(p), e))
     report("json-validity", not details, details)
+
+
+def provider_manifest_field_details(entry, manifest):
+    """Pure core of check_provider_manifest_fields (no filesystem, no git): given a registry entry
+    and a parsed manifest, return the list of provenance-contract violations. Shared by the
+    production check and its self-test fixtures so both exercise identical logic."""
+    label = entry["label"]
+    details = []
+    if not isinstance(manifest, dict):
+        return ["%s: manifest top level is not an object" % label]
+    for field in REQUIRED_MANIFEST_FIELDS:
+        if field not in manifest:
+            details.append("%s: manifest missing required field %r" % (label, field))
+    # Note the `in ("installation_mode", ...)` presence check above only proves the KEY exists.
+    # An explicit `"installation_mode": null` would satisfy that and then slip through a
+    # `not in (None, REQUIRED)` value check -- so a manifest could declare no installation mode at
+    # all and pass both halves. Compare against the required value directly.
+    if manifest.get("installation_mode") != REQUIRED_INSTALLATION_MODE:
+        details.append("%s: installation_mode %r != %r" % (
+            label, manifest.get("installation_mode"), REQUIRED_INSTALLATION_MODE))
+    # The excluded list is the audit trail for every reviewed-but-rejected candidate. A missing or
+    # misspelled key would otherwise degrade silently to "this provider rejected nothing", which
+    # reads as a complete audit rather than an absent one.
+    if entry["excluded_key"] not in manifest:
+        details.append("%s: manifest has no %r key -- rejected candidates would go unrecorded" % (
+            label, entry["excluded_key"]))
+    elif not isinstance(manifest[entry["excluded_key"]], list):
+        details.append("%s: %s must be a list, got %s" % (
+            label, entry["excluded_key"], type(manifest[entry["excluded_key"]]).__name__))
+    if manifest.get("automatic_updates") is not False:
+        details.append("%s: automatic_updates must be literally false, got %r" % (
+            label, manifest.get("automatic_updates")))
+    commit = manifest.get("upstream_commit")
+    if not (isinstance(commit, str) and SHA1_RE.match(commit)):
+        details.append("%s: upstream_commit %r is not a full 40-hex SHA" % (label, commit))
+    declared_repo = manifest.get("upstream_repo")
+    if isinstance(declared_repo, str) and _canon_repo(declared_repo) != _canon_repo(entry["upstream_repo"]):
+        details.append("%s: manifest upstream_repo %r != registry %r" % (
+            label, declared_repo, entry["upstream_repo"]))
+    if not entry.get("license", {}).get("spdx"):
+        details.append("%s: registry entry declares no license SPDX id" % label)
+    return details
+
+
+def _canon_repo(url):
+    return url.rstrip("/").removesuffix(".git")
+
+
+def check_provider_manifest_fields():
+    """Every provider manifest must carry the same top-level provenance contract, whatever its
+    blob-hash schema: the required fields exist, `installation_mode` is the project-local vendored
+    copy (never a marketplace/live-plugin install), `automatic_updates` is literally false (nothing
+    re-fetches upstream on its own), `upstream_commit` is a full 40-hex SHA (never a branch name or
+    a short SHA -- a floating ref would make every recorded hash unfalsifiable), the declared
+    `upstream_repo` matches the registry, and a license block names an SPDX id."""
+    details = []
+    for entry in MANIFESTS:
+        try:
+            manifest = provider_manifest(entry)
+        except Exception as e:
+            details.append("%s: manifest unreadable: %s" % (entry["label"], e))
+            continue
+        details += provider_manifest_field_details(entry, manifest)
+    report("provider-manifest-fields", not details, details)
+
+
+def provider_license_file_details(entry, skill_names, skills_dir, repo_root):
+    """Pure-ish core of check_provider_license_files: root-parameterized so a fixture can point it
+    at a synthetic tree."""
+    lic = entry.get("license", {})
+    layout = lic.get("layout")
+    if layout == "shared":
+        if not os.path.isfile(os.path.join(repo_root, lic["path"])):
+            return ["%s: shared license file missing: %s" % (entry["label"], lic["path"])]
+        return []
+    if layout == "per-skill":
+        fname = lic["filename"]
+        return ["%s: %s/%s missing (per-skill %s notice)" % (entry["label"], name, fname, lic.get("spdx"))
+                for name in sorted(skill_names)
+                if not os.path.isfile(os.path.join(skills_dir, name, fname))]
+    return ["%s: unknown license layout %r" % (entry["label"], layout)]
+
+
+def check_provider_license_files():
+    """The redistribution notice each provider's license actually requires must be present on disk.
+    "per-skill" layouts (Apache-2.0 §4(a), CC BY-SA 4.0 §3(a)(1) attribution) need the license file
+    inside EVERY one of that provider's skill directories; "shared" layouts need the single
+    declared file. A vendored tree that lost its license file is a redistribution defect, not a
+    cosmetic one."""
+    details = []
+    for entry in MANIFESTS:
+        details += provider_license_file_details(
+            entry, provider_skill_dir_names(entry), SKILLS_DIR, REPO_ROOT)
+    report("provider-license-files", not details, details)
 
 
 def check_no_symlinks_no_exec():
@@ -318,13 +627,13 @@ def check_skill_dirs_have_skillmd():
 def check_unique_skill_names():
     dirs = list_skill_dirs()
     dup = {d for d in dirs if dirs.count(d) > 1}
-    # Union across ALL THREE ownership sources (the two vendored manifests plus the project
+    # Union across ALL ownership sources (the six vendored manifests plus the project
     # manifest): a name duplicated within one source OR appearing in more than one source is
     # equally a collision -- two different skills must never share a name.
     names = []
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        names.extend(s["name"] for s in manifest["skills"])
+        names.extend(s["name"] for s in provider_skills(entry)
+                     if isinstance(s, dict) and isinstance(s.get("name"), str))
     names.extend(project_skill_names())
     dup_manifest = {n for n in names if names.count(n) > 1}
     details = ["duplicate dir: %s" % d for d in dup] + ["duplicate manifest entry (union of all manifests): %s" % n for n in dup_manifest]
@@ -333,9 +642,11 @@ def check_unique_skill_names():
 
 def check_frontmatter_keys():
     details = []
-    anthropic_dirs = anthropic_skill_dir_names()
-    project_dirs = set(project_skill_names())  # membership only -- project_skill_names() is a
-    # list (not deduplicated, see its docstring), so callers needing set semantics wrap it here.
+    # Allowlist selected explicitly BY OWNERSHIP, from the provider registry plus the project
+    # manifest (see allowed_frontmatter_keys_by_dir). A dir claimed by no source falls back to the
+    # base set -- which is the strictest of them, so an unclaimed dir can never gain keys by
+    # accident (and check_manifest_ownership_partition fails on it independently anyway).
+    allowed_by_dir = allowed_frontmatter_keys_by_dir()
     for name in list_skill_dirs():
         skillmd = os.path.join(SKILLS_DIR, name, "SKILL.md")
         if not os.path.isfile(skillmd):
@@ -344,16 +655,7 @@ def check_frontmatter_keys():
         if not ok:
             details.append("%s/SKILL.md: no valid frontmatter fence" % name)
             continue
-        # Allowlist selected explicitly by ownership -- anthropic dirs get the anthropic set,
-        # project dirs get the (currently identical, but independently named) project set,
-        # everything else (mattpocock or unclaimed) falls through to the base set. Never an
-        # accidental else-fallback: project dirs are checked by membership, not by exclusion.
-        if name in anthropic_dirs:
-            allowed = ALLOWED_SKILL_KEYS_ANTHROPIC
-        elif name in project_dirs:
-            allowed = ALLOWED_SKILL_KEYS_PROJECT
-        else:
-            allowed = ALLOWED_SKILL_KEYS
+        allowed = allowed_by_dir.get(name, ALLOWED_SKILL_KEYS)
         extra = keys - allowed
         if extra:
             details.append("%s/SKILL.md: unexpected frontmatter keys %s" % (name, sorted(extra)))
@@ -377,13 +679,97 @@ def check_frontmatter_keys():
 
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+# Inline code spans. Deliberately single-line: a span is matched only within one line, so an odd
+# number of backticks on some line (upstream really does write things like `](` as a code span)
+# cannot swallow the rest of the file and expose unrelated text as if it were prose. Multi-line
+# spans are legal CommonMark but vanishingly rare in these skills, and mis-pairing across lines
+# produced exactly the phantom "dangling link" findings this form prevents.
+INLINE_CODE_RE = re.compile(r"(`+)(?:(?!\1)[^\n])*?\1")
+
+
+FENCE_LINE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def strip_fenced_blocks(text):
+    """Drop ONLY fenced code blocks, keeping inline code spans intact.
+
+    Line-based and fence-length aware, following CommonMark: a fence is closed only by a fence of
+    the SAME character that is at least as long as the opener. The previous regex form
+    (```` ```.*?``` ```` with DOTALL) could not express that, so a document containing a nested
+    four-backtick fence -- the standard way to show a fenced block inside a fenced block, and
+    exactly what these skills do when documenting their own output format -- had its fences paired
+    wrongly. Everything after the mis-pair fell outside any recognised fence, and prose that merely
+    QUOTED a Markdown link was then checked as if it were a real link. That produced phantom
+    "dangling link" findings whose only cheap fix was editing correct upstream prose, which is the
+    pressure the vendoring policies exist to remove.
+
+    Used by the dependency-closure check, which deliberately reads backticked paths
+    (`scripts/context.mjs`) as closure claims -- stripping inline code there would blind it.
+    Link checking wants the stronger strip_code_fences() below."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = FENCE_LINE_RE.match(line)
+        if fence is None:
+            # An opening backtick fence may not carry a backtick in its info string (CommonMark);
+            # that rule is what keeps a line like ``a `b` `` from being read as a fence opener.
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+                continue
+            out.append(line)
+        else:
+            if (m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence)
+                    and not m.group(2).strip()):
+                fence = None
+    return "\n".join(out)
 
 
 def strip_code_fences(text):
-    """Drop fenced code blocks so illustrative example links inside a ```md
-    template (not real links in this file) aren't checked as real targets."""
-    return FENCE_RE.sub("", text)
+    """Drop fenced code blocks AND inline code spans, so text that merely *shows* link syntax is
+    not checked as if it were a real link.
+
+    Both halves matter. The fenced half keeps an example inside a ```md template from being read as
+    a live link. The inline half is the same rule for `[T01.S](2-stride-analysis.md#anchor)` written
+    in backticks: a skill documenting the link syntax its OUTPUT must use is quoting a string, not
+    referencing a file that has to exist. Without this, every such quotation is a false "dangling
+    link" -- and the pressure that creates is to edit correct upstream prose to satisfy the
+    checker, which the vendoring policies exist to prevent."""
+    return INLINE_CODE_RE.sub("", strip_fenced_blocks(text))
+
+
+# Trail of Bits' skills write intra-skill paths as `{baseDir}/references/foo.md`. `{baseDir}` is
+# their own documented convention for "this skill's own directory" (upstream AGENTS.md: "Use
+# `{baseDir}` for paths, **never hardcode** absolute paths"), not a loader-substituted variable, so
+# a vendored copy keeps the token verbatim and the file really does live at <skill>/references/foo.md.
+#
+# The validator resolves the token instead of the vendoring rewriting it. That is deliberate: the
+# alternative -- editing hundreds of upstream lines to strip a prefix -- would be a large,
+# content-touching patch made solely to satisfy an older link resolver, exactly the kind of change
+# the vendoring policies forbid. Resolving it here keeps upstream bytes intact AND makes the check
+# stronger, because these targets are now actually verified rather than skipped.
+BASEDIR_TOKEN = "{baseDir}"
+
+
+def resolve_skill_link(target, dirpath, skill_dir):
+    """(kind, resolved_abs_path) for one Markdown link target inside a vendored skill.
+
+    kind is "skip" (external/anchor-only/bare token), "absolute" (a `/`-rooted path, always a
+    finding), or "path" (resolved_abs_path is what must exist). A `#fragment` suffix is stripped
+    before resolution -- a link to a heading inside a real file is a valid link."""
+    target = target.split(" ", 1)[0].strip()
+    if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+        return "skip", None
+    if target == BASEDIR_TOKEN:
+        return "skip", None
+    if target.startswith("/"):
+        return "absolute", None
+    if target.startswith(BASEDIR_TOKEN + "/"):
+        base, rest = skill_dir, target[len(BASEDIR_TOKEN) + 1:]
+    else:
+        base, rest = dirpath, target
+    rest = rest.split("#", 1)[0]
+    if not rest:
+        return "skip", None
+    return "path", os.path.normpath(os.path.join(base, rest))
 
 
 def check_relative_links_resolve():
@@ -397,16 +783,19 @@ def check_relative_links_resolve():
                 path = os.path.join(dirpath, fname)
                 with open(path, encoding="utf-8") as f:
                     text = strip_code_fences(f.read())
-                for target in LINK_RE.findall(text):
-                    target = target.split(" ", 1)[0].strip()
-                    if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+                for raw in LINK_RE.findall(text):
+                    kind, resolved = resolve_skill_link(raw, dirpath, skill_dir)
+                    if kind == "skip":
                         continue
-                    if target.startswith("/"):
-                        details.append("%s: absolute-path link %r" % (rel(path), target))
+                    if kind == "absolute":
+                        details.append("%s: absolute-path link %r" % (rel(path), raw.strip()))
                         continue
-                    resolved = os.path.normpath(os.path.join(dirpath, target))
-                    if not os.path.isfile(resolved):
-                        details.append("%s: dangling link %r" % (rel(path), target))
+                    # os.path.exists, not isfile: a link to a DIRECTORY inside the skill (e.g.
+                    # `./references/skeletons/`) is a legitimate reference, and treating it as
+                    # dangling was a bug in the original check that only surfaced once a provider
+                    # shipping directory links was vendored.
+                    if not os.path.exists(resolved):
+                        details.append("%s: dangling link %r" % (rel(path), raw.strip()))
     report("relative-links-resolve", not details, details)
 
 
@@ -442,7 +831,7 @@ def check_forbidden_vendor_files_absent():
 
 def check_manifest_fs_consistency():
     """Per-source filesystem consistency, reported under the original single-manifest report
-    name. With three ownership sources now in play (mattpocock, anthropic, and the project
+    name. With seven ownership sources now in play (the six vendored providers and the project
     manifest), a directory legitimately claimed by one source must not be flagged as "not in
     manifest" when checking another -- so each source's "dir but not in manifest" half only
     considers directories no OTHER source already claims. Directories claimed by no source at all
@@ -452,8 +841,7 @@ def check_manifest_fs_consistency():
     fs_names = set(list_skill_dirs())
     manifest_names_by_label = {}
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        manifest_names_by_label[entry["label"]] = {s["name"] for s in manifest["skills"]}
+        manifest_names_by_label[entry["label"]] = provider_skill_dir_names(entry)
     manifest_names_by_label["project"] = set(project_skill_names())  # set() needed: this dict's
     # values are combined with |/- below, and project_skill_names() is deliberately a
     # non-deduplicated list (see its docstring).
@@ -500,8 +888,8 @@ def partition_details(fs_names, names_by_label):
 
 
 def check_manifest_ownership_partition():
-    """Every .claude/skills/<dir> must be claimed by EXACTLY one of the three ownership sources
-    (mattpocock, anthropic, project): the union of all their skill names must equal the set of
+    """Every .claude/skills/<dir> must be claimed by EXACTLY one of the registered ownership sources
+    (the six vendored providers + project): the union of all their skill names must equal the set of
     directories on disk, and no name may appear in more than one source (a cross-source name
     collision would mean two different reviewed owners both think they own the same directory).
     The project manifest is read directly (project_skill_names()), never via the vendored
@@ -509,8 +897,7 @@ def check_manifest_ownership_partition():
     fs_names = set(list_skill_dirs())
     names_by_label = {}
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        names_by_label[entry["label"]] = {s["name"] for s in manifest["skills"]}
+        names_by_label[entry["label"]] = provider_skill_dir_names(entry)
     names_by_label["project"] = set(project_skill_names())  # set() needed: partition_details()
     # does set algebra (&, -), and project_skill_names() is deliberately a non-deduplicated list.
 
@@ -518,62 +905,157 @@ def check_manifest_ownership_partition():
     report("manifest-ownership-partition", not details, details)
 
 
+def exclusion_entry_details(label, key, excluded, fs_names):
+    """Pure core of check_excluded_absent's per-entry validation: a rejected candidate must not
+    also be installed, must carry a non-blank reason, and (when it states one) must use a
+    recognised verdict. Shared with the self-test fixture so both exercise identical logic."""
+    if not isinstance(excluded, list):
+        return ["%s: %s must be a list" % (label, key)]
+    details = []
+    for item in excluded:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            details.append("%s: malformed exclusion entry %r" % (label, item))
+            continue
+        name = item["name"]
+        if name in fs_names:
+            details.append("%s: excluded but present: %s" % (label, name))
+        if not (isinstance(item.get("reason"), str) and item["reason"].strip()):
+            details.append("%s: exclusion %r has no reason" % (label, name))
+        status = item.get("status")
+        if status is not None and status not in ALLOWED_EXCLUSION_STATUSES:
+            details.append("%s: exclusion %r has status %r, expected one of %s" % (
+                label, name, status, sorted(ALLOWED_EXCLUSION_STATUSES)))
+    return details
+
+
 def check_excluded_absent():
+    """A candidate the review REJECTED must not also be installed, and every rejection must carry
+    a verdict a human can audit: a non-empty `reason`, and (when present) a `status` of EXCLUDE or
+    HOLD. HOLD records "valuable but blocked" -- a mandatory hosted service, an unpinned CLI, a
+    missing redistribution grant -- so that a blocker is documented rather than silently omitted."""
     fs_names = set(list_skill_dirs())
     details = []
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        excluded_names = {e["name"] for e in manifest.get(entry["excluded_key"], [])}
-        present = excluded_names & fs_names
-        details += ["%s: excluded but present: %s" % (entry["label"], n) for n in sorted(present)]
+        label = entry["label"]
+        try:
+            manifest = provider_manifest(entry)
+        except Exception:
+            continue  # reported by check_json_validity / check_provider_manifest_fields
+        # Compare a provider's rejections against the dirs THAT PROVIDER owns, not against every
+        # dir on disk. Two upstreams can ship same-named skills (github/awesome-copilot and
+        # trailofbits both publish a `codeql`); rejecting one while installing the other is a
+        # deliberate, recorded choice, not a contradiction. Global name uniqueness is still
+        # enforced -- by check_unique_skill_names and check_manifest_ownership_partition, which is
+        # where that invariant belongs.
+        details += exclusion_entry_details(
+            label, entry["excluded_key"], manifest.get(entry["excluded_key"], []),
+            provider_skill_dir_names(entry))
 
-    # anthropic-specific: the pre-rename source name ("skill-creator") must not exist as a dir --
-    # only the renamed skill-creator-anthropic may be present.
-    anthropic_manifest = load_anthropic_manifest()
-    renamed_froms = {
-        s["renamed_from"] for s in anthropic_manifest.get("skills", []) if s.get("renamed_from")
-    }
-    present_renamed = renamed_froms & fs_names
-    details += ["anthropic: renamed_from source present as dir: %s" % n for n in sorted(present_renamed)]
+        # A skill vendored under a different directory name than upstream's (to dodge a builtin
+        # collision) must not ALSO leave the pre-rename name on disk -- that would shadow the
+        # builtin the rename existed to protect. Generic across providers, not anthropic-only.
+        renamed_froms = {
+            s["renamed_from"] for s in provider_skills(entry)
+            if isinstance(s, dict) and s.get("renamed_from")
+        }
+        for n in sorted(renamed_froms & fs_names):
+            details.append("%s: renamed_from source present as dir: %s" % (label, n))
 
     report("excluded-skills-absent", not details, details)
 
 
-def check_blob_hashes():
-    """mattpocock branch: unchanged from before the anthropic set was added -- skill-level,
-    SKILL.md-only, locally_modified skills are skipped (only unmodified ones can be verified
-    byte-for-byte against a single recorded hash)."""
-    manifest = load_manifest()
+def all_providers_file_level_details(manifests):
+    """Root-parameterized core of check_all_providers_file_level."""
+    return ["%s: schema is %r, not \"file-level\"" % (entry["label"], entry.get("schema"))
+            for entry in manifests if entry.get("schema") != "file-level"]
+
+
+def check_all_providers_file_level():
+    """Every provider in the registry must record one hash pair per FILE.
+
+    This replaces the old mattpocock-only `check_blob_hashes`, which verified a single
+    SKILL.md hash per skill and skipped every locally-modified skill -- so of that provider's
+    42 files it could speak for 4. Migrating mattpocock to the file-level schema made
+    `check_provider_file_hashes` (which proves the inventory in BOTH directions, covers patched
+    and local-origin files, and catches any undeclared file on disk) apply to all six
+    providers, strictly subsuming what the old check did.
+
+    Keeping this as a check rather than deleting the concept is the point: `file_level_providers()`
+    silently skips any entry whose schema is something else, so a future provider added on a
+    retired schema would get NO hash coverage and every hash check would still report PASS.
+    This fails closed on that instead."""
+    details = all_providers_file_level_details(MANIFESTS)
+    report("all-providers-file-level", not details, details)
+
+
+#: Key an automated update candidate carries in a provider manifest. See
+#: scripts/skill_updates/candidate.py and docs/agents/skills-update-automation.md.
+CANDIDATE_KEY = "automated_candidate"
+
+#: The candidate state machine, mirrored from scripts/skill_updates/states.py. Only
+#: PREPARED_AUDIT_REQUIRED may ever appear in a checked-in manifest written by automation;
+#: AUDITED is what a human establishes, and it is established by DELETING the block, never by
+#: writing the word.
+CANDIDATE_STATE_PREPARED = "PREPARED_AUDIT_REQUIRED"
+CANDIDATE_STATE_AUDITED = "AUDITED"
+
+
+def unaudited_candidate_details(manifests):
+    """Root-parameterized core of check_no_unaudited_candidate.
+
+    Note what is checked: the PRESENCE of the block, not its `state` value. A candidate that
+    rewrote its own state to AUDITED is caught by exactly the same rule as one that left it
+    alone -- there is no string a machine can write into this block that makes it pass. The
+    state value is still reported, and an AUDITED claim is called out separately, because a
+    manifest asserting it is either a bug in the bot or a hand-edit that took the wrong route.
+    """
     details = []
-    upstream_dir = os.environ.get("GOVERNANCE_UPSTREAM_DIR_MATTPOCOCK") or os.environ.get("GOVERNANCE_UPSTREAM_DIR")
-    for skill in manifest["skills"]:
-        if skill.get("locally_modified"):
-            continue  # only unmodified skills can be hash-verified byte-for-byte
-        local_path = os.path.join(REPO_ROOT, skill["path"], "SKILL.md")
-        if not os.path.isfile(local_path):
-            continue  # already reported by manifest-filesystem-consistency
+    for entry in manifests:
         try:
-            out = subprocess.run(["git", "hash-object", local_path], stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=5, text=True)
-        except Exception as e:
-            details.append("%s: could not run git hash-object (%s)" % (skill["name"], e))
+            manifest = provider_manifest(entry)
+        except Exception:
+            continue  # reported by check_json_validity
+        block = manifest.get(CANDIDATE_KEY)
+        if not isinstance(block, dict):
             continue
-        if out.returncode != 0:
-            details.append("%s: git hash-object failed" % skill["name"])
+        state = block.get("state")
+        if state == CANDIDATE_STATE_AUDITED:
+            details.append(
+                "%s: %s block claims state=%r. AUDITED is never written into this block -- it is "
+                "established by auditing the diff, recording a fresh reviewed_at/reviewed_by, "
+                "and DELETING the block. A manifest that writes the word instead is asserting a "
+                "review through the one route that is not allowed to grant it."
+                % (entry["label"], CANDIDATE_KEY, state))
             continue
-        local_sha = out.stdout.strip()
-        if local_sha != skill.get("upstream_blob_sha"):
-            details.append("%s: local blob %s != manifest upstream_blob_sha %s" % (
-                skill["name"], local_sha, skill.get("upstream_blob_sha")))
-        if upstream_dir:
-            upstream_path = os.path.join(upstream_dir, skill["upstream_path"], "SKILL.md")
-            if os.path.isfile(upstream_path):
-                out2 = subprocess.run(["git", "hash-object", upstream_path], stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, timeout=5, text=True)
-                if out2.returncode == 0 and out2.stdout.strip() != local_sha:
-                    details.append("%s: local blob differs from %s" % (skill["name"], upstream_path))
-    label = "blob-hash-verified-against-upstream-clone" if upstream_dir else "blob-hash-verified-locally"
-    report(label, not details, details)
+        details.append(
+            "%s: manifest carries an unaudited %s block (state=%r, %s -> %s). This is a "
+            "machine-prepared candidate, not a reviewed pin: audit the diff, record a fresh "
+            "reviewed_at/reviewed_by, and delete the block.%s" % (
+                entry["label"], CANDIDATE_KEY, state,
+                str(block.get("superseded_commit"))[:12], str(block.get("target_commit"))[:12],
+                (" EVAL_REQUIRED: %d changed file(s) can alter behaviour, so provenance alone "
+                 "does not establish equivalence -- run the behavioural comparison before "
+                 "clearing." % len(block["eval_required"]))
+                if isinstance(block.get("eval_required"), list) and block["eval_required"]
+                else ""))
+    return details
+
+
+def check_no_unaudited_candidate():
+    """No provider manifest may claim a pin that only a machine has ever looked at.
+
+    The scheduled update bot (.github/workflows/skills-update.yml) can prepare a mechanically
+    clean refresh, but it has no standing to establish that the new upstream content is
+    something this project wants to run. It marks every candidate with an `automated_candidate`
+    block, and this check FAILS while that block is present.
+
+    That is what makes "audited" unfakeable rather than merely asserted in a PR body: the only
+    way to a passing governance run is for a human -- or an agent under a task contract -- to
+    read the diff, record a fresh reviewed_at/reviewed_by, and remove the block deliberately.
+    An automated candidate therefore cannot masquerade as a reviewed pin no matter how clean
+    its merge was."""
+    details = unaudited_candidate_details(MANIFESTS)
+    report("no-unaudited-update-candidate", not details, details)
 
 
 def check_patch_ledger_coverage():
@@ -592,142 +1074,226 @@ def check_patch_ledger_coverage():
     report("patch-ledger-covers-modified-skills", not details, details)
 
 
-def check_anthropic_file_hashes():
-    """anthropic branch (file-level, unlike mattpocock's skill-level check_blob_hashes above): for
-    every file in every skill's files[], the file must exist; an unmodified upstream-origin file's
-    on-disk git hash-object must equal its recorded upstream_blob_sha; a locally-modified file must
-    have a non-empty patch_ids; a local-origin file must carry a reason. ALSO, for every entry
-    regardless of origin/modification status, the on-disk git hash-object must equal the manifest's
-    recorded vendored_blob_sha -- this is the integrity pin that covers patched and local-origin
-    files too (upstream_blob_sha alone only pins the unmodified ones). A vendored_blob_sha mismatch
-    on a script whose skill has scripts_audited=true means the file changed since it was last read
-    end-to-end; re-audit (not just a manifest hash bump) is required before trusting it again. Also
-    walks each anthropic skill's directory on disk and fails if any file there isn't listed in
-    files[] at all (an unreviewed file with no manifest entry is exactly the kind of drift this
-    check exists to catch)."""
-    manifest = load_anthropic_manifest()
+def _git_blob_sha(path):
+    """(sha, error) for one file. Shells out to `git hash-object` exactly as the original
+    per-provider checks did, so the recorded hashes stay directly reproducible by hand."""
+    try:
+        out = subprocess.run(["git", "hash-object", path], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=5, text=True)
+    except Exception as e:
+        return None, "could not run git hash-object (%s)" % e
+    if out.returncode != 0:
+        return None, "git hash-object failed"
+    return out.stdout.strip(), None
+
+
+def check_provider_file_hashes():
+    """File-level integrity, for EVERY file-level provider in the registry (this is the
+    generalization of the original anthropic-only check; mattpocock keeps its skill-level
+    check_blob_hashes above). For every file in every skill's files[]: the file must exist; its
+    on-disk `git hash-object` must equal the recorded `vendored_blob_sha` (the integrity pin that
+    covers patched and local-origin files too); an unmodified upstream-origin file must ALSO equal
+    its `upstream_blob_sha`; a locally-modified file must name at least one patch id; a
+    local-origin file must carry a reason. When the provider's upstream-clone env var is set, an
+    unmodified file is additionally compared byte-for-byte against the clone.
+
+    The inventory half is what makes the file list PROVABLY complete in both directions: a listed
+    path missing on disk fails, and any on-disk file under a claimed skill directory that files[]
+    does not mention fails. An unreviewed file with no manifest entry is exactly the drift this
+    exists to catch.
+
+    A `vendored_blob_sha` mismatch on a file whose skill has `scripts_audited: true` means a script
+    that was read end-to-end during review no longer matches what was reviewed: re-audit is
+    required, not just a manifest hash bump."""
     details = []
-    upstream_dir = os.environ.get("GOVERNANCE_UPSTREAM_DIR_ANTHROPIC")
-    for skill in manifest["skills"]:
+    verified_against_clone = []
+    for entry in file_level_providers():
+        upstream_dir = provider_upstream_dir(entry)
+        if upstream_dir:
+            verified_against_clone.append(entry["label"])
+        details += provider_file_hash_details(
+            entry, provider_skills(entry), REPO_ROOT, upstream_dir)
+    if verified_against_clone:
+        print("  (info) file hashes additionally verified against an upstream clone for: %s" %
+              ", ".join(sorted(verified_against_clone)))
+    report("provider-file-hashes", not details, details)
+
+
+def provider_file_hash_details(entry, skills, repo_root, upstream_dir=None):
+    """Root-parameterized core of check_provider_file_hashes, so a fixture can drive it against a
+    synthetic tree and prove each failure mode really fails."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict) or "name" not in skill:
+            details.append("%s: malformed skills[] entry %r" % (label, skill))
+            continue
+        sname = skill["name"]
         listed_paths = set()
-        for entry in skill.get("files", []):
-            rel_path = entry["path"]
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                details.append("%s: %s: malformed files[] entry %r" % (label, sname, fentry))
+                continue
+            rel_path = fentry["path"]
             listed_paths.add(rel_path)
-            local_path = os.path.join(REPO_ROOT, rel_path)
+            local_path = os.path.join(repo_root, rel_path)
             if not os.path.isfile(local_path):
-                details.append("%s: %s: listed in files[] but missing on disk" % (skill["name"], rel_path))
+                details.append("%s: %s: %s: listed in files[] but missing on disk" % (
+                    label, sname, rel_path))
                 continue
 
-            try:
-                out = subprocess.run(["git", "hash-object", local_path], stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, timeout=5, text=True)
-            except Exception as e:
-                details.append("%s: %s: could not run git hash-object (%s)" % (skill["name"], rel_path, e))
+            local_sha, err = _git_blob_sha(local_path)
+            if err:
+                details.append("%s: %s: %s: %s" % (label, sname, rel_path, err))
                 continue
-            if out.returncode != 0:
-                details.append("%s: %s: git hash-object failed" % (skill["name"], rel_path))
-                continue
-            local_sha = out.stdout.strip()
 
-            # Integrity pin, ALL entries regardless of origin/locally_modified: on-disk content
-            # must equal the manifest's own recorded vendored_blob_sha.
-            vendored_sha = entry.get("vendored_blob_sha")
+            vendored_sha = fentry.get("vendored_blob_sha")
             if not vendored_sha:
-                details.append("%s: %s: missing vendored_blob_sha in manifest" % (skill["name"], rel_path))
+                details.append("%s: %s: %s: missing vendored_blob_sha in manifest" % (
+                    label, sname, rel_path))
             elif local_sha != vendored_sha:
-                details.append("%s: %s: local blob %s != manifest vendored_blob_sha %s"
-                                " (if this file's skill has scripts_audited=true, re-audit is required,"
-                                " not just re-hashing)" % (
-                                    skill["name"], rel_path, local_sha, vendored_sha))
+                details.append("%s: %s: %s: local blob %s != manifest vendored_blob_sha %s"
+                               " (if this file's skill has scripts_audited=true, re-audit is"
+                               " required, not just re-hashing)" % (
+                                   label, sname, rel_path, local_sha, vendored_sha))
 
-            origin = entry.get("origin")
-            if origin == "local":
-                if not entry.get("reason"):
-                    details.append("%s: %s: origin=local but no 'reason' given" % (skill["name"], rel_path))
+            if fentry.get("origin") == "local":
+                if not fentry.get("reason"):
+                    details.append("%s: %s: %s: origin=local but no 'reason' given" % (
+                        label, sname, rel_path))
                 continue
 
-            if entry.get("locally_modified"):
-                if not entry.get("patch_ids"):
-                    details.append("%s: %s: locally_modified=true but patch_ids is empty" % (skill["name"], rel_path))
+            if fentry.get("locally_modified"):
+                if not fentry.get("patch_ids"):
+                    details.append("%s: %s: %s: locally_modified=true but patch_ids is empty" % (
+                        label, sname, rel_path))
                 continue
 
-            # origin == "upstream" and not locally_modified: also verify byte-for-byte against the
-            # recorded upstream_blob_sha (unmodified files must match BOTH upstream_blob_sha and
-            # vendored_blob_sha, which should themselves be equal to each other).
-            if local_sha != entry.get("upstream_blob_sha"):
-                details.append("%s: %s: local blob %s != manifest upstream_blob_sha %s"
-                                " (if this file's skill has scripts_audited=true, re-audit is required,"
-                                " not just re-hashing)" % (
-                                    skill["name"], rel_path, local_sha, entry.get("upstream_blob_sha")))
-            if upstream_dir and entry.get("upstream_path"):
-                upstream_path = os.path.join(upstream_dir, entry["upstream_path"])
+            if local_sha != fentry.get("upstream_blob_sha"):
+                details.append("%s: %s: %s: local blob %s != manifest upstream_blob_sha %s"
+                               " (if this file's skill has scripts_audited=true, re-audit is"
+                               " required, not just re-hashing)" % (
+                                   label, sname, rel_path, local_sha,
+                                   fentry.get("upstream_blob_sha")))
+            if upstream_dir and fentry.get("upstream_path"):
+                upstream_path = os.path.join(upstream_dir, fentry["upstream_path"])
                 if os.path.isfile(upstream_path):
-                    out2 = subprocess.run(["git", "hash-object", upstream_path], stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, timeout=5, text=True)
-                    if out2.returncode == 0 and out2.stdout.strip() != local_sha:
-                        details.append("%s: %s: local blob differs from %s" % (
-                            skill["name"], rel_path, upstream_path))
+                    up_sha, up_err = _git_blob_sha(upstream_path)
+                    if up_err is None and up_sha != local_sha:
+                        details.append("%s: %s: %s: local blob differs from %s" % (
+                            label, sname, rel_path, upstream_path))
 
-        # Any on-disk file under this skill's directory that files[] doesn't mention at all.
-        skill_dir = os.path.join(REPO_ROOT, skill["path"])
-        if os.path.isdir(skill_dir):
+        skill_path = skill.get("path")
+        skill_dir = os.path.join(repo_root, skill_path) if skill_path else None
+        if skill_dir and os.path.isdir(skill_dir):
             for dirpath, dirnames, filenames in os.walk(skill_dir):
-                # Running a vendored skill's own scripts (e.g. `python -m scripts.aggregate_benchmark`)
-                # creates __pycache__/*.pyc inside the skill dir; .gitignore covers __pycache__, so
-                # these can never be committed and are not supply-chain drift. Skip narrowly by name
-                # only (no git check-ignore shell-out, no broader pattern) so this stays fail-closed
-                # for everything actually committable.
+                # Running a vendored skill's own scripts (e.g. `python -m scripts.foo`) creates
+                # __pycache__/*.pyc inside the skill dir; .gitignore covers __pycache__, so these
+                # can never be committed and are not supply-chain drift. Skip narrowly by name
+                # only, so this stays fail-closed for everything actually committable.
                 dirnames[:] = [d for d in dirnames if d != "__pycache__"]
                 for fname in filenames:
                     if fname.endswith(".pyc"):
                         continue
-                    full = os.path.join(dirpath, fname)
-                    rel_path = rel(full)
-                    if rel_path not in listed_paths:
-                        details.append("%s: %s: present on disk but not listed in files[]" % (
-                            skill["name"], rel_path))
-
-    label = "anthropic-file-hashes-verified-against-upstream-clone" if upstream_dir else "anthropic-file-hashes-verified-locally"
-    report(label, not details, details)
+                    disk_rel = os.path.relpath(os.path.join(dirpath, fname), repo_root)
+                    if disk_rel not in listed_paths:
+                        details.append("%s: %s: %s: present on disk but not listed in files[]" % (
+                            label, sname, disk_rel))
+    return details
 
 
-def check_anthropic_vendored_modes():
-    """anthropic files[]: every on-disk file must have no executable bit set, and its recorded
-    vendored_mode must be "100644" -- these are vendored docs/scripts read by an agent, never
-    executed as a standalone binary/shebang-invoked file directly off disk."""
-    manifest = load_anthropic_manifest()
+def provider_vendored_mode_details(entry, skills, repo_root):
+    """Root-parameterized core of check_provider_vendored_modes."""
+    label = entry["label"]
     details = []
-    for skill in manifest["skills"]:
-        for entry in skill.get("files", []):
-            rel_path = entry["path"]
-            local_path = os.path.join(REPO_ROOT, rel_path)
-            if entry.get("vendored_mode") != "100644":
-                details.append("%s: %s: manifest vendored_mode %r != \"100644\"" % (
-                    skill["name"], rel_path, entry.get("vendored_mode")))
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        sname = skill.get("name")
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                continue
+            rel_path = fentry["path"]
+            vendored_mode = fentry.get("vendored_mode")
+            if vendored_mode != "100644":
+                details.append("%s: %s: %s: manifest vendored_mode %r != \"100644\"" % (
+                    label, sname, rel_path, vendored_mode))
+            upstream_mode = fentry.get("upstream_mode")
+            if (fentry.get("origin") == "upstream" and upstream_mode is not None
+                    and upstream_mode != vendored_mode and not fentry.get("patch_ids")):
+                details.append(
+                    "%s: %s: %s: upstream_mode %r normalized to %r with no patch id documenting it"
+                    % (label, sname, rel_path, upstream_mode, vendored_mode))
+            local_path = os.path.join(repo_root, rel_path)
             if not os.path.isfile(local_path):
-                continue  # already reported by check_anthropic_file_hashes
-            st = os.stat(local_path)
-            if st.st_mode & 0o111:
-                details.append("%s: %s: executable bit set on disk" % (skill["name"], rel_path))
-    report("anthropic-vendored-modes", not details, details)
+                continue  # already reported by check_provider_file_hashes
+            if os.stat(local_path).st_mode & 0o111:
+                details.append("%s: %s: %s: executable bit set on disk" % (label, sname, rel_path))
+    return details
 
 
-def check_anthropic_scripts_audited():
-    """Any anthropic skill whose files[] contains a .py/.html/.sh file must have scripts_audited
-    true -- prose-only skills (frontend-design) are exempt since there's nothing to audit."""
-    manifest = load_anthropic_manifest()
+def check_provider_vendored_modes():
+    """Vendored files are content an agent READS (and runs explicitly, e.g. `python3 <path>`),
+    never a binary invoked straight off disk, so every file-level provider's files[] must record
+    `vendored_mode: "100644"` and carry no executable bit on disk. Upstream frequently ships
+    scripts 100755; normalizing the mode is a real change to the vendored artifact, so when
+    `upstream_mode` differs from `vendored_mode` the entry must name the patch id that documents
+    the normalization -- an undocumented mode change is exactly the "unexpected executable-bit
+    drift" this check exists to make impossible in either direction."""
     details = []
-    script_exts = (".py", ".html", ".sh")
-    for skill in manifest["skills"]:
-        has_script = any(entry["path"].endswith(script_exts) for entry in skill.get("files", []))
-        if has_script and not skill.get("scripts_audited"):
-            details.append("%s: ships a .py/.html/.sh file but scripts_audited is not true" % skill["name"])
-    report("anthropic-scripts-audited", not details, details)
+    for entry in file_level_providers():
+        details += provider_vendored_mode_details(entry, provider_skills(entry), REPO_ROOT)
+    report("provider-vendored-modes", not details, details)
+
+
+SCRIPT_EXTS = (".py", ".html", ".sh", ".mjs", ".js", ".bash", ".zsh")
+
+
+def provider_scripts_audited_details(entry, skills, repo_root):
+    """Root-parameterized core of check_provider_scripts_audited."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        scripts = []
+        for fentry in skill.get("files", []):
+            if not isinstance(fentry, dict) or not isinstance(fentry.get("path"), str):
+                continue
+            p = fentry["path"]
+            if p.endswith(SCRIPT_EXTS):
+                scripts.append(p)
+            elif "." not in os.path.basename(p):
+                # _has_shebang returns (is_shebang, error) -- unpack it. Testing the tuple itself
+                # would be truthy for EVERY extensionless file (a LICENSE would read as a script).
+                is_shebang, err = _has_shebang(os.path.join(repo_root, p))
+                if err:
+                    details.append("%s: %s: %s: could not read to classify: %s" % (
+                        label, skill.get("name"), p, err))
+                elif is_shebang:
+                    scripts.append(p)
+        if scripts and not skill.get("scripts_audited"):
+            details.append("%s: %s: ships %d script file(s) (e.g. %s) but scripts_audited is not true"
+                           % (label, skill.get("name"), len(scripts), sorted(scripts)[0]))
+    return details
+
+
+def check_provider_scripts_audited():
+    """Any file-level provider skill whose files[] contains executable-ish content -- a script in
+    any of the languages these providers actually ship, or an extensionless file with a shebang --
+    must record `scripts_audited: true`, meaning the file was read END TO END during review rather
+    than trusted from its SKILL.md description. Prose-only skills are exempt: there is nothing to
+    audit. The extension list is deliberately wider than the original anthropic-only check's
+    (.py/.html/.sh), because the newer providers ship .mjs/.js and extensionless shebang scripts."""
+    details = []
+    for entry in file_level_providers():
+        details += provider_scripts_audited_details(entry, provider_skills(entry), REPO_ROOT)
+    report("provider-scripts-audited", not details, details)
 
 
 def check_builtin_collision_denylist():
     """No vendored or first-party skill directory name and no manifest skill name (across any of
-    the three ownership sources) may collide with a name Claude Code (or another first-party
+    the registered ownership sources) may collide with a name Claude Code (or another first-party
     surface) already provides -- see BUILTIN_SKILL_NAMES above. This is the general form of the
     specific problem the skc-rename-vendored patch fixed for skill-creator. The project manifest
     is checked directly (project_skill_names()), never via the vendored MANIFESTS registry."""
@@ -736,10 +1302,9 @@ def check_builtin_collision_denylist():
         if name in BUILTIN_SKILL_NAMES:
             details.append("skill dir name collides with a builtin: %s" % name)
     for entry in MANIFESTS:
-        manifest = load_manifest(entry["manifest"])
-        for s in manifest["skills"]:
-            if s["name"] in BUILTIN_SKILL_NAMES:
-                details.append("%s: manifest skill name collides with a builtin: %s" % (entry["label"], s["name"]))
+        for name in sorted(provider_skill_dir_names(entry)):
+            if name in BUILTIN_SKILL_NAMES:
+                details.append("%s: manifest skill name collides with a builtin: %s" % (entry["label"], name))
     for name in sorted(project_skill_names()):
         if name in BUILTIN_SKILL_NAMES:
             details.append("project: manifest skill name collides with a builtin: %s" % name)
@@ -766,10 +1331,23 @@ def check_builtin_collision_denylist():
 #     (a change region is usually a whole function or block, not cleanly bracketable by a
 #     standalone comment line the way HTML/Markdown text is), so PY_MARK_RE matches are collected
 #     for coverage purposes only -- they are never subject to an open/close balance check.
+#   - Shell scripts (.sh, and extensionless files with a shell shebang) use the same single-line
+#     `#` form as Python -- `#` is a comment in both, so PY_MARK_RE covers them unchanged.
+#   - JavaScript/ESM (.mjs, .js) has no `#` comment, so it uses the equivalent `//` form:
+#     `// bukerov-local-patch: <id> — <note>`. Like the Python form it is single-line only and
+#     has no balance concept.
 PATCH_OPEN_RE = re.compile(r"<!--\s*bukerov-local-patch:\s*([\w-]+)\s*-->")
 PATCH_CLOSE_RE = re.compile(r"<!--\s*/bukerov-local-patch:\s*([\w-]+)\s*-->")
 PATCH_SELFCLOSING_RE = re.compile(r"<!--\s*bukerov-local-patch:\s*([\w-]+)\s*—[^>]*-->")
 PY_MARK_RE = re.compile(r"#\s*bukerov-local-patch:\s*([\w-]+)")
+JS_MARK_RE = re.compile(r"//\s*bukerov-local-patch:\s*([\w-]+)")
+
+# Extensions carrying the single-line `#` marker form (no open/close balance).
+HASH_MARK_EXTS = (".py", ".sh", ".bash", ".zsh", ".yaml", ".yml")
+# Extensions carrying the single-line `//` marker form.
+SLASH_MARK_EXTS = (".mjs", ".js", ".ts")
+# Extensions carrying the wrapping HTML-comment marker pair.
+WRAP_MARK_EXTS = (".md", ".html")
 
 
 def check_patch_marker_balance():
@@ -786,12 +1364,12 @@ def check_patch_marker_balance():
     for dirpath, _, filenames in os.walk(SKILLS_DIR):
         for fname in filenames:
             path = os.path.join(dirpath, fname)
-            if fname.endswith(".py"):
-                with open(path, encoding="utf-8") as f:
+            if fname.endswith(HASH_MARK_EXTS) or fname.endswith(SLASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
-                py_mark_count += len(PY_MARK_RE.findall(text))
+                py_mark_count += len(PY_MARK_RE.findall(text)) + len(JS_MARK_RE.findall(text))
                 continue
-            if not (fname.endswith(".md") or fname.endswith(".html")):
+            if not fname.endswith(WRAP_MARK_EXTS):
                 continue
             with open(path, encoding="utf-8") as f:
                 text = f.read()
@@ -819,54 +1397,176 @@ def find_all_patch_marker_ids(root_dir):
     for dirpath, _, filenames in os.walk(root_dir):
         for fname in filenames:
             path = os.path.join(dirpath, fname)
-            if fname.endswith(".py"):
-                with open(path, encoding="utf-8") as f:
-                    text = f.read()
-                ids.update(PY_MARK_RE.findall(text))
-            elif fname.endswith(".md") or fname.endswith(".html"):
-                with open(path, encoding="utf-8") as f:
+            if fname.endswith(WRAP_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
                     text = f.read()
                 ids.update(PATCH_OPEN_RE.findall(text))
                 ids.update(PATCH_SELFCLOSING_RE.findall(text))
+                continue
+            if fname.endswith(HASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(PY_MARK_RE.findall(f.read()))
+                continue
+            if fname.endswith(SLASH_MARK_EXTS):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(JS_MARK_RE.findall(f.read()))
+                continue
+            # Extensionless bundled scripts (e.g. CE's `pr-snapshot`) carry the `#` form; detect
+            # them by shebang rather than by name so a patched one can never go uncounted.
+            # _has_shebang returns (is_shebang, error) -- unpack it; the bare tuple is always truthy.
+            if "." not in fname and _has_shebang(path)[0]:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    ids.update(PY_MARK_RE.findall(f.read()))
     return ids
 
 
-def check_anthropic_patch_coverage():
-    """Bidirectional coverage check for the anthropic skill set specifically (the mattpocock set's
-    equivalent is check_patch_ledger_coverage above, which is skill-level and unchanged):
-      - every marker id found anywhere in an anthropic-owned skill directory must appear in the
-        anthropic ledger (anthropic-skills-patches.md) AND in some file's files[].patch_ids;
-      - every files[].patch_ids id (for every file, in every anthropic skill) must appear in the
-        ledger -- a manifest entry claiming a patch id the ledger never documents is exactly the
-        kind of drift a ledger is supposed to make impossible."""
-    manifest = load_anthropic_manifest()
-    with open(ANTHROPIC_PATCHES_PATH, encoding="utf-8") as f:
-        ledger_text = f.read()
-
-    manifest_patch_ids = set()
-    for skill in manifest["skills"]:
-        for entry in skill.get("files", []):
-            manifest_patch_ids.update(entry.get("patch_ids", []))
-
+def check_provider_patch_coverage():
+    """Bidirectional patch coverage for EVERY file-level provider (the generalization of the
+    original anthropic-only check; mattpocock's skill-level equivalent is
+    check_patch_ledger_coverage above, unchanged):
+      - every marker id found anywhere inside a provider-owned skill directory must appear in that
+        provider's ledger AND in some file's files[].patch_ids;
+      - every files[].patch_ids id must appear in that provider's ledger -- a manifest entry
+        claiming a patch id the ledger never documents is exactly the drift a ledger prevents.
+    Each provider is checked against ITS OWN ledger: an id documented in a different provider's
+    ledger does not count, or the ledgers would silently cross-cover each other."""
     details = []
-    for skill in manifest["skills"]:
-        skill_dir = os.path.join(REPO_ROOT, skill["path"])
+    for entry in file_level_providers():
+        try:
+            with open(entry["patches"], encoding="utf-8") as f:
+                ledger_text = f.read()
+        except Exception as e:
+            details.append("%s: patch ledger unreadable: %s" % (entry["label"], e))
+            continue
+        details += provider_patch_coverage_details(
+            entry, provider_skills(entry), ledger_text, REPO_ROOT, rel(entry["patches"]))
+    report("provider-patch-marker-coverage", not details, details)
+
+
+def provider_patch_coverage_details(entry, skills, ledger_text, repo_root, ledger_name):
+    """Root-parameterized core of check_provider_patch_coverage."""
+    label = entry["label"]
+    details = []
+    manifest_patch_ids = set()
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        for fentry in skill.get("files", []):
+            if isinstance(fentry, dict):
+                manifest_patch_ids.update(fentry.get("patch_ids", []))
+
+    for skill in skills:
+        if not isinstance(skill, dict) or not skill.get("path"):
+            continue
+        skill_dir = os.path.join(repo_root, skill["path"])
         if not os.path.isdir(skill_dir):
             continue  # already reported elsewhere
-        found_ids = find_all_patch_marker_ids(skill_dir)
-        for pid in sorted(found_ids):
+        for pid in sorted(find_all_patch_marker_ids(skill_dir)):
             if pid not in ledger_text:
-                details.append("%s: marker id %r found in-file but missing from anthropic ledger" % (
-                    skill["name"], pid))
+                details.append("%s: %s: marker id %r found in-file but missing from %s" % (
+                    label, skill["name"], pid, ledger_name))
             if pid not in manifest_patch_ids:
-                details.append("%s: marker id %r found in-file but not recorded in any files[].patch_ids" % (
-                    skill["name"], pid))
+                details.append("%s: %s: marker id %r found in-file but not recorded in any"
+                               " files[].patch_ids" % (label, skill["name"], pid))
 
     for pid in sorted(manifest_patch_ids):
         if pid not in ledger_text:
-            details.append("manifest patch_id %r not found in anthropic ledger" % pid)
+            details.append("%s: manifest patch_id %r not found in %s" % (label, pid, ledger_name))
+    return details
 
-    report("anthropic-patch-marker-coverage", not details, details)
+
+# Directory names a vendored skill uses for its own dependency closure. A path reference in a
+# skill's Markdown is only checked when its FIRST segment is one of these AND that directory
+# actually exists in the skill -- which keeps illustrative prose ("put it in scripts/") from being
+# read as a claim about a file, while still catching a real reference to a file that was not
+# vendored.
+CLOSURE_DIRS = ("scripts", "references", "assets", "examples", "agents", "templates", "evals",
+                "hooks", "reference", "resources", "commands", "rules", "prompts")
+CLOSURE_REF_RE = re.compile(
+    r"`(?:\{baseDir\}/)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)`")
+
+
+def invocation_consistency_details(entry, skills, skills_dir):
+    """Pure core of check_provider_invocation_matches_frontmatter, root-parameterized for fixtures."""
+    label = entry["label"]
+    details = []
+    for skill in skills:
+        if not isinstance(skill, dict) or "name" not in skill:
+            continue
+        declared = skill.get("invocation")
+        if declared is None:
+            continue  # not every manifest schema records it
+        skillmd = os.path.join(skills_dir, skill["name"], "SKILL.md")
+        if not os.path.isfile(skillmd):
+            continue  # reported elsewhere
+        raw = parse_frontmatter_value(skillmd, "disable-model-invocation")
+        user_only = isinstance(raw, str) and raw.strip().lower() == "true"
+        expected = "user" if user_only else "model"
+        if declared != expected:
+            details.append(
+                "%s: %s: manifest invocation %r but SKILL.md frontmatter says %s "
+                "(disable-model-invocation: %s)" % (
+                    label, skill["name"], declared, expected,
+                    raw if raw is not None else "absent"))
+    return details
+
+
+def check_provider_invocation_matches_frontmatter():
+    """A manifest's `invocation` must agree with the skill's own frontmatter: `user` exactly when the
+    skill sets `disable-model-invocation: true`, `model` otherwise.
+
+    This is not bookkeeping. `invocation` is how a reader learns whether a skill can fire from model
+    judgment alone, and it is the field the vendoring policies cite when explaining why a
+    high-authority skill was moved to explicit invocation. A manifest that says `model` for a skill
+    whose frontmatter disables model invocation (or the reverse) misdescribes the installed system's
+    actual trigger surface -- which is exactly the class of drift the manifests exist to prevent.
+    Caught first by a reviewer on one real entry; now mechanical for every provider."""
+    details = []
+    for entry in MANIFESTS:
+        details += invocation_consistency_details(entry, provider_skills(entry), SKILLS_DIR)
+    report("provider-invocation-matches-frontmatter", not details, details)
+
+
+def check_provider_dependency_closure():
+    """Every file a vendored skill points at must actually have been vendored with it.
+
+    check_relative_links_resolve above covers Markdown `[link](target)` syntax. This covers the
+    other half, which is how these providers actually reference their closure: an inline-code path
+    such as `scripts/context.mjs` or `references/anti-patterns.md`. A reference is only treated as
+    a claim when its first path segment is a real closure directory inside that skill, so prose and
+    example paths cannot produce false failures -- but a SKILL.md that tells the agent to run a
+    script that was never copied in fails closed, which is the whole point of vendoring a complete
+    dependency closure rather than a bare SKILL.md."""
+    details = dependency_closure_details(SKILLS_DIR)
+    report("provider-dependency-closure", not details, details)
+
+
+def dependency_closure_details(skills_dir):
+    """Root-parameterized core of check_provider_dependency_closure."""
+    details = []
+    if not os.path.isdir(skills_dir):
+        return details
+    for name in sorted(d for d in os.listdir(skills_dir)
+                       if os.path.isdir(os.path.join(skills_dir, d))):
+        skill_dir = os.path.join(skills_dir, name)
+        present_dirs = {d for d in CLOSURE_DIRS if os.path.isdir(os.path.join(skill_dir, d))}
+        if not present_dirs:
+            continue
+        for dirpath, _, filenames in os.walk(skill_dir):
+            for fname in sorted(filenames):
+                if not fname.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, fname)
+                with open(path, encoding="utf-8") as f:
+                    text = strip_fenced_blocks(f.read())
+                for target in sorted(set(CLOSURE_REF_RE.findall(text))):
+                    head = target.split("/", 1)[0]
+                    if head not in present_dirs:
+                        continue
+                    if not os.path.exists(os.path.join(skill_dir, target)):
+                        details.append("%s: %s references %r, which is not vendored" % (
+                            name, os.path.relpath(path, skills_dir), target))
+    return details
 
 
 def check_application_paths_untouched():
@@ -889,13 +1589,26 @@ def check_application_paths_untouched():
     if not base_sha:
         # `git status --porcelain` lines are "XY path"; take the path portion.
         lines = [ln[3:] if len(ln) > 3 else ln for ln in lines]
-    for path in lines:
+    details = application_path_violations(lines)
+    report("application-paths-untouched", not details, details)
+
+
+def application_path_violations(paths):
+    """Pure core of check_application_paths_untouched, so the allowlist is directly testable.
+
+    Extracted specifically because GOVERNANCE_OWNED_WORKFLOWS can punch a hole in an otherwise
+    blanket prohibition. On the stable line the allowlist is EMPTY -- there is no governance-owned
+    workflow here -- and the fixture proves every .github/workflows/** path is caught."""
+    details = []
+    for path in paths:
         path = path.strip()
         if not path:
             continue
+        if path in GOVERNANCE_OWNED_WORKFLOWS:
+            continue  # governance-layer workflow, not an application path -- see the constant
         if path.startswith(APPLICATION_PATH_PREFIXES) or path.startswith(APPLICATION_PATH_EXACT_PREFIXES):
             details.append("touched application path: %s" % path)
-    report("application-paths-untouched", not details, details)
+    return details
 
 
 def check_settings_schema():
@@ -1249,11 +1962,11 @@ def validate_project_manifest(manifest, repo_root, require_tracked=True):
         scripts = entry.get("scripts")
         hooks = entry.get("hooks")
         # mutation_capability is REVIEWED METADATA / review evidence only -- it is not a
-        # mechanical capability boundary. Actual mutation authority comes solely from the
-        # operation modes (GOVERNANCE_V3.md section 4) and an active task contract (see
-        # project-skills-policy.md); the "read-only requires empty scripts/hooks" rule below is a
-        # deterministic proxy the validator can check, not the thing that grants or denies write
-        # access.
+        # mechanical capability boundary. Actual mutation authority comes solely from Governance
+        # v3's operation modes (docs/agents/operation-modes.md) and an active task contract (see
+        # project-skills-policy.md); the
+        # "read-only requires empty scripts/hooks" rule below is a deterministic proxy the
+        # validator can check, not the thing that grants or denies write access.
         if mutation_capability not in ("read-only", "mutation-capable"):
             details.append("%s: mutation_capability must be \"read-only\" or \"mutation-capable\", got %r" % (
                 label, mutation_capability))
@@ -1571,9 +2284,983 @@ def check_project_manifest():
     report("project-manifest-valid", not details, details)
 
 
+# --------------------------------------------------------------------------
+# Governance v3 consistency (ADR-0002)
+# --------------------------------------------------------------------------
+#
+# These checks keep the prose governance layer mechanically consistent with
+# Governance v3 (docs/adr/0002-governance-v3-skill-native-orchestration.md).
+# They are deterministic, stdlib-only, and never touch the network — same
+# contract as every other check in this file.
+#
+# GOVERNANCE_SURFACE is the set of tracked text this repository's governance
+# owns. It deliberately EXCLUDES:
+#   - .claude/skills/**     vendored upstream bodies, integrity-pinned by blob
+#                           SHA; their content is governed by the vendoring
+#                           policies + patch ledgers, not by these checks.
+#   - .claude/hooks/**      the mechanical enforcement layer, edit-denied.
+#   - Dockerfile, SPECIFICATIONS.md
+#                           deployment/protocol reference text, not governance.
+# A file is scanned only if it exists; the set is a fixed list plus two
+# directory walks, so the check is stable regardless of repo state.
+
+GOVERNANCE_SURFACE_FILES = ("CLAUDE.md", "CONTEXT.md", "README.md")
+GOVERNANCE_SURFACE_DIRS = (
+    os.path.join(".claude", "rules"),
+    os.path.join("docs", "agents"),
+    os.path.join("docs", "adr"),
+)
+
+# ADRs are the historical-decision layer: ADR-0001 preserves the Governance v2
+# wording verbatim, and the stable line's ADR-0002 (the canonical-Governance-v3
+# adoption record) must name the v2 mandates the adoption removed in order to
+# record the decision at all. Both are exempt from the stale-language scan;
+# policy documents are not.
+V2_LANGUAGE_EXEMPT = (
+    "docs/adr/0001-agent-governance-v2.md",
+    "docs/adr/0002-canonical-governance-v3.md",
+)
+
+# Normative Governance-v2 orchestration wording that v3 removed. Matched
+# case-insensitively as normalized substrings (see normalize_prose_line).
+# Deliberately phrase-level, not the bare string "v2": describing what v2 did
+# (in ADR-0002, in the vendoring policies' migration notes) is legitimate and
+# must stay possible.
+#
+# Every phrase here is quoted from the Governance-v2 text ADR-0002 superseded --
+# see `git show <pre-v3-sha>:CLAUDE.md` "### Agent orchestration" and ADR-0001's
+# preserved wording. A phrase is only admissible if it produces ZERO hits against
+# the current governance surface; the V3 fixture proves that continuously, and
+# the V8/V9 fixtures prove each family is actually detected.
+STALE_V2_ORCHESTRATION_PHRASES = (
+    # --- v2's single-writer / ledger / spawning mandates ---
+    # The identifier and the prose forms are listed separately on purpose:
+    # normalize_prose_line preserves underscores (they are part of the field
+    # name), so "single_writer" does not also cover "single-writer" or
+    # "single writer per task". Note what is deliberately ABSENT: "one writer
+    # per task" and "exactly one writer" would collide with the legitimate v3
+    # sentences that reject them (GOVERNANCE_V3.md section 10 and
+    # docs/agents/task-contract.md both say the invariant is 'not "one writer"'),
+    # so needling them would fail the check against correct text.
+    "single_writer",
+    "single-writer",
+    "single writer per task",
+    "one production writer",
+    "role ledger",
+    "no recursive subagent",
+    "no recursive spawning",
+    "no recursive delegation",
+    "claude code governance (v2)",
+    "governance v2 precedence",
+    # --- v2's UNIVERSAL reviewer-read-only mandate (removed by ADR-0002 §2) ---
+    # v2: "One production writer per task; every other agent is read-only ..."
+    #     "Reviewer/analysis agents never write to tracked files or push."
+    # A skill may still choose read-only reviewers; what v3 removed is the
+    # project imposing it on every skill, so only the universal phrasings match.
+    "every other agent is read-only",
+    "reviewer/analysis agents never write",
+    "reviewer agents never write",
+    "analysis agents never write",
+    "reviewers are always read-only",
+    "reviewer agents are always read-only",
+    "reviewers must always be read-only",
+    # --- v2's MANDATORY resource caps (v3 keeps both as optional, no default) ---
+    # Phrased so that legitimately quoting the field name -- which
+    # task-contract.md and the patch ledgers all do -- never matches; only an
+    # assertion that a cap is obligatory does.
+    "agent_cap is mandatory",
+    "mandatory agent_cap",
+    "agent_cap is required",
+    "agent_cap must be set",
+    "must set an agent_cap",
+    "max_concurrency is mandatory",
+    "mandatory max_concurrency",
+    "max_concurrency is required",
+    "max_concurrency must be set",
+    "must set a max_concurrency",
+    # NOT listed: "respect the task contract's agent_cap". Every occurrence of
+    # that phrasing is legitimate. In vendored skill bodies it is upstream text
+    # this scan cannot reach anyway (the surface excludes .claude/skills/**); in
+    # the patch ledgers and in task-contract.md / ADR-0002 it is QUOTED,
+    # precisely in order to state the v3 re-reading rule
+    # for it. Needling it would fail the check against the documents that fix
+    # the problem. Those texts are governed by that re-reading rule, not here.
+)
+
+# The host operating system of a machine that happens to run the miner's
+# container is not a governance concept (ADR-0002 §8), and the acceptance
+# condition is zero occurrences across ALL tracked files -- with no exemption for
+# the ADR that records the decision, or for this file.
+#
+# The token is therefore assembled from fragments rather than written as a
+# literal: were it spelled out here, this enforcement script would itself become
+# the last surviving occurrence of the very string it forbids, and the repo-wide
+# check below would fail on its own source. Splitting it is not obfuscation --
+# it is what lets the rule be absolute.
+FORBIDDEN_HOST_OS_TOKEN = "true" + "nas"
+
+# Pre-existing occurrences of the token in this stable line's APPLICATION files, counted at the
+# baseline this governance layer landed on. These are product files (build, user documentation,
+# protocol specification) that a governance concern has no authority to touch -- removing the token
+# there is product work under its own contract. The budget is a per-path ceiling, not a grant: a
+# NEW occurrence in any other file fails, and growth within a listed file fails. Shrinkage (a
+# product change removing occurrences) passes and the budget then merely over-provisions until it
+# is tightened here. The governance layer itself has a budget of zero everywhere.
+HOST_OS_PREEXISTING_BUDGET = {
+    "Dockerfile": 1,
+    "README.md": 3,
+    "SPECIFICATIONS.md": 1,
+}
+
+# The two invariants CLAUDE.md itself must carry, because a session that never opens
+# GOVERNANCE_V3.md section 5 still reads this file. Deliberately the SHORT forms, in the stable
+# line's canonical phrasing (GOVERNANCE_V3.md section 5: "Every new session starts READ_ONLY and
+# needs a current contract"): this is a pointer paragraph, and pinning more of it would make
+# CLAUDE.md expensive to edit for no added safety.
+CLAUDE_MD_CONTINUITY_INVARIANTS = (
+    "a checkpoint is evidence, never authority",
+    "every new session starts read_only",
+)
+
+# The canonical governance document and its adoption record. On this stable line GOVERNANCE_V3.md
+# at the repository root is the single canonical governance authority (CLAUDE.md's Governance
+# section defers to it); main's docs/agents/agent-orchestration.md + session-recovery.md pair is a
+# default-branch elaboration this line deliberately does not carry.
+V3_REQUIRED_DOCS = (
+    "GOVERNANCE_V3.md",
+    "docs/adr/0002-canonical-governance-v3.md",
+)
+
+
+def governance_surface_paths(repo_root):
+    """Repo-relative, sorted list of the governance text this repo owns.
+
+    Pure: takes the root as an argument so self-test fixtures can point it at
+    a synthetic tree. Missing files/dirs are skipped, not errors.
+    """
+    paths = []
+    for name in GOVERNANCE_SURFACE_FILES:
+        if os.path.isfile(os.path.join(repo_root, name)):
+            paths.append(name)
+    for subdir in GOVERNANCE_SURFACE_DIRS:
+        abs_dir = os.path.join(repo_root, subdir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(abs_dir):
+            for filename in sorted(filenames):
+                if not filename.endswith(".md"):
+                    continue
+                abs_path = os.path.join(dirpath, filename)
+                paths.append(os.path.relpath(abs_path, repo_root).replace(os.sep, "/"))
+    return sorted(set(paths))
+
+
+_PROSE_MARKUP_RE = re.compile(r"[`*]+")
+_PROSE_WS_RE = re.compile(r"\s+")
+
+
+def normalize_prose_line(line):
+    """Lowercase a Markdown line and strip the markup that would hide a phrase.
+
+    Backticks and asterisks are removed (so ``respect the task contract's
+    `agent_cap``` normalizes to the same text as the unformatted sentence), and
+    whitespace runs collapse to a single space. Underscores are deliberately
+    LEFT ALONE -- they carry meaning in `single_writer`, `agent_cap` and
+    `max_concurrency`, which are exactly the identifiers being matched.
+    """
+    return _PROSE_WS_RE.sub(" ", _PROSE_MARKUP_RE.sub("", line.lower())).strip()
+
+
+def scan_governance_surface(repo_root, needles, exempt=()):
+    """Return ["<relpath>:<lineno>: <needle>", ...] for case-insensitive hits.
+
+    `needles` is an iterable of lowercase substrings, matched against
+    normalize_prose_line() output. `exempt` is an iterable of repo-relative
+    paths to skip entirely.
+
+    These documents hard-wrap at ~110 columns, so a reinstated mandate can land
+    with its phrase split across two physical lines. Each line is therefore
+    matched both on its own and joined to its successor, with the hit reported
+    against the FIRST line of the pair. A phrase that spans a single wrap is
+    caught; one deliberately spread over three lines is not, which is the
+    accepted limit of a line-oriented scan.
+    """
+    exempt_set = set(exempt)
+    hits = []
+    for relpath in governance_surface_paths(repo_root):
+        if relpath in exempt_set:
+            continue
+        try:
+            with io.open(os.path.join(repo_root, relpath), encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except Exception as e:
+            hits.append("%s: unreadable: %s" % (relpath, _safe(str(e))))
+            continue
+        normalized = [normalize_prose_line(line) for line in lines]
+        for idx, current in enumerate(normalized):
+            nxt = normalized[idx + 1] if idx + 1 < len(normalized) else ""
+            window = (current + " " + nxt).strip() if nxt else current
+            for needle in needles:
+                if needle in current:
+                    # Contained in one line: report it at that line.
+                    hits.append("%s:%d: %s" % (relpath, idx + 1, _safe(needle)))
+                elif nxt and needle in window and needle not in nxt:
+                    # Only visible across the wrap. A phrase wholly inside `nxt`
+                    # is skipped here and reported on its own line next pass, so
+                    # no hit is ever counted twice.
+                    hits.append("%s:%d: %s" % (relpath, idx + 1, _safe(needle)))
+    return hits
+
+
+def governance_v3_docs_details(repo_root):
+    """Return [] if the v3 docs exist and CLAUDE.md defers to the canonical GOVERNANCE_V3.md.
+
+    Pure in `repo_root` so the self-test fixture runs this exact function against the real
+    repository rather than restating its conditions.
+    """
+    details = []
+    for relpath in V3_REQUIRED_DOCS:
+        if not os.path.isfile(os.path.join(repo_root, relpath)):
+            details.append("missing required Governance v3 doc: %s" % relpath)
+
+    claude_md = os.path.join(repo_root, "CLAUDE.md")
+    if not os.path.isfile(claude_md):
+        details.append("CLAUDE.md missing")
+        return details
+
+    with io.open(claude_md, encoding="utf-8") as f:
+        text = f.read()
+    if "## Governance" not in text:
+        details.append("CLAUDE.md must declare the heading '## Governance'")
+    if "## Claude Code Governance (v2)" in text:
+        details.append("CLAUDE.md must not still declare the Governance v2 heading")
+    if "GOVERNANCE_V3.md" not in text:
+        details.append("CLAUDE.md must point at the canonical GOVERNANCE_V3.md")
+
+    flat = normalize_prose_line(text.replace("\n", " "))
+    # CLAUDE.md must say GOVERNANCE_V3.md is canonical, not merely link it.
+    if "single canonical governance authority" not in flat:
+        details.append(
+            "CLAUDE.md must state that GOVERNANCE_V3.md is the single canonical governance authority")
+
+    # The continuity invariants live in CLAUDE.md because it is the file every fresh session
+    # actually loads; GOVERNANCE_V3.md section 5 is the canonical source (pinned separately by
+    # check_governance_v3_recovery_contract) and CLAUDE.md restates the two sentences a session
+    # must not be able to miss. Pinning them only in the pointed-to document would let this
+    # paragraph be inverted -- telling a session a resume re-enters the recorded mode -- with
+    # every other check still green.
+    for needle in CLAUDE_MD_CONTINUITY_INVARIANTS:
+        if needle not in flat:
+            details.append("CLAUDE.md's session-continuity pointer omits: %r" % needle)
+    if CHECKPOINT_CONTRACT_ID not in flat:
+        details.append(
+            "CLAUDE.md must name the checkpoint contract id %r, not the YAML key" % CHECKPOINT_CONTRACT_ID
+        )
+    return details
+
+
+def check_governance_v3_docs():
+    """The v3 docs exist and CLAUDE.md declares v3, not v2."""
+    details = governance_v3_docs_details(REPO_ROOT)
+    report("governance-v3-docs", not details, details)
+
+
+def stale_orchestration_details(repo_root):
+    """Return [] if no Governance-v2 orchestration mandate survives, else the hits."""
+    return scan_governance_surface(
+        repo_root, STALE_V2_ORCHESTRATION_PHRASES, exempt=V2_LANGUAGE_EXEMPT
+    )
+
+
+def check_governance_v3_no_stale_orchestration():
+    """No Governance-v2 orchestration mandates left in the governance surface."""
+    details = stale_orchestration_details(REPO_ROOT)
+    report("governance-v3-no-stale-orchestration", not details, details)
+
+
+RESOURCE_CEILING_FIELDS = ("agent_cap", "max_concurrency")
+
+_YAML_FENCE_RE = re.compile(r"```ya?ml\n(.*?)```", re.DOTALL)
+
+
+def _extract_yaml_schema_block(text):
+    """The contents of task-contract.md's `task_contract:` yaml fence, or None.
+
+    Selected by the `task_contract:` key rather than by position: taking the
+    FIRST yaml fence would silently rebind this whole check to an unrelated
+    example if one were ever added above the schema, and every field lookup
+    below would then pass against the wrong block while still reporting PASS.
+
+    Returns None -- never a positional guess -- when no fence declares the key.
+    Falling back to the first fence would reopen exactly the hole this function
+    closes; None instead surfaces "no ```yaml schema block found", which is a
+    real, actionable diagnostic.
+    """
+    for block in _YAML_FENCE_RE.findall(text):
+        if re.search(r"^\s*task_contract\s*:", block, re.MULTILINE):
+            return block
+    return None
+
+
+def _schema_field_line(schema_block, field):
+    """The single schema line declaring `field`, or None.
+
+    Matches the key at the start of a line (modulo indentation) so that a field
+    merely *mentioned* inside another entry's comment is never mistaken for its
+    declaration.
+    """
+    pattern = re.compile(r"^\s*%s\s*:" % re.escape(field))
+    for line in schema_block.splitlines():
+        if pattern.match(line):
+            return line
+    return None
+
+
+def _field_note_bullet(text, field):
+    """The '## Field notes' bullet that defines `field`, joined into one string.
+
+    Field notes are hard-wrapped Markdown bullets: a `- ` line followed by
+    indented continuation lines. Returns the whole logical bullet whose FIRST
+    line names the field, so a passing-mention in a neighbouring bullet cannot
+    satisfy a requirement about this field's own definition.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.strip().lower() == "## field notes")
+    except StopIteration:
+        return None
+
+    bullets = []
+    current = None
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        if line.startswith("- "):
+            # Only a TOP-LEVEL dash opens a new bullet; an indented "- " is a
+            # sub-bullet and stays part of the logical bullet above it (handled
+            # by the else-branch), which would otherwise be truncated
+            # mid-definition. An indented sub-bullet with no open parent -- one
+            # separated from it by a blank line -- has no bullet to belong to
+            # and is skipped rather than promoted to a top-level definition.
+            if current is not None:
+                bullets.append(current)
+            current = [line]
+        elif current is not None:
+            if not line.strip():
+                bullets.append(current)
+                current = None
+            else:
+                current.append(line)
+    if current is not None:
+        bullets.append(current)
+
+    for bullet in bullets:
+        if field in normalize_prose_line(bullet[0]):
+            return normalize_prose_line(" ".join(bullet))
+    return None
+
+
+def contract_schema_details(text):
+    """Return [] if `text` reads as a Governance-v3 authority envelope, else reasons.
+
+    Pure: takes the document text so both the production check and the self-test
+    fixtures exercise this exact function -- the fixtures never restate these
+    conditions themselves.
+
+    The v2 implementation of the resource-ceiling test asked only whether the
+    word "optional" occurred ANYWHERE in the document. That is vacuous here: the
+    schema's own preamble opens "Every field is optional except ...", so the
+    substring is always present and the test could never fail, no matter how the
+    fields were actually described. Each field is now checked against its OWN
+    schema line and its OWN field-note bullet, and must positively establish all
+    four v3 properties:
+
+      1. optional -- not a required field;
+      2. a resource ceiling -- not orchestration policy;
+      3. absent => no cap, and no default value;
+      4. no longer mandatory (the explicit v2 reversal).
+    """
+    details = []
+    lowered = normalize_prose_line(text.replace("\n", " "))
+
+    if "orchestration: skill_native | main_context_only" not in lowered:
+        details.append("schema must offer 'orchestration: skill_native | main_context_only'")
+    if "absent => skill_native" not in lowered:
+        details.append("schema must state that an absent 'orchestration' field means skill_native")
+
+    schema_block = _extract_yaml_schema_block(text)
+    if schema_block is None:
+        details.append("no ```yaml schema block found")
+        schema_block = ""
+
+    for field in RESOURCE_CEILING_FIELDS:
+        schema_line = _schema_field_line(schema_block, field)
+        if schema_line is None:
+            details.append("%s: no declaration in the yaml schema block" % field)
+        else:
+            norm = normalize_prose_line(schema_line)
+            if "optional" not in norm:
+                details.append(
+                    "%s: schema line must mark the field optional, got: %s" % (field, _safe(schema_line.strip()))
+                )
+            if not ("absent" in norm and "no cap" in norm):
+                details.append(
+                    "%s: schema line must state 'absent => no cap', got: %s" % (field, _safe(schema_line.strip()))
+                )
+            if "required" in norm or "mandatory" in norm:
+                details.append(
+                    "%s: schema line must not describe the field as required/mandatory, got: %s"
+                    % (field, _safe(schema_line.strip()))
+                )
+
+        bullet = _field_note_bullet(text, field)
+        if bullet is None:
+            details.append("%s: no '## Field notes' bullet defines this field" % field)
+            continue
+        if "optional" not in bullet:
+            details.append("%s: field note must call the field optional" % field)
+        if "resource ceiling" not in bullet:
+            details.append("%s: field note must describe the field as a resource ceiling" % field)
+        if "not orchestration policy" not in bullet:
+            details.append(
+                "%s: field note must state the field is NOT orchestration policy" % field
+            )
+        if "no longer mandatory" not in bullet:
+            details.append("%s: field note must record that the field is no longer mandatory" % field)
+        if not ("absent" in bullet and "no cap" in bullet):
+            details.append("%s: field note must state that absence means no cap" % field)
+        if "no default" not in bullet and "have no default" not in bullet:
+            details.append("%s: field note must state the field has no default" % field)
+
+    # v2 made single_writer a required contract field and a global invariant.
+    # v3 has no such field at any strength, so its presence anywhere in the
+    # schema document is a regression -- checked structurally (required-field
+    # sentence, yaml keys) and then document-wide.
+    single_writer_details = []
+    for line in text.splitlines():
+        low = normalize_prose_line(line)
+        if "except" in low and "authorized_by" in low and "single_writer" in low:
+            single_writer_details.append(
+                "single_writer must not be a required contract field: %s" % _safe(line.strip())
+            )
+    if _schema_field_line(schema_block, "single_writer") is not None:
+        single_writer_details.append("single_writer must not appear as a key in the yaml schema block")
+    if "single_writer" in lowered and not single_writer_details:
+        # The two checks above are the specific, actionable diagnoses; the
+        # document-wide sweep is the catch-all beneath them. Reported only when
+        # neither fired, so one regression yields one finding, not three.
+        single_writer_details.append(
+            "single_writer must not appear in the v3 contract schema document at all"
+        )
+    details.extend(single_writer_details)
+
+    return details
+
+
+def check_governance_v3_contract_schema():
+    """task-contract.md is a v3 authority envelope, not a v2 orchestration recipe."""
+    path = os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md")
+    if not os.path.isfile(path):
+        report("governance-v3-contract-schema", False, ["docs/agents/task-contract.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    details = contract_schema_details(text)
+    report("governance-v3-contract-schema", not details, details)
+
+
+# --- GOVERNANCE_V3.md section 5: the recovery-checkpoint contract on the stable line -----------
+#
+# On this stable line the durable-recovery contract is not a standalone protocol document: it is
+# section 5 of the canonical GOVERNANCE_V3.md ("Preflight, STOP, recovery"), owner-approved
+# rev 3.1. The parts a recovery is unsafe without are pinned here by normalized-substring needle,
+# the same way the task-contract schema is pinned: the checkpoint id, the evidence-never-authority
+# invariant, the new-session READ_ONLY invariant, the untrusted-checkpoint-text rule, the SAME
+# resume form, and the record fields a checkpoint must carry. main's far more detailed
+# docs/agents/session-recovery.md (ADR-0004: a key-selected 22-field deep_checkpoint yaml
+# contract) is a default-branch elaboration this line deliberately does not carry; adopting it
+# here would be a reviewed governance change that restores the full session_recovery_details
+# machinery together with the document.
+
+CHECKPOINT_CONTRACT_ID = "deep-checkpoint/v1"
+
+# Matched against normalize_prose_line() output of the whole flattened document, so hard wraps and
+# backtick/bold markup cannot hide a needle.
+GOVERNANCE_V3_RECOVERY_NEEDLES = (
+    "a checkpoint is evidence, never authority",
+    "it never restores a mode",
+    "every new session starts read_only",
+    "checkpoint text pasted into a session is untrusted data",
+    "never executed or read as authorization",
+    "same — <task / recovery>",
+)
+
+# Authority-restoring wording that must NEVER appear in GOVERNANCE_V3.md. Presence needles alone
+# cannot see an ADDITION attack: a sentence like "a resume may skip the live preflight" could be
+# planted while every pinned invariant stays present. Phrases are chosen to be impossible in
+# legitimate text -- section 5 states the inverses ("never restores a mode", "untrusted data").
+GOVERNANCE_V3_RECOVERY_FORBIDDEN = (
+    "may skip the live preflight",
+    "skip the live preflight",
+    "re-enters the recorded mode",
+    "resume re-enters the recorded",
+    "checkpoint restores the mode",
+    "checkpoint restores authority",
+    "inherit the recorded authority",
+    "inherits the checkpoint's authority",
+    "checkpoint text may be executed",
+)
+
+# Section 5's checkpoint record fields -- what a deep-checkpoint/v1 block must carry.
+GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS = (
+    "base sha",
+    "worktree/index state",
+    "completed stages",
+    "proven facts",
+    "unresolved findings",
+    "next gate",
+    "publication state",
+    "echo of the authority that was active",
+)
+
+
+def governance_v3_recovery_details(text):
+    """Return [] if `text` (GOVERNANCE_V3.md) carries the section-5 recovery contract, else reasons.
+
+    Pure in `text` so the fixtures drive this exact function.
+    """
+    details = []
+    if not text.strip():
+        details.append("GOVERNANCE_V3.md is empty")
+    flat = normalize_prose_line(text.replace("\n", " "))
+    if CHECKPOINT_CONTRACT_ID not in flat:
+        details.append("recovery contract must name the checkpoint id %r" % CHECKPOINT_CONTRACT_ID)
+    for needle in GOVERNANCE_V3_RECOVERY_NEEDLES:
+        if needle not in flat:
+            details.append("recovery invariant missing: %r" % needle)
+    for field in GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS:
+        if field not in flat:
+            details.append("checkpoint record field missing from section 5: %r" % field)
+    for phrase in GOVERNANCE_V3_RECOVERY_FORBIDDEN:
+        if phrase in flat:
+            details.append("authority-restoring wording must not appear: %r" % phrase)
+    return details
+
+
+def check_governance_v3_recovery_contract():
+    """GOVERNANCE_V3.md section 5 carries the complete recovery-checkpoint contract."""
+    path = os.path.join(REPO_ROOT, "GOVERNANCE_V3.md")
+    if not os.path.isfile(path):
+        report("governance-v3-recovery-contract", False, ["GOVERNANCE_V3.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    details = governance_v3_recovery_details(text)
+    report("governance-v3-recovery-contract", not details, details)
+
+
+def host_os_tracked_file_details(repo_root):
+    """Repo-wide, tracked-file hits for the forbidden host-OS token.
+
+    ADR-0002 §8's acceptance condition is literally `git grep -ni <token>`
+    returning nothing, over EVERY tracked file -- vendored skill bodies,
+    Dockerfile and SPECIFICATIONS.md included, with no document exempt. The
+    governance-surface scan alone cannot express that, so this mirrors the
+    acceptance command exactly.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "grep", "-n", "-i", "-I", "-e", FORBIDDEN_HOST_OS_TOKEN],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, text=True,
+        )
+    except Exception as e:
+        return ["could not run git grep: %s" % _safe(str(e))]
+    if out.returncode == 1:
+        return []                      # git grep: no matches
+    if out.returncode != 0:
+        return ["git grep failed: %s" % _safe(out.stderr.strip())]
+    return [_safe(line) for line in out.stdout.splitlines() if line.strip()]
+
+
+def host_os_details(repo_root):
+    """Return [] if no host-OS name appears anywhere in the tree, else the hits.
+
+    Two complementary scans, merged, deduplicated, and then filtered through the
+    frozen HOST_OS_PREEXISTING_BUDGET (a counted per-file ceiling for the
+    pre-existing application-file occurrences this governance layer cannot
+    remove -- growth anywhere, and any occurrence outside the budgeted paths,
+    still fails):
+
+      - the pure governance-surface scan, which works without git;
+      - a repo-wide tracked-file scan, which additionally covers the vendored
+        skill bodies, Dockerfile, SPECIFICATIONS.md and this script itself.
+
+    Both live here rather than in the check, so the fixture runs this exact
+    function instead of restating the pair.
+
+    Their coverage overlaps on CLAUDE.md and docs/**, so results are merged
+    order-preservingly and de-duplicated: one offending line is one finding,
+    not two.
+    """
+    merged = (scan_governance_surface(repo_root, (FORBIDDEN_HOST_OS_TOKEN,))
+              + host_os_tracked_file_details(repo_root))
+    seen = set()
+    deduped = []
+    for hit in merged:
+        # The two scans format hits differently ("path:line: needle" vs git
+        # grep's "path:line:content"), so key on the path:line prefix they share.
+        key = ":".join(hit.split(":", 2)[:2])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(hit)
+    return apply_host_os_budget(deduped)
+
+
+def apply_host_os_budget(hits):
+    """Pure budget filter over 'path:line[:...]' hit strings, so the fixtures drive it directly.
+
+    A path listed in HOST_OS_PREEXISTING_BUDGET is tolerated up to its counted ceiling; one
+    occurrence past the ceiling reports ALL of that file's hits (growth in a noisy file must not
+    hide behind the tolerated remainder). Every unlisted path reports as-is."""
+    by_path = {}
+    for hit in hits:
+        by_path.setdefault(hit.split(":", 1)[0], []).append(hit)
+    filtered = []
+    for path, path_hits in by_path.items():
+        budget = HOST_OS_PREEXISTING_BUDGET.get(path)
+        if budget is not None and len(path_hits) <= budget:
+            continue
+        filtered.extend(
+            path_hits if budget is None else
+            ["%s (exceeds the frozen pre-existing budget of %d for this file)" % (h, budget)
+             for h in path_hits])
+    return filtered
+
+
+# --- The four-level repo-native authority chain, restated across the policy layer ---
+#
+# GOVERNANCE_V3.md sections 1 and 3 are canonical (one hierarchy, narrowing-only
+# delegation); CLAUDE.md and every skill policy restate the four-level repo-native
+# elaboration consumed at the positions section 1 assigns. Governance v2's chain
+# had a FIFTH tier ("unpatched upstream skill defaults") sitting below the local
+# patches, and the original v3 change-set left that stale five-level list standing
+# in the skills policies. Prose alone could not stop that regressing, so it is
+# checked here.
+# Documents that must all restate the SAME four-level authority chain. Derived from the provider
+# registry rather than hand-listed: every vendored provider's policy states the chain for the skills
+# it installs, so a provider added to MANIFESTS without its policy being checked would be a silent
+# hole -- which is exactly what happened when four providers were added and this tuple was left at
+# its original two. Deriving it means the hole cannot reopen.
+#
+# Deliberately NOT in this list on the stable line: GOVERNANCE_V3.md (its section 1 is the canonical
+# governance hierarchy -- a different, wider chain -- and section 3 is the delegation rule this
+# four-level repo-native chain elaborates; needling it for "four levels" would conflate the two),
+# and docs/adr/0002-canonical-governance-v3.md (an immutable dated adoption record that predates the
+# restated chain).
+AUTHORITY_CHAIN_DOCS = tuple(
+    ["CLAUDE.md"]
+    + sorted(os.path.relpath(entry["policy"], REPO_ROOT) for entry in MANIFESTS)
+    + ["docs/agents/project-skills-policy.md"]
+)
+
+# Enumeration fragments that only occur in a five-level chain. Deliberately
+# matched with their list marker attached: ADR-0002 legitimately NAMES the
+# retired fifth tier in past tense when recording what v3 dropped, and must
+# stay able to.
+FIFTH_LEVEL_ENUMERATIONS = (
+    "(4) unpatched upstream skill defaults",
+    "4. unpatched upstream skill defaults",
+    "(5) generic model behavior",
+    "5. generic model behavior",
+)
+
+
+def authority_chain_details(repo_root):
+    """Return [] if all six documents state the same four-level chain, else reasons."""
+    details = []
+    for relpath in AUTHORITY_CHAIN_DOCS:
+        abs_path = os.path.join(repo_root, relpath)
+        if not os.path.isfile(abs_path):
+            details.append("missing authority-chain document: %s" % relpath)
+            continue
+        with io.open(abs_path, encoding="utf-8") as f:
+            text = f.read()
+        # Joined before normalizing: these documents hard-wrap, and "exactly four
+        # levels" is split across a line break in both vendoring policies.
+        flat = normalize_prose_line(text.replace("\n", " "))
+        if "four levels" not in flat:
+            details.append("%s: must state that the authority chain has exactly four levels" % relpath)
+        for phrase in FIFTH_LEVEL_ENUMERATIONS:
+            if phrase in flat:
+                details.append("%s: five-level authority chain survives: %s" % (relpath, _safe(phrase)))
+    return details
+
+
+def check_governance_v3_authority_chain():
+    """One four-level authority chain, restated consistently and with no fifth tier."""
+    details = authority_chain_details(REPO_ROOT)
+    report("governance-v3-authority-chain", not details, details)
+
+
+def check_governance_no_host_os_reference():
+    """No host-OS name anywhere in the tree (ADR-0002 section 8)."""
+    details = host_os_details(REPO_ROOT)
+    report("governance-no-host-os-reference", not details, details)
+
+
+# --- GOVERNANCE_V3.md section 7 <-> manifests <-> disk <-> routing: the approved-inventory
+# contract ------------------------------------------------------------------------------------
+#
+# The defect this closes: a validator that proves only manifest<->filesystem internal consistency
+# passes a tree with 24 of 81 approved skills installed, because nothing pins what the manifests
+# themselves are expected to contain. Section 7 of the canonical GOVERNANCE_V3.md carries the
+# owner-approved exact-name universe; these checks make that text machine-checked in both
+# directions, so a missing approved skill, an unapproved extra, a provider count drift, or a
+# routing table that no longer covers the installed set each fails. The totals are PARSED from the
+# document and cross-checked against the manifests, never hard-coded here: an owner-approved
+# inventory update that lands through the manifests + section 7 + routing map together passes,
+# exactly as section 7's living-inventory rule requires; a partial edit fails.
+
+_NUMBER_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+
+
+def _installed_names_by_provider():
+    """{registry label: [installed names]} from every provider manifest, plus load errors."""
+    out, errs = {}, []
+    for entry in MANIFESTS:
+        try:
+            data = load_manifest(entry["manifest"])
+            out[entry["label"]] = [s["name"] for s in data.get("skills", [])]
+        except Exception as e:
+            errs.append("%s: cannot load manifest: %s" % (entry["label"], _safe(str(e))))
+    return out, errs
+
+
+def _project_manifest_names():
+    try:
+        with open(PROJECT_MANIFEST_PATH, encoding="utf-8") as f:
+            return [s["name"] for s in json.load(f).get("skills", [])]
+    except Exception:
+        return []
+
+
+def _user_invoked_names():
+    """Every installed skill name any provider manifest marks invocation \"user\"."""
+    names = set()
+    for entry in MANIFESTS:
+        try:
+            data = load_manifest(entry["manifest"])
+        except Exception:
+            continue
+        for s in data.get("skills", []):
+            if s.get("invocation") == "user":
+                names.add(s["name"])
+    return names
+
+
+def parse_governance_inventory(text):
+    """Parse section 7 (and section 9's heading) of GOVERNANCE_V3.md.
+
+    Returns (details, parsed). Any structure that cannot be parsed is a DETAIL -- the caller's
+    check then fails loudly -- never a silent pass.
+    """
+    details = []
+    parsed = {"table": {}, "lists": {}, "list_counts": {}}
+
+    m = re.search(r"^## 7\. Skill inventory[^\n]*?(\d+)-skill baseline", text, re.MULTILINE)
+    if m:
+        parsed["heading_total"] = int(m.group(1))
+    else:
+        details.append("section-7 heading with '<N>-skill baseline' not found")
+    m = re.search(r"^## 9\. Routing map[^\n]*?(\d+)-skill baseline", text, re.MULTILINE)
+    if m:
+        parsed["routing_heading_total"] = int(m.group(1))
+    else:
+        details.append("section-9 heading with '<N>-skill baseline' not found")
+
+    sec = re.search(r"^## 7\. .*?(?=^## 8\. )", text, re.MULTILINE | re.DOTALL)
+    if not sec:
+        details.append("section 7 could not be isolated (no '## 8.' terminator)")
+        return details, parsed
+    sec7 = sec.group(0)
+
+    flat7 = normalize_prose_line(sec7.replace("\n", " "))
+    m = re.search(r"baseline snapshot: (\d+) installed.*? across (\d+) providers", flat7)
+    if m:
+        parsed["snapshot_total"] = int(m.group(1))
+        parsed["snapshot_providers"] = int(m.group(2))
+    else:
+        details.append("section 7 must open with 'baseline snapshot: <N> installed ... across <P> providers'")
+
+    for line in sec7.splitlines():
+        row = re.match(r"\|\s*([A-Za-z0-9_./-]+)\s*\|\s*(\d+)\s*\|", line)
+        if row:
+            parsed["table"][row.group(1)] = int(row.group(2))
+    if not parsed["table"]:
+        details.append("section 7's provider table has no parseable '| <repo> | <count> |' rows")
+
+    m = re.search(r"^((?:\d+\s*\+\s*)+\d+)\s*=\s*\*\*(\d+)\*\*", sec7, re.MULTILINE)
+    if m:
+        parsed["sum_components"] = [int(x) for x in re.findall(r"\d+", m.group(1))]
+        parsed["sum_total"] = int(m.group(2))
+    else:
+        details.append("section 7's '<a> + <b> + ... = **<N>**' sum line not found")
+
+    lists_m = re.search(r"### Installed skills.*?(?=### )", sec7, re.DOTALL)
+    if not lists_m:
+        details.append("section 7 has no '### Installed skills' subsection")
+    else:
+        for pm in re.finditer(r"\*\*([a-z-]+) \((\d+)\):\*\*(.*?)(?=\n\n\*\*|\n\n#|\Z)",
+                              lists_m.group(0), re.DOTALL):
+            label = pm.group(1)
+            parsed["list_counts"][label] = int(pm.group(2))
+            parsed["lists"][label] = re.findall(r"`([^`]+)`", pm.group(3))
+        if not parsed["lists"]:
+            details.append("section 7's installed-name lists could not be parsed")
+
+    inv_m = re.search(r"\*\*Explicit-invocation-only\*\*[^:]*\((manifest[^)]*)\):(.*?)\.\n",
+                      sec7, re.DOTALL)
+    if inv_m:
+        parsed["explicit_invocation"] = re.findall(r"`([^`]+)`", inv_m.group(2))
+    else:
+        details.append("section 7's 'Explicit-invocation-only (manifest ...):' list not found")
+    return details, parsed
+
+
+def governance_inventory_details(text, installed_by_provider, repo_short_by_label,
+                                 on_disk_dirs, project_names, user_invoked=None):
+    """Return [] iff section 7, the manifests, and the disk agree exactly; else every mismatch."""
+    details, parsed = parse_governance_inventory(text)
+    if details:
+        return details
+
+    universe = set()
+    for label, names in sorted(installed_by_provider.items()):
+        nset = set(names)
+        universe |= nset
+        want = parsed["lists"].get(label)
+        if want is None:
+            details.append("section 7 has no installed-name list for provider %r" % label)
+            continue
+        wset = set(want)
+        if len(want) != len(wset):
+            details.append("%s: section 7's installed list contains a duplicate name" % label)
+        for name in sorted(wset - nset):
+            details.append("%s: section 7 approves %r but the provider manifest does not install it"
+                           % (label, name))
+        for name in sorted(nset - wset):
+            details.append("%s: manifest installs %r but section 7's approved list omits it"
+                           % (label, name))
+        declared = parsed["list_counts"].get(label)
+        if declared != len(wset):
+            details.append("%s: section 7 declares %r skills but lists %d names"
+                           % (label, declared, len(wset)))
+        repo_short = repo_short_by_label.get(label)
+        table_count = parsed["table"].get(repo_short)
+        if table_count is None:
+            details.append("%s: section 7's provider table has no row for %r" % (label, repo_short))
+        elif table_count != len(nset):
+            details.append("%s: section 7's table says %d skills but the manifest installs %d"
+                           % (label, table_count, len(nset)))
+    for label in sorted(set(parsed["lists"]) - set(installed_by_provider)):
+        details.append("section 7 lists provider %r with no registered manifest" % label)
+
+    flat = normalize_prose_line(text.replace("\n", " "))
+    if project_names and "manifest currently ships empty" in flat:
+        details.append("first-party skills are installed (%r) but section 7 still declares the "
+                       "first-party manifest empty" % sorted(project_names))
+    universe |= set(project_names)
+    total = len(universe)
+
+    for key, human in (("heading_total", "the section-7 heading"),
+                       ("snapshot_total", "the baseline-snapshot sentence"),
+                       ("sum_total", "the sum line"),
+                       ("routing_heading_total", "the section-9 heading")):
+        got = parsed.get(key)
+        if got != total:
+            details.append("%s says %r skills but the installed inventory is %d" % (human, got, total))
+    if "sum_components" in parsed and sum(parsed["sum_components"]) != parsed.get("sum_total"):
+        details.append("section 7's sum line does not add up: %r" % parsed["sum_components"])
+    if "sum_components" in parsed and sorted(parsed["sum_components"]) != sorted(
+            len(set(v)) for v in installed_by_provider.values()):
+        details.append("section 7's sum components %r do not match the per-provider manifest counts"
+                       % parsed["sum_components"])
+    if parsed.get("snapshot_providers") != len(installed_by_provider):
+        details.append("section 7 says %r providers but %d provider manifests are registered"
+                       % (parsed.get("snapshot_providers"), len(installed_by_provider)))
+
+    for name in sorted(universe - on_disk_dirs):
+        details.append("approved skill %r has no directory under .claude/skills/" % name)
+    for name in sorted(on_disk_dirs - universe):
+        details.append("on-disk skill directory %r is not in the approved section-7 universe" % name)
+
+    # Section 7's explicit-invocation-only list must equal the manifests' invocation:"user" set.
+    # user_invoked=None (a caller that cannot compute it) skips the comparison; an empty set is a
+    # real value and is compared.
+    if user_invoked is not None and "explicit_invocation" in parsed:
+        declared = set(parsed["explicit_invocation"])
+        for name in sorted(declared - set(user_invoked)):
+            details.append("section 7 lists %r as explicit-invocation-only but no manifest records "
+                           "invocation \"user\" for it" % name)
+        for name in sorted(set(user_invoked) - declared):
+            details.append("manifests record invocation \"user\" for %r but section 7's "
+                           "explicit-invocation-only list omits it" % name)
+    return details
+
+
+def check_governance_v3_inventory():
+    """GOVERNANCE_V3.md section 7's approved inventory matches the manifests, the disk, and itself."""
+    path = os.path.join(REPO_ROOT, "GOVERNANCE_V3.md")
+    if not os.path.isfile(path):
+        report("governance-v3-inventory", False, ["GOVERNANCE_V3.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    installed, errs = _installed_names_by_provider()
+    repo_short = {e["label"]: e["upstream_repo"].split("github.com/", 1)[1] for e in MANIFESTS}
+    details = errs + governance_inventory_details(
+        text, installed, repo_short, set(list_skill_dirs()), _project_manifest_names(),
+        user_invoked=_user_invoked_names())
+    report("governance-v3-inventory", not details, details)
+
+
+def skills_routing_details(routing_text, installed_names, provider_count):
+    """Return [] iff every installed name appears in the routing doc and its totals are true."""
+    details = []
+    found = set(re.findall(r"`([^`\s]+)`", routing_text))
+    for name in sorted(set(installed_names) - found):
+        details.append("installed skill %r does not appear in docs/agents/skills-routing.md" % name)
+    flat = normalize_prose_line(routing_text.replace("\n", " "))
+    want = "%d installed skills across %s providers" % (
+        len(set(installed_names)), _NUMBER_WORDS.get(provider_count, str(provider_count)))
+    if want not in flat:
+        details.append("skills-routing.md must state %r (the machine-true total)" % want)
+    return details
+
+
+def check_skills_routing_universe():
+    """docs/agents/skills-routing.md covers the complete installed set -- the routing universe."""
+    path = os.path.join(DOCS_AGENTS_DIR, "skills-routing.md")
+    if not os.path.isfile(path):
+        report("skills-routing-universe", False, ["docs/agents/skills-routing.md missing"])
+        return
+    with io.open(path, encoding="utf-8") as f:
+        text = f.read()
+    installed, errs = _installed_names_by_provider()
+    names = set()
+    for v in installed.values():
+        names |= set(v)
+    names |= set(_project_manifest_names())
+    details = errs + skills_routing_details(text, names, len(MANIFESTS))
+    report("skills-routing-universe", not details, details)
+
+
 ALL_CHECKS = [
     check_required_files,
     check_json_validity,
+    check_provider_manifest_fields,
+    check_provider_license_files,
     check_no_symlinks_no_exec,
     check_skill_dirs_have_skillmd,
     check_unique_skill_names,
@@ -1584,20 +3271,31 @@ ALL_CHECKS = [
     check_manifest_fs_consistency,
     check_manifest_ownership_partition,
     check_excluded_absent,
-    check_blob_hashes,
-    check_anthropic_file_hashes,
-    check_anthropic_vendored_modes,
-    check_anthropic_scripts_audited,
+    check_all_providers_file_level,
+    check_no_unaudited_candidate,
+    check_provider_file_hashes,
+    check_provider_vendored_modes,
+    check_provider_scripts_audited,
+    check_provider_invocation_matches_frontmatter,
+    check_provider_dependency_closure,
     check_builtin_collision_denylist,
     check_patch_ledger_coverage,
     check_patch_marker_balance,
-    check_anthropic_patch_coverage,
+    check_provider_patch_coverage,
     check_application_paths_untouched,
     check_settings_schema,
     check_settings_mcp_mutations_denied,
     check_rules_frontmatter_and_uniqueness,
     check_hidden_unicode,
     check_project_manifest,
+    check_governance_v3_docs,
+    check_governance_v3_no_stale_orchestration,
+    check_governance_v3_contract_schema,
+    check_governance_v3_recovery_contract,
+    check_governance_v3_authority_chain,
+    check_governance_no_host_os_reference,
+    check_governance_v3_inventory,
+    check_skills_routing_universe,
 ]
 
 
@@ -1605,14 +3303,25 @@ ALL_CHECKS = [
 # --self-test: offline fixture matrix for the project-manifest logic above.
 #
 # Most fixtures build their own tree under tempfile.TemporaryDirectory; none ever WRITES to this
-# repo, makes a network call, or sleeps. Two fixtures (G11, G12) are the exception to "synthetic
-# tree" specifically, not to "never writes": they READ real files from this repo (the vendored
-# mattpocock manifest, and the real project manifest) to check facts about the actual repo state
-# -- read-only, like every other check this script performs. G1-G12 exercise positive/structural
-# cases; N1-N16 are negative cases, one per distinct violation class named in
-# project-skills-policy.md's schema. Each fixture function raises AssertionError (with a
-# diagnostic message) on failure and returns None on success -- the runner below is the only place
-# results are aggregated or printed.
+# repo, makes a network call, or sleeps. A MINORITY are the exception to "synthetic tree"
+# specifically, not to "never writes": they READ real files from this repo to check facts about the
+# actual repo state -- read-only, like every other check this script performs. Some of those also
+# shell out to git (`hash-object`, `grep`) against the real tree, exactly as the corresponding
+# production checks do, so a handful of fixtures depend on git and on a clean working tree.
+#
+# This comment deliberately does NOT enumerate which fixtures those are. Two successive attempts to
+# do so both went stale -- once by naming a pair that had grown to seven, once by giving a heuristic
+# that was already wrong for fixtures reaching the repo through a helper. `_self_test_fixtures()` is
+# the authority for what exists, and each fixture's own docstring says what it reads.
+#
+# Three families by id prefix: G* positive/structural, N* negative (one per distinct violation class
+# named in project-skills-policy.md's schema), V* the Governance-v3 prose checks. Exact id ranges are
+# deliberately NOT restated here -- they drift, and `_self_test_fixtures()` already enumerates them.
+#
+# Every V* fixture calls the same `*_details()` production helper its corresponding check calls, so
+# the fixtures assert on production logic rather than re-deriving it. Each fixture function raises
+# AssertionError (with a diagnostic message) on failure and returns None on success -- the runner
+# below is the only place results are aggregated or printed.
 # --------------------------------------------------------------------------
 
 
@@ -1779,8 +3488,21 @@ def _st_g10():
 
 
 def _st_g11():
+    # Pins the registry's shape, not just its size: every entry must be fully specified, and the
+    # project (first-party) manifest must never be reachable through the vendored registry.
     labels = {entry["label"] for entry in MANIFESTS}
-    assert labels == {"mattpocock", "anthropic"}, labels
+    assert labels == {"mattpocock", "anthropic", "compound-engineering", "trailofbits",
+                      "awesome-copilot", "builderio"}, labels
+    required = ("label", "manifest", "patches", "policy", "upstream_repo", "upstream_env",
+                "schema", "excluded_key", "extra_frontmatter_keys", "license")
+    for entry in MANIFESTS:
+        missing = [k for k in required if k not in entry]
+        assert not missing, (entry.get("label"), missing)
+        assert entry["schema"] in ("skill-level", "file-level"), entry["schema"]
+        lic = entry["license"]
+        assert lic.get("spdx"), entry["label"]
+        assert lic.get("layout") in ("shared", "per-skill"), lic
+        assert ("path" in lic) if lic["layout"] == "shared" else ("filename" in lic), lic
     manifest_paths = {entry["manifest"] for entry in MANIFESTS}
     assert PROJECT_MANIFEST_PATH not in manifest_paths, manifest_paths
     mattpocock_shaped = load_manifest(MANIFEST_PATH)
@@ -1794,7 +3516,7 @@ def _st_g12():
     assert details == [], details
 
 
-# ---- N1-N13: one negative fixture per distinct violation class ----
+# ---- N*: one negative fixture per distinct violation class (see _self_test_fixtures) ----
 
 def _st_n1():
     with tempfile.TemporaryDirectory() as tmp:
@@ -2058,9 +3780,11 @@ def _st_n21():
     # Full-report continuation: point the real production path constant at a malformed temp
     # manifest and run the REAL ALL_CHECKS list end to end (not validate_project_manifest() in
     # isolation) -- this is what actually proves the MINOR-1 gap is closed, since the original
-    # failure mode was project_skill_names() raising inside check_unique_skill_names (check 5 of
-    # 26), which aborted the whole run before check_project_manifest's own diagnostic was ever
-    # reached. RESULTS is saved/restored alongside PROJECT_MANIFEST_PATH so this fixture can never
+    # failure mode was project_skill_names() raising inside check_unique_skill_names -- an early
+    # entry in ALL_CHECKS -- which aborted the whole run before check_project_manifest's own
+    # diagnostic was ever reached. (The fixture body asserts against len(ALL_CHECKS) rather than a
+    # literal count, precisely so this comment is the only thing that can drift.)
+    # RESULTS is saved/restored alongside PROJECT_MANIFEST_PATH so this fixture can never
     # leave stray report() entries for anything that inspects RESULTS afterward.
     global PROJECT_MANIFEST_PATH, RESULTS
     with tempfile.TemporaryDirectory() as tmp:
@@ -2084,8 +3808,14 @@ def _st_n21():
         finally:
             PROJECT_MANIFEST_PATH = saved_path
             RESULTS = saved_results
-    assert len(results) == 26, "expected exactly 26 labeled results, got %d: %r" % (
-        len(results), [r[0] for r in results])
+    # Every registered check must report exactly once, even when a manifest is
+    # malformed. Pinned to len(ALL_CHECKS) rather than a literal so adding a
+    # check doesn't require editing this fixture -- duplicates and silent
+    # non-reporters are still caught by the name-uniqueness assert below.
+    names = [r[0] for r in results]
+    assert len(results) == len(ALL_CHECKS), "expected %d labeled results, got %d: %r" % (
+        len(ALL_CHECKS), len(results), names)
+    assert len(set(names)) == len(names), "duplicate check labels: %r" % (names,)
     failing = [name for name, ok, _ in results if not ok]
     assert failing, "expected at least one failing check, got none"
     assert "project-manifest-valid" in failing, failing
@@ -2201,6 +3931,1119 @@ def _st_n24():
         assert not any("skill directory must not be a symlink" in d for d in details2), details2
 
 
+def _st_v1():
+    """governance_surface_paths picks up the fixed files + .md under the walked dirs."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "x\n")
+        _write_file(os.path.join(tmp, "README.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "rules", "go-code.md"), "x\n")
+        # Not governance surface: skill bodies, hooks, non-markdown, absent CONTEXT.md.
+        _write_file(os.path.join(tmp, ".claude", "skills", "s", "SKILL.md"), "x\n")
+        _write_file(os.path.join(tmp, ".claude", "hooks", "h.py"), "x\n")
+        _write_file(os.path.join(tmp, "docs", "agents", "manifest.json"), "{}\n")
+        _write_file(os.path.join(tmp, "Dockerfile"), "x\n")
+        got = governance_surface_paths(tmp)
+        expected = [
+            ".claude/rules/go-code.md",
+            "CLAUDE.md",
+            "README.md",
+            "docs/adr/0001.md",
+            "docs/agents/task-contract.md",
+        ]
+        assert got == sorted(expected), got
+
+
+def _st_v2():
+    """scan_governance_surface reports file:line hits and honours the exempt list."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"), "ok\nOne Production Writer per task\n")
+        _write_file(os.path.join(tmp, "docs", "adr", "0001-agent-governance-v2.md"),
+                    "one production writer\n")
+        hits = scan_governance_surface(tmp, ("one production writer",))
+        assert any(h.startswith("CLAUDE.md:2:") for h in hits), hits
+        assert any("0001-agent-governance-v2.md" in h for h in hits), hits
+
+        exempt_hits = scan_governance_surface(
+            tmp, ("one production writer",), exempt=("docs/adr/0001-agent-governance-v2.md",)
+        )
+        assert len(exempt_hits) == 1, exempt_hits
+        assert exempt_hits[0].startswith("CLAUDE.md:2:"), exempt_hits
+
+
+def _real_contract_text():
+    with io.open(os.path.join(REPO_ROOT, "docs", "agents", "task-contract.md"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _st_v3():
+    """The real repo's governance surface is free of stale v2 orchestration mandates."""
+    hits = stale_orchestration_details(REPO_ROOT)
+    assert not hits, hits
+
+
+def _st_v4():
+    """The real repo names no host operating system, on the surface or in any tracked file."""
+    hits = host_os_details(REPO_ROOT)
+    assert not hits, hits
+
+
+def _st_v5():
+    """Governance v3 required docs exist and CLAUDE.md declares v3."""
+    details = governance_v3_docs_details(REPO_ROOT)
+    assert not details, details
+
+
+def _st_v6():
+    """The real task-contract.md passes the production authority-envelope check."""
+    details = contract_schema_details(_real_contract_text())
+    assert not details, details
+
+
+def _st_v7():
+    """REGRESSION: a mandatory agent_cap must FAIL, even though 'optional' occurs elsewhere.
+
+    This is the fixture the superseded implementation would have passed. That
+    version asked `if field in lowered and "optional" not in lowered`, i.e. it
+    searched the WHOLE document for the word "optional" -- and the schema's own
+    preamble ("Every field is optional except ...") guarantees a match, so the
+    test could never fire. The document below keeps that preamble verbatim while
+    describing agent_cap as a mandatory orchestration requirement, which is
+    precisely the v2 mandate ADR-0002 removed.
+    """
+    text = (
+        "# Task contract\n\n"
+        "Every field is optional except `mode`, `repository`, `base_branch`, `base_sha`,\n"
+        "`task_branch`, and `authorized_by`.\n\n"
+        "```yaml\n"
+        "task_contract:\n"
+        "  mode: READ_ONLY | PROTOTYPE | CHANGE | PUBLISH_DRAFT\n"
+        "  orchestration: skill_native | main_context_only   # optional; absent => skill_native\n"
+        "  agent_cap: <int>                             # mandatory orchestration cap\n"
+        "  max_concurrency: <int>                       # mandatory orchestration cap\n"
+        "```\n\n"
+        "## Field notes\n\n"
+        "- **`agent_cap`** / **`max_concurrency`** are mandatory orchestration policy and every\n"
+        "  contract must set them; absent, they default to 4.\n"
+    )
+    details = contract_schema_details(text)
+    assert details, "a mandatory agent_cap/max_concurrency contract must be rejected"
+    joined = " ".join(details)
+    assert "agent_cap" in joined and "max_concurrency" in joined, details
+    # And prove the old vacuous condition really would have passed this text.
+    lowered = text.lower()
+    for field in RESOURCE_CEILING_FIELDS:
+        assert not (field in lowered and "optional" not in lowered), (
+            "fixture no longer reproduces the vacuous-pass condition for %s" % field
+        )
+
+
+def _st_v8():
+    """REGRESSION: a resurrected universal reviewer-read-only mandate must be detected."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "# x\n\n- One writer per task; every other agent is read-only (research, review).\n"
+                    "- Reviewer/analysis agents never write to tracked files or push.\n")
+        hits = stale_orchestration_details(tmp)
+        assert any("every other agent is read-only" in h for h in hits), hits
+        assert any("reviewer/analysis agents never write" in h for h in hits), hits
+
+    # Positive control: a skill CHOOSING read-only reviewers is not a project mandate.
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "# x\n\nInvoking a skill authorizes its lanes, reviewers, critics and verifiers.\n")
+        assert not stale_orchestration_details(tmp), stale_orchestration_details(tmp)
+
+
+def _st_v9():
+    """REGRESSION: a resurrected mandatory resource cap must be detected, through Markdown markup.
+
+    Also pins normalize_prose_line's job: the phrase is written with backticks
+    and bold markers, exactly as it would appear in these documents, and must
+    still match.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"),
+                    "- **`agent_cap` is mandatory** for every contract.\n"
+                    "- `max_concurrency` is required whenever more than one agent runs.\n")
+        hits = stale_orchestration_details(tmp)
+        assert any("agent_cap is mandatory" in h for h in hits), hits
+        assert any("max_concurrency is required" in h for h in hits), hits
+
+    # Positive control: naming the fields as OPTIONAL ceilings must not match.
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "agents", "task-contract.md"),
+                    "- **`agent_cap`** / **`max_concurrency`** are **optional resource ceilings**, not\n"
+                    "  orchestration policy. They are no longer mandatory and have no default.\n")
+        assert not stale_orchestration_details(tmp), stale_orchestration_details(tmp)
+
+
+def _st_v10():
+    """scan_governance_surface catches a phrase split across a hard wrap, exactly once."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Genuinely split: "role" ends line 1, "ledger" opens line 2. Neither
+        # line contains the phrase; only the wrap does. Reported at the opening
+        # line, once.
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "Keep an explicit role\nledger when several agents run.\n")
+        hits = scan_governance_surface(tmp, ("role ledger",))
+        assert len(hits) == 1, hits
+        assert hits[0].startswith("CLAUDE.md:1:"), hits
+
+        # Wholly on one line: reported at that line, once -- the preceding
+        # line's wrap window also contains it and must not double-report.
+        _write_file(os.path.join(tmp, "CLAUDE.md"),
+                    "Some preamble.\nKeep an explicit role ledger here.\n")
+        hits = scan_governance_surface(tmp, ("role ledger",))
+        assert len(hits) == 1, hits
+        assert hits[0].startswith("CLAUDE.md:2:"), hits
+
+
+def _st_v11():
+    """REGRESSION: the host-OS token is rejected with no document exempt.
+
+    The token is assembled from the production constant rather than written
+    out, for the same reason the constant itself is assembled -- a literal here
+    would make this file a tracked occurrence and fail the repo-wide check.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_file(os.path.join(tmp, "docs", "adr", "0002-governance-v3-skill-native-orchestration.md"),
+                    "Deploys to the %s box are out of scope.\n" % FORBIDDEN_HOST_OS_TOKEN.upper())
+        hits = scan_governance_surface(tmp, (FORBIDDEN_HOST_OS_TOKEN,))
+        assert len(hits) == 1, hits
+        assert "0002-governance-v3-skill-native-orchestration.md:1:" in hits[0], hits
+
+
+def _st_v12():
+    """The schema block is selected by its `task_contract:` key, not by position.
+
+    Guards the failure mode where an example yaml fence added ABOVE the schema
+    would silently rebind every field lookup in contract_schema_details to the
+    wrong block -- which reports PASS while validating nothing.
+    """
+    real = _real_contract_text()
+    schema = _extract_yaml_schema_block(real)
+    assert schema is not None and "task_contract:" in schema, schema
+
+    decoy = (
+        "# Task contract\n\n"
+        "An example of what a contract is NOT:\n\n"
+        "```yaml\n"
+        "some_other_example:\n"
+        "  agent_cap: <int>   # mandatory\n"
+        "```\n\n"
+    ) + real
+    assert _extract_yaml_schema_block(decoy) == schema, "decoy fence was selected"
+    # The decoyed document must still validate exactly as the real one does.
+    assert contract_schema_details(decoy) == contract_schema_details(real)
+
+
+def _st_v13():
+    """The real repo's authority-chain documents (CLAUDE.md + the seven policies) agree on four levels."""
+    details = authority_chain_details(REPO_ROOT)
+    assert not details, details
+
+
+def _st_v14():
+    """REGRESSION: a resurrected five-level chain must be rejected.
+
+    The fixture text is the Governance-v2 chain the three skills policies still
+    carried at 6d28ef8 -- the actual Defect 3 regression, not an invented one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath),
+                        "The authority chain has exactly four levels.\n")
+        stale = os.path.join(tmp, "docs", "agents", "mattpocock-skills-policy.md")
+        _write_file(stale,
+                    "Authority chain: (1) the active task contract, (2) `CLAUDE.md` +\n"
+                    "`.claude/rules/*.md`, (3) these vendored skills (as patched),\n"
+                    "(4) unpatched upstream skill defaults, (5) generic model behavior.\n")
+        details = authority_chain_details(tmp)
+        assert any("five-level authority chain survives" in d for d in details), details
+        assert any("mattpocock-skills-policy.md" in d for d in details), details
+        # Only the tampered document is faulted.
+        assert not any("anthropic-skills-policy.md" in d for d in details), details
+
+    # A document that simply omits the four-level statement is also caught.
+    with tempfile.TemporaryDirectory() as tmp:
+        for relpath in AUTHORITY_CHAIN_DOCS:
+            _write_file(os.path.join(tmp, relpath), "no chain stated here\n")
+        details = authority_chain_details(tmp)
+        assert len(details) == len(AUTHORITY_CHAIN_DOCS), details
+
+
+# ---- V15-V17: the GOVERNANCE_V3.md section-5 recovery-contract check. Every fixture drives the
+# production governance_v3_recovery_details() helper, and every negative one MUTATES THE REAL
+# DOCUMENT rather than inventing a synthetic one, so a fixture cannot drift away from the document
+# it is meant to guard. Each mutation asserts it actually changed something first: a negative
+# fixture that silently matched nothing would "pass" by re-testing the positive case.
+
+
+def _real_governance_v3_text():
+    with io.open(os.path.join(REPO_ROOT, "GOVERNANCE_V3.md"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _drop_flat_needle(text, needle):
+    """Remove every occurrence of a normalized needle from `text`, across hard wraps.
+
+    The prose checks match their needles against the newline-flattened, markup-stripped
+    document, so a fixture that wants to REMOVE one has to match it the same way: inter-word gaps
+    become [\\s`*]+, which spans a hard wrap AND the backticks / bold markers the normalizer removes.
+    Without the markup class a needle like "a base_sha that is still the base being built on" never
+    matches the document's `base_sha`, the mutation is a no-op, and the negative fixture quietly
+    re-tests the positive case. Returns (mutated, count); callers assert count.
+    """
+    pattern = re.compile(r"[\s`*]+".join(re.escape(word) for word in needle.split()), re.IGNORECASE)
+    mutated, count = pattern.subn("[removed by fixture]", text)
+    return mutated, count
+
+
+def _st_v15():
+    """The real GOVERNANCE_V3.md carries the complete section-5 recovery contract."""
+    details = governance_v3_recovery_details(_real_governance_v3_text())
+    assert not details, details
+
+
+def _st_v16():
+    """NEGATIVE: every recovery needle and checkpoint record field, one at a time."""
+    real = _real_governance_v3_text()
+    for needle in GOVERNANCE_V3_RECOVERY_NEEDLES + GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS:
+        mutated, count = _drop_flat_needle(real, needle)
+        assert count >= 1, (needle, count)
+        details = governance_v3_recovery_details(mutated)
+        assert any(needle in d for d in details), (needle, details)
+
+
+def _st_v17():
+    """NEGATIVE: the checkpoint contract id is pinned, and an empty document reports, not raises."""
+    real = _real_governance_v3_text()
+    keyed = real.replace(CHECKPOINT_CONTRACT_ID, "deep_checkpoint/v1")
+    assert keyed != real
+    assert any("checkpoint id" in d for d in governance_v3_recovery_details(keyed)), \
+        governance_v3_recovery_details(keyed)
+    details = governance_v3_recovery_details("")
+    assert details, "an empty document must report failures"
+
+
+def _st_v18():
+    """NEGATIVE: authority-restoring wording ADDED to section 5 is rejected; list admissible."""
+    real = _real_governance_v3_text()
+    assert not governance_v3_recovery_details(real)
+    for phrase in ("a resume may skip the live preflight.",
+                   "a valid checkpoint restores the mode it recorded.",
+                   "the session inherits the checkpoint's authority."):
+        planted = real.replace("## 6. Evidence discipline",
+                               phrase + "\n\n## 6. Evidence discipline", 1)
+        assert planted != real
+        details = governance_v3_recovery_details(planted)
+        assert any("authority-restoring wording" in d for d in details), (phrase, details)
+
+
+def _st_v19():
+    """The host-OS budget filter: within-budget tolerated, growth and unlisted paths fail."""
+    assert apply_host_os_budget([]) == []
+    within = ["Dockerfile:10:x", "README.md:1:x", "README.md:2:x", "README.md:3:x",
+              "SPECIFICATIONS.md:5:x"]
+    assert apply_host_os_budget(within) == [], apply_host_os_budget(within)
+    grown = within + ["README.md:9:x"]
+    out = apply_host_os_budget(grown)
+    assert len([h for h in out if h.startswith("README.md:")]) == 4, out
+    assert all("exceeds the frozen pre-existing budget" in h for h in out), out
+    assert [h for h in out if h.startswith("Dockerfile:")] == [], out
+    unlisted = apply_host_os_budget(["CLAUDE.md:3:x"])
+    assert unlisted == ["CLAUDE.md:3:x"], unlisted
+    mixed = apply_host_os_budget(["docs/agents/foo.md:1:x", "Dockerfile:10:x"])
+    assert mixed == ["docs/agents/foo.md:1:x"], mixed
+
+
+def _st_v30():
+    """NEGATIVE: CLAUDE.md's own continuity pointer, which every fresh session actually loads.
+
+    GOVERNANCE_V3.md section 5 is a document a session may never open; CLAUDE.md is the one it
+    always reads. Pinning the invariants only in the pointed-to file would leave this paragraph
+    free to be inverted -- "a resume re-enters the recorded mode" -- with all other checks green.
+    """
+    real_claude = io.open(os.path.join(REPO_ROOT, "CLAUDE.md"), encoding="utf-8").read()
+    assert not governance_v3_docs_details(REPO_ROOT), governance_v3_docs_details(REPO_ROOT)
+
+    def _details_for(claude_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_file(os.path.join(tmp, "CLAUDE.md"), claude_text)
+            for relpath in V3_REQUIRED_DOCS:
+                _write_file(os.path.join(tmp, relpath), "x\n")
+            return governance_v3_docs_details(tmp)
+
+    assert not _details_for(real_claude), _details_for(real_claude)
+
+    dropped = real_claude.replace("GOVERNANCE_V3.md", "GOVERNANCE_V2.md")
+    assert dropped != real_claude
+    assert any("must point at the canonical GOVERNANCE_V3.md" in d for d in _details_for(dropped)), \
+        _details_for(dropped)
+
+    mutated, count = _drop_flat_needle(real_claude, "single canonical governance authority")
+    assert count >= 1, count
+    assert any("single canonical governance authority" in d for d in _details_for(mutated)), \
+        _details_for(mutated)
+
+    for needle in CLAUDE_MD_CONTINUITY_INVARIANTS:
+        mutated, count = _drop_flat_needle(real_claude, needle)
+        assert count >= 1, (needle, count)
+        details = _details_for(mutated)
+        assert any("session-continuity pointer omits" in d and needle in d for d in details), (
+            needle, details
+        )
+
+    # The pointer must name the contract id, not the YAML key.
+    keyed = real_claude.replace(CHECKPOINT_CONTRACT_ID, "deep_checkpoint/v1")
+    assert keyed != real_claude
+    assert any("must name the checkpoint contract id" in d for d in _details_for(keyed)), \
+        _details_for(keyed)
+
+
+def _st_v31():
+    """STRUCTURAL: the pinned constants themselves, so weakening one is a self-test failure."""
+    assert CHECKPOINT_CONTRACT_ID == "deep-checkpoint/v1"
+    assert set(CLAUDE_MD_CONTINUITY_INVARIANTS) == {
+        "a checkpoint is evidence, never authority",
+        "every new session starts read_only",
+    }
+    assert len(GOVERNANCE_V3_RECOVERY_NEEDLES) >= 6, GOVERNANCE_V3_RECOVERY_NEEDLES
+    assert len(GOVERNANCE_V3_RECOVERY_FORBIDDEN) >= 8, GOVERNANCE_V3_RECOVERY_FORBIDDEN
+    for phrase in GOVERNANCE_V3_RECOVERY_FORBIDDEN:
+        assert len(phrase.split()) >= 3, phrase
+    assert len(GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS) >= 8, GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS
+    # A degenerate needle ("the", "push") would match anything and check nothing.
+    for needle in GOVERNANCE_V3_RECOVERY_NEEDLES + GOVERNANCE_V3_CHECKPOINT_RECORD_FIELDS:
+        assert len(needle.split()) >= 2, needle
+    assert "every new session starts read_only" in GOVERNANCE_V3_RECOVERY_NEEDLES
+    assert HOST_OS_PREEXISTING_BUDGET == {"Dockerfile": 1, "README.md": 3, "SPECIFICATIONS.md": 1}
+    assert GOVERNANCE_OWNED_WORKFLOWS == ()
+
+
+# ---- P*: the generic provider-registry checks. Every fixture drives the SAME production
+# `*_details()` helper its check calls, against a synthetic vendored tree under a temp root, so a
+# P* pass means the production logic passed and each new check is proven able to FAIL, not merely
+# able to pass. P1 is the positive control: a fully valid synthetic provider produces zero details
+# from every one of the helpers, which is what makes the negatives meaningful. ----
+
+_P_LICENSE_TEXT = "Fixture License 1.0\n\nRedistribution permitted for test purposes.\n"
+
+
+def _fake_provider_entry(tmp_docs, label="fixture", layout="per-skill"):
+    """A registry entry shaped exactly like a real one, pointing at temp documents."""
+    lic = ({"spdx": "Fixture-1.0", "layout": "per-skill", "filename": "LICENSE.txt"}
+           if layout == "per-skill" else
+           {"spdx": "Fixture-1.0", "layout": "shared",
+            "path": os.path.join(".claude", "skills", "LICENSE")})
+    return {
+        "label": label,
+        "manifest": os.path.join(tmp_docs, "%s-skills-manifest.json" % label),
+        "patches": os.path.join(tmp_docs, "%s-skills-patches.md" % label),
+        "policy": os.path.join(tmp_docs, "%s-skills-policy.md" % label),
+        "upstream_repo": "https://github.com/fixture/skills",
+        "upstream_env": "GOVERNANCE_UPSTREAM_DIR_FIXTURE",
+        "legacy_upstream_env": None,
+        "schema": "file-level",
+        "excluded_key": "excluded_skills",
+        "extra_frontmatter_keys": frozenset({"allowed-tools"}),
+        "license": lic,
+    }
+
+
+def _build_provider_fixture(tmp, skill_name="fixture-skill", with_script=True):
+    """Builds a synthetic vendored provider tree and returns
+    (entry, skills, repo_root, skills_dir, manifest). Every declared file exists, every hash is
+    real (`git hash-object`), modes are 100644, and the license notice is in place -- i.e. the
+    tree a correct vendoring produces."""
+    repo_root = os.path.join(tmp, "repo")
+    docs = os.path.join(repo_root, "docs", "agents")
+    skills_dir = os.path.join(repo_root, ".claude", "skills")
+    skill_dir = os.path.join(skills_dir, skill_name)
+    os.makedirs(docs, exist_ok=True)
+
+    files = {
+        os.path.join(skill_dir, "SKILL.md"):
+            "---\nname: %s\ndescription: Fixture skill.\nallowed-tools: Read\n---\n\n"
+            "Run `scripts/run.sh` first.\n" % skill_name,
+        os.path.join(skill_dir, "LICENSE.txt"): _P_LICENSE_TEXT,
+    }
+    if with_script:
+        files[os.path.join(skill_dir, "scripts", "run.sh")] = "#!/bin/sh\necho fixture\n"
+    for path, content in files.items():
+        _write_file(path, content)
+
+    entries = []
+    for path in sorted(files):
+        sha, err = _git_blob_sha(path)
+        assert err is None, err
+        entries.append({
+            "path": os.path.relpath(path, repo_root),
+            "origin": "upstream",
+            "upstream_path": "skills/%s/%s" % (skill_name, os.path.relpath(path, skill_dir)),
+            "upstream_blob_sha": sha,
+            "upstream_mode": "100644",
+            "vendored_mode": "100644",
+            "vendored_blob_sha": sha,
+            "locally_modified": False,
+            "patch_ids": [],
+        })
+    skills = [{
+        "name": skill_name,
+        "path": os.path.relpath(skill_dir, repo_root),
+        "invocation": "model",
+        "scripts_audited": bool(with_script),
+        "locally_modified": False,
+        "patch_ids": [],
+        "files": entries,
+    }]
+    manifest = {
+        "upstream_repo": "https://github.com/fixture/skills",
+        "upstream_commit": "0" * 40,
+        "reviewed_at": "2026-08-16T00:00:00Z",
+        "reviewed_by": "fixture",
+        "installation_mode": REQUIRED_INSTALLATION_MODE,
+        "automatic_updates": False,
+        "skills": skills,
+        "excluded_skills": [{"name": "not-installed", "status": "EXCLUDE", "reason": "fixture"}],
+    }
+    entry = _fake_provider_entry(docs)
+    return entry, skills, repo_root, skills_dir, manifest
+
+
+def _st_p1():
+    """Positive control: a correctly vendored provider yields zero details from every helper."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, manifest = _build_provider_fixture(tmp)
+        assert provider_manifest_field_details(entry, manifest) == []
+        assert provider_file_hash_details(entry, skills, root) == []
+        assert provider_vendored_mode_details(entry, skills, root) == []
+        assert provider_scripts_audited_details(entry, skills, root) == []
+        assert provider_license_file_details(
+            entry, {skills[0]["name"]}, skills_dir, root) == []
+        assert dependency_closure_details(skills_dir) == []
+
+
+def _st_p2():
+    """automatic_updates must be literally false -- a truthy or missing value is a live-update
+    installation, which is exactly what project-local vendoring exists to prevent."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        for bad in (True, "false", None):
+            manifest["automatic_updates"] = bad
+            details = provider_manifest_field_details(entry, manifest)
+            assert any("automatic_updates must be literally false" in d for d in details), (bad, details)
+        manifest["automatic_updates"] = False
+
+        # An explicit null installation_mode must NOT slip through: the presence check sees the key,
+        # so only a direct value comparison catches it.
+        manifest["installation_mode"] = None
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("installation_mode None" in x for x in d), d
+        manifest["installation_mode"] = REQUIRED_INSTALLATION_MODE
+
+        # A missing or non-list excluded list must fail, not degrade to "rejected nothing".
+        saved = manifest.pop(entry["excluded_key"])
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("would go unrecorded" in x for x in d), d
+        manifest[entry["excluded_key"]] = {"not": "a list"}
+        d = provider_manifest_field_details(entry, manifest)
+        assert any("must be a list" in x for x in d), d
+        manifest[entry["excluded_key"]] = saved
+        assert provider_manifest_field_details(entry, manifest) == []
+
+
+def _st_p3():
+    """upstream_commit must be a full 40-hex SHA: a branch name or short SHA is a floating ref,
+    and every recorded blob hash would be unfalsifiable against it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        for bad in ("main", "0" * 39, "z" * 40, None):
+            manifest["upstream_commit"] = bad
+            details = provider_manifest_field_details(entry, manifest)
+            assert any("is not a full 40-hex SHA" in d for d in details), (bad, details)
+
+
+def _st_p4():
+    """A manifest pointing at a different upstream than the registry entry claims, and a manifest
+    missing a required provenance field, both fail."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, _s, _r, _sd, manifest = _build_provider_fixture(tmp)
+        manifest["upstream_repo"] = "https://github.com/someone-else/skills"
+        details = provider_manifest_field_details(entry, manifest)
+        assert any("upstream_repo" in d and "!= registry" in d for d in details), details
+
+        _e2, _s2, _r2, _sd2, manifest2 = _build_provider_fixture(tmp, skill_name="p4b")
+        del manifest2["reviewed_by"]
+        details2 = provider_manifest_field_details(entry, manifest2)
+        assert any("missing required field 'reviewed_by'" in d for d in details2), details2
+        # ...and the canonicalizer must not turn a genuine mismatch into a pass, nor a
+        # .git/trailing-slash spelling difference into a failure.
+        manifest2["reviewed_by"] = "fixture"
+        manifest2["upstream_repo"] = "https://github.com/fixture/skills.git/"
+        assert provider_manifest_field_details(entry, manifest2) == []
+
+
+def _st_p5():
+    """A per-skill license layout fails when the notice is missing from a skill directory, and a
+    shared layout fails when the single declared file is missing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        name = skills[0]["name"]
+        assert provider_license_file_details(entry, {name}, skills_dir, root) == []
+        os.remove(os.path.join(skills_dir, name, "LICENSE.txt"))
+        details = provider_license_file_details(entry, {name}, skills_dir, root)
+        assert any("LICENSE.txt missing" in d for d in details), details
+
+        shared_entry = _fake_provider_entry(os.path.join(root, "docs", "agents"), layout="shared")
+        details2 = provider_license_file_details(shared_entry, set(), skills_dir, root)
+        assert any("shared license file missing" in d for d in details2), details2
+
+
+def _st_p6():
+    """vendored_blob_sha is the integrity pin: editing a vendored file on disk without updating
+    the manifest must fail closed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        target = os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh")
+        _write_file(target, "#!/bin/sh\necho tampered\n")
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("!= manifest vendored_blob_sha" in d for d in details), details
+
+
+def _st_p7():
+    """Inventory completeness, both directions: a declared file absent from disk fails, and an
+    on-disk file the manifest never declares fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skill_dir = os.path.join(skills_dir, skills[0]["name"])
+        os.remove(os.path.join(skill_dir, "scripts", "run.sh"))
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("listed in files[] but missing on disk" in d for d in details), details
+
+        entry2, skills2, root2, skills_dir2, _m2 = _build_provider_fixture(tmp, skill_name="p7b")
+        _write_file(os.path.join(skills_dir2, "p7b", "scripts", "undeclared.sh"), "#!/bin/sh\n")
+        details2 = provider_file_hash_details(entry2, skills2, root2)
+        assert any("present on disk but not listed in files[]" in d for d in details2), details2
+
+
+def _st_p8():
+    """A file marked locally_modified must name a patch id, and a local-origin file must carry a
+    reason -- otherwise a change to a vendored artifact has no documented justification."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, _sd, _m = _build_provider_fixture(tmp)
+        skills[0]["files"][0]["locally_modified"] = True
+        skills[0]["files"][0]["patch_ids"] = []
+        details = provider_file_hash_details(entry, skills, root)
+        assert any("locally_modified=true but patch_ids is empty" in d for d in details), details
+
+        skills[0]["files"][0]["locally_modified"] = False
+        skills[0]["files"][0]["origin"] = "local"
+        skills[0]["files"][0].pop("reason", None)
+        details2 = provider_file_hash_details(entry, skills, root)
+        assert any("origin=local but no 'reason' given" in d for d in details2), details2
+
+
+def _st_p9():
+    """Mode drift in both directions: a manifest claiming a non-100644 vendored_mode, an
+    executable bit actually set on disk, and an undocumented 100755 -> 100644 normalization."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        assert provider_vendored_mode_details(entry, skills, root) == []
+
+        skills[0]["files"][0]["vendored_mode"] = "100755"
+        details = provider_vendored_mode_details(entry, skills, root)
+        assert any('vendored_mode' in d and '!= "100644"' in d for d in details), details
+        skills[0]["files"][0]["vendored_mode"] = "100644"
+
+        script = os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh")
+        os.chmod(script, 0o755)
+        details2 = provider_vendored_mode_details(entry, skills, root)
+        assert any("executable bit set on disk" in d for d in details2), details2
+        os.chmod(script, 0o644)
+
+        skills[0]["files"][0]["upstream_mode"] = "100755"
+        skills[0]["files"][0]["patch_ids"] = []
+        details3 = provider_vendored_mode_details(entry, skills, root)
+        assert any("with no patch id documenting it" in d for d in details3), details3
+        # Documenting the normalization with a patch id clears it.
+        skills[0]["files"][0]["patch_ids"] = ["fixture-mode-normalize"]
+        assert provider_vendored_mode_details(entry, skills, root) == []
+
+
+def _st_p10():
+    """A skill shipping a script must record scripts_audited: true; the detector covers the
+    extensions these providers actually ship AND extensionless shebang files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skills[0]["scripts_audited"] = False
+        details = provider_scripts_audited_details(entry, skills, root)
+        assert any("scripts_audited is not true" in d for d in details), details
+
+        # Extensionless shebang file: caught by content, not by name.
+        entry2, skills2, root2, skills_dir2, _m2 = _build_provider_fixture(
+            tmp, skill_name="p10b", with_script=False)
+        hookpath = os.path.join(skills_dir2, "p10b", "scripts", "pr-snapshot")
+        _write_file(hookpath, "#!/usr/bin/env bash\necho snapshot\n")
+        skills2[0]["scripts_audited"] = False
+        skills2[0]["files"].append({
+            "path": os.path.relpath(hookpath, root2), "origin": "upstream",
+            "upstream_blob_sha": "x", "vendored_blob_sha": "x",
+            "upstream_mode": "100644", "vendored_mode": "100644",
+            "locally_modified": False, "patch_ids": [],
+        })
+        details2 = provider_scripts_audited_details(entry2, skills2, root2)
+        assert any("scripts_audited is not true" in d for d in details2), details2
+
+        # ...and an extensionless file that is NOT a script (a LICENSE) must NOT be counted as one.
+        # Without this half the shebang branch passes vacuously: `_has_shebang` returns a
+        # (bool, error) TUPLE, and testing the tuple itself is truthy for every extensionless file,
+        # which is exactly the bug this assertion exists to catch.
+        entry3, skills3, root3, skills_dir3, _m3 = _build_provider_fixture(
+            tmp, skill_name="p10c", with_script=False)
+        licpath = os.path.join(skills_dir3, "p10c", "LICENSE")
+        _write_file(licpath, "MIT License\n\nCopyright (c) 2026 Someone\n")
+        skills3[0]["scripts_audited"] = False
+        skills3[0]["files"].append({
+            "path": os.path.relpath(licpath, root3), "origin": "local", "reason": "license notice",
+            "upstream_blob_sha": "x", "vendored_blob_sha": "x",
+            "upstream_mode": "100644", "vendored_mode": "100644",
+            "locally_modified": False, "patch_ids": [],
+        })
+        assert provider_scripts_audited_details(entry3, skills3, root3) == [], \
+            "a prose-only skill with an extensionless LICENSE must not be flagged as shipping a script"
+
+
+def _st_p11():
+    """Patch coverage is bidirectional: an in-file marker missing from the ledger fails, an
+    in-file marker not recorded in files[].patch_ids fails, and a manifest patch id the ledger
+    never documents fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, root, skills_dir, _m = _build_provider_fixture(tmp)
+        skillmd = os.path.join(skills_dir, skills[0]["name"], "SKILL.md")
+        with open(skillmd, "a", encoding="utf-8") as f:
+            f.write("\n<!-- bukerov-local-patch: fx-1 -->tweak<!-- /bukerov-local-patch: fx-1 -->\n")
+
+        details = provider_patch_coverage_details(entry, skills, "", root, "ledger.md")
+        assert any("found in-file but missing from ledger.md" in d for d in details), details
+        assert any("not recorded in any files[].patch_ids" in d for d in details), details
+
+        skills[0]["files"][0]["locally_modified"] = True
+        skills[0]["files"][0]["patch_ids"] = ["fx-1"]
+        details2 = provider_patch_coverage_details(entry, skills, "", root, "ledger.md")
+        assert any("manifest patch_id 'fx-1' not found in ledger.md" in d for d in details2), details2
+
+        assert provider_patch_coverage_details(
+            entry, skills, "row for `fx-1`", root, "ledger.md") == []
+
+
+def _st_p12():
+    """Dependency closure: a SKILL.md pointing at a closure file that was never vendored fails,
+    while a path whose head directory does not exist in the skill stays prose and does not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _e, skills, _r, skills_dir, _m = _build_provider_fixture(tmp)
+        assert dependency_closure_details(skills_dir) == []
+
+        os.remove(os.path.join(skills_dir, skills[0]["name"], "scripts", "run.sh"))
+        _write_file(os.path.join(skills_dir, skills[0]["name"], "scripts", "other.sh"), "#!/bin/sh\n")
+        details = dependency_closure_details(skills_dir)
+        assert any("references 'scripts/run.sh', which is not vendored" in d for d in details), details
+
+        # No `references/` directory in this skill -> a prose mention is not a closure claim.
+        skillmd = os.path.join(skills_dir, skills[0]["name"], "SKILL.md")
+        _write_file(skillmd, "---\nname: x\ndescription: y\n---\n\nPut notes in `references/notes.md`.\n")
+        assert dependency_closure_details(skills_dir) == []
+
+
+def _st_p13():
+    """Every rejected candidate must carry an auditable verdict: a missing/blank reason fails, and
+    a status outside {EXCLUDE, HOLD} fails. HOLD is accepted so a blocked-but-valuable candidate is
+    recorded rather than silently omitted."""
+    def d(excluded, fs=()):
+        return exclusion_entry_details("fx", "excluded_skills", excluded, set(fs))
+    assert any("no reason" in x for x in d([{"name": "a", "reason": "   "}])), "blank reason must fail"
+    assert any("no reason" in x for x in d([{"name": "a"}])), "missing reason must fail"
+    assert any("status" in x for x in d([{"name": "a", "reason": "r", "status": "MAYBE"}])), "bad status must fail"
+    assert any("excluded but present" in x
+               for x in d([{"name": "a", "reason": "r"}], fs=["a"])), "installed-and-excluded must fail"
+    assert d([{"name": "a", "reason": "r", "status": "HOLD"}]) == []
+    assert d([{"name": "a", "reason": "r", "status": "EXCLUDE"}]) == []
+    assert d([{"name": "a", "reason": "r"}]) == []
+    assert d("not-a-list") == ["fx: excluded_skills must be a list"]
+    assert any("malformed" in x for x in d([{"no-name": 1}]))
+
+
+def _st_p14():
+    """The frontmatter allowlist is widened PER PROVIDER from the registry, so a provider that
+    legitimately uses `allowed-tools` keeps it -- upstream frontmatter is preserved, not deleted --
+    while a key no provider declares is still rejected."""
+    by_dir = allowed_frontmatter_keys_by_dir()
+    # Every on-disk skill dir is claimed by exactly one source, so every one has an entry.
+    for name in list_skill_dirs():
+        assert name in by_dir, "no allowlist resolved for %s" % name
+    for entry in MANIFESTS:
+        allowed = ALLOWED_SKILL_KEYS | set(entry.get("extra_frontmatter_keys", ()))
+        for name in provider_skill_dir_names(entry):
+            assert by_dir[name] == allowed, (entry["label"], name, by_dir[name])
+    # A registry entry declaring an extra key widens only ITS OWN dirs, never another provider's.
+    fixture = _fake_provider_entry("/nonexistent")
+    assert "allowed-tools" in (ALLOWED_SKILL_KEYS | set(fixture["extra_frontmatter_keys"]))
+    assert "allowed-tools" not in ALLOWED_SKILL_KEYS
+    assert "totally-made-up-key" not in ALLOWED_SKILL_KEYS
+
+
+def _st_p15():
+    """`{baseDir}/x` resolves against the SKILL ROOT, plain relatives against the containing
+    directory, `#fragment` suffixes are stripped, a bare `{baseDir}` is not a path claim, and a
+    `/`-rooted target is still reported absolute. Resolution must be real: a `{baseDir}` target
+    that does not exist has to be reachable as a dangling link, or adapting the resolver would
+    have turned a check into a rubber stamp."""
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = os.path.join(tmp, "tob-skill")
+        nested = os.path.join(skill_dir, "references")
+        _write_file(os.path.join(nested, "foundations.md"), "x\n")
+        _write_file(os.path.join(nested, "sibling.md"), "y\n")
+
+        kind, res = resolve_skill_link("{baseDir}/references/foundations.md", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        kind, res = resolve_skill_link("sibling.md", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        kind, res = resolve_skill_link("{baseDir}/references/foundations.md#anchor", nested, skill_dir)
+        assert kind == "path" and os.path.isfile(res), (kind, res)
+        # Not a rubber stamp: a missing {baseDir} target still resolves to a real, absent path.
+        kind, res = resolve_skill_link("{baseDir}/references/never-vendored.md", nested, skill_dir)
+        assert kind == "path" and not os.path.isfile(res), (kind, res)
+        for skipped in ("{baseDir}", "https://example.com/x.md", "#heading", ""):
+            assert resolve_skill_link(skipped, nested, skill_dir)[0] == "skip", skipped
+        assert resolve_skill_link("/etc/passwd", nested, skill_dir)[0] == "absolute"
+        # Plain relatives are NOT silently rebased onto the skill root.
+        kind, res = resolve_skill_link("references/foundations.md", nested, skill_dir)
+        assert kind == "path" and not os.path.isfile(res), (kind, res)
+
+
+def _st_p16():
+    """Fence pairing is CommonMark-correct: a fence closes only on the SAME character at LEAST as
+    long as the opener. The nested four-backtick case is the one that matters -- it is how these
+    skills document a fenced block inside a fenced block, and getting it wrong let everything after
+    the mis-pair escape the stripper and be checked as live Markdown. Also asserts the stripper does
+    not over-reach: text after a properly closed fence is still returned, inline spans survive
+    strip_fenced_blocks (the closure check needs them), and both are gone from strip_code_fences."""
+    nested = "\n".join([
+        "before",
+        "````markdown",
+        "| [0-assessment.md](0-assessment.md) | generated |",
+        "```language",
+        "inner",
+        "```",
+        "````",
+        "after [real](target.md)",
+    ])
+    stripped = strip_fenced_blocks(nested)
+    assert "0-assessment.md" not in stripped, stripped
+    assert "inner" not in stripped, stripped
+    assert "before" in stripped and "after [real](target.md)" in stripped, stripped
+
+    # A three-backtick fence must NOT be closed by a longer run belonging to an outer block.
+    assert strip_fenced_blocks("```\na\n```\nkept") .strip().endswith("kept")
+    # Tilde fences work on their own...
+    assert "hidden" not in strip_fenced_blocks("~~~\nhidden\n~~~\nkept")
+    assert "kept" in strip_fenced_blocks("~~~\nhidden\n~~~\nkept")
+    # ...and a fence is NOT closed by a fence of the OTHER character. A `~~~` inside a ``` block is
+    # block content, so everything up to the real ``` closer stays stripped and only `kept` returns.
+    mixed = strip_fenced_blocks("```\nhidden\n~~~\nstill-hidden\n```\nkept")
+    assert "still-hidden" not in mixed, mixed
+    assert "hidden" not in mixed, mixed
+    assert "kept" in mixed, mixed
+    # An info string containing a backtick is not a fence opener (CommonMark). Without this rule a
+    # prose line that merely starts with three backticks and then quotes something would open a
+    # fence that never closes, swallowing the rest of the document.
+    unopened = strip_fenced_blocks("```js `foo`\nkept\nalso-kept")
+    assert "kept" in unopened and "also-kept" in unopened, unopened
+
+    # A CLOSING fence carries nothing after it. A same-length run followed by text is block
+    # content, so the block continues to the real closer -- otherwise a code sample containing
+    # ``` mid-line would end the block early and leak the rest of it into the checked text.
+    trailing = strip_fenced_blocks("```\nhidden\n``` trailing\nstill-hidden\n```\nkept")
+    assert "still-hidden" not in trailing, trailing
+    assert "kept" in trailing, trailing
+
+    # Division of labour between the two strippers.
+    doc = "see `scripts/run.sh` here"
+    assert "scripts/run.sh" in strip_fenced_blocks(doc), "closure check must still see inline paths"
+    assert "scripts/run.sh" not in strip_code_fences(doc), "link check must not see inline code"
+
+
+def _st_p17():
+    """`invocation` must agree with the skill's own frontmatter in BOTH directions, and a manifest
+    that simply omits the field is not fabricated into a finding."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry, skills, _root, skills_dir, _m = _build_provider_fixture(tmp, skill_name="p17-skill")
+        name, skillmd = skills[0]["name"], os.path.join(skills_dir, "p17-skill", "SKILL.md")
+
+        # Fixture skill is model-invoked and the manifest says so.
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+        # Manifest claims user-invoked, frontmatter does not disable model invocation.
+        skills[0]["invocation"] = "user"
+        d = invocation_consistency_details(entry, skills, skills_dir)
+        assert any("manifest invocation 'user'" in x and "says model" in x for x in d), d
+
+        # Frontmatter disables model invocation but the manifest still says model.
+        _write_file(skillmd, "---\nname: %s\ndescription: d\ndisable-model-invocation: true\n---\n" % name)
+        skills[0]["invocation"] = "model"
+        d = invocation_consistency_details(entry, skills, skills_dir)
+        assert any("manifest invocation 'model'" in x and "says user" in x for x in d), d
+
+        # Correcting the manifest clears it.
+        skills[0]["invocation"] = "user"
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+        # A manifest schema that does not record invocation is not a finding.
+        skills[0].pop("invocation")
+        assert invocation_consistency_details(entry, skills, skills_dir) == []
+
+
+def _st_p18():
+    """Every registry entry must be file-level; a retired-schema entry is rejected.
+
+    The real registry is asserted clean too, so this fixture fails the moment a provider is
+    added on a schema that would silently receive no hash coverage."""
+    assert all_providers_file_level_details(MANIFESTS) == [], (
+        "the real registry has a non-file-level provider: %r"
+        % all_providers_file_level_details(MANIFESTS))
+    stale = [{"label": "legacy", "schema": "skill-level"},
+             {"label": "ok", "schema": "file-level"},
+             {"label": "missing"}]
+    details = all_providers_file_level_details(stale)
+    assert len(details) == 2, details
+    assert any("legacy" in d for d in details), details
+    assert any("missing" in d for d in details), details
+
+
+def _st_p19():
+    """An automated update candidate must fail the governance gate.
+
+    This is the anti-masquerade guarantee: the bot can prepare a mechanically clean refresh,
+    but the manifest it writes carries `automated_candidate`, and that block failing here is
+    what makes "audited" impossible to fake. Cleared only by a deliberate human edit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        docs = os.path.join(tmp, "docs", "agents")
+        os.makedirs(docs)
+        path = os.path.join(docs, "fixture-skills-manifest.json")
+        entry = dict(_fake_provider_entry(docs))
+        base = {"upstream_repo": "https://github.com/fixture/skills",
+                "upstream_commit": "a" * 40, "reviewed_at": "2026-01-01T00:00:00Z",
+                "reviewed_by": "human", "installation_mode": REQUIRED_INSTALLATION_MODE,
+                "automatic_updates": False, "skills": []}
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(base, f)
+        assert unaudited_candidate_details([entry]) == [], "a reviewed manifest must pass"
+
+        candidate = dict(base)
+        candidate[CANDIDATE_KEY] = {"state": CANDIDATE_STATE_PREPARED,
+                                    "superseded_commit": "a" * 40,
+                                    "target_commit": "b" * 40}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        details = unaudited_candidate_details([entry])
+        assert len(details) == 1, details
+        assert CANDIDATE_STATE_PREPARED in details[0], details
+        assert "reviewed_at/reviewed_by" in details[0], details
+
+        # A candidate cannot hide by renaming its own state: the KEY is what fails, not the
+        # value, so "state": "AUDITED" is still caught -- and is called out specifically, because
+        # a manifest that WRITES the word is taking the one route that cannot grant a review.
+        candidate[CANDIDATE_KEY]["state"] = CANDIDATE_STATE_AUDITED
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        audited = unaudited_candidate_details([entry])
+        assert len(audited) == 1, "renaming the state must not help: %r" % (audited,)
+        assert "AUDITED is never written into this block" in audited[0], audited
+        assert "DELETING the block" in audited[0], audited
+
+        # An EVAL_REQUIRED candidate says so in the diagnostic, so a reader clearing the block
+        # learns that provenance alone did not establish behavioural equivalence.
+        candidate[CANDIDATE_KEY]["state"] = CANDIDATE_STATE_PREPARED
+        candidate[CANDIDATE_KEY]["eval_required"] = ["SKILL.md changed"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(candidate, f)
+        evald = unaudited_candidate_details([entry])
+        assert len(evald) == 1 and "EVAL_REQUIRED" in evald[0], evald
+
+
+def _st_p21():
+    """The native-plugin inventory ships empty, parses, and documents all three surfaces.
+
+    Surface B (marketplace plugins) is monitored, never mutated, and nothing is installed by the
+    task that added the schema. If a plugin ever IS adopted, that is a reviewed data change and
+    this fixture is where the "empty" assumption stops holding -- deliberately, so the change
+    cannot pass unnoticed."""
+    path = os.path.join(DOCS_AGENTS_DIR, "skills-update-plugins.json")
+    assert os.path.isfile(path), "plugin inventory missing: %s" % path
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    assert doc.get("schema_version") == 1, doc.get("schema_version")
+    assert doc.get("plugins") == [], (
+        "the plugin inventory is expected to ship EMPTY; adopting a plugin is a reviewed change "
+        "that must update this fixture too, got: %r" % (doc.get("plugins"),))
+    surfaces = doc.get("surfaces") or {}
+    assert sorted(surfaces) == ["A_project_skills", "B_native_plugins",
+                                "C_claudeai_zip_skills"], sorted(surfaces)
+    assert doc["version_precedence"][0] == "plugin.json version", doc["version_precedence"]
+    assert doc["version_precedence"][-1] == "unknown", doc["version_precedence"]
+
+
+def _st_p22():
+    """The provider registry owns the reviewed REF; manifests own the pin. No floating pins.
+
+    A registry entry whose `upstream_ref` were a SHA would freeze drift detection permanently,
+    and a manifest whose `upstream_commit` were a branch name would be the floating dependency
+    vendoring exists to avoid. Both directions are asserted against the real files."""
+    with open(os.path.join(DOCS_AGENTS_DIR, "skills-update-providers.json"),
+              encoding="utf-8") as f:
+        registry = json.load(f)
+    keys = set()
+    for entry in registry["providers"]:
+        assert not SHA1_RE.match(entry["upstream_ref"]), (
+            "%s: upstream_ref must be a branch name, not a pin" % entry["key"])
+        assert entry["key"] not in keys, "duplicate provider key %s" % entry["key"]
+        keys.add(entry["key"])
+        if entry.get("monitor_only"):
+            assert SHA1_RE.match(entry["baseline_commit"]), entry["key"]
+            continue
+        with open(os.path.join(REPO_ROOT, entry["manifest"]), encoding="utf-8") as mf:
+            manifest = json.load(mf)
+        assert SHA1_RE.match(manifest["upstream_commit"]), (
+            "%s: manifest upstream_commit must be a full sha" % entry["key"])
+        assert _canon_repo(manifest["upstream_repo"]) == _canon_repo(entry["upstream_repo"]), (
+            "%s: registry and manifest disagree about the upstream repo" % entry["key"])
+    # Every vendored provider in the MANIFESTS registry must be represented.
+    assert {e["label"] for e in MANIFESTS} <= keys, (
+        "a validated provider is missing from the update registry: %r"
+        % ({e["label"] for e in MANIFESTS} - keys))
+
+
+def _st_p20():
+    """No governance-owned workflow exists on the stable line: every workflow path is guarded."""
+    assert GOVERNANCE_OWNED_WORKFLOWS == ()
+    caught = application_path_violations([
+        ".github/workflows/ci.yml", ".github/workflows/release.yml",
+        ".github/workflows/skills-update.yml", ".github/workflows/anything-else.yml",
+        "internal/web/server.go", "cmd/miner/main.go",
+        "go.mod", "go.sum", "Dockerfile", "docker-compose.yml"])
+    assert len(caught) == 10, caught
+    # Governance-layer paths this validator owns are not application paths and never were.
+    assert application_path_violations([
+        "scripts/validate-agent-governance.py", "GOVERNANCE_V3.md",
+        "docs/agents/skills-update-providers.json", "CLAUDE.md"]) == []
+
+
+def _real_inventory_inputs():
+    """The real repo's inventory inputs, shared by the I*/R* fixtures and the checks."""
+    installed, errs = _installed_names_by_provider()
+    assert not errs, errs
+    project_names = _project_manifest_names()
+    repo_short = {e["label"]: e["upstream_repo"].split("github.com/", 1)[1] for e in MANIFESTS}
+    return installed, repo_short, set(list_skill_dirs()), project_names
+
+
+def _st_i1():
+    """The real GOVERNANCE_V3.md section 7 reconciles with the manifests, the disk, and itself."""
+    installed, repo_short, disk, proj = _real_inventory_inputs()
+    details = governance_inventory_details(
+        _real_governance_v3_text(), installed, repo_short, disk, proj)
+    assert not details, details
+
+
+def _st_i2():
+    """NEGATIVE: a missing installed skill (80-of-81) and a section-7 name swap are both caught."""
+    text = _real_governance_v3_text()
+    installed, repo_short, disk, proj = _real_inventory_inputs()
+    mut = {k: list(v) for k, v in installed.items()}
+    removed = mut["builderio"].pop()
+    details = governance_inventory_details(text, mut, repo_short, disk, proj)
+    assert any(removed in d for d in details), (removed, details)
+    swapped = text.replace("`%s`" % removed, "`not-actually-installed`", 1)
+    assert swapped != text
+    details = governance_inventory_details(swapped, installed, repo_short, disk, proj)
+    assert any(removed in d for d in details), (removed, details)
+    assert any("not-actually-installed" in d for d in details), details
+
+
+def _st_i3():
+    """NEGATIVE: an unapproved 82nd directory, a stale total, and table drift are each caught."""
+    text = _real_governance_v3_text()
+    installed, repo_short, disk, proj = _real_inventory_inputs()
+    details = governance_inventory_details(
+        text, installed, repo_short, disk | {"rogue-skill"}, proj)
+    assert any("rogue-skill" in d for d in details), details
+    total = sum(len(v) for v in installed.values()) + len(proj)
+    stale = text.replace("= **%d**" % total, "= **%d**" % (total - 1), 1)
+    assert stale != text
+    details = governance_inventory_details(stale, installed, repo_short, disk, proj)
+    assert any(str(total - 1) in d for d in details), details
+    drift = text.replace("| mattpocock/skills | 23 |", "| mattpocock/skills | 22 |", 1)
+    assert drift != text
+    details = governance_inventory_details(drift, installed, repo_short, disk, proj)
+    assert any("mattpocock" in d and "22" in d for d in details), details
+
+
+def _st_i5():
+    """NEGATIVE: section 7's explicit-invocation list is machine-tied to the manifests."""
+    text = _real_governance_v3_text()
+    installed, repo_short, disk, proj = _real_inventory_inputs()
+    user = _user_invoked_names()
+    assert user, "expected a non-empty explicit-invocation set"
+    assert not governance_inventory_details(text, installed, repo_short, disk, proj,
+                                            user_invoked=user)
+    victim = "wizard"
+    assert victim in user
+    details = governance_inventory_details(text, installed, repo_short, disk, proj,
+                                           user_invoked=user - {victim})
+    assert any(victim in d and "explicit-invocation-only" in d for d in details), details
+    details = governance_inventory_details(text, installed, repo_short, disk, proj,
+                                           user_invoked=user | {"tdd"})
+    assert any("'tdd'" in d and "omits it" in d for d in details), details
+
+
+def _st_i4():
+    """NEGATIVE: an unparseable section 7 fails loudly instead of passing silently."""
+    installed, repo_short, disk, proj = _real_inventory_inputs()
+    details = governance_inventory_details(
+        "# not governance at all\n", installed, repo_short, disk, proj)
+    assert details, "an unparseable document must fail"
+
+
+def _st_r1():
+    """The real skills-routing.md routes every installed skill and states the machine-true total."""
+    installed, _repo_short, _disk, proj = _real_inventory_inputs()
+    names = set().union(*[set(v) for v in installed.values()]) | set(proj)
+    text = io.open(os.path.join(DOCS_AGENTS_DIR, "skills-routing.md"), encoding="utf-8").read()
+    details = skills_routing_details(text, names, len(MANIFESTS))
+    assert not details, details
+
+
+def _st_r2():
+    """NEGATIVE: an unrouted installed skill and a stale routing total are both caught."""
+    installed, _repo_short, _disk, proj = _real_inventory_inputs()
+    names = set().union(*[set(v) for v in installed.values()]) | set(proj)
+    text = io.open(os.path.join(DOCS_AGENTS_DIR, "skills-routing.md"), encoding="utf-8").read()
+    victim = "vulnerability-triage-brocards"
+    assert victim in names
+    dropped = text.replace("`%s`" % victim, "`[removed]`")
+    assert dropped != text
+    details = skills_routing_details(dropped, names, len(MANIFESTS))
+    assert any(victim in d for d in details), details
+    stale = text.replace("%d installed skills" % len(names), "%d installed skills" % (len(names) - 1))
+    assert stale != text
+    details = skills_routing_details(stale, names, len(MANIFESTS))
+    assert any("installed skills across" in d for d in details), details
+
+
+
 def _self_test_fixtures():
     return [
         ("G1", "three ownership sources exactly partition a fixture fs", _st_g1),
@@ -2239,6 +5082,56 @@ def _self_test_fixtures():
         ("N22", "eval_evidence.path is a working-tree symlink", _st_n22),
         ("N23", "eval_evidence.path is a git-index symlink (tracked-mode check)", _st_n23),
         ("N24", "symlinked skill root, standalone validate_project_manifest", _st_n24),
+        ("V1", "governance_surface_paths selects exactly the owned governance text", _st_v1),
+        ("V2", "scan_governance_surface reports file:line hits and honours exemptions", _st_v2),
+        ("V3", "repo governance surface has no stale v2 orchestration mandates", _st_v3),
+        ("V4", "no tracked file names a host operating system", _st_v4),
+        ("V5", "Governance v3 docs exist and CLAUDE.md declares v3", _st_v5),
+        ("V6", "the real task-contract.md is a v3 authority envelope", _st_v6),
+        ("V7", "mandatory agent_cap/max_concurrency rejected (old vacuous check passed it)", _st_v7),
+        ("V8", "universal reviewer-read-only mandate detected; skill-chosen reviewers are not", _st_v8),
+        ("V9", "mandatory resource caps detected through Markdown markup; optional ones are not", _st_v9),
+        ("V10", "surface scan catches a hard-wrapped phrase exactly once", _st_v10),
+        ("V11", "host-OS token rejected with no document exempt", _st_v11),
+        ("V12", "schema block selected by task_contract: key, not by fence position", _st_v12),
+        ("V13", "the authority-chain documents agree on four levels", _st_v13),
+        ("V14", "a resurrected five-level authority chain is rejected", _st_v14),
+        ("V15", "the real GOVERNANCE_V3.md carries the complete section-5 recovery contract", _st_v15),
+        ("V16", "every recovery needle and checkpoint record field detected when dropped", _st_v16),
+        ("V17", "checkpoint contract id pinned; empty document reports rather than raises", _st_v17),
+        ("V18", "authority-restoring wording added to section 5 is rejected", _st_v18),
+        ("V19", "host-OS budget filter: within-budget tolerated, growth and unlisted paths fail", _st_v19),
+        ("V30", "CLAUDE.md continuity pointer: canonical link, invariants, contract id", _st_v30),
+        ("V31", "the pinned constants themselves; no degenerate needle", _st_v31),
+        ("P1", "a correctly vendored provider passes every generic provider check", _st_p1),
+        ("P2", "automatic_updates not literally false", _st_p2),
+        ("P3", "upstream_commit is a floating ref / not a 40-hex SHA", _st_p3),
+        ("P4", "manifest upstream_repo mismatch and missing provenance field", _st_p4),
+        ("P5", "missing per-skill and shared license notices", _st_p5),
+        ("P6", "vendored file edited on disk without a manifest hash bump", _st_p6),
+        ("P7", "file inventory incomplete in both directions", _st_p7),
+        ("P8", "locally_modified with no patch id; local origin with no reason", _st_p8),
+        ("P9", "vendored-mode drift: bad mode, on-disk exec bit, undocumented normalization", _st_p9),
+        ("P10", "script shipped without scripts_audited (incl. extensionless shebang)", _st_p10),
+        ("P11", "patch coverage broken in each of its three directions", _st_p11),
+        ("P12", "skill references a closure file that was never vendored", _st_p12),
+        ("P13", "exclusion entry with no reason / an invalid status", _st_p13),
+        ("P14", "frontmatter allowlist widens per provider, not globally", _st_p14),
+        ("P15", "{baseDir} link resolution is real, not a rubber stamp", _st_p15),
+        ("P16", "fence pairing handles nested/longer fences; strippers divide labour", _st_p16),
+        ("P17", "manifest invocation must agree with the skill's own frontmatter", _st_p17),
+        ("P18", "every registry provider is file-level; a retired schema is rejected", _st_p18),
+        ("P19", "an automated update candidate cannot masquerade as audited", _st_p19),
+        ("P20", "no governance-owned workflow on the stable line; application paths guarded", _st_p20),
+        ("I1", "real section-7 inventory reconciles with manifests, disk, and itself", _st_i1),
+        ("I2", "a missing installed skill and a section-7 name swap are caught", _st_i2),
+        ("I3", "an unapproved 82nd directory, a stale total, and table drift are caught", _st_i3),
+        ("I4", "an unparseable section 7 fails loudly", _st_i4),
+        ("I5", "section 7's explicit-invocation list is machine-tied to the manifests", _st_i5),
+        ("R1", "real routing doc covers every installed skill with true totals", _st_r1),
+        ("R2", "an unrouted skill and a stale routing total are caught", _st_r2),
+        ("P21", "native-plugin inventory ships empty and documents all three surfaces", _st_p21),
+        ("P22", "registry owns the reviewed ref, manifests own the pin (no floating pin)", _st_p22),
     ]
 
 

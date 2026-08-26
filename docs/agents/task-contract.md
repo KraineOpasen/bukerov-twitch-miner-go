@@ -14,7 +14,7 @@ task_contract:
   task_id: "<short slug>"
   mode: READ_ONLY | PROTOTYPE | CHANGE | PUBLISH_DRAFT
   repository: "KraineOpasen/bukerov-twitch-miner-go"
-  base_branch: "release/0.1"                  # the live active stable line — GOVERNANCE_V3.md §2
+  base_branch: "release/<X.Y>"                # the live active stable line the current owner/task names — GOVERNANCE_V3.md §2
   base_sha: "<HEAD sha the task started from>"
   task_branch: "<task branch name>"           # never a protected branch (main/master/release/*)
   allowed_paths: []                           # globs the session may touch; empty = repo-wide per mode's normal scope
@@ -22,9 +22,9 @@ task_contract:
   allowed_git_operations: []                  # subset of: branch, commit, push, rebase, merge_local
   allowed_github_operations: []               # subset of: issue_read, issue_write, pr_read, pr_draft, pr_comment
   quality_tier: Q0 | Q1 | Q2 | Q3              # see docs/agents/quality-gates.md
-  agent_cap: <int>                             # max subagents this task may have alive at once
-  max_concurrency: <int>                       # max subagents spawned in parallel in a single batch
-  orchestration: skill_native | main_context_only   # default skill_native — GOVERNANCE_V3.md §10
+  orchestration: skill_native | main_context_only   # optional; absent => skill_native — GOVERNANCE_V3.md §10
+  agent_cap: <int>                             # optional resource ceiling; absent => no cap
+  max_concurrency: <int>                       # optional resource ceiling; absent => no cap
   capabilities: []                             # named extra grants, e.g. write_research_docs, tracker_mutations
   forbidden: []                                # explicit call-outs beyond the never-grantable list below
   authorized_by: "<human, explicitly>"
@@ -46,11 +46,17 @@ task_contract:
   `docs/**`) without granting it repo-wide.
 - **`quality_tier`** states which gate this task must clear before it's considered done — not every task needs
   `Q3`; a documentation-only change may cap at `Q1`.
-- **`orchestration`** defaults to `skill_native` (`GOVERNANCE_V3.md` §10): invoking an audited skill
-  authorizes the agent topology that skill documents, and the writer invariant is **no uncontrolled
+- **`orchestration`** is optional; absent => `skill_native` (`GOVERNANCE_V3.md` §10): invoking an audited
+  skill authorizes the agent topology that skill documents, and the writer invariant is **no uncontrolled
   competing writes** — deterministic ownership partitioning with reconciliation before the final gates —
   not "one writer". `main_context_only` is a rare, explicit owner/task opt-out, never the default; every
   child agent inherits the envelope (child ≤ parent at every delegation depth).
+- **`agent_cap`** / **`max_concurrency`** are **optional resource ceilings**, not orchestration policy. They
+  are no longer mandatory and have no default: absent from the contract there is no cap, and the invoked
+  skill's own documented design governs fan-out (`GOVERNANCE_V3.md` §10). Set one only when a task genuinely
+  needs a resource bound. Where a vendored skill's local patch text or a patch-ledger row still references a
+  cap — "the task contract's `agent_cap`", "its agent cap", or any other phrasing — read it as *"respect a
+  cap if the contract sets one"*, never as an assertion that a cap always exists.
 - **`forbidden`** is for task-specific call-outs on top of the never-grantable list (e.g. a task might add
   `forbidden: [schema_migration]` if this particular change must not touch `internal/database`'s migrations)
   — it narrows further; it never removes anything from the never-grantable list (owner-gated and
@@ -62,7 +68,7 @@ A contract names one repo, one branch, one base SHA, and a ceiling on what the s
 granting `CHANGE` doesn't imply `PUBLISH_DRAFT`; granting `tracker_mutations` doesn't imply `merge`. Read the
 contract narrowly: if a capability isn't listed, treat it as not granted.
 
-A contract can never authorize merge, auto-merge, release/tag, deploy/production/TrueNAS access, workflow
+A contract can never authorize merge, auto-merge, release/tag, deploy or any runtime/production access, workflow
 trigger/rerun, or GitHub settings/secrets changes — those are owner-gated: they always require a separate,
 direct owner command, and such a command authorizes exactly one specific gated action after a fresh live
 preflight; authority does not carry from one gated action to another and is not reusable in later turns

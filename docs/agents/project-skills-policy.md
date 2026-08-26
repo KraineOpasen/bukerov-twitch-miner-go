@@ -2,8 +2,9 @@
 
 ## Purpose and ownership
 
-This is the third skill ownership class in this repository, alongside the two vendored sets
-(`docs/agents/mattpocock-skills-policy.md`, `docs/agents/anthropic-skills-policy.md`). A **project-first-party**
+This is the seventh skill ownership class in this repository, alongside the six vendored provider sets
+(each owned by its `docs/agents/<provider>-skills-policy.md`, registered in
+`docs/agents/skills-update-providers.json`). A **project-first-party**
 skill is authored and owned by this project itself: no upstream repository, no external maintainer, no vendored
 copy of someone else's work. Its inventory lives in `docs/agents/project-skills-manifest.json`
 (`ownership_class: "project-first-party"`), validated by `scripts/validate-agent-governance.py`'s
@@ -20,12 +21,25 @@ other reviewed change to this repository — write it, review it, merge it, and 
 containing `upstream` anywhere in a project entry is a schema violation (enforced by `project-manifest-valid`):
 a first-party entry must never assert provenance it doesn't have.
 
-## Governance precedence
+## Authority precedence
 
-Nothing here changes authority precedence, which is defined solely by `GOVERNANCE_V3.md` (§1, §3):
-first-party skills sit at the same invoked-audited-skill tier as the vendored sets (patched and unpatched
-bytes alike, one tier). A first-party skill instruction never overrides a `.claude/rules/*.md` constraint
-or a hook denial, exactly like a vendored one.
+Nothing here changes the project's authority chain, which has exactly four levels (see
+`GOVERNANCE_V3.md` §1 and §3), narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched and this project's own first-party
+   skills, at the same tier; ownership class changes review procedure, never authority.
+4. **Generic model behavior** — fallback only.
+
+There is no fifth tier for "unpatched upstream defaults": a first-party skill has no upstream at all, and a
+vendored skill's instructions are whatever its vendored bytes say, patched and unpatched alike, resolved inside
+level 3. A first-party skill instruction never overrides a `.claude/rules/*.md` constraint or a hook denial,
+exactly like a vendored one.
+
+On **workflow**, a first-party skill owns its documented methodology the same way a vendored one does (see
+`GOVERNANCE_V3.md` §10) — the authority chain above constrains what it may reach, not how it
+organizes its agents.
 
 ## Allowed invocation modes
 
@@ -72,8 +86,10 @@ independent comparator judging the outputs), not a self-report from the same ses
 Every first-party skill install or update goes through the same two-lens review this repository uses elsewhere
 (`code-review` skill): a **Standards** review (does it follow this repo's conventions, minimal footprint, no
 unjustified scripts/hooks) and a **Spec** review (does it do what it claims, does its eval evidence actually
-support the claim). Both reviewers are read-only — see `GOVERNANCE_V3.md` §10 (orchestration) and Q3 in
-`docs/agents/quality-gates.md`: the agent that writes the skill is never the agent that approves it.
+support the claim). The agent that writes the skill is never the agent that approves it — reviewer
+independence is a review-integrity requirement for this specific category of change, not a general
+orchestration rule (see `GOVERNANCE_V3.md` §10, which leaves reviewer topology to the invoked
+skill).
 
 ## Manifest integrity rules
 
@@ -95,7 +111,7 @@ Enforced mechanically by `project-manifest-valid` (see `scripts/validate-agent-g
   directory-existence check and no directory walk are attempted for it; the shape diagnostic is the only
   diagnostic the validator ever emits for that entry's directory.
 - Two entries must never share a `name` or a `path`, even if both are individually well-formed — a duplicate
-  is a violation in its own right, detected both within a single manifest and across all three ownership
+  is a violation in its own right, detected both within a single manifest and across all seven ownership
   sources (`unique-skill-names`, `manifest-ownership-partition`).
 - `review_status: "approved"` is required once an entry's skill directory exists on disk. `"draft"` is
   schema-valid only for a staged entry with no on-disk directory yet — the moment content lands, review must
@@ -146,8 +162,8 @@ per entry); `origin` is always the literal string `"project"` — any key contai
 entry is rejected outright (see "Distinction from vendored upstream skills"); `blob_sha` values are real
 `git hash-object` output (40 hex characters) — the placeholders above are shape examples only, never usable
 values; `eval_evidence.path` must be a tracked, repository-relative file (see "Evaluation requirement before
-installation"); `reviewed_base_sha` is the 40-hex SHA of the active development-line commit the approving review ran
-against (the live stable `release/X.Y` base — `GOVERNANCE_V3.md` §2), and `reviewed_at`
+installation"); `reviewed_base_sha` is the 40-hex SHA of the active development-line commit the approving
+review ran against (the live stable `release/X.Y` base — `GOVERNANCE_V3.md` §2), and `reviewed_at`
 is that review's `YYYY-MM-DD` date.
 
 ## Scripts and hooks policy
@@ -181,7 +197,7 @@ artifacts it produces while running belong under `/tmp` or `.scratch/` only — 
 
 ## Dedicated Draft PR requirement
 
-Each skill installation or update lands in its own dedicated Draft PR — same rule as the two vendored sets (see
+Each skill installation or update lands in its own dedicated Draft PR — same rule as the six vendored sets (see
 `mattpocock-skills-policy.md`'s "Dedicated Draft PR requirement"). Never bundle a first-party skill change into
 an unrelated feature or governance diff.
 
@@ -207,9 +223,8 @@ skill installation is a separate, later PR. The enforcement layer must exist and
 content it polices exists — a validator that ships in the same diff as the skill it's meant to check can never
 prove it would have caught a problem in that skill.
 
-## Owner-gated merge; no automatic updates
+## Human-only merge; no automatic updates
 
-Same as both vendored policies: an agent does not merge its own work here — merge is an owner-gated
-action requiring a separate, direct owner command (`GOVERNANCE_V3.md` §4). There is no CI job, scheduled
-task, or plugin mechanism that re-syncs or auto-updates a first-party skill — every change is a
-deliberate, human-reviewed PR.
+Same as the vendored policies: an agent never merges its own work here (the merge is an owner-gated,
+non-delegable action — `GOVERNANCE_V3.md` §4; `CLAUDE.md`, Governance section). There is no CI job, scheduled task, or plugin mechanism that re-syncs or auto-updates a first-party
+skill — every change is a deliberate, human-reviewed PR.

@@ -1,15 +1,15 @@
 {
   "upstream_repo": "https://github.com/anthropics/skills",
-  "upstream_commit": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "upstream_commit": "3b3fad96af16a10759d930941b4520ba0c40edae",
   "upstream_tree": {
     "skill-creator": "3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6",
     "frontend-design": "0d5b74a14bdf3ebcd64f352d06376a2ef05ed296",
     "webapp-testing": "5ffb7dc66b9fd4c25c3e400a4c00da99a349b714"
   },
-  "upstream_current_head": "b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+  "upstream_current_head": "3b3fad96af16a10759d930941b4520ba0c40edae",
   "drift": "none",
-  "reviewed_at": "2026-07-27T04:53:34Z",
-  "reviewed_by": "Claude Code Governance v2 task (Anthropic skills vendoring, single production writer)",
+  "reviewed_at": "2026-08-22T11:47:52Z",
+  "reviewed_by": "Governance v3 skill-update audit (task audit-anthropic-pr211-3b3fad96), auditing the machine-prepared candidate from .github/workflows/skills-update.yml on PR #211 after integrating current main at 78d54752a8304de8b000da39a3d1e00ca1e9acf0, rather than accepting the bot report. Upstream was re-fetched into a fresh bare read-only clone of https://github.com/anthropics/skills and inspected only through git object, tree, history and diff reads; nothing fetched from upstream was executed. Independently re-proven: 0a64e398ec6bb34a494f0c347e8ccae53a862f8e -> 3b3fad96af16a10759d930941b4520ba0c40edae is a true one-commit fast-forward (0 reverse, merge-base equal to the old pin), and refs/heads/main was exactly 3b3fad96 at review time, so drift is none. The complete upstream delta is four Markdown paths, all inside the already-excluded skills/claude-api subtree: SKILL.md and python/claude-api/README.md modified, python/claude-api/sdk-upgrade.md added, and shared/live-sources.md modified. The change adds a Python Anthropic SDK 0.x -> 1.x upgrade route and guide; it changes no installed skill, shared installed dependency, licence, script, executable bit, symlink, submodule, or installed trigger/authority surface. The existing claude-api EXCLUDE verdict was re-evaluated against the Twitch integration scope and remains correct: this repository has no Claude API SDK migration lane and the owner did not authorize adding that skill. All three installed upstream subtrees are byte-identical at both pins -- skill-creator 3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6, frontend-design 0d5b74a14bdf3ebcd64f352d06376a2ef05ed296, webapp-testing 5ffb7dc66b9fd4c25c3e400a4c00da99a349b714 -- so vendored bytes changed: 0, scripts_audited is carried forward on demonstrated identity, and no behavioural eval of the installed integration is required (EVAL_REQUIRED is not applicable). The installed selection, file inventories, per-file provenance, local patch map, patch ledger and Apache-2.0 licence evidence remain unchanged. The automated_candidate block is deleted only after this audit; this fresh reviewed_at/reviewed_by record establishes AUDITED.",
   "installation_mode": "project-local-vendored-copy",
   "automatic_updates": false,
   "license": {
@@ -22,7 +22,7 @@
       "frontend-design": "vendored LICENSE.txt has no Appendix/copyright block (ends at 'END OF TERMS AND CONDITIONS'); attribution recorded here on its behalf per Apache-2.0 practice"
     }
   },
-  "notes": "Three of upstream's 17 promoted skills (skill-creator, frontend-design, webapp-testing) are vendored here; the other 14 are excluded (see excluded_skills[]). skill-creator was renamed skill-creator-anthropic to avoid colliding with the Claude Code built-in skill of the same name, and moved from model- to user-invoked (disable-model-invocation: true). Upstream's README notes that skills/docx, skills/pdf, skills/pptx, and skills/xlsx are source-available (not open source) reference copies of Claude's built-in document capabilities -- excluded here regardless of license, since they weren't requested. See docs/agents/anthropic-skills-policy.md for the full review writeup.",
+  "notes": "Pin advanced from 0a64e398 to 3b3fad96 (PR #211, task audit-anthropic-pr211-3b3fad96) by a provenance-only audit. The single upstream commit changes four Markdown files only inside the already-excluded claude-api subtree, adding a Python Anthropic SDK 0.x -> 1.x upgrade route and guide; the claude-api EXCLUDE verdict remains unchanged because this Twitch integration has no Claude API SDK migration lane. None of the three vendored subtrees is touched, so zero vendored bytes changed and the installed selection, scripts_audited attestations, patch ledger and licence evidence are carried forward on independently re-proven subtree identity. All three upstream_tree entries (skill-creator, frontend-design, webapp-testing) are unchanged from the prior pin. At this pin upstream still promotes 19 skill directories under skills/: three are vendored and the other 16 are excluded (see excluded_skills[]). The prior 0a64e398 audit on PR #188 added the historical review of academy-guide and discernment-nudge recorded in reviewed_by history and docs/agents/anthropic-skills-policy.md. skill-creator remains renamed to skill-creator-anthropic to avoid colliding with the Claude Code built-in skill of the same name and remains user-invoked only. Upstream's README notes that skills/docx, skills/pdf, skills/pptx, and skills/xlsx are source-available (not open source) reference copies of Claude's built-in document capabilities -- excluded here regardless of license, since they were not requested. See docs/agents/anthropic-skills-policy.md for the full review writeup.",
   "skills": [
     {
       "name": "skill-creator-anthropic",
@@ -33,20 +33,21 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
-        "skc-rename-vendored",
-        "skc-user-invoked",
-        "skc-change-mode-gate",
-        "skc-workspace-tmp",
+        "anthropic-mode-normalize",
         "skc-agent-cap",
+        "skc-change-mode-gate",
+        "skc-html-no-cdn",
         "skc-no-nohup-static-viewer",
         "skc-no-open-evalreview",
-        "skc-runloop-foreground-sandbox",
         "skc-package-output-tmp",
-        "skc-html-no-cdn",
-        "skc-py-static-only-viewer",
+        "skc-py-no-autoopen-runloop",
         "skc-py-no-claudecode-strip",
         "skc-py-sandbox-guard",
-        "skc-py-no-autoopen-runloop"
+        "skc-py-static-only-viewer",
+        "skc-rename-vendored",
+        "skc-runloop-foreground-sandbox",
+        "skc-user-invoked",
+        "skc-workspace-tmp"
       ],
       "scripts_audited": true,
       "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
@@ -69,18 +70,18 @@
           "upstream_blob_sha": "65b3a402dbd09b8e83f9d637c6b553875189085c",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "5a8b7411ec734f8bec697fa0693de4a7cc6f9150",
+          "vendored_blob_sha": "c9e7fe38cf33df7682263390eea10d9ee89ad543",
           "locally_modified": true,
           "patch_ids": [
-            "skc-rename-vendored",
-            "skc-user-invoked",
-            "skc-change-mode-gate",
-            "skc-workspace-tmp",
             "skc-agent-cap",
+            "skc-change-mode-gate",
             "skc-no-nohup-static-viewer",
             "skc-no-open-evalreview",
+            "skc-package-output-tmp",
+            "skc-rename-vendored",
             "skc-runloop-foreground-sandbox",
-            "skc-package-output-tmp"
+            "skc-user-invoked",
+            "skc-workspace-tmp"
           ]
         },
         {
@@ -186,7 +187,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/generate_report.py",
@@ -198,6 +201,7 @@
           "vendored_blob_sha": "d07e808da71b200fc0908739e1c08c24354adcef",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-html-no-cdn"
           ]
         },
@@ -211,6 +215,7 @@
           "vendored_blob_sha": "4889cfde6c9f7cc7ae98960ec747eeb44b5d61eb",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-py-no-claudecode-strip"
           ]
         },
@@ -223,7 +228,9 @@
           "vendored_mode": "100644",
           "vendored_blob_sha": "f48eac444656ddc41204aac1760a217951ce609e",
           "locally_modified": false,
-          "patch_ids": []
+          "patch_ids": [
+            "anthropic-mode-normalize"
+          ]
         },
         {
           "path": ".claude/skills/skill-creator-anthropic/scripts/quick_validate.py",
@@ -235,6 +242,7 @@
           "vendored_blob_sha": "557be6266f4c11689d1f0028d62a133c315e78eb",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-user-invoked"
           ]
         },
@@ -248,6 +256,7 @@
           "vendored_blob_sha": "ed1b6c2c125510505369bd279aa7f2c902d21c5a",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-py-no-claudecode-strip",
             "skc-py-sandbox-guard"
           ]
@@ -262,6 +271,7 @@
           "vendored_blob_sha": "17db557665790992db27d6c0345830452eb62ff5",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "skc-py-no-autoopen-runloop"
           ]
         },
@@ -287,9 +297,9 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
+        "fd-artifact-paths",
         "fd-description-scope",
-        "fd-stack-pin",
-        "fd-artifact-paths"
+        "fd-stack-pin"
       ],
       "scripts_audited": null,
       "audit_ref": "not applicable -- this skill ships no scripts (SKILL.md + LICENSE.txt only)",
@@ -312,12 +322,12 @@
           "upstream_blob_sha": "decdff43d05908b4c1fc2cfd2d80fc5743440934",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "4163f8d2063472a2bfd06d7a04986ed5ae966631",
+          "vendored_blob_sha": "45311c896cdce8724865d0aaac39589647153e19",
           "locally_modified": true,
           "patch_ids": [
+            "fd-artifact-paths",
             "fd-description-scope",
-            "fd-stack-pin",
-            "fd-artifact-paths"
+            "fd-stack-pin"
           ]
         }
       ]
@@ -331,12 +341,13 @@
       "classification": "REQUIRES_LOCAL_PATCH",
       "locally_modified": true,
       "patch_ids": [
-        "webapp-testing-description-scope",
+        "anthropic-mode-normalize",
+        "webapp-testing-artifact-paths",
         "webapp-testing-audit-before-exec",
-        "webapp-testing-no-blackbox",
+        "webapp-testing-description-scope",
         "webapp-testing-localhost-only",
-        "webapp-testing-server-cleanup",
-        "webapp-testing-artifact-paths"
+        "webapp-testing-no-blackbox",
+        "webapp-testing-server-cleanup"
       ],
       "scripts_audited": true,
       "audit_ref": "read-only audit session 2026-07-27, upstream pin b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
@@ -359,13 +370,13 @@
           "upstream_blob_sha": "4726215301db64a0cc4d41fc3219c61f37a30f4a",
           "upstream_mode": "100644",
           "vendored_mode": "100644",
-          "vendored_blob_sha": "6a1efae3c00088f9d7c8801cffa2cd62dc5a53e1",
+          "vendored_blob_sha": "256b8cc59c354ea36dd91e114fd0f21efbcb6903",
           "locally_modified": true,
           "patch_ids": [
-            "webapp-testing-description-scope",
             "webapp-testing-audit-before-exec",
-            "webapp-testing-no-blackbox",
+            "webapp-testing-description-scope",
             "webapp-testing-localhost-only",
+            "webapp-testing-no-blackbox",
             "webapp-testing-server-cleanup"
           ]
         },
@@ -430,6 +441,7 @@
           "vendored_blob_sha": "d3089b1d733aef875344ab9a592a0743f8ee0bd2",
           "locally_modified": true,
           "patch_ids": [
+            "anthropic-mode-normalize",
             "webapp-testing-server-cleanup"
           ]
         }
@@ -438,74 +450,100 @@
   ],
   "excluded_skills": [
     {
+      "name": "academy-guide",
+      "upstream_path": "skills/academy-guide",
+      "reason": "Reviewed as DISCOVERY_REQUIRED at upstream 89dcaa3a283f79ed84fd8fe53e2208b9442a6427 under its then name claude-academy-guide (Issue #175), which was then ahead of the pin; that commit is now inside the reviewed tree. Upstream commit 0a64e398ec6bb34a494f0c347e8ccae53a862f8e ('Rename claude-academy-guide skill to academy-guide and shorten its description (#1605)') is the exact rename -- independently confirmed via that commit's own message and a `git diff -M` showing LICENSE.txt byte-identical (4f881c52) and SKILL.md an 88%-similarity rename, not assumed -- and that commit is now the manifest's pinned upstream_commit (Issue #187), so the EXCLUDE verdict below -- unchanged since the discovery review -- is a verdict on a skill the pin describes under its current name. End-user Claude Academy learning-recommendation skill whose distinguishing capability is recommending Academy courses/tutorials, including a runtime academy.claude.com catalog fetch. EXCLUDE on the material-addition bar: this repository has no Claude-product support/onboarding/training lane, and existing documentation/research capabilities already cover engineering grounding. The broad model-invoked Claude/Claude Code/skills/plugins/MCP trigger would add routing/context cost without a project workflow that justifies it. Apache-2.0 license and the catalog-fetch data/network hygiene were reviewed and are not grounds for exclusion. Re-evaluate if the project acquires a Claude-product education/onboarding responsibility, or the owner explicitly wants Academy guidance.",
+      "status": "EXCLUDE"
+    },
+    {
       "name": "algorithmic-art",
       "upstream_path": "skills/algorithmic-art",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "brand-guidelines",
       "upstream_path": "skills/brand-guidelines",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "canvas-design",
       "upstream_path": "skills/canvas-design",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "claude-api",
       "upstream_path": "skills/claude-api",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
+    },
+    {
+      "name": "discernment-nudge",
+      "upstream_path": "skills/discernment-nudge",
+      "reason": "New sibling skill added upstream by commit f379e5ad66e2febc1616cf8d6284666fecbe514e ('Add discernment-nudge skill', PR #1553), reviewed under Issue #187 (DISCOVERY_REQUIRED at 0a64e398ec6bb34a494f0c347e8ccae53a862f8e). Appends 2-3 short reflection questions after any substantive answer the user may act on (advice, drafted artifacts, estimates, data interpretation, factual claims, multi-step reasoning), gated to at most once per conversation. Pure prose (SKILL.md + LICENSE.txt), no scripts, no network fetch. EXCLUDE on the material-addition bar, the same standard already applied to academy-guide: this repository has no response-quality-coaching or end-user-education lane this integration's contract asks for, and the trigger is broad and ambient -- ordinary substantive replies across nearly every conversation, not a scoped engineering task -- so installing it would add routing/context cost to every reply without a project workflow that justifies it. Apache-2.0 license is not a blocker. Re-evaluate if the owner explicitly wants this response-quality behavior.",
+      "status": "EXCLUDE"
     },
     {
       "name": "doc-coauthoring",
       "upstream_path": "skills/doc-coauthoring",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract. RE-EVALUATED under Governance v3: materially in scope (a three-stage documentation co-authoring methodology), but HELD rather than installed -- the Claude Code environment already provides a builtin `doc-coauthoring` skill, so a vendored copy would collide by name and would need a rename to be installable. Revisit if the builtin is withdrawn or a rename is wanted.",
+      "status": "HOLD"
     },
     {
       "name": "docx",
       "upstream_path": "skills/docx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/docx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/docx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "internal-comms",
       "upstream_path": "skills/internal-comms",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "mcp-builder",
       "upstream_path": "skills/mcp-builder",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "pdf",
       "upstream_path": "skills/pdf",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pdf): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pdf): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "pptx",
       "upstream_path": "skills/pptx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pptx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/pptx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     },
     {
       "name": "slack-gif-creator",
       "upstream_path": "skills/slack-gif-creator",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "theme-factory",
       "upstream_path": "skills/theme-factory",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "web-artifacts-builder",
       "upstream_path": "skills/web-artifacts-builder",
-      "reason": "Not requested by this integration's contract."
+      "reason": "Not requested by this integration's contract.",
+      "status": "EXCLUDE"
     },
     {
       "name": "xlsx",
       "upstream_path": "skills/xlsx",
-      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/xlsx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license."
+      "reason": "Not requested by this integration's contract. Also source-available, not open source, per upstream README (skills/xlsx): shipped as a reference for Claude's built-in document capabilities, not under an open-source license. RE-CONFIRMED under Governance v3: upstream marks this skill source-available, NOT open source (frontmatter `license: Proprietary`), so there is no redistribution grant. This is a licence blocker, not a preference.",
+      "status": "EXCLUDE"
     }
   ],
   "excluded_upstream_paths": [

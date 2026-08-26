@@ -41,7 +41,10 @@ CURRENT OWNER DECISION
 
 ## 2. Stable line policy (branch identity)
 
-- Active development base: the **live `release/0.1` branch**. Future stable lines: `release/X.Y`.
+- Active development base: the **live current stable line `release/X.Y`** — exactly one stable line is live
+  at any time, named by the current owner decision/task contract and verified live at task start; this
+  document deliberately never hardcodes which `X.Y` (a concrete line name here would go stale exactly the
+  way a HEAD SHA does, §17). Future stable lines continue the `release/X.Y` series.
 - Historical ancestry marker (identity anchor only, not a work base): PR #148, commit
   `1cf198aa4257a5f9ba250aec29bf027870f8dad7`. Any active stable branch must be a descendant of this marker.
 - `release/pr148` is **frozen history** — never a development base.

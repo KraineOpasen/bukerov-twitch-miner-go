@@ -13,11 +13,42 @@ never share a skill name (see `scripts/validate-agent-governance.py`'s `manifest
 ## Upstream
 
 - Repo: `https://github.com/anthropics/skills`
-- Reviewed commit: `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`
-- Reviewed tree SHAs (per vendored skill directory): `skill-creator`
-  `3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6`, `frontend-design` `0d5b74a14bdf3ebcd64f352d06376a2ef05ed296`,
-  `webapp-testing` `5ffb7dc66b9fd4c25c3e400a4c00da99a349b714`
-- Current upstream HEAD at review time: same SHA (**drift: none**)
+- Reviewed commit: `3b3fad96af16a10759d930941b4520ba0c40edae` (advanced from
+  `0a64e398ec6bb34a494f0c347e8ccae53a862f8e` by a **provenance-only** audit of the machine-prepared candidate
+  on PR #211: `0a64e398 -> 3b3fad96` is a true one-commit fast-forward, with merge-base equal to the old pin and
+  zero reverse commits. The complete upstream delta is four Markdown paths, all inside the already-excluded
+  `skills/claude-api` subtree: `SKILL.md` and `python/claude-api/README.md` modified,
+  `python/claude-api/sdk-upgrade.md` added, and `shared/live-sources.md` modified. The change adds a Python
+  Anthropic SDK 0.x -> 1.x `upgrade` route and guide. The excluded skill's own behaviour/authority surface now
+  includes PyPI/network version checks, edits to Python dependency manifests, lockfiles and call sites, and
+  compile/type/test checks; its frontmatter trigger is unchanged. It touches no installed subtree, shared
+  installed dependency, licence, script, executable bit, symlink, submodule, or installed trigger/authority
+  surface, so zero vendored bytes changed. The existing `claude-api` `EXCLUDE` verdict was re-evaluated and
+  remains correct: this Twitch integration has no Claude API SDK migration lane and the owner did not authorize
+  adding that skill. Installed prose and scripts are therefore **carried forward on demonstrated byte identity,
+  not re-read end to end**; the standing end-to-end read is the one each skill's `audit_ref` records)
+- The prior pin, `0a64e398`, was advanced from `89dcaa3a283f79ed84fd8fe53e2208b9442a6427` by the
+  provenance-only audit on PR #188. Its two commits (`f379e5a` then `0a64e39`) changed five paths:
+  `.claude-plugin/marketplace.json`; the rename of
+  `skills/claude-academy-guide/{LICENSE.txt,SKILL.md}` to `skills/academy-guide/{LICENSE.txt,SKILL.md}`; and
+  the two files that added `skills/discernment-nudge`. Neither installed bytes nor installed tree SHAs changed;
+  that audit recorded both sibling skills `EXCLUDE` and closed the corresponding discovery review
+- The pin before that, `89dcaa3a`, was itself advanced from `f6656c1256d5a8adfa37db9110046ef20bac644c` by a
+  provenance-only audit on PR #176 — one commit, fast-forward, complete delta three paths
+  (`.claude-plugin/marketplace.json` and the two files that first added `skills/claude-academy-guide`) — and
+  `f6656c12` was itself refreshed from `b29e7cf65e5cb78a5ac33d582270551bc74a14eb`, also provenance-only: the
+  full selected subtree was re-audited byte-identical between those two commits, with zero content or patch
+  changes
+- Reviewed tree SHAs (per vendored skill directory), unchanged since `f6656c12` and re-proven against
+  `3b3fad96`: `skill-creator` `3cf9a8db32597ba3e24b584a3d696f4e11c7d7b6`, `frontend-design`
+  `0d5b74a14bdf3ebcd64f352d06376a2ef05ed296`, `webapp-testing` `5ffb7dc66b9fd4c25c3e400a4c00da99a349b714`.
+  This map is keyed on **upstream** directory identity, not on the vendored directory name — which is why
+  `skill-creator` appears here rather than `skill-creator-anthropic` (see "Installed: 3 skills" for the rename)
+- Current upstream HEAD at review time: `3b3fad96af16a10759d930941b4520ba0c40edae` (**drift: none**, observed
+  2026-08-22T11:47:52Z) — this is the pinned `upstream_commit` itself, confirmed from a fresh bare read-only clone
+  of `refs/heads/main`, the reviewed ref recorded in `docs/agents/skills-update-providers.json`; there is no
+  further advance to report. The promoted skill-directory set remains unchanged at 19, so this pin creates no
+  `DISCOVERY_REQUIRED` sibling-skill decision
 - Upstream's own `README.md` notes that `skills/docx`, `skills/pdf`, `skills/pptx`, and `skills/xlsx` are
   **source-available, not open source** — reference copies of the skills powering Claude's built-in document
   capabilities, shared for developers to read but not under an open-source license. None of the three skills
@@ -48,11 +79,40 @@ commit.
 
 ## Excluded
 
-- **14 non-installed promoted skills** — `algorithmic-art`, `brand-guidelines`, `canvas-design`, `claude-api`,
-  `doc-coauthoring`, `docx`, `internal-comms`, `mcp-builder`, `pdf`, `pptx`, `slack-gif-creator`,
-  `theme-factory`, `web-artifacts-builder`, `xlsx` — none requested by this integration's contract; `docx`,
-  `pdf`, `pptx`, and `xlsx` are additionally source-available-not-open-source per upstream's README (see
-  "Upstream" above). Full list with reasons in `anthropic-skills-manifest.json`'s `excluded_skills[]`.
+- **14 non-installed promoted skills, reviewed at the current pin** — `algorithmic-art`, `brand-guidelines`,
+  `canvas-design`, `claude-api`, `doc-coauthoring`, `docx`, `internal-comms`, `mcp-builder`, `pdf`, `pptx`,
+  `slack-gif-creator`, `theme-factory`, `web-artifacts-builder`, `xlsx` — none requested by this integration's
+  contract; `docx`, `pdf`, `pptx`, and `xlsx` are additionally source-available-not-open-source per upstream's
+  README (see "Upstream" above). This pin's only changed skill, `claude-api`, was re-read across its four-file
+  delta and remains `EXCLUDE`: its new Python SDK 0.x -> 1.x `upgrade` workflow would perform network checks
+  and repository edits, but adds no material capability to this repository's Twitch-miner engineering scope.
+  Full list with reasons in
+  `anthropic-skills-manifest.json`'s `excluded_skills[]`.
+- **2 discovery-reviewed exclusions, now inside the current pin**:
+  - `academy-guide` (`skills/academy-guide`), reviewed from discovery snapshot
+    `89dcaa3a283f79ed84fd8fe53e2208b9442a6427` under its then name `claude-academy-guide` (Issue #175) while
+    that commit was still ahead of the pin. Upstream commit `0a64e398ec6bb34a494f0c347e8ccae53a862f8e`
+    ("Rename claude-academy-guide skill to academy-guide and shorten its description (#1605)") is the exact
+    rename — confirmed by that commit's own message and a `git diff -M` showing `LICENSE.txt` byte-identical
+    and `SKILL.md` an 88%-similarity rename, not assumed — and `0a64e398` is the prior pin where that rename
+    entered this project's reviewed history. The current `3b3fad96` pin retains the subtree unchanged, so the
+    skill remains part of the reviewed tree under its current name. The verdict itself is unchanged. Recorded
+    `EXCLUDE`: an end-user Claude Academy learning-recommendation skill (broad model-invoked
+    Claude/Claude Code/skills/plugins/MCP trigger, runtime `academy.claude.com` catalog fetch) with no
+    material-addition case for this repository's engineering-only scope.
+  - `discernment-nudge` (`skills/discernment-nudge`), added upstream by commit
+    `f379e5ad66e2febc1616cf8d6284666fecbe514e` (PR #1553) and reviewed under Issue #187
+    (`DISCOVERY_REQUIRED` at `0a64e398ec6bb34a494f0c347e8ccae53a862f8e`). Appends 2-3 short reflection
+    questions after any substantive answer the user may act on, at most once per conversation; pure prose, no
+    scripts, no network fetch. Recorded `EXCLUDE` on the same material-addition bar as `academy-guide`: the
+    trigger is broad and ambient — most substantive replies, not a scoped engineering task — with no
+    response-quality-coaching lane this integration's contract asks for.
+
+  Neither entry changes the installed count above; see the manifest's `excluded_skills[]` for the full reasons.
+- **Totals at the reviewed pin** — `3b3fad96` promotes 19 skill directories under `skills/`: the 3 installed
+  above and the 16 excluded across the two bullets here (14 + `academy-guide` + `discernment-nudge`). The
+  predecessor pin `0a64e398` promotes the same 19 directories; this update changes content inside `claude-api`
+  only and adds no promoted sibling.
 - **Non-skill upstream paths** — `spec/`, `template/`, `.claude-plugin/`, `README.md`,
   `THIRD_PARTY_NOTICES.md`, `.gitignore` — repo scaffolding and marketplace metadata, not skill content. See
   `excluded_upstream_paths[]` in the manifest.
@@ -92,19 +152,50 @@ license.
 
 14 patch ids touch `skill-creator-anthropic` (across `SKILL.md` and 6 scripts/HTML files), 3 touch
 `frontend-design` (all in `SKILL.md`), and 6 touch `webapp-testing` (across `SKILL.md`, `with_server.py`, two
-examples, and the new local test file). Full ledger, one row per patch id per file:
+examples, and the new local test file). One further id, `anthropic-mode-normalize`, spans both script-bearing
+skills: it records the `100755` → `100644` mode normalization described under "Installation model" above. That
+normalization was always applied and always documented in prose, but had no id, so two content-unmodified
+files recorded a real change to the vendored artifact with an empty `patch_ids`. It now has one, and
+`provider-vendored-modes` fails closed on any undocumented mode difference in either direction. Full ledger,
+one row per patch id per file:
 `docs/agents/anthropic-skills-patches.md`. No patch translates or stylistically rewrites upstream text — every
 change narrows a capability (background execution, auto-open, CDN/network fetch, tracker-mutation-shaped
-writes into a git repo, shell-metachar execution, unbounded subagent fan-out, invocation scope) to match this
-project's governance model, the same principle `mattpocock-skills-policy.md` uses for its own patch set.
+writes into a git repo, shell-metachar execution, invocation scope) to match this project's governance model,
+the same principle `mattpocock-skills-policy.md` uses for its own patch set.
+
+### Default: minimal patching
+
+Under Governance v3 (`docs/adr/0002-canonical-governance-v3.md`), skills are preserved as
+close to their authors' intent as practical. **Do not patch a skill merely because it uses subagents, several
+writers, reviewers/critics, parallel analysis, iterative fixes, or its own handoff/orchestration pattern** —
+including fan-out that upstream leaves unbounded. That is engineering workflow, and workflow belongs to the
+skill (see `GOVERNANCE_V3.md` §10). Patch only for concrete project incompatibility, a broken
+dependency, license/provenance necessity, or a genuine authority/integrity boundary.
+
+The `skc-agent-cap` patch id, and the concurrency-cap clauses inside `skc-change-mode-gate` and
+`skc-runloop-foreground-sandbox`, were written under Governance v2's orchestration rules and would not be
+justified by the v3 test above. They are left in place, byte-identical, and are candidates for removal at the
+next re-vendor — each needs its own reviewed PR through the update procedure below.
 
 ## Governance precedence
 
-Vendored skills sit **below** this project's own policy. Authority precedence is defined solely by
-`GOVERNANCE_V3.md` (§1, §3): invoked audited skills — this set and the Matt Pocock set, patched and
-unpatched vendored bytes alike, one tier — rank below the owner decision, the current task contract, the
-canonical governance document, and live active stable repository evidence. A skill instruction never
-overrides a `.claude/rules/*.md` constraint or a hook denial.
+Vendored skills sit **below** this project's own policy **on authority**. The authority chain has exactly four
+levels (see `GOVERNANCE_V3.md` §1 and §3, whose assigned positions this repo-native chain elaborates),
+narrowing only — each layer may restrict, never widen:
+
+1. **Owner / task contract** — the authority envelope.
+2. **`CLAUDE.md` + `.claude/rules/*.md`** — repository safety and integrity invariants.
+3. **Invoked audited skill instructions** — vendored skills as patched (both this set and the Matt Pocock set).
+4. **Generic model behavior** — fallback only.
+
+Unpatched upstream text is **not** a separate tier below the patches: a vendored skill's instructions are
+whatever its vendored bytes say, patched and unpatched alike, and they all sit together at level 3. Where a
+local patch and the upstream text around it disagree, the patch wins — that is what patching means, and it is
+resolved inside level 3 rather than by a fifth level. A skill instruction never overrides a
+`.claude/rules/*.md` constraint or a hook denial.
+
+**On workflow the order is inverted**: an invoked audited skill owns its documented engineering methodology —
+agents, lanes, reviewers, writers, repair loops — and the project does not override it. See `GOVERNANCE_V3.md` §10.
 
 ## Supply-chain assumptions
 
@@ -115,8 +206,10 @@ hashes **per file**, not just per `SKILL.md` (`mattpocock-skills-manifest.json`'
 `skill-creator-anthropic` and `webapp-testing` ship real executable scripts (Python; `with_server.py` spawns
 subprocesses and manages process groups), so the script content itself, not just the prose instructions, is
 part of what a re-review must re-audit. `scripts_audited: true` in the manifest, with an `audit_ref`, records
-that every `.py`/`.html`/`.sh` file in those two skills' `files[]` was read end-to-end during this review, not
-just diffed.
+that every `.py`/`.html`/`.sh` file in those two skills' `files[]` was read end-to-end **during the review that
+`audit_ref` names**, not just diffed. It is that read the attestation stands on. A later provenance-only pin
+advance carries the attestation forward only by proving those bytes did not change; it does not re-establish it
+and does not claim a fresh end-to-end read (see "Upstream" above).
 
 Every `files[]` entry, in every skill, carries a `vendored_blob_sha` — the `git hash-object` of the file as
 committed to this repo right now. For an unmodified file this equals `upstream_blob_sha` (both are checked);
@@ -125,10 +218,55 @@ for a locally patched file or the local-origin test file, it's the only hash pin
 closes a gap the original design otherwise had: before `vendored_blob_sha` existed, a patched or local-origin
 file had no content-level integrity check at all — only "was it marked as modified" was verified, not "does it
 still say what the ledger says it says." Now `scripts/validate-agent-governance.py`'s
-`anthropic-file-hashes-verified-locally` check fails closed on ANY on-disk edit to ANY vendored file (patched,
+`provider-file-hashes` check (formerly `anthropic-file-hashes-verified-locally`, generalized when the
+validator's provider registry was made generic — same logic, now applied to every file-level provider) fails
+closed on ANY on-disk edit to ANY vendored file (patched,
 audited, or local-origin) that isn't accompanied by a deliberate `vendored_blob_sha` bump in the manifest —
 which is exactly the re-audit forcing function: you cannot silently edit `with_server.py` (or any other
 already-reviewed script) and have the validator stay green.
+
+## Automated drift detection
+
+`automatic_updates` stays **false**: nothing here is ever updated without review. What is automated is
+*noticing*, and the mechanical half of preparing a re-vendor.
+
+A scheduled workflow (`.github/workflows/skills-update.yml`) resolves this provider's reviewed branch —
+recorded in `docs/agents/skills-update-providers.json`, which owns the ref while this manifest owns the
+pin — to a concrete commit each day. When nothing has moved it does nothing at all: no branch, no pull
+request, no issue, no comment. When something has moved it either opens **one Draft PR** carrying
+refreshed bytes and regenerated provenance, or — if any judgement call is required — refuses entirely
+and opens **one deduplicated issue** explaining why. It never opens a partial or conflicted PR.
+
+A candidate it produces is **not** a reviewed pin. The manifest it writes carries an
+`automated_candidate` block, and `scripts/validate-agent-governance.py` fails while that block is
+present, so the candidate cannot pass the governance gate on automation alone. `reviewed_at` and
+`reviewed_by` are left untouched, because they remain true statements about the superseded commit.
+Clearing the candidate state — reading the diff, re-asserting any withdrawn `scripts_audited`, recording
+fresh review fields, deleting the block — is the human step the update procedure below describes, and
+the bot cannot perform it.
+
+Upstream is read as data: repositories are fetched bare and read through `git cat-file`, never checked
+out, and no fetched script is ever executed, including to assess it.
+
+Three further rules bound what a candidate can be. **Only a fast-forward** from the reviewed
+commit is ever prepared: if upstream's history diverged, was rewritten, or no longer contains the
+reviewed commit, that is BLOCKED — a force-push that swaps reviewed history for different content
+of the same shape passes every tree-content check, so the history relation is the only thing that
+catches it. **The trigger surface is audit-required**, and it includes `description` and
+`when_to_use`: those are what the model reads to decide whether to invoke a skill, so an upstream
+rewording changes when the skill fires. And **provenance is not behavioural equivalence** — a
+candidate whose changed bytes could alter behaviour is marked `EVAL_REQUIRED`, with old-vs-candidate
+instructions to run in a fresh Claude session; the bot never runs evals itself.
+
+A new skill appearing upstream *outside* this project's installed selection is not installed and
+does not block this provider's other updates; it opens its own deduplicated `DISCOVERY_REQUIRED`
+issue so adopting it stays a human decision taken on its own schedule.
+
+Full detail, including the nine blocked conditions and the security posture:
+`docs/agents/skills-update-automation.md` on the repository's default branch (`main`) — under GitHub
+scheduled-workflow semantics the automation is defined and runs only there; this stable line is not
+maintained by it and receives audited refreshes via the normal task-branch/PR path
+(`docs/agents/skills-routing.md`, "Keeping the stack itself current").
 
 ## Update procedure
 
@@ -140,9 +278,11 @@ already-reviewed script) and have the validator stay green.
    raw upstream — several files are locally patched) to isolate genuinely new upstream content from an old
    patch.
 4. Re-run the same review judgment as the original vendoring for anything new: does it assume standing
-   background execution, auto-open, external network fetch, unbounded fan-out, or a write into a git working
-   tree this project doesn't grant by default? If so, patch it the same way (minimal, marked, no rewrites,
-   `scripts_audited: true` re-confirmed for any touched script) rather than installing it unpatched.
+   background execution, auto-open, external network fetch, or a write into a git working tree this project
+   doesn't grant by default? If so, patch it the same way (minimal, marked, no rewrites, `scripts_audited:
+   true` re-confirmed for any touched script) rather than installing it unpatched. The test is **authority**,
+   not orchestration — a skill's agent topology, fan-out width, writer count, reviewer lanes and repair loops
+   are not grounds for a patch (see "Default: minimal patching" above).
 5. Update `upstream_commit`, `upstream_tree`, `upstream_current_head`, `drift`, and `reviewed_at` in
    `anthropic-skills-manifest.json`; update every touched file's `upstream_blob_sha`/`upstream_mode` and
    `locally_modified`/`patch_ids`. Recompute `vendored_blob_sha` (`git hash-object <path>`) for every touched
@@ -171,7 +311,7 @@ Positive/negative expectations, useful when re-tuning any of these three descrip
 | --- | --- | --- |
 | `skill-creator-anthropic` | Only the explicit `/skill-creator-anthropic` invocation. | A plain "create a skill for X" (routes to the built-in `skill-creator` instead — that's the point of the rename); "benchmark `internal/models`'s bet strategies" (that's `go test -bench`, not a skill-triggering eval). |
 | `frontend-design` | "Restyle the dashboard's streamer detail page with a more distinctive look"; "the settings page looks templated, make it feel intentional." | Backend/API/schema work ("add a new settings field", "change the analytics query") — out of scope per `fd-stack-pin`; wanting several candidate directions at once — that's `prototype`; picking chart series colors — that's `dataviz`'s territory, not this skill's. |
-| `webapp-testing` | "Click through the dashboard at localhost:8080 and confirm the notifications toggle works"; "screenshot the settings page after my CSS change." | "Add tests for the analytics repository" (that's `go test`/`tdd`, not browser automation); "debug why the dashboard shows stale data" (that's `diagnosing-bugs`'s loop — this skill only supplies browser evidence into it); anything naming a production or TrueNAS host — refused outright by the `webapp-testing-localhost-only` patch. |
+| `webapp-testing` | "Click through the dashboard at localhost:8080 and confirm the notifications toggle works"; "screenshot the settings page after my CSS change." | "Add tests for the analytics repository" (that's `go test`/`tdd`, not browser automation); "debug why the dashboard shows stale data" (that's `diagnosing-bugs`'s loop — this skill only supplies browser evidence into it); anything naming a production or remote host — refused outright by the `webapp-testing-localhost-only` patch. |
 
 The eval/benchmark loop inside `skill-creator-anthropic` never auto-starts for any of this — it only runs when
 a user explicitly asks for it in the current session (per the `skc-change-mode-gate` patch).

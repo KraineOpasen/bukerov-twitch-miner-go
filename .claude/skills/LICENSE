@@ -1,3 +1,38 @@
+SCOPE OF THIS NOTICE
+====================
+
+This MIT notice covers the vendored `mattpocock/skills` set ONLY -- the 23 skill
+directories claimed by docs/agents/mattpocock-skills-manifest.json. It is the
+shared notice for that one provider, which is why those 23 directories carry no
+licence file of their own. It does NOT license this directory as a whole.
+
+.claude/skills/ holds 81 vendored skills from six providers under three
+different licences (MIT, Apache-2.0 and CC BY-SA 4.0). Every skill directory
+outside the mattpocock set carries its own licence file; read that file, not
+this one:
+
+  Provider                                   Skills  Licence          Notice
+  -----------------------------------------  ------  ---------------  ----------------------
+  mattpocock/skills                              23  MIT              this file (shared)
+  anthropics/skills                               3  Apache-2.0       <skill>/LICENSE.txt
+  EveryInc/compound-engineering-plugin           22  MIT              <skill>/LICENSE
+  trailofbits/skills                             23  CC BY-SA 4.0     <skill>/LICENSE
+  github/awesome-copilot                          5  MIT              <skill>/LICENSE
+  BuilderIO/skills                                5  MIT              <skill>/LICENSE
+
+Note in particular that the 23 trailofbits/skills directories are CC BY-SA 4.0,
+a copyleft licence with ShareAlike and modification-marking obligations that MIT
+does not impose. Do not assume MIT terms for anything outside the mattpocock set.
+
+Which provider owns a given skill directory is recorded in
+docs/agents/<provider>-skills-manifest.json, and enforced by
+scripts/validate-agent-governance.py. This repository's own source code is
+GPL-3.0 and is licensed separately from all of the above.
+
+The unmodified mattpocock/skills MIT notice follows.
+
+------------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 Matt Pocock

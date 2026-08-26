@@ -1,0 +1,2878 @@
+{
+  "upstream_repo": "https://github.com/trailofbits/skills",
+  "upstream_commit": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
+  "upstream_tree": {
+    "audit-augmentation": "3cd7bb5361170da22144c5213abfcc0c0ec1bd0c",
+    "audit-context-building": "2fee1a2e10b9c861e97013d192a81379d070a60e",
+    "codeql": "133904ce64269ea30c935b45f649f5490dcf3e47",
+    "diagramming-code": "a0c6d08f074d64e142a3d0025cd311dbd30884d6",
+    "differential-review": "d17cb48c3f06fef093655aab9c05780b2d26dd46",
+    "fp-check": "9f74aca5c287b23ce09287765b20deb4690b4354",
+    "genotoxic": "5d9f23d8e2cbfacdea3782bf5a3d215e5188a581",
+    "graph-evolution": "df931319bf853adf5b5e981534334edda412a48f",
+    "harness-writing": "26a2eeb60144a9939a51be80880a3499c9c4b36c",
+    "mutation-testing": "4f4277111f7b202a51db4992ceea42ca508f8e82",
+    "property-based-testing": "cba63e1f5f8ed793b6c682a7e3075e1ef1b4ad63",
+    "sarif-parsing": "1a1e81517893e317da12f5e1430e6a9dde6681af",
+    "semgrep": "4bab3a7eb469ce14316042c5dafc0cfae2853081",
+    "semgrep-rule-creator": "bcf995235debdae24f74eb329dfac14cfcae6700",
+    "sharp-edges": "bdea50dfccb17c36e5f220ce810caccbb108d2c5",
+    "spec-to-code-compliance": "46b94817e78aa3140cc589d4bbd876a1b0d274c4",
+    "supply-chain-risk-auditor": "e0f446332d689ade2947cfba3480a8c194231640",
+    "trailmark": "f242a28bd9c68932fa3d0fcb62005ffbe5953a56",
+    "trailmark-finding-triage": "f34e122b5cc925dc9d57f2fe09a3a75df3fc4d8d",
+    "trailmark-review-gate": "ce15978b24f42f7de165337bfc5eab8185b5e2ce",
+    "trailmark-variant-neighborhood": "2b2565a515c909775adb2fdfefde17a8edf3989a",
+    "variant-analysis": "30e3e125f907fb265e0cddecf2616e0a7a43d6dd",
+    "vulnerability-triage-brocards": "d7bb84ba652643b0cac54a5dae8c33f50fb69be7"
+  },
+  "upstream_current_head": "07bce8a2c8ccc56c5b44b7067a04b8bf46128f05",
+  "drift": "none",
+  "reviewed_at": "2026-08-19T06:45:36Z",
+  "reviewed_by": "Governance v3 provenance audit (task trailofbits-07bce8a2-provenance-audit, contract authorized_by KraineOpasen): advances the reviewed pin from 04b24117 (previous audit: task trailofbits-property-based-testing-04b24117 / Issue #177, which read the reworked property-based-testing closure in full and verified the other 22 installed skills by exact subtree/blob identity) to 07bce8a2, the 9-commit fast-forward this repo's own automated skills-update bot had already staged in Draft PR #190. Independently re-verified against a fresh read-only clone of trailofbits/skills rather than trusting the bot's or the prior task's claim: `git merge-base --is-ancestor 04b24117 07bce8a2` confirms true fast-forward ancestry (not a rewrite); `git fetch origin main` on the clone resolves to 07bce8a2 exactly, matching the recorded upstream_ref; a full `git diff --name-status` between the two commits shows all 47 changed files fall into the new out-of-scope plugins/goal-prompt/ (a brand-new plugin, deliberately left to the update bot's own DISCOVERY_REQUIRED schedule per this policy's drift-handling rule) or plugins/modern-python/ (one of the 31 upstream skill directories this policy's Excluded/Held accounting ruled out only at plugin granularity, not a per-skill EXCLUDE verdict -- its diff here includes real shim-script content changes, not just metadata) or the already-EXCLUDE-verdicted plugins/semgrep-rule-variant-creator/, plugins/trailmark/skills/{slicing-code-context,vector-forge}/ (all three re-checked against the new bytes: none of their EXCLUDE rationale -- missing plugin-root Workflow runtime, confidentiality/context-budget scope, cryptographic scope this project lacks -- turns on file content that changed here), plus non-vendored repo infrastructure (.github/, .claude-plugin/ including plugins/trailmark/'s own nested plugin.json version bump, AGENTS.md, CODEOWNERS, root README.md); explicit per-path diffs against all 23 installed skill upstream_paths and all 5 relocated plugin-root agents/ directories return zero changed files; the root LICENSE blob is untouched; and a spot-check of 5 of the 23 upstream_tree hashes (audit-augmentation, codeql, differential-review, property-based-testing, vulnerability-triage-brocards) recomputed directly from the clone at 07bce8a2 matches every value already recorded in this manifest's upstream_tree map byte for byte. No vendored file, licence, frontmatter authority-surface key, or patch context changed as a result: every files[] entry's upstream_blob_sha/vendored_blob_sha pair from the 04b24117 review remains correct verbatim at 07bce8a2, so none were re-touched here. A subsequent ce-code-review pass (correctness, project-standards, agent-native, adversarial, run independently) corroborated this: agent-native empirically confirmed that deleting the automated_candidate block flips exactly the no-unaudited-update-candidate check and nothing else, by re-running the validator against the pre-edit and post-edit tree; adversarial independently re-verified the entire upstream diff against its own reading of the clone (all 23 skills' tree hashes and all 181 tracked blob hashes, not just this audit's 5-skill spot-check) and confirms drift:none is correct. Two reviewers (correctness, agent-native) independently caught, and this text now corrects, an earlier drafting error that called modern-python 'already-EXCLUDE-verdicted'. GOVERNANCE_UPSTREAM_DIR_TRAILOFBITS was then set to the clone and the validator re-run in its stricter upstream-hash-comparison mode: provider-file-hashes passed with hashes additionally verified against the live upstream clone, not merely self-consistency. Two systemic gaps the adversarial pass named are accepted as out of this task's scope, not fixed here: no-unaudited-update-candidate is not wired into any required CI check (a .github/workflows change needing separate explicit authorization), and this stricter upstream-clone validation mode is opt-in rather than the default for provenance audits of this class.",
+  "installation_mode": "project-local-vendored-copy",
+  "automatic_updates": false,
+  "license": {
+    "spdx": "CC-BY-SA-4.0",
+    "per_skill_license_file": "LICENSE",
+    "attribution": "Trail of Bits — https://github.com/trailofbits/skills",
+    "notes": "CC BY-SA 4.0 s3(a)(1) requires retaining the licence notice, attribution and a copy of (or link to) the licence with every distributed copy, and s3(a)(1)(B) requires indicating modifications. The upstream LICENCE text is copied verbatim into every vendored skill directory; modifications are marked in-file with bukerov-local-patch markers and itemised in the patch ledger. s3(b) ShareAlike: any adaptation of this material stays under CC BY-SA 4.0. This is separate from the repository's own GPL-3.0 licence, which covers the miner's source code, not this vendored documentation."
+  },
+  "notes": "23 of upstream's 78 skills are vendored. Upstream ships skills as Claude Code PLUGINS (plugins/<plugin>/skills/<skill>/), and two structural adaptations were required for a project-local install: (1) each skill's own agents/ directory contains ONLY openai.yaml -- Codex marketplace interface metadata (icons, brand colour), not an agent definition, and a forbidden vendored filename in this repo -- so it is excluded; (2) the real Claude Code subagent definitions live at PLUGIN level (plugins/<plugin>/agents/*.md), outside the skill directory, so the seven that the installed skills actually dispatch are relocated into each skill's own agents/ directory to keep the dependency closure complete. Trail of Bits writes intra-skill paths as {baseDir}/... (their documented convention for the skill's own directory); the validator resolves that token rather than the vendoring rewriting hundreds of upstream lines.",
+  "skills": [
+    {
+      "name": "audit-augmentation",
+      "path": ".claude/skills/audit-augmentation",
+      "upstream_path": "plugins/trailmark/skills/audit-augmentation",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/audit-augmentation/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/audit-augmentation/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/audit-augmentation/SKILL.md",
+          "upstream_blob_sha": "26038a1550bf50027eb05e8b4e9eb076f1da7164",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "26038a1550bf50027eb05e8b4e9eb076f1da7164",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/audit-augmentation/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/audit-augmentation/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/audit-augmentation/references/formats.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/audit-augmentation/references/formats.md",
+          "upstream_blob_sha": "b89a9c49b29bb2bf97c292c3aab96d917cf20522",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b89a9c49b29bb2bf97c292c3aab96d917cf20522",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "audit-context-building",
+      "path": ".claude/skills/audit-context-building",
+      "upstream_path": "plugins/audit-context-building/skills/audit-context-building",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-no-plugin-workflow",
+        "tob-plugin-agents-relocated"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/audit-context-building/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/audit-context-building/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/skills/audit-context-building/SKILL.md",
+          "upstream_blob_sha": "0c636031fc56264ec7201c2813fbc154485fd74f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d70fb53a6c81d2af2c27b2c972ee1b8296bb1c11",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
+        },
+        {
+          "path": ".claude/skills/audit-context-building/agents/function-analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/agents/function-analyzer.md",
+          "upstream_blob_sha": "fc7c5408c704ab777a67dd4444cb5c49efc41bbf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "97225752f49b33998dd74a8e277b6edbd7820af1",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-plugin-agents-relocated"
+          ],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/audit-context-building/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/skills/audit-context-building/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/audit-context-building/resources/ANALYSIS_FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/skills/audit-context-building/resources/ANALYSIS_FORMAT.md",
+          "upstream_blob_sha": "edabd5ddabdaf4690b8b86cdd95f4142956cb640",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8013f884a1e6875dd8165b091612dd76ca9fe2a3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
+        },
+        {
+          "path": ".claude/skills/audit-context-building/resources/DOMAIN_NOTES.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/skills/audit-context-building/resources/DOMAIN_NOTES.md",
+          "upstream_blob_sha": "eea579c744dbd755e1dd60c44b96d0c11bea8068",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eea579c744dbd755e1dd60c44b96d0c11bea8068",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/audit-context-building/resources/FUNCTION_MICRO_ANALYSIS_EXAMPLE.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/audit-context-building/skills/audit-context-building/resources/FUNCTION_MICRO_ANALYSIS_EXAMPLE.md",
+          "upstream_blob_sha": "4f5f47f497aad03b5de8e4cec5e10b3e209e26ad",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4f5f47f497aad03b5de8e4cec5e10b3e209e26ad",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "codeql",
+      "path": ".claude/skills/codeql",
+      "upstream_path": "plugins/static-analysis/skills/codeql",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-exec-bit-interpreter",
+        "tob-mode-normalize",
+        "tob-no-plugin-workflow"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/codeql/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/codeql/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/SKILL.md",
+          "upstream_blob_sha": "79856ae812a9c6bedbbf0cb410aa474e1091f701",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8886128ce8df5199635baa5138cad795bc3f52da",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter",
+            "tob-no-plugin-workflow"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/build-fixes.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/build-fixes.md",
+          "upstream_blob_sha": "69994a59d53fc37e275c8a6a67aa90153a89a0d9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "69994a59d53fc37e275c8a6a67aa90153a89a0d9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/diagnostic-query-templates.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/diagnostic-query-templates.md",
+          "upstream_blob_sha": "0203570f2d055c0639ae343c999d127f471b3ec2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0203570f2d055c0639ae343c999d127f471b3ec2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/extension-yaml-format.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/extension-yaml-format.md",
+          "upstream_blob_sha": "5b180b115d102f96ae0fb2c1528a4d803a5464c6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5b180b115d102f96ae0fb2c1528a4d803a5464c6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/important-only-suite.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/important-only-suite.md",
+          "upstream_blob_sha": "9f168e0bae5c3318282cfd6e7b1d554dc985ab2c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ba7255f0c79b438b26613921fa6b4b37a04372d5",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/references/language-details.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/language-details.md",
+          "upstream_blob_sha": "659c0a8bbb50e707e0acc3332f5d5a348168d586",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "659c0a8bbb50e707e0acc3332f5d5a348168d586",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/macos-arm64e-workaround.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/macos-arm64e-workaround.md",
+          "upstream_blob_sha": "e068c32e44b83d58b55af7b972fd380a7481a6d1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e068c32e44b83d58b55af7b972fd380a7481a6d1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/performance-tuning.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/performance-tuning.md",
+          "upstream_blob_sha": "54a0311bd0fb9d7bc4f55fe023ace8d78f5ef226",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "54a0311bd0fb9d7bc4f55fe023ace8d78f5ef226",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/quality-assessment.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/quality-assessment.md",
+          "upstream_blob_sha": "dfeebb9f61235f3de0b9cade44750142b662017a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dfeebb9f61235f3de0b9cade44750142b662017a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/ruleset-catalog.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/ruleset-catalog.md",
+          "upstream_blob_sha": "2ecb6f3ce361cd69ccff0b2a31753d52a410333a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2ecb6f3ce361cd69ccff0b2a31753d52a410333a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/run-all-suite.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/run-all-suite.md",
+          "upstream_blob_sha": "17e3a3acfabe7521e47378b46003d40cf83c24d6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ffd6eb6b0ede8eeb93e8887d50e8f63342f2f850",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/references/sarif-processing.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/sarif-processing.md",
+          "upstream_blob_sha": "726e2f049f7eba3fd0c0b65e3f6da1ae0a235126",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "726e2f049f7eba3fd0c0b65e3f6da1ae0a235126",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/references/threat-models.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/references/threat-models.md",
+          "upstream_blob_sha": "40718e997cc608e11c0af0fac91b03573811543f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "40718e997cc608e11c0af0fac91b03573811543f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/build_log.sh",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/build_log.sh",
+          "upstream_blob_sha": "6d561e8767279140fd958f622078ca83ebf73438",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6d561e8767279140fd958f622078ca83ebf73438",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/check_db_quality.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/check_db_quality.py",
+          "upstream_blob_sha": "7ada3a5881f28bc798511597e1b0ed000c13a6ab",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7ada3a5881f28bc798511597e1b0ed000c13a6ab",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/find_databases.sh",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/find_databases.sh",
+          "upstream_blob_sha": "889b79b08a8ab6d77a4b6e5008a1764e3ec916e3",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "889b79b08a8ab6d77a4b6e5008a1764e3ec916e3",
+          "locally_modified": false,
+          "patch_ids": [
+            "tob-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/generate_suite.sh",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/generate_suite.sh",
+          "upstream_blob_sha": "ed845c5b0ccb9728b2c68cf1c0954a152cbf465f",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ed845c5b0ccb9728b2c68cf1c0954a152cbf465f",
+          "locally_modified": false,
+          "patch_ids": [
+            "tob-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/pyproject.toml",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/pyproject.toml",
+          "upstream_blob_sha": "06559cad79aabdd6c7c2ca700d3b9ee146bdfc57",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "06559cad79aabdd6c7c2ca700d3b9ee146bdfc57",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_build_log.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_build_log.py",
+          "upstream_blob_sha": "01df07bbb62a308570f8930b12fdd6a0fcdc1428",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "01df07bbb62a308570f8930b12fdd6a0fcdc1428",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_build_mode_claims.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_build_mode_claims.py",
+          "upstream_blob_sha": "71104bad725faa12b5d0722ed313801305784db8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "71104bad725faa12b5d0722ed313801305784db8",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_check_db_quality.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_check_db_quality.py",
+          "upstream_blob_sha": "ef904fcf98374e64ffff226d778bf0dfff11e12b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ef904fcf98374e64ffff226d778bf0dfff11e12b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_find_databases.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_find_databases.py",
+          "upstream_blob_sha": "0e574c04a3f06fbecb80f2bc9544fa6de2932c27",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0e574c04a3f06fbecb80f2bc9544fa6de2932c27",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_generation_scripts.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_generation_scripts.py",
+          "upstream_blob_sha": "428733a9256bd92c0d49d5c5c02d3de0cc7acf29",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "428733a9256bd92c0d49d5c5c02d3de0cc7acf29",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_script_flags.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_script_flags.py",
+          "upstream_blob_sha": "281db92e6370dc74f846f29ef28f17067425c7f6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "281db92e6370dc74f846f29ef28f17067425c7f6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_section_pointers.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_section_pointers.py",
+          "upstream_blob_sha": "8a16d5bbe8209bd2ef79b313310443ed8fa9bb5f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8a16d5bbe8209bd2ef79b313310443ed8fa9bb5f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_shell_blocks.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_shell_blocks.py",
+          "upstream_blob_sha": "e9d7af817a9fb5255ecf4bfddeabcb127a577367",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e9d7af817a9fb5255ecf4bfddeabcb127a577367",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_suite_templates.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_suite_templates.py",
+          "upstream_blob_sha": "57fa9d8cad4ddf856bc35301697ba24f6a2125cb",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "57fa9d8cad4ddf856bc35301697ba24f6a2125cb",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/test_verify_query_suite.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/test_verify_query_suite.py",
+          "upstream_blob_sha": "0680c47b362aeed4274afaf208f6381b9918d805",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0680c47b362aeed4274afaf208f6381b9918d805",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/scripts/verify_query_suite.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/scripts/verify_query_suite.py",
+          "upstream_blob_sha": "f9d9cb8e2acef3b6cfef31df1168866fee788f4f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f9d9cb8e2acef3b6cfef31df1168866fee788f4f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/workflows/build-database.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/workflows/build-database.md",
+          "upstream_blob_sha": "f9d820572b76d3d46158248fa6d7feedafcff4cd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f9d820572b76d3d46158248fa6d7feedafcff4cd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/codeql/workflows/create-data-extensions.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/workflows/create-data-extensions.md",
+          "upstream_blob_sha": "b83d3d229d92f7f114e425898d5f9b3435af5810",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c866aeda7111dfbeb08d07b2fcb1a94ad6ced187",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
+        },
+        {
+          "path": ".claude/skills/codeql/workflows/run-analysis.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/codeql/workflows/run-analysis.md",
+          "upstream_blob_sha": "534e81411044cc475b7fa6c52472d08b863ddd16",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "19bca42f97657e9cdc56047de52f4af9bd7463fc",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "diagramming-code",
+      "path": ".claude/skills/diagramming-code",
+      "upstream_path": "plugins/trailmark/skills/diagramming-code",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/diagramming-code/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/diagramming-code/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/diagramming-code/SKILL.md",
+          "upstream_blob_sha": "7d1158d352490b8b6d074bd1d85c36dd0a591d5c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7d1158d352490b8b6d074bd1d85c36dd0a591d5c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/diagramming-code/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/diagramming-code/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/diagramming-code/references/diagram-types.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/diagramming-code/references/diagram-types.md",
+          "upstream_blob_sha": "dac2ed0c6ce45337ff83c77080ac25e8b9795dad",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dac2ed0c6ce45337ff83c77080ac25e8b9795dad",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/diagramming-code/references/mermaid-syntax.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/diagramming-code/references/mermaid-syntax.md",
+          "upstream_blob_sha": "ff1a0b42d91523447137c4fa6567996ade45fa56",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "ff1a0b42d91523447137c4fa6567996ade45fa56",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/diagramming-code/scripts/diagram.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/diagramming-code/scripts/diagram.py",
+          "upstream_blob_sha": "6d632e63c122b64cfd310d7507910622e6b636c1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6d632e63c122b64cfd310d7507910622e6b636c1",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "differential-review",
+      "path": ".claude/skills/differential-review",
+      "upstream_path": "plugins/differential-review/skills/differential-review",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer",
+        "tob-no-tree-mutation",
+        "tob-plugin-agents-relocated"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/differential-review/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/differential-review/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/SKILL.md",
+          "upstream_blob_sha": "3755d4773d231cd13b7bfd1ecd6ad243150480bd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "04eba55a1ce32b1c18bce032225e47429efe4395",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
+        },
+        {
+          "path": ".claude/skills/differential-review/adversarial.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/adversarial.md",
+          "upstream_blob_sha": "0176d374bc2d9d59f114b647cb21f0685bc7e9f3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0176d374bc2d9d59f114b647cb21f0685bc7e9f3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/differential-review/agents/adversarial-modeler.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/agents/adversarial-modeler.md",
+          "upstream_blob_sha": "b7c1dbace7a07650d504e6d9765b6de193a844f0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b8299a487b99b097262a34df14a60846e2136f42",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-plugin-agents-relocated"
+          ],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/differential-review/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/differential-review/methodology.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/methodology.md",
+          "upstream_blob_sha": "71d9dc0babf1417ee79ec8d5214ea690d0c2fe6b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "118f67b1187ab96bf88b89977b7a133a478c2bc1",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-tree-mutation"
+          ]
+        },
+        {
+          "path": ".claude/skills/differential-review/patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/patterns.md",
+          "upstream_blob_sha": "71078a725d986c90d014cceff0cc54414ad3b1a1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f6bcff6e0e3f20d2bf2f3a1b1378610674e75ba3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
+        },
+        {
+          "path": ".claude/skills/differential-review/reporting.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/differential-review/skills/differential-review/reporting.md",
+          "upstream_blob_sha": "cb5e37b4eab89c429bf6f968d3e3482adaa39faa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dd19aa615a34e3578bca72bc2529a46c9cb814dc",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fp-check",
+      "path": ".claude/skills/fp-check",
+      "upstream_path": "plugins/fp-check/skills/fp-check",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/fp-check/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/fp-check/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/SKILL.md",
+          "upstream_blob_sha": "b7e7278cbae101f948f39890e5dcc088248d789d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b7e7278cbae101f948f39890e5dcc088248d789d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/agents/data-flow-analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/agents/data-flow-analyzer.md",
+          "upstream_blob_sha": "750d280f353036717918dfddd00abc9cd1e30e88",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "750d280f353036717918dfddd00abc9cd1e30e88",
+          "locally_modified": false,
+          "patch_ids": [],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/fp-check/agents/exploitability-verifier.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/agents/exploitability-verifier.md",
+          "upstream_blob_sha": "e08550fbfdbd0bb9c707e7797a10937cfebc74db",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e08550fbfdbd0bb9c707e7797a10937cfebc74db",
+          "locally_modified": false,
+          "patch_ids": [],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/fp-check/agents/poc-builder.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/agents/poc-builder.md",
+          "upstream_blob_sha": "1f62da7af046a548f7d4a5070904bced3be3b6a6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1f62da7af046a548f7d4a5070904bced3be3b6a6",
+          "locally_modified": false,
+          "patch_ids": [],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/fp-check/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/bug-class-verification.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/bug-class-verification.md",
+          "upstream_blob_sha": "3eb666d646b4c6071b82012d4911ba0650665078",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3eb666d646b4c6071b82012d4911ba0650665078",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/deep-verification.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/deep-verification.md",
+          "upstream_blob_sha": "1b2499d03627b0d8a025f115f2137292766abdf7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1b2499d03627b0d8a025f115f2137292766abdf7",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/evidence-templates.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/evidence-templates.md",
+          "upstream_blob_sha": "c0227e56238eb856d9d4efc6d2bde6c85ebd3339",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c0227e56238eb856d9d4efc6d2bde6c85ebd3339",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/false-positive-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/false-positive-patterns.md",
+          "upstream_blob_sha": "7ad448441b882e1f801f31550f9528f7ff7d9310",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7ad448441b882e1f801f31550f9528f7ff7d9310",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/gate-reviews.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/gate-reviews.md",
+          "upstream_blob_sha": "b9dd2f4eaf118ca5206ef94ecf12c6b826d4fded",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b9dd2f4eaf118ca5206ef94ecf12c6b826d4fded",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/fp-check/references/standard-verification.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/fp-check/skills/fp-check/references/standard-verification.md",
+          "upstream_blob_sha": "c9e5b901ad4b3008950c31f24806f7bacdbf6cfe",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c9e5b901ad4b3008950c31f24806f7bacdbf6cfe",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "genotoxic",
+      "path": ".claude/skills/genotoxic",
+      "upstream_path": "plugins/trailmark/skills/genotoxic",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/genotoxic/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/genotoxic/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/genotoxic/SKILL.md",
+          "upstream_blob_sha": "3953f756b8c0c59479eeb94ac9649c7be34fd600",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "fc1e9797b5a501291a6e344a82d3fbbc26aa42d3",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
+        },
+        {
+          "path": ".claude/skills/genotoxic/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/genotoxic/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/genotoxic/references/graph-analysis.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/genotoxic/references/graph-analysis.md",
+          "upstream_blob_sha": "eaf22fa78fc44530583b00cf330028f35422227f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eaf22fa78fc44530583b00cf330028f35422227f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/genotoxic/references/mutation-frameworks.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/genotoxic/references/mutation-frameworks.md",
+          "upstream_blob_sha": "43cd2c6c5657b1fcffc16f0db5d467383d0968a6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "43cd2c6c5657b1fcffc16f0db5d467383d0968a6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/genotoxic/references/triage-methodology.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/genotoxic/references/triage-methodology.md",
+          "upstream_blob_sha": "c9f54dc58a554e3755cac4a26a7dd66440bfc9f7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "53f4c707bd109386c438707a3ac1771132125695",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "graph-evolution",
+      "path": ".claude/skills/graph-evolution",
+      "upstream_path": "plugins/trailmark/skills/graph-evolution",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/graph-evolution/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/graph-evolution/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/graph-evolution/SKILL.md",
+          "upstream_blob_sha": "785c694b30a374ec45a09fe5e4e8a6f53e8311d9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "785c694b30a374ec45a09fe5e4e8a6f53e8311d9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/graph-evolution/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/graph-evolution/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/graph-evolution/references/evolution-metrics.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/graph-evolution/references/evolution-metrics.md",
+          "upstream_blob_sha": "c6bcb13ffa1f51cdb9066e94acdf035be6702456",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c6bcb13ffa1f51cdb9066e94acdf035be6702456",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/graph-evolution/references/report-format.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/graph-evolution/references/report-format.md",
+          "upstream_blob_sha": "8f672f2a4e47d786f13b235580a7ab3cb34f8bc9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8f672f2a4e47d786f13b235580a7ab3cb34f8bc9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/graph-evolution/scripts/graph_diff.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/graph-evolution/scripts/graph_diff.py",
+          "upstream_blob_sha": "40535b88ef25b1b40b17f7bbf757e703754e370d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "40535b88ef25b1b40b17f7bbf757e703754e370d",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "harness-writing",
+      "path": ".claude/skills/harness-writing",
+      "upstream_path": "plugins/testing-handbook-skills/skills/harness-writing",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/harness-writing/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/harness-writing/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/testing-handbook-skills/skills/harness-writing/SKILL.md",
+          "upstream_blob_sha": "3981ce7f75a667492eba2f448482ad4fc052aa6f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3981ce7f75a667492eba2f448482ad4fc052aa6f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/harness-writing/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/testing-handbook-skills/skills/harness-writing/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "mutation-testing",
+      "path": ".claude/skills/mutation-testing",
+      "upstream_path": "plugins/mutation-testing/skills/mutation-testing",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/mutation-testing/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/mutation-testing/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/mutation-testing/skills/mutation-testing/SKILL.md",
+          "upstream_blob_sha": "7e55a3d3077ab8254643504a25ebf8931d4be71d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7e55a3d3077ab8254643504a25ebf8931d4be71d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/mutation-testing/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/mutation-testing/skills/mutation-testing/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/mutation-testing/references/optimization-strategies.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/mutation-testing/skills/mutation-testing/references/optimization-strategies.md",
+          "upstream_blob_sha": "8fd7035b2faea5e46dcc3f94695f4b25dfb22fb9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8fd7035b2faea5e46dcc3f94695f4b25dfb22fb9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/mutation-testing/workflows/configuration.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/mutation-testing/skills/mutation-testing/workflows/configuration.md",
+          "upstream_blob_sha": "654d60c712d280a2dd57ef25e6ee8a0cd3ff2dea",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "654d60c712d280a2dd57ef25e6ee8a0cd3ff2dea",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "property-based-testing",
+      "path": ".claude/skills/property-based-testing",
+      "upstream_path": "plugins/property-based-testing/skills/property-based-testing",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-effort-pin-dropped"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/property-based-testing/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/property-based-testing/README.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/README.md",
+          "upstream_blob_sha": "2c49678009a0e3e796a31dda185935497dec450a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2c49678009a0e3e796a31dda185935497dec450a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/SKILL.md",
+          "upstream_blob_sha": "1cc39d8d8cba5955bf9c8d7c9a2aef348722a55e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e2ce4ecf0aa058b54488a6e65fc35db5206a236a",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-effort-pin-dropped"
+          ]
+        },
+        {
+          "path": ".claude/skills/property-based-testing/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/references/generating.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/references/generating.md",
+          "upstream_blob_sha": "0133ccd27580a6f68d662807832de67cb1d91514",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "0133ccd27580a6f68d662807832de67cb1d91514",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/references/interpreting-failures.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/references/interpreting-failures.md",
+          "upstream_blob_sha": "10aeac48d239da352206b8c49f72ee776e5ca5be",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "10aeac48d239da352206b8c49f72ee776e5ca5be",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/references/libraries.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/references/libraries.md",
+          "upstream_blob_sha": "6b9964a46c014f5ecee78cd356fb0bdc4cbcd830",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6b9964a46c014f5ecee78cd356fb0bdc4cbcd830",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/references/refactoring.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/references/refactoring.md",
+          "upstream_blob_sha": "d4be7fb1fd4f00e53fde109254dd6dc937248011",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d4be7fb1fd4f00e53fde109254dd6dc937248011",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/property-based-testing/references/reviewing.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/property-based-testing/skills/property-based-testing/references/reviewing.md",
+          "upstream_blob_sha": "a2ca783a7dabaece9e383f0ace972bb4fe2f7881",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a2ca783a7dabaece9e383f0ace972bb4fe2f7881",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "sarif-parsing",
+      "path": ".claude/skills/sarif-parsing",
+      "upstream_path": "plugins/static-analysis/skills/sarif-parsing",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/sarif-parsing/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/sarif-parsing/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/sarif-parsing/SKILL.md",
+          "upstream_blob_sha": "8176208d57160fb36fbf55422be2eefef8cb2d4f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "8176208d57160fb36fbf55422be2eefef8cb2d4f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sarif-parsing/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/sarif-parsing/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sarif-parsing/resources/jq-queries.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/sarif-parsing/resources/jq-queries.md",
+          "upstream_blob_sha": "6f5377e3a9dd27ace951234eb660365b150431b2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6f5377e3a9dd27ace951234eb660365b150431b2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sarif-parsing/resources/sarif_helpers.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/sarif-parsing/resources/sarif_helpers.py",
+          "upstream_blob_sha": "937110bdb8f894a2ebcc7ab0a3c6c42d6c9aa806",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "937110bdb8f894a2ebcc7ab0a3c6c42d6c9aa806",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "semgrep",
+      "path": ".claude/skills/semgrep",
+      "upstream_path": "plugins/static-analysis/skills/semgrep",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-exec-bit-interpreter",
+        "tob-mode-normalize",
+        "tob-no-plugin-workflow"
+      ],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/semgrep/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/semgrep/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/SKILL.md",
+          "upstream_blob_sha": "94c1b610b0f1e757ca73d06386df7c5655d246cf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "1d357edaee27171db14c19321a4054ed8f496543",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
+        },
+        {
+          "path": ".claude/skills/semgrep/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep/references/rulesets.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/references/rulesets.md",
+          "upstream_blob_sha": "b4ae92d1a54c27717fe6a91b66f45371a14ba8e9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b4ae92d1a54c27717fe6a91b66f45371a14ba8e9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep/references/scan-modes.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/references/scan-modes.md",
+          "upstream_blob_sha": "d9f8cd93eea81447b35e9b91e10c2f9bca764ce1",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d9f8cd93eea81447b35e9b91e10c2f9bca764ce1",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep/scripts/merge_sarif.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/scripts/merge_sarif.py",
+          "upstream_blob_sha": "d4556b6da081a04cf7f07e5dd4d694f007ace36a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d4556b6da081a04cf7f07e5dd4d694f007ace36a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep/scripts/run-scans.sh",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/scripts/run-scans.sh",
+          "upstream_blob_sha": "dbca10799e7c62946658f1c8691d25a748eb80ca",
+          "upstream_mode": "100755",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dbca10799e7c62946658f1c8691d25a748eb80ca",
+          "locally_modified": false,
+          "patch_ids": [
+            "tob-mode-normalize"
+          ]
+        },
+        {
+          "path": ".claude/skills/semgrep/scripts/test_merge_sarif.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/scripts/test_merge_sarif.py",
+          "upstream_blob_sha": "5bb44b1a105fcdbb54b8b23cfa9f6c0205ba0b95",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5bb44b1a105fcdbb54b8b23cfa9f6c0205ba0b95",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep/workflows/scan-workflow.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/static-analysis/skills/semgrep/workflows/scan-workflow.md",
+          "upstream_blob_sha": "5e58565006ae8e8afdc67abe1c616f660264329c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "dac97630d4166a63639cf4f1e7f7c58c67abfc52",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-exec-bit-interpreter"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "semgrep-rule-creator",
+      "path": ".claude/skills/semgrep-rule-creator",
+      "upstream_path": "plugins/semgrep-rule-creator/skills/semgrep-rule-creator",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/semgrep-rule-creator/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/semgrep-rule-creator/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/semgrep-rule-creator/skills/semgrep-rule-creator/SKILL.md",
+          "upstream_blob_sha": "c938b948a94fc7fa1ff62faaf6ecb020cc291b7a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c938b948a94fc7fa1ff62faaf6ecb020cc291b7a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep-rule-creator/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/semgrep-rule-creator/skills/semgrep-rule-creator/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep-rule-creator/references/quick-reference.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/semgrep-rule-creator/skills/semgrep-rule-creator/references/quick-reference.md",
+          "upstream_blob_sha": "eda52f624f9c9b0bc6ffd0ca6501975d6c97321c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "eda52f624f9c9b0bc6ffd0ca6501975d6c97321c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/semgrep-rule-creator/references/workflow.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/semgrep-rule-creator/skills/semgrep-rule-creator/references/workflow.md",
+          "upstream_blob_sha": "30851db589de275e0fddf4813a7b0c4c86675bbf",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "30851db589de275e0fddf4813a7b0c4c86675bbf",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "sharp-edges",
+      "path": ".claude/skills/sharp-edges",
+      "upstream_path": "plugins/sharp-edges/skills/sharp-edges",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-plugin-agents-relocated"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/sharp-edges/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/sharp-edges/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/SKILL.md",
+          "upstream_blob_sha": "44ea7876d7e5f3b5599c64684eb1a02c1500cb7a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "44ea7876d7e5f3b5599c64684eb1a02c1500cb7a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/agents/sharp-edges-analyzer.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/agents/sharp-edges-analyzer.md",
+          "upstream_blob_sha": "218af31e6b9e4011fa601d5a75b40338f30bb10b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "38d19acf515e75a72e3b9a72724142976734bf4f",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-plugin-agents-relocated"
+          ],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/sharp-edges/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/auth-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/auth-patterns.md",
+          "upstream_blob_sha": "c596bd323a98c639ae4b901f246b62ddc5ea7165",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c596bd323a98c639ae4b901f246b62ddc5ea7165",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/case-studies.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/case-studies.md",
+          "upstream_blob_sha": "c94a3d4a4a50b3ddfc7b0e9f2172f732702ee892",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c94a3d4a4a50b3ddfc7b0e9f2172f732702ee892",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/config-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/config-patterns.md",
+          "upstream_blob_sha": "f9e944805682998aa9c99e5e3bbb611e524c74e2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f9e944805682998aa9c99e5e3bbb611e524c74e2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/crypto-apis.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/crypto-apis.md",
+          "upstream_blob_sha": "b3caef97da84df6674015b1352595e519c57dc2c",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b3caef97da84df6674015b1352595e519c57dc2c",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-c.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-c.md",
+          "upstream_blob_sha": "d1ef9e2449c285bacb73eca7e2f63d237b0a528f",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d1ef9e2449c285bacb73eca7e2f63d237b0a528f",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-csharp.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-csharp.md",
+          "upstream_blob_sha": "9e490413a10081452ddb9aa7e0be59f52bf5bc87",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9e490413a10081452ddb9aa7e0be59f52bf5bc87",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-go.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-go.md",
+          "upstream_blob_sha": "662a215ae18d073dc672d9aeee50ba30e1940ab0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "662a215ae18d073dc672d9aeee50ba30e1940ab0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-java.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-java.md",
+          "upstream_blob_sha": "f51c5bcce7179a32aa359d9746b6ed4d1e586a44",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f51c5bcce7179a32aa359d9746b6ed4d1e586a44",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-javascript.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-javascript.md",
+          "upstream_blob_sha": "11a959f47e36850313f2f66dc770851df0fdc1c6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "11a959f47e36850313f2f66dc770851df0fdc1c6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-kotlin.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-kotlin.md",
+          "upstream_blob_sha": "85d94d2ddacf76d179378a2dc2b63da1d4c0e13a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "85d94d2ddacf76d179378a2dc2b63da1d4c0e13a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-php.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-php.md",
+          "upstream_blob_sha": "a21bd39389fdad4e825b9e2b4be25972161cc64d",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a21bd39389fdad4e825b9e2b4be25972161cc64d",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-python.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-python.md",
+          "upstream_blob_sha": "11ec4fb4b6d3fa8149c2dc9c583a10047951a3fc",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "11ec4fb4b6d3fa8149c2dc9c583a10047951a3fc",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-ruby.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-ruby.md",
+          "upstream_blob_sha": "211bf2065dcd31fbf3afc620c793cb9fd286108a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "211bf2065dcd31fbf3afc620c793cb9fd286108a",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-rust.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-rust.md",
+          "upstream_blob_sha": "cea48830a03217acf9c53692cc46f226cbddd9c2",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cea48830a03217acf9c53692cc46f226cbddd9c2",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/lang-swift.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/lang-swift.md",
+          "upstream_blob_sha": "682d30cdbef48935112e0db64c1bce3f4dd8f405",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d26cfe345bb4eec579cc5c808cdaac86b700095a",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
+        },
+        {
+          "path": ".claude/skills/sharp-edges/references/language-specific.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/sharp-edges/skills/sharp-edges/references/language-specific.md",
+          "upstream_blob_sha": "a7feb9690486a29735bfdd03da90cfd2a43b7d88",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a7feb9690486a29735bfdd03da90cfd2a43b7d88",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "spec-to-code-compliance",
+      "path": ".claude/skills/spec-to-code-compliance",
+      "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-no-hidden-unicode",
+        "tob-no-plugin-workflow",
+        "tob-plugin-agents-relocated"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/spec-to-code-compliance/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/SKILL.md",
+          "upstream_blob_sha": "b10d8a081c39dd8f89bdc0559da3074f367ec869",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "d74529fee74ff84161ed9c8efb456071b4579b32",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-plugin-workflow"
+          ]
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/agents/spec-compliance-checker.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/agents/spec-compliance-checker.md",
+          "upstream_blob_sha": "ebe9a616521c6571d698ed7182977b82712567a9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "75397b90e8ecc4812d9299991bdf3f413695a515",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-plugin-agents-relocated"
+          ],
+          "relocated_from_plugin_root": true
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/resources/ANALYSIS_FORMAT.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/resources/ANALYSIS_FORMAT.md",
+          "upstream_blob_sha": "6740d7d661b8c3c68f38bdb1352fc3eceaa28058",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2f42c25ca7cb046a2fff267616e47ac6d8ef7632",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-no-hidden-unicode"
+          ]
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/resources/DIVERGENCE_RUBRIC.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/resources/DIVERGENCE_RUBRIC.md",
+          "upstream_blob_sha": "483ae02af20ad7eb33a3a10873baec906516ff92",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "483ae02af20ad7eb33a3a10873baec906516ff92",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/resources/DOMAIN_NOTES.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/resources/DOMAIN_NOTES.md",
+          "upstream_blob_sha": "632684bc8991da4642f0f79872024f190ccc9243",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "632684bc8991da4642f0f79872024f190ccc9243",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/spec-to-code-compliance/resources/WORKED_EXAMPLE.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/spec-to-code-compliance/skills/spec-to-code-compliance/resources/WORKED_EXAMPLE.md",
+          "upstream_blob_sha": "20a299e12c94cd0eff78ee95ce232bf4796fcb2a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "20a299e12c94cd0eff78ee95ce232bf4796fcb2a",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "supply-chain-risk-auditor",
+      "path": ".claude/skills/supply-chain-risk-auditor",
+      "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": true,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/SKILL.md",
+          "upstream_blob_sha": "83affaaf2841182c5eb610338256f7f540b270aa",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "83affaaf2841182c5eb610338256f7f540b270aa",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/collect.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/collect.py",
+          "upstream_blob_sha": "09eefdf7acf6b0b981c6d2280fe0e76a12d28c0e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "09eefdf7acf6b0b981c6d2280fe0e76a12d28c0e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/model.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/model.py",
+          "upstream_blob_sha": "81407c29544a2a84ca19a286f01c25d76ab927e9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "81407c29544a2a84ca19a286f01c25d76ab927e9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/pyproject.toml",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/pyproject.toml",
+          "upstream_blob_sha": "e435affcc1cc64171dcd449fa61fd6afb588785e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "e435affcc1cc64171dcd449fa61fd6afb588785e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/render.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/render.py",
+          "upstream_blob_sha": "a30c2623a9059356a082b4f4c88acef9fa78b829",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a30c2623a9059356a082b4f4c88acef9fa78b829",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/sources.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/sources.py",
+          "upstream_blob_sha": "3aafa9605c74071f51e18e5f4e4aac43c19e58c0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3aafa9605c74071f51e18e5f4e4aac43c19e58c0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/test_collect.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/test_collect.py",
+          "upstream_blob_sha": "df4526850c077e6b2f7019ba45fcda7594379910",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "df4526850c077e6b2f7019ba45fcda7594379910",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/test_model.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/test_model.py",
+          "upstream_blob_sha": "efbe08366de7b78bf333a51769f4a420d1bec9a4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "efbe08366de7b78bf333a51769f4a420d1bec9a4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/test_render.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/test_render.py",
+          "upstream_blob_sha": "54b1a5fef092855ee99be92be6393108609f8738",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "54b1a5fef092855ee99be92be6393108609f8738",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/test_sources.py",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/test_sources.py",
+          "upstream_blob_sha": "61fdbc5b7767352ac7a3427527e9d7882b66629b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61fdbc5b7767352ac7a3427527e9d7882b66629b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/supply-chain-risk-auditor/scripts/uv.lock",
+          "origin": "upstream",
+          "upstream_path": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/scripts/uv.lock",
+          "upstream_blob_sha": "2fb44882a94a99013d613493e38bb372dfbbdd84",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2fb44882a94a99013d613493e38bb372dfbbdd84",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "trailmark",
+      "path": ".claude/skills/trailmark",
+      "upstream_path": "plugins/trailmark/skills/trailmark",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/trailmark/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/trailmark/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark/SKILL.md",
+          "upstream_blob_sha": "c92a4f870a7dbb8649892c44550edb4d6de11ce5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c92a4f870a7dbb8649892c44550edb4d6de11ce5",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark/references/preanalysis-passes.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark/references/preanalysis-passes.md",
+          "upstream_blob_sha": "caad18cb45bd7d458fd53a7bc549de6859825339",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "caad18cb45bd7d458fd53a7bc549de6859825339",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark/references/query-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark/references/query-patterns.md",
+          "upstream_blob_sha": "f5d12fcb1483dd23bd24604a44c9e39d6289c42b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f5d12fcb1483dd23bd24604a44c9e39d6289c42b",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "trailmark-finding-triage",
+      "path": ".claude/skills/trailmark-finding-triage",
+      "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/trailmark-finding-triage/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/trailmark-finding-triage/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage/SKILL.md",
+          "upstream_blob_sha": "62dbe599e037c7fbe9bb3559088048d74ebf92f6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "62dbe599e037c7fbe9bb3559088048d74ebf92f6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-finding-triage/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-finding-triage/references/input-normalization.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage/references/input-normalization.md",
+          "upstream_blob_sha": "575aa254dd1f9bc345cb39bd69ed55d2e5a362e9",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "575aa254dd1f9bc345cb39bd69ed55d2e5a362e9",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-finding-triage/references/output-format.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage/references/output-format.md",
+          "upstream_blob_sha": "83503812027ca7c374af639bb08d3054bfc47eed",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "83503812027ca7c374af639bb08d3054bfc47eed",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-finding-triage/references/query-recipes.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-finding-triage/references/query-recipes.md",
+          "upstream_blob_sha": "6a7d280ebaaff12cea3398fc7566479fd35b15ca",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "6a7d280ebaaff12cea3398fc7566479fd35b15ca",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "trailmark-review-gate",
+      "path": ".claude/skills/trailmark-review-gate",
+      "upstream_path": "plugins/trailmark/skills/trailmark-review-gate",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/trailmark-review-gate/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/trailmark-review-gate/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-review-gate/SKILL.md",
+          "upstream_blob_sha": "96f3216cc3207453bcd0d89e0681f80839882307",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "96f3216cc3207453bcd0d89e0681f80839882307",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-review-gate/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-review-gate/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-review-gate/references/gate-rules.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-review-gate/references/gate-rules.md",
+          "upstream_blob_sha": "9d6d5cbeb9d835405531b0b182b53a9812af5062",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "9d6d5cbeb9d835405531b0b182b53a9812af5062",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-review-gate/references/output-format.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-review-gate/references/output-format.md",
+          "upstream_blob_sha": "26aaba94935373d71468da24e89afef838bd0179",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "26aaba94935373d71468da24e89afef838bd0179",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-review-gate/references/review-integration.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-review-gate/references/review-integration.md",
+          "upstream_blob_sha": "aa734a83d18a5380bccd0902cb232ce802473f3a",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "aa734a83d18a5380bccd0902cb232ce802473f3a",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "trailmark-variant-neighborhood",
+      "path": ".claude/skills/trailmark-variant-neighborhood",
+      "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood/SKILL.md",
+          "upstream_blob_sha": "11307325968bab473229f596fa973f7ab34f97ab",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "11307325968bab473229f596fa973f7ab34f97ab",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/references/neighborhood-patterns.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood/references/neighborhood-patterns.md",
+          "upstream_blob_sha": "cf6f46d57d4ee732ad0fad42d644e1dc79f92e70",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "cf6f46d57d4ee732ad0fad42d644e1dc79f92e70",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/references/output-format.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood/references/output-format.md",
+          "upstream_blob_sha": "f6f1fd01f84cfea9b7491facabdbfc7f81e4ffa3",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f6f1fd01f84cfea9b7491facabdbfc7f81e4ffa3",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/trailmark-variant-neighborhood/references/ranking.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/trailmark/skills/trailmark-variant-neighborhood/references/ranking.md",
+          "upstream_blob_sha": "83472b7ef6d86c7d54e288d888579882d318d3f7",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "83472b7ef6d86c7d54e288d888579882d318d3f7",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "variant-analysis",
+      "path": ".claude/skills/variant-analysis",
+      "upstream_path": "plugins/variant-analysis/skills/variant-analysis",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": true,
+      "patch_ids": [
+        "tob-dead-pointer",
+        "tob-no-plugin-workflow"
+      ],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/variant-analysis/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/variant-analysis/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/SKILL.md",
+          "upstream_blob_sha": "8f58f54b1883110f1a38a51c9360d4b9d1b195a8",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5311f1d1df1b03b64c710059233473400fc65e49",
+          "locally_modified": true,
+          "patch_ids": [
+            "tob-dead-pointer",
+            "tob-no-plugin-workflow"
+          ]
+        },
+        {
+          "path": ".claude/skills/variant-analysis/assets/trail-of-bits-mark.svg",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/assets/trail-of-bits-mark.svg",
+          "upstream_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7cd6e7ca7348897984f2498f301a888bb2f3ca71",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/references/reporting.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/references/reporting.md",
+          "upstream_blob_sha": "61633f837c8a0e918b47af26fd5623224a623620",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61633f837c8a0e918b47af26fd5623224a623620",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/references/root-cause.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/references/root-cause.md",
+          "upstream_blob_sha": "243834f6bab0ad7bbc8cdd7a39cba6f565415f27",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "243834f6bab0ad7bbc8cdd7a39cba6f565415f27",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/references/searching.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/references/searching.md",
+          "upstream_blob_sha": "b9427a66ce3005246e4db89a575e250b993837d4",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "b9427a66ce3005246e4db89a575e250b993837d4",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/references/triage.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/references/triage.md",
+          "upstream_blob_sha": "80f36ab221ac9b367f0226098bf30910014c4012",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "80f36ab221ac9b367f0226098bf30910014c4012",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/codeql/cpp.ql",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/codeql/cpp.ql",
+          "upstream_blob_sha": "5371f374a1ea7ec0ce95a904f7b39da62957abdd",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "5371f374a1ea7ec0ce95a904f7b39da62957abdd",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/codeql/go.ql",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/codeql/go.ql",
+          "upstream_blob_sha": "7e6efaf65d2791e1958835b4392bf7fc434b4508",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "7e6efaf65d2791e1958835b4392bf7fc434b4508",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/codeql/java.ql",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/codeql/java.ql",
+          "upstream_blob_sha": "88fb0814dd6590d356745011e74aba4c34c4e685",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "88fb0814dd6590d356745011e74aba4c34c4e685",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/codeql/javascript.ql",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/codeql/javascript.ql",
+          "upstream_blob_sha": "c40054374b78cbb745a29ddace8e1187f5755099",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "c40054374b78cbb745a29ddace8e1187f5755099",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/codeql/python.ql",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/codeql/python.ql",
+          "upstream_blob_sha": "2faaa4b9725c0a9a249df5afe85be256a34d05e0",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2faaa4b9725c0a9a249df5afe85be256a34d05e0",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/semgrep/cpp.yaml",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/semgrep/cpp.yaml",
+          "upstream_blob_sha": "da6f2c5e6b32b640c9e14869a1dfe2cbaa90b2f6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "da6f2c5e6b32b640c9e14869a1dfe2cbaa90b2f6",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/semgrep/go.yaml",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/semgrep/go.yaml",
+          "upstream_blob_sha": "61d5ae0ef75140b20ea6c6bc0f5751563e54e024",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "61d5ae0ef75140b20ea6c6bc0f5751563e54e024",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/semgrep/java.yaml",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/semgrep/java.yaml",
+          "upstream_blob_sha": "a52c86a3664f029eb349e10bc50d1e5c7181050b",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "a52c86a3664f029eb349e10bc50d1e5c7181050b",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/semgrep/javascript.yaml",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/semgrep/javascript.yaml",
+          "upstream_blob_sha": "4e233ba32e278dc490ddad36e296ddacae070b7e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "4e233ba32e278dc490ddad36e296ddacae070b7e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/semgrep/python.yaml",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/semgrep/python.yaml",
+          "upstream_blob_sha": "70d61aafab24efc30455bf341a173e5f88e0724e",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "70d61aafab24efc30455bf341a173e5f88e0724e",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/variant-analysis/resources/variant-report-template.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/variant-analysis/skills/variant-analysis/resources/variant-report-template.md",
+          "upstream_blob_sha": "42c78cc4dda57b619ebfdc02cc5f64d047bd67b6",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "42c78cc4dda57b619ebfdc02cc5f64d047bd67b6",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    },
+    {
+      "name": "vulnerability-triage-brocards",
+      "path": ".claude/skills/vulnerability-triage-brocards",
+      "upstream_path": "plugins/vulnerability-triage-brocards/skills/vulnerability-triage-brocards",
+      "renamed_from": null,
+      "invocation": "model",
+      "classification": "VENDORED_VERBATIM",
+      "locally_modified": false,
+      "patch_ids": [],
+      "scripts_audited": null,
+      "audit_ref": null,
+      "files": [
+        {
+          "path": ".claude/skills/vulnerability-triage-brocards/LICENSE",
+          "origin": "local",
+          "upstream_path": "LICENSE",
+          "upstream_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "3b7b82d0da2db857eda1a798dbd908ea136f07b5",
+          "locally_modified": false,
+          "patch_ids": [],
+          "reason": "CC BY-SA 4.0 licence text for trailofbits/skills, copied verbatim from the upstream repository root into each vendored skill directory. CC BY-SA 4.0 s3(a)(1) requires the licence notice and a copy of (or link to) the licence to accompany the Licensed Material in every distributed copy."
+        },
+        {
+          "path": ".claude/skills/vulnerability-triage-brocards/SKILL.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/vulnerability-triage-brocards/skills/vulnerability-triage-brocards/SKILL.md",
+          "upstream_blob_sha": "2e73d1f335fd3308835d5eeec3ca6b77a84e6992",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "2e73d1f335fd3308835d5eeec3ca6b77a84e6992",
+          "locally_modified": false,
+          "patch_ids": []
+        },
+        {
+          "path": ".claude/skills/vulnerability-triage-brocards/references/brocards-detail.md",
+          "origin": "upstream",
+          "upstream_path": "plugins/vulnerability-triage-brocards/skills/vulnerability-triage-brocards/references/brocards-detail.md",
+          "upstream_blob_sha": "f3b50939d59fa3ea5ed39d828efcfbeb97642465",
+          "upstream_mode": "100644",
+          "vendored_mode": "100644",
+          "vendored_blob_sha": "f3b50939d59fa3ea5ed39d828efcfbeb97642465",
+          "locally_modified": false,
+          "patch_ids": []
+        }
+      ]
+    }
+  ],
+  "excluded_skills": [
+    {
+      "name": "address-sanitizer",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Targets the C/C++ toolchain (and Rust via cargo-fuzz `--sanitizer=address`): the description itself says \"Use when fuzzing C/C++ code to find buffer overflows and use-after-free bugs\". ASan detects memory-safety classes that Go's memory model does not admit in pure Go, and Go's `-asan` only applies to cgo, which this project does not use (it ships a static binary on scratch). Go's equivalent concurrency-bug detector, `-race`, is already the project's standard test invocation and is not covered here."
+    },
+    {
+      "name": "aflpp",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: C/C++ via the AFL++ fork of AFL — the description states \"Use for multi-core fuzzing of C/C++ projects\" and the workflow is built on afl-clang-fast instrumentation and persistent-mode harnesses. Go has native `go test -fuzz` and no AFL++ instrumentation path without cgo."
+    },
+    {
+      "name": "agentic-actions-auditor",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "The skill audits GitHub Actions workflows that invoke AI coding agents, and it hard-stops when there are none: SKILL.md \"If no AI action steps are found across all workflows, report 'No AI action steps found in N workflow files' and stop.\" This repo's .github/workflows holds exactly ci.yml and release.yml, and a grep for `uses:` matching anthropics/*, google-github-actions/*, google-gemini/*, openai/codex-action or actions/ai-inference returns nothing — so every run terminates at Step 2 with no output. Its own \"When NOT to Use\" lists this case first. Excluded for no plausible use today, not for quality: the content is good (nine named injection vectors, env-var-intermediary as the most-missed one, explicit Bash rules forbidding piping fetched YAML into an interpreter)."
+    },
+    {
+      "name": "atheris",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: Python — \"Atheris is a coverage-guided Python fuzzer based on libFuzzer. Use for fuzzing pure Python code and Python C extensions.\" There is no Python application code in this repository (the only Python is the vendored ToB helper scripts, which are not fuzz targets)."
+    },
+    {
+      "name": "cargo-fuzz",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: Rust with Cargo — \"the de facto fuzzing tool for Rust projects using Cargo … with libFuzzer backend\". No Rust in this repository."
+    },
+    {
+      "name": "constant-time-testing",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Detects timing side channels in cryptographic code using dudect, Timecop/Valgrind and symbolic/formal tools, with case studies on OpenSSL RSA and KyberSlash. There is no secret-dependent cryptographic computation in this codebase to instrument. It is also the one file in the slice with zero Go-relevant content: a full-text grep for Go, `go test`, or any Go construct returns nothing."
+    },
+    {
+      "name": "coverage-analysis",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Targets the LLVM/Clang, GCC and cargo-fuzz coverage toolchains exclusively — `-fprofile-instr-generate -fcoverage-mapping`, llvm-profdata/llvm-cov, gcov/lcov, `cargo +nightly fuzz coverage` — and Step 2 is labelled \"Create Execution Runtime (C/C++ only)\". A full-text search of the 607-line file returns zero mentions of Go. Go's coverage story (`go test -coverprofile`, `go tool cover`, and native fuzzing coverage) is entirely unaddressed, so nothing here is actionable for this project."
+    },
+    {
+      "name": "crypto-protocol-diagram",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Scoped to cryptographic protocol semantics — the description enumerates TLS, Noise, Signal, X3DH, Double Ratchet, FROST, DH and ECDH, and it accepts ProVerif (.pv) and Tamarin (.spthy) models as input. This project implements no cryptographic protocol: it consumes Twitch's OAuth device-code flow and relies on stdlib TLS. The skill's own value proposition is the crypto annotation layer (\"Without crypto annotations, the diagram is just a message flow — useless for security review\"), which is precisely the part that has nothing to annotate here; the installed `diagramming-code` skill covers code-derived diagrams."
+    },
+    {
+      "name": "entry-point-analyzer",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Smart-contract only. Its language-detection table dispatches solely on `.sol`, `.vy`, `.move`+Move.toml, `.fc`/`.func`/`.tact`, and `.rs`+Cargo.toml containing solana-program or cosmwasm-std; all seven reference files are chain-specific; its scope section is defined by Solidity `view`/`pure`, Solana `mut` accounts and CosmWasm `query`; and \"When NOT to Use\" states \"Non-smart-contract codebases\" outright. There is no Go path and no partial value — a Go repo produces zero detected languages. Irrelevant platform."
+    },
+    {
+      "name": "fuzzing-dictionary",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "The skill's entire mechanism is the `-dict=` flag, which exists in libFuzzer, AFL++ and cargo-fuzz but not in Go. Its own Go section says so: SKILL.md:243-245, \"go-fuzz does not have built-in dictionary support, but you can manually seed the corpus with dictionary entries\" — and it documents the deprecated dvyukov go-fuzz rather than native `go test -fuzz`, which likewise has no dictionary support. What is left after removing the unusable tooling is a paragraph of \"seed the corpus with protocol tokens\", which does not warrant a skill."
+    },
+    {
+      "name": "fuzzing-obstacles",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Its Quick Reference table is literally headed \"| Task | C/C++ | Rust |\" (SKILL.md:56) and every remedy is a conditional-compilation construct that does not exist in Go: `#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` for libFuzzer/AFL++/honggfuzz and `cfg!(fuzzing)` for cargo-fuzz. Go is not mentioned once in the 426-line file. The underlying ideas (checksum bypass, deterministic PRNG seeding, global-state reset) are real, but the transferable residue is already covered by the installed harness-writing skill's determinism and global-state rules."
+    },
+    {
+      "name": "insecure-defaults",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "The corpus is genuinely on target — references/fail-open-security.json seeds include `InsecureSkipVerify[[:space:]]*:[[:space:]]*true` (Go/TLS) plus fail-open env-var defaults, and the six categories (fallback secrets, default credentials, fail-open switches, weak crypto, permissive access, debug leakage) map onto this repo's config.json defaults, DASHBOARD_USERNAME/DASHBOARD_PASSWORD basic auth and cookie/token handling. But the plugin ships NO SKILL.md at all: the whole mechanism is commands/audit.md invoking the `Workflow` tool with `name: \"insecure-defaults:audit-pipeline\"` and `pluginRoot: \"${CLAUDE_PLUGIN_ROOT}\"`, backed by a 35KB workflows/audit.js that fans out recon/6 sweeps/refuting verifiers/report. Nothing in that survives project-local skill vendoring."
+    },
+    {
+      "name": "libafl",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: a Rust library for building custom fuzzers, targeting C/C++ and Rust binaries — its Quick Start is an `LLVMFuzzerTestOneInput` C++ entry point and its worked example builds libpng from source. The skill itself positions LibAFL as \"High\" complexity for research and custom mutators, which is far outside this project's needs."
+    },
+    {
+      "name": "libfuzzer",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: C/C++ compiled with Clang — \"Coverage-guided fuzzer built into LLVM for C/C++ projects. Use for fuzzing C/C++ code that can be compiled with Clang.\" No C/C++ in this repository and no cgo in the build."
+    },
+    {
+      "name": "mermaid-to-proverif",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Translates Mermaid sequence diagrams into ProVerif formal-verification models (.pv) to prove secrecy, authentication, forward secrecy and replay resistance. There is no cryptographic protocol in this codebase to formally verify, and its input is the output of crypto-protocol-diagram, which is also excluded. Requires the ProVerif prover, an external toolchain with no other use here."
+    },
+    {
+      "name": "ossfuzz",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Targets enrollment in Google's OSS-Fuzz continuous-fuzzing service, which requires an accepted project application and Google-hosted infrastructure — an irrelevant external service for a personal Twitch channel-points miner. Although OSS-Fuzz does support Go upstream, this skill does not: its worked project.yaml examples are `language: c++` (SKILL.md:175) and `language: rust` (:356), and Go appears only as a passing link to the `base-builder-go` image."
+    },
+    {
+      "name": "ruzzy",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Language/toolchain: Ruby — \"Ruzzy is a coverage-guided Ruby fuzzer by Trail of Bits. Use for fuzzing pure Ruby code and Ruby C extensions.\" No Ruby in this repository."
+    },
+    {
+      "name": "second-opinion",
+      "status": "HOLD",
+      "upstream_path": "",
+      "reason": "A genuinely different capability — an independent review from a non-Claude model, with Codex driven headlessly under `--sandbox read-only --ephemeral` and a structured `--output-schema` JSON contract. But it cannot run here and one of its two paths conflicts with the permission model. Held, not excluded, because the Codex half is well-constructed and would be worth having if the blockers are cleared."
+    },
+    {
+      "name": "semgrep-rule-variant-creator",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Its entire purpose is porting an existing Semgrep rule across languages; this is a single-language Go repository (plus vendored htmx/apexcharts JS that is never rule-authored against), so there is no rule to port. Its closure is also broken outside a plugin install: SKILL.md:96 says \"The script is `workflows/port-rule-to-languages.js` at the plugin root\" — that 981-line file lives at plugins/semgrep-rule-variant-creator/workflows/, outside the skill directory — and the skill declares `Workflow` in allowed-tools and resolves `${CLAUDE_PLUGIN_ROOT}` (SKILL.md:36), neither of which exists for a project-local vendored skill. semgrep-rule-creator (INSTALL) covers all rule authoring this project needs."
+    },
+    {
+      "name": "slicing-code-context",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Its stated purpose is delegating bounded slices \"to constrained or locally hosted models without exposing the full repository\" — a confidentiality/context-budget problem this project does not have, since it is a public GPL-3.0 repo worked by Claude Code with full repository access. Its closure also reaches outside the skill: SKILL.md:102 prefers the plugin agent `trailmark:code-slice-worker`, defined at plugins/trailmark/agents/code-slice-worker.md at the PLUGIN root, which a project-local skill install cannot register. The script is also the heaviest in the slice (1105-line build_slice_packet.py plus pyproject.toml and uv.lock, pinned to Trailmark 0.5.x) for a capability with no consumer here."
+    },
+    {
+      "name": "testing-handbook-generator",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "A meta-skill for authoring new skills from appsec.guide handbook content — the same role as the already-installed `skill-creator-anthropic` and the Claude Code builtin `skill-creator`, making it a true duplicate for the one job it does. Its closure is additionally broken: SKILL.md references `scripts/validate-skills.py`, which lives at plugins/testing-handbook-skills/scripts/ outside the skill directory, and it points at sibling skill directories (plugins/testing-handbook-skills/skills/aflpp/, libfuzzer/, semgrep/) as worked exemplars — all of which this slice excludes, so the pointers would dangle after vendoring."
+    },
+    {
+      "name": "trailmark-structural",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Same dangling-orchestrator problem as trailmark-summary — \"Use when vivisect needs detailed structural data\", and no vivisect skill exists anywhere in the provider clone at this pin. Its payload is one Python snippet calling `preanalysis()`, `attack_surface()`, `complexity_hotspots()`, `subgraph()` and `type_references()`, every one of which the main `trailmark` skill documents (SKILL.md:169-221) with the same `hasattr()` feature gates. Overlapping trigger words with `trailmark` (\"structural analysis\", \"blast radius\", \"complexity hotspots\") for no added methodology."
+    },
+    {
+      "name": "trailmark-summary",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "A true subset of the `trailmark` skill: it runs `trailmark analyze --language auto --summary` plus `detect_languages()`, all of which the main skill documents at SKILL.md:133-152 and :247-252. Its sole documented trigger is an orchestrator that does not exist — the description says \"Use when vivisect or galvanize needs a quick structural overview\", and a search of the entire provider clone at this pin finds no vivisect or galvanize skill anywhere (only these two files mention the names). Installing it adds a third competing trigger for \"structural overview\" with no capability the main skill lacks."
+    },
+    {
+      "name": "vector-forge",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Generates cryptographic test vectors by mutation-testing crypto primitive implementations and measuring Wycheproof coverage gaps. Its own \"When NOT to Use\" list rules this project out explicitly: \"Testing application logic rather than algorithm implementations\" and \"The algorithm has no public test vectors to compare against\". No crypto primitive is implemented in this repo. The generic mutation-testing triage value it shares with `genotoxic` is fully covered by that skill, which is installed."
+    },
+    {
+      "name": "wycheproof",
+      "status": "EXCLUDE",
+      "upstream_path": "",
+      "reason": "Supplies Google Wycheproof test vectors for validating cryptographic implementations against known attacks (signature malleability, invalid-curve, edge-case ECDSA/RSA/AEAD). This project implements no cryptographic primitives — it uses stdlib TLS and holds OAuth tokens — so there is nothing to validate against a vector suite, and the skill's worked harnesses are pytest and mocha rather than Go."
+    }
+  ]
+}

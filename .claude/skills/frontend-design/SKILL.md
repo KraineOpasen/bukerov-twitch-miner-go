@@ -55,7 +55,7 @@ Spend your boldness in one place. Let the signature element be the one memorable
 
 <!-- bukerov-local-patch: fd-artifact-paths -->
 Screenshots and scratch notes from this critique loop go only under `/tmp` or `.scratch/`, taken
-against a locally running dashboard — never production or TrueNAS, and never with real credentials.
+against a locally running dashboard — never production or a remote host, and never with real credentials.
 Edits to tracked templates or CSS happen only in CHANGE mode, on the active task contract's branch.
 <!-- /bukerov-local-patch: fd-artifact-paths -->
 
