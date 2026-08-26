@@ -94,7 +94,7 @@ type PolicyProvider interface {
 	PolicySnapshot() (policy.Mode, []policy.Decision)
 	CurrentCampaignPolicy() (string, map[string]config.DropRule)
 	ApplyCampaignPolicy(mode string)
-	SetDropRule(rewardKey string, rule config.DropRule)
+	SetDropRule(rewardKey string, rule config.DropRule) error
 }
 
 // RewardsProvider exposes custom channel-points reward listing/redemption and

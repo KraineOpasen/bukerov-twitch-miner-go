@@ -27,7 +27,7 @@ import (
 // nil-safe with a zero-value watcher and nil streamers/discovery.
 func TestDropRulesSnapshotRaceFreeAgainstSetDropRule(t *testing.T) {
 	m := &Miner{
-		config:  &config.Config{DropRules: map[string]config.DropRule{"seed": {Skip: true}}},
+		config:  &config.Config{DropRules: map[string]config.DropRule{"g::seed": {Skip: true}}},
 		watcher: &watcher.MinuteWatcher{}, // streamers / discovery / dropsTracker stay nil
 	}
 
@@ -54,7 +54,7 @@ func TestDropRulesSnapshotRaceFreeAgainstSetDropRule(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				m.SetDropRule(fmt.Sprintf("k%d", i%16), config.DropRule{HighPriority: true})
+				_ = m.SetDropRule(fmt.Sprintf("g::k%d", i%16), config.DropRule{HighPriority: true})
 			}
 		}
 	}()

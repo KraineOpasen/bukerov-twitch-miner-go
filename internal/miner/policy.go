@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -30,12 +31,17 @@ type policySnapshot struct {
 // watchdog refresh. No network or persistence I/O occurs while this lock is
 // held.
 func (m *Miner) refreshPolicy(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshPolicyLocked(now)
+}
+
+// refreshPolicyLocked publishes one coherent policy evaluation from the
+// caller's already-serialized config state. Caller holds m.mu.
+func (m *Miner) refreshPolicyLocked(now time.Time) {
 	if m.dropsTracker == nil {
 		return
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	mode := policy.Normalize(m.config.CampaignPolicy)
 	games := append([]string(nil), m.config.DirectoryGames...)
@@ -346,12 +352,14 @@ func campaignMatchesGame(game *models.Game, candidate string) bool {
 
 // persistLocked writes the current config to disk if a path is configured.
 // Caller holds m.mu.
-func (m *Miner) persistLocked() {
+func (m *Miner) persistLocked() error {
 	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
+		if err := m.saveConfig(m.configPath, m.config); err != nil {
 			slog.Error("Failed to save config", "error", err)
+			return err
 		}
 	}
+	return nil
 }
 
 func streamerCarriesCampaign(s *models.Streamer, campaignID string) bool {
@@ -408,22 +416,49 @@ func (m *Miner) CurrentCampaignPolicy() (string, map[string]config.DropRule) {
 // ApplyCampaignPolicy validates, applies (runtime, no restart), and persists a
 // new policy mode, then re-ranks immediately so the change is visible at once.
 func (m *Miner) ApplyCampaignPolicy(mode string) {
+	if !m.beginConfigWrite() {
+		return
+	}
+	defer m.endConfigWrite()
+	if m.configWriteBarrier != nil {
+		m.configWriteBarrier()
+	}
+	m.coordinatorMu.Lock()
 	m.mu.Lock()
 	m.config.CampaignPolicy = string(policy.Normalize(mode))
-	m.persistLocked()
+	_ = m.persistLocked()
 	m.mu.Unlock()
+	m.coordinatorMu.Unlock()
 	m.refreshPolicy(time.Now())
 }
 
 // SetDropRule sets (or, when the rule is the zero value, clears — the "Reset
 // rule" control) the per-drop override for a normalized reward key, persists,
 // and re-ranks immediately.
-func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) {
-	rewardKey = strings.ToLower(strings.TrimSpace(rewardKey))
-	if rewardKey == "" {
-		return
+func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) error {
+	rewardKey, err := models.NormalizeRewardKeyInput(rewardKey)
+	if err != nil {
+		return err
 	}
+	if !m.beginConfigWrite() {
+		return ErrShuttingDown
+	}
+	defer m.endConfigWrite()
+	if m.configWriteBarrier != nil {
+		m.configWriteBarrier()
+	}
+
+	// Settings candidates deliberately share the live DropRules map. Joining
+	// the existing coordinator prevents a first write to a nil map from being
+	// detached by a candidate that was snapshotted earlier, while m.mu remains
+	// the common serializer for every config mutation and SaveConfig call.
+	m.coordinatorMu.Lock()
+	defer m.coordinatorMu.Unlock()
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	previous, hadPrevious := m.config.DropRules[rewardKey]
+	wasNil := m.config.DropRules == nil
 	if m.config.DropRules == nil {
 		m.config.DropRules = map[string]config.DropRule{}
 	}
@@ -432,7 +467,20 @@ func (m *Miner) SetDropRule(rewardKey string, rule config.DropRule) {
 	} else {
 		m.config.DropRules[rewardKey] = rule
 	}
-	m.persistLocked()
-	m.mu.Unlock()
-	m.refreshPolicy(time.Now())
+	if err := m.persistLocked(); err != nil {
+		if hadPrevious {
+			m.config.DropRules[rewardKey] = previous
+		} else {
+			delete(m.config.DropRules, rewardKey)
+		}
+		if wasNil {
+			m.config.DropRules = nil
+		}
+		return fmt.Errorf("persist drop rule: %w", err)
+	}
+
+	// The durable rename is the transaction's commit point. Publish the exact
+	// committed state before another config writer can acquire m.mu.
+	m.refreshPolicyLocked(time.Now())
+	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
 func writeTestConfig(t *testing.T, contents string) string {
@@ -13,6 +15,79 @@ func writeTestConfig(t *testing.T, contents string) string {
 		t.Fatalf("failed to write test config: %v", err)
 	}
 	return path
+}
+
+func TestConfigCloneHasNoMutableAliases(t *testing.T) {
+	chatLogs := true
+	cfg := DefaultConfig()
+	cfg.DiscordTokenFromEnv = true
+	cfg.StreamerSettings.ChatLogs = &chatLogs
+	cfg.StreamerSettings.Bet.FilterCondition = &models.FilterCondition{Value: 10}
+	cfg.Streamers = []StreamerConfig{{
+		Username: "streamer",
+		Settings: &models.StreamerSettings{
+			ChatLogs: &chatLogs,
+			Bet: models.BetSettings{
+				FilterCondition: &models.FilterCondition{Value: 20},
+			},
+		},
+	}}
+	cfg.DropBlacklist = []string{"blacklist"}
+	cfg.DropCampaignGameIDs = []string{"game-id"}
+	cfg.DropCampaignGames = []string{"game"}
+	cfg.DirectoryGames = []string{"directory"}
+	cfg.AutoRedeem = map[string]AutoRedeemConfig{
+		"streamer": {Enabled: true, RewardIDs: []string{"reward"}},
+	}
+	cfg.DropRules = map[string]DropRule{"game::reward": {Skip: true}}
+	cfg.Notifications.Batching.ImmediateEvents = []string{"drop"}
+	cfg.Notifications.ProviderBatching = map[string]BatchingSettings{
+		"webhook": {ImmediateEvents: []string{"health"}},
+	}
+
+	clone := cfg.Clone()
+	if clone == &cfg || !clone.DiscordTokenFromEnv {
+		t.Fatal("Clone did not preserve process-only state in an independent value")
+	}
+	clone.Priority[0] = PriorityOrder
+	*clone.StreamerSettings.ChatLogs = false
+	clone.StreamerSettings.Bet.FilterCondition.Value = 11
+	clone.Streamers[0].Username = "changed"
+	*clone.Streamers[0].Settings.ChatLogs = false
+	clone.Streamers[0].Settings.Bet.FilterCondition.Value = 21
+	clone.DropBlacklist[0] = "changed"
+	clone.DropCampaignGameIDs[0] = "changed"
+	clone.DropCampaignGames[0] = "changed"
+	clone.DirectoryGames[0] = "changed"
+	autoRedeem := clone.AutoRedeem["streamer"]
+	autoRedeem.RewardIDs[0] = "changed"
+	clone.AutoRedeem["streamer"] = autoRedeem
+	clone.DropRules["game::reward"] = DropRule{HighPriority: true}
+	clone.Notifications.Batching.ImmediateEvents[0] = "changed"
+	provider := clone.Notifications.ProviderBatching["webhook"]
+	provider.ImmediateEvents[0] = "changed"
+	clone.Notifications.ProviderBatching["webhook"] = provider
+
+	if cfg.Priority[0] == clone.Priority[0] || !*cfg.StreamerSettings.ChatLogs || cfg.StreamerSettings.Bet.FilterCondition.Value != 10 {
+		t.Fatal("Clone aliases top-level slice or StreamerSettings pointers")
+	}
+	if cfg.Streamers[0].Username != "streamer" || !*cfg.Streamers[0].Settings.ChatLogs || cfg.Streamers[0].Settings.Bet.FilterCondition.Value != 20 {
+		t.Fatal("Clone aliases nested streamer settings")
+	}
+	if cfg.DropBlacklist[0] != "blacklist" || cfg.DropCampaignGameIDs[0] != "game-id" || cfg.DropCampaignGames[0] != "game" || cfg.DirectoryGames[0] != "directory" {
+		t.Fatal("Clone aliases a config slice")
+	}
+	if cfg.AutoRedeem["streamer"].RewardIDs[0] != "reward" || cfg.DropRules["game::reward"] != (DropRule{Skip: true}) {
+		t.Fatal("Clone aliases a config map or nested map value slice")
+	}
+	if cfg.Notifications.Batching.ImmediateEvents[0] != "drop" || cfg.Notifications.ProviderBatching["webhook"].ImmediateEvents[0] != "health" {
+		t.Fatal("Clone aliases notification batching state")
+	}
+
+	nilClone := (&Config{}).Clone()
+	if nilClone.Priority != nil || nilClone.Streamers != nil || nilClone.AutoRedeem != nil || nilClone.DropRules != nil {
+		t.Fatal("Clone changed nil collection semantics")
+	}
 }
 
 func TestNormalizeDailySummaryTime(t *testing.T) {
@@ -282,6 +357,35 @@ func TestLoadConfigDropRulesDefaultEmpty(t *testing.T) {
 	}
 	if cfg.CampaignPolicy != "GAME_ORDER" {
 		t.Errorf("expected default GAME_ORDER policy, got %q", cfg.CampaignPolicy)
+	}
+}
+
+func TestLegacyNonCanonicalDropRuleKeyRemainsBootableAndPreserved(t *testing.T) {
+	const legacyKey = "G1 :: Cool Skin"
+	wantRule := DropRule{Skip: true, AlwaysFinishStarted: true}
+	path := writeTestConfig(t, `{
+		"username": "test",
+		"dropRules": {
+			"G1 :: Cool Skin": {"skip": true, "alwaysFinishStarted": true}
+		}
+	}`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig legacy config: %v", err)
+	}
+	if got := cfg.DropRules[legacyKey]; got != wantRule {
+		t.Fatalf("legacy rule after load = %+v, want %+v", got, wantRule)
+	}
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig legacy config: %v", err)
+	}
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("reload legacy config: %v", err)
+	}
+	if got := reloaded.DropRules[legacyKey]; got != wantRule {
+		t.Fatalf("legacy rule after save/reload = %+v, want %+v", got, wantRule)
 	}
 }
 

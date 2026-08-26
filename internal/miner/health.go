@@ -406,12 +406,20 @@ func (m *Miner) CurrentHealthSettings() config.HealthSettings {
 // ApplyHealthSettings validates, applies (runtime, no restart), and persists new
 // canary settings.
 func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
+	if !m.beginConfigWrite() {
+		return
+	}
+	defer m.endConfigWrite()
+	if m.configWriteBarrier != nil {
+		m.configWriteBarrier()
+	}
+	m.coordinatorMu.Lock()
 	m.mu.Lock()
 	m.config.Health = s
 	config.ValidateConfig(m.config)
 	applied := m.config.Health
 	if m.configPath != "" {
-		if err := config.SaveConfig(m.configPath, m.config); err != nil {
+		if err := m.saveConfig(m.configPath, m.config); err != nil {
 			slog.Error("Failed to save config", "error", err)
 		}
 	}
@@ -423,6 +431,7 @@ func (m *Miner) ApplyHealthSettings(s config.HealthSettings) {
 	if m.progressWatchdog != nil {
 		m.progressWatchdog.UpdateSettings(healthWatchdogConfig(applied))
 	}
+	m.coordinatorMu.Unlock()
 	slog.Info("Health settings updated",
 		"canaryEnabled", applied.CanaryEnabled, "canaryChannel", applied.CanaryChannel,
 		"watchdogEnabled", applied.WatchdogEnabled)
