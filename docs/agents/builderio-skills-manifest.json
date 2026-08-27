@@ -1,6 +1,17 @@
 {
   "upstream_repo": "https://github.com/BuilderIO/skills",
-  "upstream_commit": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+  "upstream_commit": "5d447740266633b959e761e46e88def4033f2c03",
+  "automated_candidate": {
+    "state": "PREPARED_AUDIT_REQUIRED",
+    "prepared_by": "scripts/skill_updates (automated skills update bot)",
+    "superseded_commit": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+    "target_commit": "5d447740266633b959e761e46e88def4033f2c03",
+    "upstream_ref": "main",
+    "reviewed_fields_refer_to": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+    "audited_state_reachable_by_automation": false,
+    "clears_when": "a human or an agent under a task contract audits the diff, records a fresh reviewed_at/reviewed_by for the target commit, and deletes this block. Only that act reaches the AUDITED state. scripts/validate-agent-governance.py fails while this block is present, so a candidate cannot pass the governance gate on automation alone.",
+    "ancestry": "fast-forward"
+  },
   "upstream_tree": {
     "agent-watchdog": "016143fa2a8f50acd62eb00b0e5b3e211a48cc39",
     "efficient-frontier": "b532256b9a1eca03c7925582baf419c9ab14cc71",
@@ -8,7 +19,7 @@
     "plow-ahead": "3fa79c34fe2ef7798c9be61147fb00c2b990b188",
     "read-the-damn-docs": "bdcaa95189bb3fad84fccb0e71ae02336e7ba85d"
   },
-  "upstream_current_head": "0ecfb56f3bf78b9d957246789379f3f78e2f85ec",
+  "upstream_current_head": "5d447740266633b959e761e46e88def4033f2c03",
   "drift": "none",
   "reviewed_at": "2026-08-16T00:00:00Z",
   "reviewed_by": "Governance v3 multi-provider skill audit (task audited-skills-stack-v3): candidate skills read in full with their complete dependency closures; every bundled script read end to end.",
