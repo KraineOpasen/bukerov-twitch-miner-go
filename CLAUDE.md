@@ -134,9 +134,12 @@ reviewed policy + file-level manifest + patch-ledger triple under `docs/agents/`
 (`<provider>-skills-policy.md`, `<provider>-skills-manifest.json`, `<provider>-skills-patches.md`),
 registered in `docs/agents/skills-update-providers.json`, and routed in
 `docs/agents/skills-routing.md`. Pins are each manifest's `upstream_commit`; `automatic_updates` is
-false for every provider. The daily skill-update automation is defined on the repository's default
-branch (`main`) and, under GitHub scheduled-workflow semantics, runs only there — this stable line is
-not maintained by it and receives audited refreshes via the normal task-branch/PR path.
+false for every provider. G1.1 adds the stable-owned, artifact-only
+`.github/workflows/stable-skills-maintenance.yml` detector/preparer. At adoption `main` is still the
+repository default and `release/0.3` is non-default, so the stable workflow is **UNCOMMISSIONED** and
+must not be described as scheduled or live. Its only production outcomes are `NO_DRIFT`, `BLOCKED`,
+and `PREPARED_AUDIT_REQUIRED`; it has no publication, audit, Ready, merge, auto-merge, or sibling-install
+authority. Default-branch migration and full liveness commissioning are separate owner-gated actions.
 `skill-creator-anthropic` is upstream's `skill-creator` renamed (explicit-invocation-only — use
 `/skill-creator-anthropic`; a plain "create a skill" request routes to the built-in instead).
 

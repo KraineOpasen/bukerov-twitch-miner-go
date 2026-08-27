@@ -1,0 +1,170 @@
+{
+  "$schema": "./schemas/control-plane.schema.json",
+  "schema_version": 1,
+  "control_plane_id": "g1.1-stable-native-control-plane",
+  "repository": {
+    "id": 1297795646,
+    "full_name": "KraineOpasen/bukerov-twitch-miner-go"
+  },
+  "stable": {
+    "branch": "release/0.3",
+    "base_mode": "live-default-head",
+    "g11_implementation_parent_sha": "22dac63fd34b4e869c93f62c669d763f45b37620"
+  },
+  "workflow": {
+    "path": ".github/workflows/stable-skills-maintenance.yml",
+    "expected_workflow_ref": "KraineOpasen/bukerov-twitch-miner-go/.github/workflows/stable-skills-maintenance.yml@refs/heads/release/0.3",
+    "historical_donor_path": ".github/workflows/skills-update.yml",
+    "execution_mode": "ARTIFACT_ONLY",
+    "publication_authority": false
+  },
+  "default_branch": {
+    "observed_at": "2026-08-27T12:15:58Z",
+    "observed_name": "main",
+    "observed_head_sha": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7",
+    "required_for_commissioning": "release/0.3",
+    "stable_is_default_observed": false
+  },
+  "commissioning": {
+    "state": "UNCOMMISSIONED",
+    "owner_action_required": true,
+    "workflow_enabled_assumed": false,
+    "workflow_id": null,
+    "workflow_state": "UNAVAILABLE"
+  },
+  "liveness": {
+    "state": "UNAVAILABLE",
+    "detector_only_is_healthy": false,
+    "schedule": {
+      "cron": "37 5 * * *",
+      "grace_seconds": 172800
+    },
+    "expected_control": {
+      "repository_id": 1297795646,
+      "repository_full_name": "KraineOpasen/bukerov-twitch-miner-go",
+      "default_branch": "release/0.3",
+      "stable_branch": "release/0.3",
+      "workflow": {
+        "path": ".github/workflows/stable-skills-maintenance.yml",
+        "workflow_id": null,
+        "trusted_file_blob_sha": null,
+        "state": "UNAVAILABLE"
+      },
+      "closed_workflow_set": {
+        "schema": "closed-workflow-set/v1",
+        "algorithm": "sha256-jcs",
+        "workflows": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "workflow_id": null,
+            "trusted_file_blob_sha": null,
+            "state": "UNAVAILABLE"
+          },
+          {
+            "path": ".github/workflows/stable-skills-maintenance.yml",
+            "workflow_id": null,
+            "trusted_file_blob_sha": null,
+            "state": "UNAVAILABLE"
+          }
+        ],
+        "digest": null,
+        "readback_state": "UNAVAILABLE"
+      },
+      "aggregate_control_plane_identity": {
+        "state": "UNAVAILABLE",
+        "schema": "control-plane-identity/v1",
+        "algorithm": "sha256-jcs",
+        "digest": null,
+        "binds": [
+          "control_input_digest",
+          "updater_source_sha",
+          "pinned_action_digests",
+          "closed_workflow_set"
+        ]
+      }
+    },
+    "qualifying_run": {
+      "event": "schedule",
+      "status": "completed",
+      "conclusion": "success",
+      "workflow": {
+        "path": ".github/workflows/stable-skills-maintenance.yml",
+        "workflow_id": "CURRENT_STABLE_ORCHESTRATOR_WORKFLOW_ID",
+        "trusted_file_blob_sha": "CURRENT_STABLE_ORCHESTRATOR_TRUSTED_FILE_BLOB_SHA",
+        "state": "active"
+      },
+      "head_sha": "CURRENT_LIVE_DEFAULT_HEAD",
+      "control_input_digest": "CURRENT_CONTROL_INPUT_DIGEST",
+      "aggregate_control_plane_identity": "CURRENT_AGGREGATE_CONTROL_PLANE_IDENTITY",
+      "required_job": {
+        "yaml_key": "reconcile-all",
+        "api_name": "Reconcile complete G1.1 control plane",
+        "conclusion": "success"
+      },
+      "max_age_seconds": 172800,
+      "ancestor_exception": {
+        "allowed": true,
+        "requires": [
+          "PROVED_ANCESTOR_OF_CURRENT_LIVE_DEFAULT_HEAD",
+          "IDENTICAL_CLOSED_WORKFLOW_SET_DIGEST",
+          "IDENTICAL_AGGREGATE_CONTROL_PLANE_IDENTITY"
+        ]
+      }
+    },
+    "failure_classes": [
+      "WORKFLOW_DISABLED",
+      "WORKFLOW_MISSING",
+      "WORKFLOW_DIGEST_MISMATCH",
+      "ORCHESTRATOR_FAILURE",
+      "ORCHESTRATOR_CANCELLED",
+      "ORCHESTRATOR_TIMED_OUT",
+      "ORCHESTRATOR_ACTION_REQUIRED",
+      "ORCHESTRATOR_STALE",
+      "RECONCILE_ALL_MISSING_OR_FAILED",
+      "WRONG_DEFAULT_HEAD",
+      "CONTROL_INPUT_DIGEST_MISMATCH",
+      "QUALIFYING_SUCCESS_ABSENT_AFTER_GRACE"
+    ],
+    "incident_policy": {
+      "dedupe": {
+        "schema": "liveness-incident/v1",
+        "algorithm": "sha256-jcs",
+        "binds": [
+          "monitor_policy_digest",
+          "workflow_id",
+          "failure_class",
+          "first_bad_run_or_grace_epoch"
+        ]
+      },
+      "recovery": {
+        "requires_later_qualifying_full_orchestrator_success": true,
+        "requires_every_workflow_active_and_digest_correct": true,
+        "detector_only_sufficient": false,
+        "send_healthy_or_repeated_message": false,
+        "inactivity_disabled_workflow_requires_manual_reenable": true
+      }
+    },
+    "external_heartbeat": {
+      "state": "UNCOMMISSIONED",
+      "provider": null,
+      "account": null,
+      "config": null,
+      "owner_action_required": true
+    }
+  },
+  "contracts": {
+    "policy": "docs/agents/skills-maintenance/policy.json",
+    "legacy_quarantine": "docs/agents/skills-maintenance/legacy-quarantine.json",
+    "external_dependencies": "docs/agents/skills-maintenance/external-dependencies.json"
+  },
+  "owner_actions_after_g1_1": [
+    "REVERIFY_MERGED_STABLE_AND_LIVE_MIGRATION_INPUTS",
+    "SNAPSHOT_COMPLETE_WORKFLOW_RUN_SETTINGS_RULESET_INTEGRATION_AND_QUARANTINE_STATE",
+    "DISABLE_DRAIN_AND_PROVE_ZERO_HISTORICAL_OR_DYNAMIC_MUTATION",
+    "FREEZE_MAIN_AND_NORMALIZE_STABLE_PROTECTION_WITHOUT_A_GAP",
+    "CHANGE_DEFAULT_BRANCH_TO_RELEASE_0_3_WITH_AUTO_MERGE_DISABLED",
+    "VERIFY_POST_SWITCH_DEFAULT_RULES_PR_BASES_WORKFLOW_AND_INTEGRATION_STATE",
+    "VERIFY_NEW_WORKFLOW_REGISTRATION_AND_ENABLEMENT",
+    "SELECT_CONFIGURE_AND_TEST_EXTERNAL_FULL_ORCHESTRATOR_HEARTBEAT"
+  ]
+}

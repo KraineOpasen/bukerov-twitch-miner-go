@@ -1,0 +1,391 @@
+"""Publication tests: deduplication, idempotence, blocked-issue handling, PR permission.
+
+Driven entirely through `ghadapter.FakeGitHub` and real local git repositories, so the branch/
+commit/push path is genuinely exercised rather than mocked away.
+"""
+
+import os
+import shutil
+import tempfile
+import unittest
+
+from .. import analyze, candidate, ghadapter, publish, report, runtime
+from ..errors import AdapterError
+from . import fixtures
+from .fixtures import SKILL_MD
+
+BASE_BODY = SKILL_MD % {"name": "fixture-skill"}
+
+
+class PublishCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.scenario = fixtures.build(
+            self.tmp.name, target_files={"SKILL.md": BASE_BODY + "\nupstream line\n"})
+        self.analysis = analyze.analyze_provider(
+            self.scenario.provider, self.scenario.root, self.scenario.upstream,
+            self.scenario.target_sha)
+        self.assertFalse(self.analysis.is_blocked, self.analysis.blocked)
+        self.identity = runtime.candidate_identity(
+            provider=self.scenario.provider.key,
+            stable_branch="release/0.3",
+            stable_base_sha="a" * 40,
+            target_sha=self.analysis.target_sha,
+            upstream_repo=self.scenario.provider.upstream_repo,
+            old_pin=self.analysis.pinned_sha,
+            control_input_digest="c" * 64,
+            updater_source_sha="d" * 64,
+            pinned_action_digests=runtime._pinned_action_digests(),
+        )
+        self.base_branch = "release/0.3"
+        self.gh = ghadapter.FakeGitHub()
+
+    def materialize_candidate_for_library_test(self):
+        """Generate in a fresh artifact root, then stage bytes in the test-only work repo.
+
+        G1.1 production never copies a candidate into the tracked checkout and cannot reach the
+        publication library.  These tests retain coverage of that inert library by explicitly
+        constructing its documented precondition after exercising the real artifact writer.
+        """
+        artifact = os.path.join(self.tmp.name, "candidate-artifact")
+        candidate.create_artifact_root(artifact)
+        paths = candidate.write(
+            self.analysis, self.scenario.provider, artifact, self.identity)
+        for relpath in paths:
+            source = os.path.join(artifact, relpath)
+            target = os.path.join(self.scenario.root, relpath)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(source, target)
+            os.chmod(target, 0o644)
+        return paths
+
+    def blocked_scenario(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        scenario = fixtures.build(
+            tmp.name,
+            vendored_overrides={"SKILL.md": BASE_BODY.replace("Body line three.", "OURS.")},
+            target_files={"SKILL.md": BASE_BODY.replace("Body line three.", "THEIRS.")})
+        analysis = analyze.analyze_provider(scenario.provider, scenario.root,
+                                            scenario.upstream, scenario.target_sha)
+        self.assertTrue(analysis.is_blocked)
+        return scenario, analysis
+
+
+class TestDeduplication(PublishCase):
+    def test_existing_branch_without_a_pr_is_recovered_not_suppressed(self):
+        """A branch on the remote with no PR is an UNFINISHED publish, not a duplicate.
+
+        `git push` runs before `create_pull_request`, so one transient failure leaves exactly
+        this state. Treating the branch as the dedup signal made every later run report
+        "duplicate" and exit 0 — red once, then green and silent forever while the candidate
+        never reached a human.
+        """
+        branch = candidate.branch_name(self.identity)
+        self.gh.branches.add(branch)
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(len(self.gh.pulls), 1)
+        self.assertTrue(self.gh.pulls[0]["draft"])
+        # Nothing was re-pushed or re-committed: only the missing PR was created.
+        self.assertNotIn("push", [c[0] for c in self.gh.calls])
+
+    def test_existing_branch_with_a_pr_is_a_duplicate(self):
+        branch = candidate.branch_name(self.identity)
+        self.gh.branches.add(branch)
+        self.gh.pulls.append({"number": 5, "head": branch, "state": "open"})
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "duplicate")
+        self.assertEqual(len(self.gh.pulls), 1)
+
+    def test_existing_pull_request_suppresses_creation(self):
+        branch = candidate.branch_name(self.identity)
+        self.gh.pulls.append({"number": 7, "head": branch, "state": "open"})
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "duplicate")
+        self.assertEqual(result["pull_request"], 7)
+        self.assertEqual(len(self.gh.pulls), 1)
+
+    def test_closed_pull_request_still_suppresses(self):
+        """A candidate a human closed unmerged must not be reopened nightly."""
+        branch = candidate.branch_name(self.identity)
+        self.gh.pulls.append({"number": 9, "head": branch, "state": "closed"})
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "duplicate")
+        self.assertEqual(len(self.gh.pulls), 1)
+
+    def test_branch_name_is_stable_across_runs(self):
+        first = candidate.branch_name(self.identity)
+        second = candidate.branch_name(self.identity)
+        self.assertEqual(first, second)
+
+    def test_different_targets_get_different_branches(self):
+        other = runtime.candidate_identity(
+            provider=self.scenario.provider.key, stable_branch="release/0.3",
+            stable_base_sha=self.identity.stable_base_sha, target_sha="c" * 40,
+            upstream_repo=self.identity.upstream_repo, old_pin=self.identity.old_pin,
+            control_input_digest=self.identity.control_input_digest,
+            updater_source_sha=self.identity.updater_source_sha,
+            pinned_action_digests=dict(self.identity.pinned_action_digests))
+        self.assertNotEqual(candidate.branch_name(self.identity), candidate.branch_name(other))
+
+    def test_wrong_stable_base_branch_is_refused(self):
+        with self.assertRaises(AdapterError):
+            publish.publish_candidate(
+                self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+                self.gh, "release/0.2", dry_run=True)
+
+    def test_no_force_flag_reaches_any_git_invocation(self):
+        """Structural guarantee, asserted rather than trusted to review.
+
+        Checks the module's real string *literals* via the AST rather than grepping the file:
+        the prose that explains this rule necessarily names the flags it forbids, and a grep
+        cannot tell an explanation from an argument.
+        """
+        import ast
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(os.path.dirname(here), "publish.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node, clean=False)
+                if doc:
+                    docstrings.add(doc)
+        literals = [n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and n.value not in docstrings]
+        for forbidden in ("--force", "--force-with-lease", "+refs/", "--delete", "--mirror",
+                          "--all", "-f"):
+            for literal in literals:
+                self.assertNotIn(forbidden, literal,
+                                 "%r appears in a publish.py string literal" % forbidden)
+
+
+class TestDryRun(PublishCase):
+    def test_dry_run_creates_nothing(self):
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, [],
+            self.gh, self.base_branch, dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(self.gh.pulls, [])
+        self.assertEqual(self.gh.issues, [])
+
+    def test_blocked_dry_run_creates_no_issue(self):
+        scenario, analysis = self.blocked_scenario()
+        result = publish.publish_blocked(analysis, scenario.provider, self.gh, dry_run=True)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(self.gh.issues, [])
+
+
+class TestBlockedIssues(PublishCase):
+    def test_issue_created_once_then_left_alone(self):
+        scenario, analysis = self.blocked_scenario()
+        first = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(len(self.gh.issues), 1)
+
+        second = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(second["status"], "unchanged")
+        self.assertEqual(len(self.gh.issues), 1)
+        self.assertNotIn(("update_issue", 1), self.gh.calls)
+
+    def test_issue_updated_when_the_reason_changes(self):
+        scenario, analysis = self.blocked_scenario()
+        publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.gh.issues[0]["body"] = "something else entirely"
+        result = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(len(self.gh.issues), 1)
+
+    def test_issue_body_is_free_of_timestamps_so_it_is_comparable(self):
+        scenario, analysis = self.blocked_scenario()
+        bodies = {report.issue_body(analysis, scenario.provider) for _ in range(5)}
+        self.assertEqual(len(bodies), 1)
+
+    def test_issue_title_encodes_provider_and_target(self):
+        scenario, analysis = self.blocked_scenario()
+        result = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertTrue(result["issue_title"].startswith("Skills update blocked: fixture -> "))
+
+    def test_upstream_details_cannot_break_out_of_the_issue_fence(self):
+        """Blocked-reason details are upstream-controlled text, and git preserves newlines in
+        paths, so a crafted path could otherwise close the fence and continue as Markdown.
+
+        Asserts the structural property rather than the absence of one substring: the rendered
+        body must contain exactly two fence lines -- the opener and the closer -- with nothing
+        in between able to act as a third.
+        """
+        scenario, analysis = self.blocked_scenario()
+        analysis.blocked = []
+        analysis.block("inventory", "hostile",
+                       ["````\n## FORGED HEADING\n[click](https://evil.example)\n````"])
+        body = report.issue_body(analysis, scenario.provider)
+        fence_lines = [ln for ln in body.splitlines() if ln.strip() == report.FENCE]
+        self.assertEqual(len(fence_lines), 2, body)
+        self.assertNotIn("\n## FORGED HEADING", body)
+        self.assertNotIn("\n````\n## ", body)
+
+
+class TestIssueSupersession(PublishCase):
+    """A persistent block must not accumulate one open issue per upstream commit.
+
+    The title embeds the target SHA -- which is what makes deduplication correct for a single
+    head, and is also what would otherwise file a fresh issue every time upstream moves. Now
+    that a reworded `description` blocks (it is trigger surface), an actively maintained
+    provider would produce one a day.
+    """
+
+    def test_older_blocked_issues_are_closed_when_a_newer_head_blocks(self):
+        scenario, analysis = self.blocked_scenario()
+        first = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(first["status"], "created")
+
+        analysis.target_sha = "b" * 40
+        second = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(second["status"], "created")
+        self.assertIn(first["issue"], second["superseded"])
+
+        open_titles = [i["title"] for i in self.gh.issues if i["state"] == "open"]
+        self.assertEqual(len(open_titles), 1, open_titles)
+        closed = [i for i in self.gh.issues if i["state"] == "closed"]
+        self.assertIn("Superseded", closed[0]["close_comment"])
+
+    def test_the_current_head_issue_is_never_superseded_by_itself(self):
+        scenario, analysis = self.blocked_scenario()
+        publish.publish_blocked(analysis, scenario.provider, self.gh)
+        again = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(again["status"], "unchanged")
+        self.assertEqual(again["superseded"], [])
+        self.assertEqual([i["state"] for i in self.gh.issues], ["open"])
+
+    def test_discovery_issues_supersede_independently_of_blocked_issues(self):
+        """The two conditions mean opposite things; one must never close the other."""
+        scenario, analysis = self.blocked_scenario()
+        publish.publish_blocked(analysis, scenario.provider, self.gh)
+        analysis.discoveries.append(
+            analyze.Discovery("new-skill", "skills/new-skill", scenario.provider.key))
+        result = publish.publish_discovery(analysis, scenario.provider, self.gh)
+        self.assertEqual(result["status"], "created")
+        self.assertEqual(result["superseded"], [])
+        self.assertEqual(sorted(i["state"] for i in self.gh.issues), ["open", "open"])
+
+
+class TestUnpaginatedIssueLookup(PublishCase):
+    def test_dedup_finds_an_issue_past_the_first_page(self):
+        """>100 open issues (PRs count too) must not defeat deduplication."""
+        scenario, analysis = self.blocked_scenario()
+        created = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        for index in range(150):
+            self.gh.issues.append({"number": 1000 + index, "title": "noise %d" % index,
+                                   "body": "", "labels": [], "state": "open"})
+        again = publish.publish_blocked(analysis, scenario.provider, self.gh)
+        self.assertEqual(again["status"], "unchanged")
+        self.assertEqual(again["issue"], created["issue"])
+
+
+class TestPullRequestPermission(PublishCase):
+    def test_403_reports_the_exact_setting_and_keeps_the_branch(self):
+        self.gh.fail_pr_permission = True
+        fixtures.init_work_repo(self.scenario.root)
+        paths = self.materialize_candidate_for_library_test()
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, paths,
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "pushed")
+        self.assertIn("Allow GitHub Actions to create and approve pull requests",
+                      result["remedy"])
+        self.assertIn("does not change repository settings", result["remedy"])
+
+    def test_non_403_failure_reports_a_failing_status_not_success(self):
+        """Any PR-creation failure must be reported as a failure, not swallowed OR raised past
+        the caller as an unhandled crash that later runs then paper over."""
+        class Boom(ghadapter.FakeGitHub):
+            def create_pull_request(self, *a, **kw):
+                raise AdapterError("upstream is on fire", status=500)
+
+        gh = Boom()
+        fixtures.init_work_repo(self.scenario.root)
+        paths = self.materialize_candidate_for_library_test()
+        result = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                           self.analysis, self.identity, paths, gh,
+                                           self.base_branch)
+        self.assertEqual(result["status"], "pushed-no-pr")
+        self.assertIn(result["status"], publish.FAILED_PUBLISH_STATUSES)
+        self.assertIn("retry ONLY the pull-request creation", result["remedy"])
+
+    def test_a_wedged_branch_keeps_failing_until_a_pr_exists(self):
+        """The regression that matters: it must NOT go green on the second run."""
+        class Boom(ghadapter.FakeGitHub):
+            fail = True
+
+            def create_pull_request(self, *a, **kw):
+                if self.fail:
+                    raise AdapterError("transient", status=502)
+                return super().create_pull_request(*a, **kw)
+
+        gh = Boom()
+        fixtures.init_work_repo(self.scenario.root)
+        paths = self.materialize_candidate_for_library_test()
+        first = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                          self.analysis, self.identity, paths, gh,
+                                          self.base_branch)
+        self.assertIn(first["status"], publish.FAILED_PUBLISH_STATUSES)
+
+        # Second run: the branch now exists on the remote. Old behaviour returned "duplicate"
+        # and exited 0 forever.
+        gh.branches.add(first["branch"])
+        second = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                           self.analysis, self.identity, paths, gh,
+                                           self.base_branch)
+        self.assertIn(second["status"], publish.FAILED_PUBLISH_STATUSES)
+        self.assertNotEqual(second["status"], "duplicate")
+
+        # Third run, once GitHub recovers: the PR is finally created.
+        gh.fail = False
+        third = publish.publish_candidate(self.scenario.root, self.scenario.provider,
+                                          self.analysis, self.identity, paths, gh,
+                                          self.base_branch)
+        self.assertEqual(third["status"], "recovered")
+        self.assertEqual(len(gh.pulls), 1)
+
+
+class TestEndToEndPublish(PublishCase):
+    def test_branch_is_created_committed_pushed_and_pr_opened_as_draft(self):
+        bare = fixtures.init_work_repo(self.scenario.root)
+        paths = self.materialize_candidate_for_library_test()
+        result = publish.publish_candidate(
+            self.scenario.root, self.scenario.provider, self.analysis, self.identity, paths,
+            self.gh, self.base_branch)
+        self.assertEqual(result["status"], "published")
+        pull = self.gh.pulls[0]
+        self.assertTrue(pull["draft"], "candidate PRs must be drafts")
+        self.assertTrue(pull["body"].startswith(candidate.PR_BANNER))
+        self.assertEqual(pull["base"], "release/0.3")
+        self.assertTrue(pull["head"].startswith("stable-skills/"))
+        # The branch really reached the remote, and main was not touched.
+        refs = fixtures._run(["for-each-ref", "--format=%(refname)"], cwd=bare)
+        self.assertIn("refs/heads/" + result["branch"], refs)
+        main_before = fixtures._run(["rev-parse", "refs/heads/main"], cwd=bare).strip()
+        self.assertTrue(main_before)
+
+    def test_pr_body_states_it_is_unaudited(self):
+        body = report.pr_body(self.analysis, self.scenario.provider, self.identity)
+        self.assertIn("AUDIT REQUIRED", body)
+        self.assertIn("PUBLICATION UNCOMMISSIONED", body)
+        self.assertIn("No audit has been performed", body)
+        self.assertIn("automated_candidate", body)
+
+
+if __name__ == "__main__":
+    unittest.main()

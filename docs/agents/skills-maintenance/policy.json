@@ -1,0 +1,101 @@
+{
+  "$schema": "./schemas/policy.schema.json",
+  "schema_version": 1,
+  "policy_id": "g1.1-stable-native-deterministic-foundation",
+  "repository": {
+    "id": 1297795646,
+    "full_name": "KraineOpasen/bukerov-twitch-miner-go",
+    "canonical_https_url": "https://github.com/KraineOpasen/bukerov-twitch-miner-go"
+  },
+  "stable": {
+    "branch": "release/0.3",
+    "base_mode": "live-default-head",
+    "g11_implementation_parent_sha": "22dac63fd34b4e869c93f62c669d763f45b37620",
+    "historical_ancestry_marker": "1cf198aa4257a5f9ba250aec29bf027870f8dad7"
+  },
+  "workflow": {
+    "path": ".github/workflows/stable-skills-maintenance.yml",
+    "execution_mode": "ARTIFACT_ONLY",
+    "selected_ref_must_equal_stable_branch": true
+  },
+  "control_input": {
+    "schema": "control-input/v1",
+    "member_mode": "100644",
+    "members": [
+      ".claude/rules/github-governance.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/stable-release.yml",
+      ".github/workflows/stable-skills-maintenance.yml",
+      "CLAUDE.md",
+      "GOVERNANCE_V3.md",
+      "docs/agents/anthropic-skills-manifest.json",
+      "docs/agents/anthropic-skills-patches.md",
+      "docs/agents/anthropic-skills-policy.md",
+      "docs/agents/awesome-copilot-skills-manifest.json",
+      "docs/agents/awesome-copilot-skills-patches.md",
+      "docs/agents/awesome-copilot-skills-policy.md",
+      "docs/agents/builderio-skills-manifest.json",
+      "docs/agents/builderio-skills-patches.md",
+      "docs/agents/builderio-skills-policy.md",
+      "docs/agents/compound-engineering-skills-manifest.json",
+      "docs/agents/compound-engineering-skills-patches.md",
+      "docs/agents/compound-engineering-skills-policy.md",
+      "docs/agents/mattpocock-skills-manifest.json",
+      "docs/agents/mattpocock-skills-patches.md",
+      "docs/agents/mattpocock-skills-policy.md",
+      "docs/agents/skills-maintenance/THIRD_PARTY_NOTICES.md",
+      "docs/agents/skills-maintenance/control-plane.json",
+      "docs/agents/skills-maintenance/external-dependencies.json",
+      "docs/agents/skills-maintenance/legacy-quarantine.json",
+      "docs/agents/skills-maintenance/policy.json",
+      "docs/agents/skills-maintenance/schemas/control-plane.schema.json",
+      "docs/agents/skills-maintenance/schemas/external-dependencies.schema.json",
+      "docs/agents/skills-maintenance/schemas/legacy-quarantine.schema.json",
+      "docs/agents/skills-maintenance/schemas/policy.schema.json",
+      "docs/agents/skills-routing.md",
+      "docs/agents/skills-update-plugins.json",
+      "docs/agents/skills-update-providers.json",
+      "docs/agents/trailofbits-skills-manifest.json",
+      "docs/agents/trailofbits-skills-patches.md",
+      "docs/agents/trailofbits-skills-policy.md",
+      "scripts/validate-agent-governance.py"
+    ]
+  },
+  "candidate_identity": {
+    "schema": "provider-update/v1",
+    "algorithm": "sha256-jcs",
+    "binds": [
+      "schema",
+      "repo_id",
+      "repo_full_name",
+      "stable_branch",
+      "stable_base_sha",
+      "provider",
+      "upstream_repo",
+      "old_pin",
+      "target_sha",
+      "control_input_digest",
+      "updater_source_sha",
+      "pinned_action_digests"
+    ]
+  },
+  "allowed_production_states": [
+    "NO_DRIFT",
+    "BLOCKED",
+    "PREPARED_AUDIT_REQUIRED"
+  ],
+  "forbidden_capabilities": [
+    "SEMANTIC_AUDIT",
+    "AUDITED_STATE",
+    "READY_FOR_REVIEW",
+    "REF_PUBLICATION",
+    "PULL_REQUEST_PUBLICATION",
+    "ISSUE_PUBLICATION",
+    "AUTO_MERGE",
+    "MERGE",
+    "SIBLING_INSTALLATION",
+    "MODEL_INVOCATION"
+  ],
+  "publication_authority": false,
+  "failure_policy": "FAIL_CLOSED"
+}

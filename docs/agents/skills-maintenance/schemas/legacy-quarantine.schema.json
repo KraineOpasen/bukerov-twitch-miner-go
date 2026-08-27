@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bukerov:skills-maintenance:legacy-quarantine:1",
+  "title": "G1.1 exact legacy updater quarantine",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "quarantine_id",
+    "repository",
+    "observed_at",
+    "binding",
+    "authority",
+    "forbidden_operations",
+    "subjects"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "./schemas/legacy-quarantine.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "quarantine_id": {
+      "const": "g1.1-legacy-default-main-quarantine"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "full_name"
+      ],
+      "properties": {
+        "id": {
+          "const": 1297795646
+        },
+        "full_name": {
+          "const": "KraineOpasen/bukerov-twitch-miner-go"
+        }
+      }
+    },
+    "observed_at": {
+      "const": "2026-08-27T17:00:03Z"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable_branch",
+        "g11_implementation_parent_sha",
+        "observed_default_branch",
+        "observed_default_sha",
+        "policy_path",
+        "policy_sha256",
+        "control_plane_path",
+        "control_plane_sha256",
+        "subjects_sha256"
+      ],
+      "properties": {
+        "stable_branch": {
+          "const": "release/0.3"
+        },
+        "g11_implementation_parent_sha": {
+          "const": "22dac63fd34b4e869c93f62c669d763f45b37620"
+        },
+        "observed_default_branch": {
+          "const": "main"
+        },
+        "observed_default_sha": {
+          "const": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7"
+        },
+        "policy_path": {
+          "const": "docs/agents/skills-maintenance/policy.json"
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "control_plane_path": {
+          "const": "docs/agents/skills-maintenance/control-plane.json"
+        },
+        "control_plane_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "subjects_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "authority": {
+      "const": "OBSERVE_AND_REPORT_ONLY"
+    },
+    "forbidden_operations": {
+      "const": [
+        "UPDATE",
+        "CLOSE",
+        "REOPEN",
+        "RETARGET",
+        "SUPERSEDE",
+        "DUPLICATE",
+        "COMMENT",
+        "RECREATE",
+        "ADOPT_AS_AUTHORITY",
+        "USE_AS_PROMOTION_EVIDENCE"
+      ]
+    },
+    "subjects": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/pull_request"
+          },
+          {
+            "$ref": "#/$defs/issue"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "common": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "pull_request",
+            "issue"
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "OPEN",
+            "CLOSED"
+          ]
+        },
+        "author": {
+          "const": "github-actions[bot]"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "target_sha": {
+          "$ref": "#/$defs/sha1"
+        }
+      }
+    },
+    "pull_request": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "number",
+            "node_id",
+            "title",
+            "state",
+            "author",
+            "provider",
+            "target_sha",
+            "draft",
+            "head_ref",
+            "head_sha",
+            "base_ref",
+            "base_sha"
+          ],
+          "properties": {
+            "kind": {
+              "const": "pull_request"
+            },
+            "number": {
+              "enum": [
+                223,
+                233,
+                241
+              ]
+            },
+            "node_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state": {
+              "const": "OPEN"
+            },
+            "author": {
+              "const": "github-actions[bot]"
+            },
+            "provider": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            },
+            "target_sha": {
+              "$ref": "#/$defs/sha1"
+            },
+            "draft": {
+              "const": true
+            },
+            "head_ref": {
+              "type": "string",
+              "pattern": "^automated/skills-update/"
+            },
+            "head_sha": {
+              "$ref": "#/$defs/sha1"
+            },
+            "base_ref": {
+              "const": "main"
+            },
+            "base_sha": {
+              "const": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7"
+            }
+          }
+        }
+      ]
+    },
+    "issue": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/common"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "number",
+            "node_id",
+            "title",
+            "state",
+            "author",
+            "provider",
+            "target_sha",
+            "label"
+          ],
+          "properties": {
+            "kind": {
+              "const": "issue"
+            },
+            "number": {
+              "enum": [
+                230,
+                238,
+                239,
+                240
+              ]
+            },
+            "node_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state": {
+              "enum": [
+                "OPEN",
+                "CLOSED"
+              ]
+            },
+            "author": {
+              "const": "github-actions[bot]"
+            },
+            "provider": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            },
+            "target_sha": {
+              "$ref": "#/$defs/sha1"
+            },
+            "label": {
+              "enum": [
+                "skills-update-blocked",
+                "skills-update-discovery"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

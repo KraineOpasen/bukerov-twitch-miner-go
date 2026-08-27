@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bukerov:skills-maintenance:policy:1",
+  "title": "G1.1 stable-native policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "policy_id",
+    "repository",
+    "stable",
+    "workflow",
+    "control_input",
+    "candidate_identity",
+    "allowed_production_states",
+    "forbidden_capabilities",
+    "publication_authority",
+    "failure_policy"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "./schemas/policy.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "policy_id": {
+      "const": "g1.1-stable-native-deterministic-foundation"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "full_name",
+        "canonical_https_url"
+      ],
+      "properties": {
+        "id": {
+          "const": 1297795646
+        },
+        "full_name": {
+          "const": "KraineOpasen/bukerov-twitch-miner-go"
+        },
+        "canonical_https_url": {
+          "const": "https://github.com/KraineOpasen/bukerov-twitch-miner-go"
+        }
+      }
+    },
+    "stable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "base_mode",
+        "g11_implementation_parent_sha",
+        "historical_ancestry_marker"
+      ],
+      "properties": {
+        "branch": {
+          "const": "release/0.3"
+        },
+        "base_mode": {
+          "const": "live-default-head"
+        },
+        "g11_implementation_parent_sha": {
+          "const": "22dac63fd34b4e869c93f62c669d763f45b37620"
+        },
+        "historical_ancestry_marker": {
+          "const": "1cf198aa4257a5f9ba250aec29bf027870f8dad7"
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "execution_mode",
+        "selected_ref_must_equal_stable_branch"
+      ],
+      "properties": {
+        "path": {
+          "const": ".github/workflows/stable-skills-maintenance.yml"
+        },
+        "execution_mode": {
+          "const": "ARTIFACT_ONLY"
+        },
+        "selected_ref_must_equal_stable_branch": {
+          "const": true
+        }
+      }
+    },
+    "control_input": {
+      "const": {
+        "schema": "control-input/v1",
+        "member_mode": "100644",
+        "members": [
+          ".claude/rules/github-governance.md",
+          ".github/workflows/ci.yml",
+          ".github/workflows/stable-release.yml",
+          ".github/workflows/stable-skills-maintenance.yml",
+          "CLAUDE.md",
+          "GOVERNANCE_V3.md",
+          "docs/agents/anthropic-skills-manifest.json",
+          "docs/agents/anthropic-skills-patches.md",
+          "docs/agents/anthropic-skills-policy.md",
+          "docs/agents/awesome-copilot-skills-manifest.json",
+          "docs/agents/awesome-copilot-skills-patches.md",
+          "docs/agents/awesome-copilot-skills-policy.md",
+          "docs/agents/builderio-skills-manifest.json",
+          "docs/agents/builderio-skills-patches.md",
+          "docs/agents/builderio-skills-policy.md",
+          "docs/agents/compound-engineering-skills-manifest.json",
+          "docs/agents/compound-engineering-skills-patches.md",
+          "docs/agents/compound-engineering-skills-policy.md",
+          "docs/agents/mattpocock-skills-manifest.json",
+          "docs/agents/mattpocock-skills-patches.md",
+          "docs/agents/mattpocock-skills-policy.md",
+          "docs/agents/skills-maintenance/THIRD_PARTY_NOTICES.md",
+          "docs/agents/skills-maintenance/control-plane.json",
+          "docs/agents/skills-maintenance/external-dependencies.json",
+          "docs/agents/skills-maintenance/legacy-quarantine.json",
+          "docs/agents/skills-maintenance/policy.json",
+          "docs/agents/skills-maintenance/schemas/control-plane.schema.json",
+          "docs/agents/skills-maintenance/schemas/external-dependencies.schema.json",
+          "docs/agents/skills-maintenance/schemas/legacy-quarantine.schema.json",
+          "docs/agents/skills-maintenance/schemas/policy.schema.json",
+          "docs/agents/skills-routing.md",
+          "docs/agents/skills-update-plugins.json",
+          "docs/agents/skills-update-providers.json",
+          "docs/agents/trailofbits-skills-manifest.json",
+          "docs/agents/trailofbits-skills-patches.md",
+          "docs/agents/trailofbits-skills-policy.md",
+          "scripts/validate-agent-governance.py"
+        ]
+      }
+    },
+    "candidate_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "algorithm",
+        "binds"
+      ],
+      "properties": {
+        "schema": {
+          "const": "provider-update/v1"
+        },
+        "algorithm": {
+          "const": "sha256-jcs"
+        },
+        "binds": {
+          "const": [
+            "schema",
+            "repo_id",
+            "repo_full_name",
+            "stable_branch",
+            "stable_base_sha",
+            "provider",
+            "upstream_repo",
+            "old_pin",
+            "target_sha",
+            "control_input_digest",
+            "updater_source_sha",
+            "pinned_action_digests"
+          ]
+        }
+      }
+    },
+    "allowed_production_states": {
+      "const": [
+        "NO_DRIFT",
+        "BLOCKED",
+        "PREPARED_AUDIT_REQUIRED"
+      ]
+    },
+    "forbidden_capabilities": {
+      "const": [
+        "SEMANTIC_AUDIT",
+        "AUDITED_STATE",
+        "READY_FOR_REVIEW",
+        "REF_PUBLICATION",
+        "PULL_REQUEST_PUBLICATION",
+        "ISSUE_PUBLICATION",
+        "AUTO_MERGE",
+        "MERGE",
+        "SIBLING_INSTALLATION",
+        "MODEL_INVOCATION"
+      ]
+    },
+    "publication_authority": {
+      "const": false
+    },
+    "failure_policy": {
+      "const": "FAIL_CLOSED"
+    }
+  }
+}

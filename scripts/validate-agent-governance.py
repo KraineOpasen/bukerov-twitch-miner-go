@@ -36,8 +36,8 @@ Usage:
         exist and what each one covers; that list is expected to grow, so it is deliberately not
         duplicated as an id range here. Families, by id prefix: G* positive/structural cases,
         N* negative cases (one per distinct violation class in project-skills-policy.md's schema),
-        V* the Governance-v3 prose checks, P* provider-registry cases, and I*/R* the approved
-        inventory / routing-universe contract.
+        V* the Governance-v3 prose checks, P* provider-registry cases, W* the stable workflow / CI
+        / control-plane integration, and I*/R* the approved inventory / routing-universe contract.
 
         Fixtures come in two flavours, and BOTH are normal. Most build a synthetic, never-committed
         tree under tempfile.TemporaryDirectory. The rest read the REAL repository, read-only, to
@@ -71,6 +71,7 @@ trusting it again.
 """
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -97,6 +98,37 @@ PROJECT_MANIFEST_PATH = os.path.join(DOCS_AGENTS_DIR, "project-skills-manifest.j
 PROJECT_OWNERSHIP_CLASS = "project-first-party"
 SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
 HOOK_PATH = os.path.join(CLAUDE_DIR, "hooks", "governance-policy.py")
+STABLE_SKILLS_WORKFLOW_REL = ".github/workflows/stable-skills-maintenance.yml"
+STABLE_CI_WORKFLOW_REL = ".github/workflows/ci.yml"
+STABLE_RELEASE_WORKFLOW_REL = ".github/workflows/stable-release.yml"
+STABLE_SKILLS_MAINTENANCE_DIR = os.path.join(DOCS_AGENTS_DIR, "skills-maintenance")
+STABLE_SKILLS_CONTROL_PATHS = (
+    "docs/agents/skills-maintenance/policy.json",
+    "docs/agents/skills-maintenance/control-plane.json",
+    "docs/agents/skills-maintenance/legacy-quarantine.json",
+    "docs/agents/skills-maintenance/external-dependencies.json",
+    "docs/agents/skills-maintenance/schemas/policy.schema.json",
+    "docs/agents/skills-maintenance/schemas/control-plane.schema.json",
+    "docs/agents/skills-maintenance/schemas/legacy-quarantine.schema.json",
+    "docs/agents/skills-maintenance/schemas/external-dependencies.schema.json",
+)
+PINNED_CHECKOUT_ACTION = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+STABLE_CI_BASELINE_SHA256 = "be5d141995b391da126648f095cd9321a1644ebeddd69b015766be6216129a18"
+STABLE_SKILLS_WORKFLOW_SHA256 = (
+    "60147affd0f00bbf6dc2e431cb7538ff84455ac1aa43ad066f6b515304971cbb"
+)
+STABLE_CI_GOVERNANCE_BLOCK_SHA256 = (
+    "012341e19dee452f6d0c504af31e4ed79129268e0dfb2fbec2f510e81d0e728e"
+)
+STABLE_RELEASE_SHA256 = "de5e499ecb2a65230a37c6fb9bc74ff37a6155584038e4a1a529c92559b01a3a"
+PRECHECKOUT_BOOTSTRAP_SHA256 = (
+    "2d0c11afc6fd18b3141ee2a211e4dab4496465cfd6afb90112687e9c0ac33148"
+)
+_PRECHECKOUT_BOOTSTRAP_RE = re.compile(
+    r"(?ms)^ {10}python3 -I -S -B <<'PY'\n(?P<body>.*?)^ {10}PY[ \t]*$"
+)
+_RESERVED_PROVIDER_ENV_PREFIXES = ("ACTIONS_", "GITHUB_", "RUNNER_")
+_RESERVED_PROVIDER_ENV_NAMES = frozenset(("CI", "ImageOS", "ImageVersion"))
 
 # --------------------------------------------------------------------------
 # Provider registry
@@ -247,16 +279,14 @@ FORBIDDEN_VENDOR_NAMES = {".github", ".claude-plugin", "package.json", "package-
 APPLICATION_PATH_PREFIXES = ("internal/", "cmd/")
 APPLICATION_PATH_EXACT_PREFIXES = ("go.mod", "go.sum", "Dockerfile", "docker-compose", ".github/workflows/")
 
-# Workflows that ARE part of the governance layer rather than the application's build/release
-# pipeline, and are therefore editable by a governance task. Deliberately an exact-path
-# allowlist, not a prefix: `.github/workflows/` stays forbidden as a whole, so ci.yml and
-# release.yml remain untouchable and a NEW workflow cannot be introduced by adding a file --
-# it has to be added to this list, in a diff a reviewer sees.
-# No workflow is governance-owned on the stable line: the skills-update automation is defined and
-# scheduled on the repository's default branch (main) only, and this line deliberately carries no
-# copy of it. With the allowlist empty, ANY .github/workflows/** change fails the application-path
-# guard -- CI changes on the stable line are always their own explicitly-confirmed concern.
-GOVERNANCE_OWNED_WORKFLOWS = ()
+# Exact G1.1 workflow integration surfaces. This must remain a literal collection: the independent
+# static runtime verifier parses the assignment without importing this validator. Every other
+# `.github/workflows/**` path remains an application path. CI is admitted only together with the
+# bounded-block check below, which proves that removing the block reproduces stable product CI.
+GOVERNANCE_OWNED_WORKFLOWS = (
+    ".github/workflows/ci.yml",
+    ".github/workflows/stable-skills-maintenance.yml",
+)
 
 # Skill names Claude Code (or another first-party surface) already provides. No vendored skill dir
 # name and no manifest skill name may collide with one of these -- that's exactly the problem the
@@ -291,6 +321,35 @@ def rel(path):
     return os.path.relpath(path, REPO_ROOT)
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key %r" % key)
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(value):
+    raise ValueError("non-JSON numeric constant %r" % value)
+
+
+def _strict_json_load(handle):
+    return json.load(
+        handle,
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
+def _strict_json_loads(raw):
+    return json.loads(
+        raw,
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
 def list_skill_dirs():
     if not os.path.isdir(SKILLS_DIR):
         return []
@@ -302,7 +361,7 @@ def list_skill_dirs():
 
 def load_manifest(path=MANIFEST_PATH):
     with open(path) as f:
-        return json.load(f)
+        return _strict_json_load(f)
 
 
 def load_anthropic_manifest():
@@ -482,8 +541,18 @@ def check_required_files():
         "docs/agents/skills-update-providers.json",
         "docs/agents/skills-update-plugins.json",
         "scripts/validate-agent-governance.py",
+        STABLE_SKILLS_WORKFLOW_REL,
+        "scripts/check-skill-updates.py",
+        "scripts/prepare-skill-update.py",
+        "scripts/skill_updates/runtime.py",
+        "scripts/skill_updates/tests/mutation_probe.py",
+        "scripts/skill_updates/tests/test_runtime.py",
+        "scripts/skill_updates/tests/test_external_dependencies.py",
+        "docs/agents/skills-update-automation.md",
+        "docs/agents/skills-maintenance/THIRD_PARTY_NOTICES.md",
+        "docs/adr/0003-stable-native-deterministic-skill-updates.md",
         "docs/agents/project-skills-manifest.json", "docs/agents/project-skills-policy.md",
-    ]
+    ] + list(STABLE_SKILLS_CONTROL_PATHS)
     # Every registered provider's three documents are required by construction, so adding a
     # provider to the registry cannot leave its manifest/ledger/policy unlisted here.
     for entry in MANIFESTS:
@@ -494,11 +563,13 @@ def check_required_files():
 
 def check_json_validity():
     details = []
-    paths = [SETTINGS_PATH, PROJECT_MANIFEST_PATH] + [e["manifest"] for e in MANIFESTS]
+    paths = ([SETTINGS_PATH, PROJECT_MANIFEST_PATH]
+             + [e["manifest"] for e in MANIFESTS]
+             + [os.path.join(REPO_ROOT, path) for path in STABLE_SKILLS_CONTROL_PATHS])
     for p in paths:
         try:
             with open(p) as f:
-                json.load(f)
+                _strict_json_load(f)
         except Exception as e:
             details.append("%s: %s" % (rel(p), e))
     report("json-validity", not details, details)
@@ -1044,7 +1115,7 @@ def unaudited_candidate_details(manifests):
 def check_no_unaudited_candidate():
     """No provider manifest may claim a pin that only a machine has ever looked at.
 
-    The scheduled update bot (.github/workflows/skills-update.yml) can prepare a mechanically
+    The stable scheduler (.github/workflows/stable-skills-maintenance.yml) can prepare a mechanically
     clean refresh, but it has no standing to establish that the new upstream content is
     something this project wants to run. It marks every candidate with an `automated_candidate`
     block, and this check FAILS while that block is present.
@@ -1571,7 +1642,10 @@ def dependency_closure_details(skills_dir):
 
 def check_application_paths_untouched():
     base_sha = os.environ.get("GOVERNANCE_BASE_SHA")
-    details = []
+    details = governance_base_sha_details(base_sha)
+    if details:
+        report("application-paths-untouched", False, details)
+        return
     try:
         if base_sha:
             out = subprocess.run(["git", "-C", REPO_ROOT, "diff", "--name-only", base_sha],
@@ -1593,29 +1667,615 @@ def check_application_paths_untouched():
     report("application-paths-untouched", not details, details)
 
 
+def governance_base_sha_details(value):
+    """Validate the optional comparison ref before it can reach ``git diff``.
+
+    Local runs may omit the ref and retain the historical clean-working-tree check. CI exports
+    an event-derived full SHA; malformed, uppercase, abbreviated and branch-creation zero values
+    fail closed instead of becoming ambiguous Git revisions.
+    """
+    if not value:
+        return []
+    if not re.fullmatch(r"[0-9a-f]{40}", value) or value == "0" * 40:
+        return ["GOVERNANCE_BASE_SHA must be one non-zero lowercase full commit SHA"]
+    return []
+
+
 def application_path_violations(paths):
     """Pure core of check_application_paths_untouched, so the allowlist is directly testable.
 
-    Extracted specifically because GOVERNANCE_OWNED_WORKFLOWS can punch a hole in an otherwise
-    blanket prohibition. On the stable line the allowlist is EMPTY -- there is no governance-owned
-    workflow here -- and the fixture proves every .github/workflows/** path is caught."""
+    The two exact workflow exceptions are paired with semantic checks below. No directory prefix
+    is exempt, and the stable release workflow remains an application path."""
     details = []
+    exact_workflow_exceptions = set(GOVERNANCE_OWNED_WORKFLOWS)
     for path in paths:
         path = path.strip()
         if not path:
             continue
-        if path in GOVERNANCE_OWNED_WORKFLOWS:
-            continue  # governance-layer workflow, not an application path -- see the constant
+        if path in exact_workflow_exceptions:
+            continue
         if path.startswith(APPLICATION_PATH_PREFIXES) or path.startswith(APPLICATION_PATH_EXACT_PREFIXES):
             details.append("touched application path: %s" % path)
     return details
+
+
+def _sha256_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _top_level_yaml_block(text, key):
+    """Return one top-level YAML source block without pretending to be a general YAML parser."""
+    lines = text.splitlines(True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\n") == key + ":"]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*(?::|\s*:)", lines[i]):
+            end = i
+            break
+    return "".join(lines[start:end])
+
+
+def _workflow_job_blocks(text):
+    """Extract exact two-space-indented job blocks from the repository-owned workflow subset."""
+    jobs = _top_level_yaml_block(text, "jobs")
+    if jobs is None:
+        return {}
+    lines = jobs.splitlines(True)
+    starts = []
+    for i, line in enumerate(lines[1:], 1):
+        match = re.match(r"^  ([A-Za-z_][A-Za-z0-9_-]*):\s*$", line)
+        if match:
+            starts.append((i, match.group(1)))
+    out = {}
+    for pos, (start, name) in enumerate(starts):
+        end = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
+        out[name] = "".join(lines[start:end])
+    return out
+
+
+def _workflow_uses(text):
+    return re.findall(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", text, re.MULTILINE)
+
+
+def _checkout_input_maps(job_text):
+    """Return each checkout step's literal input mapping from the closed workflow format."""
+    lines = job_text.splitlines()
+    maps = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", line)
+        if not match or not match.group(1).startswith("actions/checkout@"):
+            continue
+        inputs = {}
+        in_with = False
+        for later in lines[index + 1:]:
+            if re.match(r"^      - ", later):
+                break
+            if later.strip() == "with:":
+                in_with = True
+                continue
+            if not in_with:
+                continue
+            item = re.match(r"^\s{10}([a-z][a-z0-9-]*):\s*(.*?)\s*$", later)
+            if item:
+                inputs[item.group(1)] = item.group(2)
+        maps.append(inputs)
+    return maps
+
+
+def _checkout_contract_details(job_text, count, trusted_event_ref, fetch_depth=1):
+    details = []
+    uses = _workflow_uses(job_text)
+    if uses != [PINNED_CHECKOUT_ACTION] * count:
+        details.append("executable Actions must be exactly %d pinned checkout invocation(s), got %r"
+                       % (count, uses))
+    expected = {
+        "clean": "true",
+        "fetch-depth": str(fetch_depth),
+        "fetch-tags": "false",
+        "lfs": "false",
+        "persist-credentials": "false",
+        "set-safe-directory": "false",
+        "show-progress": "false",
+        "submodules": "false",
+    }
+    if trusted_event_ref:
+        expected["ref"] = "${{ github.sha }}"
+    maps = _checkout_input_maps(job_text)
+    if len(maps) != count:
+        details.append("expected %d checkout input map(s), got %d" % (count, len(maps)))
+    for inputs in maps:
+        if inputs != expected:
+            details.append("checkout inputs differ from the closed envelope: %r" % inputs)
+    return details
+
+
+def _bootstrap_source_details(text, expected_count, label):
+    bodies = [match.group("body").encode("utf-8")
+              for match in _PRECHECKOUT_BOOTSTRAP_RE.finditer(text)]
+    details = []
+    if len(bodies) != expected_count:
+        details.append("%s pre-checkout bootstrap count differs: %d"
+                       % (label, len(bodies)))
+        return details
+    for body in bodies:
+        if hashlib.sha256(body).hexdigest() != PRECHECKOUT_BOOTSTRAP_SHA256:
+            details.append("%s pre-checkout bootstrap source digest mismatch" % label)
+            break
+    return details
+
+
+def _reserved_provider_env_details(text, label):
+    env_header = re.compile(
+        r"^(?P<indent>[ ]*)(?P<quote>['\"]?)env(?P=quote)\s*:\s*(?P<tail>.*?)\s*$"
+    )
+    unsupported_yaml_key = re.compile(
+        r'(?m)^[ ]*(?:[?!]|[&*][^:\n]*:|"[^"\n]*\\[^"\n]*"\s*:)'
+    )
+    assignment = re.compile(
+        r"^(?P<indent>[ ]+)(?P<quote>['\"]?)(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)"
+        r"\s*:\s*(?P<value>.*?)\s*$"
+    )
+    lines = text.splitlines()
+    details = []
+    shadowed = set()
+    if unsupported_yaml_key.search(text):
+        details.append(
+            "%s contains an unsupported explicit, tagged, anchored, aliased, or escaped YAML key"
+            % label
+        )
+    for index, line in enumerate(lines):
+        header = env_header.match(line)
+        if header is None:
+            continue
+        if header.group("tail"):
+            details.append("%s contains a non-block or aliased env mapping" % label)
+            continue
+        parent_indent = len(header.group("indent"))
+        child_indent = None
+        keys = set()
+        for child in lines[index + 1:]:
+            if not child.strip() or child.lstrip().startswith("#"):
+                continue
+            indentation = len(child) - len(child.lstrip(" "))
+            if indentation <= parent_indent:
+                break
+            if child_indent is None:
+                child_indent = indentation
+            if indentation != child_indent:
+                continue
+            stripped = child.strip()
+            if stripped.startswith("<<:"):
+                details.append("%s contains an env merge key" % label)
+                break
+            match = assignment.match(child)
+            if match is None:
+                details.append("%s contains an unsupported env key spelling" % label)
+                break
+            key = match.group("key")
+            value = match.group("value")
+            if key in keys:
+                details.append("%s contains duplicate env key %s" % (label, key))
+                break
+            keys.add(key)
+            if re.search(r"(?:^|[\s\[{,])(?:&|\*)[A-Za-z0-9_-]+", value):
+                details.append("%s contains an env anchor or alias" % label)
+                break
+            if (key in _RESERVED_PROVIDER_ENV_NAMES
+                    or key.startswith(_RESERVED_PROVIDER_ENV_PREFIXES)):
+                shadowed.add(key)
+    if shadowed:
+        details.append("%s shadows provider-reserved environment: %r"
+                       % (label, sorted(shadowed)))
+    return details
+
+
+def _isolated_python_details(text, label):
+    details = []
+    for line in text.splitlines():
+        if not re.search(r"\bpython3\b", line):
+            continue
+        if "python3 -I -S -B" not in line:
+            details.append("%s contains a non-isolated Python invocation" % label)
+            break
+        if re.search(r"\bpython3 -I -S -B\s+(?:-m|-c)\b", line):
+            details.append(
+                "%s contains an inline or module-mode production Python invocation" % label
+            )
+            break
+    return details
+
+
+def _privileged_expression_details(text, label):
+    details = []
+    patterns = (
+        ("secret expression", r"\$\{\{[^}\n]*\bsecrets\s*(?:\.|\[)"),
+        (
+            "ambient github token expression",
+            r"\$\{\{[^}\n]*\bgithub\s*(?:\.token|\[\s*['\"]token['\"]\s*\])",
+        ),
+    )
+    for description, pattern in patterns:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            details.append("%s contains a forbidden %s" % (label, description))
+    return details
+
+
+def _exact_step_closure_details(job_text, expected_names, label):
+    step_lines = re.findall(r"^      - (?P<body>.+?)\s*$", job_text, re.MULTILINE)
+    names = []
+    for body in step_lines:
+        match = re.fullmatch(r"name:\s*(.+?)\s*", body)
+        if match is None:
+            return ["%s contains an unnamed or direct step" % label]
+        names.append(match.group(1))
+    if names != list(expected_names):
+        return ["%s step closure mismatch: %r" % (label, names)]
+    return []
+
+
+def _runner_envelope_details(job_text, label):
+    details = []
+    required = (
+        "runs-on: ubuntu-24.04",
+        "GIT_ALLOW_PROTOCOL: https",
+        "GIT_CONFIG_GLOBAL: /dev/null",
+        'GIT_CONFIG_NOSYSTEM: "1"',
+        'GIT_TERMINAL_PROMPT: "0"',
+        'PYTHONDONTWRITEBYTECODE: "1"',
+        '[[ "${ImageOS:-}" == "ubuntu24" ]]',
+        '[[ "${RUNNER_ARCH:-}" == "X64" ]]',
+        '[[ "${ImageVersion:-}" =~ ^[0-9]{8}\\.[0-9]+\\.[0-9]+$ ]]',
+        "python3 -I -S -B <<'PY'",
+        "sys.version_info[:2] != (3, 12)",
+        "(2, 43, 0) <= parsed < (2, 60, 0)",
+        "parsed_bash[:2] != (5, 2)",
+        "urllib.request.ProxyHandler({})",
+        '"SSL_CERT_DIR"',
+        '"GIT_SSL_NO_VERIFY"',
+        '"NODE_OPTIONS"',
+        '"NODE_EXTRA_CA_CERTS"',
+        '"NODE_TLS_REJECT_UNAUTHORIZED"',
+        '"GIT_CONFIG_COUNT"',
+        '"GIT_CONFIG_PARAMETERS"',
+        '"GIT_EXEC_PATH"',
+        "unexpected_git_env = sorted(",
+        'repository_api_url = "https://api.github.com/repos/actions/runner-images"',
+        'repository.get("id") != 190416463',
+        'repository.get("full_name") != "actions/runner-images"',
+        'source_sha = release.get("target_commitish")',
+        'manifest.get("state") != "uploaded"',
+        'f"{source_sha}/images/ubuntu/Ubuntu2404-Readme.md"',
+        '"- SBOM availability: `UNAVAILABLE_OPTIONAL_HARDENING`',
+    )
+    for needle in required:
+        if job_text.count(needle) != 1:
+            details.append("%s must contain exactly one runner-envelope anchor %r" % (label, needle))
+    details += _bootstrap_source_details(job_text, 1, label)
+    preflight = job_text.find("Prove the pinned runner Python and Git envelope")
+    checkout = job_text.find("uses: " + PINNED_CHECKOUT_ACTION)
+    if preflight < 0 or checkout < 0 or preflight >= checkout:
+        details.append("%s must prove the runner/Git envelope before checkout" % label)
+    influence = [
+        job_text.find("changed_git_env ="),
+        job_text.find("unexpected_git_env ="),
+        job_text.find("present_auth ="),
+        job_text.find("present_proxy ="),
+        job_text.find("present_trust ="),
+        job_text.find("present_execution ="),
+    ]
+    first_rest = job_text.find("with opener.open(request")
+    if first_rest < 0 or any(position < 0 or position >= first_rest for position in influence):
+        details.append("%s must reject ambient Git/auth/proxy/TLS influence before REST" % label)
+    return details
+
+
+def stable_skills_workflow_details(text):
+    """Semantic checks for the only stable-native workflow admitted by G1.1."""
+    details = []
+    if _sha256_text(text) != STABLE_SKILLS_WORKFLOW_SHA256:
+        details.append("stable workflow source digest mismatch")
+    details += _bootstrap_source_details(text, 2, "stable workflow")
+    details += _reserved_provider_env_details(text, "stable workflow")
+    details += _isolated_python_details(text, "stable workflow")
+    details += _privileged_expression_details(text, "stable workflow")
+    if text.count("name: Stable skills maintenance") != 1:
+        details.append("stable workflow display name must be unique and exact")
+
+    on_block = _top_level_yaml_block(text, "on")
+    if on_block is None:
+        details.append("stable workflow must contain one top-level on block")
+    else:
+        events = re.findall(r"^  ([A-Za-z_][A-Za-z0-9_-]*):", on_block, re.MULTILINE)
+        if events != ["schedule", "workflow_dispatch"]:
+            details.append("stable workflow events must be exactly schedule + workflow_dispatch: %r"
+                           % events)
+        if on_block.count('cron: "37 5 * * *"') != 1:
+            details.append("stable workflow must carry the exact reviewed daily schedule")
+        if "inputs:" in on_block or "provider:" in on_block:
+            details.append("production workflow_dispatch must always run the complete provider set")
+
+    if not re.search(r"^permissions: \{\}\s*$", text, re.MULTILINE):
+        details.append("stable workflow top-level permissions must be empty")
+    for needle in (
+        "env:\n  BASH_ENV: /dev/null",
+        'shell: "/usr/bin/bash --noprofile --norc -euo pipefail {0}"',
+    ):
+        if text.count(needle) != 1:
+            details.append("stable workflow lacks exact shell bootstrap anchor %r" % needle)
+    if text.count("group: stable-skills-maintenance") != 1 or \
+            text.count("cancel-in-progress: false") != 1:
+        details.append("stable workflow concurrency contract is missing or duplicated")
+
+    jobs = _workflow_job_blocks(text)
+    if list(jobs) != ["detect", "prepare", "reconcile-all"]:
+        details.append("stable workflow jobs must be detect, prepare, reconcile-all in order: %r"
+                       % list(jobs))
+        return details
+    detect = jobs["detect"]
+    prepare = jobs["prepare"]
+    reconcile = jobs["reconcile-all"]
+    details += _exact_step_closure_details(
+        detect,
+        (
+            "Prove the pinned runner Python and Git envelope",
+            "Check out the trusted stable event head",
+            "Prove stable workflow and control-plane identity",
+            "Refuse detection when governance or updater invariants are red",
+            "Detect and classify upstream drift",
+            "Build the inert preparation matrix",
+        ),
+        "stable detect",
+    )
+    details += _exact_step_closure_details(
+        prepare,
+        (
+            "Prove the pinned runner Python and Git envelope",
+            "Check out the trusted stable event head",
+            "Re-prove stable identity before preparation",
+            "Prepare candidate content outside the repository checkout",
+        ),
+        "stable prepare",
+    )
+    details += _exact_step_closure_details(
+        reconcile,
+        ("Refuse detector-only liveness and re-prove the runner envelope",),
+        "stable reconcile-all",
+    )
+
+    for label, block in (("detect", detect), ("prepare", prepare)):
+        if block.count("permissions:\n      contents: read") != 1:
+            details.append("%s must have only job-local contents: read" % label)
+        details += _runner_envelope_details(block, label)
+        details += _checkout_contract_details(block, 1, trusted_event_ref=True)
+    if reconcile.count("permissions: {}") != 1:
+        details.append("reconcile-all must have empty permissions")
+    if reconcile.count("name: Reconcile complete G1.1 control plane") != 1:
+        details.append(
+            "reconcile-all YAML key must map to its exact externally observable API name"
+        )
+    if reconcile.count("runs-on: ubuntu-24.04") != 1:
+        details.append("reconcile-all must use the pinned runner label")
+    for needle in (
+        "Refuse detector-only liveness and re-prove the runner envelope",
+        '[[ "${ImageOS:-}" == "ubuntu24" ]]',
+        '[[ "${RUNNER_ARCH:-}" == "X64" ]]',
+        '[[ "${ImageVersion:-}" =~ ^[0-9]{8}\\.[0-9]+\\.[0-9]+$ ]]',
+        '[[ "${BASH_VERSION:-}" =~ ^5\\.2\\.[0-9]+\\([0-9]+\\)-release$ ]]',
+    ):
+        if reconcile.count(needle) != 1:
+            details.append("reconcile-all lacks exact runtime anchor %r" % needle)
+
+    identity_needles = (
+        "github.repository == 'KraineOpasen/bukerov-twitch-miner-go'",
+        "github.repository_id == '1297795646'",
+        "github.ref == 'refs/heads/release/0.3'",
+        "github.workflow_ref == 'KraineOpasen/bukerov-twitch-miner-go/.github/workflows/"
+        "stable-skills-maintenance.yml@refs/heads/release/0.3'",
+    )
+    for needle in identity_needles:
+        if detect.count(needle) != 1:
+            details.append("detect identity guard missing %r" % needle)
+
+    verify = ("python3 -I -S -B scripts/skill_updates/runtime.py "
+              "verify-workflow --repo-root .")
+    detector = "python3 -I -S -B scripts/check-skill-updates.py"
+    preparer = "python3 -I -S -B scripts/prepare-skill-update.py"
+    if detect.count(verify) != 1 or detect.find(verify) >= detect.find(detector):
+        details.append("runtime/control guard must run once before the detector")
+    if prepare.count(verify) != 1 or prepare.find(verify) >= prepare.find(preparer):
+        details.append("runtime/control guard must run once before the preparer")
+    required_detect = (
+        "verify-repository --repo-root .",
+        "scripts/validate-agent-governance.py --self-test-hook",
+        "python3 -I -S -B scripts/validate-agent-governance.py --self-test\n",
+        "mutation_probe.py --check-anchors",
+        "mutation_probe.py --suite-only",
+        "--all",
+        "--mode prepare",
+        "any_prepare: ${{ steps.plan.outputs.any_prepare }}",
+        "matrix: ${{ steps.plan.outputs.matrix }}",
+    )
+    for needle in required_detect:
+        if detect.count(needle) != 1:
+            details.append("detect job missing exact integration anchor %r" % needle)
+    required_prepare = (
+        '--provider "$PROVIDER"', '--target-sha "$TARGET_SHA"',
+        '--artifact-root "$RUNNER_TEMP/stable-skills-$PROVIDER"',
+        '--summary "$GITHUB_STEP_SUMMARY"',
+    )
+    for needle in required_prepare:
+        if prepare.count(needle) != 1:
+            details.append("prepare job missing exact artifact-only argument %r" % needle)
+
+    if reconcile.count("needs: [detect, prepare]") != 1 or reconcile.count("if: always()") != 1:
+        details.append("reconcile-all must run after both predecessor jobs even on failure")
+    for needle in ('DETECT_RESULT: ${{ needs.detect.result }}',
+                   'PREPARE_RESULT: ${{ needs.prepare.result }}',
+                   '"$DETECT_RESULT" != "success"', 'success|skipped'):
+        if reconcile.count(needle) != 1:
+            details.append("reconcile-all missing liveness anchor %r" % needle)
+
+    forbidden = (
+        "--publish", "--base-branch", "contents: write", "pull-requests: write",
+        "issues: write", "actions: write", "id-token: write", "secrets.",
+        "${{ github.token", "Authorization:", "git push", "git commit", "git tag",
+        "gh api", "curl ", "wget ", "actions/upload-artifact@",
+    )
+    for needle in forbidden:
+        if needle in text:
+            details.append("stable workflow contains forbidden G1.1 authority %r" % needle)
+    if _workflow_uses(text) != [PINNED_CHECKOUT_ACTION, PINNED_CHECKOUT_ACTION]:
+        details.append("stable workflow executable Action registry is not exactly two checkouts")
+    return details
+
+
+_CI_BLOCK_BEGIN = "  # BEGIN stable-skills-governance-job/v1\n"
+_CI_BLOCK_END = "  # END stable-skills-governance-job/v1\n\n"
+
+
+def ci_workflow_details(text):
+    """Prove the G1.1 governance insertion without taking ownership of product CI."""
+    details = []
+    if text.count(_CI_BLOCK_BEGIN) != 1 or text.count(_CI_BLOCK_END) != 1:
+        return ["CI must contain exactly one bounded stable-skills governance block"]
+    start = text.index(_CI_BLOCK_BEGIN)
+    end = text.index(_CI_BLOCK_END, start) + len(_CI_BLOCK_END)
+    stripped = text[:start] + text[end:]
+    if _sha256_text(stripped) != STABLE_CI_BASELINE_SHA256:
+        details.append("removing the governance block does not reproduce exact stable product CI")
+    block = text[start:end]
+    if _sha256_text(block) != STABLE_CI_GOVERNANCE_BLOCK_SHA256:
+        details.append("CI governance source digest mismatch")
+    details += _bootstrap_source_details(block, 1, "CI governance")
+    details += _reserved_provider_env_details(block, "CI governance")
+    details += _isolated_python_details(block, "CI governance")
+    details += _privileged_expression_details(block, "CI governance")
+    details += _exact_step_closure_details(
+        block,
+        (
+            "Prove the pinned runner Python and Git envelope",
+            "Check out the event head and comparison history without persisted credentials",
+            "Validate stable governance and updater integration",
+            "Run validator fixture self-tests",
+            "Verify mutation probe anchors",
+            "Run updater regression suite",
+        ),
+        "CI governance",
+    )
+    if block.count("runs-on: ubuntu-24.04") != 1:
+        details.append("CI governance job must use ubuntu-24.04")
+    if block.count("permissions:\n      contents: read") != 1:
+        details.append("CI governance job must have only job-local contents: read")
+    for needle in (
+        "BASH_ENV: /dev/null",
+        'shell: "/usr/bin/bash --noprofile --norc -euo pipefail {0}"',
+    ):
+        if block.count(needle) != 1:
+            details.append("CI governance job lacks exact shell bootstrap anchor %r" % needle)
+    details += _runner_envelope_details(block, "CI governance")
+    details += _checkout_contract_details(block, 1, trusted_event_ref=True, fetch_depth=0)
+    if block.count(
+            "GOVERNANCE_BASE_SHA: ${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.base.sha || github.event.before }}") != 1:
+        details.append("CI governance job must export the exact PR/push comparison SHA")
+    required = (
+        "scripts/validate-agent-governance.py --self-test-hook",
+        "scripts/skill_updates/runtime.py verify-repository --repo-root .",
+        "python3 -I -S -B scripts/validate-agent-governance.py --self-test\n",
+        "mutation_probe.py --check-anchors",
+        "mutation_probe.py --suite-only",
+    )
+    for needle in required:
+        if block.count(needle) != 1:
+            details.append("CI governance job missing exact command %r" % needle)
+    for needle in ("contents: write", "pull-requests: write", "issues: write",
+                   "id-token: write", "secrets.", "${{ github.token", "Authorization:",
+                   "--publish"):
+        if needle in block:
+            details.append("CI governance job contains privileged surface %r" % needle)
+    return details
+
+
+def workflow_registry_details(repo_root):
+    workflow_dir = os.path.join(repo_root, ".github", "workflows")
+    try:
+        names = sorted(name for name in os.listdir(workflow_dir)
+                       if name.endswith((".yml", ".yaml")))
+    except OSError as exc:
+        return ["cannot enumerate workflow registry: %s" % exc]
+    expected = sorted(("ci.yml", "stable-release.yml", "stable-skills-maintenance.yml"))
+    details = []
+    if names != expected:
+        details.append("file-backed workflow registry differs: %r" % names)
+    release_path = os.path.join(workflow_dir, "stable-release.yml")
+    try:
+        with io.open(release_path, encoding="utf-8") as handle:
+            release_digest = _sha256_text(handle.read())
+    except OSError as exc:
+        details.append("cannot read stable release workflow: %s" % exc)
+    else:
+        if release_digest != STABLE_RELEASE_SHA256:
+            details.append("stable-release.yml differs from stable-authoritative bytes")
+    return details
+
+
+def stable_skills_control_details(repo_root, runner=subprocess.run):
+    """Delegate closed JSON/schema semantics to the updater's static, network-free owner."""
+    scripts = os.path.join(repo_root, "scripts")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = scripts + (os.pathsep + env["PYTHONPATH"]
+                                   if env.get("PYTHONPATH") else "")
+    command = [sys.executable, "-m", "skill_updates.runtime", "verify-repository",
+               "--repo-root", repo_root]
+    try:
+        result = runner(command, cwd=repo_root, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=30, text=True)
+    except Exception as exc:
+        return ["static control verification could not run: %s" % exc]
+    if result.returncode != 0:
+        output = (result.stdout or "").strip()
+        return ["static control verification failed: %s" % (output or "exit %d" % result.returncode)]
+    return []
+
+
+def check_stable_skills_workflow():
+    path = os.path.join(REPO_ROOT, STABLE_SKILLS_WORKFLOW_REL)
+    try:
+        with io.open(path, encoding="utf-8") as handle:
+            details = stable_skills_workflow_details(handle.read())
+    except OSError as exc:
+        details = ["cannot read %s: %s" % (STABLE_SKILLS_WORKFLOW_REL, exc)]
+    report("stable-skills-workflow", not details, details)
+
+
+def check_stable_ci_governance_integration():
+    path = os.path.join(REPO_ROOT, STABLE_CI_WORKFLOW_REL)
+    try:
+        with io.open(path, encoding="utf-8") as handle:
+            details = ci_workflow_details(handle.read())
+    except OSError as exc:
+        details = ["cannot read %s: %s" % (STABLE_CI_WORKFLOW_REL, exc)]
+    report("stable-ci-governance-integration", not details, details)
+
+
+def check_stable_workflow_registry():
+    details = workflow_registry_details(REPO_ROOT)
+    report("stable-workflow-registry", not details, details)
+
+
+def check_stable_skills_control_contract():
+    details = stable_skills_control_details(REPO_ROOT)
+    report("stable-skills-control-contract", not details, details)
 
 
 def check_settings_schema():
     details = []
     try:
         with open(SETTINGS_PATH) as f:
-            settings = json.load(f)
+            settings = _strict_json_load(f)
     except Exception as e:
         report("settings-json-schema-sanity", False, ["could not parse: %s" % e])
         return
@@ -1647,7 +2307,7 @@ def check_settings_mcp_mutations_denied():
     details = []
     try:
         with open(SETTINGS_PATH) as f:
-            settings = json.load(f)
+            settings = _strict_json_load(f)
     except Exception as e:
         report("settings-mcp-mutations-denied", False, ["could not parse: %s" % e])
         return
@@ -3040,7 +3700,7 @@ def _installed_names_by_provider():
 def _project_manifest_names():
     try:
         with open(PROJECT_MANIFEST_PATH, encoding="utf-8") as f:
-            return [s["name"] for s in json.load(f).get("skills", [])]
+            return [s["name"] for s in _strict_json_load(f).get("skills", [])]
     except Exception:
         return []
 
@@ -3282,6 +3942,10 @@ ALL_CHECKS = [
     check_patch_ledger_coverage,
     check_patch_marker_balance,
     check_provider_patch_coverage,
+    check_stable_skills_workflow,
+    check_stable_ci_governance_integration,
+    check_stable_workflow_registry,
+    check_stable_skills_control_contract,
     check_application_paths_untouched,
     check_settings_schema,
     check_settings_mcp_mutations_denied,
@@ -4320,7 +4984,9 @@ def _st_v31():
         assert len(needle.split()) >= 2, needle
     assert "every new session starts read_only" in GOVERNANCE_V3_RECOVERY_NEEDLES
     assert HOST_OS_PREEXISTING_BUDGET == {"Dockerfile": 1, "README.md": 3, "SPECIFICATIONS.md": 1}
-    assert GOVERNANCE_OWNED_WORKFLOWS == ()
+    assert GOVERNANCE_OWNED_WORKFLOWS == (
+        STABLE_CI_WORKFLOW_REL, STABLE_SKILLS_WORKFLOW_REL)
+    assert PINNED_CHECKOUT_ACTION.endswith("@11d5960a326750d5838078e36cf38b85af677262")
 
 
 # ---- P*: the generic provider-registry checks. Every fixture drives the SAME production
@@ -4884,7 +5550,7 @@ def _st_p21():
     path = os.path.join(DOCS_AGENTS_DIR, "skills-update-plugins.json")
     assert os.path.isfile(path), "plugin inventory missing: %s" % path
     with open(path, encoding="utf-8") as f:
-        doc = json.load(f)
+        doc = _strict_json_load(f)
     assert doc.get("schema_version") == 1, doc.get("schema_version")
     assert doc.get("plugins") == [], (
         "the plugin inventory is expected to ship EMPTY; adopting a plugin is a reviewed change "
@@ -4904,7 +5570,7 @@ def _st_p22():
     vendoring exists to avoid. Both directions are asserted against the real files."""
     with open(os.path.join(DOCS_AGENTS_DIR, "skills-update-providers.json"),
               encoding="utf-8") as f:
-        registry = json.load(f)
+        registry = _strict_json_load(f)
     keys = set()
     for entry in registry["providers"]:
         assert not SHA1_RE.match(entry["upstream_ref"]), (
@@ -4915,7 +5581,7 @@ def _st_p22():
             assert SHA1_RE.match(entry["baseline_commit"]), entry["key"]
             continue
         with open(os.path.join(REPO_ROOT, entry["manifest"]), encoding="utf-8") as mf:
-            manifest = json.load(mf)
+            manifest = _strict_json_load(mf)
         assert SHA1_RE.match(manifest["upstream_commit"]), (
             "%s: manifest upstream_commit must be a full sha" % entry["key"])
         assert _canon_repo(manifest["upstream_repo"]) == _canon_repo(entry["upstream_repo"]), (
@@ -4927,10 +5593,13 @@ def _st_p22():
 
 
 def _st_p20():
-    """No governance-owned workflow exists on the stable line: every workflow path is guarded."""
-    assert GOVERNANCE_OWNED_WORKFLOWS == ()
+    """Only the two exact G1.1 workflow paths bypass the application-path guard."""
+    assert GOVERNANCE_OWNED_WORKFLOWS == (
+        STABLE_CI_WORKFLOW_REL, STABLE_SKILLS_WORKFLOW_REL)
+    assert application_path_violations([
+        STABLE_SKILLS_WORKFLOW_REL, STABLE_CI_WORKFLOW_REL]) == []
     caught = application_path_violations([
-        ".github/workflows/ci.yml", ".github/workflows/release.yml",
+        STABLE_RELEASE_WORKFLOW_REL, ".github/workflows/release.yml",
         ".github/workflows/skills-update.yml", ".github/workflows/anything-else.yml",
         "internal/web/server.go", "cmd/miner/main.go",
         "go.mod", "go.sum", "Dockerfile", "docker-compose.yml"])
@@ -4939,6 +5608,197 @@ def _st_p20():
     assert application_path_violations([
         "scripts/validate-agent-governance.py", "GOVERNANCE_V3.md",
         "docs/agents/skills-update-providers.json", "CLAUDE.md"]) == []
+    assert governance_base_sha_details(None) == []
+    assert governance_base_sha_details("a" * 40) == []
+    for invalid in ("0" * 40, "a" * 39, "A" * 40, "release/0.3"):
+        assert governance_base_sha_details(invalid), invalid
+
+
+def _st_w1():
+    """The real stable maintenance workflow satisfies the closed G1.1 authority envelope."""
+    path = os.path.join(REPO_ROOT, STABLE_SKILLS_WORKFLOW_REL)
+    with io.open(path, encoding="utf-8") as handle:
+        details = stable_skills_workflow_details(handle.read())
+    assert not details, details
+
+
+def _st_w2():
+    """Stable-workflow mutations cannot widen authority or bypass identity and liveness."""
+    path = os.path.join(REPO_ROOT, STABLE_SKILLS_WORKFLOW_REL)
+    with io.open(path, encoding="utf-8") as handle:
+        real = handle.read()
+    mutations = (
+        ("default branch", "github.ref == 'refs/heads/release/0.3'",
+         "github.ref == 'refs/heads/main'"),
+        ("write permission", "permissions:\n      contents: read",
+         "permissions:\n      contents: write"),
+        ("floating checkout", PINNED_CHECKOUT_ACTION, "actions/checkout@v4"),
+        ("persisted credential", "persist-credentials: false", "persist-credentials: true"),
+        ("missing runtime guard",
+         "python3 -I -S -B scripts/skill_updates/runtime.py verify-workflow --repo-root .",
+         "python3 -c 'raise SystemExit(1)'"),
+        ("missing terminal reconciliation", "  reconcile-all:\n",
+         "  detector-only-success:\n"),
+        ("publication flag", '--summary "$GITHUB_STEP_SUMMARY"',
+         '--publish \\\n            --summary "$GITHUB_STEP_SUMMARY"'),
+        ("untrusted runner", "runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"),
+        ("extra executable action", "      - name: Detect and classify upstream drift\n",
+         "      - uses: example/unreviewed-action@v1\n\n"
+         "      - name: Detect and classify upstream drift\n"),
+        ("partial provider dispatch", "  workflow_dispatch:\n",
+         "  workflow_dispatch:\n    inputs:\n      provider:\n        type: string\n"),
+        ("reserved provider env", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      ImageVersion: attacker-controlled"),
+        ("flow-style reserved provider env", "    env:\n      GIT_ALLOW_PROTOCOL: https",
+         "    env: {ImageVersion: attacker-controlled}"),
+        ("indexed secret expression", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      TOKEN: ${{ secrets['PROD_TOKEN'] }}"),
+        ("indexed github token expression", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      TOKEN: ${{ github['token'] }}"),
+        ("inline Python step", "      - name: Detect and classify upstream drift\n",
+         "      - run: python3 -I -S -B -c 'raise SystemExit(0)'\n\n"
+         "      - name: Detect and classify upstream drift\n"),
+        ("ambient Git trace", '"GIT_CONFIG_PARAMETERS",',
+         '"GIT_CONFIG_PARAMETERS", "GIT_TRACE",'),
+    )
+    for label, old, new in mutations:
+        mutated = real.replace(old, new, 1)
+        assert mutated != real, "mutation anchor missing: %s" % label
+        details = stable_skills_workflow_details(mutated)
+        assert details, "%s mutation passed the production helper" % label
+
+    verify = ("python3 -I -S -B scripts/skill_updates/runtime.py "
+              "verify-workflow --repo-root .")
+    detector = "python3 -I -S -B scripts/check-skill-updates.py"
+    reordered = real.replace(verify, "", 1).replace(detector, detector + "\n        " + verify, 1)
+    assert reordered != real
+    details = stable_skills_workflow_details(reordered)
+    assert any("before the detector" in detail for detail in details), details
+
+
+def _st_w3():
+    """The real CI insertion is bounded and stable product CI remains byte-identical."""
+    path = os.path.join(REPO_ROOT, STABLE_CI_WORKFLOW_REL)
+    with io.open(path, encoding="utf-8") as handle:
+        details = ci_workflow_details(handle.read())
+    assert not details, details
+
+
+def _st_w4():
+    """CI trigger, checkout, runner and updater-command mutations all fail closed."""
+    path = os.path.join(REPO_ROOT, STABLE_CI_WORKFLOW_REL)
+    with io.open(path, encoding="utf-8") as handle:
+        real = handle.read()
+    mutations = (
+        ("product trigger", 'branches: ["release/**"]', 'branches: ["main"]'),
+        ("floating checkout", PINNED_CHECKOUT_ACTION, "actions/checkout@v4"),
+        ("shallow comparison checkout", "fetch-depth: 0", "fetch-depth: 1"),
+        ("missing comparison SHA", "GOVERNANCE_BASE_SHA:", "IGNORED_BASE_SHA:"),
+        ("persisted credential", "persist-credentials: false", "persist-credentials: true"),
+        ("missing validator self-test",
+         "python3 -I -S -B scripts/validate-agent-governance.py --self-test\n", "true\n"),
+        ("missing static verifier",
+         "python3 -I -S -B scripts/skill_updates/runtime.py verify-repository --repo-root .",
+         "python3 -c 'raise SystemExit(1)'"),
+        ("untrusted runner", "runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"),
+        ("write permission", "  governance:\n", "  governance:\n    permissions:\n      contents: write\n"),
+        ("bootstrap semantic drift", "if present_auth:", "if False and present_auth:") ,
+        ("reserved provider env", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      RUNNER_ARCH: attacker-controlled"),
+        ("flow-style reserved provider env", "    env:\n      BASH_ENV: /dev/null",
+         "    env: {ImageVersion: attacker-controlled}"),
+        ("indexed secret expression", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      TOKEN: ${{ secrets['PROD_TOKEN'] }}"),
+        ("indexed github token expression", "      PYTHONDONTWRITEBYTECODE: \"1\"",
+         "      TOKEN: ${{ github['token'] }}"),
+        ("inline Python step", "      - name: Run validator fixture self-tests\n",
+         "      - run: python3 -I -S -B -c 'raise SystemExit(0)'\n\n"
+         "      - name: Run validator fixture self-tests\n"),
+    )
+    for label, old, new in mutations:
+        mutated = real.replace(old, new, 1)
+        assert mutated != real, "mutation anchor missing: %s" % label
+        details = ci_workflow_details(mutated)
+        assert details, "%s mutation passed the production helper" % label
+
+
+def _st_w5():
+    """The file-backed workflow registry admits exactly CI, release and G1.1 maintenance."""
+    with tempfile.TemporaryDirectory() as tmp:
+        workflows = os.path.join(tmp, ".github", "workflows")
+        os.makedirs(workflows)
+        for name in ("ci.yml", "stable-release.yml", "stable-skills-maintenance.yml"):
+            shutil.copyfile(os.path.join(REPO_ROOT, ".github", "workflows", name),
+                            os.path.join(workflows, name))
+        details = workflow_registry_details(tmp)
+        assert not details, details
+
+        _write_file(os.path.join(workflows, "skills-update.yml"), "name: unreviewed\n")
+        details = workflow_registry_details(tmp)
+        assert any("registry differs" in detail for detail in details), details
+        os.unlink(os.path.join(workflows, "skills-update.yml"))
+
+        with io.open(os.path.join(workflows, "stable-release.yml"), "a", encoding="utf-8") as out:
+            out.write("# drift\n")
+        details = workflow_registry_details(tmp)
+        assert any("stable-authoritative bytes" in detail for detail in details), details
+
+
+def _st_w6():
+    """The validator delegates exact control semantics to the static, network-free runtime API."""
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    def ok_runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return Result()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        details = stable_skills_control_details(tmp, runner=ok_runner)
+        assert not details, details
+        assert len(calls) == 1, calls
+        command, kwargs = calls[0]
+        assert command == [sys.executable, "-m", "skill_updates.runtime", "verify-repository",
+                           "--repo-root", tmp], command
+        assert kwargs["cwd"] == tmp
+        assert kwargs["timeout"] == 30 and kwargs["text"] is True
+        assert kwargs["stderr"] is subprocess.STDOUT
+        assert kwargs["env"]["PYTHONPATH"].split(os.pathsep)[0] == os.path.join(tmp, "scripts")
+
+        class Failed:
+            returncode = 23
+            stdout = "control mutation rejected"
+
+        details = stable_skills_control_details(tmp, runner=lambda *args, **kwargs: Failed())
+        assert details and "control mutation rejected" in details[0], details
+
+
+def _st_w7():
+    """JSON and env source grammars reject ambiguous alternate spellings."""
+    assert _strict_json_loads('{"outer":{"value":1}}') == {"outer": {"value": 1}}
+    for raw in (
+            '{"state":"BLOCKED","state":"NO_DRIFT"}',
+            '{"outer":{"state":"BLOCKED","state":"NO_DRIFT"}}',
+            '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'):
+        try:
+            _strict_json_loads(raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("duplicate JSON key passed: %s" % raw)
+    for raw in (
+            "? env\n:\n  ImageVersion: attacker-controlled\n",
+            "!!str env:\n  ImageVersion: attacker-controlled\n",
+            "? !!str env\n:\n  ImageVersion: attacker-controlled\n",
+            "? !<tag:yaml.org,2002:str> env\n:\n  ImageVersion: attacker-controlled\n",
+            '"\\u0065nv":\n  ImageVersion: attacker-controlled\n',
+            "&envkey env:\n  ImageVersion: attacker-controlled\n",
+            "*envkey:\n  ImageVersion: attacker-controlled\n"):
+        details = _reserved_provider_env_details(raw, "fixture")
+        assert any("unsupported explicit" in detail for detail in details), details
 
 
 def _real_inventory_inputs():
@@ -5122,7 +5982,7 @@ def _self_test_fixtures():
         ("P17", "manifest invocation must agree with the skill's own frontmatter", _st_p17),
         ("P18", "every registry provider is file-level; a retired schema is rejected", _st_p18),
         ("P19", "an automated update candidate cannot masquerade as audited", _st_p19),
-        ("P20", "no governance-owned workflow on the stable line; application paths guarded", _st_p20),
+        ("P20", "only exact G1.1 workflow paths bypass the application-path guard", _st_p20),
         ("I1", "real section-7 inventory reconciles with manifests, disk, and itself", _st_i1),
         ("I2", "a missing installed skill and a section-7 name swap are caught", _st_i2),
         ("I3", "an unapproved 82nd directory, a stale total, and table drift are caught", _st_i3),
@@ -5132,6 +5992,13 @@ def _self_test_fixtures():
         ("R2", "an unrouted skill and a stale routing total are caught", _st_r2),
         ("P21", "native-plugin inventory ships empty and documents all three surfaces", _st_p21),
         ("P22", "registry owns the reviewed ref, manifests own the pin (no floating pin)", _st_p22),
+        ("W1", "real stable maintenance workflow satisfies the closed envelope", _st_w1),
+        ("W2", "stable workflow authority, identity and liveness mutations fail", _st_w2),
+        ("W3", "real CI insertion is bounded and preserves exact product CI", _st_w3),
+        ("W4", "CI trigger, checkout, runner and command mutations fail", _st_w4),
+        ("W5", "file-backed workflow registry and stable release bytes are exact", _st_w5),
+        ("W6", "control semantics use the exact static runtime verifier API", _st_w6),
+        ("W7", "JSON and env source grammars reject ambiguous spellings", _st_w7),
     ]
 
 
