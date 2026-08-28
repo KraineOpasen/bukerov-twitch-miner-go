@@ -3,6 +3,7 @@ package miner
 import (
 	"log/slog"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/chat"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/streamer"
@@ -20,6 +21,7 @@ type topicReconciler interface {
 type chatToggler interface {
 	ToggleChat(streamer *models.Streamer)
 	Leave(username string)
+	ReconcileLogging(globalEnabled bool, logger chat.ChatLogger)
 }
 
 // capabilityChangeReason explains why a roster member appears in a
@@ -207,9 +209,12 @@ func (m *Miner) executeCapabilityPlan(plan runtimeCapabilityPlan) runtimeCapabil
 	return result
 }
 
-// reconcileRuntimeCapabilities brings the runtime state (PubSub topic set, IRC
-// presence) in line with the just-saved settings for the whole roster, without
-// a restart. Called from ApplySettings AFTER the miner lock is released.
+// reconcileRuntimeCapabilities brings the runtime state (PubSub topic set,
+// IRC presence, and structured-chat authority) in line with the just-applied
+// in-memory settings for the whole roster, without a restart. Called from
+// ApplySettings AFTER the miner lock is released. On the generic no-rename /
+// no-removal path, the existing non-fatal SaveConfig attempt still follows
+// this runtime reconciliation; C2 does not change that ordering or policy.
 //
 // renamed carries each config-driven rename ApplySettings just reconciled in
 // place (BKM-006). PubSub needs no special handling for it — topics are keyed
@@ -224,10 +229,11 @@ func (m *Miner) executeCapabilityPlan(plan runtimeCapabilityPlan) runtimeCapabil
 // reconcileMu serializes concurrent sweeps end-to-end (plan build + execution).
 // Each sweep builds its plan from the CURRENT roster/settings snapshots, so
 // whichever concurrent apply reconciles last converges the runtime onto the
-// latest saved settings instead of leaving an out-of-order sweep's state
+// latest serialized applied in-memory settings instead of leaving an
+// out-of-order sweep's state
 // behind. It is a dedicated lock: no miner/manager/streamer mutex is held
 // across the side effects.
-func (m *Miner) reconcileRuntimeCapabilities(added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent) {
+func (m *Miner) reconcileRuntimeCapabilities(added, removed []*models.Streamer, changed []streamer.SettingsChange, renamed []streamer.RenameEvent, globalChatLogs bool, chatLogger chat.ChatLogger) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
 
@@ -241,6 +247,14 @@ func (m *Miner) reconcileRuntimeCapabilities(added, removed []*models.Streamer, 
 
 	plan := m.buildCapabilityPlan(added, removed, changed)
 	result := m.executeCapabilityPlan(plan)
+	// This is the LAST chat lifecycle action in the serialized sweep. Besides
+	// publishing the manager's current inherited-global/sink state, its gate
+	// writer drains any structured write admitted by a removed/replaced client
+	// whose bounded Stop returned early. Keeping the barrier at the tail is what
+	// makes successful ApplySettings return the C2 runtime convergence boundary.
+	if chatMgr := m.chatPresenceReconciler(); chatMgr != nil {
+		chatMgr.ReconcileLogging(globalChatLogs, chatLogger)
+	}
 	if result.failures > 0 {
 		slog.Warn("Runtime capability reconciliation finished with failures; drift remains until the next settings apply",
 			"streamers", result.reconciled, "failures", result.failures,

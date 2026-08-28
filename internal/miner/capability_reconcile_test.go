@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/chat"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/pubsub"
@@ -95,6 +96,12 @@ type fakeChatReconciler struct {
 	mu      sync.Mutex
 	toggles map[string]int
 	leaves  map[string]int
+	logging []fakeChatLoggingCall
+}
+
+type fakeChatLoggingCall struct {
+	global bool
+	logger chat.ChatLogger
 }
 
 func newFakeChatReconciler() *fakeChatReconciler {
@@ -111,6 +118,18 @@ func (f *fakeChatReconciler) Leave(username string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.leaves[username]++
+}
+
+func (f *fakeChatReconciler) ReconcileLogging(globalEnabled bool, logger chat.ChatLogger) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logging = append(f.logging, fakeChatLoggingCall{global: globalEnabled, logger: logger})
+}
+
+func (f *fakeChatReconciler) loggingCalls() []fakeChatLoggingCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeChatLoggingCall(nil), f.logging...)
 }
 
 func (f *fakeChatReconciler) toggleCount(username string) int {

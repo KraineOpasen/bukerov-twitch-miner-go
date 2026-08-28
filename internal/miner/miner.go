@@ -96,10 +96,15 @@ type Miner struct {
 
 	streamers *streamer.Manager
 
-	db               *database.DB
-	dbBasePath       string
-	wsPool           *pubsub.WebSocketPool
-	chatManager      *chat.ChatManager
+	db          *database.DB
+	dbBasePath  string
+	wsPool      *pubsub.WebSocketPool
+	chatManager *chat.ChatManager
+	// chatLogger is the stable structured-chat sink for this Miner generation.
+	// It is provisioned once when global runtime logging first becomes enabled
+	// and retained across later disables so explicit-true model settings keep a
+	// valid warm sink. Guarded by mu after startup.
+	chatLogger       chat.ChatLogger
 	watcher          *watcher.MinuteWatcher
 	dropsTracker     *drops.DropsTracker
 	dropCatalog      *drops.CampaignCatalog
@@ -881,6 +886,7 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	if chatLogsEnabled && m.analyticsSvc != nil {
 		chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
 	}
+	m.chatLogger = chatLogger
 	m.chatManager = chat.NewChatManager(m.config.Username, func() chat.TokenSnapshot {
 		snap := m.auth.Snapshot()
 		return chat.TokenSnapshot{Token: snap.AccessToken, Generation: snap.Generation}
@@ -2582,6 +2588,7 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	minuteWatcher := m.watcher
 	dropsTracker := m.dropsTracker
 	riskCfg := m.config.PredictionRisk
+	chatLogsEnabled, chatLogger := m.chatLoggingTargetLocked()
 
 	m.mu.Unlock()
 
@@ -2625,7 +2632,7 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	// previous apply left failed. renamed carries each old login so the stale
 	// IRC join is explicitly left exactly once (PubSub needs no equivalent
 	// action: topics are keyed by ChannelID, which a rename never changes).
-	m.reconcileRuntimeCapabilities(added, removed, changed, renamed)
+	m.reconcileRuntimeCapabilities(added, removed, changed, renamed, chatLogsEnabled, chatLogger)
 
 	// Purge every removed streamer's PERSISTED bot-owned state (analytics
 	// history, notification rules/config-lists, watch-time rows) in one atomic
@@ -2674,4 +2681,18 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 	}
 
 	slog.Info("Runtime settings updated")
+}
+
+// chatLoggingTargetLocked resolves the current in-memory global setting and
+// provisions at most one ChatLogger adapter for this Miner generation. The
+// adapter is intentionally sticky after true->false: C2 may provision the sink
+// required by a runtime global transition, while cold-start global=false plus
+// explicit per-streamer true remains the separately deferred C4 policy. Caller
+// holds m.mu.
+func (m *Miner) chatLoggingTargetLocked() (bool, chat.ChatLogger) {
+	enabled := m.config.EnableAnalytics && m.config.Analytics.EnableChatLogs
+	if enabled && m.chatLogger == nil && m.analyticsSvc != nil {
+		m.chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
+	}
+	return enabled, m.chatLogger
 }
