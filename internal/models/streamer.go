@@ -200,15 +200,21 @@ type Streamer struct {
 	// BEFORE its I/O, and only the latest-begun observation may publish or claim a
 	// bonus, so a newer request always wins regardless of completion order.
 	capObs uint64
-	// lastAuthorizedClaimID is the last bonus claim ID this streamer authorized,
-	// so a duplicate availableClaim across racing contexts is claimed at most once.
-	lastAuthorizedClaimID string
-	CommunityGoals        map[string]*CommunityGoal
-	ViewerIsMod           bool
-	ActiveMultipliers     []Multiplier
-	Stream                *Stream
-	Raid                  *Raid
-	History               map[string]*HistoryEntry
+	// bonusClaims is the single process-local arbitration ledger for every bonus
+	// claim path. Exact per-ID tombstones are retained for this Streamer's
+	// lifetime: Twitch claim IDs have no proved ordering/lifetime that would make
+	// TTL/LRU eviction safe against a delayed replay. bonusClaimSeq supplies an
+	// opaque attempt token so a stale completion cannot mutate a newer attempt.
+	bonusClaims          map[string]bonusClaimRecord
+	bonusClaimSeq        uint64
+	bonusObservation     uint64
+	bonusObservedClaimID string
+	CommunityGoals       map[string]*CommunityGoal
+	ViewerIsMod          bool
+	ActiveMultipliers    []Multiplier
+	Stream               *Stream
+	Raid                 *Raid
+	History              map[string]*HistoryEntry
 
 	// loginObs is the monotonic login-observation generation (mirrors capObs
 	// for the Channel Points context). BeginLoginObservation begins a new

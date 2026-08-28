@@ -21,7 +21,6 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/debug"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/discovery"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
-	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/journal"
@@ -1407,9 +1406,9 @@ const bonusPollInterval = 60 * time.Second
 // The primary claim path reacts to the community-points-user PubSub
 // "claim-available" event, but that event is not always delivered, so a chest
 // can sit unclaimed until it expires. Every bonusPollInterval this re-reads
-// each online streamer's channel-points context and claims any bonus PubSub
-// missed. Claims made here are logged distinctly so it stays visible how often
-// PubSub actually drops the event.
+// each online streamer's full channel-points context and arbitrates any
+// available bonus through the shared Streamer owner. A successful fallback is
+// logged as a poll-path success only; it makes no claim about PubSub delivery.
 func (m *Miner) bonusPollLoop(ctx context.Context) {
 	ticker := time.NewTicker(bonusPollInterval)
 	defer ticker.Stop()
@@ -1430,19 +1429,15 @@ func (m *Miner) pollBonuses() {
 			continue
 		}
 
-		// Centralized capability gate: the polling fallback must not claim a bonus
-		// when Channel Points are confirmed disabled or not yet confirmed.
-		if err := pointsActionGate(s, eligibility.TaskBonusClaim); err != nil {
-			slog.Debug("Skipping bonus poll: not eligible", "streamer", s.GetUsername(), "reason", err.Error())
-			m.evaluateAutoRedeem(s)
-			continue
-		}
-
+		// The full context read is also the safe capability probe. Do not pre-gate
+		// it on CapabilityUnknown: an inconclusive previous poll must not latch all
+		// future recovery probes off. The Streamer-owned reservation still checks
+		// Online + CapabilityEnabled atomically before any mutation.
 		claimed, err := m.client.ClaimAvailableBonus(s)
 		if err != nil {
 			slog.Debug("Bonus poll failed", "streamer", s.GetUsername(), "error", err)
 		} else if claimed {
-			slog.Info("Claimed channel points bonus via GQL fallback poll (PubSub missed the claim-available event)",
+			slog.Info("Claimed channel points bonus via GQL fallback poll",
 				"streamer", s.GetUsername())
 			events.Record(events.TypeBonusClaimed, s.GetUsername(), "bonus claimed (GQL fallback)")
 		}

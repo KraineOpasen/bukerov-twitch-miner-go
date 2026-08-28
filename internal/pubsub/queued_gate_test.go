@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/twitch"
 )
 
 // fakeChannelActor records every per-channel Twitch mutation the handlers
@@ -19,11 +20,11 @@ type fakeChannelActor struct {
 	lastGoal int
 }
 
-func (a *fakeChannelActor) ClaimBonus(*models.Streamer, string) error {
+func (a *fakeChannelActor) ClaimBonus(*models.Streamer, string) (twitch.BonusClaimResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.bonuses++
-	return nil
+	return twitch.BonusClaimResult{Outcome: twitch.BonusClaimFreshAccepted}, nil
 }
 
 func (a *fakeChannelActor) JoinRaid(*models.Streamer, *models.Raid) error {

@@ -308,7 +308,9 @@ func TestContextObservationUnknownPreservesAndStaleNoop(t *testing.T) {
 func TestContextObservationBonusReservationDedup(t *testing.T) {
 	s := NewStreamer("bob", DefaultStreamerSettings())
 	obs := s.BeginChannelPointsContextObservation()
-	s.ApplyChannelPointsContext(obs, ctxSnap(CapabilityEnabled, 100, 0))
+	snap := ctxSnap(CapabilityEnabled, 100, 0)
+	snap.AvailableClaimID = "claim-1"
+	s.ApplyChannelPointsContext(obs, snap)
 	s.Status = StatusOnline // reservation additionally requires confirmed-online
 
 	if !s.ReserveBonusClaimIfEligible(obs, "claim-1").Authorized {

@@ -166,34 +166,43 @@ func TestBatchGQLFirst401RecoversAndReplaysOnce(t *testing.T) {
 	}
 }
 
-// G3: a mutation-shaped operation is replayed EXACTLY once after a 401 — never
-// a third request, so a non-idempotent mutation can never be triple-sent.
-func TestMutationReplayedExactlyOnceAfter401(t *testing.T) {
-	rec := &replayRecorder{}
+// G3: ClaimCommunityPoints may only be sent through ClaimBonus, which first
+// acquires the Streamer-owned arbitration reservation. Both generic entry points
+// reject name- and hash-shaped bypasses before any HTTP request is created.
+func TestDirectBonusMutationCannotBypassArbitration(t *testing.T) {
+	var requests atomic.Int64
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		n := rec.record(r)
-		if n == 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = io.WriteString(w, `{}`)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+		requests.Add(1)
 		_, _ = io.WriteString(w, validSingleBody)
 	})
-	recoveries := installCountingRecoverFn(c)
 
-	op := constants.ClaimCommunityPoints.WithVariables(map[string]interface{}{
+	byName := constants.ClaimCommunityPoints.WithVariables(map[string]interface{}{
 		"input": map[string]interface{}{"channelID": "123", "claimID": "abc"},
 	})
-	if _, err := c.PostGQL(op); err != nil {
-		t.Fatalf("expected the replayed mutation to succeed, got %v", err)
+	byName.Extensions.PersistedQuery.SHA256Hash = "different-non-bonus-hash"
+	byHash := constants.ClaimCommunityPoints.WithVariables(map[string]interface{}{
+		"input": map[string]interface{}{"channelID": "123", "claimID": "abc"},
+	})
+	byHash.OperationName = "RenamedOperation"
+
+	for _, test := range []struct {
+		name string
+		call func() error
+	}{
+		{"single by name", func() error { _, err := c.PostGQL(byName); return err }},
+		{"single by hash", func() error { _, err := c.PostGQL(byHash); return err }},
+		{"batch by name", func() error { _, err := c.PostGQLBatch([]constants.GQLOperation{byName}); return err }},
+		{"batch by hash", func() error { _, err := c.PostGQLBatch([]constants.GQLOperation{byHash}); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, ErrDirectBonusMutation) {
+				t.Fatalf("want ErrDirectBonusMutation, got %v", err)
+			}
+		})
 	}
 
-	if got := rec.count(); got != 2 {
-		t.Fatalf("a mutation must be sent exactly twice (original + one replay), never more; got %d requests", got)
-	}
-	if got := recoveries.Load(); got != 1 {
-		t.Fatalf("expected exactly 1 recovery, got %d", got)
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("raw bonus bypass sent %d HTTP requests, want 0", got)
 	}
 }
 

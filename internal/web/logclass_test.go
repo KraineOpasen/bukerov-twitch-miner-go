@@ -59,7 +59,7 @@ func TestClassifyLogLineTable(t *testing.T) {
 		{"points other reason", ts + `level=INFO msg="Points earned" streamer=xqc points=5 reason=PREDICTION balance=1755`, "log-points-gain", "💰"},
 		{"points no reason", ts + `level=INFO msg="Points earned" streamer=xqc points=5`, "log-points-gain", "💰"},
 		{"claiming bonus", ts + `level=INFO msg="Claiming bonus" streamer=xqc`, "log-bonus", "🎉"},
-		{"bonus claimed via fallback", ts + `level=INFO msg="Claimed channel points bonus via GQL fallback poll (PubSub missed the claim-available event)" streamer=xqc`, "log-bonus", "🎉"},
+		{"bonus claimed via fallback", ts + `level=INFO msg="Claimed channel points bonus via GQL fallback poll" streamer=xqc`, "log-bonus", "🎉"},
 
 		// Predictions.
 		{"prediction WIN", ts + `level=INFO msg="Prediction result" event="Will they win?" result=WIN gained=500`, "log-bet-win", "🏆"},
