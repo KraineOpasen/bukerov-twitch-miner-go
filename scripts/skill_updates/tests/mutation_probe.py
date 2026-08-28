@@ -303,17 +303,29 @@ def digest(path):
 
 def _run_suite_child():
     """Run the suite in this already-isolated direct-entrypoint process."""
-    scripts = os.path.join(REPO, "scripts")
-    # Do not depend on an ambient import path.  The reviewed repository scripts
-    # directory is the one explicit non-stdlib package root admitted by the child.
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    suite = unittest.defaultTestLoader.discover(
-        os.path.join(scripts, "skill_updates", "tests"),
-        top_level_dir=scripts,
-    )
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
-    return 0 if result.wasSuccessful() else 1
+    # The suite's deterministic repositories are local temporary fixtures.  Give only this
+    # test-owned process boundary the one transport they need, even when the enclosing CI job
+    # correctly exports an HTTPS-only production envelope.  Production updater/runtime Git
+    # calls build their own closed environments and therefore do not inherit this allowance.
+    outer_allow_protocol = os.environ.get("GIT_ALLOW_PROTOCOL")
+    os.environ["GIT_ALLOW_PROTOCOL"] = "file"
+    try:
+        scripts = os.path.join(REPO, "scripts")
+        # Do not depend on an ambient import path.  The reviewed repository scripts
+        # directory is the one explicit non-stdlib package root admitted by the child.
+        if scripts not in sys.path:
+            sys.path.insert(0, scripts)
+        suite = unittest.defaultTestLoader.discover(
+            os.path.join(scripts, "skill_updates", "tests"),
+            top_level_dir=scripts,
+        )
+        result = unittest.TextTestRunner(verbosity=1).run(suite)
+        return 0 if result.wasSuccessful() else 1
+    finally:
+        if outer_allow_protocol is None:
+            os.environ.pop("GIT_ALLOW_PROTOCOL", None)
+        else:
+            os.environ["GIT_ALLOW_PROTOCOL"] = outer_allow_protocol
 
 
 def run_suite():
