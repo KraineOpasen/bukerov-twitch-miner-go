@@ -213,6 +213,15 @@ class TestBlockedIssues(PublishCase):
         bodies = {report.issue_body(analysis, scenario.provider) for _ in range(5)}
         self.assertEqual(len(bodies), 1)
 
+    def test_issue_body_routes_manual_g1_repair_through_dedicated_scope(self):
+        scenario, analysis = self.blocked_scenario()
+        body = report.issue_body(analysis, scenario.provider)
+        command = ("GOVERNANCE_BASE_SHA=$BASE_SHA python3 "
+                   "scripts/validate-agent-governance.py "
+                   "--application-scope g1-stable-skills")
+        self.assertIn(command, body)
+        self.assertEqual(body.count(command), 1)
+
     def test_issue_title_encodes_provider_and_target(self):
         scenario, analysis = self.blocked_scenario()
         result = publish.publish_blocked(analysis, scenario.provider, self.gh)

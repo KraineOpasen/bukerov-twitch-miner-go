@@ -298,7 +298,9 @@ class StableNativeFoundationRed(unittest.TestCase):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         for old, new in (
             ("fetch-depth: 0", "fetch-depth: 1"),
-            ("GOVERNANCE_BASE_SHA:", "IGNORED_BASE_SHA:"),
+            ("--application-scope generic", "--application-scope g1-stable-skills"),
+            ("      BASH_ENV: /dev/null",
+             "      BASH_ENV: /dev/null\n      GOVERNANCE_BASE_SHA: " + "a" * 40),
         ):
             mutated = ci.replace(old, new, 1)
             self.assertNotEqual(ci, mutated)

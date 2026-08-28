@@ -16,7 +16,7 @@ config/data files: the relevant parser succeeds (`python3 -m json.tool`, YAML fr
 
 Tests for the touched package(s) pass: `go test -v -race ./internal/<pkg>/...`. For non-Go governance/tooling
 changes, the equivalent self-test passes (e.g. `python3 .claude/hooks/governance-policy.py --self-test`,
-`python3 scripts/validate-agent-governance.py`).
+`python3 scripts/validate-agent-governance.py --application-scope generic`).
 
 ## Q2 — Full regression
 
@@ -40,6 +40,16 @@ For a change-set that touches only the governance layer (`CLAUDE.md`, `GOVERNANC
 `CONTEXT.md`, `docs/agents/**`, `docs/adr/**`, `scripts/validate-agent-governance.py`) and no application
 paths, Q0/Q1 are: `python3 -m json.tool` on every touched JSON file, the hook self-test
 (`python3 .claude/hooks/governance-policy.py --self-test`), and the governance validator with its own
-fixture matrix (`python3 scripts/validate-agent-governance.py` and `--self-test`). The heavy Go gates
-apply only where changed-path analysis shows application paths are affected; mutation testing is not
-applicable to Markdown/governance content.
+fixture matrix. Generic repository validation is
+`python3 scripts/validate-agent-governance.py --application-scope generic`; a G1/stable-skills
+change-set must additionally use its exact reviewed task base:
+
+```bash
+GOVERNANCE_BASE_SHA=$BASE_SHA \
+  python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills
+```
+
+The fixture matrix remains the separate
+`python3 scripts/validate-agent-governance.py --self-test` invocation. The heavy Go gates apply only
+where changed-path analysis shows application paths are affected; mutation testing is not applicable
+to Markdown/governance content.

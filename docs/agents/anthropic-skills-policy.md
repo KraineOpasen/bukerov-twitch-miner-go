@@ -279,7 +279,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    file **last**, after all SKILL.md/script/doc edits for this round are finalized — this is what actually
    re-pins the file and clears the validator's fail-closed check.
 6. Update `anthropic-skills-patches.md` for any patch that changed, was added, or was removed.
-7. Run `python3 scripts/validate-agent-governance.py` and fix every reported failure.
+7. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed task base, and fix every reported failure.
 8. Open the change as its own dedicated Draft PR (see `mattpocock-skills-policy.md`'s "Dedicated Draft PR
    requirement" — the same rule applies here) — never bundle a skills re-vendor into an unrelated change.
 9. Get human review before merge; this task's own governance forbids the agent from merging it itself.
@@ -290,7 +290,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
 2. Restore the three affected `.claude/skills/<name>/` directories from that prior commit (`git checkout <sha>
    -- .claude/skills/skill-creator-anthropic .claude/skills/frontend-design .claude/skills/webapp-testing`).
 3. Restore `docs/agents/anthropic-skills-manifest.json` and `anthropic-skills-patches.md` from the same commit.
-4. Run `python3 scripts/validate-agent-governance.py` to confirm consistency.
+4. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed rollback-task base to confirm consistency.
 5. Open a dedicated PR for the rollback with the reason in the description.
 
 ## Trigger evals

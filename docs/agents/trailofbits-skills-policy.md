@@ -679,7 +679,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    round are finalized; that is what re-pins the file and clears the fail-closed check.
 8. Update `trailofbits-skills-patches.md` for any patch added, changed or removed, and this policy's
    "Installed" / "Excluded / Held" / "Local patches summary" sections if the set or the patches changed.
-9. Run `python3 scripts/validate-agent-governance.py` and fix every reported failure.
+9. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed task base, and fix every reported failure.
 10. Open the change as its own dedicated Draft PR (see `mattpocock-skills-policy.md`'s "Dedicated Draft PR
     requirement" — the same rule applies here); never bundle a skills re-vendor into an unrelated change.
     Get human review before merge; this policy forbids the agent from merging it.
@@ -694,7 +694,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    → `trailmark`).
 3. Restore `docs/agents/trailofbits-skills-manifest.json` and `trailofbits-skills-patches.md` from the same
    commit (and this policy, if it moved with them).
-4. Run `python3 scripts/validate-agent-governance.py` to confirm consistency.
+4. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed rollback-task base to confirm consistency.
 5. Open a dedicated PR for the rollback with the reason in the description.
 
 Rolling back this provider is independent of the other five: no other manifest claims any of these 23
