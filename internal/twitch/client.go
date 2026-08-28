@@ -64,13 +64,18 @@ var (
 	// internal/constants/gql.go (see the per-operation client-ID fallback below).
 	ErrPersistedQueryNotFound = errors.New("twitch: persisted query not found (stale query hash or client metadata)")
 
-	// ErrClaimNotAccepted indicates a claim mutation returned an HTTP 200 with no
-	// transport or top-level GraphQL error, but its authoritative business-result
-	// node was missing, null, malformed, or an explicit rejection — so the claim
-	// was NOT accepted and must not be treated as success. It wraps a stable
-	// ClaimStatus code (never any response payload, claim ID, or token) so callers
-	// and tests can classify and, where relevant, retry the outcome.
+	// ErrClaimNotAccepted is returned only when Twitch authoritatively rejected a
+	// bonus claim in the mutation's business-result node. Missing/null/malformed
+	// responses use ErrBonusClaimIndeterminate and are quarantined, never retried.
 	ErrClaimNotAccepted = errors.New("twitch: claim not accepted")
+	// ErrBonusClaimIndeterminate means the mutation may have executed but the
+	// response did not authoritatively prove acceptance or rejection. Callers
+	// must fail closed and must not retry this claim ID.
+	ErrBonusClaimIndeterminate = errors.New("twitch: bonus claim outcome indeterminate")
+
+	// ErrDirectBonusMutation prevents callers from bypassing the Streamer-owned
+	// bonus arbitration through the generic PostGQL/read transport.
+	ErrDirectBonusMutation = errors.New("twitch: direct bonus mutation bypasses arbitration")
 )
 
 // StreamCheckError classifies a stream-status check that could NOT be resolved to
@@ -342,6 +347,11 @@ func (c *TwitchClient) PostGQLBatch(operations []constants.GQLOperation) ([]map[
 	return c.postGQLBatchRequest(operations)
 }
 
+func isBonusMutationOperation(operation constants.GQLOperation) bool {
+	return operation.OperationName == constants.ClaimCommunityPoints.OperationName ||
+		operation.Extensions.PersistedQuery.SHA256Hash == constants.ClaimCommunityPoints.Extensions.PersistedQuery.SHA256Hash
+}
+
 // gqlSingleRoundTrip performs one complete single-operation GQL cycle (client
 // ID fallback + transient retry + parse) signed with the given token, and
 // reports whether the outcome was an authoritative auth rejection. The
@@ -382,6 +392,9 @@ func (c *TwitchClient) gqlSingleRoundTrip(body []byte, operationName, token stri
 }
 
 func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[string]interface{}, error) {
+	if isBonusMutationOperation(operation) {
+		return nil, ErrDirectBonusMutation
+	}
 	body, err := json.Marshal(operation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal operation: %w", err)
@@ -435,6 +448,241 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		c.connAcct.markFunctionalFailure(time.Now())
 	}
 	return result, nil
+}
+
+// postBonusMutation is the only transport allowed to send
+// ClaimCommunityPoints. Unlike the generic read transport it never replays an
+// ambiguous network/429/5xx/read/redirect outcome. It may try another client ID
+// only after an exact APQ-not-found response with no data, and may replay once
+// after an HTTP 401 because both outcomes prove the mutation did not execute.
+func (c *TwitchClient) postBonusMutation(operation constants.GQLOperation) (map[string]interface{}, bonusMutationDelivery, error) {
+	body, err := json.Marshal(operation)
+	if err != nil {
+		return nil, bonusMutationProvenNotExecuted, fmt.Errorf("failed to marshal operation: %w", err)
+	}
+
+	snap := c.auth.Snapshot()
+	result, authRejected, delivery, err := c.bonusMutationRoundTrip(body, operation.OperationName, snap.AccessToken)
+	if err != nil {
+		return nil, delivery, err
+	}
+	if authRejected {
+		newSnap, recoveryErr := c.recoverAuth(snap.Generation)
+		if recoveryErr != nil {
+			if !isTransientRecoveryFailure(recoveryErr) {
+				c.handleUnauthorized()
+			}
+			return nil, bonusMutationProvenNotExecuted, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
+		result, authRejected, delivery, err = c.bonusMutationRoundTrip(body, operation.OperationName, newSnap.AccessToken)
+		if err != nil {
+			return nil, delivery, err
+		}
+		if authRejected {
+			c.handleUnauthorized()
+			return nil, bonusMutationProvenNotExecuted, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
+		}
+	}
+
+	return result, bonusMutationResponse, nil
+}
+
+// bonusMutationRoundTrip performs one no-ambiguous-replay mutation cycle for a
+// credential snapshot. HTTP-200 GraphQL "Unauthorized" is intentionally not an
+// auth-replay authority here: without an exact non-execution contract it remains
+// an indeterminate top-level GraphQL outcome.
+func (c *TwitchClient) bonusMutationRoundTrip(body []byte, operationName, token string) (map[string]interface{}, bool, bonusMutationDelivery, error) {
+	c.connAcct.markAttempt(time.Now())
+	candidates := c.candidateClientIDs(operationName)
+
+	for i, clientID := range candidates {
+		respBody, statusCode, requestStarted, err := c.doGQLMutationOnce(body, operationName, clientID, token)
+		if err != nil {
+			if !requestStarted {
+				return nil, false, bonusMutationProvenNotExecuted, err
+			}
+			c.gqlFailures.mark(time.Now())
+			if statusCode != 0 {
+				c.connAcct.markFunctionalFailure(time.Now())
+			}
+			slog.Warn("Bonus claim mutation outcome is indeterminate; refusing automatic replay",
+				"operation", operationName,
+				"status", statusCode,
+				"error", err,
+			)
+			return nil, false, bonusMutationIndeterminate, err
+		}
+
+		// HTTP 401 is a pre-execution authentication rejection. The caller owns
+		// the one existing auth-recovery cycle and may replay once with new creds.
+		if statusCode == http.StatusUnauthorized {
+			return nil, true, bonusMutationProvenNotExecuted, nil
+		}
+		if statusCode != http.StatusOK {
+			c.connAcct.markFunctionalFailure(time.Now())
+			return nil, false, bonusMutationIndeterminate,
+				fmt.Errorf("twitch GQL %s: non-success status %d", operationName, statusCode)
+		}
+		if len(bytes.TrimSpace(respBody)) == 0 {
+			c.connAcct.markFunctionalFailure(time.Now())
+			return nil, false, bonusMutationIndeterminate,
+				fmt.Errorf("twitch GQL %s: empty response body", operationName)
+		}
+
+		// Duplicate JSON object members are ambiguous for every mutation outcome,
+		// not only APQ fallback. encoding/json otherwise keeps the last value, so
+		// conflicting data or embedded-error members could be erased and turn an
+		// unproven response into a fresh local success. Reject the raw body before
+		// either retry proof or ordinary result classification.
+		if !jsonObjectKeysAreUnique(respBody) {
+			c.connAcct.markFunctionalFailure(time.Now())
+			return nil, false, bonusMutationIndeterminate,
+				fmt.Errorf("twitch GQL %s: ambiguous or malformed JSON response", operationName)
+		}
+
+		if strictPersistedQueryNotFound(respBody) {
+			if i+1 < len(candidates) {
+				slog.Warn("Bonus claim APQ was not found; trying the next Twitch client ID",
+					"operation", operationName,
+					"clientID", clientID,
+					"remainingCandidates", len(candidates)-i-1,
+				)
+			}
+			continue
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			c.connAcct.markFunctionalFailure(time.Now())
+			return nil, false, bonusMutationIndeterminate,
+				fmt.Errorf("failed to unmarshal %s response: %w", operationName, err)
+		}
+
+		c.rememberWorkingClientID(operationName, clientID, i > 0)
+		return result, false, bonusMutationResponse, nil
+	}
+
+	c.connAcct.markFunctionalFailure(time.Now())
+	return nil, false, bonusMutationProvenNotExecuted,
+		fmt.Errorf("%w: operation %s (tried %d client IDs)", ErrPersistedQueryNotFound, operationName, len(candidates))
+}
+
+// strictPersistedQueryNotFound is deliberately stronger than the generic
+// substring detector: mutation replay is authorized only when every top-level
+// error has the exact APQ code and no usable data accompanies it.
+func strictPersistedQueryNotFound(respBody []byte) bool {
+	if !jsonObjectKeysAreUnique(respBody) {
+		return false
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return false
+	}
+	if _, present := result["error"]; present {
+		return false
+	}
+	if data, present := result["data"]; present && data != nil {
+		return false
+	}
+	errorsList, ok := result["errors"].([]interface{})
+	if !ok || len(errorsList) == 0 {
+		return false
+	}
+	for _, rawError := range errorsList {
+		errorObject, ok := rawError.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		extensions, ok := errorObject["extensions"].(map[string]interface{})
+		if !ok || extensions["code"] != "PERSISTED_QUERY_NOT_FOUND" {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonObjectKeysAreUnique validates the raw JSON token stream before decoding
+// into maps. encoding/json otherwise applies last-value-wins to duplicate
+// members, which is unsafe proof for a side-effect retry: a conflicting
+// successful `data` member followed by `data:null` (or a duplicate nested code)
+// must invalidate PQNF authority rather than disappear during unmarshal.
+func jsonObjectKeysAreUnique(body []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	duplicate, err := scanJSONValueForDuplicateKeys(decoder)
+	if err != nil || duplicate {
+		return false
+	}
+	_, err = decoder.Token()
+	return errors.Is(err, io.EOF)
+}
+
+func scanJSONValueForDuplicateKeys(decoder *json.Decoder) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return false, nil
+	}
+
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return false, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return false, errors.New("JSON object key is not a string")
+			}
+			if _, exists := seen[key]; exists {
+				return true, nil
+			}
+			seen[key] = struct{}{}
+			if duplicate, err := scanJSONValueForDuplicateKeys(decoder); err != nil || duplicate {
+				return duplicate, err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return false, fmt.Errorf("invalid JSON object closing token: %v", err)
+		}
+	case '[':
+		for decoder.More() {
+			if duplicate, err := scanJSONValueForDuplicateKeys(decoder); err != nil || duplicate {
+				return duplicate, err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return false, fmt.Errorf("invalid JSON array closing token: %v", err)
+		}
+	default:
+		return false, fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return false, nil
+}
+
+func (c *TwitchClient) doGQLMutationOnce(body []byte, operationName, clientID, token string) ([]byte, int, bool, error) {
+	req, err := http.NewRequest(http.MethodPost, c.gqlURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.setGQLHeaders(req, clientID, token)
+
+	client := *c.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	respBody, statusCode, _, err := doGQLOnceWithClient(&client, req)
+	if err != nil {
+		return respBody, statusCode, true, err
+	}
+	slog.Debug("GQL response", "operation", operationName, "status", statusCode)
+	return respBody, statusCode, true, nil
 }
 
 // authRecoveryWait bounds how long a rejected request waits for the shared
@@ -511,6 +759,11 @@ func (c *TwitchClient) gqlBatchRoundTrip(body []byte, label, token string) (resu
 }
 
 func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) ([]map[string]interface{}, error) {
+	for _, operation := range operations {
+		if isBonusMutationOperation(operation) {
+			return nil, ErrDirectBonusMutation
+		}
+	}
 	body, err := json.Marshal(operations)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal operations: %w", err)
@@ -747,7 +1000,11 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 // errors, where no HTTP response was received at all) plus any Retry-After delay
 // the server asked for (0 when absent), so the caller can honor a 429 hint.
 func (c *TwitchClient) doGQLOnce(req *http.Request) ([]byte, int, time.Duration, error) {
-	resp, err := c.client.Do(req)
+	return doGQLOnceWithClient(c.client, req)
+}
+
+func doGQLOnceWithClient(client *http.Client, req *http.Request) ([]byte, int, time.Duration, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("request failed: %w", err)
 	}
@@ -1458,7 +1715,16 @@ func parseCommunityGoals(goals []interface{}) ([]*models.CommunityGoal, bool) {
 	return out, true
 }
 
-func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
+type channelPointsObservation struct {
+	obsID uint64
+	apply models.ContextApplyResult
+}
+
+// observeChannelPointsContext is the single full-context read/apply path used
+// by both hydration and the fallback poll. A poll therefore cannot supersede a
+// concurrent full observation while publishing only the bonus field and
+// silently discarding authoritative balance, multipliers, or goals.
+func (c *TwitchClient) observeChannelPointsContext(streamer *models.Streamer) (channelPointsObservation, error) {
 	// Begin a fresh observation BEFORE the I/O. Only the latest-begun observation
 	// may publish, so a newer request always wins regardless of completion order
 	// (capSeq alone could not order two requests that begin at the same sequence).
@@ -1467,8 +1733,8 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	// applyUnknown publishes an inconclusive result through the observation guard:
 	// capability Unknown, and every optional field absent, so LastConfirmed,
 	// balance, multipliers and goals are all PRESERVED.
-	applyUnknown := func(reason models.CapabilityReason) {
-		streamer.ApplyChannelPointsContext(obsID, models.ChannelPointsContextSnapshot{
+	applyUnknown := func(reason models.CapabilityReason) models.ContextApplyResult {
+		return streamer.ApplyChannelPointsContext(obsID, models.ChannelPointsContextSnapshot{
 			Capability: models.CapabilityUnknown, Reason: reason,
 		})
 	}
@@ -1479,8 +1745,8 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 
 	resp, err := c.postGQLRequest(op)
 	if err != nil {
-		applyUnknown(capabilityFromError(err))
-		return err
+		apply := applyUnknown(capabilityFromError(err))
+		return channelPointsObservation{obsID: obsID, apply: apply}, err
 	}
 
 	// A top-level GraphQL "errors" array (even at HTTP 200, and even when a
@@ -1490,37 +1756,38 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	// balance/multipliers/goals nor trigger a bonus claim. LastConfirmed and every
 	// optional field are preserved (applyUnknown writes none of them).
 	if gql.HasTopLevelErrors(resp) {
-		applyUnknown(models.CapReasonGraphQLError)
-		return fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
+		apply := applyUnknown(models.CapReasonGraphQLError)
+		return channelPointsObservation{obsID: obsID, apply: apply},
+			fmt.Errorf("twitch GQL %s: top-level errors", op.OperationName)
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		applyUnknown(models.CapReasonMalformed)
-		return ErrStreamerDoesNotExist
+		apply := applyUnknown(models.CapReasonMalformed)
+		return channelPointsObservation{obsID: obsID, apply: apply}, ErrStreamerDoesNotExist
 	}
 	community, ok := data["community"].(map[string]interface{})
 	if !ok || community == nil {
-		applyUnknown(models.CapReasonMalformed)
-		return ErrStreamerDoesNotExist
+		apply := applyUnknown(models.CapReasonMalformed)
+		return channelPointsObservation{obsID: obsID, apply: apply}, ErrStreamerDoesNotExist
 	}
 	channel, ok := community["channel"].(map[string]interface{})
 	if !ok || channel == nil {
-		applyUnknown(models.CapReasonMalformed)
-		return ErrStreamerDoesNotExist
+		apply := applyUnknown(models.CapReasonMalformed)
+		return channelPointsObservation{obsID: obsID, apply: apply}, ErrStreamerDoesNotExist
 	}
 	self, ok := channel["self"].(map[string]interface{})
 	if !ok {
 		// Structurally valid channel with no self node: the feature context is
 		// missing, but Twitch is NOT known to signal "disabled" by omission, so
 		// UNKNOWN (never coerced to Disabled without proof).
-		applyUnknown(models.CapReasonMissingContext)
-		return nil
+		apply := applyUnknown(models.CapReasonMissingContext)
+		return channelPointsObservation{obsID: obsID, apply: apply}, nil
 	}
 	communityPoints, ok := self["communityPoints"].(map[string]interface{})
 	if !ok {
-		applyUnknown(models.CapReasonMissingContext)
-		return nil
+		apply := applyUnknown(models.CapReasonMissingContext)
+		return channelPointsObservation{obsID: obsID, apply: apply}, nil
 	}
 
 	// Parse the FULL accepted context into one snapshot WITHOUT any streamer write.
@@ -1568,59 +1835,54 @@ func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error
 	// makes this whole context (state + optional fields + bonus opportunity) stale.
 	res := streamer.ApplyChannelPointsContext(obsID, snap)
 	if res.Stale {
-		slog.Debug("Dropping stale channel-points context (a newer observation already published)",
+		slog.Debug("Dropping stale channel-points context (a newer observation already began)",
 			"streamer", streamer.GetUsername())
+		return channelPointsObservation{obsID: obsID, apply: res}, nil
+	}
+	return channelPointsObservation{obsID: obsID, apply: res}, nil
+}
+
+func (c *TwitchClient) LoadChannelPointsContext(streamer *models.Streamer) error {
+	observation, err := c.observeChannelPointsContext(streamer)
+	if err != nil {
+		return err
+	}
+	if observation.apply.Stale || observation.apply.AvailableClaimID == "" {
 		return nil
 	}
 
-	// Bonus claim: the eligibility check and the reservation are ONE atomic step so
-	// the streamer cannot go Offline / lose the Channel Points capability between
-	// "eligible" and "reserved". ReserveBonusClaimIfEligible confirms, under the
-	// streamer lock, that the observation is still current, the streamer is Online,
-	// the capability is Enabled, and the claim id is non-empty and not already
-	// reserved — only then does it reserve. The Twitch mutation runs OUTSIDE the
-	// lock, and at most once per claim id via this path.
-	if res.AvailableClaimID != "" {
-		if r := streamer.ReserveBonusClaimIfEligible(obsID, res.AvailableClaimID); r.Authorized {
-			if err := c.ClaimBonus(streamer, res.AvailableClaimID); err != nil {
-				slog.Error("Failed to claim bonus", "error", err)
-			}
-		} else {
-			slog.Debug("Skipping bonus claim from context: not reserved",
-				"streamer", streamer.GetUsername(), "reason", r.Reason.String())
-		}
+	// Bonus claim: eligibility + reservation are one atomic Streamer transition;
+	// network I/O begins only after the lock is released. Context hydration keeps
+	// its historical error contract: a bonus failure is logged but does not turn a
+	// successfully loaded full context into a load failure.
+	claimResult, claimErr := c.claimObservedBonus(streamer, observation.obsID, observation.apply.AvailableClaimID)
+	if claimErr != nil {
+		slog.Error("Failed to claim bonus", "error", claimErr)
+	} else if claimResult.Outcome == BonusClaimSuppressed {
+		slog.Debug("Skipping bonus claim from context: not reserved",
+			"streamer", streamer.GetUsername(), "reason", claimResult.Reason.String())
 	}
-
 	return nil
 }
 
 // ClaimAvailableBonus is the polling fallback for channel-points bonus chests.
-// The primary claim path is driven by the community-points-user PubSub
-// "claim-available" event, but PubSub delivery is known to occasionally drop
-// events (a recurring pain point across Twitch miners), leaving a chest
-// unclaimed until it expires. This re-reads the channel-points context
-// directly and claims any bonus currently available, returning true when a
-// claim was actually made so the caller can log that the fallback - rather
-// than PubSub - caught it.
+// It re-reads the full channel-points context and arbitrates any available
+// bonus through the same Streamer owner as PubSub/context hydration. It returns
+// true only when this poll caller owns a fresh accepted mutation; this does not
+// imply whether a PubSub event was delivered, delayed, or absent.
 func (c *TwitchClient) ClaimAvailableBonus(streamer *models.Streamer) (bool, error) {
-	op := constants.ChannelPointsContext.WithVariables(map[string]interface{}{
-		"channelLogin": streamer.GetUsername(),
-	})
-
-	resp, err := c.postGQLRequest(op)
+	observation, err := c.observeChannelPointsContext(streamer)
 	if err != nil {
 		return false, err
 	}
-
-	claimID := availableClaimID(resp)
-	if claimID == "" {
+	if observation.apply.Stale || observation.apply.AvailableClaimID == "" {
 		return false, nil
 	}
-
-	if err := c.ClaimBonus(streamer, claimID); err != nil {
+	result, err := c.claimObservedBonus(streamer, observation.obsID, observation.apply.AvailableClaimID)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return result.Fresh(), nil
 }
 
 // availableClaimID walks a ChannelPointsContext GraphQL response down to the
@@ -1628,35 +1890,68 @@ func (c *TwitchClient) ClaimAvailableBonus(streamer *models.Streamer) (bool, err
 // available. It defends against every level being absent so a partial or
 // unexpected response is treated as "nothing to claim" rather than panicking.
 func availableClaimID(resp map[string]interface{}) string {
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	community, ok := data["community"].(map[string]interface{})
-	if !ok || community == nil {
-		return ""
-	}
-	channel, ok := community["channel"].(map[string]interface{})
-	if !ok || channel == nil {
-		return ""
-	}
-	self, ok := channel["self"].(map[string]interface{})
-	if !ok || self == nil {
-		return ""
-	}
-	communityPoints, ok := self["communityPoints"].(map[string]interface{})
-	if !ok || communityPoints == nil {
-		return ""
-	}
-	availableClaim, ok := communityPoints["availableClaim"].(map[string]interface{})
-	if !ok || availableClaim == nil {
-		return ""
-	}
-	id, _ := availableClaim["id"].(string)
+	id, _ := availableClaimContext(resp)
 	return id
 }
 
-func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) error {
+// availableClaimContext returns authoritative=true only when the complete
+// ChannelPointsContext path through communityPoints exists. An absent/null
+// availableClaim is an authoritative "nothing available"; malformed enclosing
+// structure is UNKNOWN and must never initiate a mutation.
+func availableClaimContext(resp map[string]interface{}) (string, bool) {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	community, ok := data["community"].(map[string]interface{})
+	if !ok || community == nil {
+		return "", false
+	}
+	channel, ok := community["channel"].(map[string]interface{})
+	if !ok || channel == nil {
+		return "", false
+	}
+	self, ok := channel["self"].(map[string]interface{})
+	if !ok || self == nil {
+		return "", false
+	}
+	communityPoints, ok := self["communityPoints"].(map[string]interface{})
+	if !ok || communityPoints == nil {
+		return "", false
+	}
+	rawClaim, present := communityPoints["availableClaim"]
+	if !present || rawClaim == nil {
+		return "", true
+	}
+	availableClaim, ok := rawClaim.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	id, ok := availableClaim["id"].(string)
+	if !ok {
+		return "", false
+	}
+	return id, true
+}
+
+func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) (BonusClaimResult, error) {
+	reservation := streamer.ReserveCurrentBonusClaimIfEligible(claimID)
+	return c.claimReservedBonus(streamer, claimID, reservation)
+}
+
+func (c *TwitchClient) claimObservedBonus(streamer *models.Streamer, obsID uint64, claimID string) (BonusClaimResult, error) {
+	reservation := streamer.ReserveBonusClaimIfEligible(obsID, claimID)
+	return c.claimReservedBonus(streamer, claimID, reservation)
+}
+
+func (c *TwitchClient) claimReservedBonus(streamer *models.Streamer, claimID string, reservation models.BonusClaimReservation) (BonusClaimResult, error) {
+	if !reservation.Authorized {
+		slog.Debug("Skipping bonus claim: arbitration did not grant mutation ownership",
+			"streamer", streamer.GetUsername(),
+			"reason", reservation.Reason.String())
+		return BonusClaimResult{Outcome: BonusClaimSuppressed, Reason: reservation.Reason}, nil
+	}
+
 	slog.Info("Claiming bonus", "streamer", streamer.GetUsername())
 
 	op := constants.ClaimCommunityPoints.WithVariables(map[string]interface{}{
@@ -1666,12 +1961,22 @@ func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) err
 		},
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, delivery, err := c.postBonusMutation(op)
 	if err != nil {
-		// Transport / auth (ErrUnauthorized) / PersistedQueryNotFound — already
-		// typed, and left retryable via the caller's bounded paths (the PubSub
-		// claim-available re-delivery and the polling fallback).
-		return err
+		completion := models.BonusClaimCompletionIndeterminate
+		outcome := BonusClaimIndeterminate
+		if delivery == bonusMutationProvenNotExecuted {
+			completion = models.BonusClaimCompletionProvenNotExecuted
+			outcome = BonusClaimRetryPending
+		}
+		if applied := streamer.CompleteBonusClaim(reservation, completion); !applied.Applied {
+			return BonusClaimResult{Outcome: BonusClaimIndeterminate},
+				fmt.Errorf("bonus claim completion lost arbitration ownership: %w", err)
+		}
+		if delivery == bonusMutationIndeterminate {
+			return BonusClaimResult{Outcome: outcome}, fmt.Errorf("%w: %w", ErrBonusClaimIndeterminate, err)
+		}
+		return BonusClaimResult{Outcome: outcome}, err
 	}
 
 	// An HTTP 200 with no top-level GraphQL error is NOT proof of a claim: the
@@ -1679,16 +1984,42 @@ func (c *TwitchClient) ClaimBonus(streamer *models.Streamer, claimID string) err
 	// present and un-rejected. Previously the payload was ignored, so a null or
 	// missing node was silently treated as success.
 	status := classifyCommunityPointsClaim(resp)
-	if !status.Accepted() {
+	switch status {
+	case ClaimStatusAccepted:
+		c.markSuccess()
+		completed := streamer.CompleteBonusClaim(reservation, models.BonusClaimCompletionSucceeded)
+		if !completed.Applied || !completed.FreshSuccess {
+			return BonusClaimResult{Outcome: BonusClaimIndeterminate},
+				errors.New("bonus claim success completion lost arbitration ownership")
+		}
+		return BonusClaimResult{Outcome: BonusClaimFreshAccepted}, nil
+	case ClaimStatusAlreadyClaimed:
+		c.markSuccess()
+		completed := streamer.CompleteBonusClaim(reservation, models.BonusClaimCompletionReconciled)
+		if !completed.Applied {
+			return BonusClaimResult{Outcome: BonusClaimIndeterminate},
+				errors.New("bonus claim reconciliation lost arbitration ownership")
+		}
+		return BonusClaimResult{Outcome: BonusClaimReconciled}, nil
+	case ClaimStatusRejected:
+		c.markSuccess()
+		streamer.CompleteBonusClaim(reservation, models.BonusClaimCompletionRejected)
 		// Privacy-safe: outcome class only — never the payload, claim ID, token,
 		// or headers. No success log/event is emitted for a non-accepted claim.
 		slog.Warn("Channel points bonus claim not accepted by Twitch",
 			"streamer", streamer.GetUsername(),
 			"outcome", string(status),
-			"retryable", status.Retryable())
-		return fmt.Errorf("%w: %s", ErrClaimNotAccepted, status)
+			"retryable", false)
+		return BonusClaimResult{Outcome: BonusClaimRejected}, fmt.Errorf("%w: %s", ErrClaimNotAccepted, status)
+	default:
+		c.connAcct.markFunctionalFailure(time.Now())
+		streamer.CompleteBonusClaim(reservation, models.BonusClaimCompletionIndeterminate)
+		slog.Warn("Channel points bonus claim outcome is indeterminate; refusing replay",
+			"streamer", streamer.GetUsername(),
+			"outcome", string(status),
+			"retryable", false)
+		return BonusClaimResult{Outcome: BonusClaimIndeterminate}, fmt.Errorf("%w: %s", ErrBonusClaimIndeterminate, status)
 	}
-	return nil
 }
 
 func (c *TwitchClient) ClaimMoment(streamer *models.Streamer, momentID string) error {

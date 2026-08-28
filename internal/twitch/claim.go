@@ -1,6 +1,41 @@
 package twitch
 
-import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
+import (
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/gql"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+)
+
+// BonusClaimOutcome is the privacy-safe local outcome of the complete bonus
+// arbitration + Twitch mutation path. It never carries a claim ID or payload.
+type BonusClaimOutcome string
+
+const (
+	BonusClaimFreshAccepted BonusClaimOutcome = "fresh_accepted"
+	BonusClaimReconciled    BonusClaimOutcome = "reconciled"
+	BonusClaimSuppressed    BonusClaimOutcome = "suppressed"
+	BonusClaimNoAvailable   BonusClaimOutcome = "no_available"
+	BonusClaimRetryPending  BonusClaimOutcome = "retry_pending"
+	BonusClaimRejected      BonusClaimOutcome = "rejected"
+	BonusClaimIndeterminate BonusClaimOutcome = "indeterminate"
+)
+
+// BonusClaimResult lets callers distinguish the single fresh success that may
+// emit an event from benign in-flight/completed losers and fail-closed outcomes.
+type BonusClaimResult struct {
+	Outcome BonusClaimOutcome
+	Reason  models.BonusReservationReason
+}
+
+// Fresh reports whether this caller owns the one authoritative fresh success.
+func (r BonusClaimResult) Fresh() bool { return r.Outcome == BonusClaimFreshAccepted }
+
+type bonusMutationDelivery uint8
+
+const (
+	bonusMutationResponse bonusMutationDelivery = iota
+	bonusMutationProvenNotExecuted
+	bonusMutationIndeterminate
+)
 
 // ClaimStatus is a stable, privacy-safe classification of the authoritative
 // result of a side-effecting Twitch claim mutation (a channel-points bonus
@@ -64,11 +99,11 @@ func (s ClaimStatus) Fresh() bool {
 	return s == ClaimStatusAccepted
 }
 
-// Retryable reports whether a non-accepted outcome could plausibly succeed on a
-// later attempt through the existing bounded retry paths (PubSub re-delivery /
-// the polling fallback for bonuses, the next inventory sync for drops). An
-// authoritative rejection is terminal and never retryable; a
-// missing/null/malformed/transient-shaped response is.
+// Retryable preserves the shared parser contract used by Drops inventory sync:
+// missing/null/malformed responses may be revisited by a later inventory cycle,
+// while authoritative rejection is terminal. Bonus claims do NOT use this
+// method: their side-effect outcome is governed by the stricter arbitration
+// ledger, where an ambiguous response is quarantined and never replayed.
 func (s ClaimStatus) Retryable() bool {
 	switch s {
 	case ClaimStatusAccepted, ClaimStatusAlreadyClaimed, ClaimStatusRejected:
@@ -101,7 +136,14 @@ func (s ClaimStatus) Retryable() bool {
 // No specific inner success field is required (none is confirmed), so a non-empty
 // error-free node is accepted; only the evidence-free empty object is rejected.
 func classifyCommunityPointsClaim(resp map[string]interface{}) ClaimStatus {
-	if gql.HasTopLevelErrors(resp) {
+	// Bonus mutation success requires an uncontested business response. Any
+	// top-level error member is fail-closed, including Twitch's singular
+	// {"error":"Unauthorized"} shape and malformed/empty `errors` values that
+	// the generic read-path helper deliberately ignores.
+	if _, present := resp["error"]; present {
+		return ClaimStatusGraphQLError
+	}
+	if _, present := resp["errors"]; present || gql.HasTopLevelErrors(resp) {
 		return ClaimStatusGraphQLError
 	}
 	data, ok := resp["data"].(map[string]interface{})

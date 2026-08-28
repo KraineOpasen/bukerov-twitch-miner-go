@@ -195,6 +195,11 @@ func (s *Streamer) ApplyChannelPointsContext(obsID uint64, snap ChannelPointsCon
 	if obsID != s.capObs {
 		return ContextApplyResult{Stale: true}
 	}
+	// Record exactly which authoritative current observation advertised a bonus.
+	// Observed reservations must match both fields; passing an arbitrary current
+	// generation and claim ID cannot manufacture retry authority.
+	s.bonusObservation = obsID
+	s.bonusObservedClaimID = snap.AvailableClaimID
 	s.applyChannelPointsCapabilityLocked(snap.Capability, snap.Reason)
 	if snap.HasBalance {
 		s.ChannelPoints = snap.Balance
@@ -230,7 +235,13 @@ const (
 	BonusReservationCapabilityDisabled
 	BonusReservationCapabilityUnknown
 	BonusReservationEmptyClaim
-	BonusReservationDuplicate
+	BonusReservationClaimNotObserved
+	BonusReservationInFlight
+	BonusReservationCompleted
+	BonusReservationTerminalRejected
+	BonusReservationIndeterminate
+	BonusReservationRetryNeedsObservation
+	BonusReservationRetryExhausted
 )
 
 func (r BonusReservationReason) String() string {
@@ -249,19 +260,79 @@ func (r BonusReservationReason) String() string {
 		return "capability_unknown"
 	case BonusReservationEmptyClaim:
 		return "empty_claim"
-	case BonusReservationDuplicate:
-		return "duplicate_claim"
+	case BonusReservationClaimNotObserved:
+		return "claim_not_observed"
+	case BonusReservationInFlight:
+		return "claim_in_flight"
+	case BonusReservationCompleted:
+		return "claim_completed"
+	case BonusReservationTerminalRejected:
+		return "claim_terminal_rejected"
+	case BonusReservationIndeterminate:
+		return "claim_indeterminate"
+	case BonusReservationRetryNeedsObservation:
+		return "retry_needs_current_observation"
+	case BonusReservationRetryExhausted:
+		return "claim_retry_exhausted"
 	default:
 		return "unknown"
 	}
 }
 
-// BonusClaimReservation is the immutable result of ReserveBonusClaimIfEligible.
+type bonusClaimPhase uint8
+
+const (
+	bonusClaimInFlight bonusClaimPhase = iota
+	bonusClaimSucceeded
+	bonusClaimTerminalRejected
+	bonusClaimIndeterminate
+	bonusClaimRetryableAwaitingObservation
+	bonusClaimRetryExhausted
+)
+
+// One initial mutation plus one later retry is the smallest useful bounded
+// policy. A retry is admitted only after the first attempt was proved not to
+// have executed and a fresh current context still advertises the same claim ID.
+const bonusClaimMaxAttempts = 2
+
+type bonusClaimRecord struct {
+	phase                 bonusClaimPhase
+	attempt               uint64
+	attempts              uint8
+	retryAfterObservation uint64
+}
+
+// BonusClaimCompletion is the privacy-safe outcome a network owner commits to
+// the Streamer arbitration ledger. It carries no claim ID, payload, or token.
+type BonusClaimCompletion uint8
+
+const (
+	BonusClaimCompletionInvalid BonusClaimCompletion = iota
+	BonusClaimCompletionSucceeded
+	BonusClaimCompletionReconciled
+	BonusClaimCompletionRejected
+	BonusClaimCompletionProvenNotExecuted
+	BonusClaimCompletionIndeterminate
+)
+
+// BonusClaimCompletionResult reports whether a completion token was current and
+// whether this transition owns the one permitted local fresh-success event.
+type BonusClaimCompletionResult struct {
+	Applied      bool
+	FreshSuccess bool
+}
+
+// BonusClaimReservation is the immutable result of a bonus-claim reservation.
 type BonusClaimReservation struct {
 	// Authorized is true only when the caller may proceed to the single Twitch
 	// ClaimBonus mutation for this claim id.
 	Authorized bool
 	Reason     BonusReservationReason
+
+	// claimID/attempt form an opaque completion token. Callers can only pass the
+	// reservation back to CompleteBonusClaim; they cannot forge or inspect it.
+	claimID string
+	attempt uint64
 }
 
 // ReserveBonusClaimIfEligible atomically confirms the CURRENT bonus-claim
@@ -273,38 +344,144 @@ type BonusClaimReservation struct {
 //   - obsID is still the latest-begun Channel Points observation (not superseded);
 //   - the streamer is confirmed StatusOnline;
 //   - the Channel Points capability is confirmed Enabled;
-//   - the claim id is non-empty AND not already reserved (dedup).
+//   - the claim id is non-empty AND not already in-flight/terminal;
+//   - a proved non-execution may retry only from this fresh observation, once.
 //
 // The prerequisites intentionally mirror EvaluatePointsTask(TaskBonusClaim) for
 // the liveness/capability axis (a parity test locks this equivalence). The
 // reservation is taken under the lock; the caller releases the lock before the
-// network ClaimBonus. At most one reservation is ever granted per claim id.
+// network ClaimBonus. Every production path shares this exact per-ID ledger.
 func (s *Streamer) ReserveBonusClaimIfEligible(obsID uint64, claimID string) BonusClaimReservation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if obsID != s.capObs {
 		return BonusClaimReservation{Reason: BonusReservationStaleObservation}
 	}
+	if reason := s.bonusClaimEligibilityReasonLocked(); reason != BonusReservationOK {
+		return BonusClaimReservation{Reason: reason}
+	}
+	if obsID != s.bonusObservation || claimID != s.bonusObservedClaimID {
+		return BonusClaimReservation{Reason: BonusReservationClaimNotObserved}
+	}
+	return s.reserveBonusClaimLocked(claimID, obsID, true)
+}
+
+// ReserveCurrentBonusClaimIfEligible is the PubSub/direct counterpart of
+// ReserveBonusClaimIfEligible. It re-checks liveness/capability atomically with
+// the shared reservation, but it cannot re-arm a failed attempt: only a fresh
+// current ChannelPointsContext proves that ID is still available.
+func (s *Streamer) ReserveCurrentBonusClaimIfEligible(claimID string) BonusClaimReservation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reason := s.bonusClaimEligibilityReasonLocked(); reason != BonusReservationOK {
+		return BonusClaimReservation{Reason: reason}
+	}
+	return s.reserveBonusClaimLocked(claimID, 0, false)
+}
+
+func (s *Streamer) bonusClaimEligibilityReasonLocked() BonusReservationReason {
 	switch s.Status {
 	case StatusOffline:
-		return BonusClaimReservation{Reason: BonusReservationOffline}
+		return BonusReservationOffline
 	case StatusUnknown:
-		return BonusClaimReservation{Reason: BonusReservationStatusUnknown}
+		return BonusReservationStatusUnknown
 	}
 	switch s.channelPointsCap {
 	case CapabilityDisabled:
-		return BonusClaimReservation{Reason: BonusReservationCapabilityDisabled}
+		return BonusReservationCapabilityDisabled
 	case CapabilityUnknown:
-		return BonusClaimReservation{Reason: BonusReservationCapabilityUnknown}
+		return BonusReservationCapabilityUnknown
 	}
+	return BonusReservationOK
+}
+
+func (s *Streamer) reserveBonusClaimLocked(claimID string, observationID uint64, allowObservedRetry bool) BonusClaimReservation {
 	if claimID == "" {
 		return BonusClaimReservation{Reason: BonusReservationEmptyClaim}
 	}
-	if claimID == s.lastAuthorizedClaimID {
-		return BonusClaimReservation{Reason: BonusReservationDuplicate}
+
+	record, exists := s.bonusClaims[claimID]
+	if exists {
+		switch record.phase {
+		case bonusClaimInFlight:
+			return BonusClaimReservation{Reason: BonusReservationInFlight}
+		case bonusClaimSucceeded:
+			return BonusClaimReservation{Reason: BonusReservationCompleted}
+		case bonusClaimTerminalRejected:
+			return BonusClaimReservation{Reason: BonusReservationTerminalRejected}
+		case bonusClaimIndeterminate:
+			return BonusClaimReservation{Reason: BonusReservationIndeterminate}
+		case bonusClaimRetryableAwaitingObservation:
+			if !allowObservedRetry || observationID <= record.retryAfterObservation {
+				return BonusClaimReservation{Reason: BonusReservationRetryNeedsObservation}
+			}
+			if record.attempts >= bonusClaimMaxAttempts {
+				return BonusClaimReservation{Reason: BonusReservationRetryExhausted}
+			}
+		case bonusClaimRetryExhausted:
+			return BonusClaimReservation{Reason: BonusReservationRetryExhausted}
+		default:
+			return BonusClaimReservation{Reason: BonusReservationIndeterminate}
+		}
 	}
-	s.lastAuthorizedClaimID = claimID
-	return BonusClaimReservation{Authorized: true, Reason: BonusReservationOK}
+
+	if s.bonusClaims == nil {
+		s.bonusClaims = make(map[string]bonusClaimRecord)
+	}
+	s.bonusClaimSeq++
+	attempts := uint8(1)
+	if exists {
+		attempts = record.attempts + 1
+	}
+	record = bonusClaimRecord{phase: bonusClaimInFlight, attempt: s.bonusClaimSeq, attempts: attempts}
+	s.bonusClaims[claimID] = record
+	return BonusClaimReservation{
+		Authorized: true,
+		Reason:     BonusReservationOK,
+		claimID:    claimID,
+		attempt:    record.attempt,
+	}
+}
+
+// CompleteBonusClaim commits the network owner's outcome under the Streamer
+// lock after network I/O has ended. A stale/forged reservation is ignored, so an
+// old completion cannot alter a newer attempt or emit a second success event.
+func (s *Streamer) CompleteBonusClaim(reservation BonusClaimReservation, completion BonusClaimCompletion) BonusClaimCompletionResult {
+	if !reservation.Authorized || reservation.claimID == "" {
+		return BonusClaimCompletionResult{}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.bonusClaims[reservation.claimID]
+	if !ok || record.phase != bonusClaimInFlight || record.attempt != reservation.attempt {
+		return BonusClaimCompletionResult{}
+	}
+
+	result := BonusClaimCompletionResult{Applied: true}
+	switch completion {
+	case BonusClaimCompletionSucceeded:
+		record.phase = bonusClaimSucceeded
+		result.FreshSuccess = true
+	case BonusClaimCompletionReconciled:
+		record.phase = bonusClaimSucceeded
+	case BonusClaimCompletionRejected:
+		record.phase = bonusClaimTerminalRejected
+	case BonusClaimCompletionProvenNotExecuted:
+		if record.attempts < bonusClaimMaxAttempts {
+			record.phase = bonusClaimRetryableAwaitingObservation
+			record.retryAfterObservation = s.capObs
+		} else {
+			record.phase = bonusClaimRetryExhausted
+		}
+	case BonusClaimCompletionIndeterminate:
+		record.phase = bonusClaimIndeterminate
+	default:
+		// Unknown completion values always fail closed.
+		record.phase = bonusClaimIndeterminate
+	}
+	s.bonusClaims[reservation.claimID] = record
+	return result
 }
 
 // ChannelPointsCapabilitySnapshot returns the current capability state and the

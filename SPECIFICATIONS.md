@@ -442,10 +442,10 @@ Twitch periodically rotates the persisted-query hashes (and occasionally the
 variable shape) of these operations server-side. When the hash the code ships no
 longer matches, Twitch answers **HTTP 200** with an
 `errors[].message = "PersistedQueryNotFound"` body and no `data`. The GQL client
-(`internal/api/client.go`) handles this so a Twitch-side rotation degrades
+(`internal/twitch/client.go`) handles this so a Twitch-side rotation degrades
 gracefully instead of corrupting local state:
 
-- **Per-operation client-ID fallback.** Each request is tried against an ordered
+- **Per-operation client-ID fallback.** Generic GQL requests are tried against an ordered
   list of public client IDs (`constants.GQLClientIDFallbacks`: TV → Browser →
   Mobile). The order is per-operation: the last client ID that worked for that
   operation is tried first (cached in a mutex-guarded map, `opClientID`), then
@@ -456,7 +456,7 @@ gracefully instead of corrupting local state:
   as the *Active GQL Client ID*.
 - **Distinct error, not "streamer does not exist".** When *every* candidate
   client ID still returns `PersistedQueryNotFound`, the hash itself is stale:
-  `postGQLRequest` returns `api.ErrPersistedQueryNotFound` (one `ERROR` log naming
+  `postGQLRequest` returns `twitch.ErrPersistedQueryNotFound` (one `ERROR` log naming
   the operation and the count of client IDs tried). Callers treat this as a
   temporary outage — they keep the last-known channel points, tracked drop
   campaigns and online flag (`CheckStreamerOnline` does not flap a streamer
@@ -466,6 +466,11 @@ gracefully instead of corrupting local state:
 - **Robust parsing.** Empty bodies, malformed JSON, missing `data`, and Twitch
   error responses are all handled with `, ok` type assertions and explicit
   guards — a changed Twitch response shape yields a clean error, never a panic.
+- **Side-effect exception.** `ClaimCommunityPoints` does not use the generic
+  substring detector or transient retry loop. Its client-ID fallback is allowed
+  only for an HTTP-200 response whose every error has exact code
+  `PERSISTED_QUERY_NOT_FOUND` and whose `data` is absent/null; all other ambiguous
+  outcomes fail closed. See *Bonus claim arbitration* below.
 
 ---
 
@@ -566,6 +571,30 @@ gracefully instead of corrupting local state:
 | Watch Streak | +300-450 | Returning for consecutive streams |
 | Raid Participation | +250 | Joining a raid |
 | Predictions (Win) | Variable | Winning a prediction bet |
+
+#### Bonus claim arbitration
+
+PubSub `claim-available`, the periodic fallback poll, and full Channel Points
+context hydration share one process-local ledger owned by each `Streamer`.
+Entries are keyed by the exact authoritative claim ID and retain terminal
+tombstones for the Streamer's lifetime. Exactly one caller may transition an ID
+to `in_flight`; duplicates are benign and perform no mutation or success event.
+Accepted and authoritative rejected results are terminal. An ambiguous remote
+outcome is quarantined as indeterminate because Twitch idempotency is not
+assumed.
+
+`ClaimCommunityPoints` uses a side-effect-specific transport: redirects and the
+generic connection/429/5xx retry loop are disabled. Network/read failures,
+non-200 statuses other than the first HTTP 401, malformed results, and
+conflicting GraphQL errors are indeterminate and are not replayed. Exact
+APQ-not-found responses may try the bounded public client-ID list. The first
+HTTP 401 is the explicit pre-execution authentication exception and may perform
+one credential-recovery replay; a second 401 stops that transport cycle. A
+logical claim gets at most one later attempt, and only when
+the previous attempt was proved not to execute and a newer fully applied
+Channel Points context still advertises the same ID. The Streamer lock is never
+held across network I/O. At most the fresh accepted owner emits a local success
+event; authoritative `points-earned` events remain the source of balance/history.
 
 ### Minute-Watched System
 
@@ -2408,11 +2437,15 @@ Raid
 4. Create new connection
 5. Re-subscribe to all topics
 
-**HTTP Requests (GQL):**
+**HTTP Requests (generic GQL reads/non-bonus operations):**
 1. Catch a transient failure (connection error, rate limiting, 5xx)
 2. Retry with exponential backoff plus random jitter
 3. Give up after `gqlMaxRetries` = 4 retries (up to 5 attempts total per
    client ID) and surface the error to the caller
+
+`ClaimCommunityPoints` is the non-idempotent exception and follows the bounded,
+fail-closed policy in *Bonus claim arbitration*; it never uses this generic
+transient retry loop.
 
 ### Graceful Shutdown
 

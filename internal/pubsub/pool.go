@@ -172,7 +172,7 @@ type streamChecker interface {
 // setting gates can be unit-tested without real Twitch calls;
 // *twitch.TwitchClient satisfies it.
 type channelActor interface {
-	ClaimBonus(streamer *models.Streamer, claimID string) error
+	ClaimBonus(streamer *models.Streamer, claimID string) (twitch.BonusClaimResult, error)
 	JoinRaid(streamer *models.Streamer, raid *models.Raid) error
 	ClaimMoment(streamer *models.Streamer, momentID string) error
 	ContributeToCommunityGoal(streamer *models.Streamer, goalID, goalTitle string, amount int) error
@@ -840,10 +840,16 @@ func (p *WebSocketPool) handleCommunityPointsUser(msg *PubSubMessage, streamer *
 					logSkippedPointsAction(streamer, "bonus claim", d)
 					return outcome
 				}
-				if err := p.actor.ClaimBonus(streamer, claimID); err != nil {
+				result, err := p.actor.ClaimBonus(streamer, claimID)
+				if err != nil {
 					slog.Error("Failed to claim bonus", "error", err)
-				} else {
+				} else if result.Fresh() {
 					events.Record(events.TypeBonusClaimed, streamer.GetUsername(), "bonus claimed")
+				} else {
+					slog.Debug("Skipping bonus claim after arbitration",
+						"streamer", streamer.GetUsername(),
+						"outcome", string(result.Outcome),
+						"reason", result.Reason.String())
 				}
 			}
 		}
