@@ -259,13 +259,17 @@ workflow enablement, or default switch alone never establishes liveness.
 The stable CI governance job owns the repository checks. The focused local commands are:
 
 ```bash
-python3 -I -S -B scripts/validate-agent-governance.py
-python3 -I -S -B scripts/validate-agent-governance.py --self-test-hook
+GOVERNANCE_BASE_SHA=$BASE_SHA \
+  python3 -I -S -B scripts/validate-agent-governance.py \
+    --application-scope g1-stable-skills --self-test-hook
 python3 -I -S -B scripts/skill_updates/runtime.py verify-repository --repo-root .
 python3 -I -S -B scripts/validate-agent-governance.py --self-test
 python3 -I -S -B scripts/skill_updates/tests/mutation_probe.py --check-anchors
 python3 -I -S -B -m unittest discover -t scripts -s scripts/skill_updates/tests
 ```
+
+`BASE_SHA` is the exact full commit selected as the reviewed task base. Omitting it, supplying a
+non-commit object, or using the generic application scope does not prove the G1 concern boundary.
 
 The disposable mutation probe additionally proves that load-bearing policy, identity, permission,
 runtime, dependency, quarantine, and publication-reachability mutations fail and that the clean bytes

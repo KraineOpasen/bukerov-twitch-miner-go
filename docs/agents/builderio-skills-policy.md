@@ -553,7 +553,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
 8. If the round also revisits `BuilderIO/builder-agent-skills`, check first whether a root `LICENSE` has
    appeared. That single fact is what gates every skill in that repository, `hallmark` included; without it
    the answer is unchanged and no further reading is needed.
-9. Run `python3 scripts/validate-agent-governance.py` and fix every reported failure.
+9. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed task base, and fix every reported failure.
 10. Open the change as its own dedicated Draft PR (see `mattpocock-skills-policy.md`'s "Dedicated Draft PR
     requirement" — the same rule applies here); never bundle a skills re-vendor into an unrelated change. Get
     human review before merge; this policy forbids the agent from merging it.
@@ -566,7 +566,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    .claude/skills/plow-ahead .claude/skills/read-the-damn-docs`.
 3. Restore `docs/agents/builderio-skills-manifest.json` and `builderio-skills-patches.md` from the same commit
    (and this policy, if it moved with them).
-4. Run `python3 scripts/validate-agent-governance.py` to confirm consistency.
+4. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed rollback-task base to confirm consistency.
 5. Open a dedicated PR for the rollback with the reason in the description.
 
 Rolling back this provider is independent of the other five: no other manifest claims any of those five

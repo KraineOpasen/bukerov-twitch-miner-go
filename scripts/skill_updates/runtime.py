@@ -50,7 +50,7 @@ STABLE_SKILLS_WORKFLOW_SHA256 = (
     "60147affd0f00bbf6dc2e431cb7538ff84455ac1aa43ad066f6b515304971cbb"
 )
 STABLE_CI_GOVERNANCE_BLOCK_SHA256 = (
-    "012341e19dee452f6d0c504af31e4ed79129268e0dfb2fbec2f510e81d0e728e"
+    "8a0170032264a1eeb90f3f6385874704eaeec92272de6b4ef6398330670c04d8"
 )
 _CI_BLOCK_BEGIN = "  # BEGIN stable-skills-governance-job/v1\n"
 _CI_BLOCK_END = "  # END stable-skills-governance-job/v1\n\n"
@@ -3582,12 +3582,14 @@ def validate_ci_trust_boundary_text(
     if len(_checkout_blocks(governance)) != 1:
         raise RuntimeEnvelopeError("governance checkout consumer closure mismatch")
     validate_checkout_contract(root, governance, fetch_depth=0)
-    comparison_sha = (
-        "GOVERNANCE_BASE_SHA: ${{ github.event_name == 'pull_request' && "
-        "github.event.pull_request.base.sha || github.event.before }}"
+    if "GOVERNANCE_BASE_SHA" in governance:
+        raise RuntimeEnvelopeError("generic CI governance carries a G1 comparison SHA")
+    generic_validator = (
+        "python3 -I -S -B scripts/validate-agent-governance.py "
+        "--application-scope generic --self-test-hook"
     )
-    if governance.count(comparison_sha) != 1:
-        raise RuntimeEnvelopeError("CI governance job lacks the exact PR/push comparison SHA")
+    if governance.count(generic_validator) != 1:
+        raise RuntimeEnvelopeError("CI governance lacks the exact generic validator invocation")
     if (
         "python3 -I -S -B scripts/skill_updates/runtime.py "
         "verify-repository --repo-root ."

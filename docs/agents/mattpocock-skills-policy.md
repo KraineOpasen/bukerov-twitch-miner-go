@@ -201,7 +201,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
 5. Update `upstream_commit`, `upstream_tree`, `upstream_current_head`, `upstream_version`, and `reviewed_at` in
    `mattpocock-skills-manifest.json`; update per-skill `upstream_blob_sha` for every touched file.
 6. Update `mattpocock-skills-patches.md` for any patch that changed, was added, or was removed.
-7. Run `python3 scripts/validate-agent-governance.py` and fix every reported failure.
+7. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed task base, and fix every reported failure.
 8. Open the change as its own dedicated Draft PR (see "Dedicated Draft PR requirement" below) — never bundle a
    skills re-vendor into an unrelated feature or governance change.
 9. Get human review before merge; this task's own governance forbids the agent from merging it itself.
@@ -212,7 +212,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
 2. Restore `.claude/skills/**` from that prior commit (`git checkout <sha> -- .claude/skills`).
 3. Restore `docs/agents/mattpocock-skills-manifest.json` and `mattpocock-skills-patches.md` from the same
    commit.
-4. Run `python3 scripts/validate-agent-governance.py` to confirm consistency.
+4. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed rollback-task base to confirm consistency.
 5. Open a dedicated PR for the rollback with the reason in the description (broken skill behavior, a patch that
    didn't survive an upstream change, etc.).
 

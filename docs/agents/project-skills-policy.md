@@ -205,9 +205,10 @@ an unrelated feature or governance diff.
 
 An update is an ordinary reviewed edit, not a re-vendor: edit the skill content, bump every changed file's
 `blob_sha` (and `eval_evidence.blob_sha` if the evidence file changed) in the same PR, re-run
-`python3 scripts/validate-agent-governance.py` until clean, and get the same Standards + Spec review as a new
-install. `reviewed_base_sha`/`reviewed_at` are updated to the SHA and date of the review that approved the
-change.
+`GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills`
+with `BASE_SHA` set to the exact reviewed task base until clean, and get the same Standards + Spec review as a
+new install. `reviewed_base_sha`/`reviewed_at` are updated to the SHA and date of the
+review that approved the change.
 
 ## Rollback
 

@@ -379,7 +379,9 @@ def issue_body(analysis, provider):
         "2. Re-apply or retire each local patch against the new content, updating",
         "   the patch ledger.",
         "3. Regenerate the manifest's provenance and record a fresh `reviewed_at`/`reviewed_by`.",
-        "4. Run `python3 scripts/validate-agent-governance.py` and its `--self-test`.",
+        "4. Set `BASE_SHA` to the exact reviewed task base, run "
+        "`GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py "
+        "--application-scope g1-stable-skills`, and run the separate validator `--self-test`.",
         "",
         "The bot re-checks daily and will keep this issue updated in place while the condition",
         "persists. It will not open a second issue for the same provider and target commit.",

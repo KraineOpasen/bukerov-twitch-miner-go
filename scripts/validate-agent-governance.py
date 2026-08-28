@@ -28,8 +28,10 @@ complete file inventory in both directions. Adding a provider means appending a 
 adding a conditional inside a check -- the provider-aware checks all iterate the registry.
 
 Usage:
-    python3 scripts/validate-agent-governance.py
-    python3 scripts/validate-agent-governance.py --self-test-hook
+    python3 scripts/validate-agent-governance.py [--application-scope generic]
+    python3 scripts/validate-agent-governance.py --application-scope generic --self-test-hook
+    GOVERNANCE_BASE_SHA=<full-base-commit> python3 scripts/validate-agent-governance.py \
+        --application-scope g1-stable-skills [--self-test-hook]
     python3 scripts/validate-agent-governance.py --self-test
         Runs ONLY this script's own offline fixture matrix -- no network, no sleeps, fully
         deterministic. `_self_test_fixtures()` is the single source of truth for which fixtures
@@ -51,7 +53,7 @@ Usage:
         re-implement a check's conditions. Prints "N/N self-test fixtures passed" and exits 1 on any
         fixture failure, 0 otherwise. Independent of --self-test-hook and of the default run.
 
-Env vars (all optional, all make specific checks stricter, never required):
+Env vars:
     GOVERNANCE_UPSTREAM_DIR_<LABEL>     path to a read-only clone of that provider's upstream at
                                         the pinned commit; when set, that provider's blob-hash check
                                         additionally verifies each unmodified file byte-for-byte
@@ -61,14 +63,18 @@ Env vars (all optional, all make specific checks stricter, never required):
                                         _TRAILOFBITS, _AWESOME_COPILOT, _BUILDERIO.
     GOVERNANCE_UPSTREAM_DIR             legacy fallback for _MATTPOCOCK only, kept for compatibility
                                         with scripts/CI that pre-date the multi-provider registry.
-    GOVERNANCE_BASE_SHA                 a git ref; when set, the "application paths untouched"
-                                        check diffs against it instead of the working tree.
+    GOVERNANCE_BASE_SHA                 required only with
+                                        `--application-scope g1-stable-skills`; it must name a
+                                        full, non-zero lowercase commit object used as the diff
+                                        base. Generic validation rejects this variable so an
+                                        intended G1 scope check cannot silently downgrade.
 
 A blob-hash mismatch on a file whose skill has `scripts_audited: true` in ANY provider's manifest
 means more than "content drifted": it means a script that was read end-to-end during the last
 review no longer matches what was reviewed, so re-audit (not just re-hash) is required before
 trusting it again.
 """
+import argparse
 import contextlib
 import datetime
 import hashlib
@@ -118,7 +124,7 @@ STABLE_SKILLS_WORKFLOW_SHA256 = (
     "60147affd0f00bbf6dc2e431cb7538ff84455ac1aa43ad066f6b515304971cbb"
 )
 STABLE_CI_GOVERNANCE_BLOCK_SHA256 = (
-    "012341e19dee452f6d0c504af31e4ed79129268e0dfb2fbec2f510e81d0e728e"
+    "8a0170032264a1eeb90f3f6385874704eaeec92272de6b4ef6398330670c04d8"
 )
 STABLE_RELEASE_SHA256 = "de5e499ecb2a65230a37c6fb9bc74ff37a6155584038e4a1a529c92559b01a3a"
 PRECHECKOUT_BOOTSTRAP_SHA256 = (
@@ -278,6 +284,9 @@ ALLOWED_RULE_KEYS = {"paths"}
 FORBIDDEN_VENDOR_NAMES = {".github", ".claude-plugin", "package.json", "package-lock.json", "openai.yaml"}
 APPLICATION_PATH_PREFIXES = ("internal/", "cmd/")
 APPLICATION_PATH_EXACT_PREFIXES = ("go.mod", "go.sum", "Dockerfile", "docker-compose", ".github/workflows/")
+APPLICATION_SCOPE_GENERIC = "generic"
+APPLICATION_SCOPE_G1_STABLE_SKILLS = "g1-stable-skills"
+APPLICATION_SCOPES = (APPLICATION_SCOPE_GENERIC, APPLICATION_SCOPE_G1_STABLE_SKILLS)
 
 # Exact G1.1 workflow integration surfaces. This must remain a literal collection: the independent
 # static runtime verifier parses the assignment without importing this validator. Every other
@@ -1642,43 +1651,96 @@ def dependency_closure_details(skills_dir):
 
 def check_application_paths_untouched():
     base_sha = os.environ.get("GOVERNANCE_BASE_SHA")
-    details = governance_base_sha_details(base_sha)
+    details = governance_base_commit_details(base_sha, required=True)
     if details:
         report("application-paths-untouched", False, details)
         return
     try:
-        if base_sha:
-            out = subprocess.run(["git", "-C", REPO_ROOT, "diff", "--name-only", base_sha],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
-        else:
-            out = subprocess.run(["git", "-C", REPO_ROOT, "status", "--porcelain"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
+        paths = application_scope_changed_paths(base_sha, REPO_ROOT)
     except Exception as e:
         report("application-paths-untouched", False, ["could not run git: %s" % e])
         return
-    if out.returncode != 0:
-        report("application-paths-untouched", False, ["git command failed: %s" % out.stderr.strip()])
-        return
-    lines = out.stdout.splitlines()
-    if not base_sha:
-        # `git status --porcelain` lines are "XY path"; take the path portion.
-        lines = [ln[3:] if len(ln) > 3 else ln for ln in lines]
-    details = application_path_violations(lines)
+    details = application_path_violations(paths)
     report("application-paths-untouched", not details, details)
 
 
-def governance_base_sha_details(value):
-    """Validate the optional comparison ref before it can reach ``git diff``.
+def governance_base_sha_details(value, required=False):
+    """Validate the comparison object spelling before it can reach Git.
 
-    Local runs may omit the ref and retain the historical clean-working-tree check. CI exports
-    an event-derived full SHA; malformed, uppercase, abbreviated and branch-creation zero values
-    fail closed instead of becoming ambiguous Git revisions.
+    Dedicated G1 scope validation requires an explicit base. Malformed, uppercase, abbreviated and
+    branch-creation zero values fail closed instead of becoming ambiguous Git revisions.
     """
     if not value:
+        if required:
+            return ["GOVERNANCE_BASE_SHA is required for g1-stable-skills application scope"]
         return []
     if not re.fullmatch(r"[0-9a-f]{40}", value) or value == "0" * 40:
         return ["GOVERNANCE_BASE_SHA must be one non-zero lowercase full commit SHA"]
     return []
+
+
+def governance_base_commit_details(value, repo_root=REPO_ROOT, required=False):
+    """Require ``value`` to name an existing commit object, never a tree/blob/tag lookalike."""
+    details = governance_base_sha_details(value, required=required)
+    if details or not value:
+        return details
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "cat-file", "-t", value],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, text=True)
+    except Exception as exc:
+        return ["could not inspect GOVERNANCE_BASE_SHA object: %s" % exc]
+    if out.returncode != 0:
+        return ["GOVERNANCE_BASE_SHA does not name an existing commit object"]
+    if out.stdout.strip() != "commit":
+        return ["GOVERNANCE_BASE_SHA must name a commit object, got %s" %
+                (out.stdout.strip() or "unknown")]
+    return []
+
+
+def application_scope_invocation_details(scope, environ=os.environ, repo_root=REPO_ROOT):
+    """Validate the mode/environment ownership boundary before any repository check runs."""
+    if scope == APPLICATION_SCOPE_GENERIC:
+        if "GOVERNANCE_BASE_SHA" in environ:
+            return ["GOVERNANCE_BASE_SHA is forbidden for generic application scope"]
+        return []
+    if scope == APPLICATION_SCOPE_G1_STABLE_SKILLS:
+        return governance_base_commit_details(
+            environ.get("GOVERNANCE_BASE_SHA"), repo_root=repo_root, required=True)
+    return ["unknown application scope %r" % scope]
+
+
+def application_scope_changed_paths(base_sha, repo_root=REPO_ROOT):
+    """Return exact changed and untracked paths for a dedicated G1 comparison.
+
+    Rename detection is disabled so an application file moved into governance produces both the
+    deleted application source and added governance destination. HEAD, index and worktree are
+    inspected independently: no layer can hide an application path by restoring another layer to
+    the base version. NUL framing preserves unusual filenames without Git quoting or line splits.
+    """
+    commands = (
+        ["git", "-C", repo_root, "diff", "--name-only", "--no-renames", "-z",
+         base_sha, "HEAD", "--"],
+        ["git", "-C", repo_root, "diff", "--cached", "--name-only", "--no-renames", "-z",
+         base_sha, "--"],
+        ["git", "-C", repo_root, "diff", "--name-only", "--no-renames", "-z", "--"],
+        ["git", "-C", repo_root, "ls-files", "--others", "--exclude-standard", "-z", "--"],
+    )
+    paths = []
+    seen = set()
+    for command in commands:
+        out = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        if out.returncode != 0:
+            error = os.fsdecode(out.stderr).strip()
+            raise RuntimeError("git command failed: %s" % (error or "exit %d" % out.returncode))
+        for raw in out.stdout.split(b"\0"):
+            if not raw:
+                continue
+            path = os.fsdecode(raw)
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def application_path_violations(paths):
@@ -1689,13 +1751,15 @@ def application_path_violations(paths):
     details = []
     exact_workflow_exceptions = set(GOVERNANCE_OWNED_WORKFLOWS)
     for path in paths:
-        path = path.strip()
         if not path:
             continue
         if path in exact_workflow_exceptions:
             continue
         if path.startswith(APPLICATION_PATH_PREFIXES) or path.startswith(APPLICATION_PATH_EXACT_PREFIXES):
-            details.append("touched application path: %s" % path)
+            # Git permits control characters in filenames. JSON string escaping keeps one path on
+            # one diagnostic line, so a hostile name cannot forge PASS/FAIL records in CI logs.
+            display_path = json.dumps(path, ensure_ascii=True)[1:-1]
+            details.append("touched application path: %s" % display_path)
     return details
 
 
@@ -2177,12 +2241,10 @@ def ci_workflow_details(text):
             details.append("CI governance job lacks exact shell bootstrap anchor %r" % needle)
     details += _runner_envelope_details(block, "CI governance")
     details += _checkout_contract_details(block, 1, trusted_event_ref=True, fetch_depth=0)
-    if block.count(
-            "GOVERNANCE_BASE_SHA: ${{ github.event_name == 'pull_request' && "
-            "github.event.pull_request.base.sha || github.event.before }}") != 1:
-        details.append("CI governance job must export the exact PR/push comparison SHA")
+    if "GOVERNANCE_BASE_SHA" in block:
+        details.append("generic CI governance must not export a G1 application-scope base")
     required = (
-        "scripts/validate-agent-governance.py --self-test-hook",
+        "scripts/validate-agent-governance.py --application-scope generic --self-test-hook",
         "scripts/skill_updates/runtime.py verify-repository --repo-root .",
         "python3 -I -S -B scripts/validate-agent-governance.py --self-test\n",
         "mutation_probe.py --check-anchors",
@@ -3963,6 +4025,15 @@ ALL_CHECKS = [
 ]
 
 
+def checks_for_application_scope(scope):
+    """Select exactly one concern boundary without changing any generic invariant."""
+    if scope == APPLICATION_SCOPE_GENERIC:
+        return [check for check in ALL_CHECKS if check is not check_application_paths_untouched]
+    if scope == APPLICATION_SCOPE_G1_STABLE_SKILLS:
+        return list(ALL_CHECKS)
+    raise ValueError("unknown application scope %r" % scope)
+
+
 # --------------------------------------------------------------------------
 # --self-test: offline fixture matrix for the project-manifest logic above.
 #
@@ -5609,9 +5680,215 @@ def _st_p20():
         "scripts/validate-agent-governance.py", "GOVERNANCE_V3.md",
         "docs/agents/skills-update-providers.json", "CLAUDE.md"]) == []
     assert governance_base_sha_details(None) == []
+    assert governance_base_sha_details(None, required=True)
     assert governance_base_sha_details("a" * 40) == []
     for invalid in ("0" * 40, "a" * 39, "A" * 40, "release/0.3"):
         assert governance_base_sha_details(invalid), invalid
+
+
+def _st_p23():
+    """Generic and dedicated G1 invocations select disjoint, fail-closed boundaries."""
+    generic = checks_for_application_scope(APPLICATION_SCOPE_GENERIC)
+    dedicated = checks_for_application_scope(APPLICATION_SCOPE_G1_STABLE_SKILLS)
+    assert dedicated == ALL_CHECKS
+    assert len(generic) == len(ALL_CHECKS) - 1
+    assert check_application_paths_untouched not in generic
+    assert [check for check in ALL_CHECKS if check is not check_application_paths_untouched] == generic
+    try:
+        checks_for_application_scope("unknown")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown programmatic scope did not fail closed")
+
+    assert application_scope_invocation_details(APPLICATION_SCOPE_GENERIC, {}) == []
+    assert application_scope_invocation_details(
+        APPLICATION_SCOPE_GENERIC, {"GOVERNANCE_BASE_SHA": "a" * 40})
+    assert application_scope_invocation_details(APPLICATION_SCOPE_G1_STABLE_SKILLS, {})
+
+    head = subprocess.check_output(
+        ["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], text=True).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", REPO_ROOT, "rev-parse", "HEAD^{tree}"], text=True).strip()
+    blob = subprocess.check_output(
+        ["git", "-C", REPO_ROOT, "rev-parse", "HEAD:scripts/validate-agent-governance.py"],
+        text=True).strip()
+    assert not governance_base_commit_details(head, required=True)
+    tree_details = governance_base_commit_details(tree, required=True)
+    assert any("commit object" in detail for detail in tree_details), tree_details
+    blob_details = governance_base_commit_details(blob, required=True)
+    assert any("commit object" in detail for detail in blob_details), blob_details
+    assert governance_base_commit_details("a" * 40, required=True)
+
+    assert parse_cli_args([]).application_scope == APPLICATION_SCOPE_GENERIC
+    assert parse_cli_args([
+        "--application-scope", APPLICATION_SCOPE_G1_STABLE_SKILLS,
+        "--self-test-hook",
+    ]).application_scope == APPLICATION_SCOPE_G1_STABLE_SKILLS
+    malformed = (
+        ["--unknown-governance-mode"],
+        ["--application-sc", APPLICATION_SCOPE_GENERIC],
+        ["--application-scope"],
+        ["--application-scope", "unknown"],
+        ["--application-scope", APPLICATION_SCOPE_G1_STABLE_SKILLS,
+         "--application-scope", APPLICATION_SCOPE_GENERIC],
+        ["--self-test", "--application-scope", APPLICATION_SCOPE_GENERIC],
+        ["--self-test", "--self-test-hook"],
+    )
+    for argv in malformed:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parse_cli_args(argv)
+            except SystemExit as exc:
+                assert exc.code != 0, argv
+            else:
+                raise AssertionError("malformed invocation passed: %r" % (argv,))
+
+
+def _st_p24():
+    """G1 path collection catches every Git layer, renames and unusual filenames."""
+    git = shutil.which("git")
+    assert git, "git not found on PATH; required for the P24 fixture"
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "internal"))
+        os.makedirs(os.path.join(tmp, "docs", "agents"))
+        source = os.path.join(tmp, "internal", "runtime.go")
+        destination = os.path.join(tmp, "docs", "agents", "runtime.go")
+        _write_file(source, "package internal\n")
+        _write_file(os.path.join(tmp, "internal", "index-only.go"), "package internal\n")
+        _write_file(os.path.join(tmp, "internal", "head-only.go"), "package internal\n")
+
+        def _git(*args):
+            out = subprocess.run([git] + list(args), cwd=tmp, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, timeout=5, text=True)
+            assert out.returncode == 0, "git %s failed: %s" % (" ".join(args), out.stderr)
+            return out.stdout.strip()
+
+        author_flags = ("-c", "user.name=governance-self-test",
+                        "-c", "user.email=governance-self-test@example.invalid")
+        _git("init", "-q")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "p24: base")))
+        base = _git("rev-parse", "HEAD")
+
+        # Commit an application change to HEAD, then hide it from both index and worktree by
+        # restoring those layers from base. Only the explicit base-to-HEAD comparison sees it.
+        _write_file(os.path.join(tmp, "internal", "head-only.go"),
+                    "package internal\n\n// changed in HEAD\n")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "p24: head-only")))
+        _git("restore", "--source", base, "--staged", "--worktree", "--",
+             "internal/head-only.go")
+
+        os.replace(source, destination)
+        _git("add", "-A")
+
+        # Stage an application change, then restore only its worktree bytes from base. Only the
+        # explicit base-to-index comparison is guaranteed to see the staged candidate. This must
+        # happen after staging the rename so a later broad add cannot overwrite the index layer.
+        _write_file(os.path.join(tmp, "internal", "index-only.go"),
+                    "package internal\n\n// changed in index\n")
+        _git("add", "--", "internal/index-only.go")
+        _git("restore", "--source", base, "--worktree", "--", "internal/index-only.go")
+
+        unusual = "internal/odd\nname.go"
+        _write_file(os.path.join(tmp, unusual), "package internal\n")
+
+        paths = application_scope_changed_paths(base, tmp)
+        assert "internal/runtime.go" in paths, paths
+        assert "docs/agents/runtime.go" in paths, paths
+        assert "internal/head-only.go" in paths, paths
+        assert "internal/index-only.go" in paths, paths
+        assert unusual in paths, paths
+        assert len(paths) == len(set(paths)), paths
+        violations = application_path_violations(paths)
+        assert any("internal/runtime.go" in detail for detail in violations), violations
+        assert any("internal/odd\\nname.go" in detail for detail in violations), violations
+        assert not any("\n" in detail for detail in violations), violations
+
+
+def _st_p25():
+    """Production CLI routes generic runtime and dedicated G1 diffs end to end."""
+    git = shutil.which("git")
+    assert git, "git not found on PATH; required for the P25 fixture"
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+
+        tracked = subprocess.check_output(
+            [git, "-C", REPO_ROOT, "ls-files", "-z"], timeout=10)
+        for raw_path in tracked.split(b"\0"):
+            if not raw_path:
+                continue
+            path = os.fsdecode(raw_path)
+            source = os.path.join(REPO_ROOT, path)
+            target = os.path.join(repo, path)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.islink(source):
+                os.symlink(os.readlink(source), target)
+            else:
+                shutil.copy2(source, target)
+
+        def _git(*args):
+            out = subprocess.run([git] + list(args), cwd=repo, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, timeout=10, text=True)
+            assert out.returncode == 0, "git %s failed: %s" % (" ".join(args), out.stderr)
+            return out.stdout.strip()
+
+        author_flags = ("-c", "user.name=governance-self-test",
+                        "-c", "user.email=governance-self-test@example.invalid")
+        _git("init", "-q")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "p25: base")))
+        base = _git("rev-parse", "HEAD")
+
+        validator = os.path.join(repo, "scripts", "validate-agent-governance.py")
+        clean_env = os.environ.copy()
+        clean_env.pop("GOVERNANCE_BASE_SHA", None)
+        # The fixture's commits belong to its disposable repository, never to an outer Actions
+        # checkout. Hosted event identity would make the nested runtime verifier compare this
+        # temporary HEAD with the outer PR merge SHA, so remove the entire GitHub event namespace.
+        for name in tuple(clean_env):
+            if name.startswith("GITHUB_"):
+                clean_env.pop(name)
+        clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        def _validate(scope, base_sha=None):
+            env = clean_env.copy()
+            if base_sha is not None:
+                env["GOVERNANCE_BASE_SHA"] = base_sha
+            return subprocess.run(
+                [sys.executable, "-I", "-S", "-B", validator,
+                 "--application-scope", scope, "--self-test-hook"],
+                cwd=repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, text=True)
+
+        # A governance-only candidate is a valid dedicated G1 comparison.
+        _write_file(os.path.join(repo, "docs", "agents", "g1-scope-probe.md"),
+                    "# G1 scope fixture\n")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "p25: governance-only")))
+        dedicated_clean = _validate(APPLICATION_SCOPE_G1_STABLE_SKILLS, base)
+        assert dedicated_clean.returncode == 0, dedicated_clean.stdout + dedicated_clean.stderr
+        assert "44/44 checks passed" in dedicated_clean.stdout, dedicated_clean.stdout
+
+        # A committed base-to-head application change must pass generic validation and fail only
+        # the dedicated guard. Committing the probe catches collectors that inspect only the index.
+        _write_file(os.path.join(repo, "internal", "g1-scope-probe.go"),
+                    "package internal\n")
+        _git(*(author_flags + ("add", "-A")))
+        _git(*(author_flags + ("commit", "-q", "-m", "p25: application change")))
+
+        generic = _validate(APPLICATION_SCOPE_GENERIC)
+        assert generic.returncode == 0, generic.stdout + generic.stderr
+        assert "43/43 checks passed" in generic.stdout, generic.stdout
+
+        dedicated_mixed = _validate(APPLICATION_SCOPE_G1_STABLE_SKILLS, base)
+        assert dedicated_mixed.returncode == 1, dedicated_mixed.stdout + dedicated_mixed.stderr
+        fail_lines = [line for line in dedicated_mixed.stdout.splitlines()
+                      if line.startswith("[FAIL]")]
+        assert fail_lines == ["[FAIL] application-paths-untouched"], fail_lines
+        assert "43/44 checks passed" in dedicated_mixed.stdout, dedicated_mixed.stdout
 
 
 def _st_w1():
@@ -5693,7 +5970,9 @@ def _st_w4():
         ("product trigger", 'branches: ["release/**"]', 'branches: ["main"]'),
         ("floating checkout", PINNED_CHECKOUT_ACTION, "actions/checkout@v4"),
         ("shallow comparison checkout", "fetch-depth: 0", "fetch-depth: 1"),
-        ("missing comparison SHA", "GOVERNANCE_BASE_SHA:", "IGNORED_BASE_SHA:"),
+        ("generic scope downgraded", "--application-scope generic", "--application-scope g1-stable-skills"),
+        ("ambient G1 comparison SHA", "      BASH_ENV: /dev/null",
+         "      BASH_ENV: /dev/null\n      GOVERNANCE_BASE_SHA: " + "a" * 40),
         ("persisted credential", "persist-credentials: false", "persist-credentials: true"),
         ("missing validator self-test",
          "python3 -I -S -B scripts/validate-agent-governance.py --self-test\n", "true\n"),
@@ -5983,6 +6262,9 @@ def _self_test_fixtures():
         ("P18", "every registry provider is file-level; a retired schema is rejected", _st_p18),
         ("P19", "an automated update candidate cannot masquerade as audited", _st_p19),
         ("P20", "only exact G1.1 workflow paths bypass the application-path guard", _st_p20),
+        ("P23", "generic and G1 application-scope invocations are explicit and fail closed", _st_p23),
+        ("P24", "G1 path collection covers HEAD, index, worktree, renames and unusual paths", _st_p24),
+        ("P25", "production CLI separates generic runtime and dedicated G1 diffs", _st_p25),
         ("I1", "real section-7 inventory reconciles with manifests, disk, and itself", _st_i1),
         ("I2", "a missing installed skill and a section-7 name swap are caught", _st_i2),
         ("I3", "an unapproved 82nd directory, a stale total, and table drift are caught", _st_i3),
@@ -6018,20 +6300,64 @@ def run_self_test():
     return len(fixtures) - len(failures), len(fixtures), failures
 
 
-def main():
-    self_test = "--self-test" in sys.argv
-    self_test_hook = "--self-test-hook" in sys.argv
+def _argument_parser():
+    parser = argparse.ArgumentParser(
+        description="Validate repository governance with an explicit application concern scope.",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--application-scope",
+        choices=APPLICATION_SCOPES,
+        default=APPLICATION_SCOPE_GENERIC,
+        help="generic repository checks (default) or the dedicated G1 stable-skills scope guard",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--self-test", action="store_true",
+                      help="run only the offline validator fixture matrix")
+    mode.add_argument("--self-test-hook", action="store_true",
+                      help="run repository validation plus the hook self-test")
+    return parser
 
-    if self_test:
+
+def parse_cli_args(argv):
+    parser = _argument_parser()
+    scope_count = sum(
+        arg == "--application-scope" or arg.startswith("--application-scope=")
+        for arg in argv
+    )
+    if scope_count > 1:
+        parser.error("--application-scope may be specified exactly once")
+    args = parser.parse_args(argv)
+    if args.self_test and scope_count:
+        parser.error("--self-test cannot be combined with --application-scope")
+    return args
+
+
+def main(argv=None):
+    args = parse_cli_args(sys.argv[1:] if argv is None else argv)
+
+    # Keep the callable entry point deterministic when embedded or exercised more than once in
+    # one interpreter. Ordinary CLI execution also starts from the same explicit empty state.
+    RESULTS.clear()
+
+    if args.self_test:
         passed, total, failures = run_self_test()
         for fid, desc, err in failures:
             print("[FAIL] self-test %s (%s): %s" % (fid, desc, err))
         print("\n%d/%d self-test fixtures passed" % (passed, total))
         return 0 if not failures else 1
 
-    for check in ALL_CHECKS:
+    invocation_details = application_scope_invocation_details(args.application_scope)
+    if invocation_details:
+        for detail in invocation_details:
+            print("[FAIL] validation-invocation: %s" % detail)
+        print("\n0/0 checks passed")
+        print("Failed checks: validation-invocation")
+        return 2
+
+    for check in checks_for_application_scope(args.application_scope):
         check()
-    if self_test_hook:
+    if args.self_test_hook:
         check_hook_self_test()
     failed = [name for name, ok, _ in RESULTS if not ok]
     print("\n%d/%d checks passed" % (len(RESULTS) - len(failed), len(RESULTS)))

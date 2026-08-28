@@ -565,7 +565,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    fail-closed check.
 7. Update `compound-engineering-skills-patches.md` for any patch added, changed, or removed, and this policy
    for any count that moved.
-8. Run `python3 scripts/validate-agent-governance.py` and fix every reported failure.
+8. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed task base, and fix every reported failure.
 9. Open the change as its own dedicated Draft PR — never bundle a skills re-vendor into an unrelated change
    (see `mattpocock-skills-policy.md`'s "Dedicated Draft PR requirement"; the same rule applies here). Get
    human review before merge; this policy forbids the agent from merging it.
@@ -580,7 +580,7 @@ G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissi
    `peer-job-runner.py` change spans many directories at once).
 3. Restore `docs/agents/compound-engineering-skills-manifest.json` and
    `compound-engineering-skills-patches.md` from the same commit.
-4. Run `python3 scripts/validate-agent-governance.py` to confirm consistency.
+4. Run `GOVERNANCE_BASE_SHA=$BASE_SHA python3 scripts/validate-agent-governance.py --application-scope g1-stable-skills` with `BASE_SHA` set to the exact reviewed rollback-task base to confirm consistency.
 5. Open a dedicated PR for the rollback with the reason in the description.
 
 ## Known limitations

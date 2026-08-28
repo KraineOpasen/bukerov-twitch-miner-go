@@ -29,7 +29,6 @@ jobs:
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
       GIT_TERMINAL_PROMPT: "0"
-      GOVERNANCE_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Prove the pinned runner Python and Git envelope
@@ -363,7 +362,7 @@ jobs:
       - name: Validate stable governance and updater integration
         run: |
           set -euo pipefail
-          python3 -I -S -B scripts/validate-agent-governance.py --self-test-hook
+          python3 -I -S -B scripts/validate-agent-governance.py --application-scope generic --self-test-hook
           python3 -I -S -B scripts/skill_updates/runtime.py verify-repository --repo-root .
 
       - name: Run validator fixture self-tests
