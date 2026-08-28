@@ -159,6 +159,9 @@ func TestEqualActiveDropLatchYieldsToFairPairAfterReconciliation(t *testing.T) {
 	for idx, minutes := range map[int]float64{2: 10, 3: 20, 4: 30} {
 		streamers[idx].Settings.ClaimDrops = true
 		streamers[idx].Stream.SetCampaignIDs([]string{"equal-drop"})
+		streamers[idx].Stream.SetCampaigns([]*models.Campaign{
+			watchSlotTestCampaign("equal-drop", streamers[idx].ChannelID, false),
+		})
 		if err := store.RecordMinutes(streamers[idx].GetUsername(), minutes, time.Now()); err != nil {
 			t.Fatalf("seed initial fairness for %s: %v", streamers[idx].GetUsername(), err)
 		}
@@ -230,10 +233,9 @@ func TestStrictlyStrongerRestrictedDropPreemptsProtectedStreak(t *testing.T) {
 	streamers[2].Settings.WatchStreak = false
 	streamers[2].Settings.ClaimDrops = true
 	streamers[2].Stream.SetCampaignIDs([]string{"restricted"})
-	streamers[2].Stream.SetCampaigns([]*models.Campaign{{
-		ID:       "restricted",
-		Channels: []string{"streamerc"},
-	}})
+	streamers[2].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("restricted", streamers[2].ChannelID, true),
+	})
 
 	runSelectionTick(w, online)
 	state := w.GetDebugState()

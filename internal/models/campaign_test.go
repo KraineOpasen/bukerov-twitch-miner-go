@@ -215,6 +215,64 @@ func TestCampaignCurrentDropNilWhenNoDrops(t *testing.T) {
 	}
 }
 
+func TestCampaignHasRemainingUnclaimedWork(t *testing.T) {
+	tests := []struct {
+		name     string
+		campaign *Campaign
+		want     bool
+	}{
+		{name: "nil campaign", campaign: nil},
+		{name: "no drops", campaign: &Campaign{}},
+		{name: "nil drop", campaign: &Campaign{Drops: []*Drop{nil}}},
+		{
+			name: "unfinished reward",
+			campaign: &Campaign{Drops: []*Drop{{
+				MinutesRequired:       60,
+				CurrentMinutesWatched: 59,
+			}}},
+			want: true,
+		},
+		{
+			name: "threshold met",
+			campaign: &Campaign{Drops: []*Drop{{
+				MinutesRequired:       60,
+				CurrentMinutesWatched: 60,
+			}}},
+		},
+		{
+			name: "reward claimed",
+			campaign: &Campaign{Drops: []*Drop{{
+				MinutesRequired: 60,
+				IsClaimed:       true,
+			}}},
+		},
+		{
+			name: "campaign already claimed",
+			campaign: &Campaign{
+				ClaimStatus: CampaignClaimStatusAlreadyClaimed,
+				Drops:       []*Drop{{MinutesRequired: 60}},
+			},
+		},
+		{
+			name: "mixed claimed completed and unfinished",
+			campaign: &Campaign{Drops: []*Drop{
+				{MinutesRequired: 30, IsClaimed: true},
+				{MinutesRequired: 60, CurrentMinutesWatched: 60},
+				{MinutesRequired: 120, CurrentMinutesWatched: 90},
+			}},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.campaign.HasRemainingUnclaimedWork(); got != tc.want {
+				t.Fatalf("HasRemainingUnclaimedWork()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCampaignOverallProgressPercent(t *testing.T) {
 	c := &Campaign{
 		Drops: []*Drop{

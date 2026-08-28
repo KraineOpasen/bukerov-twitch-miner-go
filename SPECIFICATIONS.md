@@ -1119,11 +1119,25 @@ sync continues normally with the dashboard/details-built campaigns.
 
 ### Drops Eligibility
 
-A streamer is eligible for drops when:
-- `claimDrops` setting is enabled
-- Streamer is online
-- Stream has active campaign IDs
-- Campaign game matches stream game
+A configured streamer has Drop watch-slot authority only when:
+
+- `claimDrops` is enabled;
+- the streamer is confirmed online; and
+- `Stream.Campaigns` contains an authoritatively assigned campaign with at
+  least one non-nil, unclaimed reward whose watched minutes are still below
+  its required threshold.
+
+Confirmed online is required to grant a new slot. The broker's existing
+bounded online→UNKNOWN liveness-retention rule may preserve an already-held
+slot but never creates an assignment or new authority.
+
+`Stream.CampaignIDs` is channel-advertised availability evidence, not an
+assignment and never slot authority by itself. Game, ACL, window, account-link,
+and other reward eligibility checks are applied by the assignment producer
+before it publishes `Stream.Campaigns`. During a transient UNKNOWN availability
+result, the existing `CampaignAvailabilityGrace` may retain a previously proven
+unfinished assignment; a retained advertised ID without such an assignment
+cannot create `active_drop`, `restricted_drop`, or a Drop priority boost.
 
 ### Account-Linked Drop Eligibility
 
@@ -1277,10 +1291,11 @@ nil ledger (never wired) or a failed `Snapshot` load both fail **open** —
 `brokerView` returns the original campaign object unchanged, no clone, no
 filtering. The tracked pool itself (`Campaigns()`, the drop catalog, every
 published `*models.Campaign`) always stays the full, unfiltered set — only
-the clone handed to a streamer's `Stream.SetCampaigns` is ever filtered. This
-gates `Streamer.HasEligibleAssignedDropCampaign` (the real watch-slot gate);
-it does **not** gate `Streamer.DropsCondition`, which reads a separate
-channel-side `Stream.CampaignIDs` list.
+the clone handed to a streamer's `Stream.SetCampaigns` is ever filtered. Its
+surviving real unfinished work gates `Streamer.DropsCondition`,
+`Streamer.HasEligibleAssignedDropCampaign`, and channel-restricted Drop
+authority. The separate channel-side `Stream.CampaignIDs` list remains
+advertised/availability evidence only and cannot directly grant a watch slot.
 
 **Diagnostics**: every suppressed drop is logged individually at DEBUG
 (`"Drop suppressed by ghost-skip ledger"`, with the campaign/drop identity and
@@ -1326,20 +1341,20 @@ A campaign's `allowedChannels` (parsed from GraphQL `allow.channels`) is either
 empty (any channel streaming the game credits progress) or a specific list of
 channel IDs (only those channels credit progress).
 
-Per-channel eligibility is determined authoritatively by Twitch: each
-configured streamer's `CampaignIDs` comes from a per-channel query
-(`DropsHighlightServiceAvailableDrops`, scoped by `channelID`), so a channel
-that isn't in a campaign's allowed list won't have that campaign's ID
-returned for it in the first place. `updateStreamerCampaigns`
-(`internal/drops/drops.go`) additionally cross-checks `allowedChannels`
-against the streamer's own channel ID as a defensive second layer, logging a
-warning and withholding the campaign if it ever mismatches (see
-`Campaign.AllowsChannel`).
+Per-channel advertised availability comes from a Twitch query
+(`DropsHighlightServiceAvailableDrops`, scoped by `channelID`). A returned ID
+is not slot authority by itself: `updateStreamerCampaigns`
+(`internal/drops/drops.go`) exact-intersects the channel evidence with the
+account-known campaign pool and applies the shared Drops evaluator, including
+the authoritative `allowedChannels`/`Campaign.AllowsChannel` check. It
+publishes only surviving assignments to `Stream.Campaigns`.
 
 Because a channel-restricted campaign can only ever progress by watching that
 exact channel, the watcher's `DROPS` priority and rotation boost
 (`internal/watcher/watcher.go`) treat streamers holding one as higher
-priority than streamers whose active campaigns are all unrestricted — an
+priority only when the assigned restricted campaign still has real unclaimed
+work. Such streamers rank above those whose active campaigns are all
+unrestricted — an
 unrestricted campaign's progress could in principle also be earned by
 watching a different configured streamer with the same game, so it's safer
 to spend a limited watch slot on the channel-restricted one first. The
@@ -1386,12 +1401,14 @@ Flow, per configured game:
    proposal out-prioritizes a configured occupant — see *Watch Slot
    Architecture*. Candidate preparation runs on the broker's loop goroutine,
    so a discovered channel's `models.Streamer` is only ever touched by that
-   one goroutine plus locked `State()` reads. Channel eligibility requires an
-   intersection between the channel's available campaign IDs and the
-   tracker's active unclaimed campaigns (honoring channel-restricted
-   allow-lists) — the same check `updateStreamerCampaigns` performs for
-   tracked streamers — so a channel carrying only an already-claimed
-   recurring campaign is never farmed. At most 3 candidates are
+   one goroutine plus locked `State()` reads. Discovery requires a **Known**
+   channel-availability snapshot, an exact non-empty advertised-ID/account-known
+   campaign intersection, an exact game match, real remaining unclaimed work,
+   and an eligible result from the shared Drops evaluator (including ACL). Only
+   that survivor set is published to the ephemeral `Stream.Campaigns`.
+   UNKNOWN retained IDs, completed/claimed campaigns, malformed or missing game
+   identity, and IDs absent from the account pool produce no proposal or
+   restricted fact. At most 3 candidates are
    online-verified per tick to bound API bursts.
 4. **Auto-switching** — the slot abandons its channel and moves to the next
    candidate when the channel goes offline, switches game, no longer
@@ -1450,8 +1467,9 @@ pre-existing rank-based arbitration stands: a discovered channel farming an
 active drop (rank `active_drop`) can displace a configured streamer held only by
 points/fair-rotation priority (rank below `active_drop`). Either way, and
 regardless of the flag, a channel-restricted discovery drop keeps its normal
-rank because discovery carries the verified campaign-ID/ACL restricted fact in
-the same candidate snapshot the broker arbitrates.
+rank because discovery derives the restricted fact only from the verified,
+eligible unfinished assignment survivor set carried in the same candidate
+snapshot the broker arbitrates.
 
 The optional `discoveryPreferSubscribed` flag (config key, also a checkbox in the
 Directory Discovery settings panel; default `false`) adds a *tertiary* key to the
@@ -1751,8 +1769,10 @@ restricted/streak classes remain outermost; among otherwise comparable drop
 contenders, bounded semantic utility is applied before persisted watch-time
 deficit, and deficit remains the fairness authority for a full primary+secondary
 tie. Discovery
-verifies each candidate's advertised campaign IDs and channel ACL, orders by
-that channel's bounded exact utility (never the game's aggregate best), and
+verifies each candidate's Known advertised campaign IDs against the
+account-known pool, exact game, shared Drops evaluator, real remaining work,
+and channel ACL. It orders by that channel's bounded exact utility (never the
+game's aggregate best), and
 carries the exact eligible campaign IDs, their current real-remaining-work
 subset, and the restricted fact into the same broker tick; the broker intersects
 that fail-closed evidence with the tick's immutable policy snapshot before

@@ -232,6 +232,9 @@ func TestApplyPriorityBoostSwapsInDropsStreamer(t *testing.T) {
 	// streamer 2 has an active drop campaign but isn't in the base pair.
 	w.streamers[2].SetConfirmedOnline()
 	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-1"})
+	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-1", w.streamers[2].ChannelID, false),
+	})
 
 	pair := [2]int{0, 1}
 	w.rotation.lastWatched = map[int]time.Time{
@@ -256,9 +259,12 @@ func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 	w.streamers[3].SetConfirmedOnline()
 	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-unrestricted"})
 	w.streamers[3].Stream.SetCampaignIDs([]string{"campaign-restricted"})
-	w.streamers[3].Stream.Campaigns = []*models.Campaign{
-		{ID: "campaign-restricted", Channels: []string{w.streamers[3].ChannelID}},
-	}
+	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-unrestricted", w.streamers[2].ChannelID, false),
+	})
+	w.streamers[3].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-restricted", w.streamers[3].ChannelID, true),
+	})
 
 	pair := [2]int{0, 1}
 	w.rotation.lastWatched = map[int]time.Time{
@@ -276,12 +282,18 @@ func TestApplyPriorityBoostPrefersChannelRestrictedDrop(t *testing.T) {
 
 func TestNearStreakCompletionProtectsFromSwap(t *testing.T) {
 	w, online := newTestWatcher(3)
+	w.streamers[2].SetConfirmedOnline()
 	w.streamers[2].Stream.SetCampaignIDs([]string{"campaign-1"})
+	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-1", w.streamers[2].ChannelID, false),
+	})
 
 	pair := [2]int{0, 1}
 
 	// Both current pair members are seconds away from completing their
 	// watch streak; neither should be sacrificed for the boost.
+	w.streamers[0].Stream.Update("broadcast-a", "", nil, nil, 0)
+	w.streamers[1].Stream.Update("broadcast-b", "", nil, nil, 0)
 	w.streamers[0].Stream.MinuteWatched = 6.5
 	w.streamers[1].Stream.MinuteWatched = 6.8
 

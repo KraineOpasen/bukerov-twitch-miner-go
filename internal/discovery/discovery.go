@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
@@ -888,18 +889,21 @@ func (m *Manager) channelCarriesActiveCampaign(ch *Channel) bool {
 	return len(eligible) > 0
 }
 
-// eligibleCampaignsForChannel mirrors the tracker intersection for an
-// ephemeral discovery streamer: still unclaimed, not blacklisted (those never
-// reach Campaigns()), exact advertised campaign ID, same game, and an allowed
-// channel ACL. AllowsChannel is the crediting gate for every ACL state: it
-// accepts unrestricted campaigns, checks restricted membership, and fails
-// closed when the allowlist is unknown.
+// eligibleCampaignsForChannel derives the authoritative assignment for an
+// ephemeral discovery streamer. A new discovery proposal requires a Known
+// channel-side availability snapshot, an exact advertised/account-known
+// campaign intersection, real remaining work, and the shared Drops evaluator.
+// Retained IDs under Unknown are continuity/diagnostic data only and can never
+// create a discovery assignment.
 func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 	if m.campaigns == nil {
 		return nil
 	}
 
-	ids := ch.Streamer.Stream.GetCampaignIDs()
+	availability, ids := ch.Streamer.Stream.CampaignAvailability()
+	if availability != models.CampaignAvailabilityKnown {
+		return nil
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -909,18 +913,26 @@ func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 	}
 
 	_, gameID, _, _ := m.channelFacts(ch)
+	if gameID == "" {
+		return nil
+	}
 	var eligible []*models.Campaign
 	for _, c := range m.campaigns.Campaigns() {
-		if c.Game == nil || c.Game.ID != gameID {
+		if c == nil || c.ID == "" || !idSet[c.ID] {
 			continue
 		}
-		if len(c.Drops) == 0 || c.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
+		if c.Game == nil || c.Game.ID == "" || c.Game.ID != gameID {
 			continue
 		}
-		if !idSet[c.ID] {
+		if !c.HasRemainingUnclaimedWork() {
 			continue
 		}
-		if !c.AllowsChannel(ch.Streamer.ChannelID) {
+		drop := c.CurrentDrop()
+		if drop == nil {
+			continue
+		}
+		decision := (eligibility.Evaluator{}).EvaluateDrops(ch.Streamer, c, drop, eligibility.AvailabilityYes)
+		if !decision.Eligible {
 			continue
 		}
 		eligible = append(eligible, c)

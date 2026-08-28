@@ -20,9 +20,9 @@ func discoveryStreamer(login string, restricted bool) *models.Streamer {
 	s.SetConfirmedOnline()
 	s.OnlineAt = time.Now().Add(-time.Minute)
 	s.Stream.SetCampaignIDs([]string{"camp-" + login})
-	if restricted {
-		s.Stream.Campaigns = []*models.Campaign{{ID: "camp-" + login, Channels: []string{s.ChannelID}}}
-	}
+	s.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("camp-"+login, s.ChannelID, restricted),
+	})
 	return s
 }
 

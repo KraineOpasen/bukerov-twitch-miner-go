@@ -569,53 +569,62 @@ func (s *Streamer) StreamUpElapsed() bool {
 	return s.StreamUpTime.IsZero() || time.Since(s.StreamUpTime) > 2*time.Minute
 }
 
-// DropsCondition reports drop-farming eligibility for confirmed-online streamers
-// only. Unknown yields false (fail closed), but note SetUnknown never clears the
-// campaign IDs, and the watcher retains an already-farming slot during a transient
-// unknown — so a brief blip does not lose drop progress.
+// DropsCondition reports authoritative drop-slot eligibility for a
+// confirmed-online streamer. A channel-advertised CampaignID is not authority:
+// at least one authoritatively assigned campaign must still contain real
+// unclaimed work.
+// Unknown liveness yields false; campaign-availability continuity is represented
+// only by the bounded configured assignment retained in Stream.Campaigns.
 func (s *Streamer) DropsCondition() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.Settings.ClaimDrops &&
-		s.Status == StatusOnline &&
-		len(s.Stream.GetCampaignIDs()) > 0
+	active, _ := assignedDropAuthority(s.Stream.GetCampaigns())
+	return s.Settings.ClaimDrops && s.Status == StatusOnline && active
 }
 
 // HasEligibleAssignedDropCampaign reports whether this streamer currently has at
-// least one drop campaign ASSIGNED by the drops tracker with a still-watchable
-// current drop. The tracker only assigns campaigns that passed the full
-// production eligibility evaluation (active entitlement, not claimed, feasible
-// deadline, coherent ACL, exact channel eligibility, confirmed channel-side
-// availability), so this is the authoritative "has an eligible Drops reason to
-// occupy a watch slot" signal — distinct from DropsCondition, which only proves
-// online + ClaimDrops + a non-empty advertised campaign-ID list.
+// least one campaign authoritatively assigned by the configured tracker or
+// discovery producer with real unfinished work. Assignment producers apply the
+// full production eligibility evaluation (active entitlement, not claimed,
+// feasible deadline, coherent ACL, exact channel eligibility, confirmed
+// channel-side availability or its existing bounded continuity retention), so
+// this is the authoritative "has an eligible Drops reason to occupy a watch
+// slot" signal. DropsCondition applies the online and ClaimDrops gates to this
+// same assigned unfinished-work authority.
 func (s *Streamer) HasEligibleAssignedDropCampaign() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, c := range s.Stream.GetCampaigns() {
-		if c.CurrentDrop() != nil {
-			return true
-		}
-	}
-	return false
+	active, _ := assignedDropAuthority(s.Stream.GetCampaigns())
+	return active
 }
 
-// HasChannelRestrictedCampaign reports whether this streamer currently has
-// an assigned drop campaign that only credits progress on this specific
-// channel (as opposed to any channel streaming the campaign's game). Such a
-// campaign cannot be farmed by watching a different streamer, so channel
-// selection should prioritize keeping this one watched.
+// HasChannelRestrictedCampaign reports whether Drops are enabled and this
+// streamer currently has an assigned unfinished campaign that only credits
+// progress on this specific channel (as opposed to any channel streaming the
+// campaign's game). Such a campaign cannot be farmed by watching a different
+// streamer, so channel selection should prioritize keeping this one watched.
 func (s *Streamer) HasChannelRestrictedCampaign() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	_, restricted := assignedDropAuthority(s.Stream.GetCampaigns())
+	return s.Settings.ClaimDrops && restricted
+}
 
-	for _, c := range s.Stream.GetCampaigns() {
-		if c.IsChannelRestricted() {
-			return true
+// assignedDropAuthority derives both active and channel-restricted authority
+// from one campaign snapshot and one unfinished-work predicate. It owns no
+// state and performs no I/O.
+func assignedDropAuthority(campaigns []*Campaign) (active, restricted bool) {
+	for _, campaign := range campaigns {
+		if !campaign.HasRemainingUnclaimedWork() {
+			continue
+		}
+		active = true
+		if campaign.IsChannelRestricted() {
+			restricted = true
 		}
 	}
-	return false
+	return active, restricted
 }
 
 // CampaignSummary is a read-only view of an assigned drop campaign, exposed

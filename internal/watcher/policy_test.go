@@ -20,6 +20,9 @@ func dropsEligible(w *MinuteWatcher, idx int) {
 	s.SetConfirmedOnline()
 	s.OnlineAt = time.Now().Add(-time.Minute)
 	s.Stream.SetCampaignIDs([]string{"camp-" + s.Username})
+	s.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("camp-"+s.Username, s.ChannelID, false),
+	})
 }
 
 // TestLegacyCampaignScoreCompatibilityIsAllocationInactive keeps the restored
@@ -112,7 +115,7 @@ func TestDropsRestrictedStillFirstUnderClasses(t *testing.T) {
 	}
 	// Streamer 2 holds a channel-restricted campaign (Channels non-empty).
 	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{
-		{ID: "camp-" + w.streamers[2].Username, Channels: []string{w.streamers[2].ChannelID}},
+		watchSlotTestCampaign("camp-"+w.streamers[2].Username, w.streamers[2].ChannelID, true),
 	})
 	w.SetCampaignSemanticClasses(map[string]policy.SemanticClass{
 		w.streamers[0].Username: 0,

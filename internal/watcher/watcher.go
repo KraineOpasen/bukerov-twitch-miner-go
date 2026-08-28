@@ -1734,7 +1734,7 @@ func CampaignSemanticEvidence(campaigns []*models.Campaign) (campaignIDs, remain
 			continue
 		}
 		campaignIDs = append(campaignIDs, campaign.ID)
-		remaining := campaignHasRemainingUnclaimedWork(campaign)
+		remaining := campaign.HasRemainingUnclaimedWork()
 		if seen[campaign.ID] {
 			remainingByID[campaign.ID] = remainingByID[campaign.ID] && remaining
 		} else {
@@ -1751,18 +1751,6 @@ func CampaignSemanticEvidence(campaigns []*models.Campaign) (campaignIDs, remain
 		}
 	}
 	return campaignIDs, remainingWorkCampaignIDs
-}
-
-func campaignHasRemainingUnclaimedWork(campaign *models.Campaign) bool {
-	if campaign.ClaimStatus == models.CampaignClaimStatusAlreadyClaimed {
-		return false
-	}
-	for _, drop := range campaign.Drops {
-		if drop != nil && !drop.IsClaimed && drop.CurrentMinutesWatched < drop.MinutesRequired {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *MinuteWatcher) campaignSemanticSnapshotForTick() *campaignSemanticSnapshot {
