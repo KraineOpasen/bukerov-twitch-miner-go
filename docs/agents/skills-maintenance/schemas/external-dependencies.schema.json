@@ -1,0 +1,1994 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bukerov:skills-maintenance:external-dependencies:1",
+  "title": "G1.1 closed external runtime ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "ledger_id",
+    "policy",
+    "dependencies",
+    "runtime",
+    "transport"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "./schemas/external-dependencies.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "ledger_id": {
+      "const": "g1.1-external-runtime-envelope"
+    },
+    "policy": {
+      "const": "CLOSED_FAIL_CLOSED"
+    },
+    "dependencies": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/checkout"
+        },
+        {
+          "$ref": "#/$defs/managedService"
+        },
+        {
+          "$ref": "#/$defs/managedService"
+        }
+      ],
+      "items": false
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "transport": {
+      "$ref": "#/$defs/transport"
+    }
+  },
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "checkout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "owning_concern",
+        "consumers",
+        "source",
+        "commit",
+        "tree",
+        "license",
+        "action",
+        "dist",
+        "package_lock",
+        "tree_manifest",
+        "inputs",
+        "permissions",
+        "network",
+        "transitive_closure",
+        "drift_detector",
+        "applicability",
+        "data_retention",
+        "rollback_owner",
+        "provenance"
+      ],
+      "properties": {
+        "kind": {
+          "const": "github-action"
+        },
+        "id": {
+          "const": "actions/checkout"
+        },
+        "owning_concern": {
+          "const": "G1.1_STABLE_NATIVE_RUNTIME"
+        },
+        "consumers": {
+          "const": [
+            {
+              "workflow": ".github/workflows/stable-skills-maintenance.yml",
+              "job": "detect"
+            },
+            {
+              "workflow": ".github/workflows/stable-skills-maintenance.yml",
+              "job": "prepare"
+            },
+            {
+              "workflow": ".github/workflows/ci.yml",
+              "job": "governance"
+            }
+          ]
+        },
+        "source": {
+          "const": {
+            "provider": "GitHub",
+            "repository_id": 197814629,
+            "repository_full_name": "actions/checkout",
+            "canonical_https_url": "https://github.com/actions/checkout"
+          }
+        },
+        "commit": {
+          "const": "11d5960a326750d5838078e36cf38b85af677262"
+        },
+        "tree": {
+          "const": "f8a7b72dc00648d050099727d25ca92a43ad1162"
+        },
+        "license": {
+          "const": {
+            "spdx": "MIT",
+            "path": "LICENSE",
+            "blob_sha1": "a67dca8b4f65d6bd351f6b1e333ce2cd84d843a5",
+            "sha256": "3e855ffa704114a51628ef8f0bf3aeb41728adf9d9070e263bf58aa5640b0eb5",
+            "notice_path": "docs/agents/skills-maintenance/THIRD_PARTY_NOTICES.md"
+          }
+        },
+        "action": {
+          "const": {
+            "path": "action.yml",
+            "blob_sha1": "24e73e5a12126edc2adb9e5cd1bf245ce85bde56",
+            "sha256": "6188f6991491ed38977347cdaad0b0cd921a6d6232892363c91f433c22954f4f",
+            "using": "node20",
+            "main": "dist/index.js",
+            "post": "dist/index.js"
+          }
+        },
+        "dist": {
+          "const": {
+            "path": "dist/index.js",
+            "blob_sha1": "17a1749fafa5ad50ee5376ad39fe19386c37f5a3",
+            "sha256": "ff743df9891fd49ffdf6e6bb11ad574bce26a13862ede59474201ef4c9ae029e"
+          }
+        },
+        "package_lock": {
+          "const": {
+            "path": "package-lock.json",
+            "blob_sha1": "aef29d3bce5069236ea8ed92827834d6381f2685",
+            "sha256": "678275cbeb52fecbacc620aed081473053f86b787f1b469e157016376a26cc70"
+          }
+        },
+        "tree_manifest": {
+          "const": {
+            "kind": "full-recursive-git-tree",
+            "algorithm": "sha256-jcs",
+            "formula": "sha256(JCS(manifest))",
+            "source": {
+              "root": "f8a7b72dc00648d050099727d25ca92a43ad1162",
+              "recursive": true,
+              "truncated": false,
+              "entry_count": 117
+            },
+            "manifest": {
+              "schema": "github-action-tree-manifest/v1",
+              "repository": "actions/checkout",
+              "commit": "11d5960a326750d5838078e36cf38b85af677262",
+              "tree": "f8a7b72dc00648d050099727d25ca92a43ad1162",
+              "members": [
+                {
+                  "path": ".eslintignore",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "6de9a76115d1983525536c96b7ba905e6b1d7467"
+                },
+                {
+                  "path": ".eslintrc.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "14c084ef11f8cdd8d8b63b7aa21e8f336628aa26"
+                },
+                {
+                  "path": ".gitattributes",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "541fd55ed6ef70904b3b1f6cd24d0c5c13c53c3e"
+                },
+                {
+                  "path": ".github",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "3887b3c308be56ca43cdf4fc342430e2feeef958"
+                },
+                {
+                  "path": ".github/dependabot.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "4f6427b937726142b0a723649314c5f496e4926e"
+                },
+                {
+                  "path": ".github/workflows",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "14d0bc05528cee48fff4148bbec20c4e63cfc4ff"
+                },
+                {
+                  "path": ".github/workflows/check-dist.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "53902eeb903886205402d7e8935f5905d1c370aa"
+                },
+                {
+                  "path": ".github/workflows/codeql-analysis.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "778d474d8d9d8945f0612d3cf3885c2d02c9030a"
+                },
+                {
+                  "path": ".github/workflows/licensed.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "1f71aa7494b631ce1f97419c962731f0632b3eff"
+                },
+                {
+                  "path": ".github/workflows/publish-immutable-actions.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "87c0207285703173ffd1c9c6ec07f6fd61bb2f60"
+                },
+                {
+                  "path": ".github/workflows/test.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "cde9f060eb9cc0ff0d0f319219b5fd5814a35e34"
+                },
+                {
+                  "path": ".github/workflows/update-main-version.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "7bec7d5a894c903cff08199b0832ee9dc5da2e76"
+                },
+                {
+                  "path": ".github/workflows/update-test-ubuntu-git.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "5c252b98de3e868314a2887a5fe805cc8173857b"
+                },
+                {
+                  "path": ".gitignore",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "cd1f03c78a0b30f7a654a3014c47884b48ffce06"
+                },
+                {
+                  "path": ".licensed.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "15f619829c198f08b52da7549f6602495f4eef27"
+                },
+                {
+                  "path": ".licenses",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "129fc5e6f3b3d1041990c51c42b7c9f617d907ac"
+                },
+                {
+                  "path": ".licenses/npm",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "f565bc729df73f6d196989d535a9d62fbe0f5027"
+                },
+                {
+                  "path": ".licenses/npm/@actions",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "62fc660b4f9e9c20b8197b5ef3583cc021da9980"
+                },
+                {
+                  "path": ".licenses/npm/@actions/core.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "06638c01d908037d75e2cc98a3047d7a97d0008d"
+                },
+                {
+                  "path": ".licenses/npm/@actions/exec.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "cbc5abd39e6391ec6e526e6536f1a3efd706ec05"
+                },
+                {
+                  "path": ".licenses/npm/@actions/github.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "423601cac95ec71f36cafb9263d0b2889c835a0f"
+                },
+                {
+                  "path": ".licenses/npm/@actions/http-client.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "cdccff4e12d03fd72ab43975a6fb77dd0764565e"
+                },
+                {
+                  "path": ".licenses/npm/@actions/io.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "d28465403a243506f508f965c1c0641dfd5e0673"
+                },
+                {
+                  "path": ".licenses/npm/@actions/tool-cache.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "fbf911fef93e283a9bea20fd65d59fe51dad7d22"
+                },
+                {
+                  "path": ".licenses/npm/@fastify",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "6913476ec6c6151c7bc7839491acc810f643e4fd"
+                },
+                {
+                  "path": ".licenses/npm/@fastify/busboy.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "4344f3a43f34f7c98d5a7162dc2b060ec558e72f"
+                },
+                {
+                  "path": ".licenses/npm/@octokit",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "0e7bc3683b3cb76303c27e4969500ed67899067f"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/auth-token.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "2ffbd9eaf76d929968946ff59b8dac3c14608a7e"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/core.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "55830bf1117ea08221245945e0b59b35240b5cfe"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/endpoint.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "71234c6712bee8579721fd04135149f4cf4e6bca"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/graphql.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "898286909537997d5d50ba0db0d3e8a30f43373e"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/openapi-types-20.0.0.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "b94d58918928b46c4dfbd304cd2864bfe4adc6ca"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/openapi-types-22.1.0.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "f9be342546e0883651bc8db650fdc8aed1356d8c"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/plugin-paginate-rest.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "c1853a6f2abcfb7a58928fcb1e4d4ff44cd7018a"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/plugin-rest-endpoint-methods.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "3f4728f4e145ff400ada982d0b066d6f961f328d"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/request-error.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "9c9d70242a68452f0f7a0be6d088e992c83a615e"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/request.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "ef1a5542bfc69f9b38febda71fa1078f43b36411"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/types-12.6.0.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "ffc81c9fd1068d9bca7140b0140814726124af7e"
+                },
+                {
+                  "path": ".licenses/npm/@octokit/types-13.4.1.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "5d9ee98c132209491d434d6142bb600947548d36"
+                },
+                {
+                  "path": ".licenses/npm/before-after-hook.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "c147501643837a50c60bf2f898ec2adef5b84b80"
+                },
+                {
+                  "path": ".licenses/npm/deprecation.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "12fd7cec70b8bd94724ff65b854269269db02504"
+                },
+                {
+                  "path": ".licenses/npm/once.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "7cf525acbb095d6d79c345aea72c63747a2d23e1"
+                },
+                {
+                  "path": ".licenses/npm/semver.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "248cb030140ec2e555e4f01285814778b13cb00e"
+                },
+                {
+                  "path": ".licenses/npm/tunnel.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "9a7111da96a36c81dd1160453ab32caa08c8707f"
+                },
+                {
+                  "path": ".licenses/npm/undici.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "fadecf4a743b7ff972adff6fb838d0547a1c7578"
+                },
+                {
+                  "path": ".licenses/npm/universal-user-agent.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "708e8965f36e8890ba155a6b1d72275c6534e67f"
+                },
+                {
+                  "path": ".licenses/npm/uuid-3.4.0.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "461f159ddef8d5b617cc91c6b65d9517e00601a8"
+                },
+                {
+                  "path": ".licenses/npm/uuid-8.3.2.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "bf84da082324fb7972ccc5d1e813ecbc29df1c0b"
+                },
+                {
+                  "path": ".licenses/npm/uuid-9.0.1.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "c9efb0980bae25f214bd2143a1a6c84ba4d30c7d"
+                },
+                {
+                  "path": ".licenses/npm/wrappy.dep.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "2a532ec343ca5b72b9833d2a9fb53e8de07b61f1"
+                },
+                {
+                  "path": ".prettierignore",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "2186947299cfa1b6f7cff87b03944518cfea920b"
+                },
+                {
+                  "path": ".prettierrc.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "386485a7669de54ba6ac7c0de972aaf5f47c1d84"
+                },
+                {
+                  "path": "CHANGELOG.md",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "baf5c2d7e95444ed8092794db58b9165a23f958f"
+                },
+                {
+                  "path": "CODEOWNERS",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "992d27f094ebee464fcf37f435775899f14f61d8"
+                },
+                {
+                  "path": "CONTRIBUTING.md",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "5c764651984ffde959cd3afde3a1afa706b6766b"
+                },
+                {
+                  "path": "LICENSE",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "a67dca8b4f65d6bd351f6b1e333ce2cd84d843a5"
+                },
+                {
+                  "path": "README.md",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "28c91208b39f4eefced50d79b57f5794bf47e8c7"
+                },
+                {
+                  "path": "__test__",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "d4104db914318c92523ef756794329a4d46625f1"
+                },
+                {
+                  "path": "__test__/git-auth-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "92a61fecc423310f325793ec914abf711dc8f88c"
+                },
+                {
+                  "path": "__test__/git-command-manager.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "cea73d4dd3ae8487038c9bf53e7d08a978ecf5ea"
+                },
+                {
+                  "path": "__test__/git-directory-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "1627b842e29943f77b45271eb363dbc4ea7d16b4"
+                },
+                {
+                  "path": "__test__/git-version.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "27f702e169ef3b313c6521580b2f220c81f56285"
+                },
+                {
+                  "path": "__test__/input-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "fc26c5150ff29c83e4e8e0f3c9ee1fd9c80603a8"
+                },
+                {
+                  "path": "__test__/modify-work-tree.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "89447eb5b09aeb25b040e9fea914d3628b751e09"
+                },
+                {
+                  "path": "__test__/override-git-version.cmd",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "64c7f4dc0fd30185de0b867ad08b0d0840825834"
+                },
+                {
+                  "path": "__test__/override-git-version.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "7c3ca011a9970c6fc9c954d6f1a37d6836b29e3e"
+                },
+                {
+                  "path": "__test__/ref-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "5c8d76b87e5fb954ee110828b471ba9885e68791"
+                },
+                {
+                  "path": "__test__/retry-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "a5d3f790911f87091b3447950aa5b8f1c748ed18"
+                },
+                {
+                  "path": "__test__/unsafe-pr-checkout-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "9efa246e8a9c421672f00409d9c254aae4f0d093"
+                },
+                {
+                  "path": "__test__/url-helper.test.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "57cb28f6d2777cc4e08c46fd37aae7e6f0da728d"
+                },
+                {
+                  "path": "__test__/verify-basic.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "d084617f022b481e0494af94a236ae34337e0e19"
+                },
+                {
+                  "path": "__test__/verify-clean.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "86bf9d6ba4fc2859a585d9c1b22df0e8416698db"
+                },
+                {
+                  "path": "__test__/verify-fetch-filter.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "4fc9d9e38103de5dc5db27a001a1193f36a2e95e"
+                },
+                {
+                  "path": "__test__/verify-lfs.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "b0463f1b963142548bb1cccf04127442bccf134d"
+                },
+                {
+                  "path": "__test__/verify-no-unstaged-changes.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "9b30471320c5fc2cc22aa14477b1d92239066d6b"
+                },
+                {
+                  "path": "__test__/verify-side-by-side.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "35de29abcafd44514ab027ad70ec69c65bf638d3"
+                },
+                {
+                  "path": "__test__/verify-sparse-checkout-non-cone-mode.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "dae28ed7053ec443e1676704fb2273599acf7825"
+                },
+                {
+                  "path": "__test__/verify-sparse-checkout.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "a9f7748b080d6766d3fe180b64757e4de7cb01c3"
+                },
+                {
+                  "path": "__test__/verify-submodules-false.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "733e24712013c34475f3aad4430dfc999f4feb65"
+                },
+                {
+                  "path": "__test__/verify-submodules-recursive.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "1b68f9b975fb457b1cfaecc43c211e0e2774721b"
+                },
+                {
+                  "path": "__test__/verify-submodules-true.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "43769fe060286425613215c4c25fdc57c2cf2b45"
+                },
+                {
+                  "path": "action.yml",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "24e73e5a12126edc2adb9e5cd1bf245ce85bde56"
+                },
+                {
+                  "path": "adrs",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "de88f10e82e3cb587767bad6c23bdce26c5b332d"
+                },
+                {
+                  "path": "adrs/0153-checkout-v2.md",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "c3312909e4cb1049f1f6259dcbe13dfb8d2a78b3"
+                },
+                {
+                  "path": "dist",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "af01a1bcb5c9a1451443f2b26051f3e163cadc76"
+                },
+                {
+                  "path": "dist/index.js",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "17a1749fafa5ad50ee5376ad39fe19386c37f5a3"
+                },
+                {
+                  "path": "dist/problem-matcher.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "071f2cb4441a02d54d7e07af9145a8f4fb79ceca"
+                },
+                {
+                  "path": "images",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "c3c052d63733f5b6aa0081caf91ee41cf6d2e3be"
+                },
+                {
+                  "path": "images/test-ubuntu-git.Dockerfile",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "8b464c3d75c819f61428adc8483d28338464f3ba"
+                },
+                {
+                  "path": "images/test-ubuntu-git.md",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "adf4bf6d421b67a8d70278291dbbce683ac1c99a"
+                },
+                {
+                  "path": "jest.config.js",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "f09fe5c009cdd4ff3b62773d85c37aed84a2baef"
+                },
+                {
+                  "path": "package-lock.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "aef29d3bce5069236ea8ed92827834d6381f2685"
+                },
+                {
+                  "path": "package.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "dbbaabbae229c1c7404f819eefeec49a8b27d9f0"
+                },
+                {
+                  "path": "src",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "4ab2b279f2a58767b7740dd8e99daf7ef06bb72f"
+                },
+                {
+                  "path": "src/fs-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "00ad941ea9f93a9a4bb7b00a6f21244efcb59e43"
+                },
+                {
+                  "path": "src/git-auth-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "0c82dddabf9704020ac33271cdb4eb36c54d7cbf"
+                },
+                {
+                  "path": "src/git-command-manager.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "9c789ac803e4d3b99463037d0ada654b79d8b863"
+                },
+                {
+                  "path": "src/git-directory-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "9a0085f21bba0a6116b8cfd8e6fed413223977d0"
+                },
+                {
+                  "path": "src/git-source-provider.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "2d3513897655e0ea2eb4efc2b2c9d6132a69549f"
+                },
+                {
+                  "path": "src/git-source-settings.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "79041c43476ab09af7235e83bec0507ac9ea0abc"
+                },
+                {
+                  "path": "src/git-version.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "44bee1ae5944aa099703b8eb01f2dbcbed0dd08f"
+                },
+                {
+                  "path": "src/github-api-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "1ff27c2c7c5c5e7784f1cac2a6d8b7ca6e664c46"
+                },
+                {
+                  "path": "src/input-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "2ded955533070ad5a1cd5fd4b3f29e0b15e13833"
+                },
+                {
+                  "path": "src/main.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "0684c6f5e202d1aa4952fc83b791bbc903a9dbd3"
+                },
+                {
+                  "path": "src/misc",
+                  "mode": "040000",
+                  "type": "tree",
+                  "sha": "5a399f31ad441263deac8145a53359b2e3690ba1"
+                },
+                {
+                  "path": "src/misc/generate-docs.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "4b3c8ff529afee28d69e5c8fddf6b048c3f97cea"
+                },
+                {
+                  "path": "src/misc/licensed-check.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "81987b6ca6901bdf8f794dcc1f6ee055e621d568"
+                },
+                {
+                  "path": "src/misc/licensed-download.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "973e8e217658fd8bc24856a5c64403ffd14c4f51"
+                },
+                {
+                  "path": "src/misc/licensed-generate.sh",
+                  "mode": "100755",
+                  "type": "blob",
+                  "sha": "d2e18774de43b5a6a7b8a8c9eab719b448ac21d6"
+                },
+                {
+                  "path": "src/ref-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "925be86614ded8ed4057bbbed4b3d15170f6e445"
+                },
+                {
+                  "path": "src/regexp-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "ec76c3ad3e78a5e3fd417da2c1aa9b837442da60"
+                },
+                {
+                  "path": "src/retry-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "323e75da6dbd09244db21786aebaed8065cb6d24"
+                },
+                {
+                  "path": "src/state-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "aa3eecc75f4f4078f60278ea3350eace0a4fb4c9"
+                },
+                {
+                  "path": "src/unsafe-pr-checkout-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "f6bf389cfb95375b8518606d36570fb6100e8517"
+                },
+                {
+                  "path": "src/url-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "17a0842a42876edc46514a3c59b7cb8442863cc1"
+                },
+                {
+                  "path": "src/workflow-context-helper.ts",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "5b342e6d34cb03f93b6a14ff854ecd45afc20a8e"
+                },
+                {
+                  "path": "tsconfig.json",
+                  "mode": "100644",
+                  "type": "blob",
+                  "sha": "b0ff5f7fb9bfd78b4c371d92ebac5a29fcf836bc"
+                }
+              ]
+            },
+            "digest": "4815ff3a74ae4f01971ccb58454ce373292dbac3e21394d23b48151df2feade7",
+            "candidate_pin_key": "actions/checkout/action.yml@11d5960a326750d5838078e36cf38b85af677262"
+          }
+        },
+        "inputs": {
+          "const": {
+            ".github/workflows/stable-skills-maintenance.yml#detect": {
+              "clean": true,
+              "fetch-depth": 1,
+              "fetch-tags": false,
+              "lfs": false,
+              "persist-credentials": false,
+              "ref": "${{ github.sha }}",
+              "set-safe-directory": false,
+              "show-progress": false,
+              "submodules": false
+            },
+            ".github/workflows/stable-skills-maintenance.yml#prepare": {
+              "clean": true,
+              "fetch-depth": 1,
+              "fetch-tags": false,
+              "lfs": false,
+              "persist-credentials": false,
+              "ref": "${{ github.sha }}",
+              "set-safe-directory": false,
+              "show-progress": false,
+              "submodules": false
+            },
+            ".github/workflows/ci.yml#governance": {
+              "clean": true,
+              "fetch-depth": 0,
+              "fetch-tags": false,
+              "lfs": false,
+              "persist-credentials": false,
+              "ref": "${{ github.sha }}",
+              "set-safe-directory": false,
+              "show-progress": false,
+              "submodules": false
+            }
+          }
+        },
+        "permissions": {
+          "const": [
+            "contents:read"
+          ]
+        },
+        "network": {
+          "const": [
+            "https://github.com"
+          ]
+        },
+        "transitive_closure": {
+          "const": {
+            "binding": "full-recursive-git-tree-manifest",
+            "tree_sha1": "f8a7b72dc00648d050099727d25ca92a43ad1162",
+            "manifest_sha256": "4815ff3a74ae4f01971ccb58454ce373292dbac3e21394d23b48151df2feade7",
+            "member_count": 117,
+            "blob_count": 104,
+            "tree_count": 13,
+            "truncated": false,
+            "package_lock_blob_sha1": "aef29d3bce5069236ea8ed92827834d6381f2685",
+            "package_lock_sha256": "678275cbeb52fecbacc620aed081473053f86b787f1b469e157016376a26cc70",
+            "bundled_license_metadata": {
+              "prefix": ".licenses/npm/",
+              "entry_count": 33,
+              "blob_count": 30,
+              "tree_count": 3
+            },
+            "package_install": false,
+            "upstream_script_execution": false
+          }
+        },
+        "drift_detector": {
+          "const": {
+            "method": "exact-full-tree-manifest-license-action-dist-lock-input-consumer-real-worktree-head",
+            "on_mismatch": "BLOCKED"
+          }
+        },
+        "applicability": {
+          "const": {
+            "runner": "ubuntu-24.04",
+            "stable_jobs_trusted_event_head": true,
+            "ci_untrusted_pr_read_only": true,
+            "secret_bearing": false
+          }
+        },
+        "data_retention": {
+          "const": "GITHUB_HOSTED_RUNNER_EPHEMERAL"
+        },
+        "rollback_owner": {
+          "const": "repository-owner"
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "observed_at",
+            "commit_url",
+            "tree_url",
+            "license_url",
+            "action_url",
+            "commit_signature_verified",
+            "tree_recursive_url"
+          ],
+          "properties": {
+            "observed_at": {
+              "const": "2026-08-27T12:15:58Z"
+            },
+            "commit_url": {
+              "const": "https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262"
+            },
+            "tree_url": {
+              "const": "https://api.github.com/repos/actions/checkout/git/trees/f8a7b72dc00648d050099727d25ca92a43ad1162"
+            },
+            "license_url": {
+              "const": "https://github.com/actions/checkout/blob/11d5960a326750d5838078e36cf38b85af677262/LICENSE"
+            },
+            "action_url": {
+              "const": "https://github.com/actions/checkout/blob/11d5960a326750d5838078e36cf38b85af677262/action.yml"
+            },
+            "commit_signature_verified": {
+              "const": true
+            },
+            "tree_recursive_url": {
+              "const": "https://api.github.com/repos/actions/checkout/git/trees/f8a7b72dc00648d050099727d25ca92a43ad1162?recursive=1"
+            }
+          }
+        }
+      }
+    },
+    "managedService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "owner",
+        "consumers",
+        "source",
+        "license",
+        "transitive_closure",
+        "permissions",
+        "network",
+        "data_retention",
+        "applicability",
+        "drift_detector",
+        "rollback"
+      ],
+      "properties": {
+        "kind": {
+          "const": "managed-service"
+        },
+        "id": {
+          "enum": [
+            "github-rest-quarantine-read",
+            "github-rest-runner-image-release-read"
+          ]
+        },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operational",
+            "governance"
+          ],
+          "properties": {
+            "operational": {
+              "const": "GitHub, Inc."
+            },
+            "governance": {
+              "const": "repository-owner"
+            }
+          }
+        },
+        "consumers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "workflow",
+              "job",
+              "component"
+            ],
+            "properties": {
+              "workflow": {
+                "enum": [
+                  ".github/workflows/stable-skills-maintenance.yml",
+                  ".github/workflows/ci.yml"
+                ]
+              },
+              "job": {
+                "enum": [
+                  "detect",
+                  "prepare",
+                  "governance"
+                ]
+              },
+              "component": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "service",
+            "canonical_https_url",
+            "documentation_url",
+            "api_version",
+            "identity_mode"
+          ],
+          "properties": {
+            "provider": {
+              "const": "GitHub"
+            },
+            "service": {
+              "const": "GitHub REST API"
+            },
+            "canonical_https_url": {
+              "const": "https://api.github.com"
+            },
+            "documentation_url": {
+              "type": "string",
+              "pattern": "^https://docs\\.github\\.com/"
+            },
+            "api_version": {
+              "const": "2022-11-28"
+            },
+            "repository_id": {
+              "const": 190416463
+            },
+            "repository_full_name": {
+              "const": "actions/runner-images"
+            },
+            "identity_mode": {
+              "enum": [
+                "managed-service-exact-endpoint-and-response-fields",
+                "managed-service-exact-repository-release-response"
+              ]
+            }
+          }
+        },
+        "license": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "spdx",
+            "disposition",
+            "terms_url",
+            "response_content"
+          ],
+          "properties": {
+            "spdx": {
+              "const": "N/A"
+            },
+            "disposition": {
+              "const": "MANAGED_SERVICE_NO_EXECUTABLE_CODE_REDISTRIBUTED"
+            },
+            "terms_url": {
+              "const": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service"
+            },
+            "response_content": {
+              "enum": [
+                "PUBLIC_REPOSITORY_SUBJECT_METADATA_ONLY",
+                "PUBLIC_RUNNER_IMAGE_RELEASE_METADATA_ONLY"
+              ]
+            }
+          }
+        },
+        "transitive_closure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "client",
+            "tls_runtime",
+            "response_binding",
+            "response_limit_bytes",
+            "package_install",
+            "downloaded_executable"
+          ],
+          "properties": {
+            "client": {
+              "const": "CPython_3_12_STDLIB_urllib_request_JSON_SSL"
+            },
+            "tls_runtime": {
+              "const": "HOSTED_IMAGE_PROVIDER_MANIFEST_AND_INCLUDED_SOFTWARE"
+            },
+            "response_binding": {
+              "type": "string",
+              "minLength": 1
+            },
+            "repository_identity_get": {
+              "const": "REQUIRED_BEFORE_RELEASE_GET"
+            },
+            "response_limit_bytes": {
+              "enum": [
+                1048576,
+                2097152
+              ]
+            },
+            "provider_manifest_download": {
+              "const": false
+            },
+            "provider_manifest_byte_hash": {
+              "const": "OPTIONAL_HARDENING_NOT_REQUIRED"
+            },
+            "package_install": {
+              "const": false
+            },
+            "downloaded_executable": {
+              "const": false
+            }
+          }
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "authentication",
+            "github_token",
+            "secrets",
+            "operation"
+          ],
+          "properties": {
+            "authentication": {
+              "const": "NONE"
+            },
+            "github_token": {
+              "const": false
+            },
+            "secrets": {
+              "const": false
+            },
+            "operation": {
+              "const": "READ_ONLY_GET"
+            }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transport",
+            "endpoint",
+            "path_binding",
+            "method",
+            "tls_verification",
+            "proxies",
+            "redirects"
+          ],
+          "properties": {
+            "transport": {
+              "enum": [
+                "github-rest-quarantine-read",
+                "github-rest-runner-image-release-read"
+              ]
+            },
+            "endpoint": {
+              "const": "https://api.github.com"
+            },
+            "repository_identity_path_binding": {
+              "const": "transport.runner_image_release_read.repository_identity_path"
+            },
+            "path_binding": {
+              "enum": [
+                "transport.quarantine_read.paths",
+                "transport.runner_image_release_read.path_template"
+              ]
+            },
+            "method": {
+              "const": "GET"
+            },
+            "tls_verification": {
+              "const": "REQUIRED"
+            },
+            "proxies": {
+              "const": "FORBIDDEN"
+            },
+            "redirects": {
+              "const": "REJECT"
+            }
+          }
+        },
+        "data_retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "response_bytes",
+            "uploaded_artifacts"
+          ],
+          "properties": {
+            "response_bytes": {
+              "enum": [
+                "MEMORY_ONLY_JOB_SCOPED",
+                "MEMORY_ONLY_PRE_CHECKOUT_STEP_SCOPED"
+              ]
+            },
+            "response_logging": {
+              "const": false
+            },
+            "safe_summary_fields": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "uploaded_artifacts": {
+              "const": false
+            }
+          }
+        },
+        "applicability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "purpose",
+            "jobs",
+            "secret_bearing"
+          ],
+          "properties": {
+            "purpose": {
+              "enum": [
+                "LIVE_LEGACY_QUARANTINE_IDENTITY",
+                "PRE_CHECKOUT_HOSTED_RUNTIME_PROVENANCE"
+              ]
+            },
+            "trusted_stable_workflow_only": {
+              "const": true
+            },
+            "jobs": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "enum": [
+                  "detect",
+                  "prepare",
+                  "governance"
+                ]
+              }
+            },
+            "before_checkout": {
+              "const": true
+            },
+            "secret_bearing": {
+              "const": false
+            }
+          }
+        },
+        "drift_detector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "checks",
+            "on_missing_or_mismatch"
+          ],
+          "properties": {
+            "checks": {
+              "type": "array",
+              "minItems": 4,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "on_missing_or_mismatch": {
+              "enum": [
+                "BLOCKED_BEFORE_UPDATER_OR_PROVIDER_ACCESS",
+                "BLOCKED_BEFORE_CHECKOUT"
+              ]
+            }
+          }
+        },
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "method",
+            "automatic_fallback"
+          ],
+          "properties": {
+            "owner": {
+              "const": "repository-owner"
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "automatic_fallback": {
+              "const": false
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "github-rest-runner-image-release-read"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "transitive_closure": {
+                "required": [
+                  "repository_identity_get"
+                ]
+              },
+              "network": {
+                "required": [
+                  "repository_identity_path_binding"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "const": {
+        "identity_policy": "PROVIDER_ATTESTED_FAIL_CLOSED",
+        "records": [
+          {
+            "kind": "hosted-runner-image",
+            "id": "github-hosted-ubuntu24-x64",
+            "owner": {
+              "operational": "GitHub Actions",
+              "governance": "repository-owner"
+            },
+            "consumers": [
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "detect"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "prepare"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "reconcile-all"
+              },
+              {
+                "workflow": ".github/workflows/ci.yml",
+                "job": "governance"
+              }
+            ],
+            "source": {
+              "provider": "GitHub",
+              "repository_id": 190416463,
+              "repository_full_name": "actions/runner-images",
+              "canonical_https_url": "https://github.com/actions/runner-images",
+              "identity_mode": "provider-attested-rolling",
+              "selector": "ubuntu-24.04",
+              "architecture": "X64",
+              "required_evidence": {
+                "image_os": "ubuntu24",
+                "image_version_pattern": "^[0-9]{8}\\.[0-9]+\\.[0-9]+$",
+                "release_tag_formula": "ubuntu24/{YYYYMMDD}.{BUILD}",
+                "release_api_path_formula": "/repos/actions/runner-images/releases/tags/{encoded_tag}",
+                "release_target_commitish_pattern": "^[0-9a-f]{40}$",
+                "included_software_raw_url_formula": "https://raw.githubusercontent.com/actions/runner-images/{SOURCE_SHA}/images/ubuntu/Ubuntu2404-Readme.md",
+                "provider_manifest_asset_name": "internal.ubuntu24.json",
+                "provider_manifest_required_fields": [
+                  "id",
+                  "size",
+                  "digest"
+                ],
+                "provider_manifest_digest_pattern": "^sha256:[0-9a-f]{64}$",
+                "sbom_disposition": "OPTIONAL_HARDENING_UNAVAILABLE_NOT_REQUIRED"
+              },
+              "audit_sample": {
+                "non_authoritative": true,
+                "image_version": "20260823.283.1",
+                "release_tag": "ubuntu24/20260823.283",
+                "release_target_commit": "73a898e845210ee1565a4bb3328897e152dd73ae",
+                "included_software_path": "73a898e845210ee1565a4bb3328897e152dd73ae/images/ubuntu/Ubuntu2404-Readme.md",
+                "provider_manifest_asset": {
+                  "name": "internal.ubuntu24.json",
+                  "id": 527689532,
+                  "size": 30505,
+                  "digest": "sha256:68c57165414e6868ea1b042b920640435daacf12eaa3bbdcaa85abbc4caac214"
+                }
+              }
+            },
+            "license": {
+              "source_repository_spdx": "MIT",
+              "source_repository_url": "https://github.com/actions/runner-images/blob/main/LICENSE",
+              "image_packages": "MULTI_LICENSE_AS_RECORDED_BY_INCLUDED_SOFTWARE_AND_PROVIDER_MANIFEST",
+              "disposition": "PROVIDER_ATTESTED_PER_RUN"
+            },
+            "transitive_closure": {
+              "binding": "EXACT_RELEASE_TARGET_INCLUDED_SOFTWARE_AND_PROVIDER_MANIFEST_ASSET",
+              "provider_manifest_asset_required": true,
+              "provider_manifest_digest_required": true,
+              "included_software_required": true,
+              "sbom_disposition": "OPTIONAL_HARDENING_UNAVAILABLE_NOT_REQUIRED",
+              "silent_install": false
+            },
+            "permissions": {
+              "github_token": "contents:read for detect, prepare, and governance; none for reconcile-all",
+              "secrets": false,
+              "host_elevation": "FORBIDDEN",
+              "package_install": "FORBIDDEN"
+            },
+            "network": {
+              "allowed_hosts": [
+                "api.github.com",
+                "raw.githubusercontent.com"
+              ],
+              "method": "GET",
+              "authentication": "NONE",
+              "tls_verification": "REQUIRED",
+              "redirects": "REJECT"
+            },
+            "data_retention": {
+              "runner_files": "GITHUB_HOSTED_EPHEMERAL_JOB_SCOPED",
+              "workflow_logs": "PLATFORM_POLICY_OWNER_READBACK_UNAVAILABLE",
+              "uploaded_artifacts": false
+            },
+            "applicability": {
+              "runner_label": "ubuntu-24.04",
+              "image_os": "ubuntu24",
+              "runner_arch": "X64",
+              "stable_jobs_trusted_event_head": true,
+              "ci_untrusted_pr_read_only": true,
+              "secret_bearing": false
+            },
+            "drift_detector": {
+              "checks": [
+                "ImageOS exact",
+                "RUNNER_ARCH exact",
+                "ImageVersion syntax",
+                "release tag derivation",
+                "release target full SHA",
+                "included-software source-SHA URL derivation",
+                "provider-manifest asset id/size/digest"
+              ],
+              "on_missing_or_mismatch": "BLOCKED"
+            },
+            "rollback": {
+              "owner": "repository-owner",
+              "method": "revert workflow to last reviewed compatible runner envelope",
+              "automatic_fallback": false
+            }
+          },
+          {
+            "kind": "language-runtime",
+            "id": "cpython-3.12",
+            "owner": {
+              "operational": "GitHub Actions runner-images",
+              "upstream": "Python Software Foundation",
+              "governance": "repository-owner"
+            },
+            "consumers": [
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "detect"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "prepare"
+              },
+              {
+                "workflow": ".github/workflows/ci.yml",
+                "job": "governance"
+              }
+            ],
+            "source": {
+              "provider": "GitHub-hosted runner image",
+              "upstream_repository": "python/cpython",
+              "canonical_https_url": "https://github.com/python/cpython",
+              "identity_mode": "provider-attested-rolling",
+              "implementation": "CPython",
+              "executable": "python3",
+              "version_pattern": "^3\\.12\\.[0-9]+(?:[+.-].*)?$",
+              "packages": "stdlib-only"
+            },
+            "license": {
+              "primary_spdx": "PSF-2.0",
+              "canonical_url": "https://github.com/python/cpython/blob/3.12/LICENSE",
+              "bundled_components": "AS_RECORDED_IN_CPYTHON_LICENSE_AND_PROVIDER_MANIFEST",
+              "disposition": "ACCEPTED_RUNTIME_ONLY"
+            },
+            "transitive_closure": {
+              "binding": "HOSTED_IMAGE_PROVIDER_MANIFEST_AND_INCLUDED_SOFTWARE",
+              "python_packages": "STDLIB_ONLY",
+              "pip_install": false,
+              "site_packages_import": "DISABLED_BY_-S",
+              "ambient_pythonpath": "IGNORED_BY_ISOLATED_MODE",
+              "interpreter_invocation": "python3 -I -S -B <direct-entrypoint>"
+            },
+            "permissions": {
+              "github_token": "NONE_DIRECT",
+              "secrets": false,
+              "host_elevation": "FORBIDDEN",
+              "package_install": "FORBIDDEN"
+            },
+            "network": {
+              "direct_access": "NONE"
+            },
+            "data_retention": {
+              "local_state": "RUNNER_JOB_SCOPED",
+              "bytecode": "DISABLED",
+              "uploaded_artifacts": false
+            },
+            "applicability": {
+              "runner_record": "github-hosted-ubuntu24-x64",
+              "implementation": "CPython",
+              "min_inclusive": "3.12.0",
+              "max_exclusive": "3.13.0",
+              "stdlib_only": true
+            },
+            "drift_detector": {
+              "checks": [
+                "sys.implementation.name == cpython",
+                "sys.version_info major/minor == 3.12",
+                "platform.python_version exact run evidence",
+                "isolated direct-entrypoint flags exact"
+              ],
+              "on_missing_or_mismatch": "BLOCKED"
+            },
+            "rollback": {
+              "owner": "repository-owner",
+              "method": "revert to last reviewed compatible runner image envelope",
+              "automatic_fallback": false
+            }
+          },
+          {
+            "kind": "system-executable",
+            "id": "git",
+            "owner": {
+              "operational": "GitHub Actions runner-images",
+              "upstream": "Git project",
+              "governance": "repository-owner"
+            },
+            "consumers": [
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "detect",
+                "interfaces": [
+                  "maintenance-runtime",
+                  "actions/checkout"
+                ]
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "prepare",
+                "interfaces": [
+                  "maintenance-runtime",
+                  "actions/checkout"
+                ]
+              },
+              {
+                "workflow": ".github/workflows/ci.yml",
+                "job": "governance",
+                "interfaces": [
+                  "maintenance-runtime",
+                  "actions/checkout"
+                ]
+              }
+            ],
+            "source": {
+              "provider": "GitHub-hosted runner image",
+              "upstream_repository": "git/git",
+              "canonical_https_url": "https://github.com/git/git",
+              "identity_mode": "provider-attested-rolling",
+              "executable": "git",
+              "min_inclusive": "2.43.0",
+              "max_exclusive": "2.60.0"
+            },
+            "license": {
+              "spdx": "GPL-2.0-only",
+              "canonical_url": "https://github.com/git/git/blob/master/COPYING",
+              "disposition": "SYSTEM_EXECUTABLE_RUNTIME_ONLY"
+            },
+            "transitive_closure": {
+              "binding": "HOSTED_IMAGE_PROVIDER_MANIFEST_AND_INCLUDED_SOFTWARE",
+              "argv_prefixes": {
+                "runtime_control": "git -c core.hooksPath=/dev/null -c credential.helper= -c protocol.allow=never -c protocol.https.allow=always -c protocol.file.allow=never -c protocol.ext.allow=never -c http.sslVerify=true -c http.followRedirects=false",
+                "updater_untrusted": "git -c core.hooksPath=/nonexistent -c core.symlinks=false -c core.autocrlf=false -c core.fsmonitor=false -c protocol.ext.allow=never -c advice.detachedHead=false -c gc.auto=0 -c credential.helper= -c http.sslVerify=true -c http.followRedirects=false -c protocol.file.allow=never"
+              },
+              "commands": [
+                "git --version",
+                "<runtime_control> ls-remote --symref --exit-code -- <repository-https-url> HEAD refs/heads/<stable-ref>",
+                "<runtime_control> rev-parse --is-inside-work-tree",
+                "<runtime_control> rev-parse --show-toplevel",
+                "<runtime_control> rev-parse --verify HEAD^{commit}",
+                "<updater_untrusted> ls-remote --exit-code -- <https-url> refs/heads/<ref>",
+                "<updater_untrusted> ls-remote --symref -- <https-url> HEAD",
+                "<updater_untrusted> init --bare --quiet -- <temp-dir>",
+                "<updater_untrusted> remote add origin -- <https-url>",
+                "<updater_untrusted> fetch --quiet --no-tags --no-write-fetch-head origin <sha>...",
+                "<updater_untrusted> cat-file -t <sha>",
+                "<updater_untrusted> cat-file -e <sha>",
+                "<updater_untrusted> cat-file blob <sha>",
+                "<updater_untrusted> ls-tree -r -z --full-tree <sha> [-- <prefix>]",
+                "<updater_untrusted> merge-base --is-ancestor <sha> <sha>",
+                "<updater_untrusted> merge-base <sha> <sha>",
+                "<updater_untrusted> rev-parse <sha>^{tree}",
+                "<updater_untrusted> rev-parse <sha>:<path>"
+              ],
+              "checkout_internals": "OWNED_BY_EXACT_ACTION_TREE_AND_CONSUMER_INPUT_CLOSURE",
+              "credential_helper": false,
+              "isolated_home": "EMPTY_0700_PYTHON_TEMPDIR_COMMAND_SCOPED_WITH_JOB_VM_FALLBACK",
+              "hooks": false,
+              "shell": false,
+              "protocol": "https"
+            },
+            "permissions": {
+              "github_token": "contents:read only through exact checkout consumers; updater Git is unauthenticated",
+              "secrets": false,
+              "credential_persistence": false,
+              "host_elevation": "FORBIDDEN",
+              "package_install": "FORBIDDEN"
+            },
+            "network": {
+              "allowed_hosts": [
+                "github.com"
+              ],
+              "protocol": "https",
+              "authentication": "NONE_FOR_UPDATER",
+              "tls_verification": "REQUIRED",
+              "redirects": "REJECT"
+            },
+            "data_retention": {
+              "bare_object_database": "PYTHON_TEMPDIR_COMMAND_SCOPED_WITH_JOB_VM_FALLBACK",
+              "git_home": "EMPTY_0700_PYTHON_TEMPDIR_COMMAND_SCOPED_WITH_JOB_VM_FALLBACK",
+              "working_tree": false,
+              "credentials": false,
+              "uploaded_artifacts": false
+            },
+            "applicability": {
+              "runner_record": "github-hosted-ubuntu24-x64",
+              "min_inclusive": "2.43.0",
+              "max_exclusive": "2.60.0",
+              "updater_transport": "git-https",
+              "checkout_delegation": "actions/checkout"
+            },
+            "drift_detector": {
+              "checks": [
+                "git --version parse",
+                "tested version envelope",
+                "closed argv command set",
+                "controlled config and environment",
+                "all ambient GIT_* variables outside the exact four workflow controls absent",
+                "post-checkout real worktree root and HEAD equal GITHUB_SHA",
+                "HTTPS-only protocol"
+              ],
+              "on_missing_or_mismatch": "BLOCKED"
+            },
+            "rollback": {
+              "owner": "repository-owner",
+              "method": "revert to last reviewed compatible runner image or updater command closure",
+              "automatic_fallback": false
+            }
+          },
+          {
+            "kind": "command-shell",
+            "id": "gnu-bash",
+            "owner": {
+              "operational": "GitHub Actions runner-images",
+              "upstream": "GNU Project",
+              "governance": "repository-owner"
+            },
+            "consumers": [
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "detect"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "prepare"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "reconcile-all"
+              },
+              {
+                "workflow": ".github/workflows/ci.yml",
+                "job": "governance"
+              }
+            ],
+            "source": {
+              "provider": "GitHub-hosted runner image",
+              "upstream_project": "GNU Bash",
+              "canonical_https_url": "https://savannah.gnu.org/projects/bash",
+              "identity_mode": "provider-attested-rolling",
+              "executable": "/usr/bin/bash",
+              "version_pattern": "^5\\.2\\.[0-9]+(?:\\([^)]*\\))?.*$"
+            },
+            "license": {
+              "spdx": "GPL-3.0-or-later",
+              "canonical_url": "https://git.savannah.gnu.org/cgit/bash.git/tree/COPYING",
+              "disposition": "SYSTEM_EXECUTABLE_RUNTIME_ONLY"
+            },
+            "transitive_closure": {
+              "binding": "HOSTED_IMAGE_PROVIDER_MANIFEST_AND_INCLUDED_SOFTWARE",
+              "invocation": "/usr/bin/bash --noprofile --norc -e -o pipefail <script>",
+              "profile_loading": false,
+              "shell_extensions": "WORKFLOW_BUILTINS_ONLY",
+              "downloaded_scripts": false
+            },
+            "permissions": {
+              "github_token": "contents:read in detect, prepare, and governance; none in reconcile-all",
+              "secrets": false,
+              "host_elevation": "FORBIDDEN",
+              "package_install": "FORBIDDEN"
+            },
+            "network": {
+              "direct_access": "NONE"
+            },
+            "data_retention": {
+              "local_state": "RUNNER_JOB_SCOPED",
+              "workflow_logs": "PLATFORM_POLICY_OWNER_READBACK_UNAVAILABLE",
+              "uploaded_artifacts": false
+            },
+            "applicability": {
+              "runner_record": "github-hosted-ubuntu24-x64",
+              "jobs": [
+                "detect",
+                "prepare",
+                "reconcile-all",
+                "governance"
+              ],
+              "secret_bearing": false
+            },
+            "drift_detector": {
+              "checks": [
+                "BASH exact executable",
+                "GNU Bash 5.2.x version envelope",
+                "no profile loading",
+                "errexit and pipefail invocation"
+              ],
+              "on_missing_or_mismatch": "BLOCKED"
+            },
+            "rollback": {
+              "owner": "repository-owner",
+              "method": "revert workflow to last reviewed compatible shell envelope",
+              "automatic_fallback": false
+            }
+          },
+          {
+            "kind": "action-handler-runtime",
+            "id": "checkout-node20",
+            "owner": {
+              "operational": "GitHub Actions",
+              "upstream": "OpenJS Foundation Node.js project",
+              "governance": "repository-owner"
+            },
+            "consumers": [
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "detect",
+                "via": "actions/checkout/action.yml@11d5960a326750d5838078e36cf38b85af677262"
+              },
+              {
+                "workflow": ".github/workflows/stable-skills-maintenance.yml",
+                "job": "prepare",
+                "via": "actions/checkout/action.yml@11d5960a326750d5838078e36cf38b85af677262"
+              },
+              {
+                "workflow": ".github/workflows/ci.yml",
+                "job": "governance",
+                "via": "actions/checkout/action.yml@11d5960a326750d5838078e36cf38b85af677262"
+              }
+            ],
+            "source": {
+              "provider": "GitHub Actions runner",
+              "upstream_repository": "nodejs/node",
+              "canonical_https_url": "https://github.com/nodejs/node",
+              "identity_mode": "provider-attested-rolling",
+              "runtime_family": "node20",
+              "selection_binding": "actions/checkout action.yml using=node20"
+            },
+            "license": {
+              "primary_spdx": "MIT",
+              "canonical_url": "https://github.com/nodejs/node/blob/main/LICENSE",
+              "bundled_components": "AS_RECORDED_IN_NODE_LICENSE_AND_HOSTED_IMAGE_PROVIDER_MANIFEST",
+              "disposition": "ACTION_HANDLER_RUNTIME_ONLY"
+            },
+            "transitive_closure": {
+              "binding": "HOSTED_IMAGE_PROVIDER_MANIFEST_PLUS_EXACT_CHECKOUT_ACTION_TREE",
+              "runtime_patch": "PROVIDER_ATTESTED_ROLLING_NODE20",
+              "checkout_bundle_manifest_sha256": "4815ff3a74ae4f01971ccb58454ce373292dbac3e21394d23b48151df2feade7",
+              "npm_install": false,
+              "external_module_resolution": false
+            },
+            "permissions": {
+              "github_token": "contents:read",
+              "secrets": false,
+              "credential_persistence": false,
+              "host_elevation": "FORBIDDEN",
+              "package_install": "FORBIDDEN"
+            },
+            "network": {
+              "allowed_hosts": [
+                "github.com"
+              ],
+              "protocol": "https",
+              "authentication": "GITHUB_TOKEN_CONTENTS_READ",
+              "tls_verification": "REQUIRED"
+            },
+            "data_retention": {
+              "checkout": "RUNNER_JOB_SCOPED",
+              "credentials": false,
+              "post_cleanup": "EXACT_PINNED_ACTION_HANDLER",
+              "uploaded_artifacts": false
+            },
+            "applicability": {
+              "runner_record": "github-hosted-ubuntu24-x64",
+              "action": "actions/checkout",
+              "action_commit": "11d5960a326750d5838078e36cf38b85af677262",
+              "runtime_family": "node20",
+              "consumer_count": 3
+            },
+            "drift_detector": {
+              "checks": [
+                "exact checkout commit/tree/action descriptor",
+                "action.yml using == node20",
+                "exact three workflow consumers and inputs",
+                "ambient Node execution and TLS overrides absent",
+                "hosted-image release attestation"
+              ],
+              "on_missing_or_mismatch": "BLOCKED_BEFORE_UPDATER_OR_PROVIDER_ACCESS"
+            },
+            "rollback": {
+              "owner": "repository-owner",
+              "method": "revert checkout pin and runtime ledger to last jointly reviewed closure",
+              "automatic_fallback": false
+            }
+          }
+        ],
+        "installation": {
+          "silent_install": false,
+          "pip": false,
+          "npm": false,
+          "npx": false,
+          "curl_pipe_shell": false
+        }
+      }
+    },
+    "transport": {
+      "const": {
+        "allowed": [
+          "git-https",
+          "github-rest-quarantine-read",
+          "github-rest-runner-image-release-read"
+        ],
+        "git_endpoint": "https://github.com/KraineOpasen/bukerov-twitch-miner-go",
+        "upstream_host": "github.com",
+        "quarantine_read": {
+          "endpoint": "https://api.github.com",
+          "method": "GET",
+          "paths": [
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/pulls/223",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/pulls/233",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/pulls/241",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/issues/230",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/issues/238",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/issues/239",
+            "/repos/KraineOpasen/bukerov-twitch-miner-go/issues/240"
+          ],
+          "authentication": "NONE",
+          "tls_verification": "REQUIRED",
+          "redirects": "REJECT",
+          "response_identity": "EXACT_SUBJECT_NUMBER_NODE_ID_STATE_AUTHOR_HEAD_AND_BASE"
+        },
+        "runner_image_release_read": {
+          "endpoint": "https://api.github.com",
+          "method": "GET",
+          "repository_identity_path": "/repos/actions/runner-images",
+          "path_template": "/repos/actions/runner-images/releases/tags/ubuntu24%2F{YYYYMMDD}.{BUILD}",
+          "authentication": "NONE",
+          "tls_verification": "REQUIRED",
+          "redirects": "REJECT",
+          "response_constraints": {
+            "repository_id": 190416463,
+            "repository_full_name": "actions/runner-images",
+            "tag_name_formula": "ubuntu24/{YYYYMMDD}.{BUILD}",
+            "target_commitish_pattern": "^[0-9a-f]{40}$",
+            "asset_name": "internal.ubuntu24.json",
+            "asset_required_fields": [
+              "id",
+              "size",
+              "digest"
+            ],
+            "asset_digest_pattern": "^sha256:[0-9a-f]{64}$",
+            "included_software_raw_url_formula": "https://raw.githubusercontent.com/actions/runner-images/{SOURCE_SHA}/images/ubuntu/Ubuntu2404-Readme.md"
+          }
+        },
+        "rest_checkout": "FORBIDDEN",
+        "ssh": "FORBIDDEN",
+        "file": "FORBIDDEN_IN_PRODUCTION"
+      }
+    }
+  }
+}

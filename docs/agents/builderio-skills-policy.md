@@ -489,46 +489,36 @@ would have been useful for, so the loss is understood rather than assumed to be 
 
 ## Automated drift detection
 
-`automatic_updates` stays **false**: nothing here is ever updated without review. What is automated is
-*noticing*, and the mechanical half of preparing a re-vendor.
+`automatic_updates` stays **false**: nothing here is updated or installed without a separate audit.
+G1.1 automates only deterministic detection and artifact preparation.
 
-A scheduled workflow (`.github/workflows/skills-update.yml`) resolves this provider's reviewed branch —
-recorded in `docs/agents/skills-update-providers.json`, which owns the ref while this manifest owns the
-pin — to a concrete commit each day. When nothing has moved it does nothing at all: no branch, no pull
-request, no issue, no comment. When something has moved it either opens **one Draft PR** carrying
-refreshed bytes and regenerated provenance, or — if any judgement call is required — refuses entirely
-and opens **one deduplicated issue** explaining why. It never opens a partial or conflicted PR.
+The stable-owned workflow is `.github/workflows/stable-skills-maintenance.yml`. It is committed on
+`release/0.3`, while the repository default at G1.1 adoption is still `main`; under GitHub scheduled
+workflow semantics this makes the stable workflow **UNCOMMISSIONED**, not a currently live daily updater.
+Changing the default branch and commissioning liveness are separate owner-gated actions.
 
-A candidate it produces is **not** a reviewed pin. The manifest it writes carries an
-`automated_candidate` block, and `scripts/validate-agent-governance.py` fails while that block is
-present, so the candidate cannot pass the governance gate on automation alone. `reviewed_at` and
-`reviewed_by` are left untouched, because they remain true statements about the superseded commit.
-Clearing the candidate state — reading the diff, re-asserting any withdrawn `scripts_audited`, recording
-fresh review fields, deleting the block — is the human step the update procedure below describes, and
-the bot cannot perform it.
+After fail-closed workflow, ref, repository, policy, runtime, and dependency checks, the engine resolves
+this provider's reviewed ref from `docs/agents/skills-update-providers.json` to a full commit. Every
+production run ends in exactly one of `NO_DRIFT`, `BLOCKED`, or `PREPARED_AUDIT_REQUIRED`.
+Unknown or unavailable evidence is `BLOCKED`, never `NO_DRIFT`.
 
-Upstream is read as data: repositories are fetched bare and read through `git cat-file`, never checked
-out, and no fetched script is ever executed, including to assess it.
+A prepared candidate is not a reviewed pin. Candidate bytes and `candidate-report.json` are written
+only beneath an artifact root outside the repository checkout; any candidate manifest retains its
+`automated_candidate` marker. G1.1 has no route to publish a branch, pull request, issue, or comment,
+claim `AUDITED` or semantic PASS, mark Ready, merge or enable auto-merge, or install a sibling skill.
+The manual update procedure below remains the only route to reviewed repository state.
 
-Three further rules bound what a candidate can be. **Only a fast-forward** from the reviewed
-commit is ever prepared: if upstream's history diverged, was rewritten, or no longer contains the
-reviewed commit, that is BLOCKED — a force-push that swaps reviewed history for different content
-of the same shape passes every tree-content check, so the history relation is the only thing that
-catches it. **The trigger surface is audit-required**, and it includes `description` and
-`when_to_use`: those are what the model reads to decide whether to invoke a skill, so an upstream
-rewording changes when the skill fires. And **provenance is not behavioural equivalence** — a
-candidate whose changed bytes could alter behaviour is marked `EVAL_REQUIRED`, with old-vs-candidate
-instructions to run in a fresh Claude session; the bot never runs evals itself.
+Upstream is untrusted data: repositories are fetched bare and read through `git cat-file`, never
+checked out, and no fetched script is executed. Only a proven fast-forward from the reviewed commit can
+be prepared. Diverged, rewritten, unreachable, inventory/licence/authority/closure changes and any
+other judgement-dependent condition fail closed as `BLOCKED`. Behaviour-changing bytes may be labelled
+for a future evaluation, but G1.1 invokes no model and grants no audit state. A newly discovered sibling
+is evidence only and is never installed or given a production promotion verdict.
 
-A new skill appearing upstream *outside* this project's installed selection is not installed and
-does not block this provider's other updates; it opens its own deduplicated `DISCOVERY_REQUIRED`
-issue so adopting it stays a human decision taken on its own schedule.
-
-Full detail, including the nine blocked conditions and the security posture:
-`docs/agents/skills-update-automation.md` on the repository's default branch (`main`) — under GitHub
-scheduled-workflow semantics the automation is defined and runs only there; this stable line is not
-maintained by it and receives audited refreshes via the normal task-branch/PR path
-(`docs/agents/skills-routing.md`, "Keeping the stack itself current").
+The legacy main-control-plane subjects bound in
+`docs/agents/skills-maintenance/legacy-quarantine.json` may be observed for identity evidence only;
+G1.1 cannot mutate or adopt them. Full state, security, quarantine, and commissioning detail:
+`docs/agents/skills-update-automation.md`.
 
 ## Update procedure
 

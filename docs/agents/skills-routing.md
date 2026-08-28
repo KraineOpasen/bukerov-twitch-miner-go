@@ -214,18 +214,32 @@ Recorded honestly so the next review knows what to look for:
 ## Keeping the stack itself current
 
 Routing tells you which installed skill to reach for. Keeping those installed skills from silently
-falling behind upstream is a separate job. The automated drift-detection bot
-(`.github/workflows/skills-update.yml` plus `scripts/skill_updates/`) is defined on the repository's
-**default branch** (`main`) and, under GitHub scheduled-workflow semantics, executes only there: it
-checks all six vendored providers daily and opens **one Draft PR per provider, based on `main`**,
-when a refresh needs no judgement call, or **one deduplicated issue** when it does. This stable line
-carries no copy of that automation and is **not** maintained by it. Audited skill refreshes reach
-this line only through the normal governed path: an audited update lands on `main` (or is audited
-directly against upstream), then a human-driven task-branch/PR under its own task contract brings it
-here. Nothing is updated without review in either place — a candidate manifest carries an
-`automated_candidate` block that makes `scripts/validate-agent-governance.py` fail until a human
-audits the diff and clears it, and this line's validator enforces exactly that rule on this tree.
+falling behind upstream is a separate job. G1.1 places the deterministic detector/preparer on the
+stable line as `.github/workflows/stable-skills-maintenance.yml` plus `scripts/skill_updates/`. It
+resolves every reviewed provider ref to a full commit, treats fetched repositories as untrusted data,
+and can prepare bounded audit artifacts outside the repository checkout. It never changes the 81-skill
+selection or routing table.
+
+At G1.1 adoption the repository default is still `main`; `release/0.3` is the committed stable policy
+base but remains non-default. GitHub schedules use the default branch, so the new stable workflow is
+**UNCOMMISSIONED**, not a live daily updater. Its production terminal states are only `NO_DRIFT`,
+`BLOCKED`, and `PREPARED_AUDIT_REQUIRED`. Unknown or unavailable identity, provenance, runtime, or
+upstream facts fail closed as `BLOCKED`; they never become `NO_DRIFT`.
+
+`PREPARED_AUDIT_REQUIRED` means only that deterministic candidate bytes and a report were materialized
+as artifacts for later review. G1.1 cannot publish a branch, pull request, issue, or comment; claim
+`AUDITED` or semantic PASS; mark Ready; merge or enable auto-merge; or install a sibling skill. A later
+audited refresh still uses its own owner-approved task branch and review. Provider manifests, policies,
+patch ledgers, and `automatic_updates: false` remain authoritative.
 
 What this means for routing: if a skill in the table above behaves differently than documented
-here, check whether an update candidate is open on the default branch before assuming the table is
-wrong.
+here, check the manifest pin and reviewed policy before assuming the table is wrong. A G1.1 artifact
+is evidence to inspect, never installed or routing authority.
+
+After this foundation merges, disabling or draining the historical main updater/release control plane,
+switching the default branch from `main` to `release/0.3`, enabling the new workflow if GitHub registers
+it disabled, and selecting/configuring an external heartbeat are separate owner-gated actions. The
+workflow remains **UNCOMMISSIONED**, full liveness remains **UNAVAILABLE**, and the external heartbeat
+remains **UNCOMMISSIONED** until that migration and a full future orchestrator/heartbeat success; a
+detector-only success cannot establish control-plane health. See
+[`skills-update-automation.md`](skills-update-automation.md).

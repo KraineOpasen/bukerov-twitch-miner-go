@@ -1,0 +1,125 @@
+{
+  "$schema": "./schemas/legacy-quarantine.schema.json",
+  "schema_version": 1,
+  "quarantine_id": "g1.1-legacy-default-main-quarantine",
+  "repository": {
+    "id": 1297795646,
+    "full_name": "KraineOpasen/bukerov-twitch-miner-go"
+  },
+  "observed_at": "2026-08-27T17:00:03Z",
+  "binding": {
+    "stable_branch": "release/0.3",
+    "g11_implementation_parent_sha": "22dac63fd34b4e869c93f62c669d763f45b37620",
+    "observed_default_branch": "main",
+    "observed_default_sha": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7",
+    "policy_path": "docs/agents/skills-maintenance/policy.json",
+    "policy_sha256": "d06b7a478b6e8934edccb8afbf7068c66975c6a5a88b9bfd7f7212c31430ab5d",
+    "control_plane_path": "docs/agents/skills-maintenance/control-plane.json",
+    "control_plane_sha256": "7b434eda71f7738ff278a58fc46ee5cfee403bfe1c86ceabfb3e9545e2ccc726",
+    "subjects_sha256": "83af85d6b56a6eb88cd9c4cdd301bec9c95126358c8937eed1e51a1368a4aaa7"
+  },
+  "authority": "OBSERVE_AND_REPORT_ONLY",
+  "forbidden_operations": [
+    "UPDATE",
+    "CLOSE",
+    "REOPEN",
+    "RETARGET",
+    "SUPERSEDE",
+    "DUPLICATE",
+    "COMMENT",
+    "RECREATE",
+    "ADOPT_AS_AUTHORITY",
+    "USE_AS_PROMOTION_EVIDENCE"
+  ],
+  "subjects": [
+    {
+      "kind": "pull_request",
+      "number": 223,
+      "node_id": "PR_kwDOTVrKPs8AAAABAwgA3g",
+      "title": "chore(skills): awesome-copilot update candidate 4742f265",
+      "state": "OPEN",
+      "author": "github-actions[bot]",
+      "provider": "awesome-copilot",
+      "target_sha": "4742f265959bf025882314564b364d9d7af6e2d5",
+      "draft": true,
+      "head_ref": "automated/skills-update/awesome-copilot-4742f265959b",
+      "head_sha": "39c75012a9d9d14bcb8a8551c5773b24620a3b8d",
+      "base_ref": "main",
+      "base_sha": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7"
+    },
+    {
+      "kind": "pull_request",
+      "number": 233,
+      "node_id": "PR_kwDOTVrKPs8AAAABA5O3lA",
+      "title": "chore(skills): awesome-copilot update candidate d0d9d9f0",
+      "state": "OPEN",
+      "author": "github-actions[bot]",
+      "provider": "awesome-copilot",
+      "target_sha": "d0d9d9f014abb27bf0d8321851867500a3a46bba",
+      "draft": true,
+      "head_ref": "automated/skills-update/awesome-copilot-d0d9d9f014ab",
+      "head_sha": "0c79e6e71d265b3ce6eeb1c1fa46a1289aaaee49",
+      "base_ref": "main",
+      "base_sha": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7"
+    },
+    {
+      "kind": "pull_request",
+      "number": 241,
+      "node_id": "PR_kwDOTVrKPs8AAAABBCNmyg",
+      "title": "chore(skills): awesome-copilot update candidate 71f7c9b1",
+      "state": "OPEN",
+      "author": "github-actions[bot]",
+      "provider": "awesome-copilot",
+      "target_sha": "71f7c9b1dc5044287b62fc700efc034da4065f87",
+      "draft": true,
+      "head_ref": "automated/skills-update/awesome-copilot-71f7c9b1dc50",
+      "head_sha": "f6143c10cf5cac3c3dce65c6020615c7b71a7b6f",
+      "base_ref": "main",
+      "base_sha": "9c2c11030dd34c34bd7812e5a18bfe52d897b2a7"
+    },
+    {
+      "kind": "issue",
+      "number": 230,
+      "node_id": "I_kwDOTVrKPs8AAAABOHuyaw",
+      "title": "Skills update blocked: mattpocock -> 6654f6b6",
+      "state": "OPEN",
+      "author": "github-actions[bot]",
+      "provider": "mattpocock",
+      "target_sha": "6654f6b60cd9d5be8b54c6fafe44346dabeb3b76",
+      "label": "skills-update-blocked"
+    },
+    {
+      "kind": "issue",
+      "number": 238,
+      "node_id": "I_kwDOTVrKPs8AAAABOSenbw",
+      "title": "Skills update blocked: compound-engineering -> 4e673822",
+      "state": "CLOSED",
+      "author": "github-actions[bot]",
+      "provider": "compound-engineering",
+      "target_sha": "4e6738223d7dd66d765a598673c48c136fb78f95",
+      "label": "skills-update-blocked"
+    },
+    {
+      "kind": "issue",
+      "number": 239,
+      "node_id": "I_kwDOTVrKPs8AAAABOSerzw",
+      "title": "Skills update blocked: trailofbits -> 65720f8d",
+      "state": "CLOSED",
+      "author": "github-actions[bot]",
+      "provider": "trailofbits",
+      "target_sha": "65720f8db2ca0c1d1a1805db0dacbabc190a1aa1",
+      "label": "skills-update-blocked"
+    },
+    {
+      "kind": "issue",
+      "number": 240,
+      "node_id": "I_kwDOTVrKPs8AAAABOSexIA",
+      "title": "Skills discovery required: awesome-copilot -> 71f7c9b1",
+      "state": "CLOSED",
+      "author": "github-actions[bot]",
+      "provider": "awesome-copilot",
+      "target_sha": "71f7c9b1dc5044287b62fc700efc034da4065f87",
+      "label": "skills-update-discovery"
+    }
+  ]
+}
