@@ -2280,8 +2280,19 @@ Per-streamer configuration options:
 | `consoleLevel` | enum | INFO | Console log level |
 | `fileLevel` | enum | DEBUG | File log level |
 | `colored` | bool | false | Enable colored output |
-| `autoClear` | bool | true | Log rotation (7 days) |
+| `autoClear` | bool | true | Write-triggered ~24h segmented rotation; retain at most 7 completed segments |
 | `timeZone` | string | null | Custom timezone |
+
+With `save=true`, the canonical active file is `logs/<StorageKey>.log`. When
+`autoClear=true`, the first write after approximately 24 hours of segment age
+renames the old active file to
+`<active>.rotated-<20-digit-monotonic-sequence>` and writes the triggering
+record to a new canonical active file. At most seven completed owned segments
+are retained. With `autoClear=false`, logging remains ordinary append-only and
+does not rotate or prune. The dashboard reads the newest 500 complete lines
+under one aggregate 2 MiB budget; `/debug/log` defaults to 1000 lines, clamps
+at 2000, and uses one aggregate 4 MiB budget. Both readers traverse the retained
+family and return records in chronological order.
 
 ### Rate Limit Settings
 
@@ -2486,9 +2497,11 @@ application/
 ├── cookies/
 │   └── {username}.json       # Authentication tokens (JSON; optionally AES-256-GCM encrypted)
 ├── logs/
-│   └── {username}.log        # Log files (7-day rotation)
+│   ├── {StorageKey}.log      # Canonical active plain slog text
+│   └── {StorageKey}.log.rotated-{20-digit-sequence}
+│                             # Up to 7 completed owned segments when autoClear=true
 └── database/
-    └── {username}/
+    └── {StorageKey}/
         └── miner.db          # Unified SQLite database (analytics, notifications, etc.)
 ```
 

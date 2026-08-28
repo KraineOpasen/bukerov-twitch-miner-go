@@ -1,9 +1,7 @@
 package web
 
 import (
-	"bufio"
-	"bytes"
-	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -15,7 +13,7 @@ import (
 const (
 	// logTailLines is how many trailing log lines the viewer shows.
 	logTailLines = 500
-	// logTailMaxBytes bounds how much of the file's tail is read (memory guard).
+	// logTailMaxBytes is one total read budget for the retained log family.
 	logTailMaxBytes = 2 << 20 // 2 MiB
 )
 
@@ -55,18 +53,25 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 	s.renderPartial(w, r, "logs_lines", LogsLinesData{Lines: lines, FileLogging: enabled})
 }
 
-// readLogTail reads the last logTailLines lines of the miner's log file and
+// readLogTail reads the last logTailLines lines of the retained log family and
 // classifies each by level for coloring. The second return is false when file
 // logging is off (the file doesn't exist), so the page can explain how to
 // enable it rather than showing a bare empty state.
 func (s *Server) readLogTail() ([]LogLineView, bool) {
-	path := logger.LogFilePath(s.username)
-	raw, err := tailLogFile(path, logTailMaxBytes)
+	path := s.logPath
+	if path == "" {
+		path = stableLogPath(s.basePath, s.username)
+	}
+	if path == "" {
+		return nil, false
+	}
+	raw, err := logger.TailLogFamily(path, logTailLines, logTailMaxBytes)
 	if err != nil {
 		// Missing file => file logging disabled (or nothing written yet).
 		if os.IsNotExist(err) {
 			return nil, false
 		}
+		slog.Error("Failed to read retained log family", "path", path, "error", err)
 		return nil, true
 	}
 
@@ -86,35 +91,7 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 	return views, true
 }
 
-// tailLogFile returns the last maxBytes of the file at path (aligned to the next
-// line boundary so the first returned line isn't truncated mid-way).
+// tailLogFile returns a complete-line family tail under one byte budget.
 func tailLogFile(path string, maxBytes int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	if info.Size() <= maxBytes {
-		return io.ReadAll(f)
-	}
-
-	if _, err := f.Seek(info.Size()-maxBytes, io.SeekStart); err != nil {
-		return nil, err
-	}
-	buf := bufio.NewReader(f)
-	// Drop the partial first line so the tail starts at a clean boundary.
-	if _, err := buf.ReadBytes('\n'); err != nil && err != io.EOF {
-		return nil, err
-	}
-	var out bytes.Buffer
-	if _, err := io.Copy(&out, buf); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	return logger.TailLogFamily(path, int(^uint(0)>>1), maxBytes)
 }

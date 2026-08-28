@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 func TestTailLogFile(t *testing.T) {
@@ -54,6 +56,163 @@ func TestTailLogFileMissing(t *testing.T) {
 	if !os.IsNotExist(err) {
 		t.Errorf("missing file should return os.IsNotExist error, got %v", err)
 	}
+}
+
+func TestReadLogTailCrossesRotatedSegments(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	activePath := filepath.Join("logs", "family.log")
+	var archive, active strings.Builder
+	for i := 1; i <= 350; i++ {
+		fmt.Fprintf(&archive, "time=2026-07-13T00:00:00Z level=INFO msg=archive-%03d\n", i)
+	}
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&active, "time=2026-07-14T00:00:00Z level=INFO msg=active-%03d\n", i)
+	}
+	if err := os.WriteFile(activePath+".rotated-00000000000000000001", []byte(archive.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activePath, []byte(active.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{username: "family"}
+	views, enabled := s.readLogTail()
+	if !enabled {
+		t.Fatal("readLogTail reported a retained family as disabled")
+	}
+	if len(views) != logTailLines {
+		t.Fatalf("views=%d, want %d", len(views), logTailLines)
+	}
+	if !strings.Contains(views[0].Text, "archive-051") || !strings.Contains(views[299].Text, "archive-350") {
+		t.Fatalf("archive portion is not the chronological newest 300 lines: first=%q boundary=%q", views[0].Text, views[299].Text)
+	}
+	if !strings.Contains(views[300].Text, "active-001") || !strings.Contains(views[499].Text, "active-200") {
+		t.Fatalf("active portion is not chronological: boundary=%q last=%q", views[300].Text, views[499].Text)
+	}
+}
+
+func TestReadLogTailUsesImmutableStorageKey(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("logs", "oldlogin.log"), []byte("time=x level=INFO msg=stable-storage-key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("logs", "newlogin.log"), []byte("time=x level=INFO msg=mutable-login-wrong\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	constructors := map[string]func() *Server{
+		"full": func() *Server {
+			return NewServer(config.AnalyticsSettings{}, "newlogin", filepath.Join("database", "oldlogin"), nil, nil)
+		},
+		"early": func() *Server {
+			return NewServerEarly(config.AnalyticsSettings{}, "newlogin", filepath.Join("database", "oldlogin"), nil)
+		},
+	}
+	for name, construct := range constructors {
+		t.Run(name, func(t *testing.T) {
+			s := construct()
+			s.username = "renamed-again"
+			views, enabled := s.readLogTail()
+			if !enabled || len(views) != 1 {
+				t.Fatalf("enabled=%v views=%d, want stable StorageKey family", enabled, len(views))
+			}
+			if !strings.Contains(views[0].Text, "stable-storage-key") || strings.Contains(views[0].Text, "mutable-login-wrong") {
+				t.Fatalf("web log source followed mutable username: %+v", views)
+			}
+		})
+	}
+}
+
+func TestReadLogTailHonorsTwoMiBAcrossFamily(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	activePath := filepath.Join("logs", "web-budget.log")
+	payload := strings.Repeat("x", 5000)
+	var archive, active strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&archive, "time=2026-08-27T00:00:00Z level=INFO msg=archive-%03d-%s\n", i, payload)
+	}
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&active, "time=2026-08-28T00:00:00Z level=INFO msg=active-%03d-%s\n", i, payload)
+	}
+	if err := os.WriteFile(completedSegmentPathForWeb(activePath, 1), []byte(archive.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activePath, []byte(active.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	views, enabled := (&Server{logPath: activePath}).readLogTail()
+	if !enabled {
+		t.Fatal("budgeted retained family reported disabled")
+	}
+	physicalEquivalent := 0
+	for _, view := range views {
+		physicalEquivalent += len(view.Text) + 1
+		if !strings.HasPrefix(view.Text, "time=") {
+			t.Fatalf("partial leading line escaped budget: %q", view.Text[:min(len(view.Text), 80)])
+		}
+	}
+	if physicalEquivalent > logTailMaxBytes {
+		t.Fatalf("rendered family bytes=%d exceed web cap=%d", physicalEquivalent, logTailMaxBytes)
+	}
+	joined := viewsText(views)
+	if strings.Contains(joined, "archive-001-") || !strings.Contains(joined, "active-300-") {
+		t.Fatal("web family budget selected the wrong end of retained history")
+	}
+}
+
+func TestReadLogTailServesArchivesWithoutActive(t *testing.T) {
+	dir := t.TempDir()
+	activePath := filepath.Join(dir, "archives-only.log")
+	if err := os.WriteFile(completedSegmentPathForWeb(activePath, 1), []byte("time=x level=INFO msg=archive-only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	views, enabled := (&Server{logPath: activePath}).readLogTail()
+	if !enabled || len(views) != 1 || !strings.Contains(views[0].Text, "archive-only") {
+		t.Fatalf("archives-only web family: enabled=%v views=%+v", enabled, views)
+	}
+}
+
+func TestReadLogTailUnsafeIdentityDoesNotScanCurrentDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	canaryPath := ".rotated-00000000000000000001"
+	if err := os.WriteFile(canaryPath, []byte("cwd-canary-must-not-be-disclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	views, enabled := (&Server{username: "../unsafe"}).readLogTail()
+	if enabled || len(views) != 0 {
+		t.Fatalf("unsafe empty locator scanned cwd: enabled=%v views=%+v", enabled, views)
+	}
+	data, err := os.ReadFile(canaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "cwd-canary-must-not-be-disclosed\n" {
+		t.Fatalf("cwd canary changed: %q", data)
+	}
+}
+
+func completedSegmentPathForWeb(activePath string, sequence uint64) string {
+	return fmt.Sprintf("%s.rotated-%020d", activePath, sequence)
+}
+
+func viewsText(views []LogLineView) string {
+	var out strings.Builder
+	for _, view := range views {
+		out.WriteString(view.Text)
+		out.WriteByte('\n')
+	}
+	return out.String()
 }
 
 // TestReadLogTailClassifies exercises the handler-level pipeline: a real log
