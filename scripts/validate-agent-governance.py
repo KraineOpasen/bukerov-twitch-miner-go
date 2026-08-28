@@ -5845,6 +5845,12 @@ def _st_p25():
         validator = os.path.join(repo, "scripts", "validate-agent-governance.py")
         clean_env = os.environ.copy()
         clean_env.pop("GOVERNANCE_BASE_SHA", None)
+        # The fixture's commits belong to its disposable repository, never to an outer Actions
+        # checkout. Hosted event identity would make the nested runtime verifier compare this
+        # temporary HEAD with the outer PR merge SHA, so remove the entire GitHub event namespace.
+        for name in tuple(clean_env):
+            if name.startswith("GITHUB_"):
+                clean_env.pop(name)
         clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         def _validate(scope, base_sha=None):
