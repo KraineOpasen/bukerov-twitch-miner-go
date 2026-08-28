@@ -561,6 +561,13 @@ func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount, 
 	defer d.mu.Unlock()
 	d.syncRuns++
 	now := time.Now()
+	// A failed acquisition never publishes its candidate set. Keep the tracked
+	// count aligned with the actual last-known campaign pool instead of recording
+	// the caller's zero-value candidate count as if Twitch authoritatively
+	// reported no campaigns. LastError still describes the failed attempt.
+	if err != nil {
+		trackedCount = len(d.campaigns)
+	}
 	d.lastSyncAt = now
 	d.lastDuration = duration
 	d.lastDashboardCount = dashboardCount
@@ -1379,26 +1386,38 @@ func (d *DropsTracker) getDropsDashboard(status string) ([]map[string]interface{
 		return nil, err
 	}
 
+	// ViewerDropsDashboard is an authoritative replacement source: accepting an
+	// untrusted shape as an empty list would erase the last-known campaign pool.
+	// Any top-level errors member means the operation was not a complete success,
+	// even when partial data accompanies it. A successful response omits errors.
+	if _, present := resp["errors"]; present {
+		return nil, fmt.Errorf("twitch GQL %s: top-level errors present", constants.ViewerDropsDashboard.OperationName)
+	}
+
 	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		return nil, nil
+	if !ok || data == nil {
+		return nil, fmt.Errorf("twitch GQL %s: missing or malformed data object", constants.ViewerDropsDashboard.OperationName)
 	}
 
 	currentUser, ok := data["currentUser"].(map[string]interface{})
 	if !ok || currentUser == nil {
-		return nil, nil
+		return nil, fmt.Errorf("twitch GQL %s: missing or malformed currentUser object", constants.ViewerDropsDashboard.OperationName)
 	}
 
 	campaignsData, ok := currentUser["dropCampaigns"].([]interface{})
 	if !ok || campaignsData == nil {
-		return nil, nil
+		return nil, fmt.Errorf("twitch GQL %s: missing or malformed dropCampaigns array", constants.ViewerDropsDashboard.OperationName)
 	}
 
-	var result []map[string]interface{}
-	for _, c := range campaignsData {
+	result := make([]map[string]interface{}, 0, len(campaignsData))
+	for i, c := range campaignsData {
 		campaign, ok := c.(map[string]interface{})
-		if !ok {
-			continue
+		if !ok || campaign == nil {
+			return nil, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] is not an object", constants.ViewerDropsDashboard.OperationName, i)
+		}
+		campaignID, ok := campaign["id"].(string)
+		if !ok || campaignID == "" || strings.TrimSpace(campaignID) != campaignID {
+			return nil, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] has no valid id", constants.ViewerDropsDashboard.OperationName, i)
 		}
 
 		if status != "" {
