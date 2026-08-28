@@ -1050,9 +1050,13 @@ An optional localhost-only diagnostic HTTP server (disabled by default):
 | Endpoint | Description |
 |----------|-------------|
 | `GET http://127.0.0.1:5757/debug/snapshot` | JSON snapshot of the miner's internal state: overall status, the active watch pair and why it was chosen, a per-streamer human-readable reason for being watched or not, drop campaigns, active predictions, and the most recent events (claims, bets, online/offline transitions) |
-| `GET http://127.0.0.1:5757/debug/log?lines=1000` | The last N lines of the log file as plain text (default 1000, max 2000) |
+| `GET http://127.0.0.1:5757/debug/log?lines=1000` | The last N complete lines across the retained log family as plain text (default 1000, max 2000; 4 MiB aggregate read budget) |
 
 The server binds strictly to `127.0.0.1` and is never reachable from other machines; no tokens or cookies are exposed. When enabled, the dashboard nav bar shows a **Debug** link to the snapshot. Note for Docker users: since it only listens on the container's loopback interface, it isn't reachable through `-p` port mappings — it's intended for running the binary directly.
+
+The built-in **Logs** page reads the newest 500 complete lines across the same
+retained family with one aggregate 2 MiB read budget. Both readers return the
+selected records in chronological order.
 
 ---
 
@@ -1369,7 +1373,7 @@ The miner creates the following directories:
 |-----------|----------|
 | `config/` | Configuration file |
 | `cookies/` | Authentication tokens |
-| `logs/` | Log files (7-day rotation) |
+| `logs/` | Canonical `logs/<StorageKey>.log` plus up to seven completed `.rotated-<20-digit-sequence>` segments when `logger.autoClear` is enabled |
 | `database/` | SQLite database (analytics, notifications) |
 
 ---

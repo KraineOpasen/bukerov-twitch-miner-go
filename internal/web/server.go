@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/health"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/i18n"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/notifications"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/policy"
@@ -134,6 +136,7 @@ type Server struct {
 	daysAgo        int
 	username       string
 	basePath       string
+	logPath        string
 	streamers      []*models.Streamer
 	discordEnabled bool
 	debugURL       string
@@ -248,6 +251,7 @@ func NewServer(analyticsSettings config.AnalyticsSettings, username string, base
 		daysAgo:   analyticsSettings.DaysAgo,
 		username:  username,
 		basePath:  basePath,
+		logPath:   stableLogPath(basePath, username),
 		streamers: streamers,
 		analytics: analyticsSvc,
 		i18n:      loc,
@@ -269,6 +273,7 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 		daysAgo:   analyticsSettings.DaysAgo,
 		username:  username,
 		basePath:  basePath,
+		logPath:   stableLogPath(basePath, username),
 		streamers: nil,
 		analytics: analyticsSvc,
 		i18n:      loc,
@@ -277,6 +282,17 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 		status:    NewStatusBroadcaster(),
 		ready:     false,
 	}
+}
+
+func stableLogPath(basePath, username string) string {
+	if basePath == "" {
+		return logger.LogFilePath(username)
+	}
+	key := filepath.Base(filepath.Clean(basePath))
+	if key == "." || key == string(filepath.Separator) || key == "" {
+		key = username
+	}
+	return logger.LogFilePath(key)
 }
 
 // loadTemplates parses each page (base + page + partials) and the standalone

@@ -1,25 +1,23 @@
 package debug
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/logger"
 )
 
 const (
 	defaultLogLines = 1000
 	maxLogLines     = 2000
 
-	// maxLogTailBytes bounds how much of the log file is read from the end
-	// when serving /debug/log; generous enough for maxLogLines of typical
-	// slog output without ever loading a multi-day log wholesale.
+	// maxLogTailBytes is one total read budget for the retained log family;
+	// it is generous enough for maxLogLines of typical slog output.
 	maxLogTailBytes = 4 << 20
 )
 
@@ -33,7 +31,8 @@ type SnapshotFunc func() Snapshot
 type Server struct {
 	port     int
 	snapshot SnapshotFunc
-	// logPath is the miner's log file, served by /debug/log. Empty when
+	// logPath is the miner's canonical active log path; /debug/log also reads
+	// its exact retained segments. Empty when
 	// file logging is disabled.
 	logPath string
 
@@ -148,60 +147,8 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(tail)
 }
 
-// tailFile returns the last n lines of the file at path, reading at most
-// maxLogTailBytes from its end.
+// tailFile returns the last n lines across the retained family at path, using
+// maxLogTailBytes as one aggregate physical-read budget.
 func tailFile(path string, n int) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	offset := info.Size() - maxLogTailBytes
-	truncated := offset > 0
-	if !truncated {
-		offset = 0
-	}
-
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-
-	if truncated {
-		// The first line is almost certainly cut mid-way; drop it.
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			data = data[i+1:]
-		}
-	}
-
-	data = bytes.TrimRight(data, "\n")
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	// Walk backwards to the start of the n-th line from the end.
-	pos := len(data)
-	for i := 0; i < n; i++ {
-		next := bytes.LastIndexByte(data[:pos], '\n')
-		if next < 0 {
-			pos = 0
-			break
-		}
-		pos = next
-	}
-	if pos > 0 {
-		pos++ // skip the newline itself
-	}
-
-	out := data[pos:]
-	return append(out, '\n'), nil
+	return logger.TailLogFamily(path, n, maxLogTailBytes)
 }

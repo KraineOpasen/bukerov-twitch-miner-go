@@ -123,3 +123,115 @@ func TestTailFileMoreLinesThanFile(t *testing.T) {
 		t.Fatalf("expected whole file back, got %q", string(out))
 	}
 }
+
+func TestLogEndpointTailsRetainedFamily(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "family.log")
+	var archive, active strings.Builder
+	for i := 1; i <= 1800; i++ {
+		fmt.Fprintf(&archive, "archive-%04d\n", i)
+	}
+	for i := 1; i <= 700; i++ {
+		fmt.Fprintf(&active, "active-%04d\n", i)
+	}
+	if err := os.WriteFile(logPath+".rotated-00000000000000000001", []byte(archive.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(active.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := startTestServer(t, func() Snapshot { return Snapshot{} }, logPath)
+	tests := []struct {
+		name      string
+		query     string
+		wantLines int
+		first     string
+		boundary  string
+		last      string
+	}{
+		{name: "default-1000", query: "", wantLines: 1000, first: "archive-1501", boundary: "active-0001", last: "active-0700"},
+		{name: "clamped-2000", query: "?lines=5000", wantLines: 2000, first: "archive-0501", boundary: "active-0001", last: "active-0700"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := http.Get(base + "/debug/log" + tc.query)
+			if err != nil {
+				t.Fatalf("GET /debug/log: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+			if len(lines) != tc.wantLines {
+				t.Fatalf("lines=%d, want %d", len(lines), tc.wantLines)
+			}
+			boundaryIndex := tc.wantLines - 700
+			if lines[0] != tc.first || lines[boundaryIndex] != tc.boundary || lines[len(lines)-1] != tc.last {
+				t.Fatalf("family tail order/boundary wrong: first=%q boundary=%q last=%q", lines[0], lines[boundaryIndex], lines[len(lines)-1])
+			}
+		})
+	}
+}
+
+func TestLogEndpointHonorsFourMiBAcrossFamily(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "budget.log")
+	payload := strings.Repeat("x", 3000)
+	var archive, active strings.Builder
+	for i := 1; i <= 1000; i++ {
+		fmt.Fprintf(&archive, "archive-%04d-%s\n", i, payload)
+	}
+	for i := 1; i <= 1000; i++ {
+		fmt.Fprintf(&active, "active-%04d-%s\n", i, payload)
+	}
+	if err := os.WriteFile(logPath+".rotated-00000000000000000001", []byte(archive.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(active.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := startTestServer(t, func() Snapshot { return Snapshot{} }, logPath)
+	resp, err := http.Get(base + "/debug/log?lines=5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxLogTailBytes {
+		t.Fatalf("debug response bytes=%d exceed cap=%d", len(body), maxLogTailBytes)
+	}
+	if len(body) > 0 && body[len(body)-1] != '\n' {
+		t.Fatal("debug response ends with a partial record")
+	}
+	if strings.Contains(string(body), "archive-0001-") || !strings.Contains(string(body), "active-1000-") {
+		t.Fatal("debug family byte cap selected the wrong end of retained history")
+	}
+}
+
+func TestLogEndpointServesArchivesWithoutActive(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "archives-only.log")
+	if err := os.WriteFile(logPath+".rotated-00000000000000000001", []byte("archive-only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := startTestServer(t, func() Snapshot { return Snapshot{} }, logPath)
+	resp, err := http.Get(base + "/debug/log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "archive-only\n" {
+		t.Fatalf("archives-only debug family: status=%d body=%q", resp.StatusCode, body)
+	}
+}

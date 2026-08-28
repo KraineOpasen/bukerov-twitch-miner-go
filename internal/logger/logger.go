@@ -3,28 +3,38 @@ package logger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
+	"strings"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
 )
 
 type Logger struct {
-	file    *os.File
+	file    *rotatingWriter
 	console *consoleWriter
 	handler slog.Handler
 }
 
-// LogFilePath returns the path of the log file Setup writes to for username
+// LogFilePath returns the canonical active path Setup writes to for storageKey
 // when file logging (settings.Save) is enabled. Exposed so other components
-// (the debug endpoint's log tail) can locate the same file.
-func LogFilePath(username string) string {
-	return filepath.Join("logs", username+".log")
+// can locate the same retained family without following a mutable username.
+// It returns an empty path for a key that cannot be one safe file component.
+func LogFilePath(storageKey string) string {
+	if validateStorageKey(storageKey) != nil {
+		return ""
+	}
+	return filepath.Join("logs", storageKey+".log")
 }
 
-func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
+func Setup(storageKey string, settings config.LoggerSettings) (*Logger, error) {
+	return setupWithOptions(storageKey, settings, rotationOptions{})
+}
+
+func setupWithOptions(storageKey string, settings config.LoggerSettings, opts rotationOptions) (*Logger, error) {
+	opts = opts.withDefaults()
 	consoleLevel := parseLevel(settings.ConsoleLevel)
 	fileLevel := parseLevel(settings.FileLevel)
 
@@ -35,23 +45,34 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 	// console last means an early return here never leaks that goroutine.
 	var fileHandler slog.Handler
 	if settings.Save {
+		if err := validateStorageKey(storageKey); err != nil {
+			return nil, err
+		}
 		if err := os.MkdirAll("logs", 0755); err != nil {
 			return nil, err
 		}
 
-		logPath := LogFilePath(username)
-
+		logPath := LogFilePath(storageKey)
+		segmentStarted := opts.now()
+		fileMode := os.FileMode(0o644)
 		if settings.AutoClear {
-			clearOldLogs(logPath, 7)
+			if err := pruneCompletedSegments(logPath, maxCompletedSegments, opts.ops); err != nil {
+				return nil, err
+			}
+			var err error
+			segmentStarted, fileMode, err = inspectActiveSegment(logPath, segmentStarted, opts.ops)
+			if err != nil {
+				return nil, err
+			}
 		}
 
-		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		file, err := opts.ops.openFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fileMode)
 		if err != nil {
 			return nil, err
 		}
-		l.file = file
+		l.file = newRotatingWriter(file, logPath, fileMode, segmentStarted, settings.AutoClear, opts)
 
-		fileHandler = slog.NewTextHandler(file, &slog.HandlerOptions{
+		fileHandler = slog.NewTextHandler(l.file, &slog.HandlerOptions{
 			Level: fileLevel,
 		})
 	}
@@ -76,6 +97,32 @@ func Setup(username string, settings config.LoggerSettings) (*Logger, error) {
 	slog.SetDefault(slog.New(handler))
 
 	return l, nil
+}
+
+func validateStorageKey(storageKey string) error {
+	if storageKey == "" || storageKey == "." || storageKey == ".." ||
+		!filepath.IsLocal(storageKey) || filepath.Base(storageKey) != storageKey ||
+		filepath.VolumeName(storageKey) != "" || strings.ContainsAny(storageKey, `<>:"/\|?*`) ||
+		strings.HasSuffix(storageKey, ".") || strings.HasSuffix(storageKey, " ") {
+		return fmt.Errorf("invalid logger storage key %q: must be one cross-platform-safe path component", storageKey)
+	}
+	for _, char := range storageKey {
+		if char < ' ' {
+			return fmt.Errorf("invalid logger storage key %q: contains a control character", storageKey)
+		}
+	}
+	windowsBase := strings.ToUpper(strings.SplitN(storageKey, ".", 2)[0])
+	windowsDevice := windowsBase == "CON" || windowsBase == "PRN" || windowsBase == "AUX" || windowsBase == "NUL" ||
+		windowsBase == "CONIN$" || windowsBase == "CONOUT$"
+	if strings.HasPrefix(windowsBase, "COM") || strings.HasPrefix(windowsBase, "LPT") {
+		suffix := windowsBase[3:]
+		windowsDevice = windowsDevice || suffix == "1" || suffix == "2" || suffix == "3" || suffix == "4" || suffix == "5" ||
+			suffix == "6" || suffix == "7" || suffix == "8" || suffix == "9" || suffix == "¹" || suffix == "²" || suffix == "³"
+	}
+	if windowsDevice {
+		return fmt.Errorf("invalid logger storage key %q: reserved on Windows", storageKey)
+	}
+	return nil
 }
 
 // fanoutHandler dispatches every record to each underlying handler, each of
@@ -151,16 +198,5 @@ func parseLevel(level string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
-	}
-}
-
-func clearOldLogs(logPath string, daysToKeep int) {
-	info, err := os.Stat(logPath)
-	if err != nil {
-		return
-	}
-
-	if time.Since(info.ModTime()) > time.Duration(daysToKeep)*24*time.Hour {
-		_ = os.Remove(logPath)
 	}
 }
