@@ -20,12 +20,15 @@ func TestSelectByPriorityFavorsChannelRestrictedDrop(t *testing.T) {
 	for _, idx := range online {
 		w.streamers[idx].SetConfirmedOnline()
 		w.streamers[idx].Stream.SetCampaignIDs([]string{"campaign-unrestricted"})
+		w.streamers[idx].Stream.SetCampaigns([]*models.Campaign{
+			watchSlotTestCampaign("campaign-unrestricted", w.streamers[idx].ChannelID, false),
+		})
 	}
 
 	// Only streamer 2 also holds a channel-restricted campaign.
-	w.streamers[2].Stream.Campaigns = []*models.Campaign{
-		{ID: "campaign-restricted", Channels: []string{w.streamers[2].ChannelID}},
-	}
+	w.streamers[2].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-restricted", w.streamers[2].ChannelID, true),
+	})
 
 	watching := w.selectByPriority(online)
 

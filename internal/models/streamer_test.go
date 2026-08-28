@@ -14,14 +14,44 @@ func TestHasChannelRestrictedCampaign(t *testing.T) {
 		t.Error("streamer with no campaigns should not have a channel-restricted campaign")
 	}
 
-	s.Stream.Campaigns = []*Campaign{{ID: "unrestricted"}}
+	s.Stream.SetCampaigns([]*Campaign{{
+		ID:    "unrestricted",
+		Drops: []*Drop{{ID: "unrestricted-drop", MinutesRequired: 30}},
+	}})
 	if s.HasChannelRestrictedCampaign() {
 		t.Error("streamer with only unrestricted campaigns should not report a channel-restricted campaign")
 	}
 
-	s.Stream.Campaigns = append(s.Stream.Campaigns, &Campaign{ID: "restricted", Channels: []string{"channel-1"}})
+	restricted := &Campaign{
+		ID:       "restricted",
+		Channels: []string{"channel-1"},
+		Drops:    []*Drop{{ID: "restricted-drop", MinutesRequired: 30}},
+	}
+	s.Stream.SetCampaigns(append(s.Stream.GetCampaigns(), restricted))
 	if !s.HasChannelRestrictedCampaign() {
 		t.Error("streamer with a channel-restricted campaign should report it")
+	}
+	settings := s.GetSettings()
+	settings.ClaimDrops = false
+	s.SetSettings(settings)
+	if s.HasChannelRestrictedCampaign() {
+		t.Error("disabled Drops must suppress retained restricted-campaign authority")
+	}
+	settings.ClaimDrops = true
+	s.SetSettings(settings)
+
+	completedRestricted := &Campaign{
+		ID:       "restricted-completed",
+		Channels: []string{"channel-1"},
+		Drops: []*Drop{{
+			ID:                    "restricted-completed-drop",
+			MinutesRequired:       30,
+			CurrentMinutesWatched: 30,
+		}},
+	}
+	s.Stream.SetCampaigns([]*Campaign{completedRestricted})
+	if s.HasChannelRestrictedCampaign() {
+		t.Error("completed restricted campaign must not report restricted slot authority")
 	}
 }
 

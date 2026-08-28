@@ -415,6 +415,23 @@ func (c *Campaign) CurrentDrop() *Drop {
 	return c.FinalDrop()
 }
 
+// HasRemainingUnclaimedWork reports whether this campaign still contains at
+// least one reward that can gain progress from another watched minute. It is a
+// pure projection over the tracker-published campaign snapshot: claimed
+// campaigns, claimed rewards, nil rewards, and rewards whose watch threshold
+// is already met contribute no remaining work.
+func (c *Campaign) HasRemainingUnclaimedWork() bool {
+	if c == nil || c.ClaimStatus == CampaignClaimStatusAlreadyClaimed {
+		return false
+	}
+	for _, drop := range c.Drops {
+		if drop != nil && !drop.IsClaimed && drop.CurrentMinutesWatched < drop.MinutesRequired {
+			return true
+		}
+	}
+	return false
+}
+
 // FinalDrop returns the campaign's furthest milestone — the remaining drop
 // with the largest required watch time — or nil when there are no drops.
 func (c *Campaign) FinalDrop() *Drop {

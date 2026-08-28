@@ -166,6 +166,9 @@ func TestSessionConverge_CommittedSnapshotReflectsBoostDisplacement(t *testing.T
 	b := bringOnlineCoherent("streamerb", "cid-b", "broadcast-b", "http://spade.test/b")
 	c := bringOnlineCoherent("streamerc", "cid-c", "broadcast-c", "http://spade.test/c")
 	c.Stream.SetCampaignIDs([]string{"campaign-1"}) // active (unrestricted) drop -> boost-eligible
+	c.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-1", c.ChannelID, false),
+	})
 
 	w, _, adapter, _ := newDeliveryLifecycleWatcher(t, []*models.Streamer{a, b, c})
 

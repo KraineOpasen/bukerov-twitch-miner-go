@@ -48,9 +48,9 @@ func TestBoostRestrictedDropStillOutranksStreak(t *testing.T) {
 	w.streamers[3].SetConfirmedOnline()
 	w.streamers[2].Stream.MinuteWatched = 6 // streak nearly done
 	w.streamers[3].Stream.SetCampaignIDs([]string{"restricted"})
-	w.streamers[3].Stream.Campaigns = []*models.Campaign{
-		{ID: "restricted", Channels: []string{w.streamers[3].ChannelID}},
-	}
+	w.streamers[3].Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("restricted", w.streamers[3].ChannelID, true),
+	})
 
 	w.rotation.lastWatched = map[int]time.Time{
 		0: time.Now(), 1: time.Now(),

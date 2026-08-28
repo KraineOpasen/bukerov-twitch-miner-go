@@ -324,6 +324,10 @@ func TestCampaignPolicyBoundedUtilityArbitratesConfiguredAndDiscovery(t *testing
 
 	disco := discoveryStreamer("overlap_discovery", false)
 	disco.Stream.SetCampaignIDs([]string{discoveryPrimary, discoverySecondary})
+	disco.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign(discoveryPrimary, disco.ChannelID, false),
+		watchSlotTestCampaign(discoverySecondary, disco.ChannelID, false),
+	})
 	w.SetDiscoveryCandidatePolicy(disco.GetUsername(), CandidateCampaignPolicy{
 		CampaignIDs:              []string{discoveryPrimary, discoverySecondary},
 		RemainingWorkCampaignIDs: []string{discoveryPrimary, discoverySecondary},
@@ -355,6 +359,11 @@ func TestCampaignPolicyStrongerPrimaryBlocksManyDiscoverySecondaries(t *testing.
 
 	disco := discoveryStreamer("many_weak_discovery", false)
 	disco.Stream.SetCampaignIDs(ids)
+	assigned := make([]*models.Campaign, 0, len(ids))
+	for _, id := range ids {
+		assigned = append(assigned, watchSlotTestCampaign(id, disco.ChannelID, false))
+	}
+	disco.Stream.SetCampaigns(assigned)
 	w.SetDiscoveryCandidatePolicy(disco.GetUsername(), CandidateCampaignPolicy{
 		CampaignIDs:              ids,
 		RemainingWorkCampaignIDs: ids,
@@ -525,6 +534,9 @@ func TestCampaignPolicyFirstPublicationWaitsForNextBrokerTick(t *testing.T) {
 	disco := discoveryStreamer("first_policy_discovery", false)
 	discoID := "first-policy-campaign"
 	disco.Stream.SetCampaignIDs([]string{discoID})
+	disco.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign(discoID, disco.ChannelID, false),
+	})
 	byCampaign[discoID] = policy.CampaignSemantic{SemanticClass: 0, SecondaryEligible: true}
 	w.AddSource(&discoveryPolicySwapSource{
 		w:         w,
@@ -611,6 +623,9 @@ func TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation(t *t
 		s.Settings.WatchStreak = false
 		id := "campaign-" + string(rune('a'+i))
 		s.Stream.SetCampaignIDs([]string{id})
+		s.Stream.SetCampaigns([]*models.Campaign{
+			watchSlotTestCampaign(id, s.ChannelID, false),
+		})
 	}
 
 	weak := discoveryStreamer("discovery_game_one", false)
@@ -685,6 +700,12 @@ func TestCampaignPolicyPreservesFreshStreakBoostAgainstActiveDrop(t *testing.T) 
 	activeDrop.Settings.ClaimDrops = true
 	activeDrop.SetConfirmedOnline()
 	activeDrop.Stream.SetCampaignIDs([]string{"campaign-active"})
+	activeDrop.Stream.SetCampaigns([]*models.Campaign{
+		watchSlotTestCampaign("campaign-active", activeDrop.ChannelID, false),
+	})
+	if !activeDrop.DropsCondition() {
+		t.Fatal("precondition: active-drop base member lacks authoritative unfinished assignment")
+	}
 	freshStreak := w.streamers[2]
 	freshStreak.Settings.WatchStreak = true
 	freshStreak.Stream.Update("fresh-streak-broadcast", "t", nil, nil, 1)
