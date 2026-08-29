@@ -132,10 +132,13 @@ type StreamerSettingsConfig struct {
 	CommunityGoalsMaxPercent *int `json:"communityGoalsMaxPercent,omitempty"`
 	// CommunityGoalsMaxAmount caps a single contribution to this absolute number
 	// of points (0 = no cap). Applies only when CommunityGoals is on.
-	CommunityGoalsMaxAmount *int             `json:"communityGoalsMaxAmount,omitempty"`
-	Chat                    *string          `json:"chat,omitempty"`
-	Bet                     *BetSettingsJSON `json:"bet,omitempty"`
-	Preference              *string          `json:"preference,omitempty"`
+	CommunityGoalsMaxAmount *int    `json:"communityGoalsMaxAmount,omitempty"`
+	Chat                    *string `json:"chat,omitempty"`
+	// ChatLogs is tri-state: nil inherits the global analytics Chat Logs
+	// setting, while non-nil false/true are explicit per-streamer choices.
+	ChatLogs   *bool            `json:"chatLogs,omitempty"`
+	Bet        *BetSettingsJSON `json:"bet,omitempty"`
+	Preference *string          `json:"preference,omitempty"`
 	// DisableWatch hard-excludes the streamer from the watch rotation (see
 	// models.StreamerSettings.DisableWatch). Pointer so an unset value falls
 	// back to DefaultSettings rather than forcing false.

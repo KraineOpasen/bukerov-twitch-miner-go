@@ -558,6 +558,12 @@
         { value: 'NEVER', label: t('js.set.opt.chat.never') }
     ];
 
+    const chatLogsOptions = [
+        { value: 'inherit', label: t('js.set.opt.chat_logs.inherit') },
+        { value: 'enabled', label: t('js.set.opt.chat_logs.enabled') },
+        { value: 'disabled', label: t('js.set.opt.chat_logs.disabled') }
+    ];
+
     const preferenceOptions = [
         { value: '', label: t('js.set.opt.pref.none') },
         { value: 'prefer', label: t('js.set.opt.pref.prefer') },
@@ -858,6 +864,7 @@
             return value ? 'checked' : '';
         };
         const selectValue = (field, value, defaultVal) => value !== undefined && value !== null ? value : defaultVal;
+        const chatLogsValue = value => value === true ? 'enabled' : (value === false ? 'disabled' : 'inherit');
 
         return `
             <div class="space-y-0">
@@ -924,6 +931,15 @@
                     </div>
                     <select class="input-field w-36" data-field="chat" data-prefix="${prefix}">
                         ${chatOptions.map(o => `<option value="${o.value}" ${selectValue('chat', settings.chat, 'ONLINE') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">${t('js.set.form.chat_logs')}</div>
+                        <div class="setting-description">${t('js.set.form.chat_logs.desc')}</div>
+                    </div>
+                    <select class="input-field w-36" data-field="chatLogs" data-prefix="${prefix}">
+                        ${chatLogsOptions.map(o => `<option value="${o.value}" ${chatLogsValue(settings.chatLogs) === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
                     </select>
                 </div>
                 ${isOverride ? `
@@ -1065,7 +1081,18 @@
                 value = input.value;
             }
             
-            if (field.startsWith('bet.')) {
+            if (field === 'chatLogs') {
+                if (value === 'enabled') {
+                    settings[field] = true;
+                } else if (value === 'disabled') {
+                    settings[field] = false;
+                } else {
+                    // Explicit null is required here: defaultSettings is
+                    // decoded over the current DTO, so omission would retain
+                    // a previous true/false instead of clearing to inherit.
+                    settings[field] = null;
+                }
+            } else if (field.startsWith('bet.')) {
                 if (!settings.bet) settings.bet = {};
                 settings.bet[field.substring(4)] = value;
             } else {
