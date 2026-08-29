@@ -933,7 +933,7 @@ Drop
 ├── requiredMinutesWatched: int
 ├── currentMinutesWatched: int
 ├── percentageProgress: int
-├── hasPreconditionsMet: bool
+├── hasPreconditionsMet: bool | null (null is distinct from false and true)
 ├── dropInstanceId: string (null until started)
 ├── isClaimable: bool
 ├── isClaimed: bool
@@ -1042,18 +1042,31 @@ default, range 1-60):
 Progress sync (dropProgressSyncInterval, or on demand)
    ├── GET Inventory   (single query; no dashboard listing, no per-campaign
    │                    DropCampaignDetails fetches)
-   ├── For each already-tracked campaign the inventory reports progress for:
-   │   clone it, advance its drops' currentMinutesWatched from the inventory
-   │   `self` data, drop claimed/out-of-window drops
+   ├── For each already-tracked campaign the inventory reports Drop state for:
+   │   clone it, refresh currentMinutesWatched and, when explicitly reported as
+   │   Boolean, hasPreconditionsMet from the inventory `self` data; drop
+   │   claimed/out-of-window drops
    └── Republish the campaign pool (fresh objects, swapped under lock so the
        Drops page and directory discovery keep reading immutable published
-       campaigns) only when progress actually changed
+       campaigns) only when tracked publication state changed semantically
 ```
 
-It never discovers, claims, or filters campaigns — those stay with the full
-sync — it only advances the watched-minute counters of campaigns the full
-sync already published. A newly seen campaign still requires a full sync for
-discovery and is found on the ordinary interval or an explicit full-sync wake.
+It never discovers new campaigns, claims Drops, or owns the full-sync campaign
+filters. On campaigns the full sync already published, a Drop-set/count/identity
+change, a `CurrentMinutesWatched` change, or a semantic `HasPreconditionsMet`
+tri-state change (`nil`, explicit `false`, or explicit `true`) republishes the
+shared immutable pool. A `HasPreconditionsMet`-only publication increments
+`Revision` exactly once, records `UpdateSource=light_sync`, and re-points
+streamers using the fresh published `Campaigns()` snapshot. Repeated
+semantically identical observations do not churn the pool, revision, source,
+or streamer pointers; an omitted `hasPreconditionsMet` observation does not
+erase a previously known value.
+
+`HasPreconditionsMet` is publication state here, not a local interpretation of
+watch-progress or broker eligibility. In particular, `nil` is not coerced to
+either Boolean value and explicit `false` is not classified as `IMPOSSIBLE`.
+A newly seen campaign still requires a full sync for discovery and is found on
+the ordinary interval or an explicit full-sync wake.
 The watcher calls `DropsTracker.TriggerProgressSync` after every successfully
 reported watched minute, so a watched minute is reflected on the Drops page
 within seconds rather than waiting out the interval.
@@ -1069,7 +1082,7 @@ superseded — an unguarded republish would resurrect a removed campaign, drop
 one the full sync just added, or revert streamer assignments, silently
 undoing the full sync's own result.
 
-Every outcome a light sync can report — changed progress, an unchanged
+Every outcome a light sync can report — changed tracked state, an unchanged
 observation, or a valid empty/no-in-progress inventory — is therefore
 conditional on the revision it observed: immediately before publishing
 (or, for an unchanged/empty result, before recording the observation at
@@ -1083,6 +1096,12 @@ the revision has moved on, the result is discarded in full:
 - `ProgressLastSyncAt`/`ProgressLastError` are not touched — a discarded
   result must never look like a fresh observation of the newer pool;
 - at most a DEBUG diagnostic is logged; the sync returns without retrying.
+
+The subsequent streamer re-point is fenced separately against a newer
+publication. If a light-sync assignment pass captured an older `Revision`, it
+is discarded before applying; if the newer full-sync publication lands after
+that check, serialized re-pointing makes the newer pass run last. An older
+light-sync pass therefore cannot overwrite a newer full-sync assignment.
 
 The next scheduled (or on-demand) light sync simply observes whatever pool is
 current by then. Progress can legitimately decrease after a valid Twitch
@@ -2404,7 +2423,7 @@ Drop
 ├── minutesRequired: int
 ├── currentMinutesWatched: int
 ├── percentageProgress: int
-├── hasPreconditionsMet: bool
+├── hasPreconditionsMet: bool | null (null is distinct from false and true)
 ├── dropInstanceId: string
 ├── isClaimable: bool
 ├── isClaimed: bool
