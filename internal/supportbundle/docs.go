@@ -129,19 +129,23 @@ type dropsDoc struct {
 }
 
 type dropsSyncStatusDoc struct {
-	LastSyncAt             time.Time `json:"lastSyncAt,omitzero"`
-	LastSuccessAt          time.Time `json:"lastSuccessAt,omitzero"`
-	IntervalMinutes        int       `json:"intervalMinutes,omitempty"`
-	SyncRuns               int       `json:"syncRuns"`
-	DashboardCampaigns     int       `json:"dashboardCampaigns"`
-	TrackedCampaigns       int       `json:"trackedCampaigns"`
-	RecoveredFromInventory int       `json:"recoveredFromInventory"`
-	FilteredByBlacklist    int       `json:"filteredByBlacklist"`
-	FilteredByGame         int       `json:"filteredByGame"`
-	LastSyncFailed         bool      `json:"lastSyncFailed"`
-	Revision               uint64    `json:"revision"`
-	BackendUpdatedAt       time.Time `json:"backendUpdatedAt,omitzero"`
-	UpdateSource           string    `json:"updateSource,omitempty"`
+	LastSyncAt         time.Time `json:"lastSyncAt,omitzero"`
+	LastSuccessAt      time.Time `json:"lastSuccessAt,omitzero"`
+	IntervalMinutes    int       `json:"intervalMinutes,omitempty"`
+	SyncRuns           int       `json:"syncRuns"`
+	DashboardCampaigns int       `json:"dashboardCampaigns"`
+	// DashboardListingUnavailable is always serialized (no omitempty, like
+	// lastSyncFailed): explicit false distinguishes an authoritative
+	// zero-campaign listing from the UNKNOWN (explicit null) listing state.
+	DashboardListingUnavailable bool      `json:"dashboardListingUnavailable"`
+	TrackedCampaigns            int       `json:"trackedCampaigns"`
+	RecoveredFromInventory      int       `json:"recoveredFromInventory"`
+	FilteredByBlacklist         int       `json:"filteredByBlacklist"`
+	FilteredByGame              int       `json:"filteredByGame"`
+	LastSyncFailed              bool      `json:"lastSyncFailed"`
+	Revision                    uint64    `json:"revision"`
+	BackendUpdatedAt            time.Time `json:"backendUpdatedAt,omitzero"`
+	UpdateSource                string    `json:"updateSource,omitempty"`
 }
 
 type dropCampaignDoc struct {

@@ -946,7 +946,11 @@ Drop
 ```
 1. Sync Campaigns (startup; every 60 minutes by default; manual/config wake)
    ├── GET ViewerDropsDashboard (explicitly non-active summaries are rejected;
-   │   a missing summary status fails open to detail/window validation)
+   │   a missing summary status fails open to detail/window validation; an
+   │   explicit JSON null dropCampaigns listing is UNKNOWN — the sync
+   │   continues and the inventory recovery in step 2 still applies, but the
+   │   listing carries no authority; missing/wrong-type/malformed listings and
+   │   top-level GQL errors remain errors — see "Dashboard-listing authority")
    ├── GET DropCampaignDetails for each
    ├── Backfill campaign date window (startAt/endAt) from the dashboard
    │   summary when the details response omits it, then recompute the
@@ -957,7 +961,9 @@ Drop
    (One concise INFO line is logged per sync — dashboard count, recovered-
    from-inventory count, and tracked count — and the same figures plus the
    tracked campaign list are exposed at GET /debug/snapshot under "drops", so
-   an empty Drops page is diagnosable without -debug.)
+   an empty Drops page is diagnosable without -debug. For an UNKNOWN listing
+   the summary instead reports tracked / recovered-from-inventory /
+   kept-from-last-known counts — see "Dashboard-listing authority".)
 
 2. Sync Inventory
    ├── GET Inventory
@@ -1002,7 +1008,10 @@ Drop
        accept / E2 already-claimed — see "Drop Skip Ledger" below)
 
 5. Broker-Facing Assignment (updateStreamerCampaigns — every full AND
-   lightweight sync)
+   lightweight sync that publishes; a sync that leaves the published pool
+   untouched — an UNKNOWN dashboard listing with no fresh inventory evidence,
+   or a no-change light sync — skips it, since assignments are already
+   current)
    └── Filter each campaign's drops against the skip ledger (Decide) before a
        streamer may be assigned it, on a CLONE only — the tracked pool itself
        (Campaigns(), the catalog, every published Campaign) always stays the
@@ -1108,6 +1117,79 @@ current by then. Progress can legitimately decrease after a valid Twitch
 observation (no local monotonic-max rule), and this guard does not change
 that — it only ensures a response is judged against the pool it was actually
 taken from.
+
+### Dashboard-listing authority (explicit null is UNKNOWN, never authoritative zero)
+
+The full sync classifies the `ViewerDropsDashboard` response's
+`data.currentUser.dropCampaigns` value into three distinct states:
+
+- **Explicit JSON array (including `[]`)** — authoritative. `[]` is a genuine
+  "no campaigns listed" observation and flows through the normal
+  dashboard/details path; campaigns absent from an authoritative listing may
+  be removed by the ordinary pipeline.
+- **Missing key, wrong type, or malformed campaign elements — and any
+  top-level GQL `errors` member** — an error, exactly as before: the sync
+  fails the dashboard/details stage and the last-known-good pool is preserved
+  (see the next section). This classification is deliberately unchanged (the
+  PR #252 response-authority protection).
+- **Explicit JSON `null`** — a distinct UNKNOWN/unavailable listing state.
+  Production Twitch has been empirically observed (2026-08, authenticated
+  read-only canaries across persisted-query hashes, variables, and client
+  profiles) answering HTTP 200 with `data` and `currentUser` objects present
+  and exactly this null — without top-level errors on all but one tested
+  profile (the browser/web profile carried top-level `errors` alongside the
+  null; that combined shape is still rejected by the errors gate above). The
+  errorless null is **not** an error and **not** an authoritative empty
+  listing: the sync continues with an empty dashboard/details-derived set,
+  and the existing `syncWithInventory` reconciliation (step 2 of "Drop
+  Claiming Flow") still surfaces every in-progress campaign Twitch is
+  actively crediting — a bounded, positive-only recovery. "Fresh evidence"
+  here means an in-progress entry that yields at least one usable unclaimed
+  drop; a fully-claimed entry leaves the campaign's previous version carried
+  over while claiming and the drop skip ledger consume the raw entry
+  directly.
+
+A null listing alone can therefore never erase last-known campaign state.
+Campaigns the inventory positively proves in progress take the normal
+pipeline's outcome (refreshed, or removed by claim-history/blacklist/game/
+account-link authority); a refreshed campaign rebuilt from a date-less
+inventory entry inherits its previous version's known StartAt/EndAt window
+(a date-less rebuild cannot zero out good dates, the same rule the drop
+catalog applies); previously tracked campaigns with no fresh inventory
+evidence are carried over unchanged, because absence from
+`dropCampaignsInProgress` is not proof a campaign ended. When there is no
+fresh evidence at all, the published pool, `Revision`, `BackendUpdatedAt`,
+and `UpdateSource` stay untouched (no republish). Removing a previously
+tracked campaign requires an authoritative listing (an explicit array without
+it) or campaign-level authoritative evidence (expiry, claim). This mirrors
+the existing rules that an omitted `hasPreconditionsMet` observation does not
+erase a previously known value, and that a date-less catalog observation
+cannot zero out good dates.
+
+An UNKNOWN (null) listing is not recorded as a `SyncStatus.LastError`: the
+attempt counts normally (`LastSyncAt`/`Runs` advance, and `LastSuccessAt`
+advances iff the subsequent inventory merge succeeds), while
+`SyncStatus.DashboardListingUnavailable` is set and `DashboardCampaigns`
+reads 0 because nothing was listed — never as an authoritative zero. The
+per-sync summary line for this state says the listing was unavailable and
+reports tracked/recovered/kept-from-last-known counts; it never claims
+"Twitch reports no active drop campaigns", which remains reserved for an
+authoritative empty listing.
+
+The UNKNOWN state is a distinct operator-visible state end to end, so
+`dashboardCampaigns: 0` can always be told apart from an authoritative zero:
+
+- the Health Center's **Drops Inventory Sync** signal reports `degraded` with
+  the stable code `dashboard_listing_unavailable` (detail: inventory
+  reconciliation succeeded, N campaign(s) tracked, newly discoverable
+  campaigns may be missing) — never ordinary "successful discovery"; an
+  actual sync error keeps its `failed`/`sync_error` precedence over the flag;
+- the debug snapshot's `drops` section, the manual-sync JSON
+  (`POST /api/drops/sync`), and the support bundle's `drops.json syncStatus`
+  all carry an explicit `dashboardListingUnavailable` boolean (always
+  serialized, so `false` is explicit — key absence never stands in for it),
+  crossing the support bundle's typed allowlist as a plain flag with no raw
+  Twitch response material, error bodies, or query metadata.
 
 ### Full-sync inventory-merge failure preserves the last-known-good pool
 
@@ -1552,7 +1634,11 @@ The signals are distinct kinds of health:
 - **Watch Transport** — whether Twitch *accepts the watch transport and beacon*
   (from the canary, below). This is independent of whether any drop is active.
 - **Drops Inventory Sync** — whether the periodic inventory sync is running
-  without error (from the drops tracker's sync status).
+  without error (from the drops tracker's sync status). A sync that completed
+  without error but observed the explicit-null (UNKNOWN) dashboard listing is
+  `degraded` with the stable code `dashboard_listing_unavailable` — never
+  ordinary "successful discovery" — while an actual sync error keeps its
+  `failed`/`sync_error` precedence (see "Dashboard-listing authority").
 - **Drops Progress** — composed by the drop-progress watchdog (below): `ok`
   while every tracked drop advances (with a `recovering:<stage>` marker while
   the pipeline runs), `stalled` once a drop's stall is confirmed and automatic

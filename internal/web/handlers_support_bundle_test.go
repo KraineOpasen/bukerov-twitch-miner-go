@@ -369,6 +369,63 @@ func TestSupportBundleRawErrorBecomesBoundedFlag(t *testing.T) {
 	}
 }
 
+// TestSupportBundleExposesUnavailableListing is RED E (handler half): the
+// dashboardListingUnavailable fact must cross the typed support-bundle
+// allowlist explicitly — drops.json's syncStatus must carry the key for both
+// states, so a bundle collected during a null-listing outage can distinguish
+// "0 listed, listing unknown" from "0 listed, authoritative". Uses the same
+// debug.Snapshot fixture seam as T8.
+func TestSupportBundleExposesUnavailableListing(t *testing.T) {
+	s := newAuthedServer(t)
+	fixture := debug.Snapshot{
+		Status: debug.StatusRunning,
+		Drops:  &debug.DropsSyncInfo{SyncRuns: 2, TrackedCampaigns: 1},
+	}
+	s.SetSupportBundleSource(func() debug.Snapshot { return fixture })
+	h := s.handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedBundleRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", rec.Code)
+	}
+	entries := zipEntryBytes(t, rec.Body.Bytes())
+	var doc struct {
+		SyncStatus map[string]interface{} `json:"syncStatus"`
+	}
+	if err := json.Unmarshal(entries["drops.json"], &doc); err != nil {
+		t.Fatalf("unmarshal drops.json: %v", err)
+	}
+	v, present := doc.SyncStatus["dashboardListingUnavailable"]
+	if !present || v != false {
+		t.Errorf("drops.json syncStatus.dashboardListingUnavailable = %v (present=%v), want explicit false for an authoritative listing", v, present)
+	}
+
+	// True half: the UNKNOWN-listing state crosses the handler copy into the
+	// bundle as an explicit true, with lastSyncFailed staying false (an
+	// unavailable listing is not a sync failure).
+	fixture.Drops = &debug.DropsSyncInfo{
+		SyncRuns: 3, TrackedCampaigns: 2, DashboardCampaigns: 0,
+		DashboardListingUnavailable: true,
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authedBundleRequest())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET (unavailable listing) = %d, want 200", rec.Code)
+	}
+	entries = zipEntryBytes(t, rec.Body.Bytes())
+	doc.SyncStatus = nil
+	if err := json.Unmarshal(entries["drops.json"], &doc); err != nil {
+		t.Fatalf("unmarshal drops.json (unavailable listing): %v", err)
+	}
+	if doc.SyncStatus["dashboardListingUnavailable"] != true {
+		t.Errorf("drops.json syncStatus.dashboardListingUnavailable = %v, want true", doc.SyncStatus["dashboardListingUnavailable"])
+	}
+	if doc.SyncStatus["lastSyncFailed"] != false {
+		t.Errorf("an UNKNOWN listing must not read as lastSyncFailed; got %v", doc.SyncStatus["lastSyncFailed"])
+	}
+}
+
 // T9: no raw config/env map ever crosses the boundary - setting an
 // unrelated env var with a distinctive value must never surface it, since
 // this package never reads os.Environ() or the config file.

@@ -76,7 +76,9 @@ func TestStalenessSignal(t *testing.T) {
 // Drops Inventory Sync signal: unknown before the first run; failed on a last
 // error; OK while within the configured interval (with a next-sync ETA and, for
 // a long interval, the honest new-campaign delay); DEGRADED once the last
-// SUCCESS is older than interval+grace even if a later attempt was recent.
+// SUCCESS is older than interval+grace even if a later attempt was recent; and
+// DEGRADED with dashboard_listing_unavailable when the last sync observed the
+// explicit-null (UNKNOWN) dashboard listing without an actual error.
 func TestDropsInventorySignal(t *testing.T) {
 	now := time.Now()
 
@@ -121,6 +123,48 @@ func TestDropsInventorySignal(t *testing.T) {
 		}, now)
 		if sig.Status != health.StatusDegraded || sig.ErrorCode != "sync_overdue" {
 			t.Fatalf("got %q/%q, want degraded/sync_overdue; detail=%q", sig.Status, sig.ErrorCode, sig.Detail)
+		}
+	})
+
+	// RED A (explicit-null listing truthfulness): a sync that completed without
+	// an actual error but observed an UNKNOWN (explicit-null) dashboard listing
+	// must never be presented as ordinary successful authoritative discovery.
+	// It is DEGRADED with the stable dashboard_listing_unavailable code — not
+	// OK (dashboard discovery is blind), not FAILED (nothing errored; the
+	// inventory reconciliation succeeded), and it must not depend on
+	// sync_overdue eventually firing (LastSuccessAt is fresh here).
+	t.Run("unavailable listing is degraded, not successful discovery", func(t *testing.T) {
+		sig := dropsInventorySignal(drops.SyncStatus{
+			IntervalMinutes:             60,
+			LastSyncAt:                  now.Add(-time.Minute),
+			LastSuccessAt:               now.Add(-time.Minute), // fresh success: overdue can never fire
+			TrackedCampaigns:            3,
+			RecoveredCampaigns:          3,
+			DashboardListingUnavailable: true,
+		}, now)
+		if sig.Status != health.StatusDegraded || sig.ErrorCode != "dashboard_listing_unavailable" {
+			t.Fatalf("got %q/%q, want degraded/dashboard_listing_unavailable; detail=%q", sig.Status, sig.ErrorCode, sig.Detail)
+		}
+		if strings.Contains(sig.Detail, "successful discovery") {
+			t.Errorf("detail claims successful discovery for an UNKNOWN listing: %q", sig.Detail)
+		}
+		if !strings.Contains(sig.Detail, "3 campaign(s) tracked") {
+			t.Errorf("detail should report the retained/recovered tracked count: %q", sig.Detail)
+		}
+	})
+
+	// RED C guard: an actual sync error keeps its FAILED/sync_error precedence
+	// even when the unavailable-listing flag is also set (null listing followed
+	// by an inventory-acquisition failure records both).
+	t.Run("actual error outranks unavailable listing", func(t *testing.T) {
+		sig := dropsInventorySignal(drops.SyncStatus{
+			IntervalMinutes:             60,
+			LastSyncAt:                  now.Add(-time.Minute),
+			LastError:                   "boom",
+			DashboardListingUnavailable: true,
+		}, now)
+		if sig.Status != health.StatusFailed || sig.ErrorCode != "sync_error" {
+			t.Fatalf("got %q/%q, want failed/sync_error", sig.Status, sig.ErrorCode)
 		}
 	})
 }

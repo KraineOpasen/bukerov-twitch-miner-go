@@ -209,9 +209,12 @@ func (m *Miner) refreshHealthCenter(now time.Time) {
 // dropsInventorySignal composes the Drops Inventory Sync health signal from the
 // tracker's SyncStatus. It deliberately separates "attempted" (LastSyncAt) from
 // "succeeded" (LastSuccessAt) so a failing sync can't masquerade as fresh, and
-// it makes the freshness contract honest: an interval-plus-grace overdue sync is
-// DEGRADED (campaign discovery is overdue), while a sync that is simply old but
-// within the configured cadence stays OK with the next-sync ETA and — for a long
+// it makes the freshness contract honest: an explicit-null (UNKNOWN) dashboard
+// listing is DEGRADED with the stable code dashboard_listing_unavailable (never
+// ordinary successful discovery, with an actual error keeping FAILED
+// precedence), an interval-plus-grace overdue sync is DEGRADED (campaign
+// discovery is overdue), while a sync that is simply old but within the
+// configured cadence stays OK with the next-sync ETA and — for a long
 // interval — the worst-case new-campaign delay stated plainly. No secret is ever
 // placed in the detail (only counts, ages, and the interval).
 func dropsInventorySignal(st drops.SyncStatus, now time.Time) health.Signal {
@@ -236,6 +239,19 @@ func dropsInventorySignal(st drops.SyncStatus, now time.Time) health.Signal {
 		sig.Status = health.StatusFailed
 		sig.Detail = "the last inventory sync attempt errored"
 		sig.ErrorCode = "sync_error"
+		return sig
+	case st.DashboardListingUnavailable:
+		// The last sync completed without an error but Twitch answered the
+		// ViewerDropsDashboard listing with an explicit null: campaign
+		// discovery is UNKNOWN/unavailable, not a success and not a failure.
+		// The inventory reconciliation did succeed (a failed one sets
+		// LastError above), so tracked campaigns are retained/recovered — but
+		// newly discoverable campaigns cannot be seen. This state must never
+		// render as ordinary "successful discovery", and it cannot rely on
+		// sync_overdue below (LastSuccessAt keeps advancing on these runs).
+		sig.Status = health.StatusDegraded
+		sig.ErrorCode = "dashboard_listing_unavailable"
+		sig.Detail = fmt.Sprintf("dashboard campaign listing unavailable (Twitch returned null — unknown, not zero): inventory reconciliation succeeded, %d campaign(s) tracked; newly discoverable campaigns may be missing", st.TrackedCampaigns)
 		return sig
 	}
 

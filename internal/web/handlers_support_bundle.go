@@ -362,19 +362,20 @@ func buildSupportBundleDrops(snap debug.Snapshot) *supportbundle.DropsSection {
 	d := snap.Drops
 	out := &supportbundle.DropsSection{
 		SyncStatus: supportbundle.DropsSyncStatus{
-			LastSyncAt:             d.LastSyncAt,
-			LastSuccessAt:          d.LastSuccessAt,
-			IntervalMinutes:        d.IntervalMinutes,
-			SyncRuns:               d.SyncRuns,
-			DashboardCampaigns:     d.DashboardCampaigns,
-			TrackedCampaigns:       d.TrackedCampaigns,
-			RecoveredFromInventory: d.RecoveredFromInventory,
-			FilteredByBlacklist:    d.FilteredByBlacklist,
-			FilteredByGame:         d.FilteredByGame,
-			LastSyncFailed:         d.LastError != "",
-			Revision:               d.Revision,
-			BackendUpdatedAt:       d.BackendUpdatedAt,
-			UpdateSource:           d.UpdateSource,
+			LastSyncAt:                  d.LastSyncAt,
+			LastSuccessAt:               d.LastSuccessAt,
+			IntervalMinutes:             d.IntervalMinutes,
+			SyncRuns:                    d.SyncRuns,
+			DashboardCampaigns:          d.DashboardCampaigns,
+			DashboardListingUnavailable: d.DashboardListingUnavailable,
+			TrackedCampaigns:            d.TrackedCampaigns,
+			RecoveredFromInventory:      d.RecoveredFromInventory,
+			FilteredByBlacklist:         d.FilteredByBlacklist,
+			FilteredByGame:              d.FilteredByGame,
+			LastSyncFailed:              d.LastError != "",
+			Revision:                    d.Revision,
+			BackendUpdatedAt:            d.BackendUpdatedAt,
+			UpdateSource:                d.UpdateSource,
 		},
 	}
 	for _, c := range d.Campaigns {

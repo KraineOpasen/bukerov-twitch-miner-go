@@ -50,8 +50,51 @@ func TestHandleAPIDropsSyncTriggered(t *testing.T) {
 	if got["trackedCampaigns"].(float64) != 1 {
 		t.Errorf("trackedCampaigns = %v, want 1", got["trackedCampaigns"])
 	}
+	// RED F (false half): dashboardCampaigns=0 with an authoritative listing
+	// must carry an explicit dashboardListingUnavailable=false — key absence
+	// would make it indistinguishable from the UNKNOWN-listing state.
+	if v, ok := got["dashboardListingUnavailable"]; !ok || v != false {
+		t.Errorf("dashboardListingUnavailable = %v (present=%v), want explicit false", v, ok)
+	}
 	if prov.calls != 1 {
 		t.Errorf("RequestManualSync called %d times, want 1", prov.calls)
+	}
+}
+
+// TestHandleAPIDropsSyncReportsUnavailableListing is RED F: when the last sync
+// observed the explicit-null (UNKNOWN) dashboard listing, the manual-sync JSON
+// must expose dashboardListingUnavailable=true alongside dashboardCampaigns=0
+// and an empty lastError, so the Drops page's sync response can never present
+// the UNKNOWN listing as an authoritative zero.
+func TestHandleAPIDropsSyncReportsUnavailableListing(t *testing.T) {
+	srv := newStatsTestServer(t)
+	prov := &fakeCampaignsProvider{
+		status: drops.SyncStatus{
+			Runs: 5, TrackedCampaigns: 2, DashboardCampaigns: 0, RecoveredCampaigns: 2,
+			DashboardListingUnavailable: true, LastSyncAt: time.Now(),
+		},
+		manual: drops.ManualSyncResult{Triggered: true},
+	}
+	prov.manual.Status = prov.status
+	srv.SetCampaignsProvider(prov)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/drops/sync", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["dashboardListingUnavailable"] != true {
+		t.Errorf("dashboardListingUnavailable = %v, want true", got["dashboardListingUnavailable"])
+	}
+	if got["dashboardCampaigns"].(float64) != 0 {
+		t.Errorf("dashboardCampaigns = %v, want 0 (nothing was listed)", got["dashboardCampaigns"])
+	}
+	if got["lastError"] != "" {
+		t.Errorf("lastError = %v, want empty (UNKNOWN listing is not a failure)", got["lastError"])
 	}
 }
 

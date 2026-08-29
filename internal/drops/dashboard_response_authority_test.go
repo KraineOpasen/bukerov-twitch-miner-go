@@ -20,7 +20,14 @@ func TestGetDropsDashboardResponseAuthority(t *testing.T) {
 		name     string
 		response map[string]interface{}
 		wantErr  bool
-		wantIDs  []string
+		// wantUnknown marks the one shape classified as an UNKNOWN/unavailable
+		// listing (explicit JSON null under a present dropCampaigns key):
+		// no error, no campaigns, listingUnavailable=true. Every other row
+		// additionally asserts the unknown classification is NOT set, so
+		// missing-key/wrong-type/malformed/errors shapes can never silently
+		// migrate into the null carve-out.
+		wantUnknown bool
+		wantIDs     []string
 	}{
 		{
 			name:     "valid non-empty",
@@ -97,9 +104,21 @@ func TestGetDropsDashboardResponseAuthority(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "null dropCampaigns",
+			// The owner-observed production shape (2026-08-29 canaries): HTTP
+			// 200, no errors, and an explicit JSON null listing. UNKNOWN, not
+			// an error and not an authoritative empty array.
+			name:        "null dropCampaigns",
+			response:    nullDashboardResponse(),
+			wantUnknown: true,
+		},
+		{
+			// The other owner-observed combined shape (browser/web profile):
+			// top-level errors alongside the null listing. The errors gate
+			// runs first, so this stays a hard error — never UNKNOWN.
+			name: "top-level errors with null dropCampaigns",
 			response: map[string]interface{}{
-				"data": map[string]interface{}{"currentUser": map[string]interface{}{"dropCampaigns": nil}},
+				"errors": []interface{}{map[string]interface{}{"message": "partial dashboard failure"}},
+				"data":   map[string]interface{}{"currentUser": map[string]interface{}{"dropCampaigns": nil}},
 			},
 			wantErr: true,
 		},
@@ -173,15 +192,30 @@ func TestGetDropsDashboardResponseAuthority(t *testing.T) {
 			client := &fakeDropsClient{dashboard: tc.response}
 			tracker := NewDropsTracker(client, nil, config.RateLimitSettings{}, nil)
 
-			campaigns, err := tracker.getDropsDashboard("ACTIVE")
+			campaigns, listingUnavailable, err := tracker.getDropsDashboard("ACTIVE")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("getDropsDashboard() error = nil, want untrusted response rejected; campaigns=%v", campaigns)
+				}
+				if listingUnavailable {
+					t.Fatal("a rejected response must never also claim the UNKNOWN-listing classification")
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("getDropsDashboard() unexpected error: %v", err)
+			}
+			if tc.wantUnknown {
+				if !listingUnavailable {
+					t.Fatal("explicit-null dropCampaigns must classify as an UNKNOWN/unavailable listing")
+				}
+				if campaigns != nil {
+					t.Fatalf("an UNKNOWN listing must not surface campaigns (not even an empty authoritative list), got %v", campaigns)
+				}
+				return
+			}
+			if listingUnavailable {
+				t.Fatal("an authoritative listing must not carry the UNKNOWN classification")
 			}
 			if len(campaigns) != len(tc.wantIDs) {
 				t.Fatalf("getDropsDashboard() campaigns=%v, want IDs %v", campaigns, tc.wantIDs)

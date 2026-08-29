@@ -75,6 +75,51 @@ func fullInput() Input {
 	return in
 }
 
+// TestDropsJSONCarriesDashboardListingUnavailable is RED E (package half):
+// drops.json's syncStatus must serialize the dashboardListingUnavailable
+// boolean explicitly in BOTH states — the operator distinguishes
+// "dashboardCampaigns=0, listing unknown" from "dashboardCampaigns=0,
+// authoritative" by this key, so false must be present, never omitted.
+func TestDropsJSONCarriesDashboardListingUnavailable(t *testing.T) {
+	clock := fixedClock(time.Date(2026, 7, 24, 10, 30, 0, 0, time.UTC))
+
+	in := fullInput()
+	result, err := Build(in, Options{Now: clock})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	entries := zipEntries(t, result)
+	var doc struct {
+		SyncStatus map[string]interface{} `json:"syncStatus"`
+	}
+	if err := json.Unmarshal(entries["drops.json"], &doc); err != nil {
+		t.Fatalf("unmarshal drops.json: %v", err)
+	}
+	if v, present := doc.SyncStatus["dashboardListingUnavailable"]; !present || v != false {
+		t.Errorf("syncStatus.dashboardListingUnavailable = %v (present=%v), want explicit false", v, present)
+	}
+
+	// True half: an UNKNOWN-listing sync (dashboardCampaigns=0, listing
+	// unavailable, no failure) must serialize the flag as true.
+	in.Drops.SyncStatus.DashboardCampaigns = 0
+	in.Drops.SyncStatus.DashboardListingUnavailable = true
+	result, err = Build(in, Options{Now: clock})
+	if err != nil {
+		t.Fatalf("Build (unavailable listing): %v", err)
+	}
+	entries = zipEntries(t, result)
+	doc.SyncStatus = nil
+	if err := json.Unmarshal(entries["drops.json"], &doc); err != nil {
+		t.Fatalf("unmarshal drops.json (unavailable listing): %v", err)
+	}
+	if doc.SyncStatus["dashboardListingUnavailable"] != true {
+		t.Errorf("syncStatus.dashboardListingUnavailable = %v, want true", doc.SyncStatus["dashboardListingUnavailable"])
+	}
+	if doc.SyncStatus["lastSyncFailed"] != false {
+		t.Errorf("an UNKNOWN listing is not a sync failure; lastSyncFailed = %v, want false", doc.SyncStatus["lastSyncFailed"])
+	}
+}
+
 // zipEntries reads back a Result's ZIP and returns name -> raw bytes.
 func zipEntries(t *testing.T, result Result) map[string][]byte {
 	t.Helper()
