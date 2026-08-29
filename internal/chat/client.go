@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/constants"
@@ -18,6 +19,17 @@ import (
 
 type ChatLogger interface {
 	RecordChatMessage(streamer string, msg ChatMessageData) error
+}
+
+// chatLogGate is the manager-wide structured-write linearization point. Every
+// actual ChatLogger call holds mu for reading for the entire sink call. Runtime
+// settings reconciliation takes it for writing, which drains every previously
+// admitted write -- including one from a client already detached after a
+// bounded Stop timeout -- before it changes logging authority.
+type chatLogGate struct {
+	mu         sync.RWMutex
+	generation uint64
+	logger     ChatLogger
 }
 
 // MentionHandler is called when the user is mentioned in chat.
@@ -78,18 +90,33 @@ type IRCClient struct {
 	lastAuthGen    uint64
 	channel        string
 	streamer       *models.Streamer
-	logger         ChatLogger
+	logGate        *chatLogGate
+	logGeneration  uint64
+	logAuthorized  atomic.Bool
 	logChat        bool
 	mentionHandler MentionHandler
+	// lifecycleAuthorized is the manager/session ownership bit. Manager-owned
+	// candidates complete dial/auth/JOIN while false and cannot read, reconnect,
+	// report auth failures, or emit mentions until their exact reservation CAS
+	// activates them. Guarded by mu; standalone clients start true.
+	lifecycleAuthorized bool
 
-	conn     net.Conn
-	reader   *bufio.Reader
-	running  bool
-	stopChan chan struct{}
+	conn   net.Conn
+	reader *bufio.Reader
+	// connEpoch is incremented whenever a freshly dialed transport becomes the
+	// current connection. Every read loop carries its immutable epoch, so a
+	// delayed error or RECONNECT line from an old reader cannot close or replace
+	// the fresh transport. Guarded by mu.
+	connEpoch uint64
+	// sessionReady means the current reader completed auth/JOIN and may start a
+	// read loop once lifecycle authority is granted. Guarded by mu.
+	sessionReady bool
+	running      bool
+	stopChan     chan struct{}
 
 	// forcedClose is set by Stop() and permanently disables reconnection.
-	// reconnecting guards against overlapping reconnect() runs (read-loop error
-	// and a RECONNECT command can race).
+	// reconnecting guards against overlapping reconnect loops (a read error and
+	// a server RECONNECT command can race).
 	forcedClose  bool
 	reconnecting bool
 
@@ -114,6 +141,10 @@ type IRCClient struct {
 // shutdown drain).
 var ErrClientStopped = errors.New("chat: client stopped")
 
+// errStaleConnection is internal control flow: a delayed reader/handshake from
+// an old transport epoch must never send on or claim the fresh connection.
+var errStaleConnection = errors.New("chat: stale connection generation")
+
 // stopJoinTimeout bounds how long Stop waits for the read loop to drain an
 // in-flight message (which may be writing a chat row) before giving up, so a
 // wedged handler can never block shutdown indefinitely. Package variable so
@@ -134,6 +165,15 @@ var errLoopJoinTimeout = errors.New("chat: client loop join timed out")
 var partWriteTimeout = time.Second
 
 func NewIRCClient(username string, tokenFn TokenProvider, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler) *IRCClient {
+	gate := &chatLogGate{generation: 1, logger: logger}
+	return newIRCClient(username, tokenFn, streamer, logger, logChat, mentionHandler, gate, 1, true)
+}
+
+// newIRCClient constructs one immutable IRC/session logging generation.
+// Manager-owned candidates start unauthorized and gain authority only after
+// their exact-pointer install succeeds; standalone clients returned by
+// NewIRCClient are authoritative immediately.
+func newIRCClient(username string, tokenFn TokenProvider, streamer *models.Streamer, logger ChatLogger, logChat bool, mentionHandler MentionHandler, gate *chatLogGate, generation uint64, authorized bool) *IRCClient {
 	// Captured once, race-safe (Username can be mutated in place by a
 	// concurrent rename): this connection's IRC channel is fixed for its
 	// lifetime, exactly the login it was joined under. A later rename does
@@ -141,16 +181,20 @@ func NewIRCClient(username string, tokenFn TokenProvider, streamer *models.Strea
 	// leaves this login's client and joins a fresh one under the new login.
 	login := streamer.GetUsername()
 	slog.Debug("Creating IRC client", "channel", login, "logChat", logChat, "hasLogger", logger != nil)
-	return &IRCClient{
-		username:       username,
-		tokenFn:        tokenFn,
-		channel:        "#" + strings.ToLower(login),
-		streamer:       streamer,
-		logger:         logger,
-		logChat:        logChat,
-		mentionHandler: mentionHandler,
-		stopChan:       make(chan struct{}),
+	client := &IRCClient{
+		username:            username,
+		tokenFn:             tokenFn,
+		channel:             "#" + strings.ToLower(login),
+		streamer:            streamer,
+		logGate:             gate,
+		logGeneration:       generation,
+		logChat:             logChat,
+		mentionHandler:      mentionHandler,
+		lifecycleAuthorized: authorized,
+		stopChan:            make(chan struct{}),
 	}
+	client.logAuthorized.Store(authorized)
+	return client
 }
 
 // dial opens a TLS connection to Twitch IRC. The OAuth token is sent as the
@@ -183,40 +227,107 @@ func (c *IRCClient) Connect() error {
 		_ = conn.Close()
 		return ErrClientStopped
 	}
+	reader := bufio.NewReader(conn)
 	c.conn = conn
-	c.reader = bufio.NewReader(conn)
+	c.reader = reader
+	c.connEpoch++
+	epoch := c.connEpoch
 	c.running = true
 	c.mu.Unlock()
 
-	if err := c.authenticate(); err != nil {
-		_ = c.conn.Close()
+	authGeneration, err := c.authenticateAt(epoch)
+	if err != nil {
+		_ = conn.Close()
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
 
-	if err := c.join(); err != nil {
-		_ = c.conn.Close()
+	if err := c.joinAt(epoch); err != nil {
+		_ = conn.Close()
 		return fmt.Errorf("failed to join channel: %w", err)
 	}
 
+	var startReadLoop func()
 	c.mu.Lock()
-	if c.forcedClose {
+	if c.forcedClose || c.connEpoch != epoch {
 		// Stop raced the handshake; it already closed the conn it saw. Do not
 		// spawn a read loop for a stopped client.
 		c.mu.Unlock()
 		_ = conn.Close()
 		return ErrClientStopped
 	}
-	// Registered under the same mu that checked forcedClose — the
-	// no-Add-after-Wait pairing with Stop (see loopWG).
-	c.loopWG.Add(1)
+	c.sessionReady = true
+	if c.lifecycleAuthorized {
+		// Registered under the same mu that checked forcedClose — the
+		// no-Add-after-Wait pairing with Stop (see loopWG).
+		c.loopWG.Add(1)
+		startReadLoop = func() {
+			go func() {
+				defer c.loopWG.Done()
+				c.readLoop(reader, epoch, authGeneration)
+			}()
+		}
+	}
 	c.mu.Unlock()
-	go func() {
-		defer c.loopWG.Done()
-		c.readLoop()
-	}()
+	if startReadLoop != nil {
+		startReadLoop()
+	}
 
 	slog.Info("Joined IRC chat", "channel", c.channel)
 	return nil
+}
+
+// activate grants a manager candidate lifecycle/write authority after its
+// exact reservation is published. It returns a starter so ChatManager can
+// release m.mu before any read/reconnect goroutine begins. WaitGroup admission
+// happens here under c.mu, paired with Stop's forcedClose transition.
+func (c *IRCClient) activate(reconnectIfUnavailable bool) (func(), bool) {
+	c.mu.Lock()
+	if c.forcedClose || c.lifecycleAuthorized {
+		c.mu.Unlock()
+		return nil, false
+	}
+	c.lifecycleAuthorized = true
+	c.logAuthorized.Store(true)
+
+	if c.sessionReady && c.reader != nil {
+		reader := c.reader
+		epoch := c.connEpoch
+		authGeneration := c.lastAuthGen
+		c.loopWG.Add(1)
+		c.mu.Unlock()
+		return func() {
+			go func() {
+				defer c.loopWG.Done()
+				c.readLoop(reader, epoch, authGeneration)
+			}()
+		}, true
+	}
+	if !reconnectIfUnavailable || c.reconnecting {
+		c.lifecycleAuthorized = false
+		c.logAuthorized.Store(false)
+		c.mu.Unlock()
+		return nil, false
+	}
+
+	c.reconnecting = true
+	c.running = true
+	c.sessionReady = false
+	c.loopWG.Add(1)
+	old := c.conn
+	c.mu.Unlock()
+	return func() { go c.reconnectLoop(old) }, true
+}
+
+// revoke synchronously removes lifecycle and structured-write authority with
+// no network I/O. ChatManager calls it while it still owns the registry/gate
+// publication, closing the handoff window in which a detached reader could
+// otherwise acquire fresh reconnect authority before asynchronous Stop starts.
+func (c *IRCClient) revoke() {
+	c.logAuthorized.Store(false)
+	c.mu.Lock()
+	c.lifecycleAuthorized = false
+	c.sessionReady = false
+	c.mu.Unlock()
 }
 
 // currentToken resolves the token provider (nil-safe for library/test use)
@@ -224,34 +335,52 @@ func (c *IRCClient) Connect() error {
 // login-failed NOTICE is attributed to the exact snapshot this connection
 // authenticated with — not to whatever is current when the NOTICE arrives.
 func (c *IRCClient) currentToken() string {
-	if c.tokenFn == nil {
-		return ""
-	}
-	snap := c.tokenFn()
+	snap := c.tokenSnapshot()
 	c.mu.Lock()
 	c.lastAuthGen = snap.Generation
 	c.mu.Unlock()
 	return snap.Token
 }
 
-func (c *IRCClient) authenticate() error {
+func (c *IRCClient) tokenSnapshot() TokenSnapshot {
+	if c.tokenFn == nil {
+		return TokenSnapshot{}
+	}
+	return c.tokenFn()
+}
+
+func (c *IRCClient) authenticateAt(epoch uint64) (uint64, error) {
 	if c.logChat {
-		if err := c.send("CAP REQ :twitch.tv/tags twitch.tv/commands"); err != nil {
-			return err
+		if err := c.sendAt(epoch, "CAP REQ :twitch.tv/tags twitch.tv/commands"); err != nil {
+			return 0, err
 		}
 	}
-	if err := c.send(fmt.Sprintf("PASS oauth:%s", c.currentToken())); err != nil {
-		return err
+	snap := c.tokenSnapshot()
+	c.mu.Lock()
+	if c.forcedClose || c.connEpoch != epoch {
+		c.mu.Unlock()
+		return 0, errStaleConnection
 	}
-	return c.send(fmt.Sprintf("NICK %s", c.username))
+	c.lastAuthGen = snap.Generation
+	c.mu.Unlock()
+	if err := c.sendAt(epoch, fmt.Sprintf("PASS oauth:%s", snap.Token)); err != nil {
+		return 0, err
+	}
+	return snap.Generation, c.sendAt(epoch, fmt.Sprintf("NICK %s", c.username))
 }
 
-func (c *IRCClient) join() error {
-	return c.send(fmt.Sprintf("JOIN %s", c.channel))
+func (c *IRCClient) joinAt(epoch uint64) error {
+	return c.sendAt(epoch, fmt.Sprintf("JOIN %s", c.channel))
 }
 
-func (c *IRCClient) send(message string) error {
+// sendAt snapshots the exact epoch's conn under c.mu, then releases the lock
+// before network I/O. An epoch of zero is the direct/current helper path.
+func (c *IRCClient) sendAt(epoch uint64, message string) error {
 	c.mu.RLock()
+	if c.forcedClose || (epoch != 0 && epoch != c.connEpoch) {
+		c.mu.RUnlock()
+		return errStaleConnection
+	}
 	conn := c.conn
 	c.mu.RUnlock()
 
@@ -263,7 +392,7 @@ func (c *IRCClient) send(message string) error {
 	return err
 }
 
-func (c *IRCClient) readLoop() {
+func (c *IRCClient) readLoop(reader *bufio.Reader, epoch, authGeneration uint64) {
 	for {
 		select {
 		case <-c.stopChan:
@@ -272,46 +401,50 @@ func (c *IRCClient) readLoop() {
 		}
 
 		c.mu.RLock()
-		reader := c.reader
 		running := c.running
+		current := c.lifecycleAuthorized && c.connEpoch == epoch
 		c.mu.RUnlock()
 
-		if !running || reader == nil {
+		if !running || !current || reader == nil {
 			return
 		}
 
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			c.mu.RLock()
-			forced := c.forcedClose
-			c.mu.RUnlock()
-
-			// A forced close (Stop) is the expected shutdown path; anything else
-			// is an unexpected drop (EOF, reset) that we recover from.
-			if forced {
-				return
+			// Admission is synchronous and owned by this exact transport epoch.
+			// Stop or a newer connection makes beginReconnect reject the stale
+			// error without touching the current connection.
+			if c.beginReconnect(epoch) {
+				slog.Debug("IRC read error, reconnecting", "channel", c.channel, "error", err)
 			}
-			slog.Debug("IRC read error, reconnecting", "channel", c.channel, "error", err)
-			go c.reconnect()
 			return
 		}
 
+		c.mu.RLock()
+		current = !c.forcedClose && c.lifecycleAuthorized && c.connEpoch == epoch
+		c.mu.RUnlock()
+		if !current {
+			return
+		}
 		line = strings.TrimSpace(line)
-		c.handleMessage(line)
+		c.handleMessageFromEpoch(line, epoch, authGeneration)
 	}
 }
 
-// reconnect re-establishes a dropped IRC connection with exponential backoff.
-// It is triggered by a read error or a server RECONNECT command. The
-// reconnecting guard collapses concurrent triggers into a single loop, and
-// forcedClose (set by Stop) makes it exit for good.
-func (c *IRCClient) reconnect() {
+// beginReconnect synchronously transfers reconnect authority from one exact
+// transport epoch into the existing backoff loop. sourceEpoch==0 is the
+// direct/current helper form. Manager recovery after an initial Connect failure
+// is admitted by activate. No network I/O occurs in this admission section.
+func (c *IRCClient) beginReconnect(sourceEpoch uint64) bool {
 	c.mu.Lock()
-	if c.forcedClose || c.reconnecting {
+	if c.forcedClose || !c.lifecycleAuthorized || c.reconnecting ||
+		(sourceEpoch != 0 && sourceEpoch != c.connEpoch) {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	c.reconnecting = true
+	c.running = true
+	c.sessionReady = false
 	// The reconnect goroutine itself is tracked (admission-checked by the
 	// forcedClose test above): it can sit in a dial for up to the 30s TLS
 	// timeout, and Stop's bounded join is what makes that observable instead
@@ -320,6 +453,13 @@ func (c *IRCClient) reconnect() {
 	c.loopWG.Add(1)
 	old := c.conn
 	c.mu.Unlock()
+	go c.reconnectLoop(old)
+	return true
+}
+
+// reconnectLoop re-establishes a dropped IRC connection with the existing
+// exponential-backoff/jitter policy. Only beginReconnect may start it.
+func (c *IRCClient) reconnectLoop(old net.Conn) {
 	defer c.loopWG.Done()
 
 	// Closing the old connection unblocks any in-flight ReadString in the
@@ -333,7 +473,7 @@ func (c *IRCClient) reconnect() {
 
 	for {
 		c.mu.RLock()
-		forced := c.forcedClose
+		forced := c.forcedClose || !c.lifecycleAuthorized
 		c.mu.RUnlock()
 		if forced {
 			return
@@ -355,16 +495,20 @@ func (c *IRCClient) reconnect() {
 		}
 
 		c.mu.Lock()
-		if c.forcedClose {
+		if c.forcedClose || !c.lifecycleAuthorized {
 			c.mu.Unlock()
 			_ = conn.Close()
 			return
 		}
+		reader := bufio.NewReader(conn)
 		c.conn = conn
-		c.reader = bufio.NewReader(conn)
+		c.reader = reader
+		c.connEpoch++
+		epoch := c.connEpoch
 		c.mu.Unlock()
 
-		if err := c.authenticate(); err != nil {
+		authGeneration, err := c.authenticateAt(epoch)
+		if err != nil {
 			slog.Debug("IRC reconnect auth failed, retrying", "channel", c.channel, "error", err)
 			_ = conn.Close()
 			if delay < maxDelay {
@@ -372,7 +516,7 @@ func (c *IRCClient) reconnect() {
 			}
 			continue
 		}
-		if err := c.join(); err != nil {
+		if err := c.joinAt(epoch); err != nil {
 			slog.Debug("IRC reconnect join failed, retrying", "channel", c.channel, "error", err)
 			_ = conn.Close()
 			if delay < maxDelay {
@@ -382,7 +526,7 @@ func (c *IRCClient) reconnect() {
 		}
 
 		c.mu.Lock()
-		if c.forcedClose {
+		if c.forcedClose || !c.lifecycleAuthorized || c.connEpoch != epoch {
 			// Stop raced the successful redial: never spawn a read loop for a
 			// stopped client.
 			c.mu.Unlock()
@@ -390,12 +534,13 @@ func (c *IRCClient) reconnect() {
 			return
 		}
 		c.reconnecting = false
+		c.sessionReady = true
 		c.loopWG.Add(1)
 		c.mu.Unlock()
 
 		go func() {
 			defer c.loopWG.Done()
-			c.readLoop()
+			c.readLoop(reader, epoch, authGeneration)
 		}()
 		slog.Info("Reconnected to IRC chat", "channel", c.channel)
 		return
@@ -410,11 +555,28 @@ func withJitter(d time.Duration) time.Duration {
 }
 
 func (c *IRCClient) handleMessage(line string) {
+	c.mu.RLock()
+	epoch := c.connEpoch
+	authGeneration := c.lastAuthGen
+	c.mu.RUnlock()
+	c.handleMessageFromEpoch(line, epoch, authGeneration)
+}
+
+// handleMessageFromEpoch carries the source transport's authority into
+// RECONNECT admission. epoch==0 is the package/test direct-call form and uses
+// whichever transport is current when beginReconnect takes c.mu.
+func (c *IRCClient) handleMessageFromEpoch(line string, epoch, authGeneration uint64) {
+	c.mu.RLock()
+	current := !c.forcedClose && c.lifecycleAuthorized && (epoch == 0 || epoch == c.connEpoch)
+	c.mu.RUnlock()
+	if !current {
+		return
+	}
 	slog.Debug("IRC message received", "channel", c.channel, "line", line)
 
 	if strings.HasPrefix(line, "PING") {
 		pongMsg := strings.Replace(line, "PING", "PONG", 1)
-		_ = c.send(pongMsg)
+		_ = c.sendAt(epoch, pongMsg)
 		return
 	}
 
@@ -425,11 +587,10 @@ func (c *IRCClient) handleMessage(line string) {
 	if isLoginAuthFailedNotice(line) {
 		slog.Warn("IRC login authentication failed; reporting for credential recovery", "channel", c.channel)
 		c.mu.RLock()
-		gen := c.lastAuthGen
 		handler := c.authErrorFn
 		c.mu.RUnlock()
 		if handler != nil {
-			go handler(gen)
+			go handler(authGeneration)
 		}
 		return
 	}
@@ -438,16 +599,16 @@ func (c *IRCClient) handleMessage(line string) {
 	// tears the connection down for maintenance. Honour it proactively.
 	if strings.Contains(line, "RECONNECT") {
 		slog.Info("IRC reconnect requested by server", "channel", c.channel)
-		go c.reconnect()
+		c.beginReconnect(epoch)
 		return
 	}
 
 	if strings.Contains(line, "PRIVMSG") {
-		c.handlePrivMsg(line)
+		c.handlePrivMsg(line, epoch)
 	}
 }
 
-func (c *IRCClient) handlePrivMsg(line string) {
+func (c *IRCClient) handlePrivMsg(line string, epoch uint64) {
 	var tags map[string]string
 	remaining := line
 
@@ -476,7 +637,7 @@ func (c *IRCClient) handlePrivMsg(line string) {
 		}
 	}
 
-	if c.logChat && c.logger != nil {
+	if c.logChat {
 		displayName := nick
 		if dn, ok := tags["display-name"]; ok && dn != "" {
 			displayName = dn
@@ -491,7 +652,7 @@ func (c *IRCClient) handlePrivMsg(line string) {
 			Color:       tags["color"],
 		}
 
-		if err := c.logger.RecordChatMessage(c.streamer.GetUsername(), msgData); err != nil {
+		if err := c.recordChatMessage(msgData, epoch); err != nil {
 			slog.Debug("Failed to log chat message", "error", err)
 		}
 	}
@@ -511,6 +672,31 @@ func (c *IRCClient) handlePrivMsg(line string) {
 	}
 }
 
+// recordChatMessage admits a structured write only while this exact immutable
+// client generation still owns authority. Holding the shared gate's RLock
+// through RecordChatMessage is load-bearing: checking before the call and then
+// unlocking would let an already-admitted stale write commit after a successful
+// settings apply returned.
+func (c *IRCClient) recordChatMessage(msg ChatMessageData, epoch uint64) error {
+	gate := c.logGate
+	if gate == nil {
+		return nil
+	}
+
+	gate.mu.RLock()
+	defer gate.mu.RUnlock()
+	c.mu.RLock()
+	current := !c.forcedClose && c.lifecycleAuthorized && (epoch == 0 || epoch == c.connEpoch)
+	c.mu.RUnlock()
+	if !current {
+		return nil
+	}
+	if !c.logAuthorized.Load() || c.logGeneration != gate.generation || gate.logger == nil {
+		return nil
+	}
+	return gate.logger.RecordChatMessage(c.streamer.GetUsername(), msg)
+}
+
 func parseTags(tagStr string) map[string]string {
 	tags := make(map[string]string)
 	for _, tag := range strings.Split(tagStr, ";") {
@@ -527,6 +713,10 @@ func parseTags(tagStr string) map[string]string {
 // errLoopJoinTimeout and proceeds — it never hangs. A repeated Stop is a nil
 // no-op.
 func (c *IRCClient) Stop() error {
+	// Authority is one-way: a stopped/replaced generation can never regain the
+	// right to enter the structured sink, including through internal reconnect.
+	c.logAuthorized.Store(false)
+
 	c.mu.Lock()
 	if c.forcedClose {
 		// Idempotent: a second Stop must not re-close the stop channel (a
@@ -536,6 +726,8 @@ func (c *IRCClient) Stop() error {
 		return nil
 	}
 	c.running = false
+	c.lifecycleAuthorized = false
+	c.sessionReady = false
 	c.forcedClose = true
 	conn := c.conn
 	c.mu.Unlock()
@@ -547,7 +739,7 @@ func (c *IRCClient) Stop() error {
 		// blocking write could wedge Stop before the join even starts,
 		// making the bound below meaningless.
 		_ = conn.SetWriteDeadline(time.Now().Add(partWriteTimeout))
-		_ = c.send("PART " + c.channel)
+		_, _ = conn.Write([]byte("PART " + c.channel + "\r\n"))
 		_ = conn.Close() // unblocks the read loop's pending ReadString
 	}
 
