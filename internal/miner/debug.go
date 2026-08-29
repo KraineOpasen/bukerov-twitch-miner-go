@@ -185,20 +185,21 @@ func (m *Miner) BuildDebugSnapshot() debug.Snapshot {
 	if m.dropsTracker != nil {
 		status := m.dropsTracker.SyncStatus()
 		info := &debug.DropsSyncInfo{
-			LastSyncAt:             status.LastSyncAt,
-			LastSuccessAt:          status.LastSuccessAt,
-			LastDurationMillis:     status.LastDuration.Milliseconds(),
-			IntervalMinutes:        status.IntervalMinutes,
-			SyncRuns:               status.Runs,
-			DashboardCampaigns:     status.DashboardCampaigns,
-			RecoveredFromInventory: status.RecoveredCampaigns,
-			TrackedCampaigns:       status.TrackedCampaigns,
-			FilteredByBlacklist:    status.FilteredByBlacklist,
-			FilteredByGame:         status.FilteredByGame,
-			LastError:              status.LastError,
-			Revision:               status.Revision,
-			BackendUpdatedAt:       status.BackendUpdatedAt,
-			UpdateSource:           status.UpdateSource,
+			LastSyncAt:                  status.LastSyncAt,
+			LastSuccessAt:               status.LastSuccessAt,
+			LastDurationMillis:          status.LastDuration.Milliseconds(),
+			IntervalMinutes:             status.IntervalMinutes,
+			SyncRuns:                    status.Runs,
+			DashboardCampaigns:          status.DashboardCampaigns,
+			DashboardListingUnavailable: status.DashboardListingUnavailable,
+			RecoveredFromInventory:      status.RecoveredCampaigns,
+			TrackedCampaigns:            status.TrackedCampaigns,
+			FilteredByBlacklist:         status.FilteredByBlacklist,
+			FilteredByGame:              status.FilteredByGame,
+			LastError:                   status.LastError,
+			Revision:                    status.Revision,
+			BackendUpdatedAt:            status.BackendUpdatedAt,
+			UpdateSource:                status.UpdateSource,
 		}
 		for _, c := range m.dropsTracker.Campaigns() {
 			tc := debug.TrackedCampaignInfo{

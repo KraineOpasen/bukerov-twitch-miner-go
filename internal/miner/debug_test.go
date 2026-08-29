@@ -1,6 +1,8 @@
 package miner
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +107,106 @@ func TestBuildDebugSnapshotIncludesDropsSection(t *testing.T) {
 	}
 	if snap.Drops.Campaigns[0].GameID != "g1" {
 		t.Errorf("expected the tracked campaign's opaque game ID in the snapshot, got %q", snap.Drops.Campaigns[0].GameID)
+	}
+	// RED D (false half): after an authoritative listing the snapshot JSON must
+	// carry the explicit dashboardListingUnavailable=false, so an operator can
+	// tell "0 listed, authoritative" apart from "0 listed, listing unknown" —
+	// absence of the key is not a truthful encoding of false.
+	raw, err := json.Marshal(snap.Drops)
+	if err != nil {
+		t.Fatalf("marshal drops snapshot: %v", err)
+	}
+	if !strings.Contains(string(raw), `"dashboardListingUnavailable":false`) {
+		t.Errorf("snapshot JSON must expose dashboardListingUnavailable=false after an authoritative listing, got: %s", raw)
+	}
+}
+
+// nullListingDropsClient answers ViewerDropsDashboard with the owner-observed
+// production shape — HTTP-200-equivalent, no errors, an explicit JSON null at
+// data.currentUser.dropCampaigns — and an Inventory carrying one in-progress
+// campaign, so the tracker completes a null-listing sync with positive
+// recovery (SyncStatus.DashboardListingUnavailable=true, LastError empty).
+type nullListingDropsClient struct{}
+
+func (nullListingDropsClient) PostGQL(op constants.GQLOperation) (map[string]interface{}, error) {
+	switch op.OperationName {
+	case "ViewerDropsDashboard":
+		return map[string]interface{}{
+			"data": map[string]interface{}{
+				"currentUser": map[string]interface{}{"dropCampaigns": nil},
+			},
+		}, nil
+	default:
+		return map[string]interface{}{
+			"data": map[string]interface{}{
+				"currentUser": map[string]interface{}{
+					"inventory": map[string]interface{}{
+						"dropCampaignsInProgress": []interface{}{
+							map[string]interface{}{
+								"id":   "c-null",
+								"name": "Recovered Campaign",
+								"game": map[string]interface{}{"id": "g1", "name": "World of Warships"},
+								"timeBasedDrops": []interface{}{
+									map[string]interface{}{
+										"id":                     "d-null",
+										"name":                   "Flag",
+										"requiredMinutesWatched": float64(120),
+										"self": map[string]interface{}{
+											"currentMinutesWatched": float64(30),
+											"isClaimed":             false,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, nil
+	}
+}
+
+func (nullListingDropsClient) GetDropCampaignDetails(string) (map[string]interface{}, error) {
+	return nil, nil
+}
+
+func (nullListingDropsClient) ClaimDrop(*models.Drop) (twitch.ClaimStatus, error) {
+	return twitch.ClaimStatusRejected, nil
+}
+
+// TestBuildDebugSnapshotExposesUnavailableListing is RED D: after a full sync
+// that observed the explicit-null (UNKNOWN) dashboard listing and recovered a
+// campaign from the inventory, the debug snapshot's drops section must expose
+// dashboardListingUnavailable=true in its JSON — the operator-facing proof
+// that dashboardCampaigns=0 means "listing unknown", not "Twitch reported
+// zero campaigns".
+func TestBuildDebugSnapshotExposesUnavailableListing(t *testing.T) {
+	tracker := drops.NewDropsTracker(nullListingDropsClient{}, nil, config.RateLimitSettings{}, nil)
+	tracker.SyncNow()
+
+	m := &Miner{
+		config:       &config.Config{Username: "tester"},
+		dropsTracker: tracker,
+	}
+	snap := m.BuildDebugSnapshot()
+	if snap.Drops == nil {
+		t.Fatal("expected snapshot to include a drops section, got nil")
+	}
+	if snap.Drops.DashboardCampaigns != 0 {
+		t.Errorf("expected dashboardCampaigns=0 (nothing was listed), got %d", snap.Drops.DashboardCampaigns)
+	}
+	if snap.Drops.TrackedCampaigns != 1 {
+		t.Errorf("expected trackedCampaigns=1 (recovered from inventory), got %d", snap.Drops.TrackedCampaigns)
+	}
+	if snap.Drops.LastError != "" {
+		t.Errorf("null listing must not be a sync error, got %q", snap.Drops.LastError)
+	}
+	raw, err := json.Marshal(snap.Drops)
+	if err != nil {
+		t.Fatalf("marshal drops snapshot: %v", err)
+	}
+	if !strings.Contains(string(raw), `"dashboardListingUnavailable":true`) {
+		t.Errorf("snapshot JSON must expose dashboardListingUnavailable=true for an UNKNOWN listing, got: %s", raw)
 	}
 }
 

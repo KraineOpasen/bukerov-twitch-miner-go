@@ -283,17 +283,22 @@ type DiscoveryInfo struct {
 // an empty Drops page diagnosable without -debug — telling a campaign that was
 // filtered out apart from a sync that never ran or one that errored.
 type DropsSyncInfo struct {
-	LastSyncAt             time.Time `json:"lastSyncAt,omitzero"`
-	LastSuccessAt          time.Time `json:"lastSuccessAt,omitzero"`
-	LastDurationMillis     int64     `json:"lastDurationMillis,omitempty"`
-	IntervalMinutes        int       `json:"intervalMinutes,omitempty"`
-	SyncRuns               int       `json:"syncRuns"`
-	DashboardCampaigns     int       `json:"dashboardCampaigns"`
-	RecoveredFromInventory int       `json:"recoveredFromInventory"`
-	TrackedCampaigns       int       `json:"trackedCampaigns"`
-	FilteredByBlacklist    int       `json:"filteredByBlacklist"`
-	FilteredByGame         int       `json:"filteredByGame"`
-	LastError              string    `json:"lastError,omitempty"`
+	LastSyncAt         time.Time `json:"lastSyncAt,omitzero"`
+	LastSuccessAt      time.Time `json:"lastSuccessAt,omitzero"`
+	LastDurationMillis int64     `json:"lastDurationMillis,omitempty"`
+	IntervalMinutes    int       `json:"intervalMinutes,omitempty"`
+	SyncRuns           int       `json:"syncRuns"`
+	DashboardCampaigns int       `json:"dashboardCampaigns"`
+	// DashboardListingUnavailable distinguishes "dashboardCampaigns=0 because
+	// the ViewerDropsDashboard listing came back as an explicit null (UNKNOWN,
+	// not authoritative zero)" from a genuine authoritative empty listing.
+	// Always serialized — key absence must never stand in for false.
+	DashboardListingUnavailable bool   `json:"dashboardListingUnavailable"`
+	RecoveredFromInventory      int    `json:"recoveredFromInventory"`
+	TrackedCampaigns            int    `json:"trackedCampaigns"`
+	FilteredByBlacklist         int    `json:"filteredByBlacklist"`
+	FilteredByGame              int    `json:"filteredByGame"`
+	LastError                   string `json:"lastError,omitempty"`
 	// Shared-snapshot freshness diagnostics: the campaign-pool revision Overview
 	// and Drops both read (identical revision ⇒ same backend snapshot), when the
 	// pool was last (re)published, and by what (full_sync / light_sync).

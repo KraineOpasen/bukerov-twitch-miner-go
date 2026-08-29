@@ -78,14 +78,18 @@ func (s *Server) handleAPIDropsSync(w http.ResponseWriter, r *http.Request) {
 	res := provider.RequestManualSync()
 	st := res.Status
 	writeJSONOK(w, map[string]interface{}{
-		"triggered":          res.Triggered,
-		"retryAfterSecs":     int(res.RetryAfter.Round(time.Second).Seconds()),
-		"runs":               st.Runs,
-		"lastSyncAtMillis":   unixMilliOrZero(st.LastSyncAt),
-		"dashboardCampaigns": st.DashboardCampaigns,
-		"recoveredCampaigns": st.RecoveredCampaigns,
-		"trackedCampaigns":   st.TrackedCampaigns,
-		"lastError":          st.LastError,
+		"triggered":        res.Triggered,
+		"retryAfterSecs":   int(res.RetryAfter.Round(time.Second).Seconds()),
+		"runs":             st.Runs,
+		"lastSyncAtMillis": unixMilliOrZero(st.LastSyncAt),
+		// dashboardListingUnavailable distinguishes "dashboardCampaigns=0,
+		// listing UNKNOWN (explicit null)" from an authoritative zero; always
+		// present so false is explicit.
+		"dashboardCampaigns":          st.DashboardCampaigns,
+		"dashboardListingUnavailable": st.DashboardListingUnavailable,
+		"recoveredCampaigns":          st.RecoveredCampaigns,
+		"trackedCampaigns":            st.TrackedCampaigns,
+		"lastError":                   st.LastError,
 	})
 }
 

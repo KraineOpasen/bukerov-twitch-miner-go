@@ -245,21 +245,25 @@ type DropsSection struct {
 
 // DropsSyncStatus mirrors debug.DropsSyncInfo except LastError: instead of
 // the raw (potentially arbitrary) error string, only the derived
-// LastSyncFailed bool is carried.
+// LastSyncFailed bool is carried. DashboardListingUnavailable is the safe
+// boolean distinguishing "DashboardCampaigns=0 because the dashboard listing
+// was UNKNOWN (explicit null)" from an authoritative zero — a plain flag, no
+// response material.
 type DropsSyncStatus struct {
-	LastSyncAt             time.Time
-	LastSuccessAt          time.Time
-	IntervalMinutes        int
-	SyncRuns               int
-	DashboardCampaigns     int
-	TrackedCampaigns       int
-	RecoveredFromInventory int
-	FilteredByBlacklist    int
-	FilteredByGame         int
-	LastSyncFailed         bool
-	Revision               uint64
-	BackendUpdatedAt       time.Time
-	UpdateSource           string
+	LastSyncAt                  time.Time
+	LastSuccessAt               time.Time
+	IntervalMinutes             int
+	SyncRuns                    int
+	DashboardCampaigns          int
+	DashboardListingUnavailable bool
+	TrackedCampaigns            int
+	RecoveredFromInventory      int
+	FilteredByBlacklist         int
+	FilteredByGame              int
+	LastSyncFailed              bool
+	Revision                    uint64
+	BackendUpdatedAt            time.Time
+	UpdateSource                string
 }
 
 type DropCampaign struct {

@@ -1176,6 +1176,21 @@ reports tracked/recovered/kept-from-last-known counts; it never claims
 "Twitch reports no active drop campaigns", which remains reserved for an
 authoritative empty listing.
 
+The UNKNOWN state is a distinct operator-visible state end to end, so
+`dashboardCampaigns: 0` can always be told apart from an authoritative zero:
+
+- the Health Center's **Drops Inventory Sync** signal reports `degraded` with
+  the stable code `dashboard_listing_unavailable` (detail: inventory
+  reconciliation succeeded, N campaign(s) tracked, newly discoverable
+  campaigns may be missing) — never ordinary "successful discovery"; an
+  actual sync error keeps its `failed`/`sync_error` precedence over the flag;
+- the debug snapshot's `drops` section, the manual-sync JSON
+  (`POST /api/drops/sync`), and the support bundle's `drops.json syncStatus`
+  all carry an explicit `dashboardListingUnavailable` boolean (always
+  serialized, so `false` is explicit — key absence never stands in for it),
+  crossing the support bundle's typed allowlist as a plain flag with no raw
+  Twitch response material, error bodies, or query metadata.
+
 ### Full-sync inventory-merge failure preserves the last-known-good pool
 
 The full sync's dashboard/details path (`getActiveCampaigns`) builds fresh
@@ -1619,7 +1634,11 @@ The signals are distinct kinds of health:
 - **Watch Transport** — whether Twitch *accepts the watch transport and beacon*
   (from the canary, below). This is independent of whether any drop is active.
 - **Drops Inventory Sync** — whether the periodic inventory sync is running
-  without error (from the drops tracker's sync status).
+  without error (from the drops tracker's sync status). A sync that completed
+  without error but observed the explicit-null (UNKNOWN) dashboard listing is
+  `degraded` with the stable code `dashboard_listing_unavailable` — never
+  ordinary "successful discovery" — while an actual sync error keeps its
+  `failed`/`sync_error` precedence (see "Dashboard-listing authority").
 - **Drops Progress** — composed by the drop-progress watchdog (below): `ok`
   while every tracked drop advances (with a `recovering:<stage>` marker while
   the pipeline runs), `stalled` once a drop's stall is confirmed and automatic
