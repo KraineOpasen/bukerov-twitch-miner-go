@@ -58,7 +58,16 @@ type SyncStatus struct {
 	// tracked set without -debug.
 	FilteredByBlacklist int
 	FilteredByGame      int
-	LastError           string
+	// DashboardListingUnavailable reports that the last full-sync attempt saw
+	// Twitch answer ViewerDropsDashboard successfully but with an explicit JSON
+	// null dropCampaigns value: the dashboard listing was UNKNOWN/unavailable,
+	// not an authoritative array. In that state DashboardCampaigns is 0 because
+	// nothing was listed — never because Twitch authoritatively reported zero
+	// campaigns — and the tracked pool is the last-known set plus whatever the
+	// Inventory positively proved in progress. It is an observation, not a
+	// failure: LastError stays empty unless something else actually failed.
+	DashboardListingUnavailable bool
+	LastError                   string
 
 	// Revision is a monotonic counter bumped every time the published campaign
 	// pool changes (full sync OR lightweight progress sync). Overview and Drops
@@ -125,7 +134,11 @@ type DropsTracker struct {
 	lastTrackedCount      int
 	lastFilteredBlacklist int
 	lastFilteredGame      int
-	lastSyncErr           string
+	// lastListingUnavailable mirrors SyncStatus.DashboardListingUnavailable:
+	// the last full-sync attempt observed an explicit-null (UNKNOWN) dashboard
+	// listing. Guarded by mu, written only from recordSync.
+	lastListingUnavailable bool
+	lastSyncErr            string
 
 	// lastSummaryFingerprint is a deterministic semantic signature of the last
 	// "Drops sync complete" summary published at INFO (sorted tracked campaign
@@ -515,23 +528,24 @@ func (d *DropsTracker) SyncStatus() SyncStatus {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return SyncStatus{
-		LastSyncAt:          d.lastSyncAt,
-		LastSuccessAt:       d.lastSuccessAt,
-		LastDuration:        d.lastDuration,
-		Runs:                d.syncRuns,
-		IntervalMinutes:     d.settings.CampaignSyncInterval,
-		DashboardCampaigns:  d.lastDashboardCount,
-		RecoveredCampaigns:  d.lastRecoveredCount,
-		TrackedCampaigns:    d.lastTrackedCount,
-		FilteredByBlacklist: d.lastFilteredBlacklist,
-		FilteredByGame:      d.lastFilteredGame,
-		LastError:           d.lastSyncErr,
-		Revision:            d.revision,
-		BackendUpdatedAt:    d.backendUpdatedAt,
-		UpdateSource:        d.lastUpdateSource,
-		ProgressRuns:        d.progressRuns,
-		ProgressLastSyncAt:  d.progressLastSyncAt,
-		ProgressLastError:   d.progressLastErr,
+		LastSyncAt:                  d.lastSyncAt,
+		LastSuccessAt:               d.lastSuccessAt,
+		LastDuration:                d.lastDuration,
+		Runs:                        d.syncRuns,
+		IntervalMinutes:             d.settings.CampaignSyncInterval,
+		DashboardCampaigns:          d.lastDashboardCount,
+		RecoveredCampaigns:          d.lastRecoveredCount,
+		TrackedCampaigns:            d.lastTrackedCount,
+		FilteredByBlacklist:         d.lastFilteredBlacklist,
+		FilteredByGame:              d.lastFilteredGame,
+		DashboardListingUnavailable: d.lastListingUnavailable,
+		LastError:                   d.lastSyncErr,
+		Revision:                    d.revision,
+		BackendUpdatedAt:            d.backendUpdatedAt,
+		UpdateSource:                d.lastUpdateSource,
+		ProgressRuns:                d.progressRuns,
+		ProgressLastSyncAt:          d.progressLastSyncAt,
+		ProgressLastError:           d.progressLastErr,
 	}
 }
 
@@ -554,9 +568,11 @@ func (d *DropsTracker) bumpRevisionLocked(source string) {
 
 // recordSync updates the sync bookkeeping surfaced by SyncStatus. duration is
 // the wall time of the full sync; filteredByBlacklist/filteredByGame are how
-// many candidates it dropped for each reason. lastSyncAt is stamped on every
+// many candidates it dropped for each reason; listingUnavailable records
+// whether this attempt observed an explicit-null (UNKNOWN) dashboard listing
+// (see SyncStatus.DashboardListingUnavailable). lastSyncAt is stamped on every
 // attempt; lastSuccessAt only when err is nil.
-func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount, filteredByBlacklist, filteredByGame int, duration time.Duration, err error) {
+func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount, filteredByBlacklist, filteredByGame int, listingUnavailable bool, duration time.Duration, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.syncRuns++
@@ -575,6 +591,7 @@ func (d *DropsTracker) recordSync(dashboardCount, recoveredCount, trackedCount, 
 	d.lastTrackedCount = trackedCount
 	d.lastFilteredBlacklist = filteredByBlacklist
 	d.lastFilteredGame = filteredByGame
+	d.lastListingUnavailable = listingUnavailable
 	if err != nil {
 		d.lastSyncErr = err.Error()
 	} else {
@@ -1004,18 +1021,22 @@ func (d *DropsTracker) syncCampaignsLocked() {
 
 	d.claimAllDropsFromInventory()
 
-	campaigns, dashboardCount, err := d.getActiveCampaigns()
+	campaigns, dashboardCount, listingUnavailable, err := d.getActiveCampaigns()
 	if err != nil {
 		slog.Error("Drops sync failed: could not fetch active drop campaigns from Twitch; keeping previously tracked campaigns", "error", err)
 		// dashboardCount is non-zero when the dashboard listing succeeded and
 		// the failure happened later (campaign details), so SyncStatus shows
 		// what Twitch reported even for a failed run.
-		d.recordSync(dashboardCount, 0, 0, 0, 0, time.Since(start), err)
+		d.recordSync(dashboardCount, 0, 0, 0, 0, listingUnavailable, time.Since(start), err)
 		return
 	}
 
 	// Campaigns produced by the dashboard -> DropCampaignDetails path, before
 	// syncWithInventory folds in any in-progress campaign that path missed.
+	// Under an unavailable (explicit-null) listing this set is empty: the sync
+	// still proceeds so the inventory merge below can contribute positive
+	// evidence, but the listing itself carries no authority (see the
+	// listingUnavailable handling before publication).
 	fromDashboard := len(campaigns)
 
 	campaigns, err = d.syncWithInventory(campaigns)
@@ -1026,12 +1047,28 @@ func (d *DropsTracker) syncCampaignsLocked() {
 		// syncWithInventory's doc comment), so publishing them now would replace
 		// previously known Twitch progress with zero/unknown data without a new
 		// authoritative observation. Abort exactly like a dashboard/details
-		// failure above and keep the previously tracked campaigns.
+		// failure above and keep the previously tracked campaigns. This holds
+		// under an unavailable listing too: with the inventory unusable there is
+		// no evidence source left at all.
 		slog.Error("Drops sync failed: could not merge live inventory progress into campaigns; keeping previously tracked campaigns", "error", err)
-		d.recordSync(dashboardCount, 0, 0, 0, 0, time.Since(start), err)
+		d.recordSync(dashboardCount, 0, 0, 0, 0, listingUnavailable, time.Since(start), err)
 		return
 	}
 	afterInventory := len(campaigns)
+
+	// Under an unavailable listing, the campaigns present after the inventory
+	// merge are exactly the ones the inventory positively proved in progress.
+	// Their IDs mark where fresh authoritative evidence exists: the pipeline's
+	// outcome below is authoritative for those campaigns, while previously
+	// tracked campaigns outside this set are preserved as-is before publication
+	// (an explicit-null listing is not deletion authority).
+	var freshEvidence map[string]bool
+	if listingUnavailable {
+		freshEvidence = make(map[string]bool, len(campaigns))
+		for _, c := range campaigns {
+			freshEvidence[c.ID] = true
+		}
+	}
 	// Anything syncWithInventory added beyond the dashboard set was recovered
 	// straight from the inventory's in-progress list.
 	recovered := afterInventory - fromDashboard
@@ -1124,10 +1161,68 @@ func (d *DropsTracker) syncCampaignsLocked() {
 	d.mu.RUnlock()
 	reconcileCampaignACLs(previous, campaigns)
 
-	d.mu.Lock()
-	d.campaigns = campaigns
-	d.bumpRevisionLocked(updateSourceFullSync)
-	d.mu.Unlock()
+	// Explicit-null (UNKNOWN) listing: no authority to remove or to report an
+	// authoritative empty pool. Campaigns WITH fresh inventory evidence take
+	// the pipeline's outcome above (refreshed when they survived the filters,
+	// dropped when claim-history/blacklist/game/account-link authority removed
+	// them). Previously tracked campaigns WITHOUT fresh evidence are carried
+	// over by pointer, unmodified — published campaigns are immutable once
+	// swapped in, the same invariant syncProgress relies on — because absence
+	// from dropCampaignsInProgress is not proof a campaign ended. With no fresh
+	// evidence at all nothing changed: keep the published pool untouched (no
+	// republish, no revision bump) and only record the truthful observation.
+	keptFromPrevious := 0
+	publishPool := true
+	if listingUnavailable {
+		if len(freshEvidence) == 0 {
+			publishPool = false
+			campaigns = previous
+			keptFromPrevious = len(previous)
+		} else {
+			// A fresh-evidence campaign here was rebuilt inventory-only
+			// (buildInProgressCampaign — no DropCampaignDetails fetch on this
+			// path), and inventory entries frequently omit the campaign date
+			// window. Backfill the window from the same campaign's previous
+			// (details-built) version so a date-less rebuild cannot zero out
+			// known-good dates — the same per-field rule the drop catalog
+			// applies. Fresh objects are not yet published, so mutating them
+			// here is safe. Accepted trade-off: if Twitch extended a window
+			// mid-flight while the listing is null and the entry is date-less,
+			// the old EndAt is carried until the next authoritative listing or
+			// dated observation — in the common unchanged-window case the
+			// known deadline beats a fail-open zero window. DateMatch is
+			// deliberately not recomputed: the recovery path never reads it.
+			prevByID := make(map[string]*models.Campaign, len(previous))
+			for _, p := range previous {
+				prevByID[p.ID] = p
+			}
+			for _, c := range campaigns {
+				prev := prevByID[c.ID]
+				if prev == nil {
+					continue
+				}
+				if c.StartAt.IsZero() && !prev.StartAt.IsZero() {
+					c.StartAt = prev.StartAt
+				}
+				if c.EndAt.IsZero() && !prev.EndAt.IsZero() {
+					c.EndAt = prev.EndAt
+				}
+			}
+			for _, p := range previous {
+				if !freshEvidence[p.ID] {
+					campaigns = append(campaigns, p)
+					keptFromPrevious++
+				}
+			}
+		}
+	}
+
+	if publishPool {
+		d.mu.Lock()
+		d.campaigns = campaigns
+		d.bumpRevisionLocked(updateSourceFullSync)
+		d.mu.Unlock()
+	}
 
 	// One concise summary per sync so a production deployment - which runs without
 	// -debug - can confirm the sync ran and see what it found. Detailed
@@ -1142,6 +1237,18 @@ func (d *DropsTracker) syncCampaignsLocked() {
 		summaryArgs []any
 	)
 	switch {
+	case listingUnavailable:
+		// Never the authoritative "Twitch reports no active drop campaigns"
+		// claim below: the listing was UNKNOWN, so zero was not reported —
+		// nothing was. The tracked pool is inventory-proven campaigns plus
+		// preserved last-known state.
+		summaryMsg = "Drops sync complete: dashboard campaign listing unavailable (Twitch returned explicit null); keeping last-known campaigns"
+		summaryArgs = []any{
+			"tracked", len(campaigns), "recoveredFromInventory", recovered,
+			"keptFromLastKnown", keptFromPrevious,
+			"filteredByBlacklist", filteredByBlacklist, "filteredByGame", filteredByGame,
+			"filteredRewardsByAccountLink", filteredRewardsByAccountLink,
+		}
 	case len(campaigns) > 0:
 		names := make([]string, 0, len(campaigns))
 		for _, c := range campaigns {
@@ -1167,7 +1274,7 @@ func (d *DropsTracker) syncCampaignsLocked() {
 		}
 	}
 
-	fingerprint := syncSummaryFingerprint(campaigns, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink)
+	fingerprint := syncSummaryFingerprint(campaigns, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink, listingUnavailable)
 	d.mu.Lock()
 	changed := fingerprint != d.lastSummaryFingerprint
 	recovering := d.lastSyncErr != ""
@@ -1180,9 +1287,13 @@ func (d *DropsTracker) syncCampaignsLocked() {
 		slog.Debug(summaryMsg, summaryArgs...)
 	}
 
-	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, time.Since(start), nil)
+	d.recordSync(dashboardCount, recovered, len(campaigns), filteredByBlacklist, filteredByGame, listingUnavailable, time.Since(start), nil)
 
-	d.updateStreamerCampaigns()
+	// An unpublished pool (unavailable listing, no fresh evidence) left the
+	// campaign set untouched, so streamer assignments are already current.
+	if publishPool {
+		d.updateStreamerCampaigns()
+	}
 }
 
 // syncSummaryFingerprint is a deterministic semantic signature of a completed
@@ -1191,8 +1302,11 @@ func (d *DropsTracker) syncCampaignsLocked() {
 // facts: the sorted tracked campaign IDs and the salient pipeline counts. It
 // excludes timestamps, map iteration order, pointer addresses, request IDs,
 // volatile progress values and raw payloads, so two syncs that reached the same
-// outcome produce the same fingerprint.
-func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink int) string {
+// outcome produce the same fingerprint. listingUnavailable is part of the
+// signature so a transition between an authoritative listing and an
+// explicit-null (UNKNOWN) one re-publishes the summary at INFO even when the
+// tracked set happens to be identical.
+func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink int, listingUnavailable bool) string {
 	ids := make([]string, 0, len(campaigns))
 	for _, c := range campaigns {
 		ids = append(ids, c.ID)
@@ -1202,19 +1316,27 @@ func syncSummaryFingerprint(campaigns []*models.Campaign, dashboardCount, recove
 	// campaign that keeps its tracked ID (a mixed campaign losing a link-required
 	// reward) still counts as a changed outcome and refreshes the INFO summary,
 	// rather than being demoted to DEBUG because the tracked ID set is unchanged.
-	return fmt.Sprintf("tracked=%d[%s]|dashboard=%d|recovered=%d|blacklist=%d|game=%d|acctlink=%d",
-		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink)
+	return fmt.Sprintf("tracked=%d[%s]|dashboard=%d|recovered=%d|blacklist=%d|game=%d|acctlink=%d|listingUnavailable=%t",
+		len(ids), strings.Join(ids, ","), dashboardCount, recovered, filteredByBlacklist, filteredByGame, filteredRewardsByAccountLink, listingUnavailable)
 }
 
-func (d *DropsTracker) getActiveCampaigns() (active []*models.Campaign, dashboardTotal int, err error) {
+func (d *DropsTracker) getActiveCampaigns() (active []*models.Campaign, dashboardTotal int, listingUnavailable bool, err error) {
 	// Current farming rejects dashboard rows Twitch explicitly reports as
 	// non-active. A missing summary status fails open to the detail/window checks
 	// below so a partial response cannot hide a real current campaign. A complete
 	// window remains authoritative; when a boundary is missing, explicit ACTIVE
 	// detail/summary status is the only signal that may keep it in the farm set.
-	dashboardCampaigns, err := d.getDropsDashboard(string(models.CampaignActive))
+	dashboardCampaigns, listingUnavailable, err := d.getDropsDashboard(string(models.CampaignActive))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
+	}
+	if listingUnavailable {
+		// The listing is UNKNOWN (explicit null): there are no summaries to
+		// fetch details for. The caller decides how far the sync proceeds —
+		// inventory reconciliation still runs, deletion authority does not
+		// exist (see syncCampaignsLocked).
+		slog.Debug("Drops sync: dashboard campaign listing unavailable (explicit null); skipping details stage")
+		return nil, 0, true, nil
 	}
 	dashboardCount := len(dashboardCampaigns)
 
@@ -1246,7 +1368,7 @@ func (d *DropsTracker) getActiveCampaigns() (active []*models.Campaign, dashboar
 			// walk per campaign. Abort the sync instead: the caller keeps the
 			// previously tracked campaigns, exactly like a dashboard-level error.
 			if errors.Is(err, twitch.ErrPersistedQueryNotFound) {
-				return nil, dashboardCount, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
+				return nil, dashboardCount, false, fmt.Errorf("campaign details unavailable (stale Twitch query metadata): %w", err)
 			}
 			// Any other error is campaign-specific (campaign gone, malformed
 			// response) — skip just this one and keep syncing the rest.
@@ -1285,7 +1407,7 @@ func (d *DropsTracker) getActiveCampaigns() (active []*models.Campaign, dashboar
 	slog.Debug("Drops sync: active campaigns after detail fetch and filtering",
 		"trackedCount", len(campaigns))
 
-	return campaigns, dashboardCount, nil
+	return campaigns, dashboardCount, false, nil
 }
 
 // campaignSkipReason explains why buildTrackedCampaign declined to track a
@@ -1398,10 +1520,29 @@ func buildTrackedCampaignAt(summary, detail map[string]interface{}, now time.Tim
 	return campaign, dropsFromDetails, skipNone
 }
 
-func (d *DropsTracker) getDropsDashboard(status string) ([]map[string]interface{}, error) {
+// getDropsDashboard fetches the ViewerDropsDashboard listing and classifies
+// the response's authority into three distinct outcomes:
+//
+//   - authoritative array (explicit [] included): (campaigns, false, nil) —
+//     Twitch enumerated the listing; an empty array is a genuine "zero
+//     campaigns" observation;
+//   - explicit JSON null at data.currentUser.dropCampaigns: (nil, true, nil) —
+//     the listing is UNKNOWN/unavailable. Production Twitch has been observed
+//     returning exactly this shape (HTTP 200, no top-level errors, data and
+//     currentUser objects present) across persisted-query hashes, variables,
+//     and client profiles: a successful response that declines to enumerate
+//     campaigns. It carries no authority to report zero campaigns and no
+//     authority to erase last-known state — the caller may still consume
+//     positive Inventory evidence, and must not treat it as an error;
+//   - anything else — top-level errors, missing/malformed data or currentUser,
+//     a missing dropCampaigns key, a wrong-typed or typed-nil value, malformed
+//     campaign elements or ids: (nil, false, error). This is the untrusted-
+//     shape protection introduced by the response-authority fix (PR #252),
+//     deliberately unchanged.
+func (d *DropsTracker) getDropsDashboard(status string) (campaigns []map[string]interface{}, listingUnavailable bool, err error) {
 	resp, err := d.client.PostGQL(constants.ViewerDropsDashboard)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// ViewerDropsDashboard is an authoritative replacement source: accepting an
@@ -1409,33 +1550,45 @@ func (d *DropsTracker) getDropsDashboard(status string) ([]map[string]interface{
 	// Any top-level errors member means the operation was not a complete success,
 	// even when partial data accompanies it. A successful response omits errors.
 	if _, present := resp["errors"]; present {
-		return nil, fmt.Errorf("twitch GQL %s: top-level errors present", constants.ViewerDropsDashboard.OperationName)
+		return nil, false, fmt.Errorf("twitch GQL %s: top-level errors present", constants.ViewerDropsDashboard.OperationName)
 	}
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok || data == nil {
-		return nil, fmt.Errorf("twitch GQL %s: missing or malformed data object", constants.ViewerDropsDashboard.OperationName)
+		return nil, false, fmt.Errorf("twitch GQL %s: missing or malformed data object", constants.ViewerDropsDashboard.OperationName)
 	}
 
 	currentUser, ok := data["currentUser"].(map[string]interface{})
 	if !ok || currentUser == nil {
-		return nil, fmt.Errorf("twitch GQL %s: missing or malformed currentUser object", constants.ViewerDropsDashboard.OperationName)
+		return nil, false, fmt.Errorf("twitch GQL %s: missing or malformed currentUser object", constants.ViewerDropsDashboard.OperationName)
 	}
 
-	campaignsData, ok := currentUser["dropCampaigns"].([]interface{})
+	raw, present := currentUser["dropCampaigns"]
+	if !present {
+		return nil, false, fmt.Errorf("twitch GQL %s: missing dropCampaigns array", constants.ViewerDropsDashboard.OperationName)
+	}
+	if raw == nil {
+		// Explicit JSON null under a present key — the one and only shape
+		// encoding/json produces for `"dropCampaigns": null` (an untyped nil
+		// interface value). Deliberately distinct from the missing key above
+		// and from the typed-nil/wrong-type checks below, which both remain
+		// hard errors.
+		return nil, true, nil
+	}
+	campaignsData, ok := raw.([]interface{})
 	if !ok || campaignsData == nil {
-		return nil, fmt.Errorf("twitch GQL %s: missing or malformed dropCampaigns array", constants.ViewerDropsDashboard.OperationName)
+		return nil, false, fmt.Errorf("twitch GQL %s: malformed dropCampaigns array", constants.ViewerDropsDashboard.OperationName)
 	}
 
 	result := make([]map[string]interface{}, 0, len(campaignsData))
 	for i, c := range campaignsData {
 		campaign, ok := c.(map[string]interface{})
 		if !ok || campaign == nil {
-			return nil, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] is not an object", constants.ViewerDropsDashboard.OperationName, i)
+			return nil, false, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] is not an object", constants.ViewerDropsDashboard.OperationName, i)
 		}
 		campaignID, ok := campaign["id"].(string)
 		if !ok || campaignID == "" || strings.TrimSpace(campaignID) != campaignID {
-			return nil, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] has no valid id", constants.ViewerDropsDashboard.OperationName, i)
+			return nil, false, fmt.Errorf("twitch GQL %s: dropCampaigns[%d] has no valid id", constants.ViewerDropsDashboard.OperationName, i)
 		}
 
 		if status != "" {
@@ -1447,7 +1600,7 @@ func (d *DropsTracker) getDropsDashboard(status string) ([]map[string]interface{
 		result = append(result, campaign)
 	}
 
-	return result, nil
+	return result, false, nil
 }
 
 func (d *DropsTracker) getInventory() (map[string]interface{}, error) {

@@ -63,8 +63,10 @@ type fakeDropsClient struct {
 	// sync (each ViewerDropsDashboard call), letting a test observe the
 	// background loop's cadence. Set before Start. dashboard/details/inventory
 	// may be swapped after construction (e.g. publishCampaignB), but only
-	// while every concurrent caller is parked in the inventoryGate and cannot
-	// re-enter PostGQL -- swapping them at any other time is a data race.
+	// while no concurrent caller can re-enter PostGQL: either parked in the
+	// inventoryGate, or at full quiescence (after wg.Wait for every goroutine
+	// of one phase, before the next phase's goroutines start) -- swapping
+	// them at any other time is a data race.
 	fullSyncSignal chan struct{}
 
 	// gateMu guards inventoryGate: armInventoryGate (the test goroutine) and
