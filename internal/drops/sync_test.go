@@ -3,6 +3,7 @@ package drops
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,32 @@ import (
 
 func nowMinusHours(h int) time.Time { return time.Now().Add(-time.Duration(h) * time.Hour) }
 func nowPlusHours(h int) time.Time  { return time.Now().Add(time.Duration(h) * time.Hour) }
+
+type blockingSuppressionHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	blockOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func (h *blockingSuppressionHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *blockingSuppressionHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == "Drop suppressed by ghost-skip ledger" {
+		h.blockOnce.Do(func() {
+			close(h.entered)
+			<-h.release
+		})
+	}
+	return nil
+}
+
+func (h *blockingSuppressionHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingSuppressionHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *blockingSuppressionHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
 
 // fakeDropsClient is a scripted twitchClient for exercising the whole
 // syncCampaigns pipeline without a live Twitch connection. PostGQL is
@@ -219,6 +246,48 @@ func inventoryWithInProgress(campaigns ...map[string]interface{}) map[string]int
 	}
 }
 
+type testPreconditionState struct {
+	present bool
+	value   bool
+}
+
+func testPreconditionPtr(state testPreconditionState) *bool {
+	if !state.present {
+		return nil
+	}
+	value := state.value
+	return &value
+}
+
+func inProgressDropWithPrecondition(
+	id, name string,
+	required, watched float64,
+	claimed bool,
+	state testPreconditionState,
+) map[string]interface{} {
+	drop := inProgressDrop(id, name, required, watched, claimed)
+	if state.present {
+		drop["self"].(map[string]interface{})["hasPreconditionsMet"] = state.value
+	}
+	return drop
+}
+
+func assertPreconditionState(t *testing.T, got *bool, want testPreconditionState) {
+	t.Helper()
+	if !want.present {
+		if got != nil {
+			t.Fatalf("HasPreconditionsMet=%v, want nil", *got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("HasPreconditionsMet=nil, want %v", want.value)
+	}
+	if *got != want.value {
+		t.Fatalf("HasPreconditionsMet=%v, want %v", *got, want.value)
+	}
+}
+
 // TestLoopAdoptsRuntimeCampaignSyncInterval is the regression guard for the
 // dead runtime-interval bug: the full-sync loop used to create a time.Ticker
 // once at startup, so a CampaignSyncInterval change via UpdateSettings (the
@@ -331,6 +400,237 @@ func TestSyncProgressImmediateRevisionBump(t *testing.T) {
 	tracker.syncProgress()
 	if r := tracker.Revision(); r != rev1+1 {
 		t.Errorf("unchanged progress must not bump the revision: got %d, want %d", r, rev1+1)
+	}
+}
+
+func TestProgressDiffersSemanticSnapshotMatrix(t *testing.T) {
+	states := []struct {
+		name  string
+		state testPreconditionState
+	}{
+		{name: "nil", state: testPreconditionState{}},
+		{name: "false", state: testPreconditionState{present: true, value: false}},
+		{name: "true", state: testPreconditionState{present: true, value: true}},
+	}
+
+	campaign := func(drops ...*models.Drop) *models.Campaign {
+		return &models.Campaign{Drops: drops}
+	}
+	drop := func(id string, minutes int, state testPreconditionState) *models.Drop {
+		return &models.Drop{
+			ID:                    id,
+			CurrentMinutesWatched: minutes,
+			HasPreconditionsMet:   testPreconditionPtr(state),
+		}
+	}
+
+	for _, before := range states {
+		for _, after := range states {
+			name := before.name + "_to_" + after.name
+			t.Run(name, func(t *testing.T) {
+				wantChanged := before.state.present != after.state.present ||
+					(before.state.present && before.state.value != after.state.value)
+				got := progressDiffers(
+					campaign(drop("drop-a", 45, before.state)),
+					campaign(drop("drop-a", 45, after.state)),
+				)
+				if got != wantChanged {
+					t.Fatalf("progressDiffers=%v, want %v", got, wantChanged)
+				}
+			})
+		}
+	}
+
+	controls := []struct {
+		name          string
+		before, after *models.Campaign
+		wantChanged   bool
+	}{
+		{
+			name:        "minutes changed",
+			before:      campaign(drop("drop-a", 45, testPreconditionState{})),
+			after:       campaign(drop("drop-a", 46, testPreconditionState{})),
+			wantChanged: true,
+		},
+		{
+			name:        "ID changed with same count and minutes",
+			before:      campaign(drop("drop-a", 45, testPreconditionState{})),
+			after:       campaign(drop("drop-b", 45, testPreconditionState{})),
+			wantChanged: true,
+		},
+		{
+			name:        "drop added",
+			before:      campaign(drop("drop-a", 45, testPreconditionState{})),
+			after:       campaign(drop("drop-a", 45, testPreconditionState{}), drop("drop-b", 45, testPreconditionState{})),
+			wantChanged: true,
+		},
+		{
+			name:        "drop removed",
+			before:      campaign(drop("drop-a", 45, testPreconditionState{}), drop("drop-b", 45, testPreconditionState{})),
+			after:       campaign(drop("drop-a", 45, testPreconditionState{})),
+			wantChanged: true,
+		},
+		{
+			name: "order changed only",
+			before: campaign(
+				drop("drop-a", 45, testPreconditionState{present: true, value: false}),
+				drop("drop-b", 30, testPreconditionState{present: true, value: true}),
+			),
+			after: campaign(
+				drop("drop-b", 30, testPreconditionState{present: true, value: true}),
+				drop("drop-a", 45, testPreconditionState{present: true, value: false}),
+			),
+			wantChanged: false,
+		},
+	}
+
+	for _, tc := range controls {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := progressDiffers(tc.before, tc.after); got != tc.wantChanged {
+				t.Fatalf("progressDiffers=%v, want %v", got, tc.wantChanged)
+			}
+		})
+	}
+}
+
+func TestSyncProgressPublishesPreconditionStateTransitions(t *testing.T) {
+	nilState := testPreconditionState{}
+	falseState := testPreconditionState{present: true, value: false}
+	trueState := testPreconditionState{present: true, value: true}
+
+	cases := []struct {
+		name        string
+		initial     testPreconditionState
+		observed    testPreconditionState
+		want        testPreconditionState
+		wantPublish bool
+	}{
+		{name: "nil to false", initial: nilState, observed: falseState, want: falseState, wantPublish: true},
+		{name: "false to true", initial: falseState, observed: trueState, want: trueState, wantPublish: true},
+		{name: "true to false", initial: trueState, observed: falseState, want: falseState, wantPublish: true},
+		{name: "nil to nil", initial: nilState, observed: nilState, want: nilState, wantPublish: false},
+		{name: "false to false", initial: falseState, observed: falseState, want: falseState, wantPublish: false},
+		{name: "true to true", initial: trueState, observed: trueState, want: trueState, wantPublish: false},
+		{name: "false then absent", initial: falseState, observed: nilState, want: falseState, wantPublish: false},
+		{name: "true then absent", initial: trueState, observed: nilState, want: trueState, wantPublish: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			summary, detail, _, _ := campaignAAndB()
+			inventoryDrop := func(state testPreconditionState) map[string]interface{} {
+				return inProgressDropWithPrecondition("drop-a", "Reward A", 120, 45, false, state)
+			}
+			inventory := func(state testPreconditionState) map[string]interface{} {
+				return inventoryWithInProgress(map[string]interface{}{
+					"id":             "campaign-a",
+					"name":           "Campaign A",
+					"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+					"timeBasedDrops": []interface{}{inventoryDrop(state)},
+				})
+			}
+
+			client := &fakeDropsClient{
+				dashboard: dashboardResponse(summary),
+				inventory: inventory(tc.initial),
+				details:   map[string]map[string]interface{}{"campaign-a": detail},
+			}
+			streamer := models.NewStreamer("streamer1", models.StreamerSettings{ClaimDrops: true})
+			streamer.SetConfirmedOnline()
+			streamer.Stream.SetCampaignIDs([]string{"campaign-a"})
+
+			tracker := NewDropsTracker(client, []*models.Streamer{streamer}, config.RateLimitSettings{}, nil)
+			tracker.syncCampaigns()
+
+			publishedBefore := tracker.Campaigns()
+			if len(publishedBefore) != 1 || len(publishedBefore[0].Drops) != 1 {
+				t.Fatalf("fixture setup: expected one campaign/drop, got %+v", publishedBefore)
+			}
+			beforeCampaign := publishedBefore[0]
+			beforeDrop := beforeCampaign.Drops[0]
+			assertPreconditionState(t, beforeDrop.HasPreconditionsMet, tc.initial)
+			assertAssigned(t, streamer, "campaign-a")
+			assignedBefore := streamer.Stream.GetCampaigns()[0]
+			if assignedBefore != beforeCampaign {
+				t.Fatal("fixture setup: streamer must reference the shared published campaign")
+			}
+
+			freshDrop := inventoryDrop(tc.observed)
+			freshSelf := freshDrop["self"].(map[string]interface{})
+			freshValue, freshPresent := freshSelf["hasPreconditionsMet"]
+			if freshPresent != tc.observed.present {
+				t.Fatalf("fresh Inventory field presence=%v, want %v", freshPresent, tc.observed.present)
+			}
+			if tc.observed.present {
+				value, ok := freshValue.(bool)
+				if !ok || value != tc.observed.value {
+					t.Fatalf("fresh Inventory value=%T(%v), want bool(%v)", freshValue, freshValue, tc.observed.value)
+				}
+			}
+
+			clone := beforeCampaign.Clone()
+			clone.SyncDrops([]interface{}{freshDrop}, nil)
+			clone.ClearClaimedDrops()
+			assertPreconditionState(t, clone.Drops[0].HasPreconditionsMet, tc.want)
+			if differs := progressDiffers(beforeCampaign, clone); differs != tc.wantPublish {
+				t.Errorf("progressDiffers=%v, want %v for semantic transition", differs, tc.wantPublish)
+			}
+
+			statusBefore := tracker.SyncStatus()
+			client.inventory = inventory(tc.observed)
+			tracker.syncProgress()
+
+			statusAfter := tracker.SyncStatus()
+			publishedAfter := tracker.Campaigns()
+			if len(publishedAfter) != 1 || len(publishedAfter[0].Drops) != 1 {
+				t.Fatalf("expected one published campaign/drop after light sync, got %+v", publishedAfter)
+			}
+			afterCampaign := publishedAfter[0]
+			if statusAfter.ProgressRuns != statusBefore.ProgressRuns+1 {
+				t.Errorf("ProgressRuns=%d, want %d", statusAfter.ProgressRuns, statusBefore.ProgressRuns+1)
+			}
+
+			assignedAfter := streamer.Stream.GetCampaigns()
+			if len(assignedAfter) != 1 || assignedAfter[0].ID != "campaign-a" {
+				t.Fatalf("streamer assignment lost after light sync: %+v", assignedAfter)
+			}
+			if tc.wantPublish {
+				if statusAfter.Revision != statusBefore.Revision+1 {
+					t.Errorf("Revision=%d, want exactly %d", statusAfter.Revision, statusBefore.Revision+1)
+				}
+				if statusAfter.UpdateSource != updateSourceLightSync {
+					t.Errorf("UpdateSource=%q, want %q", statusAfter.UpdateSource, updateSourceLightSync)
+				}
+				if afterCampaign == beforeCampaign {
+					t.Error("changed semantic state must publish a new immutable campaign snapshot")
+				}
+				if assignedAfter[0] != afterCampaign || assignedAfter[0] == assignedBefore {
+					t.Error("streamer must be re-pointed to the newly published campaign snapshot")
+				}
+			} else {
+				if statusAfter.Revision != statusBefore.Revision {
+					t.Errorf("unchanged semantic state must not bump Revision: got %d, want %d", statusAfter.Revision, statusBefore.Revision)
+				}
+				if statusAfter.UpdateSource != statusBefore.UpdateSource {
+					t.Errorf("unchanged semantic state changed UpdateSource from %q to %q", statusBefore.UpdateSource, statusAfter.UpdateSource)
+				}
+				if afterCampaign != beforeCampaign || assignedAfter[0] != assignedBefore {
+					t.Error("unchanged semantic state must not churn published or assigned campaign pointers")
+				}
+			}
+			assertPreconditionState(t, afterCampaign.Drops[0].HasPreconditionsMet, tc.want)
+			assertPreconditionState(t, beforeDrop.HasPreconditionsMet, tc.initial)
+
+			stableRevision := tracker.Revision()
+			stableCampaign := tracker.Campaigns()[0]
+			tracker.syncProgress()
+			if got := tracker.Revision(); got != stableRevision {
+				t.Errorf("repeated identical Inventory observation churned Revision: got %d, want %d", got, stableRevision)
+			}
+			if got := tracker.Campaigns()[0]; got != stableCampaign {
+				t.Error("repeated identical Inventory observation churned the shared campaign pointer")
+			}
+		})
 	}
 }
 
@@ -1211,6 +1511,77 @@ func TestSyncProgressStaleUnchangedOrEmptyResultDiscarded(t *testing.T) {
 			assertAssigned(t, f.streamer, "campaign-b")
 		})
 	}
+}
+
+func TestSyncProgressPublishedLightRepointCannotOverwriteNewerFullRepoint(t *testing.T) {
+	f := newStaleProgressFixture(t)
+
+	ledger := newTestSkipLedger(t, uniqueAccountKey(t))
+	if err := ledger.Observe(context.Background(), skipEvidence{
+		class: evidenceClaimAccepted, gameID: "game-wot", campaignID: "campaign-a", dropID: "drop-a",
+	}); err != nil {
+		t.Fatalf("seed skip ledger: %v", err)
+	}
+	f.tracker.skipLedger = ledger
+
+	// Make the light observation a precondition-only nil -> false transition at
+	// unchanged IDs/count/minutes, so this exercises the exact concern.
+	f.client.inventory = inventoryWithInProgress(map[string]interface{}{
+		"id":             "campaign-a",
+		"name":           "Campaign A",
+		"game":           map[string]interface{}{"id": "game-wot", "name": "World of Tanks"},
+		"timeBasedDrops": []interface{}{inProgressDropWithPrecondition("drop-a", "Reward A", 120, 45, false, testPreconditionState{present: true, value: false})},
+	})
+
+	h := &blockingSuppressionHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	defer h.unblock()
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(h))
+	defer slog.SetDefault(previousLogger)
+
+	lightDone := make(chan struct{})
+	go func() {
+		defer close(lightDone)
+		f.tracker.syncProgress()
+	}()
+
+	select {
+	case <-h.entered:
+		// The light sync already published A at R+1 and updateStreamerCampaigns
+		// captured that old pool; it is now deterministically paused before logMu.
+	case <-time.After(2 * time.Second):
+		t.Fatal("light repoint did not reach the post-snapshot gate")
+	}
+
+	lightRevision := f.tracker.Revision()
+	got := f.tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-a" || got[0].Drops[0].CurrentMinutesWatched != 45 ||
+		got[0].Drops[0].HasPreconditionsMet == nil || *got[0].Drops[0].HasPreconditionsMet {
+		t.Fatalf("light publication did not land before repoint gate: %+v", got)
+	}
+
+	// A full sync now publishes B at R+2 and completes its own repoint first.
+	f.publishCampaignB(t)
+	if f.tracker.Revision() != lightRevision+1 {
+		t.Fatalf("full publication revision=%d, want %d", f.tracker.Revision(), lightRevision+1)
+	}
+	assertAssigned(t, f.streamer, "campaign-b")
+
+	// Let the older light repoint continue after the newer full repoint.
+	h.unblock()
+	select {
+	case <-lightDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("light repoint did not return after release")
+	}
+
+	// The published pool remains B, and the assignment must match it. Without
+	// a revision fence, the old A pass clears the fresh B assignment here.
+	got = f.tracker.Campaigns()
+	if len(got) != 1 || got[0].ID != "campaign-b" {
+		t.Fatalf("published pool changed unexpectedly: %v", keptIDs(got))
+	}
+	assertAssigned(t, f.streamer, "campaign-b")
 }
 
 // TestSyncProgressChangedObservationPublishesOnceAfterFreshRevision is F1-T3:

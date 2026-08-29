@@ -829,14 +829,14 @@ func (d *DropsTracker) progressSyncInterval() time.Duration {
 	return time.Duration(mins) * d.intervalUnit
 }
 
-// syncProgress runs a lightweight, inventory-only refresh of the watched-minute
-// progress of the already-tracked campaigns. Unlike syncCampaigns it issues a
-// single Inventory GQL request and touches neither the ViewerDropsDashboard
-// listing nor the per-campaign DropCampaignDetails calls, so it is cheap enough
-// to run every couple of minutes (and on demand after a watched minute). It
-// never adds, removes, or claims campaigns/drops -- discovery, claiming, and
-// blacklist/claim-history filtering all stay with the full sync -- it only
-// advances the progress counters of campaigns the full sync already published.
+// syncProgress runs a lightweight, inventory-only refresh of watched-minute
+// progress and HasPreconditionsMet state on already-tracked campaigns. Unlike
+// syncCampaigns it issues a single Inventory GQL request and touches neither the
+// ViewerDropsDashboard listing nor the per-campaign DropCampaignDetails calls,
+// so it is cheap enough to run every couple of minutes (and on demand after a
+// watched minute). It never discovers new campaigns or claims drops --
+// discovery, claiming, and blacklist/claim-history filtering stay with the full
+// sync.
 func (d *DropsTracker) syncProgress() {
 	d.mu.RLock()
 	existing := make([]*models.Campaign, len(d.campaigns))
@@ -946,26 +946,44 @@ func (d *DropsTracker) syncProgress() {
 		"campaigns", len(updated))
 }
 
-// progressDiffers reports whether the watched-minute progress (or the set of
-// still-unclaimed drops) changed between the pre- and post-refresh campaign, so
-// syncProgress only republishes -- and re-points streamers -- when something
-// actually moved. Compared by drop ID so it is independent of ordering or of
-// drops ClearClaimedDrops removed on the refreshed copy.
+// progressDiffers reports whether the drop set, watched-minute progress, or
+// HasPreconditionsMet state changed between the pre- and post-refresh campaign,
+// so syncProgress only republishes -- and re-points streamers -- when one of
+// those fields actually moved. Compared by drop ID so it is independent of
+// ordering or of drops ClearClaimedDrops removed on the refreshed copy.
+// HasPreconditionsMet is compared semantically as a tri-state: nil, explicit
+// false, and explicit true are distinct, while equal values remain equal even
+// when their pointers differ.
 func progressDiffers(before, after *models.Campaign) bool {
 	if len(before.Drops) != len(after.Drops) {
 		return true
 	}
-	beforeMinutes := make(map[string]int, len(before.Drops))
+	type dropSnapshotState struct {
+		minutes             int
+		hasPreconditionsMet *bool
+	}
+	beforeState := make(map[string]dropSnapshotState, len(before.Drops))
 	for _, drop := range before.Drops {
-		beforeMinutes[drop.ID] = drop.CurrentMinutesWatched
+		beforeState[drop.ID] = dropSnapshotState{
+			minutes:             drop.CurrentMinutesWatched,
+			hasPreconditionsMet: drop.HasPreconditionsMet,
+		}
 	}
 	for _, drop := range after.Drops {
-		prev, ok := beforeMinutes[drop.ID]
-		if !ok || prev != drop.CurrentMinutesWatched {
+		prev, ok := beforeState[drop.ID]
+		if !ok || prev.minutes != drop.CurrentMinutesWatched ||
+			!samePreconditionState(prev.hasPreconditionsMet, drop.HasPreconditionsMet) {
 			return true
 		}
 	}
 	return false
+}
+
+func samePreconditionState(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (d *DropsTracker) syncCampaigns() {
@@ -2302,6 +2320,7 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	d.mu.RLock()
 	campaigns := d.campaigns
 	streamers := d.streamers
+	capturedRevision := d.revision
 	d.mu.RUnlock()
 
 	// Load the skip-ledger snapshot ONCE per pass (S6), off-lock: a nil ledger
@@ -2340,6 +2359,20 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	// goroutine. The work here is cheap and runs at most every couple of minutes.
 	d.logMu.Lock()
 	defer d.logMu.Unlock()
+
+	// The campaign pool can advance while this pass loads the skip-ledger
+	// snapshot and builds broker views. logMu orders every re-point pass; once
+	// held, reject a pass built from an older revision. If a newer publication
+	// lands after this check, its own re-point waits on logMu and therefore runs
+	// after this pass, leaving the newest assignment last.
+	d.mu.RLock()
+	currentRevision := d.revision
+	d.mu.RUnlock()
+	if currentRevision != capturedRevision {
+		slog.Debug("Drops assignment: discarding stale campaign re-point",
+			"capturedRevision", capturedRevision, "currentRevision", currentRevision)
+		return
+	}
 
 	if d.loggedRestrictedAssignments == nil {
 		d.loggedRestrictedAssignments = make(map[string]struct{})
