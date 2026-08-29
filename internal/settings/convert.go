@@ -2,6 +2,18 @@ package settings
 
 import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 
+// cloneOptionalBool keeps RuntimeSettings detached from the live config. A
+// direct pointer copy would let JSON decode mutate config state before the
+// fail-closed ApplySettings boundary, and would let a retained DTO mutate a
+// config built from it after the apply returned.
+func cloneOptionalBool(source *bool) *bool {
+	if source == nil {
+		return nil
+	}
+	value := *source
+	return &value
+}
+
 // StreamerSettingsToDTO converts model settings to the DTO format (all fields populated).
 func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 	chat := string(s.Chat)
@@ -19,6 +31,7 @@ func StreamerSettingsToDTO(s models.StreamerSettings) StreamerSettingsConfig {
 		CommunityGoalsMaxPercent: &s.CommunityGoalsMaxPercent,
 		CommunityGoalsMaxAmount:  &s.CommunityGoalsMaxAmount,
 		Chat:                     &chat,
+		ChatLogs:                 cloneOptionalBool(s.ChatLogs),
 		Preference:               &preference,
 		DisableWatch:             &s.DisableWatch,
 		Bet: &BetSettingsJSON{
@@ -87,6 +100,9 @@ func ApplyStreamerSettingsFromDTO(dst *models.StreamerSettings, src StreamerSett
 	}
 	if src.Chat != nil {
 		dst.Chat = models.ChatPresence(*src.Chat)
+	}
+	if src.ChatLogs != nil {
+		dst.ChatLogs = cloneOptionalBool(src.ChatLogs)
 	}
 	if src.Preference != nil {
 		dst.Preference = models.Preference(*src.Preference)
