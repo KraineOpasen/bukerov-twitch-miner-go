@@ -48,9 +48,10 @@ func TestApplySettingsChatLoggingUsesOneStableRuntimeSink(t *testing.T) {
 		t.Fatalf("initial false ApplySettings: %v", err)
 	}
 	calls := chatRec.loggingCalls()
-	if len(calls) != 1 || calls[0].global || calls[0].logger != nil {
-		t.Fatalf("initial false logging target = %+v, want false/nil", calls)
+	if len(calls) != 1 || calls[0].global || calls[0].logger == nil {
+		t.Fatalf("initial false logging target = %+v, want false/non-nil", calls)
 	}
+	firstSink := calls[0].logger
 
 	enabled := m.GetRuntimeSettings()
 	enabled.Analytics.EnableChatLogs = true
@@ -58,8 +59,7 @@ func TestApplySettingsChatLoggingUsesOneStableRuntimeSink(t *testing.T) {
 		t.Fatalf("enable ApplySettings: %v", err)
 	}
 	calls = chatRec.loggingCalls()
-	firstSink := calls[len(calls)-1].logger
-	if !calls[len(calls)-1].global || firstSink == nil {
+	if !calls[len(calls)-1].global || calls[len(calls)-1].logger != firstSink {
 		t.Fatalf("enabled logging target = %+v, want true/non-nil", calls[len(calls)-1])
 	}
 
