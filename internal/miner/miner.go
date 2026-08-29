@@ -101,9 +101,9 @@ type Miner struct {
 	wsPool      *pubsub.WebSocketPool
 	chatManager *chat.ChatManager
 	// chatLogger is the stable structured-chat sink for this Miner generation.
-	// It is provisioned once when global runtime logging first becomes enabled
-	// and retained across later disables so explicit-true model settings keep a
-	// valid warm sink. Guarded by mu after startup.
+	// It is provisioned once whenever top-level analytics infrastructure is
+	// available, independently of the nested inherited-global policy, so an
+	// explicit-true model setting has a valid sink. Guarded by mu after startup.
 	chatLogger       chat.ChatLogger
 	watcher          *watcher.MinuteWatcher
 	dropsTracker     *drops.DropsTracker
@@ -880,13 +880,10 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		mentionHandler = notifMgr.NotifyMention
 	}
 
-	var chatLogger chat.ChatLogger
-	chatLogsEnabled := m.config.EnableAnalytics && m.config.Analytics.EnableChatLogs
+	m.mu.Lock()
+	chatLogsEnabled, chatLogger := m.chatLoggingTargetLocked()
+	m.mu.Unlock()
 	slog.Debug("Chat logging config", "enableAnalytics", m.config.EnableAnalytics, "enableChatLogs", m.config.Analytics.EnableChatLogs, "chatLogsEnabled", chatLogsEnabled)
-	if chatLogsEnabled && m.analyticsSvc != nil {
-		chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
-	}
-	m.chatLogger = chatLogger
 	m.chatManager = chat.NewChatManager(m.config.Username, func() chat.TokenSnapshot {
 		snap := m.auth.Snapshot()
 		return chat.TokenSnapshot{Token: snap.AccessToken, Generation: snap.Generation}
@@ -2684,14 +2681,14 @@ func (m *Miner) finishApply(ctx context.Context, coord *streamerlifecycle.Coordi
 }
 
 // chatLoggingTargetLocked resolves the current in-memory global setting and
-// provisions at most one ChatLogger adapter for this Miner generation. The
-// adapter is intentionally sticky after true->false: C2 may provision the sink
-// required by a runtime global transition, while cold-start global=false plus
-// explicit per-streamer true remains the separately deferred C4 policy. Caller
-// holds m.mu.
+// provisions at most one ChatLogger adapter for this Miner generation. Sink
+// availability is intentionally independent of the nested global policy: a
+// per-streamer explicit true needs the same canonical sink when the inherited
+// global is false. Top-level EnableAnalytics remains the infrastructure gate.
+// Caller holds m.mu.
 func (m *Miner) chatLoggingTargetLocked() (bool, chat.ChatLogger) {
 	enabled := m.config.EnableAnalytics && m.config.Analytics.EnableChatLogs
-	if enabled && m.chatLogger == nil && m.analyticsSvc != nil {
+	if m.config.EnableAnalytics && m.chatLogger == nil && m.analyticsSvc != nil {
 		m.chatLogger = analytics.NewChatLoggerAdapter(m.analyticsSvc)
 	}
 	return enabled, m.chatLogger
