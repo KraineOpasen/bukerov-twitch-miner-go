@@ -2143,18 +2143,21 @@ func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]
 	}
 
 	// The viewerDropCampaigns CONTAINER is discriminated via map MEMBERSHIP, not a
-	// single type assertion — a bare `.([]interface{})` would conflate a genuinely
-	// resolved absence with a malformed wrong-type value. Per the proven contract:
-	//   - key absent          => authoritative "no campaigns here" (Known + empty);
-	//   - explicit JSON null   => authoritative "no campaigns here" (Known + empty);
+	// single type assertion — a bare `.([]interface{})` would conflate unavailable
+	// evidence with a malformed wrong-type value. Per the proven contract:
+	//   - key absent           => unavailable response => error (UNKNOWN);
+	//   - explicit JSON null   => unavailable response => error (UNKNOWN);
 	//   - valid empty array    => authoritative "no campaigns here" (Known + empty);
 	//   - present, wrong type  => MALFORMED response => error (=> availability
 	//                             UNKNOWN, previous IDs preserved; NEVER recorded as
 	//                             an authoritative "No" that would clear a live
 	//                             assignment).
 	raw, present := channel["viewerDropCampaigns"]
-	if !present || raw == nil {
-		return nil, nil
+	if !present {
+		return nil, fmt.Errorf("twitch GQL %s: missing viewerDropCampaigns", op.OperationName)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("twitch GQL %s: null viewerDropCampaigns", op.OperationName)
 	}
 	campaigns, ok := raw.([]interface{})
 	if !ok {
