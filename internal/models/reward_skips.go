@@ -51,6 +51,18 @@ func (s *RewardSkips) SkipsReward(gameID, dropName string) bool {
 	return s.SkipsKey(NormalizeRewardKey(gameID, dropName))
 }
 
+// SkipsProvisionalCandidate reports whether a provisional observation
+// candidate's reward is farming-excluded. The candidate is minted from its
+// campaign's CURRENT drop, so this is the same current-drop interpretation
+// the other boundaries use, expressed on the candidate tuple the watcher
+// actually holds. The lookup keys on whatever label the candidate carries in
+// Drop — a non-name label (the minting side may fall back to an ID when
+// Twitch reports an empty name) can never match a name-keyed rule and fails
+// open, exactly like every other name-keyed gate. Nil-safe.
+func (s *RewardSkips) SkipsProvisionalCandidate(c ProvisionalDropCandidate) bool {
+	return s.SkipsReward(c.GameID, c.Drop)
+}
+
 // SkipsCampaignCurrentDrop reports whether the campaign is farming-excluded
 // right now: true exactly when its CurrentDrop's reward identity carries a
 // Skip rule. This mirrors the policy ranker's campaign-level interpretation

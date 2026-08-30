@@ -1581,6 +1581,13 @@ func (m *Manager) provisionalCandidatesForChannelAtSource(
 		return nil
 	}
 
+	// One coherent operator farming-exclusion decision per channel evaluation
+	// (the stored value is immutable). The gate below closes both the runtime
+	// rule-flip window — broker views republish only on sync passes, while
+	// this constructor runs every broker tick — and the unfenced raw-pool
+	// fallback of accountCampaignSnapshot.
+	skips := m.currentRewardSkips()
+
 	result := make([]provisionalCampaignEvaluation, 0, len(source.Campaigns))
 	for _, campaign := range source.Campaigns {
 		if campaign == nil || campaign.ID == "" || campaign.Game == nil ||
@@ -1593,6 +1600,14 @@ func (m *Manager) provisionalCandidatesForChannelAtSource(
 		}
 		drop := campaign.CurrentDrop()
 		if drop == nil || drop.ID == "" || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			continue
+		}
+		// Operator farming exclusion (DropRule.Skip): a skipped current reward
+		// never seeds a provisional observation candidate — the channel would
+		// be watched solely to farm the reward the operator excluded. Keyed on
+		// the campaign's actual current drop name, exactly like every other
+		// RewardSkips boundary.
+		if skips.SkipsReward(campaign.Game.ID, drop.Name) {
 			continue
 		}
 		if decision := (eligibility.Evaluator{}).EvaluateDrops(
@@ -1765,7 +1780,7 @@ func (m *Manager) provisionalCandidateStillCurrentAtSource(
 	} else if requireSameSource {
 		return false
 	}
-	if !provisionalCandidateBackedByCampaign(ch.Streamer, candidate, source.Campaigns) {
+	if !provisionalCandidateBackedByCampaign(ch.Streamer, candidate, source.Campaigns, m.currentRewardSkips()) {
 		return false
 	}
 
@@ -1780,6 +1795,7 @@ func provisionalCandidateBackedByCampaign(
 	streamer *models.Streamer,
 	candidate models.ProvisionalDropCandidate,
 	campaigns []*models.Campaign,
+	skips *models.RewardSkips,
 ) bool {
 	if streamer == nil || !candidate.Valid() {
 		return false
@@ -1791,6 +1807,12 @@ func provisionalCandidateBackedByCampaign(
 		}
 		drop := campaign.CurrentDrop()
 		if drop == nil || drop.ID != candidate.DropID || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			return false
+		}
+		// Operator farming exclusion — the publication fence re-checks the
+		// live rule set so a proposal derived just before a runtime Skip flip
+		// cannot leave discovery within the same tick.
+		if skips.SkipsReward(campaign.Game.ID, drop.Name) {
 			return false
 		}
 		if decision := (eligibility.Evaluator{}).EvaluateDrops(

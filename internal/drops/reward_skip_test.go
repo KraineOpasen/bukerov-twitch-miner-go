@@ -201,6 +201,71 @@ func TestAssignmentExcludesSkippedCampaignKeepsSibling(t *testing.T) {
 	}
 }
 
+// The atomically published broker view — the account-campaign authority the
+// provisional UNKNOWN bootstrap consumes for candidate minting, quarantine
+// scope, and lease/proof retention — excludes a campaign whose current drop
+// is Skip-ruled, exactly like the assignment it is published with, while the
+// tracked source pool stays unfiltered (the reward remains observable).
+func TestBrokerCampaignSnapshotExcludesSkippedCurrentDrop(t *testing.T) {
+	skippedDrop := assignActiveDrop("d-skip")
+	skippedDrop.Name = "Skipped Reward"
+	skipped := campaignFor("camp-skip", unrestrictedACL(), skippedDrop)
+
+	wantedDrop := assignActiveDrop("d-want")
+	wantedDrop.Name = "Wanted Reward"
+	wanted := campaignFor("camp-want", unrestrictedACL(), wantedDrop)
+
+	s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+	s.ChannelID = "chan-1"
+	s.SetConfirmedOnline()
+	s.Stream.Game = &models.Game{ID: "g1", Name: "Game"}
+	s.Stream.SetCampaignIDs([]string{"camp-skip", "camp-want"})
+
+	d := &DropsTracker{streamers: []*models.Streamer{s}, campaigns: []*models.Campaign{skipped, wanted}}
+	d.UpdateRewardSkips(models.NewRewardSkips([]string{
+		models.NormalizeRewardKey("g1", "Skipped Reward"),
+	}))
+	d.updateStreamerCampaigns()
+
+	broker := d.BrokerCampaigns()
+	if len(broker) != 1 || broker[0].ID != "camp-want" {
+		t.Fatalf("broker view must exclude the skipped campaign, got %+v", broker)
+	}
+	if source := d.Campaigns(); len(source) != 2 {
+		t.Fatalf("the tracked source pool must stay unfiltered, got %d campaigns", len(source))
+	}
+
+	// Runtime flip back: the next assignment pass republishes the campaign.
+	d.UpdateRewardSkips(nil)
+	d.updateStreamerCampaigns()
+	if broker := d.BrokerCampaigns(); len(broker) != 2 {
+		t.Fatalf("cleared rule must restore the broker view, got %+v", broker)
+	}
+}
+
+// Availability-continuity retention under UNKNOWN never bypasses the Skip
+// veto: a previously assigned campaign whose current drop becomes Skip-ruled
+// is released on the next pass even while the channel-side lookup is UNKNOWN
+// (retained last-known IDs are continuity, not farming authority).
+func TestAssignmentUnknownContinuityDoesNotBypassSkip(t *testing.T) {
+	c := campaignFor("camp-1", unrestrictedACL(), assignActiveDrop("d1"))
+	c.Drops[0].Name = "Skipped Reward"
+	d, s := assignmentTracker(models.CapabilityEnabled, c, func(s *models.Streamer) {
+		s.Stream.SetCampaigns([]*models.Campaign{c}) // already assigned
+		s.Stream.SetCampaignIDs([]string{"camp-1"})
+		s.Stream.MarkCampaignAvailabilityUnknown() // lookup now failing
+	})
+	// Control first: continuity retention keeps the unskipped assignment.
+	d.updateStreamerCampaigns()
+	assertAssigned(t, s, "camp-1")
+
+	d.UpdateRewardSkips(models.NewRewardSkips([]string{
+		models.NormalizeRewardKey("g1", "Skipped Reward"),
+	}))
+	d.updateStreamerCampaigns()
+	assertNotAssigned(t, s)
+}
+
 // A previously-assigned campaign is UNASSIGNED once its current drop becomes
 // Skip-ruled at runtime — and a completed (claimed) skipped drop stops
 // excluding the campaign, so later unskipped rewards keep farming (no
