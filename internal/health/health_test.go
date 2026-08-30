@@ -109,6 +109,22 @@ type fakeSlots struct{ free int }
 
 func (f fakeSlots) FreeSlots() int { return f.free }
 
+type permittingFakeSlots struct {
+	fakeSlots
+	granted  bool
+	acquired int
+	released int
+}
+
+func (f *permittingFakeSlots) AcquireObservationPermit(_ *models.Streamer, _ uint64) (watcher.ObservationPermit, bool) {
+	f.acquired++
+	return watcher.ObservationPermit{}, f.granted
+}
+
+func (f *permittingFakeSlots) ReleaseObservationPermit(_ watcher.ObservationPermit) {
+	f.released++
+}
+
 func onlineClient() *fakeClient {
 	return &fakeClient{channelID: "cid", online: true, spade: "http://spade.test/track"}
 }
@@ -159,6 +175,46 @@ func TestCanaryProbeSuccess(t *testing.T) {
 	sig := c.probe(context.Background(), "canary_chan")
 	if sig.Status != StatusOK || sig.Name != SignalWatchTransport {
 		t.Fatalf("expected watch_transport OK, got %+v", sig)
+	}
+}
+
+func TestCanaryPermitDenialDefersWithoutPublishingHealth(t *testing.T) {
+	center := NewCenter()
+	before := Signal{
+		Name: SignalWatchTransport, Status: StatusOK,
+		CheckedAt: time.Now().Add(-time.Hour), Detail: "previous observation",
+	}
+	center.Record(before)
+	slots := &permittingFakeSlots{fakeSlots: fakeSlots{free: 1}, granted: false}
+	prober := &fakeProber{res: watcher.ProbeResult{OK: true}}
+	notifier := &fakeNotifier{}
+	c := newCanary(center, onlineClient(), prober, notifier, slots)
+
+	c.runOnce(true)
+
+	if got := prober.callCount(); got != 0 {
+		t.Fatalf("denied broker permit must prevent the real probe, got %d calls", got)
+	}
+	after, ok := center.Signal(SignalWatchTransport)
+	if !ok || after != before {
+		t.Fatalf("permit denial is a defer, not a health result: before=%+v after=%+v ok=%v", before, after, ok)
+	}
+	if notifier.count() != 0 || slots.acquired != 1 || slots.released != 0 {
+		t.Fatalf("denied permit must not notify/release a nonexistent token: notifications=%d acquired=%d released=%d",
+			notifier.count(), slots.acquired, slots.released)
+	}
+}
+
+func TestCanaryGrantedPermitReleasedAfterProbe(t *testing.T) {
+	slots := &permittingFakeSlots{fakeSlots: fakeSlots{free: 1}, granted: true}
+	prober := &fakeProber{res: watcher.ProbeResult{OK: true}}
+	c := newCanary(NewCenter(), onlineClient(), prober, &fakeNotifier{}, slots)
+
+	c.runOnce(true)
+
+	if prober.callCount() != 1 || slots.acquired != 1 || slots.released != 1 {
+		t.Fatalf("granted permit must bracket one real probe: probes=%d acquired=%d released=%d",
+			prober.callCount(), slots.acquired, slots.released)
 	}
 }
 

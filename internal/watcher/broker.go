@@ -52,6 +52,12 @@ type SlotAssignment struct {
 	Reason     string    `json:"reason"`
 	Campaign   string    `json:"campaign,omitempty"`
 	SelectedAt time.Time `json:"selectedAt,omitzero"`
+
+	// provisionalDrop remains internal: exact ACL/channel/session evidence is
+	// broker-owned and must not leak through the dashboard/debug JSON surface.
+	provisionalDrop    *models.ProvisionalDropCandidate
+	provisionalProven  bool
+	provisionalProofID uint64
 }
 
 // WaitingChannel is a channel that was proposed for a slot but did not get one
@@ -78,15 +84,29 @@ type BrokerSnapshot struct {
 // slot during arbitration. idx is the index into w.streamers for configured
 // channels, or -1 for external (discovery) candidates.
 type slotOccupant struct {
-	streamer          *models.Streamer
-	origin            string
-	idx               int
-	reasonCode        string
-	reason            string
-	campaign          string
-	campaignPolicy    CandidateCampaignPolicy
-	hasCampaignPolicy bool
-	selectedAt        time.Time
+	streamer           *models.Streamer
+	origin             string
+	idx                int
+	reasonCode         string
+	reason             string
+	campaign           string
+	campaignPolicy     CandidateCampaignPolicy
+	hasCampaignPolicy  bool
+	selectedAt         time.Time
+	provisionalDrop    *models.ProvisionalDropCandidate
+	provisionalProven  bool
+	provisionalProofID uint64
+
+	// Final proof validation runs after arbitration. Retaining the displaced
+	// configured occupant lets that boundary restore it if the proof changed.
+	provisionalFallback          *slotOccupant
+	provisionalFallbackSelection string
+	provisionalFallbackParity    uint64
+	// provisionalFallbackParityChanged distinguishes an actual cold-start
+	// alternation advance from an in-place overlay or a displacement whose
+	// victim choice did not consume parity. Only the former is rolled back if
+	// final proof reconciliation restores the configured occupant.
+	provisionalFallbackParityChanged bool
 }
 
 // CandidateCampaignPolicy is a source-published scheduling fact snapshot, not
@@ -255,10 +275,27 @@ func defaultReason(reasonCode, origin string) string {
 // With no external candidates this is a pure pass-through of the configured
 // selection, so all existing single-list behavior is preserved exactly.
 func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now time.Time) ([]slotOccupant, []WaitingChannel) {
+	slots, waiting, _ := w.arbitrateWithProvisionalContenders(configuredWatch, extra, now)
+	return slots, waiting
+}
+
+// arbitrateWithProvisionalContenders preserves every unproved proposal in the
+// source's Campaign Policy order through ordinary/proved arbitration. The slot
+// slice remains defensively capped; reconcileProvisionalSlots consumes the
+// separate list and admits at most one exact lease into genuinely idle capacity.
+func (w *MinuteWatcher) arbitrateWithProvisionalContenders(
+	configuredWatch []int,
+	extra []Candidate,
+	now time.Time,
+) ([]slotOccupant, []WaitingChannel, []slotOccupant) {
 	slots := make([]slotOccupant, 0, constants.MaxSimultaneousStreams)
 	seen := make(map[string]bool, constants.MaxSimultaneousStreams)
+	proved := w.provenProvisionalCandidates(extra)
 
 	for _, idx := range configuredWatch {
+		if len(slots) >= constants.MaxSimultaneousStreams {
+			break
+		}
 		s := w.streamers[idx]
 		facts, hasFacts := w.campaignPolicyForStreamer(s)
 		rc, reason, camp := w.classifyWithCampaignPolicy(s, OriginConfigured, idx, facts, hasFacts)
@@ -270,23 +307,114 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 		seen[s.GetUsername()] = true
 	}
 
-	var waiting []WaitingChannel
+	// Ordinary proposals are always considered before provisional observation
+	// proposals. This makes provisional work genuinely fill-only even when a
+	// source happens to return it first.
+	type rankedCandidate struct {
+		candidate Candidate
+		proved    bool
+		proofID   uint64
+	}
+	ordered := make([]rankedCandidate, 0, len(extra))
 	for _, c := range extra {
+		proofID, isProved := findProvisionalProofIdentity(proved, c.Streamer, c.ProvisionalDrop)
+		if c.ProvisionalDrop == nil || isProved {
+			ordered = append(ordered, rankedCandidate{candidate: c, proved: isProved, proofID: proofID})
+		}
+	}
+	for _, c := range extra {
+		if _, ok := findProvisionalProofIdentity(proved, c.Streamer, c.ProvisionalDrop); c.ProvisionalDrop != nil && !ok {
+			ordered = append(ordered, rankedCandidate{candidate: c})
+		}
+	}
+
+	var waiting []WaitingChannel
+	var provisionalContenders []slotOccupant
+	for _, ranked := range ordered {
+		c := ranked.candidate
 		if c.Streamer == nil {
 			continue
 		}
 		login := c.Streamer.GetUsername()
 		if seen[login] {
-			// One channel can never occupy two slots (e.g. a discovered
-			// channel that is also on the configured list).
+			// A source may carry provisional metadata for the exact configured
+			// object Phase A already selected. Overlay the tuple on that existing
+			// seat instead of creating a duplicate. The untouched ordinary slot is
+			// retained as a fallback: failed lease/proof reconciliation must not
+			// remove a points/fairness slot that was independently legitimate.
+			if c.ProvisionalDrop != nil {
+				for i := range slots {
+					if slots[i].streamer != c.Streamer || slots[i].provisionalDrop != nil {
+						continue
+					}
+					fallback := slots[i]
+					slots[i].provisionalDrop = cloneProvisionalCandidate(c.ProvisionalDrop)
+					slots[i].provisionalProven = ranked.proved
+					slots[i].provisionalProofID = ranked.proofID
+					slots[i].provisionalFallback = &fallback
+					slots[i].provisionalFallbackSelection = w.selectionReasons[fallback.idx]
+					slots[i].provisionalFallbackParity = w.displaceParity
+					if ranked.proved {
+						proofFacts, hasProofFacts := w.campaignPolicyForProvenCandidate(*c.ProvisionalDrop)
+						slots[i].campaignPolicy = proofFacts
+						slots[i].hasCampaignPolicy = hasProofFacts
+						slots[i].campaign = ""
+						if c.ProvisionalDrop.Restricted() {
+							slots[i].reasonCode = ReasonRestrictedDrop
+							slots[i].reason = "server-proven channel-restricted drop observation"
+						} else {
+							slots[i].reasonCode = ReasonActiveDrop
+							slots[i].reason = "server-proven active drop observation"
+						}
+						if fallback.idx >= 0 && w.selectionReasons != nil {
+							w.selectionReasons[fallback.idx] = slots[i].reason
+						}
+					}
+					if !ranked.proved {
+						provisionalContenders = append(provisionalContenders, slots[i])
+					}
+					break
+				}
+			}
+			// One channel can never occupy two slots.
 			continue
 		}
 		facts, hasFacts := w.campaignPolicyForCandidate(c)
 		rc, reason, camp := w.classifyWithCampaignPolicy(c.Streamer, c.Origin, -1, facts, hasFacts)
+		if c.ProvisionalDrop != nil && ranked.proved {
+			facts, hasFacts = w.campaignPolicyForProvenCandidate(*c.ProvisionalDrop)
+			if c.ProvisionalDrop.Restricted() {
+				rc = ReasonRestrictedDrop
+				reason = "server-proven channel-restricted drop observation"
+			} else {
+				rc = ReasonActiveDrop
+				reason = "server-proven active drop observation"
+			}
+			// Candidate names/ids remain broker-owned and never enter the JSON
+			// broker snapshot.
+			camp = ""
+		} else if c.ProvisionalDrop != nil {
+			// UNKNOWN observation authority must never borrow the priority of a
+			// confirmed assigned campaign or a source-published Campaign Policy
+			// fact. It can only fill otherwise-idle capacity.
+			facts = CandidateCampaignPolicy{}
+			hasFacts = false
+			rc = ReasonDiscoveryFill
+			reason = "provisional UNKNOWN drop observation filling an otherwise-idle watch slot"
+			// Exact candidate metadata is intentionally absent from the public
+			// broker snapshot; health reads the broker-owned lease instead.
+			camp = ""
+		}
 		incoming := slotOccupant{
 			streamer: c.Streamer, origin: c.Origin, idx: -1,
 			reasonCode: rc, reason: reason, campaign: camp,
 			campaignPolicy: facts, hasCampaignPolicy: hasFacts, selectedAt: now,
+			provisionalDrop:    cloneProvisionalCandidate(c.ProvisionalDrop),
+			provisionalProven:  ranked.proved,
+			provisionalProofID: ranked.proofID,
+		}
+		if incoming.provisionalDrop != nil && !incoming.provisionalProven {
+			provisionalContenders = append(provisionalContenders, incoming)
 		}
 
 		if len(slots) < constants.MaxSimultaneousStreams {
@@ -295,8 +423,19 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 			continue
 		}
 
-		victim := w.pickDisplaceable(slots, incoming)
+		// Provisional observation is strictly fill-only. It never displaces an
+		// existing occupant, regardless of that occupant's hard or semantic rank.
+		victim := -1
+		parityBefore := w.displaceParity
+		if incoming.provisionalDrop == nil || incoming.provisionalProven {
+			victim = w.pickDisplaceable(slots, incoming)
+		}
 		if victim < 0 {
+			if incoming.provisionalDrop != nil && !incoming.provisionalProven {
+				// Final lease admission (including conflicts/quarantine) owns the
+				// waiting explanation for every ordered provisional contender.
+				continue
+			}
 			waiting = append(waiting, WaitingChannel{
 				Channel:    login,
 				Origin:     c.Origin,
@@ -307,6 +446,13 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 		}
 
 		evicted := slots[victim]
+		if incoming.provisionalProven && evicted.origin == OriginConfigured {
+			fallback := evicted
+			incoming.provisionalFallback = &fallback
+			incoming.provisionalFallbackSelection = w.selectionReasons[evicted.idx]
+			incoming.provisionalFallbackParity = parityBefore
+			incoming.provisionalFallbackParityChanged = w.displaceParity != parityBefore
+		}
 		waiting = append(waiting, WaitingChannel{
 			Channel:    evicted.streamer.GetUsername(),
 			Origin:     evicted.origin,
@@ -321,7 +467,26 @@ func (w *MinuteWatcher) arbitrate(configuredWatch []int, extra []Candidate, now 
 		seen[login] = true
 	}
 
-	return slots, waiting
+	return slots, waiting, provisionalContenders
+}
+
+// campaignPolicyForProvenCandidate resolves the exact server-proven campaign
+// against the immutable policy snapshot captured for this broker tick. No
+// source ordinal or Stream.Campaigns assignment is borrowed.
+func (w *MinuteWatcher) campaignPolicyForProvenCandidate(candidate models.ProvisionalDropCandidate) (CandidateCampaignPolicy, bool) {
+	facts := CandidateCampaignPolicy{
+		Restricted:               candidate.Restricted(),
+		CampaignIDs:              []string{candidate.CampaignID},
+		RemainingWorkCampaignIDs: []string{candidate.CampaignID},
+	}
+	if snapshot := w.campaignSemanticSnapshotForTick(); snapshot != nil && snapshot.byCampaign != nil {
+		facts.Utility, facts.Ranked = policy.BuildSemanticUtilityWithRemainingWork(
+			facts.CampaignIDs,
+			facts.RemainingWorkCampaignIDs,
+			snapshot.byCampaign,
+		)
+	}
+	return facts, true
 }
 
 func (w *MinuteWatcher) campaignPolicyForCandidate(candidate Candidate) (CandidateCampaignPolicy, bool) {
@@ -536,13 +701,16 @@ func (w *MinuteWatcher) publishBrokerSnapshot(slots []slotOccupant, waiting []Wa
 	watching := make(map[string]bool, len(slots))
 	for i, s := range slots {
 		snap.Slots = append(snap.Slots, SlotAssignment{
-			Slot:       i + 1,
-			Channel:    s.streamer.GetUsername(),
-			Origin:     s.origin,
-			ReasonCode: s.reasonCode,
-			Reason:     s.reason,
-			Campaign:   s.campaign,
-			SelectedAt: s.selectedAt,
+			Slot:               i + 1,
+			Channel:            s.streamer.GetUsername(),
+			Origin:             s.origin,
+			ReasonCode:         s.reasonCode,
+			Reason:             s.reason,
+			Campaign:           s.campaign,
+			SelectedAt:         s.selectedAt,
+			provisionalDrop:    cloneProvisionalCandidate(s.provisionalDrop),
+			provisionalProven:  s.provisionalProven,
+			provisionalProofID: s.provisionalProofID,
 		})
 		watching[s.streamer.GetUsername()] = true
 	}
@@ -556,9 +724,19 @@ func (w *MinuteWatcher) publishBrokerSnapshot(slots []slotOccupant, waiting []Wa
 // call from any goroutine; returns an empty snapshot before the first tick.
 func (w *MinuteWatcher) BrokerSnapshot() BrokerSnapshot {
 	if snap := w.brokerSnapshot.Load(); snap != nil {
-		return *snap
+		return cloneBrokerSnapshot(*snap)
 	}
 	return BrokerSnapshot{MaxSlots: constants.MaxSimultaneousStreams}
+}
+
+func cloneBrokerSnapshot(snapshot BrokerSnapshot) BrokerSnapshot {
+	copy := snapshot
+	copy.Slots = append([]SlotAssignment(nil), snapshot.Slots...)
+	for i := range copy.Slots {
+		copy.Slots[i].provisionalDrop = cloneProvisionalCandidate(copy.Slots[i].provisionalDrop)
+	}
+	copy.Waiting = append([]WaitingChannel(nil), snapshot.Waiting...)
+	return copy
 }
 
 // FreeSlots reports how many of the constants.MaxSimultaneousStreams watch

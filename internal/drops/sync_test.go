@@ -1556,6 +1556,15 @@ func TestSyncProgressPublishedLightRepointCannotOverwriteNewerFullRepoint(t *tes
 	}
 
 	lightRevision := f.tracker.Revision()
+	lightObservation := f.tracker.ProgressObservation("campaign-a", "drop-a")
+	if lightObservation.Error != "" || !lightObservation.Found || lightObservation.Revision != lightRevision {
+		t.Fatalf("light exact observation was not published at its final revision: %+v (revision=%d)", lightObservation, lightRevision)
+	}
+	preRepointBroker := f.tracker.BrokerCampaignSnapshot()
+	if preRepointBroker.CurrentRevision != lightRevision ||
+		preRepointBroker.SourceRevision == preRepointBroker.CurrentRevision {
+		t.Fatalf("post-light/pre-repoint window was not represented by a stale broker source fence: %+v", preRepointBroker)
+	}
 	got := f.tracker.Campaigns()
 	if len(got) != 1 || got[0].ID != "campaign-a" || got[0].Drops[0].CurrentMinutesWatched != 45 ||
 		got[0].Drops[0].HasPreconditionsMet == nil || *got[0].Drops[0].HasPreconditionsMet {
@@ -1568,6 +1577,11 @@ func TestSyncProgressPublishedLightRepointCannotOverwriteNewerFullRepoint(t *tes
 		t.Fatalf("full publication revision=%d, want %d", f.tracker.Revision(), lightRevision+1)
 	}
 	assertAssigned(t, f.streamer, "campaign-b")
+	postFullBroker := f.tracker.BrokerCampaignSnapshot()
+	if postFullBroker.SourceRevision != postFullBroker.CurrentRevision ||
+		postFullBroker.CurrentRevision != f.tracker.Revision() {
+		t.Fatalf("newer full re-point did not close the broker source fence: %+v", postFullBroker)
+	}
 
 	// Let the older light repoint continue after the newer full repoint.
 	h.unblock()

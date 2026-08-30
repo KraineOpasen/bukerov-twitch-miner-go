@@ -14,11 +14,22 @@ import (
 // --- fakes ---
 
 type fakeDropsView struct {
-	mu        sync.Mutex
-	campaigns []*models.Campaign
-	status    drops.SyncStatus
-	syncNow   int
-	triggered int
+	mu                     sync.Mutex
+	campaigns              []*models.Campaign
+	brokerCampaigns        []*models.Campaign
+	brokerViewOverride     bool
+	status                 drops.SyncStatus
+	syncNow                int
+	triggered              int
+	exactOverride          bool
+	exact                  map[string]int
+	exactUnknown           map[string]bool
+	brokerRevisionOverride bool
+	brokerSourceRevision   uint64
+	brokerCurrentOverride  bool
+	brokerCurrentRevision  uint64
+	brokerGenerationZero   bool
+	observationRevision    *uint64
 }
 
 func (f *fakeDropsView) Campaigns() []*models.Campaign {
@@ -26,10 +37,74 @@ func (f *fakeDropsView) Campaigns() []*models.Campaign {
 	defer f.mu.Unlock()
 	return append([]*models.Campaign(nil), f.campaigns...)
 }
+func (f *fakeDropsView) BrokerCampaignSnapshot() drops.BrokerCampaignSnapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	campaigns := f.campaigns
+	if f.brokerViewOverride {
+		campaigns = f.brokerCampaigns
+	}
+	sourceRevision := f.status.Revision
+	if f.brokerRevisionOverride {
+		sourceRevision = f.brokerSourceRevision
+	}
+	currentRevision := f.status.Revision
+	if f.brokerCurrentOverride {
+		currentRevision = f.brokerCurrentRevision
+	}
+	generation := uint64(1)
+	if f.brokerGenerationZero {
+		generation = 0
+	}
+	return drops.BrokerCampaignSnapshot{
+		Generation:      generation,
+		SourceRevision:  sourceRevision,
+		CurrentRevision: currentRevision,
+		Campaigns:       append([]*models.Campaign(nil), campaigns...),
+	}
+}
 func (f *fakeDropsView) SyncStatus() drops.SyncStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.status
+}
+func (f *fakeDropsView) ProgressObservation(campaignID, dropID string) drops.ProgressObservation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	obs := drops.ProgressObservation{
+		Run:        uint64(f.status.ProgressRuns),
+		ObservedAt: f.status.ProgressLastSyncAt,
+		Error:      f.status.ProgressLastError,
+		Revision:   f.status.Revision,
+		CampaignID: campaignID,
+		DropID:     dropID,
+	}
+	if f.observationRevision != nil {
+		obs.Revision = *f.observationRevision
+	}
+	obs.Complete = obs.Error == ""
+	if f.exactOverride {
+		key := campaignID + "\x00" + dropID
+		minutes, ok := f.exact[key]
+		obs.Minutes, obs.Found = minutes, ok
+		obs.AuthoritativeAbsent = obs.Complete && !ok && !f.exactUnknown[key]
+		obs.TupleUnknown = obs.Complete && !ok && f.exactUnknown[key]
+		return obs
+	}
+	for _, campaign := range f.campaigns {
+		if campaign == nil || campaign.ID != campaignID {
+			continue
+		}
+		for _, drop := range campaign.Drops {
+			if drop != nil && drop.ID == dropID {
+				obs.Minutes = drop.CurrentMinutesWatched
+				obs.Found = true
+				return obs
+			}
+		}
+	}
+	obs.AuthoritativeAbsent = obs.Complete
+	return obs
 }
 func (f *fakeDropsView) SyncNow()             { f.mu.Lock(); f.syncNow++; f.mu.Unlock() }
 func (f *fakeDropsView) TriggerProgressSync() { f.mu.Lock(); f.triggered++; f.mu.Unlock() }
@@ -43,6 +118,34 @@ func (f *fakeDropsView) observe(at time.Time, errText string) {
 	f.status.ProgressRuns++
 	f.status.ProgressLastSyncAt = at
 	f.status.ProgressLastError = errText
+	f.exactOverride = false
+	f.exact = nil
+	f.exactUnknown = nil
+	f.mu.Unlock()
+}
+
+func (f *fakeDropsView) observeExact(at time.Time, errText string, exact map[string]int) {
+	f.mu.Lock()
+	f.status.ProgressRuns++
+	f.status.ProgressLastSyncAt = at
+	f.status.ProgressLastError = errText
+	f.exactOverride = true
+	f.exact = make(map[string]int, len(exact))
+	f.exactUnknown = nil
+	for key, minutes := range exact {
+		f.exact[key] = minutes
+	}
+	f.mu.Unlock()
+}
+
+func (f *fakeDropsView) observeExactUnknown(at time.Time, campaignID, dropID string) {
+	f.mu.Lock()
+	f.status.ProgressRuns++
+	f.status.ProgressLastSyncAt = at
+	f.status.ProgressLastError = ""
+	f.exactOverride = true
+	f.exact = nil
+	f.exactUnknown = map[string]bool{campaignID + "\x00" + dropID: true}
 	f.mu.Unlock()
 }
 
@@ -52,11 +155,12 @@ type refreshCall struct {
 }
 
 type fakeWatchView struct {
-	mu        sync.Mutex
-	slots     []string
-	watching  map[string]bool
-	successes map[string]int
-	refreshes []refreshCall
+	mu         sync.Mutex
+	slots      []string
+	watching   map[string]bool
+	successes  map[string]int
+	reportHook func()
+	refreshes  []refreshCall
 	// outcomes is the last correlated refresh outcome per login, as the broker
 	// would publish it. outcomeMode selects how a staged request auto-resolves so
 	// tests can model the broker succeeding/failing/going stale/skipping/never
@@ -65,6 +169,27 @@ type fakeWatchView struct {
 	outcomeMode string
 	obsSeq      uint64
 	lastReq     map[string]watcher.SessionRefreshRequest
+	// When enabled, a successful staged refresh mirrors the production broker:
+	// it applies a new Stream session generation and replaces an active exact
+	// observation lease with a fresh Pending lease for that generation.
+	refreshStreamer      *models.Streamer
+	rebindLeaseOnRefresh bool
+	deferNextLeaseRebind bool
+	pendingReboundLease  *watcher.ProvisionalLease
+
+	monitorEnabled           bool
+	lease                    *watcher.ProvisionalLease
+	proofs                   []watcher.ProvisionalProof
+	provisionalOwner         *models.Streamer
+	released                 []uint64
+	quarantined              []models.ProvisionalDropCandidate
+	absenceObservations      int
+	tupleUnknownObservations int
+	quarantineBlocked        bool
+	quarantineAfterAt        time.Time
+	permitDenied             bool
+	permitAcquires           int
+	permitReleases           int
 }
 
 func (f *fakeWatchView) BrokerSnapshot() watcher.BrokerSnapshot {
@@ -91,8 +216,13 @@ func (f *fakeWatchView) IsWatching(login string) bool {
 }
 func (f *fakeWatchView) ReportStats(login string) (watcher.ReportStats, bool) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	n, ok := f.successes[login]
+	hook := f.reportHook
+	f.reportHook = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	if !ok {
 		return watcher.ReportStats{}, false
 	}
@@ -139,6 +269,36 @@ func (f *fakeWatchView) RequestSessionRefresh(req watcher.SessionRefreshRequest)
 	default: // success
 		out.Success = true
 		out.Reason = watcher.RefreshReasonOK
+		if f.rebindLeaseOnRefresh && f.refreshStreamer != nil && f.lease != nil {
+			f.refreshStreamer.Stream.SetSpadeURL("https://health-recovery.invalid/" + req.RequestID)
+			snapshot := f.refreshStreamer.Stream.ProvisionalDropSnapshot()
+			out.CurrentBroadcastID = snapshot.BroadcastID
+			out.CurrentSessionGeneration = snapshot.SessionGeneration
+			out.AppliedSessionGeneration = snapshot.SessionGeneration
+
+			candidate := f.lease.Candidate
+			candidate.BroadcastID = snapshot.BroadcastID
+			candidate.SessionGeneration = snapshot.SessionGeneration
+			candidate.AvailabilityObs = snapshot.Availability.ObservationID
+			candidate.AvailabilityKnownGen = snapshot.Availability.KnownGeneration
+			leaseID := f.lease.LeaseID + 1
+			if leaseID == 0 {
+				leaseID = 1
+			}
+			rebound := &watcher.ProvisionalLease{
+				LeaseID:    leaseID,
+				Candidate:  candidate,
+				State:      watcher.ProvisionalLeasePending,
+				ReservedAt: req.Requested,
+			}
+			if f.deferNextLeaseRebind {
+				f.deferNextLeaseRebind = false
+				f.pendingReboundLease = rebound
+				f.lease = nil
+			} else {
+				f.lease = rebound
+			}
+		}
 	}
 	if f.outcomes == nil {
 		f.outcomes = make(map[string]watcher.SessionRefreshOutcome)
@@ -169,6 +329,240 @@ func (f *fakeWatchView) LastSessionRefresh(login string) (watcher.SessionRefresh
 	defer f.mu.Unlock()
 	o, ok := f.outcomes[login]
 	return o, ok
+}
+
+func (f *fakeWatchView) SetProvisionalMonitoringEnabled(enabled bool) {
+	f.mu.Lock()
+	f.monitorEnabled = enabled
+	if !enabled {
+		f.lease = nil
+		f.proofs = nil
+	}
+	f.mu.Unlock()
+}
+
+func (f *fakeWatchView) ProvisionalLease() (watcher.ProvisionalLease, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil {
+		return watcher.ProvisionalLease{}, false
+	}
+	lease := *f.lease
+	lease.Candidate.RestrictedACL = append([]string(nil), lease.Candidate.RestrictedACL...)
+	return lease, true
+}
+
+func (f *fakeWatchView) ProvisionalProofs() []watcher.ProvisionalProof {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	proofs := append([]watcher.ProvisionalProof(nil), f.proofs...)
+	for i := range proofs {
+		proofs[i].Candidate.RestrictedACL = append([]string(nil), proofs[i].Candidate.RestrictedACL...)
+	}
+	return proofs
+}
+
+func (f *fakeWatchView) ProvisionalOwner(authorityID uint64, expected models.ProvisionalDropCandidate) (*models.Streamer, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	owner := f.provisionalOwner
+	if owner == nil || owner.Stream == nil || owner.GetStatus() != models.StatusOnline ||
+		owner.GetUsername() != expected.Login || owner.ChannelID != expected.ChannelID {
+		return nil, false
+	}
+	proof := false
+	if f.lease != nil && f.lease.LeaseID == authorityID && f.lease.Candidate.SameLeaseIdentity(expected) {
+		proof = false
+	} else {
+		matched := false
+		for _, current := range f.proofs {
+			if current.ProofID == authorityID && current.Candidate.SameProofIdentity(expected) {
+				matched = true
+				proof = true
+				break
+			}
+		}
+		if !matched {
+			return nil, false
+		}
+	}
+	if len(owner.Stream.GetCampaigns()) != 0 {
+		return nil, false
+	}
+	snapshot := owner.Stream.ProvisionalDropSnapshot()
+	if snapshot.Availability.State != models.CampaignAvailabilityUnknown ||
+		snapshot.Availability.KnownGeneration != expected.AvailabilityKnownGen ||
+		snapshot.GameID != expected.GameID || snapshot.BroadcastID != expected.BroadcastID ||
+		snapshot.SessionGeneration != expected.SessionGeneration {
+		return nil, false
+	}
+	if !proof && snapshot.Availability.ObservationID != expected.AvailabilityObs {
+		return nil, false
+	}
+	return owner, true
+}
+
+func (f *fakeWatchView) ObserveProvisionalAbsence(leaseID, run uint64, at time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID || f.lease.State != watcher.ProvisionalLeasePending ||
+		run <= f.lease.MaxRun || at.IsZero() || at.Before(f.lease.MaxAt) {
+		return false
+	}
+	f.lease.MaxRun = run
+	f.lease.MaxAt = at
+	f.lease.PendingObservation = watcher.ProvisionalPendingObservationAbsence
+	f.absenceObservations++
+	return true
+}
+
+func (f *fakeWatchView) ObserveProvisionalTupleUnknown(leaseID, run uint64, at time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID || f.lease.State != watcher.ProvisionalLeasePending ||
+		run <= f.lease.MaxRun || at.IsZero() || at.Before(f.lease.MaxAt) {
+		return false
+	}
+	f.lease.MaxRun = run
+	f.lease.MaxAt = at
+	f.lease.PendingObservation = watcher.ProvisionalPendingObservationTupleUnknown
+	f.tupleUnknownObservations++
+	return true
+}
+
+func (f *fakeWatchView) ArmProvisionalLease(leaseID, run uint64, at time.Time, minutes int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID || f.lease.State != watcher.ProvisionalLeasePending ||
+		run == 0 || run <= f.lease.MaxRun || at.IsZero() || at.Before(f.lease.MaxAt) || minutes < 0 {
+		return false
+	}
+	f.lease.State = watcher.ProvisionalLeaseObserving
+	f.lease.BaselineRun = run
+	f.lease.BaselineAt = at
+	f.lease.BaselineMinutes = minutes
+	f.lease.MaxRun = run
+	f.lease.MaxAt = at
+	f.lease.MaxMinutes = minutes
+	f.lease.PendingObservation = watcher.ProvisionalPendingObservationNone
+	return true
+}
+
+func (f *fakeWatchView) ObserveProvisionalProgress(leaseID, run uint64, at time.Time, minutes int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID || f.lease.State == watcher.ProvisionalLeasePending ||
+		run <= f.lease.MaxRun || at.IsZero() || at.Before(f.lease.MaxAt) || minutes < f.lease.MaxMinutes {
+		return false
+	}
+	f.lease.MaxRun = run
+	f.lease.MaxAt = at
+	f.lease.MaxMinutes = minutes
+	if minutes > f.lease.BaselineMinutes {
+		f.lease.State = watcher.ProvisionalLeaseProven
+		f.proofs = []watcher.ProvisionalProof{{
+			ProofID:         f.lease.LeaseID,
+			Candidate:       f.lease.Candidate,
+			BaselineRun:     f.lease.BaselineRun,
+			BaselineAt:      f.lease.BaselineAt,
+			BaselineMinutes: f.lease.BaselineMinutes,
+			ProvenRun:       run,
+			ProvenAt:        at,
+			ProvenMinutes:   minutes,
+		}}
+	}
+	return true
+}
+
+func (f *fakeWatchView) ReleaseProvisionalLease(leaseID uint64) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID {
+		return false
+	}
+	f.released = append(f.released, leaseID)
+	f.lease = nil
+	return true
+}
+
+func (f *fakeWatchView) QuarantineProvisionalLease(leaseID uint64, expected models.ProvisionalDropCandidate) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lease == nil || f.lease.LeaseID != leaseID || !f.lease.Candidate.SameLeaseIdentity(expected) {
+		return false
+	}
+	if f.quarantineBlocked {
+		return false
+	}
+	if !f.quarantineAfterAt.IsZero() && !f.lease.MaxAt.After(f.quarantineAfterAt) {
+		return false
+	}
+	f.quarantined = append(f.quarantined, expected)
+	for i := range f.proofs {
+		if f.proofs[i].Candidate.SameLeaseIdentity(expected) {
+			f.proofs = append(f.proofs[:i], f.proofs[i+1:]...)
+			break
+		}
+	}
+	f.lease = nil
+	return true
+}
+
+func (f *fakeWatchView) AcquireObservationPermit(streamer *models.Streamer, leaseID uint64) (watcher.ObservationPermit, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.permitAcquires++
+	if leaseID != 0 && (f.lease == nil || f.lease.LeaseID != leaseID || streamer != f.provisionalOwner) {
+		return watcher.ObservationPermit{}, false
+	}
+	return watcher.ObservationPermit{}, !f.permitDenied
+}
+
+func (f *fakeWatchView) AcquireProvisionalProofPermit(streamer *models.Streamer, proofID uint64, expected models.ProvisionalDropCandidate) (watcher.ObservationPermit, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.permitAcquires++
+	if f.permitDenied || streamer == nil || streamer.GetStatus() != models.StatusOnline ||
+		streamer != f.provisionalOwner || streamer.GetUsername() != expected.Login || streamer.ChannelID != expected.ChannelID {
+		return watcher.ObservationPermit{}, false
+	}
+	found := false
+	for _, proof := range f.proofs {
+		if proof.ProofID == proofID && proof.Candidate.SameProofIdentity(expected) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return watcher.ObservationPermit{}, false
+	}
+	for _, campaign := range streamer.Stream.GetCampaigns() {
+		if campaign != nil && campaign.ID == expected.CampaignID {
+			return watcher.ObservationPermit{}, false
+		}
+	}
+	snapshot := streamer.Stream.ProvisionalDropSnapshot()
+	if snapshot.Availability.State != models.CampaignAvailabilityUnknown ||
+		snapshot.Availability.KnownGeneration != expected.AvailabilityKnownGen || snapshot.GameID != expected.GameID ||
+		snapshot.BroadcastID != expected.BroadcastID || snapshot.SessionGeneration != expected.SessionGeneration {
+		return watcher.ObservationPermit{}, false
+	}
+	return watcher.ObservationPermit{}, true
+}
+
+func (f *fakeWatchView) ReleaseObservationPermit(_ watcher.ObservationPermit) {
+	f.mu.Lock()
+	f.permitReleases++
+	f.mu.Unlock()
+}
+
+func (f *fakeWatchView) publishPendingReboundLease() {
+	f.mu.Lock()
+	if f.pendingReboundLease != nil {
+		f.lease = f.pendingReboundLease
+		f.pendingReboundLease = nil
+	}
+	f.mu.Unlock()
 }
 
 // lastRequest returns the most recent refresh request staged for a login.

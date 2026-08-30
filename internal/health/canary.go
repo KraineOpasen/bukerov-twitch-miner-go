@@ -41,6 +41,15 @@ type SlotView interface {
 	FreeSlots() int
 }
 
+// observationPermitSlots is an optional broker capability. MinuteWatcher
+// implements it; simple/testing SlotView implementations need not. A canary
+// passes leaseID zero because it is never the owner of a provisional Drop
+// observation.
+type observationPermitSlots interface {
+	AcquireObservationPermit(streamer *models.Streamer, leaseID uint64) (watcher.ObservationPermit, bool)
+	ReleaseObservationPermit(permit watcher.ObservationPermit)
+}
+
 // CanaryConfig is the canary's runtime configuration.
 type CanaryConfig struct {
 	Enabled      bool
@@ -218,6 +227,11 @@ func (c *Canary) runOnce(manual bool) {
 	defer cancel()
 
 	sig := c.probe(ctx, cfg.Channel)
+	if sig.Name == "" {
+		// Broker permit denial is a scheduling deferral, not a transport
+		// observation. Do not publish a fake success/failure or notify.
+		return
+	}
 	c.center.Record(sig)
 	c.handleTransition(sig)
 }
@@ -258,6 +272,17 @@ func (c *Canary) probe(ctx context.Context, channel string) Signal {
 	}
 	if streamer.Stream.GetSpadeURL() == "" {
 		return c.failSignal("spade_url", "spade URL was not discovered", "spade_url_missing", start)
+	}
+
+	if permits, ok := c.slots.(observationPermitSlots); ok {
+		permit, granted := permits.AcquireObservationPermit(streamer, 0)
+		if !granted {
+			// A conflicting exact-Drop observation already owns causal
+			// exclusivity. Empty Signal is an internal defer sentinel consumed by
+			// runOnce; it is intentionally never recorded in Center.
+			return Signal{}
+		}
+		defer permits.ReleaseObservationPermit(permit)
 	}
 
 	res := c.prober.Probe(ctx, streamer)

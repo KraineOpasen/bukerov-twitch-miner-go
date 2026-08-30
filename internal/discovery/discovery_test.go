@@ -43,8 +43,14 @@ func (f *fakeClient) GetDirectoryStreams(gameName string, limit int) ([]twitch.D
 // the reported slot origin per login; a watching login with no explicit origin
 // defaults to "discovery" (the broker placed discovery's own proposal).
 type fakeSlotStatus struct {
-	watching map[string]bool
-	origin   map[string]string
+	watching    map[string]bool
+	origin      map[string]string
+	quarantined map[string]bool
+}
+
+func (f *fakeSlotStatus) IsProvisionalQuarantined(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+	return streamer != nil && streamer.GetUsername() == candidate.Login && streamer.ChannelID == candidate.ChannelID &&
+		f.quarantined[candidate.QuarantineKey()]
 }
 
 func (f *fakeSlotStatus) IsWatching(login string) bool { return f.watching[login] }
@@ -84,10 +90,14 @@ func onlineCandidate(login, channelID, game, gameID string, viewers int) *Channe
 }
 
 type fakeTracked struct {
-	names []string
+	names     []string
+	streamers []*models.Streamer
 }
 
 func (f *fakeTracked) Names() []string { return f.names }
+func (f *fakeTracked) All() []*models.Streamer {
+	return append([]*models.Streamer(nil), f.streamers...)
+}
 
 func newTestManager(games []string, campaigns *fakeCampaigns, client *fakeClient) *Manager {
 	m := NewManager(nil, campaigns, &fakeTracked{}, testRateLimits(), games, config.DiscoveryModeAll, false)

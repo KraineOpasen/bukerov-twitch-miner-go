@@ -91,6 +91,56 @@ type SyncStatus struct {
 	ProgressLastError  string
 }
 
+// ProgressObservation is an immutable, coherent view of one exact campaign /
+// drop tuple at the latest lightweight progress-observation boundary. Run,
+// ObservedAt, Error, Revision, Complete, TupleUnknown,
+// AuthoritativeAbsent, Found, and Minutes are captured under the same tracker
+// lock, so callers never combine progress from one campaign revision with
+// bookkeeping from another sync run.
+//
+// Complete means Twitch returned an explicit, structurally valid
+// dropCampaignsInProgress array. AuthoritativeAbsent means that complete array
+// contained no row for this exact tuple. It is useful absence evidence, but is
+// deliberately NOT a numeric zero baseline. A row whose self/minutes field is
+// null or omitted is tuple-specific UNKNOWN: both Found and
+// AuthoritativeAbsent are false. A non-empty Error makes the whole run
+// unavailable and clears all three authority flags.
+type ProgressObservation struct {
+	Run                 uint64
+	ObservedAt          time.Time
+	Error               string
+	Revision            uint64
+	CampaignID          string
+	DropID              string
+	Minutes             int
+	Complete            bool
+	TupleUnknown        bool
+	AuthoritativeAbsent bool
+	Found               bool
+}
+
+// progressTuple is the exact identity published by one successful lightweight
+// Inventory observation. It is intentionally not derived from d.campaigns:
+// that pool is last-known state and can retain a Drop that the newest Inventory
+// run did not actually contain.
+type progressTuple struct {
+	campaignID string
+	dropID     string
+}
+
+// BrokerCampaignSnapshot is the atomically published account-campaign
+// authority consumed by discovery and the progress watchdog. Generation
+// changes on every accepted broker-view publication; SourceRevision identifies
+// the exact campaign pool from which that skip-ledger-filtered view was built.
+// Callers can therefore reject both a changed source envelope and the short
+// interval in which a campaign pool has advanced but its broker view has not.
+type BrokerCampaignSnapshot struct {
+	Generation      uint64
+	SourceRevision  uint64
+	CurrentRevision uint64
+	Campaigns       []*models.Campaign
+}
+
 // Update sources for SyncStatus.UpdateSource / the diagnostic freshness fields.
 const (
 	updateSourceFullSync   = "full_sync"
@@ -109,6 +159,15 @@ type DropsTracker struct {
 	clock models.Clock
 
 	campaigns []*models.Campaign
+
+	// brokerCampaigns is the atomically published, skip-ledger-filtered view of
+	// campaigns used by updateStreamerCampaigns. Discovery reads this view rather
+	// than d.campaigns so it cannot bypass a durable ghost-skip decision or perform
+	// its own ledger I/O. The slice is replaced (never reused) after the campaign
+	// revision fence; campaign objects are immutable published views.
+	brokerCampaigns  []*models.Campaign
+	brokerGeneration uint64
+	brokerRevision   uint64
 
 	// catalog, when set, durably records every campaign actually observed in the
 	// current/in-progress pipeline so the "Past" tab can show it after expiry.
@@ -168,6 +227,23 @@ type DropsTracker struct {
 	progressRuns       int
 	progressLastSyncAt time.Time
 	progressLastErr    string
+	// progressAuthorityErr is stricter than progressLastErr and belongs only to
+	// exact provisional proof. Ordinary lightweight merge/status keeps its
+	// established best-effort treatment of partial GraphQL data, while any
+	// partial/malformed authority is unavailable here.
+	progressAuthorityErr string
+	// progressRevision is the campaign-pool revision against which the latest
+	// accepted lightweight observation was captured. It intentionally does not
+	// follow later full-sync revisions.
+	progressRevision uint64
+	// progressExact belongs to the same run/time/error tuple above. A successful
+	// valid-empty observation publishes an empty map; a failed observation
+	// publishes nil with progressLastErr set. Values are exact server minutes.
+	progressExact map[progressTuple]int
+	// progressUnknown records exact rows that were present but carried no
+	// numeric self/currentMinutesWatched authority. Their presence must not be
+	// collapsed into authoritative absence.
+	progressUnknown map[progressTuple]struct{}
 
 	// fullSyncMu serializes the background full-sync owner and SyncNow (the
 	// progress watchdog's forced-resync recovery stage), so two full syncs never
@@ -407,6 +483,70 @@ func (d *DropsTracker) Campaigns() []*models.Campaign {
 	return campaigns
 }
 
+// BrokerCampaigns returns a snapshot of the exact skip-ledger-filtered campaign
+// views most recently accepted by updateStreamerCampaigns' revision fence. It
+// performs no database or network I/O. The returned slice is independent of the
+// tracker's published slice; the immutable campaign objects are shared.
+func (d *DropsTracker) BrokerCampaigns() []*models.Campaign {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	campaigns := make([]*models.Campaign, len(d.brokerCampaigns))
+	copy(campaigns, d.brokerCampaigns)
+	return campaigns
+}
+
+// BrokerCampaignSnapshot returns the broker-facing campaigns together with
+// their publication generation and source campaign revision under one lock.
+// The returned slice is independent; its campaign objects are immutable
+// published views.
+func (d *DropsTracker) BrokerCampaignSnapshot() BrokerCampaignSnapshot {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	return BrokerCampaignSnapshot{
+		Generation:      d.brokerGeneration,
+		SourceRevision:  d.brokerRevision,
+		CurrentRevision: d.revision,
+		Campaigns:       append([]*models.Campaign(nil), d.brokerCampaigns...),
+	}
+}
+
+// ProgressObservation returns a coherent snapshot for the exact requested
+// campaign/drop IDs from the latest lightweight Inventory run. It deliberately
+// reads the per-run exact-presence map under the same RLock as run/time/error;
+// d.campaigns is retained display/assignment state and must not be mistaken for
+// proof that the latest Inventory response contained this tuple.
+func (d *DropsTracker) ProgressObservation(campaignID, dropID string) ProgressObservation {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	observation := ProgressObservation{
+		Run:        uint64(d.progressRuns),
+		ObservedAt: d.progressLastSyncAt,
+		Error:      d.progressAuthorityErr,
+		Revision:   d.progressRevision,
+		CampaignID: campaignID,
+		DropID:     dropID,
+	}
+	if observation.Error != "" {
+		return observation
+	}
+	observation.Complete = d.progressExact != nil && d.progressUnknown != nil
+	key := progressTuple{campaignID: campaignID, dropID: dropID}
+	if minutes, ok := d.progressExact[progressTuple{campaignID: campaignID, dropID: dropID}]; ok {
+		observation.Minutes = minutes
+		observation.Found = true
+		return observation
+	}
+	if observation.Complete {
+		_, unknown := d.progressUnknown[key]
+		observation.TupleUnknown = unknown
+		observation.AuthoritativeAbsent = !unknown
+	}
+	return observation
+}
+
 // SetCatalog wires the durable campaign catalog. Set once before the sync loops
 // start; when nil, cataloging is a no-op.
 func (d *DropsTracker) SetCatalog(catalog *CampaignCatalog) {
@@ -612,10 +752,15 @@ func (d *DropsTracker) recordProgressSync(err error) {
 	defer d.mu.Unlock()
 	d.progressRuns++
 	d.progressLastSyncAt = time.Now()
+	d.progressRevision = d.revision
 	if err != nil {
 		d.progressLastErr = err.Error()
+		d.progressAuthorityErr = err.Error()
+		d.progressExact = nil
+		d.progressUnknown = nil
 	} else {
 		d.progressLastErr = ""
+		d.progressAuthorityErr = ""
 	}
 }
 
@@ -642,7 +787,13 @@ func (d *DropsTracker) recordProgressSync(err error) {
 // describes. Returns false when the result was discarded as stale (nothing
 // published or recorded); the caller must not treat that as an observation
 // (no streamer re-point, no further logging beyond this DEBUG line).
-func (d *DropsTracker) publishProgressObservation(capturedRevision uint64, newCampaigns []*models.Campaign) bool {
+func (d *DropsTracker) publishProgressObservation(
+	capturedRevision uint64,
+	newCampaigns []*models.Campaign,
+	exact map[progressTuple]int,
+	unknown map[progressTuple]struct{},
+	authorityErr error,
+) bool {
 	d.mu.Lock()
 	if d.revision != capturedRevision {
 		current := d.revision
@@ -658,6 +809,16 @@ func (d *DropsTracker) publishProgressObservation(capturedRevision uint64, newCa
 	d.progressRuns++
 	d.progressLastSyncAt = time.Now()
 	d.progressLastErr = ""
+	d.progressRevision = d.revision
+	if authorityErr != nil {
+		d.progressAuthorityErr = authorityErr.Error()
+		d.progressExact = nil
+		d.progressUnknown = nil
+	} else {
+		d.progressAuthorityErr = ""
+		d.progressExact = exact
+		d.progressUnknown = unknown
+	}
 	d.mu.Unlock()
 	return true
 }
@@ -867,7 +1028,7 @@ func (d *DropsTracker) syncProgress() {
 		return
 	}
 
-	inventory, err := d.getInventory()
+	inventory, authorityErr, err := d.getProgressInventory()
 	if err != nil || inventory == nil {
 		if err == nil {
 			err = fmt.Errorf("empty inventory response")
@@ -880,14 +1041,41 @@ func (d *DropsTracker) syncProgress() {
 		return
 	}
 
-	inProgress, ok := inventory["dropCampaignsInProgress"].([]interface{})
-	if !ok || inProgress == nil {
+	// Preserve the ordinary light-sync parser exactly: a missing/null/wrong-type
+	// list remains a legitimate no-update observation for known-positive work.
+	// Exact provisional authority is stricter and accepts only an explicitly
+	// present array; both interpretations consume this ONE network response.
+	var inProgress []interface{}
+	rawInProgress, listPresent := inventory["dropCampaignsInProgress"]
+	if list, ok := rawInProgress.([]interface{}); ok && list != nil {
+		inProgress = list
+	} else if authorityErr == nil {
+		switch {
+		case !listPresent:
+			authorityErr = fmt.Errorf("inventory dropCampaignsInProgress is missing")
+		case rawInProgress == nil:
+			authorityErr = fmt.Errorf("inventory dropCampaignsInProgress is null")
+		default:
+			authorityErr = fmt.Errorf("malformed inventory dropCampaignsInProgress")
+		}
+	}
+
+	var exact map[progressTuple]int
+	var unknown map[progressTuple]struct{}
+	if inProgress != nil {
+		var exactErr error
+		exact, unknown, exactErr = exactProgressFromInventory(inProgress)
+		if authorityErr == nil && exactErr != nil {
+			authorityErr = exactErr
+		}
+	}
+	if len(inProgress) == 0 {
 		// A fetched inventory without an in-progress list is a legitimate state
 		// (tracked campaigns whose watching hasn't credited any minutes yet), so
 		// this counts as a completed observation reporting zero progress — unless
 		// the pool this snapshot was captured against has since been superseded by
 		// a full sync (see publishProgressObservation).
-		d.publishProgressObservation(capturedRevision, nil)
+		d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr)
 		return
 	}
 
@@ -942,7 +1130,7 @@ func (d *DropsTracker) syncProgress() {
 		// The inventory read completed and nothing moved — "checked and
 		// unchanged" is exactly the observation the progress watchdog counts
 		// stalls with (again subject to the same staleness guard).
-		d.publishProgressObservation(capturedRevision, nil)
+		d.publishProgressObservation(capturedRevision, nil, exact, unknown, authorityErr)
 		return
 	}
 
@@ -951,7 +1139,7 @@ func (d *DropsTracker) syncProgress() {
 	// Inventory read was in flight (see publishProgressObservation). A
 	// discarded stale result must not re-point streamers either, so that only
 	// happens below once publication is confirmed.
-	if !d.publishProgressObservation(capturedRevision, updated) {
+	if !d.publishProgressObservation(capturedRevision, updated, exact, unknown, authorityErr) {
 		return
 	}
 
@@ -961,6 +1149,78 @@ func (d *DropsTracker) syncProgress() {
 
 	slog.Debug("Drops progress sync: refreshed tracked campaign progress from inventory",
 		"campaigns", len(updated))
+}
+
+// exactProgressFromInventory extracts the exact campaign/drop/minutes facts
+// carried by one Inventory response. Any malformed entry makes the authority
+// run unusable rather than silently turning an unknown shape into absence or
+// zero progress. Duplicate identical tuples are harmless; conflicting values
+// fail the whole run closed.
+func exactProgressFromInventory(inProgress []interface{}) (map[progressTuple]int, map[progressTuple]struct{}, error) {
+	exact := make(map[progressTuple]int)
+	unknown := make(map[progressTuple]struct{})
+	for campaignIndex, rawCampaign := range inProgress {
+		campaign, ok := rawCampaign.(map[string]interface{})
+		if !ok {
+			return nil, nil, fmt.Errorf("campaign[%d] is not an object", campaignIndex)
+		}
+		campaignID, _ := campaign["id"].(string)
+		if campaignID == "" || strings.TrimSpace(campaignID) != campaignID {
+			return nil, nil, fmt.Errorf("campaign[%d] has no id", campaignIndex)
+		}
+		rawDrops, present := campaign["timeBasedDrops"]
+		if !present || rawDrops == nil {
+			return nil, nil, fmt.Errorf("campaign %q has no timeBasedDrops list", campaignID)
+		}
+		dropsList, ok := rawDrops.([]interface{})
+		if !ok {
+			return nil, nil, fmt.Errorf("campaign %q timeBasedDrops is not a list", campaignID)
+		}
+		for dropIndex, rawDrop := range dropsList {
+			drop, ok := rawDrop.(map[string]interface{})
+			if !ok {
+				return nil, nil, fmt.Errorf("campaign %q drop[%d] is not an object", campaignID, dropIndex)
+			}
+			dropID, _ := drop["id"].(string)
+			if dropID == "" || strings.TrimSpace(dropID) != dropID {
+				return nil, nil, fmt.Errorf("campaign %q drop[%d] has no id", campaignID, dropIndex)
+			}
+			key := progressTuple{campaignID: campaignID, dropID: dropID}
+			rawSelf, selfPresent := drop["self"]
+			if !selfPresent || rawSelf == nil {
+				if _, duplicateExact := exact[key]; duplicateExact {
+					return nil, nil, fmt.Errorf("campaign %q drop %q has conflicting exact/unknown progress", campaignID, dropID)
+				}
+				unknown[key] = struct{}{}
+				continue
+			}
+			self, ok := rawSelf.(map[string]interface{})
+			if !ok {
+				return nil, nil, fmt.Errorf("campaign %q drop %q has malformed progress self", campaignID, dropID)
+			}
+			rawValue, minutesPresent := self["currentMinutesWatched"]
+			if !minutesPresent || rawValue == nil {
+				if _, duplicateExact := exact[key]; duplicateExact {
+					return nil, nil, fmt.Errorf("campaign %q drop %q has conflicting exact/unknown progress", campaignID, dropID)
+				}
+				unknown[key] = struct{}{}
+				continue
+			}
+			rawMinutes, ok := rawValue.(float64)
+			minutes := int(rawMinutes)
+			if !ok || rawMinutes < 0 || float64(minutes) != rawMinutes {
+				return nil, nil, fmt.Errorf("campaign %q drop %q has invalid currentMinutesWatched", campaignID, dropID)
+			}
+			if _, duplicateUnknown := unknown[key]; duplicateUnknown {
+				return nil, nil, fmt.Errorf("campaign %q drop %q has conflicting unknown/exact progress", campaignID, dropID)
+			}
+			if previous, duplicate := exact[key]; duplicate && previous != minutes {
+				return nil, nil, fmt.Errorf("campaign %q drop %q has conflicting progress values", campaignID, dropID)
+			}
+			exact[key] = minutes
+		}
+	}
+	return exact, unknown, nil
 }
 
 // progressDiffers reports whether the drop set, watched-minute progress, or
@@ -1604,27 +1864,50 @@ func (d *DropsTracker) getDropsDashboard(status string) (campaigns []map[string]
 }
 
 func (d *DropsTracker) getInventory() (map[string]interface{}, error) {
+	return d.getInventoryFromResponse()
+}
+
+// getProgressInventory preserves the ordinary light-sync response semantics
+// while independently reporting whether that same response is complete enough
+// for exact provisional authority. Partial GraphQL data remains available to
+// the pre-existing merge and raw isClaimed/Skip-Ledger observation paths; it
+// can never arm or prove a provisional exact-Drop lease.
+func (d *DropsTracker) getProgressInventory() (inventory map[string]interface{}, authorityErr, err error) {
+	resp, err := d.client.PostGQL(constants.Inventory)
+	if err != nil {
+		return nil, err, err
+	}
+	if _, present := resp["errors"]; present {
+		authorityErr = fmt.Errorf("twitch GQL %s: top-level errors present", constants.Inventory.OperationName)
+	}
+	return inventoryFromGQLResponse(resp), authorityErr, nil
+}
+
+func (d *DropsTracker) getInventoryFromResponse() (map[string]interface{}, error) {
 	resp, err := d.client.PostGQL(constants.Inventory)
 	if err != nil {
 		return nil, err
 	}
+	return inventoryFromGQLResponse(resp), nil
+}
 
+func inventoryFromGQLResponse(resp map[string]interface{}) map[string]interface{} {
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		return nil, nil
+		return nil
 	}
 
 	currentUser, ok := data["currentUser"].(map[string]interface{})
 	if !ok || currentUser == nil {
-		return nil, nil
+		return nil
 	}
 
 	inventory, ok := currentUser["inventory"].(map[string]interface{})
 	if !ok {
-		return nil, nil
+		return nil
 	}
 
-	return inventory, nil
+	return inventory
 }
 
 // syncWithInventory merges live per-drop progress from the Inventory query
@@ -2518,14 +2801,25 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 	// held, reject a pass built from an older revision. If a newer publication
 	// lands after this check, its own re-point waits on logMu and therefore runs
 	// after this pass, leaving the newest assignment last.
-	d.mu.RLock()
+	d.mu.Lock()
 	currentRevision := d.revision
-	d.mu.RUnlock()
 	if currentRevision != capturedRevision {
+		d.mu.Unlock()
 		slog.Debug("Drops assignment: discarding stale campaign re-point",
 			"capturedRevision", capturedRevision, "currentRevision", currentRevision)
 		return
 	}
+	// Publish the exact views this accepted assignment pass will use. Allocate a
+	// fresh slice so readers holding an older BrokerCampaigns result can never see
+	// its elements rewritten by a later pass. This happens under the revision
+	// check's same lock, making the view and its source revision one atomic fact.
+	d.brokerCampaigns = append([]*models.Campaign(nil), views...)
+	d.brokerRevision = capturedRevision
+	d.brokerGeneration++
+	if d.brokerGeneration == 0 {
+		d.brokerGeneration++
+	}
+	d.mu.Unlock()
 
 	if d.loggedRestrictedAssignments == nil {
 		d.loggedRestrictedAssignments = make(map[string]struct{})

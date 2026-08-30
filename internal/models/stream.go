@@ -22,6 +22,13 @@ type Stream struct {
 	// access is tolerated only in single-goroutine test setup.
 	CampaignIDs []string
 	Campaigns   []*Campaign
+	// confirmedCampaignBroadcastID/confirmedCampaignIDs remember every canonical
+	// campaign assignment published for the current broadcast. SetCampaigns(nil)
+	// may clear the live intersection, but it must not erase this same-session
+	// fact and let discovery relabel that campaign as a cold-start provisional
+	// observation. A different BroadcastID is a different fence namespace.
+	confirmedCampaignBroadcastID string
+	confirmedCampaignIDs         []string
 	// campaignAvailability is the tri-state result of the last channel-side
 	// per-channel campaign lookup (see campaign_availability.go). Unknown means
 	// the lookup failed and CampaignIDs is stale continuity data, not a fresh
@@ -35,8 +42,13 @@ type Stream struct {
 	// the bounded-continuity timestamps: UnknownSince is stamped at the first
 	// Unknown after a Known and preserved across a run of Unknowns (so repeated
 	// failures never extend the grace); LastKnownAt is the last authoritative Known.
-	campaignAvailability    CampaignAvailabilityState
-	campaignAvailObs        uint64
+	campaignAvailability CampaignAvailabilityState
+	campaignAvailObs     uint64
+	// campaignKnownGen is the monotonic authority epoch. It advances only when
+	// an availability lookup resolves Known (including Known+empty), never for
+	// an Unknown refresh. Provisional proofs use it to survive routine Unknown
+	// observations without surviving an intervening authoritative result.
+	campaignKnownGen        uint64
 	campaignAvailObservedAt time.Time
 	campaignUnknownSince    time.Time
 	campaignLastKnownAt     time.Time
@@ -332,6 +344,7 @@ func (s *Stream) SetCampaignIDs(ids []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.campaignAvailObs++
+	s.bumpCampaignKnownGenerationLocked()
 	s.CampaignIDs = ids
 	s.campaignAvailability = CampaignAvailabilityKnown
 	s.campaignAvailObservedAt = time.Now()
@@ -350,10 +363,40 @@ func (s *Stream) GetCampaigns() []*Campaign {
 }
 
 // SetCampaigns replaces the assigned tracked campaigns (drops tracker only).
+// Every canonical non-empty assignment is also retained as a same-broadcast
+// fact. Empty updates clear the live intersection but deliberately preserve the
+// fact, so a later UNKNOWN observation cannot bootstrap the same campaign again
+// during that broadcast.
 func (s *Stream) SetCampaigns(campaigns []*Campaign) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Campaigns = campaigns
+
+	if s.BroadcastID == "" || len(campaigns) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(campaigns))
+	for _, campaign := range campaigns {
+		if campaign != nil && canonicalProvisionalIdentity(campaign.ID) {
+			ids = append(ids, campaign.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	if s.confirmedCampaignBroadcastID == s.BroadcastID {
+		ids = append(ids, s.confirmedCampaignIDs...)
+	}
+	sort.Strings(ids)
+	canonical := ids[:0]
+	for _, id := range ids {
+		if len(canonical) == 0 || canonical[len(canonical)-1] != id {
+			canonical = append(canonical, id)
+		}
+	}
+	s.confirmedCampaignBroadcastID = s.BroadcastID
+	s.confirmedCampaignIDs = canonical
 }
 
 // BuildMinuteWatchedPayload builds the beacon events for a minute-watched report
