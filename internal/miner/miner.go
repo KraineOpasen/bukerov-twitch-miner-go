@@ -104,8 +104,13 @@ type Miner struct {
 	// It is provisioned once whenever top-level analytics infrastructure is
 	// available, independently of the nested inherited-global policy, so an
 	// explicit-true model setting has a valid sink. Guarded by mu after startup.
-	chatLogger       chat.ChatLogger
-	watcher          *watcher.MinuteWatcher
+	chatLogger chat.ChatLogger
+	watcher    *watcher.MinuteWatcher
+	// routineRefresh is the narrow arbitration seam used only by periodic and
+	// triggered roster status polling. The concrete watcher is assigned during
+	// setup before runtime loops start; startup and explicit recovery/lifecycle
+	// refreshes intentionally bypass it.
+	routineRefresh   routineRefreshRunner
 	dropsTracker     *drops.DropsTracker
 	dropCatalog      *drops.CampaignCatalog
 	discovery        *discovery.Manager
@@ -391,6 +396,10 @@ type Miner struct {
 	// admitted writers. Production leaves it nil. It lets lifecycle tests prove
 	// the generation ordering with channel barriers instead of elapsed time.
 	configDrainStarted func()
+}
+
+type routineRefreshRunner interface {
+	RunRoutineRefresh(streamer *models.Streamer, refresh func()) bool
 }
 
 // applyCommitPhase identifies which side of an apply's commit section
@@ -944,6 +953,9 @@ func (m *Miner) setupComponents(ctx context.Context) {
 		m.config.RateLimits,
 		watchTimeStore,
 	)
+	m.routineRefresh = m.watcher
+	m.streamers.SetRoutineRefreshRunner(m.watcher)
+	m.wsPool.SetRoutineRefreshRunner(m.watcher)
 	// Inject the bounded slot-lifecycle diagnostic journal (BKM-013). Diagnostic
 	// only: it observes slot transitions and never affects selection or sending.
 	m.watcher.SetSlotJournal(journal.New[journal.SlotEvent](slotJournalCapacity, nil))
@@ -1511,7 +1523,7 @@ func (m *Miner) chatRosterMembership(s *models.Streamer) bool {
 
 func (m *Miner) checkAllStreamers() {
 	for _, s := range m.streamers.All() {
-		m.client.CheckStreamerOnline(s)
+		m.runRoutineRefresh(s, func() { m.client.CheckStreamerOnline(s) })
 		m.chatManager.ToggleChat(s)
 	}
 }
@@ -1523,10 +1535,18 @@ func (m *Miner) checkUncheckedStreamers() {
 	for _, s := range m.streamers.All() {
 		lastChecked := s.GetLastChecked()
 		if lastChecked.IsZero() || now.Sub(lastChecked) >= interval {
-			m.client.CheckStreamerOnline(s)
+			m.runRoutineRefresh(s, func() { m.client.CheckStreamerOnline(s) })
 			m.chatManager.ToggleChat(s)
 		}
 	}
+}
+
+func (m *Miner) runRoutineRefresh(streamer *models.Streamer, refresh func()) bool {
+	if m.routineRefresh == nil {
+		refresh()
+		return true
+	}
+	return m.routineRefresh.RunRoutineRefresh(streamer, refresh)
 }
 
 func (m *Miner) triggerStreamCheck() {

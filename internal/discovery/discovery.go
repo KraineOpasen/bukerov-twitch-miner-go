@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/config"
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/drops"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/eligibility"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/events"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -52,10 +53,6 @@ const (
 	// only costing one small GQL query per game per retry.
 	emptyPoolRetryInterval = 2 * time.Minute
 
-	// staleStreamRecheck mirrors the watcher's behavior of re-verifying a
-	// watched stream that hasn't been refreshed in a while.
-	staleStreamRecheck = 10 * time.Minute
-
 	// maxCandidateChecksPerTick caps how many pool candidates are brought
 	// online (spade URL + stream info fetches) in a single watch tick, so a
 	// pool full of stale entries can't cause a burst of requests. Remaining
@@ -63,11 +60,24 @@ const (
 	maxCandidateChecksPerTick = 3
 )
 
+// staleStreamRecheck mirrors the watcher's behavior of re-verifying a watched
+// stream that hasn't been refreshed in a while. It is a package variable only
+// so focused tests can advance this gate without a ten-minute sleep.
+var staleStreamRecheck = 10 * time.Minute
+
 // CampaignsProvider exposes the drop campaigns currently tracked by the drops
 // tracker (already filtered by date window, inventory, account-wide claim
 // history, and the drop-name blacklist). Satisfied by *drops.DropsTracker.
 type CampaignsProvider interface {
 	Campaigns() []*models.Campaign
+}
+
+// brokerCampaignsProvider is an optional, broader account-campaign view used
+// only by the lower-authority provisional observation path. The ordinary
+// Known-availability path continues to consume Campaigns() exactly as before.
+// Focused fakes and older providers intentionally fall back to Campaigns().
+type brokerCampaignsProvider interface {
+	BrokerCampaignSnapshot() drops.BrokerCampaignSnapshot
 }
 
 // twitchAPI is the slice of the Twitch client this subsystem needs; narrowed
@@ -108,12 +118,77 @@ type campaignPolicyProvider interface {
 	DiscoveryCampaignPolicy() (map[string]int, map[string]policy.CampaignSemantic)
 }
 
+// provisionalProofProvider is the broker's optional exact-tuple proof query.
+// Its absence is fail-closed: an UNKNOWN proposal keeps fill-only authority.
+// A true result changes only discovery's local comparison for continuity; the
+// candidate remains explicitly provisional so the broker must independently
+// consume and validate its proof.
+type provisionalProofProvider interface {
+	HasProvisionalProof(*models.Streamer, models.ProvisionalDropCandidate) bool
+}
+
+// provisionalQuarantineProvider exposes only the broker's exact narrow
+// channel/drop/session negative. Discovery consults it inside the per-campaign
+// loop, so a quarantined best tuple does not hide another eligible Drop on the
+// same channel (or the next eligible channel) for an extra broker cycle.
+type provisionalQuarantineProvider interface {
+	IsProvisionalQuarantined(*models.Streamer, models.ProvisionalDropCandidate) bool
+}
+
+// provisionalQuarantineReconciler is the broker's sole mutation boundary for
+// negative lifecycle state. Discovery supplies a strictly newer complete scope
+// only after both its Directory enumeration and broker campaign snapshot have
+// passed their end-of-build fences.
+type provisionalQuarantineReconciler interface {
+	RequireProvisionalScope()
+	ReconcileProvisionalQuarantine(
+		uint64,
+		watcher.ProvisionalDirectoryAuthority,
+		[]watcher.ProvisionalAccountWork,
+		[]watcher.ProvisionalQuarantineOwnerScope,
+	) bool
+}
+
+// routineRefreshRunner linearizes routine metadata refresh with provisional
+// lease admission under the broker's observation ownership lock. A standalone
+// Manager without a broker retains the historical direct-refresh fallback.
+type routineRefreshRunner interface {
+	RunRoutineRefresh(*models.Streamer, func()) bool
+}
+
+type provisionalCandidateOwner interface {
+	OwnsProvisionalCandidate(*models.Streamer, models.ProvisionalDropCandidate) bool
+}
+
 // TrackedLoginsProvider exposes the logins of the configured streamer list so
 // discovery never duplicates a channel the watch rotation already covers
 // (double minute-watched reporting for one channel would both waste the slot
 // and look anomalous). Satisfied by *streamer.Manager.
 type TrackedLoginsProvider interface {
 	Names() []string
+}
+
+// trackedStreamersProvider is the optional identity-bearing extension supplied
+// by *streamer.Manager. Names remains the ordinary directory exclusion API;
+// All is consulted only by the lower-authority provisional path so a configured
+// login can be proposed with its exact broker-owned *models.Streamer object.
+// A provider that exposes only Names keeps the historical behavior unchanged.
+type trackedStreamersProvider interface {
+	All() []*models.Streamer
+}
+
+// configuredDirectoryEvidence is a provisional-only copy of one successful
+// DROPS_ENABLED Directory row for a configured login. Configured rows remain
+// excluded from the ordinary discovery pool in the default mode; retaining the
+// row here supplies only the independent evidence required by an unrestricted
+// UNKNOWN bootstrap. Restricted campaigns rely on their exact complete ACL and
+// do not require a Directory row.
+type configuredDirectoryEvidence struct {
+	game          string
+	gameID        string
+	channelID     string
+	dropsEnabled  bool
+	observationID uint64
 }
 
 // AvoidChecker reports whether the drop-progress watchdog has temporarily
@@ -147,6 +222,18 @@ type Channel struct {
 	// DropsEnabled records that the directory listing returned this channel
 	// under the DROPS_ENABLED filter.
 	DropsEnabled bool
+
+	// directoryGameID is the game ID carried by the successful Directory row
+	// itself. It is intentionally distinct from GameID, whose legacy fallback to
+	// the account campaign's game ID remains useful to the ordinary discovery
+	// path but is not independent evidence for a provisional observation.
+	directoryGameID string
+
+	// directoryObservation is the Manager generation in which this exact channel
+	// was returned by a successful DROPS_ENABLED Directory listing. A retained
+	// row from an errored listing keeps its old generation and therefore cannot
+	// bootstrap an unrestricted campaign.
+	directoryObservation uint64
 
 	// Subscribed marks that the authenticated account is subscribed to this
 	// channel, per the periodic ChannelPointsContext multiplier probe (see
@@ -199,6 +286,30 @@ type Manager struct {
 	pool     []*Channel
 	current  *Channel
 	lastSync time.Time
+	// directoryObservation advances for every directory refresh attempt that
+	// queried at least one active game. Only rows returned by a successful
+	// listing are stamped with the new value, making retained-on-error rows
+	// observably stale without relying on wall-clock guesses.
+	directoryObservation uint64
+	// configuredDirectory is keyed by normalized login and guarded by mu. It is
+	// deliberately separate from pool/current: configured objects must never be
+	// run through discovery's ordinary Known assignment or online-refresh path.
+	configuredDirectory map[string]configuredDirectoryEvidence
+	// directoryAllUncertain is the fail-closed transition state between a
+	// settings change and its replacement Directory publication.
+	directoryAllUncertain bool
+	// directoryUncertainGameIDs contains only active game IDs whose current
+	// listing errored. Successful games remain independently authoritative, so an
+	// unrelated game failure cannot starve or retain their provisional scope.
+	directoryUncertainGameIDs map[string]struct{}
+	// directoryScopeGeneration advances on every applied Directory refresh
+	// publication, including complete-empty and errored retained-pool attempts.
+	// A full quarantine scope must observe the same value before and after build.
+	directoryScopeGeneration uint64
+	// provisionalScopeGeneration advances only after one complete, final-fenced
+	// full candidate scope has been built. Broker pruning rejects equal or older
+	// generations, so delayed/replayed snapshots cannot delete newer negatives.
+	provisionalScopeGeneration atomic.Uint64
 
 	// emptyLogged makes the "pool is empty" INFO line fire once per
 	// transition instead of every tick.
@@ -227,14 +338,15 @@ func NewManager(
 	preferSubscribed bool,
 ) *Manager {
 	return &Manager{
-		client:           client,
-		campaigns:        campaigns,
-		tracked:          tracked,
-		settings:         settings,
-		mode:             config.NormalizeDiscoveryMode(string(mode)),
-		preferSubscribed: preferSubscribed,
-		games:            games,
-		resync:           make(chan struct{}, 1),
+		client:                client,
+		campaigns:             campaigns,
+		tracked:               tracked,
+		settings:              settings,
+		mode:                  config.NormalizeDiscoveryMode(string(mode)),
+		preferSubscribed:      preferSubscribed,
+		games:                 games,
+		directoryAllUncertain: true,
+		resync:                make(chan struct{}, 1),
 	}
 }
 
@@ -590,6 +702,335 @@ func (m *Manager) trackedLogins() map[string]bool {
 	return set
 }
 
+func (m *Manager) configuredStreamers() []*models.Streamer {
+	provider, ok := m.tracked.(trackedStreamersProvider)
+	if !ok {
+		return nil
+	}
+	return provider.All()
+}
+
+func containsConfiguredGame(games []string, game string) bool {
+	for _, configured := range games {
+		if strings.EqualFold(configured, game) {
+			return true
+		}
+	}
+	return false
+}
+
+// provisionalConfiguredGameEnabled preserves discovery's dormant scope: even
+// an exact restricted ACL may bootstrap without a Directory row, but only for
+// a game the operator enabled in DirectoryGames. Game ID is resolved through
+// the existing account campaign view when the live payload lacks a name.
+func (m *Manager) provisionalConfiguredGameEnabled(gameID, liveGame string) bool {
+	games := m.getGames()
+	if m.campaigns == nil {
+		return false
+	}
+	return provisionalGameEnabledAtSource(games, gameID, liveGame, m.campaigns.Campaigns())
+}
+
+func provisionalGameEnabledAtSource(
+	games []string,
+	gameID, liveGame string,
+	campaigns []*models.Campaign,
+) bool {
+	if len(games) == 0 || gameID == "" {
+		return false
+	}
+	if liveGame != "" && containsConfiguredGame(games, liveGame) {
+		return true
+	}
+	for _, campaign := range campaigns {
+		if campaign == nil || campaign.Game == nil || campaign.Game.ID != gameID {
+			continue
+		}
+		if containsConfiguredGame(games, campaign.Game.Name) ||
+			containsConfiguredGame(games, campaign.Game.DisplayName) {
+			return true
+		}
+	}
+	return false
+}
+
+// configuredProvisionalCandidates reads configured streamers only through
+// their existing immutable/status snapshots. It deliberately performs no
+// online refresh and never calls candidatePolicyFacts/channelCarriesActiveCampaign,
+// so Known-positive/empty assignments remain wholly owned by the pre-existing
+// configured drops path. Only UNKNOWN cold-start tuples can leave this method.
+type sourceWatchProposal struct {
+	candidate   watcher.Candidate
+	channel     *Channel
+	facts       watcher.CandidateCampaignPolicy
+	provisional *provisionalCampaignEvaluation
+	priority    gamePolicyPriority
+	continuity  bool
+}
+
+func (m *Manager) configuredProvisionalCandidates(published *campaignPolicySnapshot) []sourceWatchProposal {
+	streamers := m.configuredStreamers()
+	if len(streamers) == 0 {
+		return nil
+	}
+
+	m.mu.RLock()
+	directory := make(map[string]configuredDirectoryEvidence, len(m.configuredDirectory))
+	for login, evidence := range m.configuredDirectory {
+		directory[login] = evidence
+	}
+	m.mu.RUnlock()
+
+	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
+	result := make([]sourceWatchProposal, 0, len(streamers))
+	seen := make(map[string]bool, len(streamers))
+	for _, streamer := range streamers {
+		if streamer == nil || streamer.Stream == nil {
+			continue
+		}
+		login := streamer.GetUsername()
+		loginKey := strings.ToLower(login)
+		if login == "" || seen[loginKey] || m.isAvoided(login) {
+			continue
+		}
+		seen[loginKey] = true
+
+		stream := streamer.Stream.ProvisionalDropSnapshot()
+		if !m.provisionalConfiguredGameEnabled(stream.GameID, streamer.Stream.GameName()) {
+			continue
+		}
+		channel := &Channel{
+			Streamer: streamer,
+			Game:     streamer.Stream.GameName(),
+			GameID:   stream.GameID,
+		}
+		if channel.Game == "" {
+			channel.Game = stream.GameID
+		}
+		if evidence, ok := directory[loginKey]; ok && evidence.channelID == streamer.ChannelID {
+			channel.Game = evidence.game
+			channel.directoryGameID = evidence.gameID
+			channel.DropsEnabled = evidence.dropsEnabled
+			channel.directoryObservation = evidence.observationID
+		}
+
+		provisional, eligible := m.provisionalCandidateForChannel(channel, published)
+		if !eligible || !m.provisionalCandidateStillCurrentAtSource(
+			channel, provisional.candidate, provisional.sourceGeneration, provisional.sourceFenced,
+		) {
+			continue
+		}
+		candidate := provisional.candidate
+		copy := *provisional
+		result = append(result, sourceWatchProposal{
+			candidate: watcher.Candidate{
+				Streamer:        streamer,
+				Origin:          watcher.OriginDiscovery,
+				Reason:          "configured channel provisional UNKNOWN drops observation for " + channel.Game,
+				ProvisionalDrop: &candidate,
+			},
+			channel:     channel,
+			provisional: &copy,
+			priority:    order.priority(channel.Game),
+			continuity:  copy.owned,
+		})
+	}
+	return result
+}
+
+// reconcileProvisionalQuarantineScope publishes one complete candidate
+// namespace before quarantine filtering, proof continuity, ranking, and
+// per-login selection. It is deliberately separate from WatchCandidates'
+// result: the latter omits quarantined and unselected tuples and therefore
+// cannot authorize lifecycle pruning.
+func (m *Manager) reconcileProvisionalQuarantineScope(published *campaignPolicySnapshot) {
+	m.mu.RLock()
+	status := m.slotStatus
+	directoryAuthority := m.provisionalDirectoryAuthorityLocked()
+	directoryGeneration := m.directoryScopeGeneration
+	configuredGames := append([]string(nil), m.games...)
+	channels := append([]*Channel(nil), m.pool...)
+	if m.current != nil {
+		channels = append(channels, m.current)
+	}
+	directory := make(map[string]configuredDirectoryEvidence, len(m.configuredDirectory))
+	for login, evidence := range m.configuredDirectory {
+		directory[login] = evidence
+	}
+	m.mu.RUnlock()
+
+	reconciler, ok := status.(provisionalQuarantineReconciler)
+	if !ok {
+		return
+	}
+	// Activate exact-scope admission before any source or build fence can return.
+	// A source that becomes usable later in this WatchCandidates tick must not
+	// publish a provisional envelope outside a successfully committed namespace.
+	reconciler.RequireProvisionalScope()
+	source, fenced := m.accountCampaignSnapshot()
+	if !fenced || source.Generation == 0 || source.SourceRevision != source.CurrentRevision {
+		return
+	}
+	accountWork := provisionalOpenAccountWorkAtSource(configuredGames, source.Campaigns)
+
+	// Add the configured roster with its exact objects. Virtual Channel wrappers
+	// carry only the retained independent Directory evidence needed by open
+	// campaigns; restricted candidates remain ACL-authoritative without it.
+	for _, streamer := range m.configuredStreamers() {
+		if streamer == nil || streamer.Stream == nil {
+			continue
+		}
+		stream := streamer.Stream.ProvisionalDropSnapshot()
+		channel := &Channel{
+			Streamer: streamer,
+			Game:     streamer.Stream.GameName(),
+			GameID:   stream.GameID,
+		}
+		if channel.Game == "" {
+			channel.Game = stream.GameID
+		}
+		if evidence, exists := directory[strings.ToLower(streamer.GetUsername())]; exists &&
+			evidence.channelID == streamer.ChannelID {
+			channel.Game = evidence.game
+			channel.directoryGameID = evidence.gameID
+			channel.DropsEnabled = evidence.dropsEnabled
+			channel.directoryObservation = evidence.observationID
+		}
+		channels = append(channels, channel)
+	}
+
+	seen := make(map[*models.Streamer]struct{}, len(channels))
+	scopes := make([]watcher.ProvisionalQuarantineOwnerScope, 0, len(channels))
+	for _, channel := range channels {
+		if channel == nil || channel.Streamer == nil || channel.Streamer.Stream == nil {
+			continue
+		}
+		streamer := channel.Streamer
+		if _, duplicate := seen[streamer]; duplicate {
+			continue
+		}
+		seen[streamer] = struct{}{}
+		stream := streamer.Stream.ProvisionalDropSnapshot()
+		if stream.BroadcastID == "" || stream.SessionGeneration == 0 {
+			continue
+		}
+		scope := watcher.ProvisionalQuarantineOwnerScope{
+			Streamer:          streamer,
+			BroadcastID:       stream.BroadcastID,
+			SessionGeneration: stream.SessionGeneration,
+		}
+		liveGame := streamer.Stream.GameName()
+		if liveGame == "" {
+			liveGame, _, _, _ = m.channelFacts(channel)
+		}
+		// Temporary watchdog avoidance affects ranking/admission only. It is not
+		// source authority and therefore cannot remove an otherwise-live tuple from
+		// the full quarantine scope.
+		if provisionalGameEnabledAtSource(configuredGames, stream.GameID, liveGame, source.Campaigns) {
+			for _, evaluation := range m.provisionalCandidatesForChannelAtSource(channel, published, source, true) {
+				scope.Candidates = append(scope.Candidates, evaluation.candidate)
+			}
+		}
+		scopes = append(scopes, scope)
+	}
+
+	// End-of-build fences. An errored/replaced Directory publication, a newer
+	// broker campaign envelope, or session churn makes the entire scope a no-op;
+	// partial snapshots never delete negatives.
+	m.mu.RLock()
+	directoryStillCurrent := sameProvisionalDirectoryAuthority(
+		m.provisionalDirectoryAuthorityLocked(), directoryAuthority,
+	) &&
+		m.directoryScopeGeneration == directoryGeneration
+	m.mu.RUnlock()
+	if !directoryStillCurrent {
+		return
+	}
+	currentSource, currentFenced := m.accountCampaignSnapshot()
+	if !currentFenced || currentSource.Generation != source.Generation ||
+		currentSource.SourceRevision != currentSource.CurrentRevision ||
+		currentSource.SourceRevision != source.SourceRevision {
+		return
+	}
+	for _, scope := range scopes {
+		stream := scope.Streamer.Stream.ProvisionalDropSnapshot()
+		if stream.BroadcastID != scope.BroadcastID || stream.SessionGeneration != scope.SessionGeneration {
+			return
+		}
+	}
+
+	scopeGeneration := m.provisionalScopeGeneration.Add(1)
+	if scopeGeneration == 0 {
+		scopeGeneration = m.provisionalScopeGeneration.Add(1)
+	}
+	reconciler.ReconcileProvisionalQuarantine(scopeGeneration, directoryAuthority, accountWork, scopes)
+}
+
+// provisionalDirectoryAuthorityLocked snapshots the per-game incompleteness
+// fence in deterministic order. Caller holds m.mu for reading or writing.
+func (m *Manager) provisionalDirectoryAuthorityLocked() watcher.ProvisionalDirectoryAuthority {
+	authority := watcher.ProvisionalDirectoryAuthority{AllUncertain: m.directoryAllUncertain}
+	if authority.AllUncertain {
+		return authority
+	}
+	authority.UncertainGameIDs = make([]string, 0, len(m.directoryUncertainGameIDs))
+	for gameID := range m.directoryUncertainGameIDs {
+		authority.UncertainGameIDs = append(authority.UncertainGameIDs, gameID)
+	}
+	sort.Strings(authority.UncertainGameIDs)
+	return authority
+}
+
+func sameProvisionalDirectoryAuthority(left, right watcher.ProvisionalDirectoryAuthority) bool {
+	if left.AllUncertain != right.AllUncertain ||
+		len(left.UncertainGameIDs) != len(right.UncertainGameIDs) {
+		return false
+	}
+	for i := range left.UncertainGameIDs {
+		if left.UncertainGameIDs[i] != right.UncertainGameIDs[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func provisionalOpenAccountWorkAtSource(
+	configuredGames []string,
+	campaigns []*models.Campaign,
+) []watcher.ProvisionalAccountWork {
+	workByKey := make(map[string]watcher.ProvisionalAccountWork)
+	for _, campaign := range campaigns {
+		if campaign == nil || campaign.ID == "" || campaign.Game == nil || campaign.Game.ID == "" ||
+			(!containsConfiguredGame(configuredGames, campaign.Game.Name) &&
+				!containsConfiguredGame(configuredGames, campaign.Game.DisplayName)) ||
+			!campaign.HasRemainingUnclaimedWork() || campaign.ACL.Source == models.ACLSourceNone ||
+			!campaign.ACLComplete() || campaign.ACLState() != models.ACLUnrestricted {
+			continue
+		}
+		drop := campaign.CurrentDrop()
+		if drop == nil || drop.ID == "" || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			continue
+		}
+		work := watcher.ProvisionalAccountWork{
+			CampaignID: campaign.ID,
+			DropID:     drop.ID,
+			GameID:     campaign.Game.ID,
+		}
+		key := work.CampaignID + "\x00" + work.DropID + "\x00" + work.GameID
+		workByKey[key] = work
+	}
+	work := make([]watcher.ProvisionalAccountWork, 0, len(workByKey))
+	for _, item := range workByKey {
+		work = append(work, item)
+	}
+	sort.Slice(work, func(i, j int) bool {
+		left := work[i].CampaignID + "\x00" + work[i].DropID + "\x00" + work[i].GameID
+		right := work[j].CampaignID + "\x00" + work[j].DropID + "\x00" + work[j].GameID
+		return left < right
+	})
+	return work
+}
+
 // isTracked reports whether the login is on the configured streamer list.
 func (m *Manager) isTracked(login string) bool {
 	if m.tracked == nil {
@@ -670,6 +1111,17 @@ func (m *Manager) UpdateSettings(games []string, mode config.DiscoveryMode, pref
 	m.mode = config.NormalizeDiscoveryMode(string(mode))
 	m.preferSubscribed = preferSubscribed
 	m.settings = settings
+	m.directoryScopeGeneration++
+	if m.directoryScopeGeneration == 0 {
+		m.directoryScopeGeneration++
+	}
+	m.directoryAllUncertain = true
+	m.directoryUncertainGameIDs = nil
+	for login, evidence := range m.configuredDirectory {
+		if !containsConfiguredGame(games, evidence.game) {
+			delete(m.configuredDirectory, login)
+		}
+	}
 	m.mu.Unlock()
 
 	m.triggerResync()
@@ -774,6 +1226,39 @@ func (m *Manager) syncOnce() time.Duration {
 	trackedSet := m.trackedLogins()
 
 	m.mu.Lock()
+	m.directoryScopeGeneration++
+	if m.directoryScopeGeneration == 0 {
+		m.directoryScopeGeneration++
+	}
+	directoryAllUncertain := false
+	directoryUncertainGameIDs := make(map[string]struct{})
+	for _, listing := range listings {
+		if listing.err != nil {
+			if listing.gameID == "" {
+				directoryAllUncertain = true
+				directoryUncertainGameIDs = nil
+				break
+			}
+			directoryUncertainGameIDs[listing.gameID] = struct{}{}
+		}
+	}
+	var directoryObservation uint64
+	if len(listings) > 0 {
+		m.directoryObservation++
+		if m.directoryObservation == 0 { // reserve zero for "never observed"
+			m.directoryObservation++
+		}
+		directoryObservation = m.directoryObservation
+	}
+	// Start from the retained evidence set. A failed listing keeps its prior row
+	// (which is stale because the manager generation advanced); a successful
+	// listing replaces every configured row previously observed for that game.
+	configuredDirectory := make(map[string]configuredDirectoryEvidence, len(m.configuredDirectory))
+	for login, evidence := range m.configuredDirectory {
+		if containsConfiguredGame(games, evidence.game) {
+			configuredDirectory[login] = evidence
+		}
+	}
 	var newPool []*Channel
 	for _, l := range listings {
 		if l.err != nil {
@@ -786,11 +1271,26 @@ func (m *Manager) syncOnce() time.Duration {
 			}
 			continue
 		}
+		for login, evidence := range configuredDirectory {
+			if strings.EqualFold(evidence.game, l.game) {
+				delete(configuredDirectory, login)
+			}
+		}
 
 		candidates := make([]*Channel, 0, len(l.streams))
 		for _, ds := range l.streams {
 			if !ds.DropsEnabled || ds.Login == "" || ds.ChannelID == "" {
 				continue
+			}
+			loginKey := strings.ToLower(ds.Login)
+			if trackedSet[loginKey] && ds.GameID != "" {
+				configuredDirectory[loginKey] = configuredDirectoryEvidence{
+					game:          l.game,
+					gameID:        ds.GameID,
+					channelID:     ds.ChannelID,
+					dropsEnabled:  true,
+					observationID: directoryObservation,
+				}
 			}
 			// In "all" mode, channels on the configured streamer list are the
 			// rotation's business — duplicating them here would double-report
@@ -798,10 +1298,10 @@ func (m *Manager) syncOnce() time.Duration {
 			// "tracked_only" inverts this: it keeps ONLY configured-list channels
 			// and drops everything else from the pool.
 			if trackedOnly {
-				if !trackedSet[strings.ToLower(ds.Login)] {
+				if !trackedSet[loginKey] {
 					continue
 				}
-			} else if trackedSet[strings.ToLower(ds.Login)] {
+			} else if trackedSet[loginKey] {
 				continue
 			}
 			ch := m.findExistingLocked(ds.Login)
@@ -810,11 +1310,13 @@ func (m *Manager) syncOnce() time.Duration {
 			}
 			ch.Game = l.game
 			ch.GameID = ds.GameID
+			ch.directoryGameID = ds.GameID
 			if ch.GameID == "" {
 				ch.GameID = l.gameID
 			}
 			ch.Viewers = ds.Viewers
 			ch.DropsEnabled = true
+			ch.directoryObservation = directoryObservation
 			ch.Subscribed = subscribedSet[strings.ToLower(ds.Login)]
 			ch.offline = false
 			candidates = append(candidates, ch)
@@ -840,6 +1342,9 @@ func (m *Manager) syncOnce() time.Duration {
 	}
 
 	m.pool = newPool
+	m.configuredDirectory = configuredDirectory
+	m.directoryAllUncertain = directoryAllUncertain
+	m.directoryUncertainGameIDs = directoryUncertainGameIDs
 	m.lastSync = time.Now()
 	poolEmpty := len(newPool) == 0
 	if !poolEmpty {
@@ -902,6 +1407,20 @@ func (m *Manager) gameStillActive(gameID string) bool {
 		}
 	}
 	return false
+}
+
+// accountCampaigns returns the broker-facing account campaign snapshot when
+// the provider exposes it. This may be broader than the confirmed assignment
+// view used by eligibleCampaignsForChannel, which deliberately continues to
+// call Campaigns() directly.
+func (m *Manager) accountCampaignSnapshot() (drops.BrokerCampaignSnapshot, bool) {
+	if m.campaigns == nil {
+		return drops.BrokerCampaignSnapshot{}, false
+	}
+	if provider, ok := m.campaigns.(brokerCampaignsProvider); ok {
+		return provider.BrokerCampaignSnapshot(), true
+	}
+	return drops.BrokerCampaignSnapshot{Campaigns: m.campaigns.Campaigns()}, false
 }
 
 // channelCarriesActiveCampaign reports whether at least one of the campaigns
@@ -975,6 +1494,377 @@ func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 		eligible = append(eligible, c)
 	}
 	return eligible
+}
+
+// provisionalCampaignEvaluation is discovery-local ordering metadata for one
+// exact lower-authority observation proposal. It must never be converted into
+// watcher.CandidateCampaignPolicy: channel-advertised availability is UNKNOWN,
+// so there is no confirmed campaign policy fact to publish.
+type provisionalCampaignEvaluation struct {
+	candidate        models.ProvisionalDropCandidate
+	restricted       bool
+	ranked           bool
+	utility          policy.SemanticUtility
+	proved           bool
+	owned            bool
+	sourceGeneration uint64
+	sourceFenced     bool
+}
+
+// provisionalCandidateForChannel derives a pure observation candidate for an
+// UNKNOWN channel without touching Stream.CampaignIDs or Stream.Campaigns. The
+// account campaign, live stream, Directory row and playback-session identities
+// are all exact; the final snapshot check fences concurrent stream refreshes.
+func (m *Manager) provisionalCandidateForChannel(
+	ch *Channel,
+	published *campaignPolicySnapshot,
+) (*provisionalCampaignEvaluation, bool) {
+	source, sourceFenced := m.accountCampaignSnapshot()
+	evaluations := m.provisionalCandidatesForChannelAtSource(ch, published, source, sourceFenced)
+	var best *provisionalCampaignEvaluation
+	for i := range evaluations {
+		evaluation := evaluations[i]
+		if m.isProvisionalQuarantined(ch.Streamer, evaluation.candidate) {
+			continue
+		}
+		evaluation.owned = m.ownsProvisionalCandidate(ch.Streamer, evaluation.candidate)
+		evaluation.proved = m.hasProvisionalProof(ch.Streamer, evaluation.candidate)
+		if best == nil || compareProvisionalCampaigns(evaluation, *best) < 0 {
+			copy := evaluation
+			best = &copy
+		}
+	}
+	if best == nil || !m.provisionalCandidateStillCurrentAtSource(
+		ch, best.candidate, best.sourceGeneration, best.sourceFenced,
+	) {
+		return nil, false
+	}
+	return best, true
+}
+
+// provisionalCandidatesForChannelAtSource derives the complete eligible tuple
+// scope for one exact owner before broker quarantine, proof continuity, ranking,
+// or best-candidate selection. That distinction is what lets the broker retain
+// quarantined A while B is selected and safely prune only campaign/drop slots
+// absent from a later complete authoritative account snapshot.
+func (m *Manager) provisionalCandidatesForChannelAtSource(
+	ch *Channel,
+	published *campaignPolicySnapshot,
+	source drops.BrokerCampaignSnapshot,
+	sourceFenced bool,
+) []provisionalCampaignEvaluation {
+	if ch == nil || m.campaigns == nil || ch.Streamer.GetStatus() != models.StatusOnline {
+		return nil
+	}
+	// This bootstrap is cold-start-only. An UNKNOWN refresh after a previously
+	// confirmed discovery assignment follows the existing invalidation path,
+	// which clears that assignment; it must not relabel stale authority as a new
+	// provisional lease.
+	if len(ch.Streamer.Stream.GetCampaigns()) != 0 {
+		return nil
+	}
+
+	stream := ch.Streamer.Stream.ProvisionalDropSnapshot()
+	if stream.Availability.State != models.CampaignAvailabilityUnknown ||
+		stream.Availability.ObservationID == 0 || stream.Availability.ObservedAt.IsZero() || stream.GameID == "" ||
+		stream.BroadcastID == "" || stream.SessionGeneration == 0 {
+		return nil
+	}
+
+	directoryGameID, dropsEnabled, channelObservation, currentObservation := m.provisionalDirectoryFacts(ch)
+	login, channelID := ch.Streamer.GetUsername(), ch.Streamer.ChannelID
+	if login == "" || channelID == "" {
+		return nil
+	}
+
+	if sourceFenced && (source.Generation == 0 || source.SourceRevision != source.CurrentRevision) {
+		return nil
+	}
+
+	result := make([]provisionalCampaignEvaluation, 0, len(source.Campaigns))
+	for _, campaign := range source.Campaigns {
+		if campaign == nil || campaign.ID == "" || campaign.Game == nil ||
+			campaign.Game.ID == "" || campaign.Game.ID != stream.GameID ||
+			!campaign.HasRemainingUnclaimedWork() {
+			continue
+		}
+		if stream.HasConfirmedCampaign(campaign.ID) {
+			continue
+		}
+		drop := campaign.CurrentDrop()
+		if drop == nil || drop.ID == "" || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			continue
+		}
+		if decision := (eligibility.Evaluator{}).EvaluateDrops(
+			ch.Streamer, campaign, drop, eligibility.AvailabilityUnknown,
+		); !decision.Eligible {
+			continue
+		}
+
+		// Provisional observation accepts only an explicitly typed, complete ACL.
+		// Legacy Channels compatibility and an unknown/incomplete response are not
+		// enough authority for this bootstrap path.
+		if campaign.ACL.Source == models.ACLSourceNone || !campaign.ACLComplete() {
+			continue
+		}
+
+		candidate := models.ProvisionalDropCandidate{
+			CampaignID:           campaign.ID,
+			Campaign:             campaign.Name,
+			DropID:               drop.ID,
+			Drop:                 drop.Name,
+			GameID:               stream.GameID,
+			Login:                login,
+			ChannelID:            channelID,
+			BroadcastID:          stream.BroadcastID,
+			SessionGeneration:    stream.SessionGeneration,
+			AvailabilityObs:      stream.Availability.ObservationID,
+			AvailabilityKnownGen: stream.Availability.KnownGeneration,
+		}
+		evaluation := provisionalCampaignEvaluation{
+			candidate:        candidate,
+			sourceGeneration: source.Generation,
+			sourceFenced:     sourceFenced,
+		}
+		switch campaign.ACLState() {
+		case models.ACLUnrestricted:
+			if directoryGameID == "" || directoryGameID != stream.GameID ||
+				!dropsEnabled || channelObservation == 0 || channelObservation != currentObservation {
+				continue
+			}
+			evaluation.candidate.Evidence = models.ProvisionalEvidenceDirectory
+			evaluation.candidate.DirectoryObs = channelObservation
+		case models.ACLRestricted:
+			if !campaign.AllowsChannel(channelID) || len(campaign.ACL.ChannelIDs) == 0 {
+				continue
+			}
+			evaluation.restricted = true
+			evaluation.candidate.Evidence = models.ProvisionalEvidenceRestrictedACL
+			evaluation.candidate.RestrictedACL = append([]string(nil), campaign.ACL.ChannelIDs...)
+			sort.Strings(evaluation.candidate.RestrictedACL)
+		default:
+			continue
+		}
+		if evaluation.candidate.Campaign == "" {
+			evaluation.candidate.Campaign = campaign.ID
+		}
+		if evaluation.candidate.Drop == "" {
+			evaluation.candidate.Drop = drop.ID
+		}
+		if !evaluation.candidate.Valid() {
+			continue
+		}
+
+		if published != nil && published.campaignSemantics != nil {
+			evaluation.utility, evaluation.ranked = policy.BuildSemanticUtilityWithRemainingWork(
+				[]string{campaign.ID}, []string{campaign.ID}, published.campaignSemantics,
+			)
+		}
+		result = append(result, evaluation)
+	}
+	return result
+}
+
+func (m *Manager) hasProvisionalProof(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+	m.mu.RLock()
+	status := m.slotStatus
+	m.mu.RUnlock()
+	provider, ok := status.(provisionalProofProvider)
+	return ok && provider.HasProvisionalProof(streamer, candidate)
+}
+
+func (m *Manager) isProvisionalQuarantined(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+	m.mu.RLock()
+	status := m.slotStatus
+	m.mu.RUnlock()
+	provider, ok := status.(provisionalQuarantineProvider)
+	return ok && provider.IsProvisionalQuarantined(streamer, candidate)
+}
+
+func (m *Manager) runRoutineRefresh(streamer *models.Streamer) bool {
+	if streamer == nil || m.client == nil {
+		return false
+	}
+	m.mu.RLock()
+	status := m.slotStatus
+	m.mu.RUnlock()
+	refresh := func() { m.client.CheckStreamerOnline(streamer) }
+	if runner, ok := status.(routineRefreshRunner); ok {
+		return runner.RunRoutineRefresh(streamer, refresh)
+	}
+	refresh()
+	return true
+}
+
+func (m *Manager) ownsProvisionalCandidate(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+	m.mu.RLock()
+	status := m.slotStatus
+	m.mu.RUnlock()
+	provider, ok := status.(provisionalCandidateOwner)
+	return ok && provider.OwnsProvisionalCandidate(streamer, candidate)
+}
+
+func (m *Manager) provisionalDirectoryFacts(ch *Channel) (gameID string, dropsEnabled bool, channelObservation, currentObservation uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return ch.directoryGameID, ch.DropsEnabled, ch.directoryObservation, m.directoryObservation
+}
+
+// provisionalCandidateStillCurrent closes the read window between derivation
+// and publication. Stream facts are re-read atomically; Directory facts share
+// the Manager lock. A refresh to Known (including Known-empty), a game/session
+// change, or a newer open-campaign Directory generation suppresses the tuple.
+func (m *Manager) provisionalCandidateStillCurrent(ch *Channel, candidate models.ProvisionalDropCandidate) bool {
+	return m.provisionalCandidateStillCurrentAtSource(ch, candidate, 0, false)
+}
+
+func (m *Manager) provisionalCandidateStillCurrentAtSource(
+	ch *Channel,
+	candidate models.ProvisionalDropCandidate,
+	sourceGeneration uint64,
+	requireSameSource bool,
+) bool {
+	if ch == nil || ch.Streamer == nil || ch.Streamer.Stream == nil || !candidate.Valid() ||
+		ch.Streamer.GetStatus() != models.StatusOnline ||
+		ch.Streamer.GetUsername() != candidate.Login || ch.Streamer.ChannelID != candidate.ChannelID {
+		return false
+	}
+	stream := ch.Streamer.Stream.ProvisionalDropSnapshot()
+	if stream.Availability.State != models.CampaignAvailabilityUnknown ||
+		stream.Availability.ObservationID != candidate.AvailabilityObs ||
+		stream.Availability.ObservedAt.IsZero() ||
+		stream.GameID != candidate.GameID || stream.BroadcastID != candidate.BroadcastID ||
+		stream.SessionGeneration != candidate.SessionGeneration ||
+		stream.HasConfirmedCampaign(candidate.CampaignID) {
+		return false
+	}
+	directoryGameID, dropsEnabled, channelObservation, currentObservation := m.provisionalDirectoryFacts(ch)
+	// A concurrent drops re-point may have published a confirmed assignment
+	// after the cold-start check but before this final fence. Never let the same
+	// stream leave discovery carrying both authorities: the ordinary assignment
+	// path owns it from this point on.
+	if len(ch.Streamer.Stream.GetCampaigns()) != 0 {
+		return false
+	}
+	if m.isProvisionalQuarantined(ch.Streamer, candidate) {
+		return false
+	}
+
+	// Re-read the broker-facing account authority at the publication boundary.
+	// A production snapshot must be both caught up to the current campaign pool
+	// and, for the candidate derived in this call, the very same broker envelope.
+	// That gives each proposal a source-snapshot linearization point and prevents
+	// campaign removal, drop advancement, or open/restricted ACL drift from
+	// escaping between derivation and return.
+	source, fenced := m.accountCampaignSnapshot()
+	if fenced {
+		if source.Generation == 0 || source.SourceRevision != source.CurrentRevision ||
+			(requireSameSource && source.Generation != sourceGeneration) {
+			return false
+		}
+	} else if requireSameSource {
+		return false
+	}
+	if !provisionalCandidateBackedByCampaign(ch.Streamer, candidate, source.Campaigns) {
+		return false
+	}
+
+	if candidate.Evidence == models.ProvisionalEvidenceDirectory {
+		return directoryGameID == candidate.GameID && dropsEnabled && candidate.DirectoryObs != 0 &&
+			candidate.DirectoryObs == channelObservation && channelObservation == currentObservation
+	}
+	return candidate.Evidence == models.ProvisionalEvidenceRestrictedACL && candidate.DirectoryObs == 0
+}
+
+func provisionalCandidateBackedByCampaign(
+	streamer *models.Streamer,
+	candidate models.ProvisionalDropCandidate,
+	campaigns []*models.Campaign,
+) bool {
+	if streamer == nil || !candidate.Valid() {
+		return false
+	}
+	for _, campaign := range campaigns {
+		if campaign == nil || campaign.ID != candidate.CampaignID || campaign.Game == nil ||
+			campaign.Game.ID != candidate.GameID || !campaign.HasRemainingUnclaimedWork() {
+			continue
+		}
+		drop := campaign.CurrentDrop()
+		if drop == nil || drop.ID != candidate.DropID || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			return false
+		}
+		if decision := (eligibility.Evaluator{}).EvaluateDrops(
+			streamer, campaign, drop, eligibility.AvailabilityUnknown,
+		); !decision.Eligible {
+			return false
+		}
+		if campaign.ACL.Source == models.ACLSourceNone || !campaign.ACLComplete() {
+			return false
+		}
+		switch candidate.Evidence {
+		case models.ProvisionalEvidenceDirectory:
+			return campaign.ACLState() == models.ACLUnrestricted
+		case models.ProvisionalEvidenceRestrictedACL:
+			if campaign.ACLState() != models.ACLRestricted || !campaign.AllowsChannel(candidate.ChannelID) {
+				return false
+			}
+			currentACL := append([]string(nil), campaign.ACL.ChannelIDs...)
+			sort.Strings(currentACL)
+			return stringSlicesEqual(currentACL, candidate.RestrictedACL)
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// compareProvisionalCampaigns returns negative when left is the stronger choice
+// among provisional account campaigns for the same lower-authority source. The
+// existing restricted hard fact and published semantic utility are reused; IDs
+// and labels never invent a cross-channel preference.
+func compareProvisionalCampaigns(left, right provisionalCampaignEvaluation) int {
+	if left.proved != right.proved {
+		if left.proved {
+			return -1
+		}
+		return 1
+	}
+	if left.restricted != right.restricted {
+		if left.restricted {
+			return -1
+		}
+		return 1
+	}
+	if left.ranked != right.ranked {
+		if left.ranked {
+			return -1
+		}
+		return 1
+	}
+	if left.ranked {
+		if comparison := -policy.CompareSemanticUtility(left.utility, right.utility); comparison != 0 {
+			return comparison
+		}
+	}
+	if left.owned != right.owned {
+		if left.owned {
+			return -1
+		}
+		return 1
+	}
+	return 0
 }
 
 // candidatePolicyFacts derives the exact immutable facts carried with a
@@ -1064,7 +1954,14 @@ func (m *Manager) clearPool() {
 	}
 	m.pool = nil
 	m.current = nil
+	m.configuredDirectory = nil
 	m.emptyLogged = false
+	m.directoryScopeGeneration++
+	if m.directoryScopeGeneration == 0 {
+		m.directoryScopeGeneration++
+	}
+	m.directoryAllUncertain = false
+	m.directoryUncertainGameIDs = nil
 	m.mu.Unlock()
 
 	if hadCurrent != nil {
@@ -1101,23 +1998,120 @@ func newEphemeralStreamer(login, channelID string) *models.Streamer {
 func (m *Manager) WatchCandidates() []watcher.Candidate {
 	published := m.currentCampaignPolicy()
 	ch := m.prepareCurrentWithPolicy(published)
-	if ch == nil {
+	m.reconcileProvisionalQuarantineScope(published)
+	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
+	var proposals []sourceWatchProposal
+	if ch != nil {
+		game, _, _, _ := m.channelFacts(ch)
+		if availability := ch.Streamer.Stream.ProvisionalDropSnapshot().Availability.State; availability == models.CampaignAvailabilityKnown {
+			facts, eligible := m.candidatePolicyFacts(ch, published)
+			if eligible {
+				proposals = append(proposals, sourceWatchProposal{
+					candidate: watcher.Candidate{
+						Streamer: ch.Streamer,
+						Origin:   watcher.OriginDiscovery,
+						Reason:   "best available drops-enabled channel for " + game,
+					},
+					channel: ch, facts: facts, priority: order.priority(game), continuity: true,
+				})
+			}
+		} else {
+			// UNKNOWN is a separate, strictly lower-authority path. It competes
+			// only through the common source comparator below and carries no
+			// confirmed Campaign Policy publication.
+			provisional, eligible := m.provisionalCandidateForChannel(ch, published)
+			if eligible && len(ch.Streamer.Stream.GetCampaigns()) == 0 &&
+				m.provisionalCandidateStillCurrentAtSource(
+					ch, provisional.candidate, provisional.sourceGeneration, provisional.sourceFenced,
+				) {
+				candidate := provisional.candidate
+				copy := *provisional
+				proposals = append(proposals, sourceWatchProposal{
+					candidate: watcher.Candidate{
+						Streamer:        ch.Streamer,
+						Origin:          watcher.OriginDiscovery,
+						Reason:          "provisional UNKNOWN drops observation for " + game,
+						ProvisionalDrop: &candidate,
+					},
+					channel: ch, provisional: &copy, priority: order.priority(game),
+					continuity: copy.owned,
+				})
+			}
+		}
+	}
+
+	configured := m.configuredProvisionalCandidates(published)
+	if len(proposals) == 1 {
+		for _, candidate := range configured {
+			if candidate.candidate.Streamer.GetUsername() == proposals[0].candidate.Streamer.GetUsername() {
+				// tracked_only may have built an ephemeral clone for the same
+				// configured login. Only the exact All() object may carry configured
+				// provisional authority.
+				proposals = nil
+				break
+			}
+		}
+	}
+	proposals = append(proposals, configured...)
+	if len(proposals) == 0 {
 		m.publishCandidatePolicy("", watcher.CandidateCampaignPolicy{})
 		return nil
 	}
-	facts, eligible := m.candidatePolicyFacts(ch, published)
-	if !eligible {
+
+	// One source snapshot may carry one ordinary proposal plus several distinct
+	// provisional fallbacks. Campaign Policy supplies the order; continuity wins
+	// only a complete tie, so a strict stronger tuple precedes (and can replace)
+	// the active lease while equal/weaker tuples cannot churn it. The broker keeps
+	// the full provisional list through final admission so a conflicting first
+	// tuple cannot hide a clean second tuple from an otherwise-idle slot.
+	sort.SliceStable(proposals, func(i, j int) bool {
+		comparison := compareEvaluatedCandidatePolicy(
+			proposals[i].facts, proposals[i].provisional,
+			proposals[j].facts, proposals[j].provisional,
+			proposals[i].priority, proposals[j].priority,
+			published,
+		)
+		if comparison != 0 {
+			return comparison < 0
+		}
+		return proposals[i].continuity && !proposals[j].continuity
+	})
+
+	result := make([]watcher.Candidate, 0, len(proposals))
+	seen := make(map[string]bool, len(proposals))
+	var ordinary *sourceWatchProposal
+	for i := range proposals {
+		proposal := &proposals[i]
+		login := proposal.candidate.Streamer.GetUsername()
+		if seen[login] {
+			continue
+		}
+		if proposal.provisional != nil {
+			if proposal.channel == nil || !m.provisionalCandidateStillCurrentAtSource(
+				proposal.channel, proposal.provisional.candidate,
+				proposal.provisional.sourceGeneration, proposal.provisional.sourceFenced,
+			) {
+				continue
+			}
+		} else if ordinary == nil {
+			ordinary = proposal
+		} else {
+			// CandidatePolicyPublisher is intentionally a one-login snapshot; keep
+			// the historical single ordinary discovery proposal.
+			continue
+		}
+		seen[login] = true
+		result = append(result, proposal.candidate)
+	}
+	if ordinary != nil {
+		m.publishCandidatePolicy(ordinary.candidate.Streamer.GetUsername(), ordinary.facts)
+	} else {
 		m.publishCandidatePolicy("", watcher.CandidateCampaignPolicy{})
+	}
+	if len(result) == 0 {
 		return nil
 	}
-	login := ch.Streamer.GetUsername()
-	m.publishCandidatePolicy(login, facts)
-	game, _, _, _ := m.channelFacts(ch)
-	return []watcher.Candidate{{
-		Streamer: ch.Streamer,
-		Origin:   watcher.OriginDiscovery,
-		Reason:   "best available drops-enabled channel for " + game,
-	}}
+	return result
 }
 
 func (m *Manager) publishCandidatePolicy(login string, facts watcher.CandidateCampaignPolicy) {
@@ -1170,7 +2164,7 @@ func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *C
 	// Mirror the watcher: re-verify a stream whose info has gone stale. This
 	// also refreshes the channel's available campaign IDs and current game.
 	if current.Streamer.Stream.UpdateElapsed() > staleStreamRecheck {
-		m.client.CheckStreamerOnline(current.Streamer)
+		m.runRoutineRefresh(current.Streamer)
 	}
 
 	if reason, invalid := m.invalidReason(current); invalid {
@@ -1278,8 +2272,20 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 	if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {
 		return "channel switched to a different game", true
 	}
-	if !m.channelCarriesActiveCampaign(ch) {
-		return "channel no longer carries an active unclaimed drop campaign", true
+	if availability := ch.Streamer.Stream.ProvisionalDropSnapshot().Availability.State; availability == models.CampaignAvailabilityKnown {
+		if !m.channelCarriesActiveCampaign(ch) {
+			return "channel no longer carries an active unclaimed drop campaign", true
+		}
+	} else {
+		if len(ch.Streamer.Stream.GetCampaigns()) != 0 {
+			// Preserve the pre-existing UNKNOWN invalidation behavior: derive the
+			// empty authoritative intersection and clear the prior assignment.
+			m.channelCarriesActiveCampaign(ch)
+			return "channel no longer carries an active unclaimed drop campaign", true
+		}
+		if _, eligible := m.provisionalCandidateForChannel(ch, m.currentCampaignPolicy()); !eligible {
+			return "channel has no bounded provisional UNKNOWN drops observation", true
+		}
 	}
 	if m.isAvoided(ch.Streamer.GetUsername()) {
 		return "temporarily excluded by the drop-progress watchdog (stalled progress)", true
@@ -1333,7 +2339,27 @@ type orderedCandidate struct {
 
 type evaluatedCandidate struct {
 	orderedCandidate
-	facts watcher.CandidateCampaignPolicy
+	facts       watcher.CandidateCampaignPolicy
+	provisional *provisionalCampaignEvaluation
+}
+
+// evaluateCandidate keeps the authoritative and provisional paths disjoint.
+// Known availability uses the pre-existing assignment/policy derivation;
+// UNKNOWN can return only a pure observation tuple.
+func (m *Manager) evaluateCandidate(ch *Channel, published *campaignPolicySnapshot) (watcher.CandidateCampaignPolicy, *provisionalCampaignEvaluation, bool) {
+	if ch.Streamer.Stream.ProvisionalDropSnapshot().Availability.State == models.CampaignAvailabilityKnown {
+		facts, eligible := m.candidatePolicyFacts(ch, published)
+		return facts, nil, eligible
+	}
+	if len(ch.Streamer.Stream.GetCampaigns()) != 0 {
+		// Keep the old UNKNOWN behavior for an already-confirmed assignment:
+		// candidatePolicyFacts clears it through SetCampaigns(nil), and no
+		// provisional candidate is admitted in the same evaluation.
+		m.candidatePolicyFacts(ch, published)
+		return watcher.CandidateCampaignPolicy{}, nil, false
+	}
+	provisional, eligible := m.provisionalCandidateForChannel(ch, published)
+	return watcher.CandidateCampaignPolicy{}, provisional, eligible
 }
 
 func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, published *campaignPolicySnapshot) *Channel {
@@ -1404,7 +2430,7 @@ func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, pub
 				break
 			}
 			checks++
-			m.client.CheckStreamerOnline(ch.Streamer)
+			m.runRoutineRefresh(ch.Streamer)
 		}
 
 		// A NEW discovery slot requires CONFIRMED online (fail closed): an
@@ -1422,7 +2448,7 @@ func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, pub
 		if gid := ch.Streamer.Stream.GameID(); gid != "" && gid != gameID {
 			continue
 		}
-		facts, eligible := m.candidatePolicyFacts(ch, published)
+		facts, provisional, eligible := m.evaluateCandidate(ch, published)
 		if !eligible {
 			continue
 		}
@@ -1433,7 +2459,7 @@ func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, pub
 			m.mu.Unlock()
 		}
 		candidate.priority = order.priority(game)
-		evaluated := evaluatedCandidate{orderedCandidate: candidate, facts: facts}
+		evaluated := evaluatedCandidate{orderedCandidate: candidate, facts: facts, provisional: provisional}
 		if best == nil || betterExactCandidate(evaluated, *best, published) {
 			copy := evaluated
 			best = &copy
@@ -1454,8 +2480,8 @@ func (m *Manager) candidateStrictlyStronger(
 	order gamePolicyOrder,
 	published *campaignPolicySnapshot,
 ) bool {
-	candidateFacts, candidateEligible := m.candidatePolicyFacts(candidate, published)
-	currentFacts, currentEligible := m.candidatePolicyFacts(current, published)
+	candidateFacts, candidateProvisional, candidateEligible := m.evaluateCandidate(candidate, published)
+	currentFacts, currentProvisional, currentEligible := m.evaluateCandidate(current, published)
 	if !candidateEligible {
 		return false
 	}
@@ -1464,16 +2490,18 @@ func (m *Manager) candidateStrictlyStronger(
 	}
 	candidateGame, _, _, _ := m.channelFacts(candidate)
 	currentGame, _, _, _ := m.channelFacts(current)
-	return compareCandidatePolicy(
-		candidateFacts, currentFacts,
+	return compareEvaluatedCandidatePolicy(
+		candidateFacts, candidateProvisional,
+		currentFacts, currentProvisional,
 		order.priority(candidateGame), order.priority(currentGame),
 		published,
 	) < 0
 }
 
 func betterExactCandidate(candidate, current evaluatedCandidate, published *campaignPolicySnapshot) bool {
-	if cmp := compareCandidatePolicy(
-		candidate.facts, current.facts,
+	if cmp := compareEvaluatedCandidatePolicy(
+		candidate.facts, candidate.provisional,
+		current.facts, current.provisional,
 		candidate.priority, current.priority,
 		published,
 	); cmp != 0 {
@@ -1483,6 +2511,50 @@ func betterExactCandidate(candidate, current evaluatedCandidate, published *camp
 	// configured cross-game order and then the stable pool order, which already
 	// carries preferSubscribed/viewer ordering inside each game.
 	return candidate.priority.configured < current.priority.configured
+}
+
+// compareEvaluatedCandidatePolicy returns negative when left is stronger. A
+// still-unproved provisional tuple remains below every confirmed candidate. An
+// exact broker-proved tuple, however, has direct server authority and therefore
+// enters the existing restricted/active + Campaign Policy comparison instead
+// of being switched away before the broker can consume that proof.
+func compareEvaluatedCandidatePolicy(
+	leftFacts watcher.CandidateCampaignPolicy,
+	leftProvisional *provisionalCampaignEvaluation,
+	rightFacts watcher.CandidateCampaignPolicy,
+	rightProvisional *provisionalCampaignEvaluation,
+	leftGame, rightGame gamePolicyPriority,
+	published *campaignPolicySnapshot,
+) int {
+	leftAuthoritative := leftProvisional == nil || leftProvisional.proved
+	rightAuthoritative := rightProvisional == nil || rightProvisional.proved
+	if leftAuthoritative != rightAuthoritative {
+		if leftAuthoritative {
+			return -1
+		}
+		return 1
+	}
+	if !leftAuthoritative {
+		return compareProvisionalCampaigns(*leftProvisional, *rightProvisional)
+	}
+	if leftProvisional != nil {
+		leftFacts = provisionalCampaignPolicy(*leftProvisional)
+	}
+	if rightProvisional != nil {
+		rightFacts = provisionalCampaignPolicy(*rightProvisional)
+	}
+	return compareCandidatePolicy(leftFacts, rightFacts, leftGame, rightGame, published)
+}
+
+func provisionalCampaignPolicy(evaluation provisionalCampaignEvaluation) watcher.CandidateCampaignPolicy {
+	return watcher.CandidateCampaignPolicy{
+		Utility:                  evaluation.utility,
+		Ranked:                   evaluation.ranked,
+		Restricted:               evaluation.restricted,
+		Campaign:                 evaluation.candidate.Campaign,
+		CampaignIDs:              []string{evaluation.candidate.CampaignID},
+		RemainingWorkCampaignIDs: []string{evaluation.candidate.CampaignID},
+	}
 }
 
 // compareCandidatePolicy returns negative when left is semantically stronger.

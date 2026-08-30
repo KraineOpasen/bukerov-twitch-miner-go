@@ -44,6 +44,10 @@ type MinuteWatcher struct {
 	streamers  []*models.Streamer
 	priorities []config.Priority
 	settings   config.RateLimitSettings
+	// routineRefreshAfter is a per-instance deterministic test seam for the
+	// configured-stream stale recheck. Zero preserves the production 10-minute
+	// threshold.
+	routineRefreshAfter time.Duration
 
 	// pendingPriorities/pendingSettings/hasPending stage a runtime settings
 	// update from UpdateSettings (any goroutine) under mu; the loop applies
@@ -136,6 +140,31 @@ type MinuteWatcher struct {
 	// the dashboard, the debug endpoint, and discovery to read lock-free.
 	brokerSnapshot atomic.Pointer[BrokerSnapshot]
 	watchingLogins atomic.Pointer[map[string]bool]
+
+	// observationMu is the short, dedicated ownership lock for provisional
+	// exact-Drop leases and beacon permits. It is never held across a network
+	// call. Selection publishes a whole lease snapshot while health and probe
+	// goroutines use the public methods in provisional.go.
+	observationMu             sync.Mutex
+	provisionalMonitoring     bool
+	provisionalLease          *ProvisionalLease
+	provisionalLeaseStreamer  *models.Streamer
+	provisionalLeasePublished atomic.Pointer[ProvisionalLease]
+	provisionalLeaseSeq       uint64
+	observationPermitSeq      uint64
+	observationPermits        map[uint64]observationPermitRecord
+	// routineRefreshes counts in-flight routine metadata/status refreshes by
+	// exact Streamer object. Entries are registered under observationMu before
+	// network I/O and removed afterwards, so provisional lease admission and
+	// refresh start have one linearization point without holding a lock across
+	// the request.
+	routineRefreshes          map[*models.Streamer]uint64
+	provisionalBootstrapReady bool
+	provisionalQuarantine     provisionalQuarantineState
+	provisionalProofs         map[string]provisionalProofRecord
+	quarantineFenceLeaseID    uint64
+	quarantineFenceRun        uint64
+	quarantineFenceDrainAt    time.Time
 
 	// refresher rebuilds a slotted channel's watch session (spade URL, stream
 	// info, beacon payload) for the staged session-refresh requests. Set once at
@@ -497,6 +526,20 @@ func (w *MinuteWatcher) Start(ctx context.Context) {
 // to finish, so an in-flight tick's watch_time write completes before the
 // caller proceeds to close the database.
 func (w *MinuteWatcher) Stop() {
+	// Stop accepting provisional ownership before joining the loop. Any
+	// already-running network call remains outside observationMu and may finish,
+	// so its permit deliberately remains live until ReleaseObservationPermit;
+	// a later re-enable cannot forget transport that outlived the bounded join.
+	w.observationMu.Lock()
+	w.provisionalMonitoring = false
+	w.clearProvisionalLeaseLocked()
+	w.provisionalProofs = nil
+	w.provisionalQuarantine = provisionalQuarantineState{
+		namespace:       w.provisionalQuarantine.namespace,
+		enforceAccepted: w.provisionalQuarantine.enforceAccepted,
+	}
+	w.observationMu.Unlock()
+
 	w.mu.Lock()
 	if w.cancel != nil {
 		w.cancel()
@@ -791,10 +834,19 @@ func (w *MinuteWatcher) processWatching() {
 
 	onlineStreamers := w.getOnlineStreamers(avoid)
 
-	// Re-verify stale streams (network) before selecting.
+	// Re-verify stale streams (network) before selecting. RunRoutineRefresh
+	// linearizes this routine caller with provisional lease admission while
+	// leaving send-failure and explicit recovery refreshes below untouched.
+	routineRefreshAfter := w.routineRefreshAfter
+	if routineRefreshAfter == 0 {
+		routineRefreshAfter = 10 * time.Minute
+	}
 	for _, idx := range onlineStreamers {
-		if w.client != nil && w.streamers[idx].Stream.UpdateElapsed() > 10*time.Minute {
-			w.client.CheckStreamerOnline(w.streamers[idx])
+		if w.client != nil && w.streamers[idx].Stream.UpdateElapsed() > routineRefreshAfter {
+			streamer := w.streamers[idx]
+			w.RunRoutineRefresh(streamer, func() {
+				w.client.CheckStreamerOnline(streamer)
+			})
 		}
 	}
 
@@ -813,7 +865,8 @@ func (w *MinuteWatcher) processWatching() {
 	if w.selectionMode != ModeRotation && len(configuredWatch) == constants.MaxSimultaneousStreams && len(extra) > 0 {
 		w.refreshDeficitMinutes(onlineStreamers, now)
 	}
-	slots, waiting := w.arbitrate(configuredWatch, extra, now)
+	slots, waiting, provisionalContenders := w.arbitrateWithProvisionalContenders(configuredWatch, extra, now)
+	slots, waiting = w.reconcileProvisionalSlots(slots, waiting, now, provisionalContenders)
 
 	// The per-streamer debug state reflects the FINAL configured-watched set
 	// (a pick displaced by a higher-priority discovery drop is reported as not
@@ -873,8 +926,37 @@ func (w *MinuteWatcher) processWatching() {
 	watchedOK := 0
 	for _, sl := range slots {
 		streamer := sl.streamer
+		leaseID := uint64(0)
+		var (
+			permit    ObservationPermit
+			permitted bool
+		)
+		if sl.provisionalProven && sl.provisionalDrop != nil {
+			permit, permitted = w.AcquireProvisionalProofPermit(streamer, sl.provisionalProofID, *sl.provisionalDrop)
+		} else if sl.provisionalDrop != nil {
+			lease, ok := w.ProvisionalLease()
+			if !ok || !lease.Candidate.SameLeaseIdentity(*sl.provisionalDrop) {
+				continue
+			}
+			leaseID = lease.LeaseID
+			if lease.State == ProvisionalLeasePending {
+				permit, permitted = w.acquireProvisionalBootstrapPermit(streamer, leaseID)
+			} else {
+				permit, permitted = w.AcquireObservationPermit(streamer, leaseID)
+			}
+		} else {
+			permit, permitted = w.AcquireObservationPermit(streamer, leaseID)
+		}
+		if !permitted {
+			// A stale/mismatched provisional owner or causally conflicting ordinary
+			// send is suppressed without inventing a transport failure or successful-
+			// delivery statistic. Pending sends are allowed only when a fresh complete
+			// absence or exact-tuple UNKNOWN observation opened one bootstrap token.
+			continue
+		}
 
 		res := w.sendMinuteWatched(streamer)
+		w.completeObservationPermit(permit, res.Delivered)
 		switch {
 		case res.Stale:
 			// The playback session changed between snapshot capture and the beacon
@@ -945,19 +1027,19 @@ func (w *MinuteWatcher) processWatching() {
 }
 
 // gatherCandidates collects the proposed channels from every registered
-// source, dropping any channel that is on the configured streamer list (the
-// broker is the single owner of duplicate-channel prevention across all
-// sources), already proposed by an earlier source, or temporarily avoided by
-// the progress watchdog (defense in depth - discovery filters avoided
-// channels itself, but the broker enforces the exclusion regardless of
-// source behavior).
+// source. An ordinary candidate whose login is configured is dropped. The sole
+// exception is an exact provisional tuple carried by the very same configured
+// *models.Streamer pointer: this lets the broker overlay observation ownership
+// on a legitimate Phase-A slot without accepting a same-login clone or creating
+// a second channel identity. Earlier-source dedup and watchdog avoidance still
+// apply to both paths.
 func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidChecker) []Candidate {
 	if len(sources) == 0 {
 		return nil
 	}
-	configured := make(map[string]bool, len(w.streamers))
+	configured := make(map[string]*models.Streamer, len(w.streamers))
 	for _, s := range w.streamers {
-		configured[s.GetUsername()] = true
+		configured[s.GetUsername()] = s
 	}
 	var out []Candidate
 	seen := make(map[string]bool)
@@ -967,7 +1049,13 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 				continue
 			}
 			login := c.Streamer.GetUsername()
-			if configured[login] || seen[login] {
+			if owner, isConfigured := configured[login]; isConfigured {
+				if c.ProvisionalDrop == nil || c.Streamer != owner || !c.ProvisionalDrop.Valid() ||
+					c.ProvisionalDrop.Login != login || c.ProvisionalDrop.ChannelID != owner.ChannelID {
+					continue
+				}
+			}
+			if seen[login] {
 				continue
 			}
 			if avoid != nil && avoid.IsAvoided(login) {
@@ -977,6 +1065,7 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 			if c.Origin == "" {
 				c.Origin = src.SourceName()
 			}
+			c.ProvisionalDrop = cloneProvisionalCandidate(c.ProvisionalDrop)
 			out = append(out, c)
 		}
 	}

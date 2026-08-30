@@ -166,6 +166,13 @@ type streamChecker interface {
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
+// routineRefreshRunner linearizes routine status refreshes with provisional
+// observation ownership. Lifecycle evidence (stream-up/down) intentionally
+// bypasses this seam and keeps its existing authoritative behavior.
+type routineRefreshRunner interface {
+	RunRoutineRefresh(streamer *models.Streamer, refresh func()) bool
+}
+
 // channelActor is the narrow slice of the Twitch client the message handlers
 // need for per-channel actions (bonus claims, raid joins, moment claims,
 // community-goal contributions). Kept as an interface so the queued-event
@@ -200,11 +207,15 @@ type roundControl struct {
 }
 
 type WebSocketPool struct {
-	clients   []*WebSocketClient
-	actor     channelActor
-	placer    predictionPlacer
-	checker   streamChecker
-	streamers []*models.Streamer
+	clients []*WebSocketClient
+	actor   channelActor
+	placer  predictionPlacer
+	checker streamChecker
+	// routineRefresh is wired before Start and consulted only by viewcount,
+	// which is a routine status refresh. Guarded by mu so tests and embedding
+	// users can replace the coordinator without a data race.
+	routineRefresh routineRefreshRunner
+	streamers      []*models.Streamer
 	// tokenFn supplies the current auth snapshot to every connection this pool
 	// creates (including reconnect-era ones), so user-topic LISTENs always
 	// carry the current token rather than a startup-time copy.
@@ -282,6 +293,26 @@ func (p *WebSocketPool) SetStatusHandler(handler StatusHandler) {
 
 func (p *WebSocketPool) SetAuthErrorHandler(handler AuthErrorHandler) {
 	p.onAuthError = handler
+}
+
+// SetRoutineRefreshRunner installs the coordinator used by routine viewcount
+// re-checks. A nil runner preserves standalone pool behavior when no unified
+// watch-slot broker exists.
+func (p *WebSocketPool) SetRoutineRefreshRunner(runner routineRefreshRunner) {
+	p.mu.Lock()
+	p.routineRefresh = runner
+	p.mu.Unlock()
+}
+
+func (p *WebSocketPool) runRoutineRefresh(streamer *models.Streamer, refresh func()) bool {
+	p.mu.RLock()
+	runner := p.routineRefresh
+	p.mu.RUnlock()
+	if runner == nil {
+		refresh()
+		return true
+	}
+	return runner.RunRoutineRefresh(streamer, refresh)
 }
 
 // ReauthorizeUserTopics runs one bounded post-rotation sweep: every pool
@@ -913,8 +944,11 @@ func (p *WebSocketPool) handleVideoPlayback(msg *PubSubMessage, streamer *models
 		// A viewcount can only CONFIRM online via a successful GQL check or leave
 		// the status unknown on failure — it never drives a false offline.
 		if p.checker != nil && streamer.StreamUpElapsed() {
-			tr := p.checker.CheckStreamerOnline(streamer)
-			if tr.OnlineConfirmed && p.onStatusChange != nil {
+			var tr models.StatusTransition
+			ran := p.runRoutineRefresh(streamer, func() {
+				tr = p.checker.CheckStreamerOnline(streamer)
+			})
+			if ran && tr.OnlineConfirmed && p.onStatusChange != nil {
 				p.onStatusChange(streamer.GetUsername(), models.StatusOnline)
 			}
 		}
