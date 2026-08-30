@@ -450,6 +450,56 @@ func TestConfiguredProvisionalUnknown_KnownStatesRemainOrdinary(t *testing.T) {
 	}
 }
 
+func TestMergedAvailableDropsUnknownContinuityUsesOnlyProvisionalAuthority(t *testing.T) {
+	campaign := provisionalCampaign(false)
+	m, streamer := configuredProvisionalFixture(t, config.DiscoveryModeAll, campaign, true)
+	now := time.Now()
+
+	known := streamer.Stream.BeginCampaignAvailabilityObservation()
+	if result := streamer.Stream.ApplyCampaignAvailability(
+		known, true, []string{campaign.ID}, now,
+	); !result.Applied || result.State != models.CampaignAvailabilityKnown {
+		t.Fatalf("initial Known publication = %+v", result)
+	}
+	unknown := streamer.Stream.BeginCampaignAvailabilityObservation()
+	if result := streamer.Stream.ApplyCampaignAvailability(
+		unknown, false, nil, now.Add(time.Second),
+	); !result.Applied || result.State != models.CampaignAvailabilityUnknown {
+		t.Fatalf("merged parser UNKNOWN publication = %+v", result)
+	}
+
+	state, ids := streamer.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityUnknown || len(ids) != 1 || ids[0] != campaign.ID {
+		t.Fatalf("UNKNOWN continuity = state=%s ids=%v, want retained diagnostic ID", state, ids)
+	}
+	got := m.WatchCandidates()
+	if len(got) != 1 || got[0].Streamer != streamer || got[0].ProvisionalDrop == nil {
+		t.Fatalf("UNKNOWN continuity proposal = %+v, want one provisional candidate", got)
+	}
+	proposal := got[0].ProvisionalDrop
+	if proposal.CampaignID != campaign.ID || proposal.Evidence != models.ProvisionalEvidenceDirectory ||
+		proposal.DirectoryObs == 0 {
+		t.Fatalf("UNKNOWN continuity authority = %+v, want fresh Directory evidence", proposal)
+	}
+	if assigned := streamer.Stream.GetCampaigns(); len(assigned) != 0 {
+		t.Fatalf("retained CampaignIDs became confirmed assignment: %+v", assigned)
+	}
+
+	knownEmpty := streamer.Stream.BeginCampaignAvailabilityObservation()
+	if result := streamer.Stream.ApplyCampaignAvailability(
+		knownEmpty, true, nil, now.Add(2*time.Second),
+	); !result.Applied || result.State != models.CampaignAvailabilityKnown {
+		t.Fatalf("Known-empty publication = %+v", result)
+	}
+	if got := m.WatchCandidates(); len(got) != 0 {
+		t.Fatalf("Known-empty produced provisional candidates: %+v", got)
+	}
+	state, ids = streamer.Stream.CampaignAvailability()
+	if state != models.CampaignAvailabilityKnown || len(ids) != 0 {
+		t.Fatalf("Known-empty authority = state=%s ids=%v", state, ids)
+	}
+}
+
 func TestProvisionalQuarantineHandsOffWithinSameChannel(t *testing.T) {
 	first := provisionalCampaign(false)
 	first.ID = "campaign-a"
