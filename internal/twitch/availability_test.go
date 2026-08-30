@@ -13,8 +13,9 @@ import (
 // service-layer failure on the channel-side availability lookup (top-level GQL
 // errors, data:null, or an absent/null channel node) surfaces as an ERROR — so
 // the caller records availability UNKNOWN rather than an authoritative empty
-// list — while a genuinely resolved response (channel present; campaigns
-// absent/empty/populated) returns without error.
+// list — while a genuinely resolved viewerDropCampaigns array (empty or
+// populated) returns without error. A missing or explicit-null container is
+// unavailable evidence and therefore remains UNKNOWN.
 func TestGetCampaignIDsFromStreamerServiceFailureIsError(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -45,10 +46,14 @@ func TestGetCampaignIDsFromStreamerServiceFailureIsError(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "channel present, viewerDropCampaigns absent => authoritative empty",
+			name:    "channel present, viewerDropCampaigns absent => error",
 			body:    `{"data":{"channel":{"id":"chan-1"}}}`,
-			wantErr: false,
-			wantIDs: nil,
+			wantErr: true,
+		},
+		{
+			name:    "channel present, viewerDropCampaigns null => error",
+			body:    `{"data":{"channel":{"id":"chan-1","viewerDropCampaigns":null}}}`,
+			wantErr: true,
 		},
 		{
 			name:    "channel present, viewerDropCampaigns empty => authoritative empty",
@@ -84,6 +89,49 @@ func TestGetCampaignIDsFromStreamerServiceFailureIsError(t *testing.T) {
 			}
 			if !reflect.DeepEqual(ids, tc.wantIDs) {
 				t.Fatalf("ids = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+// TestUpdateStreamUnavailableContainerPreservesPreviousIDs proves the normal
+// UpdateStream continuity path for unavailable viewerDropCampaigns evidence. A
+// missing or explicit-null container records UNKNOWN and retains the previous
+// Known IDs; neither shape is authoritative proof of an empty campaign list.
+func TestUpdateStreamUnavailableContainerPreservesPreviousIDs(t *testing.T) {
+	streamInfo := `{"data":{"user":{"stream":{"id":"b1","viewersCount":3},"broadcastSettings":{"title":"t","game":{"id":"g1","name":"GameX"}}}}}`
+	cases := []struct {
+		name             string
+		availabilityBody string
+	}{
+		{
+			name:             "missing viewerDropCampaigns",
+			availabilityBody: `{"data":{"channel":{"id":"chan-1"}}}`,
+		},
+		{
+			name:             "explicit null viewerDropCampaigns",
+			availabilityBody: `{"data":{"channel":{"id":"chan-1","viewerDropCampaigns":null}}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, updateStreamHandler(t, streamInfo, tc.availabilityBody))
+
+			s := models.NewStreamer("streamer", models.StreamerSettings{ClaimDrops: true})
+			s.ChannelID = "chan-1"
+			s.Stream.SetCampaignIDs([]string{"camp-1"})
+
+			if err := c.UpdateStream(s); err != nil {
+				t.Fatalf("UpdateStream: %v", err)
+			}
+
+			state, ids := s.Stream.CampaignAvailability()
+			if state != models.CampaignAvailabilityUnknown {
+				t.Fatalf("availability = %v, want Unknown for unavailable container", state)
+			}
+			if !reflect.DeepEqual(ids, []string{"camp-1"}) {
+				t.Fatalf("previous IDs must be retained as last-known continuity, got %v", ids)
 			}
 		})
 	}
@@ -278,10 +326,11 @@ func TestUpdateStreamMalformedListPreservesPreviousIDs(t *testing.T) {
 }
 
 // TestGetCampaignIDsFromStreamerContainerMatrix pins the viewerDropCampaigns
-// CONTAINER discrimination: absent / explicit null / valid empty array are the
-// authoritative resolved-empty cases (no error, Known-empty), while a present
-// but wrong-typed container is malformed (error => availability Unknown). It also
-// pins campaign-ID whitespace strictness (opaque ids are never silently trimmed).
+// CONTAINER discrimination: absent / explicit null are unavailable (error =>
+// availability Unknown), a valid empty array is authoritative resolved-empty,
+// and a present but wrong-typed container is malformed (error => availability
+// Unknown). It also pins campaign-ID whitespace strictness (opaque ids are never
+// silently trimmed).
 func TestGetCampaignIDsFromStreamerContainerMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -289,8 +338,8 @@ func TestGetCampaignIDsFromStreamerContainerMatrix(t *testing.T) {
 		wantErr bool
 		wantIDs []string
 	}{
-		{"container absent => resolved empty", `{"id":"c"}`, false, nil},
-		{"container explicit null => resolved empty", `{"viewerDropCampaigns":null}`, false, nil},
+		{"container absent => unknown", `{"id":"c"}`, true, nil},
+		{"container explicit null => unknown", `{"viewerDropCampaigns":null}`, true, nil},
 		{"container valid empty array => resolved empty", `{"viewerDropCampaigns":[]}`, false, nil},
 		{"container string => malformed/unknown", `{"viewerDropCampaigns":"nope"}`, true, nil},
 		{"container object => malformed/unknown", `{"viewerDropCampaigns":{"a":1}}`, true, nil},
