@@ -36,6 +36,13 @@ type Manager struct {
 	client   twitchClient
 	defaults models.StreamerSettings
 
+	// routineRefresh coordinates roster-wide status polling with the unified
+	// watch-slot broker. It is installed during component wiring, before any
+	// runtime loop starts. Manager keeps the seam as a narrow interface so this
+	// package does not depend on watcher (and CheckOnlineStatus remains directly
+	// testable without Twitch I/O).
+	routineRefresh RoutineRefreshRunner
+
 	// streakCache persists Stream-owned watch-streak terminal snapshots across restarts;
 	// streakHydration is its snapshot loaded once before streamers are
 	// created, applied to each new Streamer's Stream. Both may be nil
@@ -181,6 +188,15 @@ type twitchClient interface {
 	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
 }
 
+// RoutineRefreshRunner linearizes routine status refreshes with provisional
+// observation ownership. A true return means refresh ran; false means the
+// exact streamer is currently protected by provisional ownership and refresh
+// was skipped. Implementations must not hold their arbitration lock while
+// invoking refresh.
+type RoutineRefreshRunner interface {
+	RunRoutineRefresh(streamer *models.Streamer, refresh func()) bool
+}
+
 // NewManager creates a new streamer manager.
 func NewManager(client twitchClient, defaults models.StreamerSettings) *Manager {
 	return &Manager{
@@ -189,6 +205,15 @@ func NewManager(client twitchClient, defaults models.StreamerSettings) *Manager 
 		byID:     make(map[string]*models.Streamer),
 		byLogin:  make(map[string]*models.Streamer),
 	}
+}
+
+// SetRoutineRefreshRunner installs the coordinator used by CheckOnlineStatus.
+// Production wires it before runtime loops start; nil restores the standalone
+// manager behavior for users that have no watch-slot broker.
+func (m *Manager) SetRoutineRefreshRunner(runner RoutineRefreshRunner) {
+	m.mu.Lock()
+	m.routineRefresh = runner
+	m.mu.Unlock()
 }
 
 // RenameEvent records one config-driven rename reconciled IN PLACE: the SAME
@@ -883,10 +908,17 @@ func (m *Manager) ApplySettings(configs []config.StreamerConfig, defaults models
 // CheckOnlineStatus checks the online status for all streamers.
 func (m *Manager) CheckOnlineStatus() {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	streamers := append([]*models.Streamer(nil), m.streamers...)
+	runner := m.routineRefresh
+	m.mu.RUnlock()
 
-	for _, streamer := range m.streamers {
-		m.client.CheckStreamerOnline(streamer)
+	for _, streamer := range streamers {
+		refresh := func() { m.client.CheckStreamerOnline(streamer) }
+		if runner == nil {
+			refresh()
+			continue
+		}
+		runner.RunRoutineRefresh(streamer, refresh)
 	}
 }
 

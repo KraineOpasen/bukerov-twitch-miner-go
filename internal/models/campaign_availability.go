@@ -43,7 +43,10 @@ type CampaignAvailabilitySnapshot struct {
 	State         CampaignAvailabilityState
 	CampaignIDs   []string
 	ObservationID uint64
-	ObservedAt    time.Time
+	// KnownGeneration advances for every authoritative Known publication,
+	// including Known+empty. It does not advance for Unknown observations.
+	KnownGeneration uint64
+	ObservedAt      time.Time
 	// UnknownSince is the instant the current Unknown streak began (zero while
 	// Known). It is stamped once at the first Unknown after a Known and preserved
 	// across subsequent Unknowns, so repeated failures never extend the grace.
@@ -100,6 +103,7 @@ func (s *Stream) ApplyCampaignAvailability(obsID uint64, known bool, ids []strin
 	}
 	s.campaignAvailObservedAt = now
 	if known {
+		s.bumpCampaignKnownGenerationLocked()
 		s.CampaignIDs = ids
 		s.campaignAvailability = CampaignAvailabilityKnown
 		s.campaignLastKnownAt = now
@@ -112,6 +116,16 @@ func (s *Stream) ApplyCampaignAvailability(obsID uint64, known bool, ids []strin
 		// CampaignIDs deliberately preserved (last-known continuity/diagnostic).
 	}
 	return CampaignAvailabilityApplyResult{Applied: true, State: s.campaignAvailability}
+}
+
+// bumpCampaignKnownGenerationLocked advances the non-zero authority epoch.
+// Caller must hold s.mu. Skipping zero after wrap preserves zero as the
+// never-resolved epoch without weakening monotonic inequality checks.
+func (s *Stream) bumpCampaignKnownGenerationLocked() {
+	s.campaignKnownGen++
+	if s.campaignKnownGen == 0 {
+		s.campaignKnownGen++
+	}
 }
 
 // CampaignAvailability returns the current channel-side availability state and
@@ -134,12 +148,13 @@ func (s *Stream) CampaignAvailabilitySnapshotAt(now time.Time) (CampaignAvailabi
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snap := CampaignAvailabilitySnapshot{
-		State:         s.campaignAvailability,
-		CampaignIDs:   s.CampaignIDs,
-		ObservationID: s.campaignAvailObs,
-		ObservedAt:    s.campaignAvailObservedAt,
-		UnknownSince:  s.campaignUnknownSince,
-		LastKnownAt:   s.campaignLastKnownAt,
+		State:           s.campaignAvailability,
+		CampaignIDs:     s.CampaignIDs,
+		ObservationID:   s.campaignAvailObs,
+		KnownGeneration: s.campaignKnownGen,
+		ObservedAt:      s.campaignAvailObservedAt,
+		UnknownSince:    s.campaignUnknownSince,
+		LastKnownAt:     s.campaignLastKnownAt,
 	}
 	expired := snap.State == CampaignAvailabilityUnknown &&
 		!snap.UnknownSince.IsZero() &&

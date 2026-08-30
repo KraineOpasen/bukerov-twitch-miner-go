@@ -27,6 +27,12 @@ type Candidate struct {
 	// Reason is a short source-supplied note (e.g. why discovery picked this
 	// channel) surfaced in the snapshot when the candidate is waiting.
 	Reason string
+	// ProvisionalDrop is an exact, session-fenced observation proposal for an
+	// otherwise unresolved (UNKNOWN) channel-side availability lookup. It is
+	// lower authority than every ordinary candidate: the broker may use it only
+	// to fill an idle slot under an exclusive observation lease. It never
+	// becomes a confirmed campaign assignment or Campaign Policy fact.
+	ProvisionalDrop *models.ProvisionalDropCandidate
 }
 
 // CandidateSource supplies extra watch candidates each tick, on top of the
