@@ -579,7 +579,7 @@ func (s *Streamer) DropsCondition() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	active, _ := assignedDropAuthority(s.Stream.GetCampaigns())
+	active, _ := assignedDropAuthority(s.Stream.GetCampaigns(), nil)
 	return s.Settings.ClaimDrops && s.Status == StatusOnline && active
 }
 
@@ -593,9 +593,19 @@ func (s *Streamer) DropsCondition() bool {
 // slot" signal. DropsCondition applies the online and ClaimDrops gates to this
 // same assigned unfinished-work authority.
 func (s *Streamer) HasEligibleAssignedDropCampaign() bool {
+	return s.HasEligibleAssignedDropCampaignExcluding(nil)
+}
+
+// HasEligibleAssignedDropCampaignExcluding is HasEligibleAssignedDropCampaign
+// with the operator's farming exclusions applied: an assigned campaign whose
+// current drop carries a Skip rule contributes no drop authority. The watcher
+// consults this at slot admission so a channel justified ONLY by a skipped
+// reward never earns a watch slot, even if an assignment writer upstream
+// forgot to pre-filter. A nil skips behaves exactly like the plain method.
+func (s *Streamer) HasEligibleAssignedDropCampaignExcluding(skips *RewardSkips) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	active, _ := assignedDropAuthority(s.Stream.GetCampaigns())
+	active, _ := assignedDropAuthority(s.Stream.GetCampaigns(), skips)
 	return active
 }
 
@@ -607,16 +617,20 @@ func (s *Streamer) HasEligibleAssignedDropCampaign() bool {
 func (s *Streamer) HasChannelRestrictedCampaign() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, restricted := assignedDropAuthority(s.Stream.GetCampaigns())
+	_, restricted := assignedDropAuthority(s.Stream.GetCampaigns(), nil)
 	return s.Settings.ClaimDrops && restricted
 }
 
 // assignedDropAuthority derives both active and channel-restricted authority
 // from one campaign snapshot and one unfinished-work predicate. It owns no
-// state and performs no I/O.
-func assignedDropAuthority(campaigns []*Campaign) (active, restricted bool) {
+// state and performs no I/O. A non-nil skips removes campaigns whose current
+// drop the operator farming-excluded (RewardSkips) from both authorities.
+func assignedDropAuthority(campaigns []*Campaign, skips *RewardSkips) (active, restricted bool) {
 	for _, campaign := range campaigns {
 		if !campaign.HasRemainingUnclaimedWork() {
+			continue
+		}
+		if skips.SkipsCampaignCurrentDrop(campaign) {
 			continue
 		}
 		active = true

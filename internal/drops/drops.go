@@ -124,6 +124,16 @@ type DropsTracker struct {
 	// candidate stays farmable, exactly as before this feature existed.
 	skipLedger *SkipLedger
 
+	// rewardSkips is the operator's effective farming-exclusion decision
+	// (DropRule.Skip entries, published by the miner at wiring time and on
+	// every rule change). It gates BOTH automatic claim sites and the
+	// broker-facing assignment views, so a skipped reward is neither
+	// auto-claimed nor assigned as a farming target. Distinct from skipLedger
+	// (claim-evidence ghosts): this is the operator's explicit intent.
+	// Guarded by mu; the stored *models.RewardSkips itself is immutable. Nil
+	// excludes nothing.
+	rewardSkips *models.RewardSkips
+
 	// Sync bookkeeping for SyncStatus (and LastSync); all guarded by mu.
 	syncRuns              int
 	lastSyncAt            time.Time
@@ -280,6 +290,29 @@ func (d *DropsTracker) UpdateBlacklist(dropBlacklist []string) {
 	d.mu.Lock()
 	d.dropBlacklist = dropBlacklist
 	d.mu.Unlock()
+}
+
+// UpdateRewardSkips replaces the operator's effective farming-exclusion
+// decision. Called at wiring time (before the sync loops start) and again by
+// the miner whenever a per-drop rule changes, so a Skip flipped at runtime
+// suppresses OUR claim and assignment side effects from the next evaluation
+// on, without a restart. Like UpdateBlacklist it does not trigger a resync
+// itself: the tracked-campaign claim gate reads the decision live per claim,
+// the raw-inventory sweep applies one coherent snapshot per sweep, and
+// assignments re-point on the next scheduled sync pass (the watcher's own
+// admission re-check is per-tick).
+func (d *DropsTracker) UpdateRewardSkips(skips *models.RewardSkips) {
+	d.mu.Lock()
+	d.rewardSkips = skips
+	d.mu.Unlock()
+}
+
+// currentRewardSkips snapshots the immutable farming-exclusion decision under
+// the lock; callers use the returned value lock-free.
+func (d *DropsTracker) currentRewardSkips() *models.RewardSkips {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.rewardSkips
 }
 
 // UpdateGameFilter replaces the drop-campaign game filter (the strict game-ID
@@ -1742,6 +1775,17 @@ func (d *DropsTracker) syncWithInventory(campaigns []*models.Campaign) ([]*model
 // through these exact two call sites.
 func (d *DropsTracker) claimDropFnFor(campaign *models.Campaign) func(*models.Drop) bool {
 	return func(drop *models.Drop) bool {
+		// Operator farming exclusion: a Skip-ruled reward is never claimed by
+		// US, however claimable the server reports it. The drop stays
+		// unclaimed locally and on Twitch (Skip suppresses our side effects,
+		// never rewrites server state), and the sync retries — and suppresses
+		// — again next cycle. Checked at the mutation site so no upstream
+		// pre-filter is relied on.
+		if d.currentRewardSkips().SkipsReward(campaignGameID(campaign), drop.Name) {
+			slog.Debug("Drop claim suppressed by operator Skip rule", "drop", drop.Name)
+			return false
+		}
+
 		id := drop.Identity(campaignGameID(campaign), campaign.ID, campaignFallbackWindow(campaign))
 
 		status, err := d.client.ClaimDrop(drop)
@@ -2354,6 +2398,10 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 		return
 	}
 
+	// One coherent farming-exclusion decision per sweep (the stored value is
+	// immutable), mirroring the skip-ledger's one-snapshot-per-pass pattern.
+	skips := d.currentRewardSkips()
+
 	for _, campaign := range inProgress {
 		campaignData, ok := campaign.(map[string]interface{})
 		if !ok {
@@ -2389,6 +2437,17 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 			// Claim only on the authoritative server signal (CanClaim), never on
 			// locally-counted watch minutes.
 			if drop.CanClaim() {
+				// Operator farming exclusion: the raw-inventory sweep is the
+				// final claim boundary for rewards outside the tracked set, so
+				// the Skip rule is enforced HERE too — a skipped reward never
+				// becomes auto-claimable merely because CanClaim is true. The
+				// suppression leaves the reward observable and claimable by
+				// the operator on Twitch, and never blocks the rest of the
+				// sweep (deliberately unlike a claim: no post-claim sleep).
+				if skips.SkipsReward(campaignGameID(campaignIdentity), drop.Name) {
+					slog.Debug("Drop claim suppressed by operator Skip rule", "drop", drop.Name)
+					continue
+				}
 				id := drop.Identity(campaignGameID(campaignIdentity), campaignIdentity.ID, campaignFallbackWindow(campaignIdentity))
 				status, err := d.client.ClaimDrop(drop)
 				switch {
@@ -2421,7 +2480,9 @@ func (d *DropsTracker) claimAllDropsFromInventory() {
 // campaign, whether a streamer may be ASSIGNED a drop campaign (the production
 // wiring of eligibility.EvaluateDrops). It shares the tracker's injectable clock
 // so window/deadline decisions and the availability continuity grace are judged
-// against the same time source.
+// against the same time source. The operator's farming exclusions are applied
+// upstream, on the broker-facing views (see updateStreamerCampaigns), so the
+// shared evaluator itself stays untouched.
 func (d *DropsTracker) dropsEvaluator() eligibility.Evaluator {
 	return eligibility.Evaluator{Clock: d.clock}
 }
@@ -2491,17 +2552,30 @@ func (d *DropsTracker) updateStreamerCampaigns() {
 		}
 	}
 
+	// One coherent operator farming-exclusion decision per pass (the stored
+	// value is immutable), mirroring the skip-ledger snapshot above.
+	skips := d.currentRewardSkips()
+
 	// Build each campaign's broker-facing view ONCE per sync (not once per
 	// streamer below): brokerView depends only on the campaign + snapshot,
 	// never on which streamer is being evaluated, so computing it here avoids
 	// len(streamers) * len(campaigns) redundant clones. d.campaigns, the
 	// catalog, and every published *models.Campaign stay untouched -- only
 	// these views (Campaign.Clone() when a ledger is wired) are filtered
-	// (INVARIANT 11).
+	// (INVARIANT 11). A campaign whose broker-facing CURRENT drop carries an
+	// operator Skip rule is withheld from assignment entirely, so it never
+	// becomes a farming target on any streamer and a stale assignment is
+	// cleared by the same SetCampaigns pass that maintains the others; the
+	// tracked pool itself stays unfiltered (the reward stays observable).
 	views := make([]*models.Campaign, 0, len(campaigns))
 	for _, campaign := range campaigns {
 		view := brokerView(campaign, snap)
 		if len(view.Drops) == 0 {
+			continue
+		}
+		if drop := view.CurrentDrop(); drop != nil && skips.SkipsReward(campaignGameID(view), drop.Name) {
+			slog.Debug("Drop campaign not assigned: reward skipped by operator rule",
+				"campaign", view.Name, "campaignID", view.ID, "drop", drop.Name)
 			continue
 		}
 		views = append(views, view)

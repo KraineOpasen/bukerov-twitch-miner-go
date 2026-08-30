@@ -39,6 +39,10 @@ func (m *Miner) refreshPolicy(now time.Time) {
 // refreshPolicyLocked publishes one coherent policy evaluation from the
 // caller's already-serialized config state. Caller holds m.mu.
 func (m *Miner) refreshPolicyLocked(now time.Time) {
+	// The farming exclusions are published even when no drops tracker exists:
+	// they are derived from config alone and other consumers (watcher,
+	// discovery) may still be wired.
+	m.publishRewardSkipsLocked()
 	if m.dropsTracker == nil {
 		return
 	}
@@ -72,6 +76,38 @@ func (m *Miner) refreshPolicyLocked(now time.Time) {
 		m.discovery.SetCampaignPolicy(gameRanks, campaignSemantics)
 	}
 	m.policySnap.Store(&policySnapshot{Mode: mode, Decisions: decisions, byID: byID})
+}
+
+// publishRewardSkipsLocked derives the operator's effective farming-exclusion
+// decision DIRECTLY from the config's DropRules (never from policy output —
+// ranking stays a pure preference layer, not a side-effect authority) and
+// publishes the immutable snapshot to every side-effect owner: the drops
+// tracker (auto-claim gates + broker-facing assignment views), the watcher
+// (slot admission fail-safe), and discovery (proposal gate). Caller holds m.mu.
+func (m *Miner) publishRewardSkipsLocked() {
+	skips := models.NewRewardSkips(rewardSkipKeys(m.config.DropRules))
+	if m.dropsTracker != nil {
+		m.dropsTracker.UpdateRewardSkips(skips)
+	}
+	if m.watcher != nil {
+		m.watcher.SetRewardSkips(skips)
+	}
+	if m.discovery != nil {
+		m.discovery.UpdateRewardSkips(skips)
+	}
+}
+
+// rewardSkipKeys collects the rule keys with Skip=true, verbatim: lookups run
+// through models.NormalizeRewardKey exactly like the policy ranker's, so a
+// legacy non-canonical config key stays equally inert in both layers.
+func rewardSkipKeys(rules map[string]config.DropRule) []string {
+	var keys []string
+	for key, rule := range rules {
+		if rule.Skip {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // buildPolicyInputs assembles one CampaignInput per trackable campaign from
