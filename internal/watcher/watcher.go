@@ -217,6 +217,14 @@ type MinuteWatcher struct {
 	// The broker captures one pointer at the start of each allocation tick; every
 	// configured/discovery comparison therefore belongs to the same decision set.
 	campaignSemanticPolicy atomic.Pointer[campaignSemanticSnapshot]
+
+	// rewardSkips is the operator's effective farming-exclusion decision
+	// (DropRule.Skip entries), published by the miner alongside the semantic
+	// policy. Slot admission consults it as the watch-side fail-safe: even if
+	// an assignment writer upstream forgot to pre-filter, a channel justified
+	// ONLY by a skipped reward's campaign never earns a new watch slot. The
+	// stored value is immutable; nil excludes nothing.
+	rewardSkips atomic.Pointer[models.RewardSkips]
 	// activeCampaignSemanticPolicy is non-nil only while one processWatching
 	// allocation is in progress. Discovery's concurrent sync goroutine may read
 	// it too, so it is atomic; receiving the just-captured snapshot for that short
@@ -389,6 +397,16 @@ func (w *MinuteWatcher) AddSource(src CandidateSource) {
 	w.mu.Lock()
 	w.sources = append(w.sources, src)
 	w.mu.Unlock()
+}
+
+// SetRewardSkips publishes the operator's effective farming-exclusion
+// decision (DropRule.Skip entries). The producer may call this concurrently
+// with the broker loop; pass nil to clear. The decision is consulted at slot
+// admission so a drop-only-justified channel whose campaign's current drop is
+// skipped never earns a new watch slot, independent of upstream assignment
+// filtering.
+func (w *MinuteWatcher) SetRewardSkips(skips *models.RewardSkips) {
+	w.rewardSkips.Store(skips)
 }
 
 // SetCampaignSemanticClasses publishes immutable per-login ordinal facts from
@@ -1065,6 +1083,9 @@ const unknownSlotRetentionGrace = 2 * time.Minute
 
 func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 	var online []int
+	// One coherent farming-exclusion decision per admission pass (the stored
+	// value is immutable), mirroring the per-tick semantic-policy capture.
+	skips := w.rewardSkips.Load()
 	for i, s := range w.streamers {
 		confirmed := s.GetIsOnline()
 		// A streamer that just went online→unknown while holding a slot stays a
@@ -1109,8 +1130,11 @@ func (w *MinuteWatcher) getOnlineStreamers(avoid AvoidChecker) []int {
 		// advertised campaign ID no longer earns a slot - the drops tracker must
 		// have actually assigned an eligible campaign (active entitlement, not
 		// claimed, feasible, coherent ACL, allowed channel, confirmed availability).
-		// Points capability still grants a slot independently.
-		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.HasEligibleAssignedDropCampaign()); !ok {
+		// Points capability still grants a slot independently. The operator's
+		// farming exclusions are applied HERE as the watch-side fail-safe: an
+		// assigned campaign whose current drop is Skip-ruled contributes no drop
+		// justification, even if the assignment writer forgot to pre-filter.
+		if ok, reason := watcherEligibility.SlotCandidateEligible(s, s.HasEligibleAssignedDropCampaignExcluding(skips)); !ok {
 			w.noteSelection(i, "not eligible for a new watch slot ("+string(reason)+")")
 			continue
 		}

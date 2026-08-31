@@ -317,6 +317,11 @@ type Manager struct {
 
 	resync chan struct{}
 
+	// rewardSkips is the operator's effective farming-exclusion decision
+	// (DropRule.Skip entries) for the shared drops evaluator. Guarded by mu;
+	// the stored value is immutable. Nil excludes nothing.
+	rewardSkips *models.RewardSkips
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -359,6 +364,27 @@ func (m *Manager) SetAvoidChecker(a AvoidChecker) {
 	m.mu.Lock()
 	m.avoid = a
 	m.mu.Unlock()
+}
+
+// UpdateRewardSkips replaces the operator's effective farming-exclusion
+// decision (DropRule.Skip entries), published by the miner at wiring time and
+// on every rule change. eligibleCampaignsForChannel consults it, so a channel
+// whose only tracked campaign carries a skipped current drop is neither
+// proposed to the broker nor kept as the current discovery channel
+// (channelCarriesActiveCampaign turns false and invalidReason abandons it).
+// Safe for concurrent use; nil excludes nothing.
+func (m *Manager) UpdateRewardSkips(skips *models.RewardSkips) {
+	m.mu.Lock()
+	m.rewardSkips = skips
+	m.mu.Unlock()
+}
+
+// currentRewardSkips snapshots the immutable farming-exclusion decision under
+// the lock; callers use the returned value lock-free.
+func (m *Manager) currentRewardSkips() *models.RewardSkips {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rewardSkips
 }
 
 type campaignPolicySnapshot struct {
@@ -1435,6 +1461,9 @@ func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 	if gameID == "" {
 		return nil
 	}
+	// One coherent farming-exclusion decision per channel evaluation (the
+	// stored value is immutable), mirroring the tracker's per-sweep snapshot.
+	skips := m.currentRewardSkips()
 	var eligible []*models.Campaign
 	for _, c := range m.campaigns.Campaigns() {
 		if c == nil || c.ID == "" || !idSet[c.ID] {
@@ -1448,6 +1477,14 @@ func (m *Manager) eligibleCampaignsForChannel(ch *Channel) []*models.Campaign {
 		}
 		drop := c.CurrentDrop()
 		if drop == nil {
+			continue
+		}
+		// Operator farming exclusion: a campaign whose current drop carries a
+		// Skip rule never justifies a discovery proposal (the channel would be
+		// watched ONLY to farm the skipped reward). Keyed exactly like the
+		// policy ranker's rule lookup; c.Game is non-nil past the game gate
+		// above.
+		if skips.SkipsReward(c.Game.ID, drop.Name) {
 			continue
 		}
 		decision := (eligibility.Evaluator{}).EvaluateDrops(ch.Streamer, c, drop, eligibility.AvailabilityYes)
@@ -1544,6 +1581,13 @@ func (m *Manager) provisionalCandidatesForChannelAtSource(
 		return nil
 	}
 
+	// One coherent operator farming-exclusion decision per channel evaluation
+	// (the stored value is immutable). The gate below closes both the runtime
+	// rule-flip window — broker views republish only on sync passes, while
+	// this constructor runs every broker tick — and the unfenced raw-pool
+	// fallback of accountCampaignSnapshot.
+	skips := m.currentRewardSkips()
+
 	result := make([]provisionalCampaignEvaluation, 0, len(source.Campaigns))
 	for _, campaign := range source.Campaigns {
 		if campaign == nil || campaign.ID == "" || campaign.Game == nil ||
@@ -1556,6 +1600,14 @@ func (m *Manager) provisionalCandidatesForChannelAtSource(
 		}
 		drop := campaign.CurrentDrop()
 		if drop == nil || drop.ID == "" || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			continue
+		}
+		// Operator farming exclusion (DropRule.Skip): a skipped current reward
+		// never seeds a provisional observation candidate — the channel would
+		// be watched solely to farm the reward the operator excluded. Keyed on
+		// the campaign's actual current drop name, exactly like every other
+		// RewardSkips boundary.
+		if skips.SkipsReward(campaign.Game.ID, drop.Name) {
 			continue
 		}
 		if decision := (eligibility.Evaluator{}).EvaluateDrops(
@@ -1728,7 +1780,7 @@ func (m *Manager) provisionalCandidateStillCurrentAtSource(
 	} else if requireSameSource {
 		return false
 	}
-	if !provisionalCandidateBackedByCampaign(ch.Streamer, candidate, source.Campaigns) {
+	if !provisionalCandidateBackedByCampaign(ch.Streamer, candidate, source.Campaigns, m.currentRewardSkips()) {
 		return false
 	}
 
@@ -1743,6 +1795,7 @@ func provisionalCandidateBackedByCampaign(
 	streamer *models.Streamer,
 	candidate models.ProvisionalDropCandidate,
 	campaigns []*models.Campaign,
+	skips *models.RewardSkips,
 ) bool {
 	if streamer == nil || !candidate.Valid() {
 		return false
@@ -1754,6 +1807,12 @@ func provisionalCandidateBackedByCampaign(
 		}
 		drop := campaign.CurrentDrop()
 		if drop == nil || drop.ID != candidate.DropID || drop.HasPreconditionsMet == nil || !*drop.HasPreconditionsMet {
+			return false
+		}
+		// Operator farming exclusion — the publication fence re-checks the
+		// live rule set so a proposal derived just before a runtime Skip flip
+		// cannot leave discovery within the same tick.
+		if skips.SkipsReward(campaign.Game.ID, drop.Name) {
 			return false
 		}
 		if decision := (eligibility.Evaluator{}).EvaluateDrops(

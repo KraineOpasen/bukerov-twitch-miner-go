@@ -233,7 +233,7 @@ func (w *MinuteWatcher) ArmProvisionalLease(leaseID, run uint64, at time.Time, m
 	if lease == nil || lease.LeaseID != leaseID || lease.State != ProvisionalLeasePending ||
 		run == 0 || run <= lease.MaxRun || at.IsZero() || !at.After(lease.MaxAt) ||
 		!at.After(lease.ReservedAt) || minutes < 0 ||
-		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate) {
+		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate, w.rewardSkips.Load()) {
 		return false
 	}
 	lease.State = ProvisionalLeaseObserving
@@ -281,7 +281,7 @@ func (w *MinuteWatcher) observeProvisionalPending(
 	if lease == nil || lease.LeaseID != leaseID || lease.State != ProvisionalLeasePending ||
 		run == 0 || run <= lease.MaxRun || at.IsZero() || !at.After(lease.MaxAt) ||
 		!at.After(lease.ReservedAt) ||
-		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate) {
+		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate, w.rewardSkips.Load()) {
 		return false
 	}
 	lease.MaxRun = run
@@ -304,7 +304,7 @@ func (w *MinuteWatcher) ObserveProvisionalProgress(leaseID, run uint64, at time.
 	lease := w.provisionalLease
 	if lease == nil || lease.LeaseID != leaseID || lease.State == ProvisionalLeasePending ||
 		run <= lease.MaxRun || at.IsZero() || !at.After(lease.MaxAt) || minutes < lease.MaxMinutes ||
-		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate) {
+		!provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate, w.rewardSkips.Load()) {
 		return false
 	}
 	// An ordinary beacon admitted as causally nonconflicting is not settled
@@ -466,7 +466,7 @@ func (w *MinuteWatcher) HasProvisionalProof(streamer *models.Streamer, candidate
 	}
 	record, ok := w.provisionalProofs[candidate.QuarantineKey()]
 	if !ok || record.owner != streamer || !record.proof.Candidate.SameProofIdentity(candidate) ||
-		!provisionalCandidateCurrent(streamer, candidate) {
+		!provisionalCandidateCurrent(streamer, candidate, w.rewardSkips.Load()) {
 		return false
 	}
 	return true
@@ -611,7 +611,13 @@ func (w *MinuteWatcher) ReconcileProvisionalQuarantine(
 			return false
 		}
 		for _, candidate := range scope.candidates {
-			if !provisionalProofCandidateCurrent(streamer, candidate) {
+			// Deliberately skip-agnostic (nil RewardSkips): this fence validates
+			// quarantine-scope bookkeeping, not farming justification. Vetoing a
+			// just-skipped tuple here would no-op the whole reconcile and stall
+			// unrelated negative maintenance while the (possibly stale) broker
+			// scope still lists the campaign; farming itself is already refused
+			// at admission, permits, lease continuity, and proof retention.
+			if !provisionalProofCandidateCurrent(streamer, candidate, nil) {
 				return false
 			}
 		}
@@ -751,15 +757,17 @@ func (w *MinuteWatcher) ProvisionalOwner(authorityID uint64, expected models.Pro
 	if !w.provisionalMonitoring {
 		return nil, false
 	}
+	// One coherent farming-exclusion decision for both authority legs.
+	skips := w.rewardSkips.Load()
 	if lease := w.provisionalLease; lease != nil && lease.LeaseID == authorityID &&
 		lease.Candidate.SameLeaseIdentity(expected) &&
-		provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate) {
+		provisionalCandidateCurrent(w.provisionalLeaseStreamer, lease.Candidate, skips) {
 		return w.provisionalLeaseStreamer, true
 	}
 	proof, ok := w.provisionalProofs[expected.QuarantineKey()]
 	if !ok || proof.proof.ProofID != authorityID ||
 		!proof.proof.Candidate.SameProofIdentity(expected) ||
-		!provisionalProofCandidateCurrent(proof.owner, expected) {
+		!provisionalProofCandidateCurrent(proof.owner, expected, skips) {
 		return nil, false
 	}
 	return proof.owner, true
@@ -781,7 +789,7 @@ func (w *MinuteWatcher) OwnsProvisionalObservation(streamer *models.Streamer) bo
 		return false
 	}
 	if w.provisionalLease != nil && w.provisionalLeaseStreamer == streamer &&
-		provisionalCandidateCurrent(streamer, w.provisionalLease.Candidate) {
+		provisionalCandidateCurrent(streamer, w.provisionalLease.Candidate, w.rewardSkips.Load()) {
 		return true
 	}
 	return false
@@ -799,7 +807,7 @@ func (w *MinuteWatcher) OwnsProvisionalCandidate(streamer *models.Streamer, cand
 	defer w.observationMu.Unlock()
 	return w.provisionalLease != nil && w.provisionalLeaseStreamer == streamer &&
 		w.provisionalLease.Candidate.SameLeaseIdentity(candidate) &&
-		provisionalCandidateCurrent(streamer, candidate)
+		provisionalCandidateCurrent(streamer, candidate, w.rewardSkips.Load())
 }
 
 // AcquireObservationPermit arbitrates every in-process minute beacon/probe
@@ -817,11 +825,12 @@ func (w *MinuteWatcher) AcquireObservationPermit(streamer *models.Streamer, leas
 	defer w.observationMu.Unlock()
 
 	lease := w.provisionalLease
+	skips := w.rewardSkips.Load()
 	if leaseID != 0 {
 		if lease == nil || lease.LeaseID != leaseID ||
 			w.provisionalLeaseStreamer != streamer ||
-			!provisionalCandidateCurrent(streamer, lease.Candidate) {
-			if lease != nil && lease.LeaseID == leaseID && !provisionalCandidateCurrent(streamer, lease.Candidate) {
+			!provisionalCandidateCurrent(streamer, lease.Candidate, skips) {
+			if lease != nil && lease.LeaseID == leaseID && !provisionalCandidateCurrent(streamer, lease.Candidate, skips) {
 				w.clearProvisionalLeaseLocked()
 			}
 			return ObservationPermit{}, false
@@ -855,7 +864,7 @@ func (w *MinuteWatcher) acquireProvisionalBootstrapPermit(streamer *models.Strea
 	defer w.observationMu.Unlock()
 	lease := w.provisionalLease
 	if lease == nil || lease.LeaseID != leaseID || lease.State != ProvisionalLeasePending ||
-		w.provisionalLeaseStreamer != streamer || !provisionalCandidateCurrent(streamer, lease.Candidate) ||
+		w.provisionalLeaseStreamer != streamer || !provisionalCandidateCurrent(streamer, lease.Candidate, w.rewardSkips.Load()) ||
 		!w.provisionalBootstrapReady || w.quarantineFenceLeaseID == leaseID {
 		return ObservationPermit{}, false
 	}
@@ -881,7 +890,7 @@ func (w *MinuteWatcher) AcquireProvisionalProofPermit(streamer *models.Streamer,
 	}
 	proof, ok := w.provisionalProofs[expected.QuarantineKey()]
 	if !w.provisionalMonitoring || !ok || proof.proof.ProofID != proofID || proof.owner != streamer ||
-		!proof.proof.Candidate.SameProofIdentity(expected) || !provisionalProofCandidateCurrent(streamer, expected) {
+		!proof.proof.Candidate.SameProofIdentity(expected) || !provisionalProofCandidateCurrent(streamer, expected, w.rewardSkips.Load()) {
 		return ObservationPermit{}, false
 	}
 	conflict := captureObservationConflict(streamer)
@@ -1008,6 +1017,8 @@ func (w *MinuteWatcher) reconcileProvisionalSlots(
 		waiting = removeWaitingChannel(waiting, fallback.streamer.GetUsername(), fallback.origin)
 		return true
 	}
+	// One coherent farming-exclusion decision per reconcile pass (immutable).
+	skips := w.rewardSkips.Load()
 	for _, slot := range slots {
 		if slot.provisionalDrop == nil {
 			ordinary = append(ordinary, slot)
@@ -1021,7 +1032,7 @@ func (w *MinuteWatcher) reconcileProvisionalSlots(
 				proof.proof.Candidate.SameProofIdentity(candidate) &&
 				(!w.provisionalQuarantine.enforceAccepted ||
 					w.provisionalCandidateAcceptedLocked(slot.streamer, candidate)) &&
-				provisionalProofCandidateCurrent(slot.streamer, candidate) {
+				provisionalProofCandidateCurrent(slot.streamer, candidate, skips) {
 				ordinary = append(ordinary, slot)
 				ordinarySeen[slot.streamer.GetUsername()] = true
 				continue
@@ -1080,7 +1091,7 @@ func (w *MinuteWatcher) reconcileProvisionalSlots(
 			!w.provisionalCandidateAcceptedLocked(slot.streamer, candidate) {
 			return false
 		}
-		if !provisionalCandidateCurrent(slot.streamer, candidate) {
+		if !provisionalCandidateCurrent(slot.streamer, candidate, skips) {
 			return false
 		}
 		if w.isProvisionalQuarantinedLocked(slot.streamer, candidate) {
@@ -1194,9 +1205,11 @@ func appendProvisionalWaiting(waiting []WaitingChannel, slot slotOccupant, reaso
 // order cannot decide whether a causal proof-identity match survives.
 func (w *MinuteWatcher) provenProvisionalCandidates(candidates []Candidate) []provenProvisionalCandidate {
 	current := make(map[string][]provenProvisionalCandidate)
+	// One coherent farming-exclusion decision per pass (immutable value).
+	skips := w.rewardSkips.Load()
 	for _, candidate := range candidates {
 		if candidate.Streamer == nil || candidate.ProvisionalDrop == nil ||
-			!provisionalProofCandidateCurrent(candidate.Streamer, *candidate.ProvisionalDrop) {
+			!provisionalProofCandidateCurrent(candidate.Streamer, *candidate.ProvisionalDrop, skips) {
 			continue
 		}
 		key := candidate.ProvisionalDrop.QuarantineKey()
@@ -1392,7 +1405,15 @@ func provisionalConflictsWithStreamer(candidate models.ProvisionalDropCandidate,
 	return true
 }
 
-func provisionalCandidateCurrent(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+func provisionalCandidateCurrent(streamer *models.Streamer, candidate models.ProvisionalDropCandidate, skips *models.RewardSkips) bool {
+	// Operator farming exclusion (DropRule.Skip): a skipped reward is never
+	// current provisional justification. After a runtime rule flip the next
+	// authoritative evaluation refuses the candidate here, so the lease dies
+	// and permits are withheld through the ordinary release paths — never via
+	// a quarantine negative, and without fabricating any observation state.
+	if skips.SkipsProvisionalCandidate(candidate) {
+		return false
+	}
 	if streamer == nil || streamer.Stream == nil || !candidate.Valid() ||
 		!streamer.GetIsOnline() || streamer.GetUsername() != candidate.Login ||
 		streamer.ChannelID == "" || streamer.ChannelID != candidate.ChannelID {
@@ -1427,7 +1448,13 @@ func provisionalCandidateCurrent(streamer *models.Streamer, candidate models.Pro
 // Routine UNKNOWN and Directory observation generations do not revoke a
 // positive server delta, but any authoritative Known publication (including
 // Known-empty), owner/session/game drift, or ordinary assignment does.
-func provisionalProofCandidateCurrent(streamer *models.Streamer, candidate models.ProvisionalDropCandidate) bool {
+func provisionalProofCandidateCurrent(streamer *models.Streamer, candidate models.ProvisionalDropCandidate, skips *models.RewardSkips) bool {
+	// Operator farming exclusion — see provisionalCandidateCurrent. A proof for
+	// a Skip-ruled reward stops justifying sends/slots; the record itself is
+	// removed by the existing source-veto/currency deletion paths.
+	if skips.SkipsProvisionalCandidate(candidate) {
+		return false
+	}
 	if streamer == nil || streamer.Stream == nil || !candidate.Valid() ||
 		!streamer.GetIsOnline() || streamer.GetUsername() != candidate.Login ||
 		streamer.ChannelID == "" || streamer.ChannelID != candidate.ChannelID {

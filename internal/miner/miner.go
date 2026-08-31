@@ -1051,6 +1051,14 @@ func (m *Miner) setupComponents(ctx context.Context) {
 	m.watcher.AddSource(m.discovery)
 	m.discovery.SetSlotStatus(m.watcher)
 
+	// Seed the operator's effective farming exclusions (DropRule.Skip) into
+	// every side-effect owner BEFORE the loops start, so the very first sync's
+	// claim sweep and assignment pass are already gated. refreshPolicy
+	// republishes the decision on every rule change and watchdog tick.
+	m.mu.Lock()
+	m.publishRewardSkipsLocked()
+	m.mu.Unlock()
+
 	// Health center aggregates operational signals; the canary verifies the
 	// watch transport independently (one real beacon, opportunistically or once
 	// past max staleness — never a permanent slot). Both are always constructed;

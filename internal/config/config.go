@@ -219,6 +219,16 @@ type Config struct {
 type DropRule struct {
 	// Skip excludes the reward from farming entirely (like a targeted
 	// blacklist entry, but keyed by reward identity rather than a keyword).
+	// Enforced at every side-effect boundary the miner owns: policy ranking
+	// (Excluded), campaign assignment and discovery proposals (the campaign
+	// whose CURRENT drop is skipped is not a farming target), watch-slot
+	// admission (a skipped reward never justifies a slot by itself), and both
+	// automatic claim paths (the reward is never auto-claimed, however
+	// claimable Twitch reports it — it stays claimable by hand on Twitch).
+	// Watching that is justified independently (channel points, another
+	// wanted reward) continues: the minute-watched beacon carries no
+	// per-campaign selector, so Twitch may still credit incidental progress
+	// server-side; that progress is simply never claimed automatically.
 	Skip bool `json:"skip,omitempty"`
 	// HighPriority floats the campaign to the top under every policy mode.
 	HighPriority bool `json:"highPriority,omitempty"`
