@@ -60,10 +60,13 @@ func Normalize(s string) Mode {
 type FeasStatus string
 
 const (
-	StatusUnknown        FeasStatus = "UNKNOWN"          // deadline absent; feasibility cannot be decided
-	StatusSafe           FeasStatus = "SAFE"             // can finish the whole campaign with margin
-	StatusAtRisk         FeasStatus = "AT_RISK"          // can finish all, but the margin is thin
-	StatusNextRewardOnly FeasStatus = "NEXT_REWARD_ONLY" // can finish the next reward but not the chain
+	StatusUnknown FeasStatus = "UNKNOWN" // deadline absent; feasibility cannot be decided
+	// The goal a status is judged against is the whole remaining chain, or just
+	// the next reward when the NextRewardOnly rule applies. The CanComplete*
+	// facts always report both independently of that selection.
+	StatusSafe           FeasStatus = "SAFE"             // can finish the selected goal with margin
+	StatusAtRisk         FeasStatus = "AT_RISK"          // can finish the selected goal, but the margin is thin
+	StatusNextRewardOnly FeasStatus = "NEXT_REWARD_ONLY" // can finish the next reward but not the selected goal
 	StatusImpossible     FeasStatus = "IMPOSSIBLE"       // cannot even finish the next reward before it ends
 )
 
@@ -400,19 +403,26 @@ func ComputeFeasibility(in CampaignInput, now time.Time) Feasibility {
 	f.MinutesToNextReward = nr
 	f.MinutesToCompleteAll = completeAllRemaining(in.Drops)
 
-	// The NextRewardOnly rule reduces the "finish everything" goal to just the
-	// next reward, so a user who only wants the next reward reads SAFE once it
-	// is reachable.
-	goalAll := f.MinutesToCompleteAll
-	if in.NextRewardOnly {
-		goalAll = nr
-	}
-
+	// Two independent facts, derived once from the same snapshot: whether the
+	// next reward still fits, and whether the entire remaining chain does.
+	// Neither is a policy choice.
 	availMin := 0
+	nextRewardFeasible, fullChainFeasible := false, false
 	if f.DeadlineKnown {
 		availMin = int(f.TimeUntilEnd/time.Minute) - safetyReserveMin
-		f.CanCompleteNextReward = hasNext && availMin >= nr
-		f.CanCompleteAll = availMin >= goalAll
+		nextRewardFeasible = availMin >= nr
+		fullChainFeasible = availMin >= f.MinutesToCompleteAll
+	}
+	f.CanCompleteNextReward = hasNext && nextRewardFeasible
+	f.CanCompleteAll = fullChainFeasible
+
+	// The NextRewardOnly rule selects which of those two facts the status (and
+	// the SMART rank built on it) is judged against, so a user who only wants
+	// the next reward reads SAFE once it is reachable. It narrows the goal
+	// only: CanCompleteAll keeps reporting the whole remaining chain either way.
+	goal, goalReached := f.MinutesToCompleteAll, fullChainFeasible
+	if in.NextRewardOnly {
+		goal, goalReached = nr, nextRewardFeasible
 	}
 
 	switch {
@@ -424,9 +434,9 @@ func ComputeFeasibility(in CampaignInput, now time.Time) Feasibility {
 		f.Status = StatusUnknown
 	case !f.CanCompleteNextReward:
 		f.Status = StatusImpossible
-	case !f.CanCompleteAll:
+	case !goalReached:
 		f.Status = StatusNextRewardOnly
-	case availMin-goalAll < atRiskMarginMin:
+	case availMin-goal < atRiskMarginMin:
 		f.Status = StatusAtRisk
 	default:
 		f.Status = StatusSafe

@@ -1834,14 +1834,23 @@ candidates and produces an explainable decision per campaign. No opaque model.
 Per campaign: `timeUntilEnd`, `minutesToNextReward` (the lowest-threshold
 unmet drop's remaining), `minutesToCompleteAll` (the furthest milestone's
 remaining — the codebase's cumulative model), `canCompleteNextReward`,
-`canCompleteAll` (both against `timeUntilEnd − safetyReserve`), `deadlineKnown`,
-and a status: `UNKNOWN` when Twitch supplied no real deadline, `SAFE` (finishes
-the chain with margin), `AT_RISK` (finishes but the margin is thin),
+`canCompleteAll` (the whole remaining chain, not just the next reward — both
+against `timeUntilEnd − safetyReserve`), `deadlineKnown`, and a status:
+`UNKNOWN` when Twitch supplied no real deadline, `SAFE` (finishes the goal
+below with margin), `AT_RISK` (finishes that goal but the margin is thin),
 `NEXT_REWARD_ONLY` (only the next reward is reachable), or `IMPOSSIBLE` (not
 even the next reward, or already ended). Within the same `HighPriority` class,
 ENDING_SOONEST orders known real deadlines before `UNKNOWN`; an absent deadline
-never becomes the earliest there. The `NextRewardOnly` rule reduces the goal to
-just the next reward.
+never becomes the earliest there. The `NextRewardOnly` rule reduces the goal
+the *status* is judged against to just the next reward, so a campaign whose
+chain no longer fits is no longer downgraded to `NEXT_REWARD_ONLY` once that
+reward is reachable — it reads `SAFE`, or `AT_RISK` when the margin over that
+reward is thin. It is a goal selection only: `canCompleteNextReward` and
+`canCompleteAll` are two independent facts derived from the same snapshot,
+and neither ever changes with the rule — `canCompleteAll` keeps reporting
+the entire remaining chain.
+The rule is not a stop condition: it never excludes a campaign and never
+shrinks the remaining work the engine reports.
 
 ### Modes
 
@@ -1857,7 +1866,8 @@ A weighted sum of named factors, each rendered as a breakdown line: high
 priority (+200), channel-restricted (+100), ends within 6h (+80), reward
 closeness (tiered +60/+40/+20), sole eligible channel (+30), already-started
 (+40), already-in-a-slot stickiness (+10), unstable channel (up to −50), and a
-−40 penalty when only the next reward is reachable. Ranking ties break on
+−40 penalty when the selected goal cannot be met (`NEXT_REWARD_ONLY`) — which
+the `NextRewardOnly` rule therefore suppresses. Ranking ties break on
 campaign ID, so identical inputs always produce identical output.
 
 **Channel-stability sample gate.** The instability penalty is derived from the
