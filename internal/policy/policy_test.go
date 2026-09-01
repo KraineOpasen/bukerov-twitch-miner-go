@@ -205,6 +205,496 @@ func TestFeasibilityNextRewardOnlyRuleShrinksGoal(t *testing.T) {
 	}
 }
 
+// TestFeasibilityNextRewardOnlyKeepsFullChainFact is the canonical A4 falsifier:
+// the next incomplete reward needs 60 minutes, the entire remaining chain needs
+// 600, and 110 minutes are authoritatively available (120 until the campaign
+// ends, less the 10-minute safety reserve). NextRewardOnly may select the
+// next-reward goal for the status/rank verdict, but it must not redefine the
+// full-chain fact.
+func TestFeasibilityNextRewardOnlyKeepsFullChainFact(t *testing.T) {
+	in := CampaignInput{
+		EndAt:          base.Add(120 * time.Minute),
+		Drops:          chain([2]int{60, 0}, [2]int{600, 0}),
+		NextRewardOnly: true,
+	}
+	f := ComputeFeasibility(in, base)
+
+	if !f.CanCompleteNextReward {
+		t.Errorf("CanCompleteNextReward = false, want true (110 available >= 60 needed)")
+	}
+	if f.CanCompleteAll {
+		t.Errorf("CanCompleteAll = true, want false (110 available < 600 needed): "+
+			"NextRewardOnly selects the goal, it must not redefine the full-chain fact (%+v)", f)
+	}
+	if f.Status != StatusSafe {
+		t.Errorf("Status = %s, want SAFE: the NextRewardOnly goal selection must be preserved", f.Status)
+	}
+}
+
+// TestFeasibilityNextVsFullChainMatrix pins behavioral matrix cases A-H for the
+// two independent feasibility facts and the goal the status is judged against.
+// Cases I (policy/fact independence) and J (no hard stop) need a differential
+// shape, so they live in the two functions below.
+// The budget is always TimeUntilEnd minus the 10-minute safety reserve.
+func TestFeasibilityNextVsFullChainMatrix(t *testing.T) {
+	// A claimed prefix plus two unclaimed tiers: next = 300-60 = 240,
+	// whole remaining chain = 600-60 = 540.
+	claimedPrefix := []DropStep{
+		{MinutesRequired: 60, CurrentMinutesWatched: 60, IsClaimed: true},
+		{MinutesRequired: 300, CurrentMinutesWatched: 60},
+		{MinutesRequired: 600, CurrentMinutesWatched: 60},
+	}
+	// Claimed tiers whose watched minutes were never reported. Claiming alone
+	// must drop them from both facts; if IsClaimed were ignored these two
+	// chains would read 600 (not 300) and 60 (not 300) respectively.
+	claimedHighUnderWatched := []DropStep{
+		{MinutesRequired: 600, CurrentMinutesWatched: 0, IsClaimed: true},
+		{MinutesRequired: 300, CurrentMinutesWatched: 0},
+	}
+	claimedLowUnderWatched := []DropStep{
+		{MinutesRequired: 60, CurrentMinutesWatched: 0, IsClaimed: true},
+		{MinutesRequired: 300, CurrentMinutesWatched: 0},
+	}
+
+	cases := []struct {
+		name     string
+		endAt    time.Time
+		drops    []DropStep
+		nextOnly bool
+
+		wantNext   bool
+		wantAll    bool
+		wantStatus FeasStatus
+	}{
+		{
+			name:  "A: next feasible, chain infeasible, NextRewardOnly selects the next goal",
+			endAt: base.Add(120 * time.Minute), drops: chain([2]int{60, 0}, [2]int{600, 0}), nextOnly: true,
+			wantNext: true, wantAll: false, wantStatus: StatusSafe,
+		},
+		{
+			name:  "B: next and chain both feasible under NextRewardOnly",
+			endAt: base.Add(48 * time.Hour), drops: chain([2]int{60, 0}, [2]int{600, 0}), nextOnly: true,
+			wantNext: true, wantAll: true, wantStatus: StatusSafe,
+		},
+		{
+			name:  "C: neither next nor chain feasible under NextRewardOnly",
+			endAt: base.Add(30 * time.Minute), drops: chain([2]int{60, 0}, [2]int{600, 0}), nextOnly: true,
+			wantNext: false, wantAll: false, wantStatus: StatusImpossible,
+		},
+		{
+			name:  "D: NextRewardOnly=false keeps full-chain selection semantics",
+			endAt: base.Add(120 * time.Minute), drops: chain([2]int{60, 0}, [2]int{600, 0}), nextOnly: false,
+			wantNext: true, wantAll: false, wantStatus: StatusNextRewardOnly,
+		},
+		{
+			name:  "E: exact boundary, available == required, is inclusive",
+			endAt: base.Add(120 * time.Minute), drops: chain([2]int{110, 0}),
+			wantNext: true, wantAll: true, wantStatus: StatusAtRisk,
+		},
+		{
+			name:  "E: one minute past the boundary is infeasible",
+			endAt: base.Add(120 * time.Minute), drops: chain([2]int{111, 0}),
+			wantNext: false, wantAll: false, wantStatus: StatusImpossible,
+		},
+		{
+			name:  "E: exact boundary on the selected next-reward goal under NextRewardOnly",
+			endAt: base.Add(120 * time.Minute), drops: chain([2]int{110, 0}, [2]int{600, 0}), nextOnly: true,
+			wantNext: true, wantAll: false, wantStatus: StatusAtRisk,
+		},
+		{
+			name: "F: chain feasibility spans every remaining tier, not just the next one",
+			// next = 300, whole chain = 600, budget 400.
+			endAt: base.Add(410 * time.Minute), drops: chain([2]int{600, 0}, [2]int{300, 0}),
+			wantNext: true, wantAll: false, wantStatus: StatusNextRewardOnly,
+		},
+		{
+			name:  "F: chain feasibility is not merely the last tier",
+			endAt: base.Add(410 * time.Minute), drops: chain([2]int{600, 0}, [2]int{300, 0}), nextOnly: true,
+			wantNext: true, wantAll: false, wantStatus: StatusSafe,
+		},
+		{
+			name:  "F: the whole chain fits once the budget covers the furthest tier",
+			endAt: base.Add(700 * time.Minute), drops: chain([2]int{600, 0}, [2]int{300, 0}),
+			wantNext: true, wantAll: true, wantStatus: StatusSafe,
+		},
+		{
+			name:  "G: completed prefix, next is the actual next incomplete tier",
+			endAt: base.Add(310 * time.Minute), drops: claimedPrefix, nextOnly: true,
+			wantNext: true, wantAll: false, wantStatus: StatusSafe,
+		},
+		{
+			name:  "G: completed prefix, all covers every tier still remaining",
+			endAt: base.Add(310 * time.Minute), drops: claimedPrefix,
+			wantNext: true, wantAll: false, wantStatus: StatusNextRewardOnly,
+		},
+		{
+			name:  "G: completed prefix, whole remaining chain fits",
+			endAt: base.Add(600 * time.Minute), drops: claimedPrefix,
+			wantNext: true, wantAll: true, wantStatus: StatusSafe,
+		},
+		{
+			// Budget 390: covers the unclaimed 300 tier but not the claimed 600 one,
+			// so the chain fact proves the claimed tier left it.
+			name:  "G: a claimed tier is excluded from the whole-chain fact",
+			endAt: base.Add(400 * time.Minute), drops: claimedHighUnderWatched,
+			wantNext: true, wantAll: true, wantStatus: StatusSafe,
+		},
+		{
+			// Budget 190: covers a 60-minute tier but not 300, so the next-reward
+			// fact proves the claimed 60 tier is not the next reward.
+			name:  "G: a claimed tier is excluded from the next-reward fact",
+			endAt: base.Add(200 * time.Minute), drops: claimedLowUnderWatched,
+			wantNext: false, wantAll: false, wantStatus: StatusImpossible,
+		},
+		{
+			// Budget 90, goal 60: slack is exactly the 30-minute AT_RISK margin,
+			// and the downgrade is strict, so this stays SAFE.
+			name:  "E: slack exactly at the AT_RISK margin stays SAFE",
+			endAt: base.Add(100 * time.Minute), drops: chain([2]int{60, 0}),
+			wantNext: true, wantAll: true, wantStatus: StatusSafe,
+		},
+		{
+			// Budget 89, goal 60: slack 29 is under the margin.
+			name:  "E: one minute under the AT_RISK margin downgrades",
+			endAt: base.Add(99 * time.Minute), drops: chain([2]int{60, 0}),
+			wantNext: true, wantAll: true, wantStatus: StatusAtRisk,
+		},
+		{
+			// 71m59s truncates to 71 minutes, so the budget is 61, not 62: a
+			// sub-minute remainder never counts toward feasibility.
+			name:  "E: a sub-minute remainder is truncated, never rounded up",
+			endAt: base.Add(71*time.Minute + 59*time.Second), drops: chain([2]int{62, 0}),
+			wantNext: false, wantAll: false, wantStatus: StatusImpossible,
+		},
+		{
+			name:  "H: unknown deadline stays honestly undecided under NextRewardOnly",
+			drops: chain([2]int{60, 0}, [2]int{600, 0}), nextOnly: true,
+			wantNext: false, wantAll: false, wantStatus: StatusUnknown,
+		},
+		{
+			name:     "H: unknown deadline stays honestly undecided without the rule",
+			drops:    chain([2]int{60, 0}, [2]int{600, 0}),
+			wantNext: false, wantAll: false, wantStatus: StatusUnknown,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := CampaignInput{CampaignID: tc.name, EndAt: tc.endAt, Drops: tc.drops, NextRewardOnly: tc.nextOnly}
+			f := ComputeFeasibility(in, base)
+			if f.CanCompleteNextReward != tc.wantNext || f.CanCompleteAll != tc.wantAll || f.Status != tc.wantStatus {
+				t.Fatalf("feasibility = %+v, want next=%v all=%v status=%s",
+					f, tc.wantNext, tc.wantAll, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestFeasibilityFactsAreIndependentOfNextRewardOnly is matrix case I: for one
+// immutable snapshot, toggling the policy rule may move the status but must
+// leave every underlying fact untouched.
+func TestFeasibilityFactsAreIndependentOfNextRewardOnly(t *testing.T) {
+	snapshots := []struct {
+		name  string
+		endAt time.Time
+		drops []DropStep
+	}{
+		{"chain out of reach", base.Add(120 * time.Minute), chain([2]int{60, 0}, [2]int{600, 0})},
+		{"chain within reach", base.Add(48 * time.Hour), chain([2]int{60, 0}, [2]int{600, 0})},
+		{"nothing reachable", base.Add(30 * time.Minute), chain([2]int{60, 0}, [2]int{600, 0})},
+		{"exact boundary", base.Add(120 * time.Minute), chain([2]int{110, 0}, [2]int{600, 0})},
+		{"unknown deadline", time.Time{}, chain([2]int{60, 0}, [2]int{600, 0})},
+		{"already ended", base.Add(-time.Minute), chain([2]int{60, 0}, [2]int{600, 0})},
+		{"nothing left to earn", base.Add(48 * time.Hour), chain([2]int{60, 60}, [2]int{600, 600})},
+	}
+
+	for _, sn := range snapshots {
+		t.Run(sn.name, func(t *testing.T) {
+			in := CampaignInput{CampaignID: sn.name, EndAt: sn.endAt, Drops: sn.drops}
+			off := ComputeFeasibility(in, base)
+			in.NextRewardOnly = true
+			on := ComputeFeasibility(in, base)
+
+			if on.CanCompleteAll != off.CanCompleteAll {
+				t.Errorf("CanCompleteAll moved with the policy rule: off=%v on=%v", off.CanCompleteAll, on.CanCompleteAll)
+			}
+			if on.CanCompleteNextReward != off.CanCompleteNextReward {
+				t.Errorf("CanCompleteNextReward moved with the policy rule: off=%v on=%v",
+					off.CanCompleteNextReward, on.CanCompleteNextReward)
+			}
+			if on.MinutesToNextReward != off.MinutesToNextReward || on.MinutesToCompleteAll != off.MinutesToCompleteAll ||
+				on.TimeUntilEnd != off.TimeUntilEnd || on.DeadlineKnown != off.DeadlineKnown ||
+				on.SafetyReserveMinutes != off.SafetyReserveMinutes {
+				t.Errorf("a fact moved with the policy rule:\n off=%+v\n on =%+v", off, on)
+			}
+		})
+	}
+}
+
+// TestNextRewardOnlyIntroducesNoHardStop is matrix case J: the rule narrows the
+// goal a campaign is judged against and nothing else. It must never exclude a
+// campaign, suppress the work still remaining, or stop reporting the chain.
+func TestNextRewardOnlyIntroducesNoHardStop(t *testing.T) {
+	in := CampaignInput{
+		CampaignID:     "no-hard-stop",
+		EndAt:          base.Add(120 * time.Minute),
+		Drops:          chain([2]int{60, 0}, [2]int{600, 0}),
+		NextRewardOnly: true,
+	}
+
+	f := ComputeFeasibility(in, base)
+	if f.MinutesToNextReward != 60 {
+		t.Errorf("MinutesToNextReward = %d, want 60", f.MinutesToNextReward)
+	}
+	if f.MinutesToCompleteAll != 600 {
+		t.Errorf("MinutesToCompleteAll = %d, want 600: the rule must not shrink the reported chain", f.MinutesToCompleteAll)
+	}
+
+	d := Decide(ModeSmart, in, base)
+	if d.Excluded {
+		t.Fatalf("NextRewardOnly excluded the campaign: reason=%q", d.ExcludeReason)
+	}
+
+	// Once the next reward is reached the campaign keeps reporting the tiers it
+	// still has left — the rule is a goal selection, never a stop condition.
+	reached := CampaignInput{
+		CampaignID:     "no-hard-stop-reached",
+		EndAt:          base.Add(48 * time.Hour),
+		Drops:          []DropStep{{MinutesRequired: 60, CurrentMinutesWatched: 60, IsClaimed: true}, {MinutesRequired: 600, CurrentMinutesWatched: 60}},
+		NextRewardOnly: true,
+	}
+	rf := ComputeFeasibility(reached, base)
+	if rf.MinutesToNextReward != 540 || rf.MinutesToCompleteAll != 540 {
+		t.Errorf("after the next reward: next=%d all=%d, want 540/540", rf.MinutesToNextReward, rf.MinutesToCompleteAll)
+	}
+	if rd := Decide(ModeSmart, reached, base); rd.Excluded {
+		t.Fatalf("campaign excluded after reaching the next reward: reason=%q", rd.ExcludeReason)
+	}
+}
+
+// TestNextRewardOnlySelectsTheRankedGoal proves the other half of matrix case I:
+// on the canonical falsifier the rule is allowed to move the SMART rank, because
+// the rank is built on the selected status — while the full-chain fact stays
+// false either way. It is the ranked goal that follows the rule, never the fact.
+func TestNextRewardOnlySelectsTheRankedGoal(t *testing.T) {
+	const penaltyLabel = "cannot finish the whole campaign in time"
+	in := CampaignInput{
+		CampaignID: "ranked-goal",
+		EndAt:      base.Add(120 * time.Minute),
+		Drops:      chain([2]int{60, 0}, [2]int{600, 0}),
+	}
+
+	off := Decide(ModeSmart, in, base)
+	if off.Status != StatusNextRewardOnly {
+		t.Fatalf("without the rule status = %s, want NEXT_REWARD_ONLY", off.Status)
+	}
+	pts, ok := factorPoints(off, penaltyLabel)
+	if !ok || pts != -smartNextRewardOnly {
+		t.Fatalf("without the rule the chain penalty = (%d, %v), want (%d, true)", pts, ok, -smartNextRewardOnly)
+	}
+
+	in.NextRewardOnly = true
+	on := Decide(ModeSmart, in, base)
+	if on.Status != StatusSafe {
+		t.Fatalf("with the rule status = %s, want SAFE", on.Status)
+	}
+	if _, ok := factorPoints(on, penaltyLabel); ok {
+		t.Errorf("with the rule the campaign still carries the whole-chain penalty: %+v", on.Factors)
+	}
+	if on.Total != off.Total+smartNextRewardOnly {
+		t.Errorf("SMART total = %d, want %d: the rule should drop exactly the chain penalty",
+			on.Total, off.Total+smartNextRewardOnly)
+	}
+
+	// The ranked goal moved; the published fact did not.
+	if off.Feasibility.CanCompleteAll || on.Feasibility.CanCompleteAll {
+		t.Errorf("CanCompleteAll must stay false either way: off=%v on=%v",
+			off.Feasibility.CanCompleteAll, on.Feasibility.CanCompleteAll)
+	}
+}
+
+// statusUnderPreA4Semantics transcribes the status rule exactly as it stood
+// before the fact/policy split, so the sweep below can prove the repair moved
+// no status verdict at all.
+func statusUnderPreA4Semantics(in CampaignInput, now time.Time) FeasStatus {
+	deadlineKnown := !in.EndAt.IsZero()
+	until := time.Duration(0)
+	if deadlineKnown {
+		if until = in.EndAt.Sub(now); until < 0 {
+			until = 0
+		}
+	}
+	nr, hasNext := nextReward(in.Drops)
+	all := completeAllRemaining(in.Drops)
+	goalAll := all
+	if in.NextRewardOnly {
+		goalAll = nr
+	}
+	availMin, canNext, canAll := 0, false, false
+	if deadlineKnown {
+		availMin = int(until/time.Minute) - safetyReserveMin
+		canNext = hasNext && availMin >= nr
+		canAll = availMin >= goalAll
+	}
+	switch {
+	case deadlineKnown && !in.EndAt.After(now):
+		return StatusImpossible
+	case !hasNext && all == 0:
+		return StatusSafe
+	case !deadlineKnown:
+		return StatusUnknown
+	case !canNext:
+		return StatusImpossible
+	case !canAll:
+		return StatusNextRewardOnly
+	case availMin-goalAll < atRiskMarginMin:
+		return StatusAtRisk
+	default:
+		return StatusSafe
+	}
+}
+
+// wantChainMinutes and wantNextMinutes restate the two definitions directly
+// over the input drops. They are separate transcriptions rather than calls into
+// nextReward/completeAllRemaining, so a mutation of either production helper —
+// min instead of max, or a dropped claim guard — makes the sweep disagree with
+// its oracle instead of moving both sides together. A claimed tier never counts;
+// an unclaimed tier already met contributes nothing and is not the next reward.
+func wantChainMinutes(drops []DropStep) int {
+	worst := 0
+	for _, d := range drops {
+		if d.IsClaimed {
+			continue
+		}
+		if rem := d.MinutesRequired - d.CurrentMinutesWatched; rem > worst {
+			worst = rem
+		}
+	}
+	return worst
+}
+
+func wantNextMinutes(drops []DropStep) (int, bool) {
+	best, remaining, found := 0, 0, false
+	for _, d := range drops {
+		if d.IsClaimed || d.CurrentMinutesWatched >= d.MinutesRequired {
+			continue
+		}
+		if !found || d.MinutesRequired < best {
+			best, remaining, found = d.MinutesRequired, d.MinutesRequired-d.CurrentMinutesWatched, true
+		}
+	}
+	return remaining, found
+}
+
+// TestFeasibilityPermutationSweep walks a deterministic cross-product of
+// deadlines and drop chains and proves four properties at once:
+//
+//  1. Both minute figures match oracles derived from the input drops, so the
+//     facts are checked against their definitions, not against each other.
+//  2. CanCompleteAll is exactly the full-chain arithmetic, never the goal.
+//  3. Neither fact depends on NextRewardOnly.
+//  4. Every status verdict still matches the pre-A4 rule, so the repair is
+//     fact-only and the NextRewardOnly status/rank behavior is preserved.
+func TestFeasibilityPermutationSweep(t *testing.T) {
+	chains := [][]DropStep{
+		chain([2]int{60, 0}),
+		chain([2]int{60, 0}, [2]int{600, 0}),
+		chain([2]int{600, 0}, [2]int{300, 0}),
+		chain([2]int{60, 22}, [2]int{300, 22}),
+		chain([2]int{110, 0}, [2]int{600, 0}),
+		chain([2]int{60, 60}, [2]int{600, 600}),
+		{{MinutesRequired: 60, CurrentMinutesWatched: 60, IsClaimed: true}, {MinutesRequired: 300, CurrentMinutesWatched: 60}},
+		{{MinutesRequired: 600, CurrentMinutesWatched: 0, IsClaimed: true}, {MinutesRequired: 300, CurrentMinutesWatched: 0}},
+		{{MinutesRequired: 60, CurrentMinutesWatched: 0, IsClaimed: true}, {MinutesRequired: 300, CurrentMinutesWatched: 0}},
+		{{MinutesRequired: 60, CurrentMinutesWatched: 60, IsClaimed: true}},
+		nil,
+	}
+	offsets := []time.Duration{
+		-time.Hour, -time.Minute, 0, time.Minute, 9 * time.Minute, 10 * time.Minute,
+		30 * time.Minute, 70 * time.Minute, 99 * time.Minute, 100 * time.Minute,
+		119 * time.Minute, 120 * time.Minute, 121 * time.Minute,
+		120*time.Minute + 59*time.Second, 200 * time.Minute, 310 * time.Minute,
+		340 * time.Minute, 400 * time.Minute, 410 * time.Minute, 610 * time.Minute,
+		700 * time.Minute, 48 * time.Hour,
+	}
+
+	// One unknown-deadline configuration plus one per offset, so no permutation
+	// is a duplicate of another.
+	type deadline struct {
+		name  string
+		endAt time.Time
+	}
+	deadlines := []deadline{{"unknown", time.Time{}}}
+	for _, off := range offsets {
+		deadlines = append(deadlines, deadline{off.String(), base.Add(off)})
+	}
+
+	checked := 0
+	for ci, drops := range chains {
+		for _, dl := range deadlines {
+			var facts [2]Feasibility
+			for i, nextOnly := range []bool{false, true} {
+				in := CampaignInput{
+					CampaignID:     fmt.Sprintf("sweep-%d-%s-%v", ci, dl.name, nextOnly),
+					EndAt:          dl.endAt,
+					Drops:          drops,
+					NextRewardOnly: nextOnly,
+				}
+				f := ComputeFeasibility(in, base)
+				facts[i] = f
+				checked++
+
+				where := fmt.Sprintf("chain %d deadline=%s nextOnly=%v", ci, dl.name, nextOnly)
+
+				// Property 1: both minute figures match the input-derived oracles.
+				if want := wantChainMinutes(drops); f.MinutesToCompleteAll != want {
+					t.Fatalf("%s: MinutesToCompleteAll = %d, want %d", where, f.MinutesToCompleteAll, want)
+				}
+				if want, _ := wantNextMinutes(drops); f.MinutesToNextReward != want {
+					t.Fatalf("%s: MinutesToNextReward = %d, want %d", where, f.MinutesToNextReward, want)
+				}
+
+				// Property 2: both facts are exactly their own arithmetic. The
+				// next-reward fact stays false when no next reward exists, so the
+				// hasNext guard is pinned too.
+				wantAll, wantNext := false, false
+				if f.DeadlineKnown {
+					budget := int(f.TimeUntilEnd/time.Minute) - safetyReserveMin
+					wantAll = budget >= wantChainMinutes(drops)
+					need, hasNext := wantNextMinutes(drops)
+					wantNext = hasNext && budget >= need
+				}
+				if f.CanCompleteAll != wantAll {
+					t.Fatalf("%s: CanCompleteAll = %v, want %v (%+v)", where, f.CanCompleteAll, wantAll, f)
+				}
+				if f.CanCompleteNextReward != wantNext {
+					t.Fatalf("%s: CanCompleteNextReward = %v, want %v (%+v)", where, f.CanCompleteNextReward, wantNext, f)
+				}
+				// The reduction can only ever have flipped the fact upward,
+				// because the next reward is itself part of the chain.
+				if f.MinutesToNextReward > f.MinutesToCompleteAll {
+					t.Fatalf("%s: next %d exceeds whole chain %d", where, f.MinutesToNextReward, f.MinutesToCompleteAll)
+				}
+				// Property 4: the status rule is unchanged.
+				if want := statusUnderPreA4Semantics(in, base); f.Status != want {
+					t.Fatalf("%s: Status = %s, want %s (%+v)", where, f.Status, want, f)
+				}
+			}
+			// Property 3: facts do not move with the policy rule.
+			if facts[0].CanCompleteAll != facts[1].CanCompleteAll ||
+				facts[0].CanCompleteNextReward != facts[1].CanCompleteNextReward ||
+				facts[0].MinutesToNextReward != facts[1].MinutesToNextReward ||
+				facts[0].MinutesToCompleteAll != facts[1].MinutesToCompleteAll {
+				t.Fatalf("chain %d deadline=%s: facts moved with NextRewardOnly:\n off=%+v\n on =%+v",
+					ci, dl.name, facts[0], facts[1])
+			}
+		}
+	}
+	if want := len(chains) * len(deadlines) * 2; checked != want {
+		t.Fatalf("sweep covered %d permutations, want %d", checked, want)
+	}
+}
+
 func TestFeasibilityMinutes(t *testing.T) {
 	in := CampaignInput{EndAt: base.Add(10 * time.Hour), Drops: chain([2]int{60, 22}, [2]int{300, 22})}
 	f := ComputeFeasibility(in, base)
