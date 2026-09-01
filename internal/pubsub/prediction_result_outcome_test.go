@@ -95,6 +95,36 @@ func TestPredictionResultOutcomeReachesOnMessage(t *testing.T) {
 	}
 }
 
+// The valid LOSE terminal contract at the pool's producer boundary (one of
+// the two adjoining boundary proofs — the miner consumer half lives in
+// internal/miner's annotation tests): a tracked confirmed round's
+// validator-valid LOSE (no points_won) is admitted with a true verdict
+// exactly once; the duplicate is rejected.
+func TestPredictionResultValidLoseAdmittedOnceWithTrueVerdict(t *testing.T) {
+	pool := newTestPool(&fakePlacer{})
+	s := newNamedTestStreamer("a3-lose-verdict", "chan-a3-lv", 100000)
+	confirmedRound(t, pool, s, "a3-lv-evt", 500)
+
+	rec := &betResultRecorder{}
+	pool.SetBetResultHandler(rec.handler)
+
+	loseMsg := func() *PubSubMessage {
+		return rawResultMsg("a3-lv-evt", map[string]interface{}{"type": "LOSE"})
+	}
+	if out := pool.handlePredictionUser(loseMsg(), s); !out.PredictionResultAccepted {
+		t.Fatal("valid LOSE for a tracked confirmed round must be admitted with a true verdict")
+	}
+	if out := pool.handlePredictionUser(loseMsg(), s); out.PredictionResultAccepted {
+		t.Error("duplicate LOSE must carry a false verdict")
+	}
+	if got := rec.count(); got != 1 {
+		t.Fatalf("valid LOSE emitted %d BetResults, want exactly 1", got)
+	}
+	if got := rec.first(); got.ResultType != "LOSE" || got.Won != 0 || got.Gained != -500 {
+		t.Errorf("LOSE record = %+v, want won=0 gained=-500", got)
+	}
+}
+
 // Pins the BetResultHandler lock contract: the sink runs OUTSIDE p.mu, so a
 // handler that re-enters the pool through both the read-lock path (snapshot)
 // and the write-lock path (SetAutoBetSkip) completes instead of deadlocking.

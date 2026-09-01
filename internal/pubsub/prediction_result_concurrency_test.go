@@ -142,6 +142,82 @@ func TestPredictionResultQueuedContendersAdmitExactlyOne(t *testing.T) {
 	}
 }
 
+// Deterministic split-check/mark falsifier: the first accepted delivery is
+// HELD inside its BetResultHandler (which runs outside p.mu — pinned by
+// TestPredictionResultBetResultHandlerInvokedOutsidePoolLock), and while it
+// is held a second same-event delivery runs to completion. A mutant that
+// marks ResultAccepted only AFTER the unlock/effects would admit the second
+// contender here; the correct implementation marks inside the admission
+// critical section, so the second delivery is rejected immediately — no
+// scheduler luck involved.
+func TestPredictionResultMarkPrecedesEffects(t *testing.T) {
+	pool := newTestPool(&fakePlacer{})
+	s := newNamedTestStreamer("a3-splitmark", "chan-a3-sm", 100000)
+	confirmedRound(t, pool, s, "a3-sm-evt", 500)
+
+	var mu sync.Mutex
+	calls := 0
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pool.SetBetResultHandler(func(BetResult) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			close(entered)
+			<-release
+		}
+	})
+
+	firstVerdict := make(chan MessageOutcome, 1)
+	go func() {
+		firstVerdict <- pool.handlePredictionUser(resultMsg("a3-sm-evt", "WIN", 1000), s)
+	}()
+	// The winner must pass admission and reach its sink; a bounded wait turns
+	// a regression that rejects the valid WIN into a named failure instead of
+	// a package-wide hang.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("winner delivery never reached the BetResultHandler sink")
+	}
+
+	second := pool.handlePredictionUser(resultMsg("a3-sm-evt", "WIN", 1000), s)
+	if second.PredictionResultAccepted {
+		t.Fatal("second delivery admitted while the winner's sink was still running: mark must precede effects")
+	}
+	mu.Lock()
+	interim := calls
+	mu.Unlock()
+	if interim != 1 {
+		t.Fatalf("second delivery reached the sink (%d calls) while the winner was blocked", interim)
+	}
+
+	close(release)
+	select {
+	case out := <-firstVerdict:
+		if !out.PredictionResultAccepted {
+			t.Fatal("winner delivery must be admitted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("winner delivery did not finish after its sink was released")
+	}
+	mu.Lock()
+	final := calls
+	mu.Unlock()
+	if final != 1 {
+		t.Fatalf("sink invoked %d times, want exactly 1", final)
+	}
+	if got := ringBetResults(s.GetUsername()); got != 1 {
+		t.Errorf("ring recorded %d bet_result events, want exactly 1", got)
+	}
+	counter, amount := historyEntry(t, s, "PREDICTION")
+	if counter != 0 || amount != -500 {
+		t.Errorf("PREDICTION history = {%d, %d}, want single-delivery {0, -500}", counter, amount)
+	}
+}
+
 // Deterministic cleanup-wins interleaving: contenders are queued at the pool
 // lock, and the round is removed under that same held lock BEFORE any of
 // them can look it up — zero admissions and zero effects must follow.
@@ -192,10 +268,12 @@ func TestPredictionResultCleanupBeforeAdmissionYieldsZero(t *testing.T) {
 	}
 }
 
-// Stale-authority replacement: after a handler could have observed the old
-// tracked object, the pool's entry is replaced by a NEW confirmed object for
-// the same event_id. Admission must commit against the current authoritative
-// object (re-read under the admission lock), never against the retired one.
+// Authoritative-lookup replacement pin: the prediction-result path performs
+// its ONLY round lookup inside the admission critical section (the stale
+// pre-admission pointer class is structurally eliminated), so when the
+// tracked entry is replaced by a NEW confirmed object for the same event_id,
+// admission must commit against that current object and the retired object
+// must stay untouched.
 func TestPredictionResultReplacementCommitsAgainstCurrentObject(t *testing.T) {
 	pool := newTestPool(&fakePlacer{})
 	s := newNamedTestStreamer("a3-replace", "chan-a3-rp", 100000)

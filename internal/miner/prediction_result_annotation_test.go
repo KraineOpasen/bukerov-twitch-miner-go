@@ -14,15 +14,21 @@ import (
 var predictionAnnotationTestSequence atomic.Uint64
 
 // predictionResultPubSubMsg builds the predictions-user prediction-result
-// message exactly as the pool's parse layer would hand it to the miner.
+// message exactly as the pool's parse layer would hand it to the miner, with
+// a payload VALID under the pool's terminal validator for each type: WIN
+// carries a numeric points_won, LOSE/REFUND carry none (canonical zero).
 func predictionResultPubSubMsg(eventID, resultType string) *pubsub.PubSubMessage {
+	result := map[string]interface{}{"type": resultType}
+	if resultType == "WIN" {
+		result["points_won"] = float64(1000)
+	}
 	return &pubsub.PubSubMessage{
 		Topic: pubsub.NewTopic(pubsub.TopicPredictionsUser, "user"),
 		Type:  "prediction-result",
 		Data: map[string]interface{}{
 			"prediction": map[string]interface{}{
 				"event_id": eventID,
-				"result":   map[string]interface{}{"type": resultType, "points_won": float64(1000)},
+				"result":   result,
 			},
 		},
 	}

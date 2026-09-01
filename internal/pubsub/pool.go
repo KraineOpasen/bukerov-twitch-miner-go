@@ -1167,16 +1167,15 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 
 	eventID, _ := prediction["event_id"].(string)
 
-	p.mu.RLock()
-	event, exists := p.predictions[eventID]
-	p.mu.RUnlock()
-
-	if !exists {
-		return outcome
-	}
-
 	switch msg.Type {
 	case "prediction-made":
+		p.mu.RLock()
+		event, exists := p.predictions[eventID]
+		p.mu.RUnlock()
+
+		if !exists {
+			return outcome
+		}
 		p.mu.Lock()
 		event.BetConfirmed = true
 		amount := event.Bet.Decision.Amount
@@ -1202,16 +1201,18 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			return outcome
 		}
 
-		// Authoritative terminal admission: re-read the tracked round and
-		// check-and-mark under ONE write-lock critical section, so at most
-		// one same-event delivery — sequential, transport-distinct, or
-		// concurrent — is admitted during the lifetime of this tracked
-		// in-process round, and only the admitted delivery invokes the side
-		// effects below. This is admission-level at-most-once, not a
-		// transaction: an individual sink can still fail after admission.
-		// The pre-lock `event` pointer is deliberately not trusted here.
+		// Authoritative terminal admission: the FIRST and ONLY lookup of the
+		// tracked round happens inside this ONE write-lock critical section,
+		// together with the check-and-mark — no pre-admission pointer is
+		// ever observed on this path, so no stale object can authorize or
+		// receive a terminal commit. At most one same-event delivery —
+		// sequential, transport-distinct, or concurrent — is admitted during
+		// the lifetime of this tracked in-process round, and only the
+		// admitted delivery invokes the side effects below. This is
+		// admission-level at-most-once, not a transaction: an individual
+		// sink can still fail after admission.
 		p.mu.Lock()
-		event, exists = p.predictions[eventID]
+		event, exists := p.predictions[eventID]
 		if !exists || !event.BetConfirmed || event.ResultAccepted {
 			p.mu.Unlock()
 			return outcome

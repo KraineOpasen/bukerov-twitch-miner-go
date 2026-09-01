@@ -8,6 +8,17 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
+// roundStillTracked reports whether the pool still owns the round — a
+// rejected payload must never trigger terminal cleanup (control-flow proof:
+// scheduleCleanup sits only in the winner section; this assertion pins the
+// observable half without any 30-second sleep).
+func roundStillTracked(pool *WebSocketPool, eventID string) bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	_, ok := pool.predictions[eventID]
+	return ok
+}
+
 // rawResultMsg builds a predictions-user "prediction-result" message with an
 // arbitrary decoded result object, for exercising the terminal payload
 // validation boundary through the real admission handler.
@@ -78,6 +89,12 @@ func TestPredictionResultMalformedWinPayoutRejectedPerCase(t *testing.T) {
 			counter, amount := historyEntry(t, s, "PREDICTION")
 			if counter != 0 || amount != 0 {
 				t.Fatalf("malformed WIN payout wrote PREDICTION history {%d, %d}", counter, amount)
+			}
+			if got := ringBetResults(s.GetUsername()); got != 0 {
+				t.Fatalf("malformed WIN payout recorded %d ring events, want 0", got)
+			}
+			if !roundStillTracked(pool, eventID) {
+				t.Fatal("malformed WIN payout must not trigger cleanup of the tracked round")
 			}
 
 			// Non-poisoning: the same round still accepts a later valid WIN,
@@ -214,6 +231,18 @@ func TestPredictionResultLosePayoutValidation(t *testing.T) {
 				t.Fatalf("contradictory LOSE payout (%s) was not rejected cleanly: accepted=%v emissions=%d consumed=%v",
 					tc.name, out.PredictionResultAccepted, rec.count(), ep.ResultAccepted)
 			}
+			if ep.Result.Type != "" {
+				t.Fatalf("rejected LOSE payout mutated Result to %q", ep.Result.Type)
+			}
+			if c, a := historyEntry(t, s, "PREDICTION"); c != 0 || a != 0 {
+				t.Fatalf("rejected LOSE payout wrote PREDICTION history {%d, %d}", c, a)
+			}
+			if got := ringBetResults(s.GetUsername()); got != 0 {
+				t.Fatalf("rejected LOSE payout recorded %d ring events, want 0", got)
+			}
+			if !roundStillTracked(pool, eventID) {
+				t.Fatal("rejected LOSE payout must not trigger cleanup of the tracked round")
+			}
 
 			pool.handlePredictionUser(resultMsg(eventID, "LOSE", 0), s)
 			pool.handlePredictionUser(resultMsg(eventID, "LOSE", 0), s)
@@ -295,6 +324,18 @@ func TestPredictionResultRefundPayoutValidation(t *testing.T) {
 			if out.PredictionResultAccepted || rec.count() != 0 || ep.ResultAccepted {
 				t.Fatalf("contradictory REFUND payout (%s) was not rejected cleanly: accepted=%v emissions=%d consumed=%v",
 					tc.name, out.PredictionResultAccepted, rec.count(), ep.ResultAccepted)
+			}
+			if ep.Result.Type != "" {
+				t.Fatalf("rejected REFUND payout mutated Result to %q", ep.Result.Type)
+			}
+			if c, a := historyEntry(t, s, "PREDICTION"); c != 0 || a != 0 {
+				t.Fatalf("rejected REFUND payout wrote PREDICTION history {%d, %d}", c, a)
+			}
+			if got := ringBetResults(s.GetUsername()); got != 0 {
+				t.Fatalf("rejected REFUND payout recorded %d ring events, want 0", got)
+			}
+			if !roundStillTracked(pool, eventID) {
+				t.Fatal("rejected REFUND payout must not trigger cleanup of the tracked round")
 			}
 
 			pool.handlePredictionUser(resultMsg(eventID, "REFUND", 0), s)
