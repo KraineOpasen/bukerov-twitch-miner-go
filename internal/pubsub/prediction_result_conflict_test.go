@@ -70,10 +70,8 @@ func TestPredictionResultConflictPermutations(t *testing.T) {
 							pCounter, pAmount, rCounter, rAmount)
 					}
 				}
-				if second != "REFUND" {
-					if first != "REFUND" && (rCounter != 0 || rAmount != 0) {
-						t.Errorf("REFUND history = {%d, %d}, want untouched", rCounter, rAmount)
-					}
+				if first != "REFUND" && (rCounter != 0 || rAmount != 0) {
+					t.Errorf("REFUND history = {%d, %d}, want untouched", rCounter, rAmount)
 				}
 			})
 		}

@@ -135,6 +135,43 @@ func TestPredictionResultAnnotationAcceptedLoseWrittenOnce(t *testing.T) {
 	}
 }
 
+// OWNER-CONTRACT PIN (CR1): a REFUND is a valid terminal result for pool
+// admission, history/accounting, ROI emission and cleanup, but terminal
+// analytics annotations are WIN/LOSE only. Today this already holds
+// end-to-end — analytics.Service.RecordAnnotation drops any type without a
+// registered color, REFUND included — so this test pins the contract
+// against a regression on either layer (e.g. a REFUND color being added,
+// or the miner gate widening).
+func TestPredictionResultAnnotationAcceptedRefundWritesNone(t *testing.T) {
+	login := fmt.Sprintf("a3-annot-refund-%d", predictionAnnotationTestSequence.Add(1))
+	m, _, _ := newCapabilityMiner(t, login)
+	s := m.streamers.Get(login)
+	if s == nil {
+		t.Fatal("streamer not found")
+	}
+
+	db, err := database.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := analytics.NewService(db, t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.analyticsSvc = svc
+
+	// Validator-valid REFUND (no points_won), admitted by the pool.
+	m.handlePubSubMessage(predictionResultPubSubMsg("a3-evt-refund", "REFUND"), s, pubsub.MessageOutcome{PredictionResultAccepted: true})
+
+	annotations, err := svc.Repository().GetAnnotationRecords(login, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(annotations) != 0 {
+		t.Fatalf("accepted REFUND wrote %d annotations (%+v), want 0", len(annotations), annotations)
+	}
+}
+
 // OWNER-CONTRACT PIN (TRACKED-ONLY): terminal Prediction business telemetry
 // belongs only to a locally tracked confirmed round. A WELL-FORMED WIN or
 // LOSE for a round this miner never tracked (or already cleaned up), and a
