@@ -65,6 +65,14 @@ func manualBetGateError(d eligibility.Decision) error {
 
 type MessageOutcome struct {
 	WatchStreak models.WatchStreakGrantResult
+
+	// PredictionResultAccepted reports that THIS predictions-user
+	// "prediction-result" message was admitted as its round's FIRST valid
+	// terminal result (WIN/LOSE/REFUND). A duplicate, a malformed or
+	// unsupported result, an unconfirmed bet, and an untracked/post-cleanup
+	// round all leave it false — downstream consumers (the miner's terminal
+	// WIN/LOSE annotation) must do nothing unless it is true.
+	PredictionResultAccepted bool
 }
 
 type MessageHandler func(msg *PubSubMessage, streamer *models.Streamer, outcome MessageOutcome)
@@ -778,7 +786,7 @@ func (p *WebSocketPool) handleMessage(msg *PubSubMessage) {
 	case TopicPredictionsChannel:
 		p.handlePredictionChannel(msg, streamer)
 	case TopicPredictionsUser:
-		p.handlePredictionUser(msg, streamer)
+		outcome = p.handlePredictionUser(msg, streamer)
 	case TopicCommunityPointsChannel:
 		p.handleCommunityPointsChannel(msg, streamer)
 	}
@@ -1144,14 +1152,15 @@ func chosenOutcomeOdds(event *models.EventPrediction) float64 {
 	return o.Odds
 }
 
-func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) {
+func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *models.Streamer) MessageOutcome {
+	var outcome MessageOutcome
 	if msg.Data == nil {
-		return
+		return outcome
 	}
 
 	prediction, ok := msg.Data["prediction"].(map[string]interface{})
 	if !ok {
-		return
+		return outcome
 	}
 
 	eventID, _ := prediction["event_id"].(string)
@@ -1161,7 +1170,7 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 	p.mu.RUnlock()
 
 	if !exists {
-		return
+		return outcome
 	}
 
 	switch msg.Type {
@@ -1174,19 +1183,35 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		events.Record(events.TypeBetPlaced, streamer.GetUsername(), fmt.Sprintf("bet %d points on %q", amount, event.Title))
 
 	case "prediction-result":
-		p.mu.RLock()
-		confirmed := event.BetConfirmed
-		p.mu.RUnlock()
-		if !confirmed {
-			return
+		// Validate the terminal envelope BEFORE taking the admission lock: an
+		// empty event identity, a missing/malformed result, or an unsupported
+		// result type is rejected outright and must NOT consume the round —
+		// a later valid terminal result can still win.
+		if eventID == "" {
+			return outcome
 		}
-
 		result, ok := prediction["result"].(map[string]interface{})
 		if !ok {
-			return
+			return outcome
+		}
+		rawType, _ := result["type"].(string)
+		switch models.PredictionResultType(rawType) {
+		case models.ResultWin, models.ResultLose, models.ResultRefund:
+		default:
+			return outcome
 		}
 
+		// Authoritative terminal admission: re-read the tracked round and
+		// check-and-mark under ONE write-lock critical section, so exactly one
+		// same-event delivery — sequential, transport-distinct, or concurrent —
+		// can ever apply the terminal state and own the side effects below.
+		// The pre-lock `event` pointer is deliberately not trusted here.
 		p.mu.Lock()
+		event, exists = p.predictions[eventID]
+		if !exists || !event.BetConfirmed || event.ResultAccepted {
+			p.mu.Unlock()
+			return outcome
+		}
 		// The raw stake must be read before ParseResult, which zeroes `placed`
 		// for a REFUND; ROI analytics still want to know a stake was put up.
 		stake := event.Bet.Decision.Amount
@@ -1196,22 +1221,24 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		if rc := p.control[eventID]; rc != nil {
 			manual = rc.manualBet
 		}
+		title := event.Title
 		placed, won, gained := event.ParseResult(result)
+		event.ResultAccepted = true
 		resultType := event.Result.Type
 		p.mu.Unlock()
-		_ = placed
-		_ = won
+
+		outcome.PredictionResultAccepted = true
 
 		if manual {
 			strategy = "MANUAL"
 		}
 
 		slog.Info("Prediction result",
-			"event", event.Title,
+			"event", title,
 			"result", resultType,
 			"gained", gained,
 		)
-		events.Record(events.TypeBetResult, streamer.GetUsername(), fmt.Sprintf("%s %+d points on %q", resultType, gained, event.Title))
+		events.Record(events.TypeBetResult, streamer.GetUsername(), fmt.Sprintf("%s %+d points on %q", resultType, gained, title))
 
 		streamer.UpdateHistory("PREDICTION", gained)
 
@@ -1239,9 +1266,11 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 			})
 		}
 
-		// The round is over; drop its tracked + transient state promptly.
+		// The round is over; only the accepted winner drops its tracked +
+		// transient state, after the usual grace.
 		p.scheduleCleanup(eventID, terminalCleanupGrace)
 	}
+	return outcome
 }
 
 // placeAutoBet runs the scheduled auto-bet for a single round. It mirrors the

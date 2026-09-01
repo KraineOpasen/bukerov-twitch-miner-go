@@ -1618,6 +1618,13 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 		case "prediction-made":
 			m.analyticsSvc.RecordAnnotation(s, "PREDICTION_MADE", "Prediction placed")
 		case "prediction-result":
+			// Pool admission is the linearization point for terminal results:
+			// a duplicate, malformed, unconfirmed, untracked or post-cleanup
+			// result was not accepted there and must not write a terminal
+			// annotation from the raw payload here.
+			if !outcome.PredictionResultAccepted {
+				return
+			}
 			if data := msg.Data; data != nil {
 				if prediction, ok := data["prediction"].(map[string]interface{}); ok {
 					if result, ok := prediction["result"].(map[string]interface{}); ok {

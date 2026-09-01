@@ -38,7 +38,14 @@ type EventPrediction struct {
 	Result                  PredictionResult
 	BetConfirmed            bool
 	BetPlaced               bool
-	Bet                     *Bet
+	// ResultAccepted marks that the FIRST valid terminal prediction-result
+	// (WIN/LOSE/REFUND) for this round has been admitted. Guarded by the
+	// owning pool's mutex like BetPlaced/BetConfirmed; the atomic
+	// check-and-mark on it is what keeps every terminal side effect
+	// exactly-once per round — a later duplicate or conflicting result must
+	// never repeat them or overwrite Result.
+	ResultAccepted bool
+	Bet            *Bet
 }
 
 func NewEventPrediction(
