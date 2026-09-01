@@ -10,6 +10,22 @@ import (
 func TestValidateTerminalResult(t *testing.T) {
 	negZero := math.Copysign(0, -1)
 
+	// Independent contract oracle: the domain payout maximum is computed here
+	// from the contract's own math — the float64 exact-integer bound (2^53)
+	// intersected with the platform int range — deliberately NEVER from the
+	// production symbol it constrains. If the production bound is ever
+	// wrongly expanded, only the implementation moves and this test fails.
+	expectedMax := math.Min(float64(1<<53), float64(math.MaxInt))
+	// The value immediately above the accepted domain maximum, independently
+	// constructed: the next representable float64 above expectedMax. On a
+	// platform whose int range ends below 2^53 that neighbor is fractional
+	// and would conflate two rejection reasons, so the exactly-representable
+	// integral expectedMax+1 is used there instead.
+	aboveMax := math.Nextafter(expectedMax, math.Inf(1))
+	if aboveMax != math.Trunc(aboveMax) {
+		aboveMax = expectedMax + 1
+	}
+
 	cases := []struct {
 		name   string
 		result map[string]interface{}
@@ -31,8 +47,8 @@ func TestValidateTerminalResult(t *testing.T) {
 		{"WIN +Inf payout", map[string]interface{}{"type": "WIN", "points_won": math.Inf(1)}, false},
 		{"WIN -Inf payout", map[string]interface{}{"type": "WIN", "points_won": math.Inf(-1)}, false},
 		{"WIN fractional payout", map[string]interface{}{"type": "WIN", "points_won": 999.5}, false},
-		{"WIN exact maximum accepted", map[string]interface{}{"type": "WIN", "points_won": maxExactTerminalPayout}, true},
-		{"WIN next representable above maximum", map[string]interface{}{"type": "WIN", "points_won": math.Nextafter(maxExactTerminalPayout, math.Inf(1))}, false},
+		{"WIN exact maximum accepted", map[string]interface{}{"type": "WIN", "points_won": expectedMax}, true},
+		{"WIN immediately above maximum", map[string]interface{}{"type": "WIN", "points_won": aboveMax}, false},
 		{"WIN clearly oversized", map[string]interface{}{"type": "WIN", "points_won": 1e300}, false},
 		{"WIN negative payout", map[string]interface{}{"type": "WIN", "points_won": float64(-1)}, false},
 		{"WIN large negative payout", map[string]interface{}{"type": "WIN", "points_won": float64(-9007199254740992)}, false},

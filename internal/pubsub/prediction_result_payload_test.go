@@ -42,10 +42,19 @@ func malformedWinPayouts() []struct {
 	name   string
 	result map[string]interface{}
 } {
+	// Independently computed contract boundary (the float64 exact-integer
+	// bound intersected with the platform int range — never the production
+	// symbol): the smallest valid-looking value ABOVE the accepted payout
+	// maximum, integral on every platform.
+	aboveMax := math.Nextafter(math.Min(float64(1<<53), float64(math.MaxInt)), math.Inf(1))
+	if aboveMax != math.Trunc(aboveMax) {
+		aboveMax = math.Min(float64(1<<53), float64(math.MaxInt)) + 1
+	}
 	return []struct {
 		name   string
 		result map[string]interface{}
 	}{
+		{"just above accepted maximum", map[string]interface{}{"type": "WIN", "points_won": aboveMax}},
 		{"missing points_won", map[string]interface{}{"type": "WIN"}},
 		{"non-numeric points_won", map[string]interface{}{"type": "WIN", "points_won": "1000"}},
 		{"NaN points_won", map[string]interface{}{"type": "WIN", "points_won": math.NaN()}},
