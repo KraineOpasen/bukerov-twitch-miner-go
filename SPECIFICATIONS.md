@@ -548,7 +548,7 @@ gracefully instead of corrupting local state:
 | `community-moments-channel-v1` | `active` | Claim moment |
 | `predictions-channel-v1` | `event-created` | Schedule prediction bet |
 | `predictions-channel-v1` | `event-updated` | Update prediction outcomes |
-| `predictions-user-v1` | `prediction-result` | Log bet result |
+| `predictions-user-v1` | `prediction-result` | Terminal result for a locally tracked confirmed round (tracked-only, at-most-once admission) |
 | `predictions-user-v1` | `prediction-made` | Confirm bet placed |
 | `community-points-channel-v1` | `community-goal-*` | Update/contribute to goals |
 
@@ -899,9 +899,40 @@ Bets can be filtered based on:
    └── Confirm bet recorded
 
 5. prediction-result (PubSub)
-   ├── Status: WIN/LOSE/REFUND
-   └── Update statistics
+   ├── Validate terminal payload (WIN/LOSE/REFUND)
+   ├── Admit at most once per tracked confirmed round
+   └── Update statistics (admitted delivery only)
 ```
+
+### Terminal Result Admission (tracked-only)
+
+`predictions-user-v1` is an **account-scoped transport** topic: a
+`prediction-result` frame on it is transport evidence, not by itself business
+authority. Terminal Prediction business handling is authoritative only for a
+**locally tracked, bet-confirmed round** owned by `pubsub.WebSocketPool`:
+
+- a structurally valid first terminal result (`WIN`/`LOSE`/`REFUND` with a
+  coherent `points_won` payout) for a tracked confirmed `event_id` is admitted
+  **at most once during the process lifetime of that tracked round**;
+- duplicate, replayed, or conflicting terminal results after first admission
+  are ignored for terminal business side effects (history/compensation, the
+  event ring, the `BetResult` emission, and the WIN/LOSE analytics
+  annotation);
+- malformed or unsupported results are rejected without consuming the
+  admission — a later valid result for the same round can still win (a
+  `WIN` requires a coherent non-negative integral `points_won`; for
+  `LOSE`/`REFUND` an absent or JSON-null `points_won` counts as the
+  canonical zero payout, while a contradictory numeric value is rejected);
+- untracked / never-tracked / post-cleanup results produce **no** terminal
+  WIN/LOSE analytics annotation (owner decision: tracked-only terminal
+  telemetry);
+- `prediction_bets` keeps its separate durable sink-local idempotency
+  (`UNIQUE(event_id)` + `INSERT OR IGNORE`) as defense in depth;
+- none of this establishes durable cross-process exactly-once semantics: the
+  admission gate does not survive a restart, and an individual sink can still
+  fail after admission.
+
+`prediction-made` handling is unchanged by this contract.
 
 ---
 
@@ -2252,7 +2283,9 @@ Resolved prediction bets are persisted to `prediction_bets` and aggregated into 
 read-only ROI report on the Statistics page. The data flow avoids touching the
 betting engine:
 
-1. **Emit** — When a confirmed prediction resolves, `pubsub.WebSocketPool`
+1. **Emit** — When a tracked, confirmed prediction resolves — i.e. the
+   delivery that wins the terminal admission (see *Terminal Result Admission
+   (tracked-only)*) — `pubsub.WebSocketPool`
    (`handlePredictionUser`, the same place that already updates streamer history)
    builds a `pubsub.BetResult` and hands it to the `SetBetResultHandler` sink.
    The raw stake is read from `event.Bet.Decision.Amount` **before**
@@ -2294,8 +2327,8 @@ The report never places, modifies, or auto-disables a bet or strategy.
 |------|-------|-------------|
 | `WATCH_STREAK` | Blue (#45c1ff) | Watch streak earned |
 | `PREDICTION_MADE` | Yellow (#ffe045) | Bet placed |
-| `WIN` | Green (#36b535) | Prediction won |
-| `LOSE` | Red (#ff4545) | Prediction lost |
+| `WIN` | Green (#36b535) | Prediction won (tracked rounds only — see *Terminal Result Admission (tracked-only)*) |
+| `LOSE` | Red (#ff4545) | Prediction lost (tracked rounds only — see *Terminal Result Admission (tracked-only)*) |
 
 ### Web Dashboard HTTP Endpoints
 

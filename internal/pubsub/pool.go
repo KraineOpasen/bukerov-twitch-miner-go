@@ -122,7 +122,9 @@ type BetResult struct {
 	Manual     bool
 }
 
-// BetResultHandler receives one BetResult per resolved, confirmed bet.
+// BetResultHandler receives at most one BetResult per tracked resolved
+// round: it is invoked only by the delivery that won the terminal admission,
+// outside the pool lock. Admission does not guarantee the sink succeeds.
 type BetResultHandler func(BetResult)
 
 // Manual-bet / round-control sentinel errors. Their messages are already
@@ -1184,9 +1186,11 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 
 	case "prediction-result":
 		// Validate the terminal envelope BEFORE taking the admission lock: an
-		// empty event identity, a missing/malformed result, or an unsupported
-		// result type is rejected outright and must NOT consume the round —
-		// a later valid terminal result can still win.
+		// empty event identity, a missing/malformed result, an unsupported
+		// result type, or a malformed/contradictory points_won payout is
+		// rejected outright and must NOT consume the round — a later valid
+		// terminal result can still win. ParseResult below therefore only
+		// ever receives already-validated terminal data.
 		if eventID == "" {
 			return outcome
 		}
@@ -1194,17 +1198,17 @@ func (p *WebSocketPool) handlePredictionUser(msg *PubSubMessage, streamer *model
 		if !ok {
 			return outcome
 		}
-		rawType, _ := result["type"].(string)
-		switch models.PredictionResultType(rawType) {
-		case models.ResultWin, models.ResultLose, models.ResultRefund:
-		default:
+		if !models.ValidateTerminalResult(result) {
 			return outcome
 		}
 
 		// Authoritative terminal admission: re-read the tracked round and
-		// check-and-mark under ONE write-lock critical section, so exactly one
-		// same-event delivery — sequential, transport-distinct, or concurrent —
-		// can ever apply the terminal state and own the side effects below.
+		// check-and-mark under ONE write-lock critical section, so at most
+		// one same-event delivery — sequential, transport-distinct, or
+		// concurrent — is admitted during the lifetime of this tracked
+		// in-process round, and only the admitted delivery invokes the side
+		// effects below. This is admission-level at-most-once, not a
+		// transaction: an individual sink can still fail after admission.
 		// The pre-lock `event` pointer is deliberately not trusted here.
 		p.mu.Lock()
 		event, exists = p.predictions[eventID]
