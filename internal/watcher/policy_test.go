@@ -155,7 +155,7 @@ func TestCampaignPolicyWinnerReachesBrokerWithPersistedDeficit(t *testing.T) {
 		0: now.Add(-time.Hour),
 		3: now.Add(-2 * time.Hour),
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	snap := w.BrokerSnapshot()
 	if !brokerHasChannel(snap, w.streamers[0].GetUsername()) {
@@ -185,7 +185,7 @@ func TestCampaignPolicyEqualClassUsesPersistedDeficit(t *testing.T) {
 	w.SetCampaignSemanticClasses(policyClassesForWatcher(w, decisions))
 
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	snap := w.BrokerSnapshot()
 	for _, idx := range []int{1, 2} {
@@ -239,7 +239,7 @@ func TestCampaignPolicyEqualPrimaryPrefersOneAdditionalCampaign(t *testing.T) {
 	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
 
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	snap := w.BrokerSnapshot()
 	if len(snap.Slots) != 2 {
@@ -290,7 +290,7 @@ func TestCampaignPolicyFullBoundedUtilityTieUsesPersistedDeficit(t *testing.T) {
 	w.SetCampaignSemanticPolicy(byLogin, byCampaign, nil)
 
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	snap := w.BrokerSnapshot()
 	if len(snap.Slots) != 2 {

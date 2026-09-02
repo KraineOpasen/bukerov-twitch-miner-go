@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -116,7 +117,7 @@ func TestDiscoveryDropAssignmentGate_RequiresKnownEligibleUnfinishedIntersection
 			}
 			manager.pool = []*Channel{candidate}
 
-			got := manager.WatchCandidates()
+			got := manager.WatchCandidates(context.Background())
 			if (len(got) == 1) != tc.want {
 				t.Fatalf("proposal count=%d, want proposal=%v", len(got), tc.want)
 			}

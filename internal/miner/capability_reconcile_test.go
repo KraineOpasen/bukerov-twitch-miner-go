@@ -463,8 +463,14 @@ func TestApplySettingsRuntimeConcurrentStorm(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w.Start(ctx)
-	defer w.Stop()
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("watch generation must start: %v", err)
+	}
+	defer func() {
+		if err := w.Stop(); err != nil {
+			t.Errorf("the watch generation did not stop cleanly: %v", err)
+		}
+	}()
 
 	// Build both variants up front (BuildRuntimeSettings reads the live config,
 	// which concurrent applies mutate under the miner lock).

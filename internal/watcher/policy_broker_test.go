@@ -19,7 +19,7 @@ type campaignPolicySwapSource struct {
 }
 
 func (s *campaignPolicySwapSource) SourceName() string { return "policy-swap-test" }
-func (s *campaignPolicySwapSource) WatchCandidates() []Candidate {
+func (s *campaignPolicySwapSource) WatchCandidates(context.Context) []Candidate {
 	s.w.SetCampaignSemanticClasses(s.classes)
 	return nil
 }
@@ -33,7 +33,7 @@ type discoveryPolicySwapSource struct {
 }
 
 func (s *discoveryPolicySwapSource) SourceName() string { return OriginDiscovery }
-func (s *discoveryPolicySwapSource) WatchCandidates() []Candidate {
+func (s *discoveryPolicySwapSource) WatchCandidates(context.Context) []Candidate {
 	s.w.SetDiscoveryCandidatePolicy(s.candidate.Streamer.GetUsername(), s.facts)
 	s.w.SetCampaignSemanticPolicy(s.nextByLogin, s.nextByCampaign, nil)
 	return []Candidate{s.candidate}
@@ -45,7 +45,7 @@ type campaignAssignmentSwapSource struct {
 }
 
 func (s *campaignAssignmentSwapSource) SourceName() string { return "campaign-assignment-swap-test" }
-func (s *campaignAssignmentSwapSource) WatchCandidates() []Candidate {
+func (s *campaignAssignmentSwapSource) WatchCandidates(context.Context) []Candidate {
 	s.streamer.Stream.SetCampaigns(s.next)
 	return nil
 }
@@ -69,7 +69,7 @@ func TestAllCampaignPolicyModesReachBrokerAllocation(t *testing.T) {
 			seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
 			w.rotation.lastWatched = map[int]time.Time{0: now.Add(-time.Hour), 3: now.Add(-2 * time.Hour)}
 
-			w.processWatching()
+			w.processWatching(tickCtx(w))
 			snap := w.BrokerSnapshot()
 			if len(snap.Slots) != 2 {
 				t.Fatalf("mode %s allocated %d slots, want hard cap allocation of 2", mode, len(snap.Slots))
@@ -105,7 +105,7 @@ func TestCampaignPolicyHighPriorityReachesBrokerInEveryMode(t *testing.T) {
 			}
 			w.SetCampaignSemanticClasses(policyClassesForWatcher(w, decisions))
 			seedPolicyBrokerWeights(t, w, now, []float64{0, 200, 1, 2})
-			w.processWatching()
+			w.processWatching(tickCtx(w))
 			if snap := w.BrokerSnapshot(); !brokerHasChannel(snap, w.streamers[1].GetUsername()) {
 				t.Fatalf("mode %s HighPriority winner missing from broker allocation %v", mode, brokerChannels(snap))
 			}
@@ -128,7 +128,7 @@ func TestCampaignPolicyUnknownDeadlineNeverBecomesEarliestAtBroker(t *testing.T)
 	}
 	w.SetCampaignSemanticClasses(policyClassesForWatcher(w, decisions))
 	seedPolicyBrokerWeights(t, w, now, []float64{0, 200, 1, 2})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if snap := w.BrokerSnapshot(); !brokerHasChannel(snap, w.streamers[1].GetUsername()) {
 		t.Fatalf("known ENDING_SOONEST winner missing from broker allocation %v", brokerChannels(snap))
 	}
@@ -150,7 +150,7 @@ func TestCampaignPolicyRestrictedHardPrecedenceAtBroker(t *testing.T) {
 		w.streamers[3].GetUsername(): 9,
 	})
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if snap := w.BrokerSnapshot(); !brokerHasChannel(snap, restricted.GetUsername()) {
 		t.Fatalf("restricted hard-priority channel missing from broker allocation %v", brokerChannels(snap))
 	}
@@ -163,7 +163,7 @@ func TestCampaignPolicyOfflineWinnerCannotTakeBrokerSlot(t *testing.T) {
 	w.SetCampaignSemanticClasses(policyClassesForWatcher(w, decisions))
 	w.streamers[0].SetConfirmedOffline()
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if snap := w.BrokerSnapshot(); brokerHasChannel(snap, w.streamers[0].GetUsername()) {
 		t.Fatalf("offline semantic winner took a broker slot: %v", brokerChannels(snap))
 	}
@@ -207,7 +207,7 @@ func TestCampaignPolicyBrokerPermutationInvariant(t *testing.T) {
 				w.rotation.lastWatched[idx] = now.Add(-2 * time.Hour)
 			}
 		}
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		got := brokerChannels(w.BrokerSnapshot())
 		sort.Strings(got)
 		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
@@ -235,7 +235,7 @@ func TestCampaignPolicyExactTiePermutationInvariant(t *testing.T) {
 			classes[s.GetUsername()] = 0
 		}
 		w.SetCampaignSemanticClasses(classes)
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		got := brokerChannels(w.BrokerSnapshot())
 		sort.Strings(got)
 		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
@@ -266,7 +266,7 @@ func TestCampaignPolicyEqualClassBrokerFairnessSurvivesRestart(t *testing.T) {
 		classes[s.GetUsername()] = 0
 	}
 	w.SetCampaignSemanticClasses(classes)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	snap := w.BrokerSnapshot()
 	for _, login := range []string{"streamerb", "streamerc"} {
 		if !brokerHasChannel(snap, login) {
@@ -299,7 +299,7 @@ func TestCampaignPolicySemanticClassArbitratesConfiguredAndDiscovery(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	snap := w.BrokerSnapshot()
 	if !brokerHasChannel(snap, "disco") || !brokerHasChannel(snap, "streamera") || brokerHasChannel(snap, "streamerb") {
 		t.Fatalf("cross-source semantic allocation = %v, want [disco streamera]", brokerChannels(snap))
@@ -430,7 +430,7 @@ func TestCampaignPolicyBrokerTickUsesOneSemanticSnapshot(t *testing.T) {
 	seedPolicyBrokerWeights(t, w, now, []float64{100, 0, 1, 200})
 	w.AddSource(&campaignPolicySwapSource{w: w, classes: next})
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	snap := w.BrokerSnapshot()
 	if !brokerHasChannel(snap, "streamera") {
 		t.Fatalf("initial semantic winner missing from broker allocation %v", brokerChannels(snap))
@@ -497,7 +497,7 @@ func TestCampaignPolicyBrokerTickUsesOneSnapshotAcrossDiscovery(t *testing.T) {
 	t.Cleanup(cancel)
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	first := w.BrokerSnapshot()
 	if !brokerHasChannel(first, disco.GetUsername()) || brokerHasChannel(first, "streamerb") {
 		t.Fatalf("in-flight snapshot allocation = %v, want discovery class 0 to displace configured class 2", brokerChannels(first))
@@ -508,7 +508,7 @@ func TestCampaignPolicyBrokerTickUsesOneSnapshotAcrossDiscovery(t *testing.T) {
 		}
 	}
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	second := w.BrokerSnapshot()
 	if brokerHasChannel(second, disco.GetUsername()) || !brokerHasChannel(second, "streamera") || !brokerHasChannel(second, "streamerb") {
 		t.Fatalf("next-tick snapshot allocation = %v, want replacement policy to keep both configured channels", brokerChannels(second))
@@ -554,13 +554,13 @@ func TestCampaignPolicyFirstPublicationWaitsForNextBrokerTick(t *testing.T) {
 	t.Cleanup(cancel)
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	first := w.BrokerSnapshot()
 	if brokerHasChannel(first, disco.GetUsername()) {
 		t.Fatalf("first publication entered the broker tick that captured no policy: %v", brokerChannels(first))
 	}
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	second := w.BrokerSnapshot()
 	if !brokerHasChannel(second, disco.GetUsername()) {
 		t.Fatalf("next broker tick did not consume the first complete policy publication: %v", brokerChannels(second))
@@ -595,13 +595,13 @@ func TestCampaignPolicyBrokerTickFreezesConfiguredAssignments(t *testing.T) {
 	t.Cleanup(cancel)
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	first := w.BrokerSnapshot()
 	if reason := brokerReason(first, w.streamers[0].GetUsername()); !strings.Contains(reason, "bounded secondary semantic class 2") {
 		t.Fatalf("in-flight assignment mutation changed captured utility: reason=%q", reason)
 	}
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	second := w.BrokerSnapshot()
 	if reason := brokerReason(second, w.streamers[0].GetUsername()); strings.Contains(reason, "bounded secondary") {
 		t.Fatalf("next tick retained removed secondary campaign: reason=%q", reason)
@@ -642,7 +642,7 @@ func TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation(t *t
 	t.Cleanup(cancel)
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	initial := w.BrokerSnapshot()
 	if len(initial.Slots) != 2 || brokerHasChannel(initial, weak.GetUsername()) {
 		t.Fatalf("weak initial discovery proposal allocation = %v, want two configured slots", brokerChannels(initial))
@@ -650,7 +650,7 @@ func TestCampaignPolicyDiscoveryProposalChangeReachesActualBrokerAllocation(t *t
 
 	source.set([]Candidate{{Streamer: strong, Origin: OriginDiscovery}})
 	w.SetDiscoveryCandidatePolicy(strong.GetUsername(), CandidateCampaignPolicy{Utility: policy.SemanticUtility{SemanticClass: 0}, Ranked: true})
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	final := w.BrokerSnapshot()
 	if len(final.Slots) != 2 {
 		t.Fatalf("proposal change allocated %d slots, want hard cap 2: %v", len(final.Slots), brokerChannels(final))

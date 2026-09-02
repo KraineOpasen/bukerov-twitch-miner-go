@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -19,7 +20,7 @@ func (f *safeCampaigns) Campaigns() []*models.Campaign { return f.campaigns }
 
 type safeClient struct{ streams []twitch.DirectoryStream }
 
-func (f *safeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
+func (f *safeClient) CheckStreamerOnlineContext(_ context.Context, s *models.Streamer) models.StatusTransition {
 	if len(s.Stream.CampaignIDs) == 0 {
 		s.Stream.SetCampaignIDs([]string{"camp-g1"}) // only the watch goroutine calls this
 	}
@@ -88,7 +89,7 @@ func TestRaceSyncVsWatch(t *testing.T) {
 	go func() { // broker loop (prepareCurrent)
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			m.prepareCurrent()
+			m.prepareCurrent(context.Background())
 		}
 	}()
 	wg.Wait()
@@ -120,7 +121,7 @@ func TestConcurrentSyncStateWatch(t *testing.T) {
 	go func() { // broker loop (prepareCurrent)
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			m.prepareCurrent()
+			m.prepareCurrent(context.Background())
 		}
 	}()
 	wg.Wait()
@@ -172,7 +173,7 @@ func TestConcurrentSetGameRanksWatchCandidates(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			_ = m.WatchCandidates()
+			_ = m.WatchCandidates(context.Background())
 		}
 	}()
 	go func() {

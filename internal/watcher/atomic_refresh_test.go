@@ -56,7 +56,7 @@ func TestBrokerExpectedGuardRejectsWithoutIO(t *testing.T) {
 			tc.req.Login = w.streamers[0].Username
 
 			w.RequestSessionRefresh(tc.req)
-			w.executeSessionRefreshes(occupantsFor(w, 0))
+			w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 			if spade, stream := ref.calls(); len(spade) != 0 || len(stream) != 0 {
 				t.Fatalf("a stale-guarded request must do ZERO refresher I/O, got spade=%v stream=%v", spade, stream)
@@ -88,7 +88,7 @@ func TestBrokerExpectedMatchRuns(t *testing.T) {
 		RequestID: "r", Login: login, Mode: RefreshSession,
 		ExpectedBroadcastID: "b1", ExpectedGeneration: 1,
 	})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	if _, stream := ref.calls(); len(stream) != 1 {
 		t.Fatalf("a matching request must run exactly once, got %v", stream)
@@ -118,7 +118,7 @@ func TestBrokerGenerationDriftDuringIOIsStale(t *testing.T) {
 		RequestID: "r", Login: login, Mode: RefreshSession,
 		ExpectedBroadcastID: "b1", ExpectedGeneration: 1,
 	})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	// The network ran (pre-I/O guard passed)...
 	if _, stream := ref.calls(); len(stream) != 1 {
@@ -150,7 +150,7 @@ func TestBrokerOutcomeDistinguishesGenerations(t *testing.T) {
 			RequestID: "r", Login: login, Mode: RefreshSession,
 			ExpectedBroadcastID: "b1", ExpectedGeneration: 99, // mismatch
 		})
-		w.executeSessionRefreshes(occupantsFor(w, 0))
+		w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 		out, _ := w.LastSessionRefresh(login)
 		if !out.Stale {
@@ -172,7 +172,7 @@ func TestBrokerOutcomeDistinguishesGenerations(t *testing.T) {
 			RequestID: "r", Login: login, Mode: RefreshSession,
 			ExpectedBroadcastID: "b1", ExpectedGeneration: 1,
 		})
-		w.executeSessionRefreshes(occupantsFor(w, 0))
+		w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 		out, _ := w.LastSessionRefresh(login)
 		if !out.Success {
@@ -206,7 +206,7 @@ func TestExecuteSessionRefreshesParallelNoRace(t *testing.T) {
 		})
 	}
 
-	w.executeSessionRefreshes(occupantsFor(w, idxs...))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, idxs...))
 
 	// Every request produced exactly one published outcome for its own login.
 	for i := 0; i < n; i++ {

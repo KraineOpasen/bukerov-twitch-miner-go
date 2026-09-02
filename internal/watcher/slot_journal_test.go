@@ -402,7 +402,7 @@ func TestJournalBehaviorParity(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		w.ctx = ctx
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 
 		var logins []string
 		for _, sl := range w.BrokerSnapshot().Slots {
@@ -434,7 +434,7 @@ func TestJournalNoPostShutdownAppend(t *testing.T) {
 	w.ctx = ctx
 
 	done := make(chan struct{})
-	go func() { w.loop(); close(done) }()
+	go func() { w.loop(tickCtx(w)); close(done) }()
 
 	// Let a few ticks run, then stop.
 	time.Sleep(30 * time.Millisecond)

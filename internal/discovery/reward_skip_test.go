@@ -6,6 +6,7 @@ package discovery
 // channel), so it must be neither proposed nor kept.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -26,7 +27,7 @@ func TestDiscoveryExcludesSkippedCampaignExactIdentity(t *testing.T) {
 	candidate := onlineCandidate("candidate", "channel-1", "World of Tanks", "g1", 100)
 	manager.pool = []*Channel{candidate}
 
-	if got := manager.WatchCandidates(); len(got) != 0 {
+	if got := manager.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("skipped-campaign channel must not be proposed, got %d proposals", len(got))
 	}
 	if assigned := candidate.Streamer.Stream.GetCampaigns(); len(assigned) != 0 {
@@ -38,7 +39,7 @@ func TestDiscoveryExcludesSkippedCampaignExactIdentity(t *testing.T) {
 	manager.UpdateRewardSkips(models.NewRewardSkips([]string{
 		models.NormalizeRewardKey("other-game", "Twin Reward"),
 	}))
-	if got := manager.WatchCandidates(); len(got) != 1 {
+	if got := manager.WatchCandidates(context.Background()); len(got) != 1 {
 		t.Fatalf("foreign-game rule must not exclude the channel, got %d proposals", len(got))
 	}
 	if !candidate.Streamer.HasEligibleAssignedDropCampaign() {
@@ -68,7 +69,7 @@ func TestDiscoveryConcurrentRewardSkipsUpdate(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 20; i++ {
-		if got := manager.WatchCandidates(); len(got) != 0 {
+		if got := manager.WatchCandidates(context.Background()); len(got) != 0 {
 			t.Fatalf("the skipped-campaign channel must stay excluded under concurrent updates, got %d proposals", len(got))
 		}
 	}
@@ -87,14 +88,14 @@ func TestDiscoveryRuntimeRuleFlipAbandonsCurrentChannel(t *testing.T) {
 	candidate := onlineCandidate("candidate", "channel-1", "World of Tanks", "g1", 100)
 	manager.pool = []*Channel{candidate}
 
-	if got := manager.WatchCandidates(); len(got) != 1 {
+	if got := manager.WatchCandidates(context.Background()); len(got) != 1 {
 		t.Fatalf("baseline: channel must be proposed before the rule lands, got %d", len(got))
 	}
 
 	manager.UpdateRewardSkips(models.NewRewardSkips([]string{
 		models.NormalizeRewardKey("g1", "Skipped Reward"),
 	}))
-	if got := manager.WatchCandidates(); len(got) != 0 {
+	if got := manager.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("rule active: the channel must be abandoned, got %d proposals", len(got))
 	}
 }

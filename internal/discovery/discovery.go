@@ -84,7 +84,11 @@ type brokerCampaignsProvider interface {
 // to an interface so tests can substitute a fake. Satisfied by
 // *twitch.TwitchClient.
 type twitchAPI interface {
-	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
+	// CheckStreamerOnlineContext is the context-owned form: candidate
+	// re-verification happens inside WatchCandidates, which the slot broker
+	// calls ON its own loop goroutine, so those checks belong to the watch
+	// generation and must stop when it does.
+	CheckStreamerOnlineContext(ctx context.Context, streamer *models.Streamer) models.StatusTransition
 	GetDirectoryStreams(gameName string, limit int) ([]twitch.DirectoryStream, error)
 }
 
@@ -1696,14 +1700,14 @@ func (m *Manager) isProvisionalQuarantined(streamer *models.Streamer, candidate 
 	return ok && provider.IsProvisionalQuarantined(streamer, candidate)
 }
 
-func (m *Manager) runRoutineRefresh(streamer *models.Streamer) bool {
+func (m *Manager) runRoutineRefresh(ctx context.Context, streamer *models.Streamer) bool {
 	if streamer == nil || m.client == nil {
 		return false
 	}
 	m.mu.RLock()
 	status := m.slotStatus
 	m.mu.RUnlock()
-	refresh := func() { m.client.CheckStreamerOnline(streamer) }
+	refresh := func() { m.client.CheckStreamerOnlineContext(ctx, streamer) }
 	if runner, ok := status.(routineRefreshRunner); ok {
 		return runner.RunRoutineRefresh(streamer, refresh)
 	}
@@ -2017,9 +2021,9 @@ func newEphemeralStreamer(login, channelID string) *models.Streamer {
 // goroutine, so — like the old watch loop — it may do its own online
 // verification with no lock held during the network calls; the sync loop and
 // State() coordinate with it through mu exactly as before.
-func (m *Manager) WatchCandidates() []watcher.Candidate {
+func (m *Manager) WatchCandidates(ctx context.Context) []watcher.Candidate {
 	published := m.currentCampaignPolicy()
-	ch := m.prepareCurrentWithPolicy(published)
+	ch := m.prepareCurrentWithPolicy(ctx, published)
 	m.reconcileProvisionalQuarantineScope(published)
 	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
 	var proposals []sourceWatchProposal
@@ -2147,11 +2151,11 @@ func (m *Manager) publishCandidatePolicy(login string, facts watcher.CandidateCa
 // selection, stale re-verification, and auto-switching the old watch loop did,
 // but never reports a watched minute — that is the slot broker's job once it
 // places the channel in a slot. Runs on the broker's loop goroutine.
-func (m *Manager) prepareCurrent() *Channel {
-	return m.prepareCurrentWithPolicy(m.currentCampaignPolicy())
+func (m *Manager) prepareCurrent(ctx context.Context) *Channel {
+	return m.prepareCurrentWithPolicy(ctx, m.currentCampaignPolicy())
 }
 
-func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *Channel {
+func (m *Manager) prepareCurrentWithPolicy(ctx context.Context, published *campaignPolicySnapshot) *Channel {
 	games := m.getGames()
 	if len(games) == 0 {
 		return nil
@@ -2161,7 +2165,7 @@ func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *C
 	m.mu.RUnlock()
 
 	if current == nil {
-		next := m.selectBestWithPolicy(nil, published)
+		next := m.selectBestWithPolicy(ctx, nil, published)
 		if next == nil {
 			m.logPoolEmpty(games)
 			// The pool exists but produced nothing watchable (candidates
@@ -2186,7 +2190,7 @@ func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *C
 	// Mirror the watcher: re-verify a stream whose info has gone stale. This
 	// also refreshes the channel's available campaign IDs and current game.
 	if current.Streamer.Stream.UpdateElapsed() > staleStreamRecheck {
-		m.runRoutineRefresh(current.Streamer)
+		m.runRoutineRefresh(ctx, current.Streamer)
 	}
 
 	if reason, invalid := m.invalidReason(current); invalid {
@@ -2199,7 +2203,7 @@ func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *C
 			m.mu.Unlock()
 		}
 
-		next := m.selectBestWithPolicy(current, published)
+		next := m.selectBestWithPolicy(ctx, current, published)
 		if next == nil {
 			m.mu.Lock()
 			m.current = nil
@@ -2232,7 +2236,7 @@ func (m *Manager) prepareCurrentWithPolicy(published *campaignPolicySnapshot) *C
 	// converge without another rank publication. Equal or weaker ranks retain
 	// current continuity, and the local pool is enough — no directory resync is
 	// required merely to apply Campaign Policy.
-	if next := m.selectStrictlyStrongerWithPolicy(current, published); next != nil {
+	if next := m.selectStrictlyStrongerWithPolicy(ctx, current, published); next != nil {
 		previous := current
 		m.setCurrent(next)
 		game, _, viewers, _ := m.channelFacts(next)
@@ -2324,13 +2328,13 @@ func (m *Manager) invalidReason(ch *Channel) (string, bool) {
 // channel being switched away from. At most maxCandidateChecksPerTick
 // candidates are brought online per call to bound the API burst; the rest wait
 // for the next tick.
-func (m *Manager) selectBest(exclude *Channel) *Channel {
-	return m.selectBestWithPolicy(exclude, m.currentCampaignPolicy())
+func (m *Manager) selectBest(ctx context.Context, exclude *Channel) *Channel {
+	return m.selectBestWithPolicy(ctx, exclude, m.currentCampaignPolicy())
 }
 
-func (m *Manager) selectBestWithPolicy(exclude *Channel, published *campaignPolicySnapshot) *Channel {
+func (m *Manager) selectBestWithPolicy(ctx context.Context, exclude *Channel, published *campaignPolicySnapshot) *Channel {
 	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
-	return m.selectBestOrdered(exclude, order, published)
+	return m.selectBestOrdered(ctx, exclude, order, published)
 }
 
 // selectStrictlyStrongerWithPolicy returns an eligible candidate only when its
@@ -2338,9 +2342,9 @@ func (m *Manager) selectBestWithPolicy(exclude *Channel, published *campaignPoli
 // current's. Equal facts retain current continuity even if configured order,
 // viewer count or subscription preference would select the other channel from
 // scratch.
-func (m *Manager) selectStrictlyStrongerWithPolicy(current *Channel, published *campaignPolicySnapshot) *Channel {
+func (m *Manager) selectStrictlyStrongerWithPolicy(ctx context.Context, current *Channel, published *campaignPolicySnapshot) *Channel {
 	order := newGamePolicyOrder(m.getGames(), policyGameRanks(published))
-	next := m.selectBestOrdered(current, order, published)
+	next := m.selectBestOrdered(ctx, current, order, published)
 	if next == nil || !m.candidateStrictlyStronger(next, current, order, published) {
 		return nil
 	}
@@ -2384,7 +2388,7 @@ func (m *Manager) evaluateCandidate(ch *Channel, published *campaignPolicySnapsh
 	return watcher.CandidateCampaignPolicy{}, provisional, eligible
 }
 
-func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, published *campaignPolicySnapshot) *Channel {
+func (m *Manager) selectBestOrdered(ctx context.Context, exclude *Channel, order gamePolicyOrder, published *campaignPolicySnapshot) *Channel {
 	m.mu.RLock()
 	pool := make([]orderedCandidate, 0, len(m.pool))
 	for _, ch := range m.pool {
@@ -2452,7 +2456,7 @@ func (m *Manager) selectBestOrdered(exclude *Channel, order gamePolicyOrder, pub
 				break
 			}
 			checks++
-			m.runRoutineRefresh(ch.Streamer)
+			m.runRoutineRefresh(ctx, ch.Streamer)
 		}
 
 		// A NEW discovery slot requires CONFIRMED online (fail closed): an

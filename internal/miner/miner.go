@@ -1299,7 +1299,13 @@ func (m *Miner) startMining(ctx context.Context) {
 		m.chatManager.ToggleChat(s)
 	}
 
-	m.watcher.Start(ctx)
+	if err := m.watcher.Start(ctx); err != nil {
+		// A refused start means this instance's previous watch generation has
+		// not quiesced. Mining without the broker is the safe outcome: the
+		// alternative is two generations racing over the same two watch slots
+		// and the same watch-time store.
+		slog.Error("Watch generation not started: the previous one is still live", "error", err)
+	}
 	m.dropsTracker.Start(ctx)
 	m.discovery.Start(ctx)
 	if m.canary != nil {
@@ -1368,8 +1374,10 @@ func (m *Miner) startLoop(ctx context.Context, fn func(context.Context)) {
 // stop() under the process-level shutdown deadline.
 var loopJoinTimeout = 3 * time.Second
 
-// errLoopJoinTimeout is the explicit shutdown error joinLoops returns when
-// the background loops did not finish inside loopJoinTimeout.
+// errLoopJoinTimeout is the explicit shutdown error joinLoops returns when the
+// background loops did not finish inside loopJoinTimeout. teardown also
+// produces it for a DIRTY watcher teardown, wrapping watcher.ErrStopJoinTimeout,
+// so both overruns reach IsJoinTimeoutError through the same sentinel.
 var errLoopJoinTimeout = errors.New("miner: background loop join timed out")
 
 // joinLoops waits — bounded by loopJoinTimeout — for the loops startMining
@@ -1414,9 +1422,13 @@ func (m *Miner) joinLoops() error {
 // without either exporting a new sentinel from a package b3's allowed paths
 // do not include, or matching on the error STRING (rejected: fragile,
 // exactly the kind of raw-sentinel-adjacent over-export this function is
-// meant to avoid). watcher.MinuteWatcher.Stop is not reachable at all here:
-// it returns no error whatsoever, so its own join-timeout log line can never
-// appear in Run's returned error in the first place.
+// meant to avoid).
+//
+// watcher.MinuteWatcher.Stop IS reachable now: it returns
+// watcher.ErrStopJoinTimeout on a dirty teardown, and stop() wraps that in
+// errLoopJoinTimeout before adding it to the drain error — so a watch
+// generation that did not quiesce reaches this classifier exactly like an
+// overrun background-loop join does, instead of being lost to a log line.
 func IsJoinTimeoutError(err error) bool {
 	return errors.Is(err, errLoopJoinTimeout)
 }
@@ -1989,7 +2001,16 @@ func (m *Miner) teardown() error {
 		drainErrs = append(drainErrs, m.wsPool.Close())
 	}
 	if m.watcher != nil {
-		m.watcher.Stop()
+		// A dirty watcher teardown (ErrStopJoinTimeout) means the watch loop is
+		// STILL RUNNING as this shutdown proceeds to close the store and the
+		// database. Folding it into drainErrs is what makes that fact reach the
+		// lifecycle owner: Run wraps the aggregate as "shutdown drain
+		// incomplete", IsJoinTimeoutError classifies it, and
+		// lifecycle.IsDirtyTeardownError then keeps the generation from being
+		// retired as though it were gone.
+		if err := m.watcher.Stop(); err != nil {
+			drainErrs = append(drainErrs, fmt.Errorf("%w: %w", errLoopJoinTimeout, err))
+		}
 	}
 	if m.dropsTracker != nil {
 		m.dropsTracker.Stop()
@@ -2041,6 +2062,24 @@ func (m *Miner) teardown() error {
 	// own loops, chat/pubsub read loops and reconnect drivers, watcher,
 	// drops, notification dispatch) every asynchronous SQLite WRITER this
 	// runtime spawns has been joined or refused by the time this line runs.
+	//
+	// "Joined OR REFUSED" is load-bearing for exactly one writer. When
+	// m.watcher.Stop() above returned watcher.ErrStopJoinTimeout the watch loop
+	// is BY DEFINITION not joined, and it can still attempt the one write it
+	// deliberately does not bind to the generation context — the watch_time
+	// credit (watcher.WatchTimeStore.RecordMinutes). That write goes through
+	// database.DB's closed-barrier, so this close either waits for a credit
+	// already inside it (one statement) or refuses a later one with
+	// database.ErrClosed; it can neither be torn out from under nor silently
+	// swallowed. The same holds for the internal/app path, where the handle is
+	// injected and the composition root closes it after Run returns: the
+	// barrier belongs to the handle, not to whoever closes it.
+	//
+	// This is deliberately NOT "solved" by holding the handle open until the
+	// loop exits (an unbounded shutdown wait on a goroutine with no kill
+	// mechanism) or by handing the close to a reaper (a second lifecycle
+	// owner). The generation stays classified dirty either way: the error
+	// appended above is what keeps it from being retired as though it were gone.
 	// The process-level auto-updater (design v6 §7) is no longer one of
 	// these generation-owned loops — it is joined by the lifecycle
 	// controller itself, independently of any one generation's teardown.

@@ -1,9 +1,11 @@
 package watcher
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,20 @@ var ErrStreamerDeleted = errors.New("watch_time: streamer deleted")
 // hours ago no longer counts against a channel indefinitely, so yesterday's
 // long watch doesn't permanently deprioritize it today.
 const watchTimeWindow = 8 * time.Hour
+
+// watchTimeWriteTimeout ceilings how long EITHER statement below may wait on the
+// shared handle before giving up. Both need it, for different reasons: the
+// credit takes the closed-barrier, so an unbounded credit would hold a
+// shutdown's database Close open indefinitely; the prune does not, but it runs
+// on the watch loop goroutine, so an unbounded prune would pin the loop and
+// cause the very dirty teardown this file exists to survive.
+//
+// It is not a generation deadline: neither statement is cancellable by the
+// watch teardown that is draining it. Sized for the pathological case only — a
+// single-row insert on this handle completes in well under a millisecond — and
+// matching the other bounded teardown joins. Package variable so tests can
+// shrink it, like stopJoinTimeout.
+var watchTimeWriteTimeout = 5 * time.Second
 
 // WatchTimeStore persists accumulated per-streamer watch minutes in the
 // shared SQLite database (under the /database volume), so the fair-rotation
@@ -159,16 +175,82 @@ func (s *WatchTimeStore) RecordMinutes(streamer string, minutes float64, at time
 		return ErrStreamerDeleted
 	}
 
-	if _, err := s.db.Exec(
-		`INSERT INTO watch_time_events (streamer, timestamp, minutes) VALUES (?, ?, ?)`,
-		streamer, at.Unix(), minutes,
-	); err != nil {
+	// The credit goes through database.DB's own closed-barrier (WithTx), not
+	// the embedded *sql.DB, because this is the one watch-generation write that
+	// is deliberately NOT bound to the generation context: the bounded join in
+	// MinuteWatcher.Stop exists so it drains before the owner closes the
+	// database, and when that join expires the owner closes anyway. Through the
+	// barrier the two outcomes of that race are both correct — a credit that
+	// reaches it first makes Close wait for this ONE statement, and a credit
+	// that arrives after is refused with database.ErrClosed, which a caller can
+	// actually recognise. Through the embedded handle neither held: Close ran
+	// straight past a parked credit and killed it, and the refusal was an
+	// unmatchable driver string. The wait this adds is one INSERT long, the same
+	// kind of bounded wait Close already takes behind the WithTx paths in
+	// streamerlifecycle, notifications, analytics, drops, lifecycle and updater;
+	// it is NOT a wait for the watch generation to quiesce. Note those packages
+	// take the barrier on their TRANSACTIONAL paths only — their hot single-
+	// statement writes still use the embedded handle, so they keep the same
+	// shutdown-race exposure this credit no longer has. The credit is the case
+	// that cannot be left to chance: a dirty teardown guarantees the watch loop
+	// is still live precisely while the owner is closing.
+	//
+	// Lock order is s.mu -> database.DB.mu (RLock). Nothing may take them the
+	// other way round: a WithTx body that called Tombstone/Reinstate/
+	// RecordMinutes would deadlock against a pending Close under Go's
+	// writer-preferring RWMutex. Today no such call site exists — the purge
+	// coordinator tombstones strictly BEFORE it opens its transaction, and
+	// RenameStreamerTx/DeleteStreamerTx take no store lock at all.
+	//
+	// The credit is bounded but NOT by the generation context: a teardown must
+	// never cancel it (that is what the bounded join is for), yet it must not be
+	// able to hold the shutdown owner's Close open forever either. Waiting on
+	// the shared handle's single connection is the one step here with no
+	// intrinsic bound, and before this write took the barrier a stuck connection
+	// only cost the credit — Close could still proceed and wake it. Now Close
+	// waits behind it, so the wait needs its own ceiling: without one, one
+	// wedged connection holder would wedge shutdown itself, which is exactly the
+	// "wait forever" this whole teardown design refuses.
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), watchTimeWriteTimeout)
+	defer cancelWrite()
+	if err := s.db.WithTx(writeCtx, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO watch_time_events (streamer, timestamp, minutes) VALUES (?, ?, ?)`,
+			streamer, at.Unix(), minutes,
+		)
+		return err
+	}); err != nil {
 		return err
 	}
 
+	// Opportunistic housekeeping, deliberately outside the credit's transaction
+	// AND outside its verdict. Inside the transaction a prune failure would roll
+	// back credited watch time — strictly worse than the loss being repaired.
+	// Reported as the caller's error it would be worse still: the row is already
+	// committed, so a prune that lost its own race against Close would make a
+	// landed credit look like a failed one.
+	// Outside the credit's verdict is not the same as invisible: a prune that
+	// keeps failing (schema fault, disk error) lets watch_time_events grow
+	// without bound and quietly degrades the rotation-fairness window it feeds,
+	// so it is logged where an operator will actually see it. Losing the
+	// shutdown race is the one expected failure, and it is not noise: it only
+	// happens on a dirty teardown, which is already an exceptional, explicitly
+	// classified event worth a line. (It cannot be singled out with errors.Is
+	// either — this statement runs on the embedded handle, so a closed database
+	// surfaces as database/sql's unexported errDBClosed, not database.ErrClosed.)
+	//
+	// It carries the same ceiling as the credit, for a different reason: the
+	// prune holds no barrier, so it cannot delay a Close — but it runs on the
+	// watch loop goroutine, so an unbounded wait for the single pooled
+	// connection would pin the loop past Stop's join and manufacture a dirty
+	// teardown out of housekeeping.
+	pruneCtx, cancelPrune := context.WithTimeout(context.Background(), watchTimeWriteTimeout)
+	defer cancelPrune()
 	cutoff := at.Add(-2 * watchTimeWindow).Unix()
-	_, err := s.db.Exec(`DELETE FROM watch_time_events WHERE timestamp < ?`, cutoff)
-	return err
+	if _, err := s.db.ExecContext(pruneCtx, `DELETE FROM watch_time_events WHERE timestamp < ?`, cutoff); err != nil {
+		slog.Warn("Failed to prune old watch-time events", "error", err, "cutoff", cutoff)
+	}
+	return nil
 }
 
 // WindowMinutes returns each requested streamer's accumulated watch minutes

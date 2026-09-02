@@ -339,12 +339,17 @@ func isAuthError(statusCode int, result map[string]interface{}) bool {
 	return false
 }
 
+// PostGQL runs one GQL operation under the client's own lifetime. A caller that
+// owns a cancellation scope (today: the watch generation, through the ctx-taking
+// entry points below) reaches postGQLRequest directly with its context; this
+// exported form keeps the background ownership every other subsystem — drops,
+// pubsub, claims, predictions, discovery, chat, web — already has.
 func (c *TwitchClient) PostGQL(operation constants.GQLOperation) (map[string]interface{}, error) {
-	return c.postGQLRequest(operation)
+	return c.postGQLRequest(context.Background(), operation)
 }
 
 func (c *TwitchClient) PostGQLBatch(operations []constants.GQLOperation) ([]map[string]interface{}, error) {
-	return c.postGQLBatchRequest(operations)
+	return c.postGQLBatchRequest(context.Background(), operations)
 }
 
 func isBonusMutationOperation(operation constants.GQLOperation) bool {
@@ -357,8 +362,8 @@ func isBonusMutationOperation(operation constants.GQLOperation) bool {
 // reports whether the outcome was an authoritative auth rejection. The
 // marshaled body is reused verbatim across recovery replays, so a replayed
 // request is byte-identical to the original.
-func (c *TwitchClient) gqlSingleRoundTrip(body []byte, operationName, token string) (result map[string]interface{}, authRejected bool, err error) {
-	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, operationName, token)
+func (c *TwitchClient) gqlSingleRoundTrip(ctx context.Context, body []byte, operationName, token string) (result map[string]interface{}, authRejected bool, err error) {
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(ctx, body, operationName, token)
 	if err != nil {
 		// Includes ErrPersistedQueryNotFound when every candidate client ID
 		// returned PersistedQueryNotFound. Returning it here (instead of an empty
@@ -391,7 +396,7 @@ func (c *TwitchClient) gqlSingleRoundTrip(body []byte, operationName, token stri
 	return result, isAuthError(statusCode, result), nil
 }
 
-func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[string]interface{}, error) {
+func (c *TwitchClient) postGQLRequest(ctx context.Context, operation constants.GQLOperation) (map[string]interface{}, error) {
 	if isBonusMutationOperation(operation) {
 		return nil, ErrDirectBonusMutation
 	}
@@ -404,7 +409,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 	// Generation is what a recovery is keyed on, so a rejection of an
 	// already-rotated token never triggers a second refresh.
 	snap := c.auth.Snapshot()
-	result, authRejected, err := c.gqlSingleRoundTrip(body, operation.OperationName, snap.AccessToken)
+	result, authRejected, err := c.gqlSingleRoundTrip(ctx, body, operation.OperationName, snap.AccessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +418,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 		// Serialized recovery + exactly ONE replay of the identical body. A
 		// replay that is rejected again surfaces ErrUnauthorized with no
 		// further recovery and no third request.
-		newSnap, rerr := c.recoverAuth(snap.Generation)
+		newSnap, rerr := c.recoverAuth(ctx, snap.Generation)
 		if rerr != nil {
 			// Only a DEFINITIVE recovery failure escalates to the operator
 			// reauth path; a transient endpoint failure or a bounded-wait
@@ -424,7 +429,7 @@ func (c *TwitchClient) postGQLRequest(operation constants.GQLOperation) (map[str
 			}
 			return nil, fmt.Errorf("%w: operation %s", ErrUnauthorized, operation.OperationName)
 		}
-		result, authRejected, err = c.gqlSingleRoundTrip(body, operation.OperationName, newSnap.AccessToken)
+		result, authRejected, err = c.gqlSingleRoundTrip(ctx, body, operation.OperationName, newSnap.AccessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -467,7 +472,7 @@ func (c *TwitchClient) postBonusMutation(operation constants.GQLOperation) (map[
 		return nil, delivery, err
 	}
 	if authRejected {
-		newSnap, recoveryErr := c.recoverAuth(snap.Generation)
+		newSnap, recoveryErr := c.recoverAuth(context.Background(), snap.Generation)
 		if recoveryErr != nil {
 			if !isTransientRecoveryFailure(recoveryErr) {
 				c.handleUnauthorized()
@@ -713,20 +718,25 @@ func isTransientRecoveryFailure(err error) bool {
 // recoverAuth funnels an authoritative rejection of the given credential
 // generation into the auth layer's single-flight recovery and returns the
 // rotated snapshot to replay with.
-func (c *TwitchClient) recoverAuth(rejectedGeneration uint64) (auth.Snapshot, error) {
+// The ctx bounds THIS caller's wait only. The shared single-flight recovery
+// itself runs on the auth layer's own lifecycle context (internal/auth.Recover:
+// "the flight runs on the LIFECYCLE context, detached from every caller's
+// context"), so a cancelled watch generation stops waiting without aborting a
+// token refresh or device flow the rest of the process depends on.
+func (c *TwitchClient) recoverAuth(ctx context.Context, rejectedGeneration uint64) (auth.Snapshot, error) {
 	if c.recoverFn != nil {
 		return c.recoverFn(rejectedGeneration)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), authRecoveryWait)
+	waitCtx, cancel := context.WithTimeout(ctx, authRecoveryWait)
 	defer cancel()
-	return c.auth.Recover(ctx, rejectedGeneration)
+	return c.auth.Recover(waitCtx, rejectedGeneration)
 }
 
 // gqlBatchRoundTrip is the batch twin of gqlSingleRoundTrip: one complete
 // batch GQL cycle signed with the given token, reporting an authoritative auth
 // rejection (HTTP 401 or a documented Unauthorized body on any entry).
-func (c *TwitchClient) gqlBatchRoundTrip(body []byte, label, token string) (result []map[string]interface{}, authRejected bool, err error) {
-	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(body, label, token)
+func (c *TwitchClient) gqlBatchRoundTrip(ctx context.Context, body []byte, label, token string) (result []map[string]interface{}, authRejected bool, err error) {
+	respBody, statusCode, err := c.doGQLRequestWithClientIDFallback(ctx, body, label, token)
 	if err != nil {
 		return nil, false, err
 	}
@@ -758,7 +768,7 @@ func (c *TwitchClient) gqlBatchRoundTrip(body []byte, label, token string) (resu
 	return result, false, nil
 }
 
-func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) ([]map[string]interface{}, error) {
+func (c *TwitchClient) postGQLBatchRequest(ctx context.Context, operations []constants.GQLOperation) ([]map[string]interface{}, error) {
 	for _, operation := range operations {
 		if isBonusMutationOperation(operation) {
 			return nil, ErrDirectBonusMutation
@@ -778,20 +788,20 @@ func (c *TwitchClient) postGQLBatchRequest(operations []constants.GQLOperation) 
 	// Same snapshot/recover/replay-once contract as postGQLRequest, applied to
 	// the whole batch (the batch is one HTTP request and is replayed as one).
 	snap := c.auth.Snapshot()
-	result, authRejected, err := c.gqlBatchRoundTrip(body, label, snap.AccessToken)
+	result, authRejected, err := c.gqlBatchRoundTrip(ctx, body, label, snap.AccessToken)
 	if err != nil {
 		return nil, err
 	}
 
 	if authRejected {
-		newSnap, rerr := c.recoverAuth(snap.Generation)
+		newSnap, rerr := c.recoverAuth(ctx, snap.Generation)
 		if rerr != nil {
 			if !isTransientRecoveryFailure(rerr) {
 				c.handleUnauthorized()
 			}
 			return nil, fmt.Errorf("%w: batch %s", ErrUnauthorized, label)
 		}
-		result, authRejected, err = c.gqlBatchRoundTrip(body, label, newSnap.AccessToken)
+		result, authRejected, err = c.gqlBatchRoundTrip(ctx, body, label, newSnap.AccessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -901,7 +911,7 @@ func (c *TwitchClient) rememberWorkingClientID(operation, clientID string, viaFa
 // because the hash itself is stale — one ERROR is logged and
 // ErrPersistedQueryNotFound is returned so the caller keeps its last-known state
 // instead of parsing an error body as "no data".
-func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLabel, token string) ([]byte, int, error) {
+func (c *TwitchClient) doGQLRequestWithClientIDFallback(ctx context.Context, body []byte, operationLabel, token string) ([]byte, int, error) {
 	c.connAcct.markAttempt(time.Now())
 	candidates := c.candidateClientIDs(operationLabel)
 
@@ -912,7 +922,7 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 	)
 
 	for i, clientID := range candidates {
-		respBody, statusCode, err = c.doGQLRequestWithRetry(body, operationLabel, clientID, token)
+		respBody, statusCode, err = c.doGQLRequestWithRetry(ctx, body, operationLabel, clientID, token)
 		if err != nil {
 			return respBody, statusCode, err
 		}
@@ -945,11 +955,11 @@ func (c *TwitchClient) doGQLRequestWithClientIDFallback(body []byte, operationLa
 // the computed backoff (see gql.RetryWait). Other HTTP errors (4xx auth/logic
 // errors) are returned immediately since retrying them would just reproduce the
 // same failure. A successful response never incurs a wait.
-func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
+func (c *TwitchClient) doGQLRequestWithRetry(ctx context.Context, body []byte, operationLabel, clientID, token string) ([]byte, int, error) {
 	var lastErr error
 
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
-		req, err := http.NewRequest("POST", c.gqlURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", c.gqlURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -982,7 +992,13 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 			"status", statusCode,
 			"error", lastErr,
 		)
-		time.Sleep(wait)
+		// The backoff belongs to the request, so it belongs to whoever owns the
+		// request. gql.RetryWait still computes the same jittered delay; only
+		// the waiting is interruptible now, so a cancelled owner stops instead
+		// of sleeping out the rest of the schedule.
+		if werr := waitForRetry(ctx, wait); werr != nil {
+			return nil, statusCode, werr
+		}
 	}
 
 	c.gqlFailures.mark(time.Now())
@@ -993,6 +1009,22 @@ func (c *TwitchClient) doGQLRequestWithRetry(body []byte, operationLabel, client
 	)
 
 	return nil, 0, fmt.Errorf("gql request failed after %d attempts: %w", gqlMaxRetries+1, lastErr)
+}
+
+// waitForRetry pauses for the computed backoff, interruptible by ctx. It
+// returns ctx.Err() when the owner is cancelled mid-wait, so an abandoned
+// request stops retrying instead of finishing its schedule on behalf of a dead
+// generation. A background-owned caller (every non-watch subsystem) never
+// observes the Done branch.
+func waitForRetry(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // doGQLOnce performs a single HTTP round trip. It returns the response body on
@@ -1094,7 +1126,7 @@ func (c *TwitchClient) GetChannelID(username string) (string, error) {
 		"login": strings.ToLower(username),
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return "", err
 	}
@@ -1154,7 +1186,7 @@ func (c *TwitchClient) GetFollowedChannels() (channels []FollowedChannel, trunca
 		if cursor != "" {
 			vars["cursor"] = cursor
 		}
-		return c.postGQLRequest(constants.ChannelFollows.WithVariables(vars))
+		return c.postGQLRequest(context.Background(), constants.ChannelFollows.WithVariables(vars))
 	})
 }
 
@@ -1240,12 +1272,12 @@ func hasNextPage(follows map[string]interface{}) bool {
 	return next
 }
 
-func (c *TwitchClient) GetStreamInfo(streamer *models.Streamer) (map[string]interface{}, error) {
+func (c *TwitchClient) GetStreamInfo(ctx context.Context, streamer *models.Streamer) (map[string]interface{}, error) {
 	op := constants.VideoPlayerStreamInfoOverlayChannel.WithVariables(map[string]interface{}{
 		"channel": streamer.GetUsername(),
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(ctx, op)
 	if err != nil {
 		// Transport / auth (ErrUnauthorized) / PersistedQueryNotFound / empty body
 		// / invalid JSON — all inconclusive, never offline. Propagated verbatim and
@@ -1321,7 +1353,14 @@ type playbackRefreshIntent struct {
 // stale (superseded) apply is surfaced as ErrPlaybackSessionStale — never a silent
 // nil-success. A gated no-op returns nil and touches nothing.
 func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
-	_, err := c.doRefreshPlaybackSession(context.Background(), streamer, playbackRefreshIntent{})
+	return c.updateStream(context.Background(), streamer)
+}
+
+// updateStream is UpdateStream under an explicit owner. UpdateStream keeps its
+// context-free signature because its production caller (internal/pubsub) owns a
+// different lifecycle; only the watch-owned online check reaches this form.
+func (c *TwitchClient) updateStream(ctx context.Context, streamer *models.Streamer) error {
+	_, err := c.doRefreshPlaybackSession(ctx, streamer, playbackRefreshIntent{})
 	return err
 }
 
@@ -1331,8 +1370,8 @@ func (c *TwitchClient) UpdateStream(streamer *models.Streamer) error {
 // publishes the whole session in one atomic apply. Online is confirmable only when
 // this returns a valid stream object (err == nil, not stale). Returns the redacted
 // result plus the underlying error for the tri-state classifier.
-func (c *TwitchClient) ConfirmOnline(streamer *models.Streamer) (SessionRefreshResult, error) {
-	return c.doRefreshPlaybackSession(context.Background(), streamer, playbackRefreshIntent{
+func (c *TwitchClient) ConfirmOnline(ctx context.Context, streamer *models.Streamer) (SessionRefreshResult, error) {
+	return c.doRefreshPlaybackSession(ctx, streamer, playbackRefreshIntent{
 		fetchSpade:      true,
 		forceStreamInfo: true,
 	})
@@ -1344,8 +1383,8 @@ func (c *TwitchClient) ConfirmOnline(streamer *models.Streamer) (SessionRefreshR
 // broadcast/generation. It never returns a raw error (the broker does not classify
 // liveness); a network failure or a stale/superseded apply is reflected in the
 // redacted result.
-func (c *TwitchClient) RefreshPlaybackSession(streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) SessionRefreshResult {
-	res, err := c.doRefreshPlaybackSession(context.Background(), streamer, playbackRefreshIntent{
+func (c *TwitchClient) RefreshPlaybackSession(ctx context.Context, streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) SessionRefreshResult {
+	res, err := c.doRefreshPlaybackSession(ctx, streamer, playbackRefreshIntent{
 		fetchSpade:      fetchSpade,
 		forceStreamInfo: true,
 		expected:        expected,
@@ -1388,13 +1427,13 @@ type pendingCampaignAvailability struct {
 // contract: a resolved lookup (including a legitimately empty list) is Known; a
 // failed lookup or an unresolved game is Unknown (keeping previous IDs as
 // last-known).
-func (c *TwitchClient) observeCampaignAvailability(streamer *models.Streamer, game *models.Game, obsID uint64) pendingCampaignAvailability {
+func (c *TwitchClient) observeCampaignAvailability(ctx context.Context, streamer *models.Streamer, game *models.Game, obsID uint64) pendingCampaignAvailability {
 	pend := pendingCampaignAvailability{
 		obsID: obsID,
 		at:    time.Now(),
 	}
 	if game != nil && game.Name != "" && game.ID != "" {
-		if campaignIDs, err := c.GetCampaignIDsFromStreamer(streamer); err != nil {
+		if campaignIDs, err := c.GetCampaignIDsFromStreamer(ctx, streamer); err != nil {
 			slog.Warn("Failed to fetch channel drop campaign IDs; availability unknown (keeping previous list as last-known)",
 				"streamer", streamer.GetUsername(), "error", err)
 		} else {
@@ -1417,6 +1456,15 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 	res := SessionRefreshResult{
 		CurrentGeneration:  streamer.Stream.SessionGeneration(),
 		CurrentBroadcastID: streamer.Stream.GetBroadcastID(),
+	}
+
+	// Cancellation gate BEFORE the no-op gate. A gated no-op returns (res, nil),
+	// and classifyCheck maps a nil error to StatusOnline — so a cancelled
+	// generation reaching the no-op gate would authoritatively confirm ONLINE
+	// with zero network evidence. A cancelled refresh therefore always surfaces
+	// ctx.Err(), which classifyCheck maps to UNKNOWN/ReasonTimeout.
+	if err := ctx.Err(); err != nil {
+		return res, err
 	}
 
 	fetchStreamInfo := intent.forceStreamInfo || streamer.Stream.UpdateRequired()
@@ -1469,7 +1517,7 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 		haveAvail bool
 	)
 	if fetchStreamInfo {
-		streamInfo, err := c.GetStreamInfo(streamer)
+		streamInfo, err := c.GetStreamInfo(ctx, streamer)
 		if err != nil {
 			// Offline (ErrStreamerIsOffline) or inconclusive — no apply either way.
 			res.Stage = "stream_info"
@@ -1528,7 +1576,7 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 		// published yet: a stale/rejected playback apply must not publish
 		// availability derived from a superseded refresh.
 		if claimDrops {
-			avail = c.observeCampaignAvailability(streamer, game, availObs)
+			avail = c.observeCampaignAvailability(ctx, streamer, game, availObs)
 			haveAvail = true
 		}
 
@@ -1583,6 +1631,21 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 // before any I/O), so a slow result can never overwrite a newer authoritative
 // PubSub stream-up/stream-down that landed while this check was in flight.
 func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition {
+	return c.CheckStreamerOnlineContext(context.Background(), streamer)
+}
+
+// CheckStreamerOnlineContext is CheckStreamerOnline under an explicit
+// cancellation owner. CheckStreamerOnline keeps its context-free signature
+// because four other subsystems (pubsub, the miner's stream-check loop, the
+// streamer manager and the health canary) own their own lifecycles and must not
+// be cancelled by a watch-generation teardown. This form is used only by work
+// the watch generation owns: the broker's two call sites, and directory
+// discovery's candidate re-verification, which runs on the broker's own loop
+// goroutine. A cancelled check stays inconclusive:
+// classifyCheck maps context.Canceled/DeadlineExceeded to UNKNOWN, never to an
+// authoritative OFFLINE (and, via the gate in doRefreshPlaybackSession, never
+// to a no-op-nil ONLINE either).
+func (c *TwitchClient) CheckStreamerOnlineContext(ctx context.Context, streamer *models.Streamer) models.StatusTransition {
 	// Rate-limit re-checks of a CONFIRMED-offline streamer (don't hammer a channel
 	// just authoritatively seen offline). Unknown and online streamers are checked
 	// on their normal cadence so an unknown resolves promptly — unlike the old gate
@@ -1599,7 +1662,7 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 		// as ONE atomic session refresh (spade URL + FRESH stream info + payload
 		// published together). ConfirmOnline always fetches stream info, so a fresh
 		// lastUpdate can never let online be confirmed on stale cached data.
-		res, err := c.ConfirmOnline(streamer)
+		res, err := c.ConfirmOnline(ctx, streamer)
 		switch {
 		case res.Stage == "spade":
 			// A Spade fetch failure is inconclusive (UNKNOWN), NOT evidence the
@@ -1637,7 +1700,7 @@ func (c *TwitchClient) CheckStreamerOnline(streamer *models.Streamer) models.Sta
 	// last-known stream data are preserved; only an authoritative "stream": null
 	// settles offline (which arrives here as ErrStreamerIsOffline) or a PubSub
 	// stream-down does it directly.
-	next, reason := classifyCheck(c.UpdateStream(streamer))
+	next, reason := classifyCheck(c.updateStream(ctx, streamer))
 	tr := streamer.ApplyCheckResultIfCurrent(obsSeq, next, reason)
 	switch {
 	case tr.OfflineConfirmed:
@@ -1743,7 +1806,7 @@ func (c *TwitchClient) observeChannelPointsContext(streamer *models.Streamer) (c
 		"channelLogin": streamer.GetUsername(),
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		apply := applyUnknown(capabilityFromError(err))
 		return channelPointsObservation{obsID: obsID, apply: apply}, err
@@ -2031,7 +2094,7 @@ func (c *TwitchClient) ClaimMoment(streamer *models.Streamer, momentID string) e
 		},
 	})
 
-	_, err := c.postGQLRequest(op)
+	_, err := c.postGQLRequest(context.Background(), op)
 	return err
 }
 
@@ -2048,7 +2111,7 @@ func (c *TwitchClient) JoinRaid(streamer *models.Streamer, raid *models.Raid) er
 		},
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return err
 	}
@@ -2090,7 +2153,7 @@ func (c *TwitchClient) PlacePredictionBet(event *models.EventPrediction, outcome
 		},
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return err
 	}
@@ -2109,12 +2172,12 @@ func (c *TwitchClient) PlacePredictionBet(event *models.EventPrediction, outcome
 	return nil
 }
 
-func (c *TwitchClient) GetCampaignIDsFromStreamer(streamer *models.Streamer) ([]string, error) {
+func (c *TwitchClient) GetCampaignIDsFromStreamer(ctx context.Context, streamer *models.Streamer) ([]string, error) {
 	op := constants.DropsHighlightServiceAvailableDrops.WithVariables(map[string]interface{}{
 		"channelID": streamer.ChannelID,
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(ctx, op)
 	if err != nil {
 		return nil, err
 	}
@@ -2209,7 +2272,7 @@ func (c *TwitchClient) GetDropCampaignDetails(campaignID string) (map[string]int
 		"channelLogin": c.auth.GetUserID(),
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return nil, err
 	}
@@ -2232,7 +2295,7 @@ func (c *TwitchClient) GetDropCampaignDetails(campaignID string) (map[string]int
 	return campaign, nil
 }
 
-func (c *TwitchClient) GetPlaybackAccessToken(username string) (string, string, error) {
+func (c *TwitchClient) GetPlaybackAccessToken(ctx context.Context, username string) (string, string, error) {
 	// platform:"web" is required by the current PlaybackAccessToken persisted
 	// query (the hash and this variable set are kept in lockstep — see
 	// constants.PlaybackAccessToken). Omitting it against the new hash yields an
@@ -2246,7 +2309,7 @@ func (c *TwitchClient) GetPlaybackAccessToken(username string) (string, string, 
 		"platform":   "web",
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(ctx, op)
 	if err != nil {
 		return "", "", err
 	}
@@ -2294,7 +2357,7 @@ func (c *TwitchClient) ClaimDrop(drop *models.Drop) (ClaimStatus, error) {
 		},
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return ClaimStatus(""), err
 	}
@@ -2312,7 +2375,7 @@ func (c *TwitchClient) ContributeToCommunityGoal(streamer *models.Streamer, goal
 		},
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return err
 	}
@@ -2347,7 +2410,7 @@ func (c *TwitchClient) GetCustomRewards(streamer *models.Streamer) ([]*models.Cu
 		"channelLogin": streamer.GetUsername(),
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return nil, err
 	}
@@ -2438,7 +2501,7 @@ func (c *TwitchClient) RedeemCustomReward(streamer *models.Streamer, reward *mod
 		"input": input,
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return err
 	}

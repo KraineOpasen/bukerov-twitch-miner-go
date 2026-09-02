@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ type fakeClient struct {
 	err     error
 }
 
-func (f *fakeClient) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
+func (f *fakeClient) CheckStreamerOnlineContext(_ context.Context, s *models.Streamer) models.StatusTransition {
 	f.checked = append(f.checked, s.Username)
 	if f.online[s.Username] {
 		return s.SetConfirmedOnline()
@@ -187,7 +188,7 @@ func TestSelectBestPrefersPoolOrder(t *testing.T) {
 	second := onlineCandidate("small_streamer", "2", "World of Tanks", "g1", 100)
 	m.pool = []*Channel{top, second}
 
-	got := m.selectBest(nil)
+	got := m.selectBest(context.Background(), nil)
 	if got != top {
 		t.Fatalf("expected the first (most-viewed) candidate, got %+v", got)
 	}
@@ -213,7 +214,7 @@ func TestSelectBestSkipsIneligibleCandidates(t *testing.T) {
 
 	m.pool = []*Channel{offlineMarked, wrongGame, noCampaigns, inactiveGame, good}
 
-	got := m.selectBest(nil)
+	got := m.selectBest(context.Background(), nil)
 	if got != good {
 		var login string
 		if got != nil {
@@ -233,7 +234,7 @@ func TestSelectBestVerifiesOfflineCandidatesAndMarksThem(t *testing.T) {
 
 	m.pool = []*Channel{stale}
 
-	if got := m.selectBest(nil); got != nil {
+	if got := m.selectBest(context.Background(), nil); got != nil {
 		t.Fatalf("expected no candidate when verification finds it offline, got %+v", got)
 	}
 	if len(client.checked) != 1 || client.checked[0] != "stale_channel" {
@@ -255,7 +256,7 @@ func TestSelectBestBoundsChecksPerTick(t *testing.T) {
 		m.pool = append(m.pool, ch)
 	}
 
-	if got := m.selectBest(nil); got != nil {
+	if got := m.selectBest(context.Background(), nil); got != nil {
 		t.Fatalf("expected nil when all candidates offline, got %+v", got)
 	}
 	if len(client.checked) != maxCandidateChecksPerTick {
@@ -286,7 +287,7 @@ func TestSelectBestRequiresChannelLevelActiveCampaign(t *testing.T) {
 
 	m.pool = []*Channel{topButClaimed, smallButFresh}
 
-	if got := m.selectBest(nil); got != smallButFresh {
+	if got := m.selectBest(context.Background(), nil); got != smallButFresh {
 		var login string
 		if got != nil {
 			login = got.Streamer.Username
@@ -374,7 +375,7 @@ func TestSelectBestTrackedOnlySkipsWatchedAndNonTracked(t *testing.T) {
 	idle := onlineCandidate("idle_tracked", "3", "World of Tanks", "g1", 100)
 	m.pool = []*Channel{watched, notTracked, idle}
 
-	got := m.selectBest(nil)
+	got := m.selectBest(context.Background(), nil)
 	if got != idle {
 		var login string
 		if got != nil {
@@ -431,7 +432,7 @@ func TestPrepareCurrentAbandonsChannelAddedToStreamerList(t *testing.T) {
 	// The user adds the proposed discovered channel to the streamer list.
 	m.tracked = &fakeTracked{names: []string{"promoted_channel"}}
 
-	got := m.prepareCurrent()
+	got := m.prepareCurrent(context.Background())
 
 	if got != backup || m.current != backup {
 		t.Fatalf("expected switch to backup_channel after promotion to the streamer list, got %+v", m.current)
@@ -462,13 +463,13 @@ func TestDiscoveryHonorsAvoidList(t *testing.T) {
 
 	backup := onlineCandidate("backup_chan", "2", "World of Tanks", "g1", 100)
 	m.pool = []*Channel{avoided, backup}
-	if got := m.selectBest(nil); got != backup {
+	if got := m.selectBest(context.Background(), nil); got != backup {
 		t.Fatalf("expected selectBest to skip the avoided channel and pick backup, got %+v", got)
 	}
 
 	// Exclusion lifted: the higher-viewer channel becomes selectable again.
 	avoid.avoided = map[string]bool{}
-	if got := m.selectBest(nil); got != avoided {
+	if got := m.selectBest(context.Background(), nil); got != avoided {
 		t.Fatalf("expected the channel to be selectable after the exclusion lifts, got %+v", got)
 	}
 }
@@ -515,7 +516,7 @@ func TestPrepareCurrentSelectsBest(t *testing.T) {
 	best := onlineCandidate("best_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{best}
 
-	got := m.prepareCurrent()
+	got := m.prepareCurrent(context.Background())
 
 	if got != best || m.current != best {
 		t.Fatalf("expected best_channel selected as current, got %+v", m.current)
@@ -531,7 +532,7 @@ func TestWatchCandidatesProposesCurrent(t *testing.T) {
 	best := onlineCandidate("best_channel", "1", "World of Tanks", "g1", 9000)
 	m.pool = []*Channel{best}
 
-	cands := m.WatchCandidates()
+	cands := m.WatchCandidates(context.Background())
 	if len(cands) != 1 {
 		t.Fatalf("expected exactly one proposed candidate, got %d", len(cands))
 	}
@@ -547,7 +548,7 @@ func TestWatchCandidatesEmptyWhenNothingWatchable(t *testing.T) {
 	// No campaigns => nothing to farm => no candidate proposed, and no send is
 	// ever performed by discovery itself.
 	m := newTestManager(nil, &fakeCampaigns{}, &fakeClient{})
-	if cands := m.WatchCandidates(); cands != nil {
+	if cands := m.WatchCandidates(context.Background()); cands != nil {
 		t.Fatalf("expected no candidate when disabled, got %v", cands)
 	}
 }
@@ -563,7 +564,7 @@ func TestPrepareCurrentSwitchesWhenCurrentGoesOffline(t *testing.T) {
 
 	dying.Streamer.SetConfirmedOffline()
 
-	got := m.prepareCurrent()
+	got := m.prepareCurrent(context.Background())
 
 	if got != backup || m.current != backup {
 		t.Fatalf("expected switch to backup_channel, got %+v", m.current)
@@ -579,7 +580,7 @@ func TestPrepareCurrentClearsSlotWhenPoolExhausted(t *testing.T) {
 	m.current = only
 	only.Streamer.SetConfirmedOffline()
 
-	if got := m.prepareCurrent(); got != nil || m.current != nil {
+	if got := m.prepareCurrent(context.Background()); got != nil || m.current != nil {
 		t.Fatalf("expected the slot to empty out, got %+v", m.current)
 	}
 	select {
@@ -602,7 +603,7 @@ func TestPrepareCurrentExhaustedPoolRequestsEarlyResync(t *testing.T) {
 	m.pool = []*Channel{dead}
 	// lastSync is zero => far past the retry cadence, so the resync fires.
 
-	if got := m.prepareCurrent(); got != nil || m.current != nil {
+	if got := m.prepareCurrent(context.Background()); got != nil || m.current != nil {
 		t.Fatalf("expected no selection from a dead pool, got %+v", m.current)
 	}
 	select {
@@ -614,7 +615,7 @@ func TestPrepareCurrentExhaustedPoolRequestsEarlyResync(t *testing.T) {
 	// With a fresh sync the same situation must NOT re-query early: the rate
 	// limit keeps failed selections at the empty-pool cadence.
 	m.lastSync = time.Now()
-	m.prepareCurrent()
+	m.prepareCurrent(context.Background())
 	select {
 	case <-m.resync:
 		t.Error("expected no resync request while the last sync is recent")
@@ -626,7 +627,7 @@ func TestPrepareCurrentDoesNothingWhenDisabled(t *testing.T) {
 	client := &fakeClient{}
 	m := newTestManager(nil, &fakeCampaigns{}, client)
 
-	if got := m.prepareCurrent(); got != nil {
+	if got := m.prepareCurrent(context.Background()); got != nil {
 		t.Errorf("expected nil from a disabled subsystem, got %+v", got)
 	}
 	if len(client.checked) != 0 {
@@ -646,7 +647,7 @@ func TestPrepareCurrentSwitchesWhenCampaignExhausted(t *testing.T) {
 
 	provider.campaigns = nil // final reward claimed -> tracker drops the campaign
 
-	if got := m.prepareCurrent(); got != nil || m.current != nil {
+	if got := m.prepareCurrent(context.Background()); got != nil || m.current != nil {
 		t.Fatalf("expected the slot to clear once the game has no active campaign, got %+v", m.current)
 	}
 }
@@ -668,7 +669,7 @@ func TestPrepareCurrentAbandonsDeconfiguredGame(t *testing.T) {
 	m.UpdateSettings([]string{"Rust"}, config.DiscoveryModeAll, false, testRateLimits())
 	<-m.resync // drain so the assertion below checks prepareCurrent, not UpdateSettings
 
-	got := m.prepareCurrent()
+	got := m.prepareCurrent(context.Background())
 
 	if got != rustChannel || m.current != rustChannel {
 		t.Fatalf("expected switch to the still-configured game's channel, got %+v", m.current)

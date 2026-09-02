@@ -241,7 +241,7 @@ func TestSendRejectsBeaconRedirects(t *testing.T) {
 			rt.extra[leakURL] = beaconRedirectStep{status: 200}
 
 			sender, streamer := beaconRedirectSender(rt, "http://spade.test/beacon")
-			res := sender.Send(streamer)
+			res := sender.Send(context.Background(), streamer)
 
 			if res.Delivered {
 				t.Fatalf("redirect %d: beacon must not be Delivered", status)
@@ -283,7 +283,7 @@ func TestSendRejectsBeaconHTTPSToHTTPDowngrade(t *testing.T) {
 	rt.extra[downgradeURL] = beaconRedirectStep{status: 200}
 
 	sender, streamer := beaconRedirectSender(rt, "https://spade.test/beacon")
-	res := sender.Send(streamer)
+	res := sender.Send(context.Background(), streamer)
 
 	if res.Delivered {
 		t.Fatal("beacon must not be Delivered when the redirect downgrades https to http")
@@ -304,7 +304,7 @@ func TestSendBeaconDirect200IsDelivered(t *testing.T) {
 	rt.beacon = beaconRedirectStep{status: 200}
 
 	sender, streamer := beaconRedirectSender(rt, "http://spade.test/beacon")
-	res := sender.Send(streamer)
+	res := sender.Send(context.Background(), streamer)
 
 	if !res.Delivered || res.Failure != nil {
 		t.Fatalf("expected a direct 200 beacon to be Delivered, got %+v", res)
@@ -317,7 +317,7 @@ func TestSendBeaconDirect204IsDelivered(t *testing.T) {
 	rt.beacon = beaconRedirectStep{status: 204}
 
 	sender, streamer := beaconRedirectSender(rt, "http://spade.test/beacon")
-	res := sender.Send(streamer)
+	res := sender.Send(context.Background(), streamer)
 
 	if !res.Delivered || res.Failure != nil {
 		t.Fatalf("expected a direct 204 beacon to be Delivered, got %+v", res)
@@ -330,7 +330,7 @@ func TestSendBeaconDirectNon2xxIsFailure(t *testing.T) {
 	rt.beacon = beaconRedirectStep{status: 500}
 
 	sender, streamer := beaconRedirectSender(rt, "http://spade.test/beacon")
-	res := sender.Send(streamer)
+	res := sender.Send(context.Background(), streamer)
 
 	if res.Delivered {
 		t.Fatal("a direct non-2xx beacon must not be Delivered")
@@ -355,7 +355,7 @@ func TestSendBeaconUsesInjectedTransportAfterClientCopy(t *testing.T) {
 	const beaconURL = "beacontest://spade.local/beacon"
 
 	sender, streamer := beaconRedirectSender(rt, beaconURL)
-	res := sender.Send(streamer)
+	res := sender.Send(context.Background(), streamer)
 
 	if !res.Delivered || res.Failure != nil {
 		t.Fatalf("expected the beacon POST to reach the injected Transport and be Delivered, got %+v", res)
@@ -386,7 +386,7 @@ func TestSendTwoPhaseBeaconRejectionThenNormalRedirectsFollowed(t *testing.T) {
 	origClient := sender.httpClient
 
 	// --- Phase A: playlist/variant/segment succeed, beacon redirects -------
-	resA := sender.Send(streamer)
+	resA := sender.Send(context.Background(), streamer)
 	if resA.Delivered {
 		t.Fatal("phase A: beacon redirect must not be Delivered")
 	}
@@ -423,7 +423,7 @@ func TestSendTwoPhaseBeaconRejectionThenNormalRedirectsFollowed(t *testing.T) {
 
 	rt.beacon = beaconRedirectStep{status: 204}
 
-	resB := sender.Send(streamer)
+	resB := sender.Send(context.Background(), streamer)
 
 	if !resB.Delivered {
 		t.Fatalf("phase B: expected the second Send to be Delivered, got %+v", resB)

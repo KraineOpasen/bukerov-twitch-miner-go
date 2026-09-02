@@ -298,7 +298,7 @@ func TestWatcherRoutineStaleRefreshDefersForOwnedLeaseAndResumes(t *testing.T) {
 	lease, _ := w.ProvisionalLease()
 	generation := owner.Stream.SessionGeneration()
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	select {
 	case checked := <-checker.checked:
 		t.Fatalf("watcher routine stale path refreshed active owner %q", checked)
@@ -314,7 +314,7 @@ func TestWatcherRoutineStaleRefreshDefersForOwnedLeaseAndResumes(t *testing.T) {
 	if !w.ReleaseProvisionalLease(lease.LeaseID) {
 		t.Fatal("setup: lease release failed")
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	select {
 	case checked := <-checker.checked:
 		if checked != owner.GetUsername() {
@@ -347,7 +347,7 @@ func TestProvisionalSendFailureRecoveryBypassesRoutineGuard(t *testing.T) {
 		t.Fatal("setup: provisional baseline not armed")
 	}
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	select {
 	case checked := <-checker.checked:
 		if checked != owner.GetUsername() {

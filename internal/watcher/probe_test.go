@@ -16,7 +16,7 @@ type fakeToken struct {
 	err        error
 }
 
-func (f fakeToken) GetPlaybackAccessToken(string) (string, string, error) {
+func (f fakeToken) GetPlaybackAccessToken(context.Context, string) (string, string, error) {
 	return f.sig, f.token, f.err
 }
 
@@ -165,7 +165,7 @@ func TestSendSimulateFailureIsNonFatal(t *testing.T) {
 	b := okBehavior()
 	b.playlistStatus = 403 // simulate fails
 	// beacon still 204 (OK)
-	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
+	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(context.Background(), canaryStreamer())
 	if res.SimulateErr == nil {
 		t.Error("expected a non-nil SimulateErr when the playlist fails")
 	}
@@ -178,7 +178,7 @@ func TestSendSimulateFailureIsNonFatal(t *testing.T) {
 }
 
 func TestSendTokenErrorIsFatalAndSkipsSimulate(t *testing.T) {
-	res := testSender(okBehavior(), fakeToken{err: context.DeadlineExceeded}).Send(canaryStreamer())
+	res := testSender(okBehavior(), fakeToken{err: context.DeadlineExceeded}).Send(context.Background(), canaryStreamer())
 	if res.Failure == nil || res.Failure.Stage != StagePlaybackToken {
 		t.Errorf("expected a fatal playback_token failure, got %+v", res)
 	}
@@ -193,7 +193,7 @@ func TestSendTokenErrorIsFatalAndSkipsSimulate(t *testing.T) {
 func TestSendBeaconNon2xxIsFatal(t *testing.T) {
 	b := okBehavior()
 	b.beaconStatus = 400
-	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(canaryStreamer())
+	res := testSender(b, fakeToken{sig: "s", token: "t"}).Send(context.Background(), canaryStreamer())
 	if res.Failure == nil || res.Failure.Stage != StageBeacon || res.Failure.Status != 400 {
 		t.Errorf("expected a non-2xx spade response to fail the send at the beacon, got %+v", res)
 	}
@@ -202,7 +202,7 @@ func TestSendBeaconNon2xxIsFatal(t *testing.T) {
 func TestSendMissingSpadeURLIsFatal(t *testing.T) {
 	s := canaryStreamer()
 	s.Stream.SetSpadeURL("")
-	res := testSender(okBehavior(), fakeToken{sig: "s", token: "t"}).Send(s)
+	res := testSender(okBehavior(), fakeToken{sig: "s", token: "t"}).Send(context.Background(), s)
 	if res.Failure == nil || res.Failure.Stage != StageSessionSnapshot {
 		t.Errorf("expected a missing spade URL to fail the send at the session snapshot, got %+v", res)
 	}

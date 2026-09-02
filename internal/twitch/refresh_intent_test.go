@@ -54,7 +54,7 @@ func TestUpdateStreamNoOpDoesNotSupersedeInFlightRefresh(t *testing.T) {
 	}
 
 	// The forced recovery always fetches stream info and applies.
-	res := c.RefreshPlaybackSession(s, false, models.ExpectedSession{})
+	res := c.RefreshPlaybackSession(context.Background(), s, false, models.ExpectedSession{})
 	got := <-noopc
 
 	if !got.res.NoOp || got.err != nil {
@@ -328,11 +328,17 @@ func runAvailabilityInterleave(t *testing.T, olderAppliesFirst bool) {
 
 	// A begins its session (and availability) observation first, then blocks in
 	// stream-info.
-	go func() { resA = cA.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(aDone) }()
+	go func() {
+		resA = cA.RefreshPlaybackSession(context.Background(), s, false, models.ExpectedSession{})
+		close(aDone)
+	}()
 	<-aStreamReached
 
 	// B begins its observations second and runs to just before its apply.
-	go func() { resB = cB.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(bDone) }()
+	go func() {
+		resB = cB.RefreshPlaybackSession(context.Background(), s, false, models.ExpectedSession{})
+		close(bDone)
+	}()
 	<-bBeforeApply
 
 	// Release A's stream-info; A fetches its availability and reaches its apply.
@@ -444,11 +450,17 @@ func TestObservationPairCannotInvertBetweenConcurrentRefreshes(t *testing.T) {
 	bDone := make(chan struct{})
 
 	// A reserves first, then blocks at afterRefreshObservation.
-	go func() { resA = cA.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(aDone) }()
+	go func() {
+		resA = cA.RefreshPlaybackSession(context.Background(), s, false, models.ExpectedSession{})
+		close(aDone)
+	}()
 	<-aReserved
 
 	// B reserves second and runs to just before its apply.
-	go func() { resB = cB.RefreshPlaybackSession(s, false, models.ExpectedSession{}); close(bDone) }()
+	go func() {
+		resB = cB.RefreshPlaybackSession(context.Background(), s, false, models.ExpectedSession{})
+		close(bDone)
+	}()
 	<-bBeforeApply
 
 	// Only now release A — in the split allocator this is where A reserves its

@@ -166,11 +166,15 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	// Start's immediate first pass instead of waiting out the interval.)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w.Start(ctx)
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("watch generation must start: %v", err)
+	}
 	waitForCondition(t, "watch loop to adopt the runtime-added streamer", 5*time.Second, func() bool {
 		return debugHasDecision(w, "beta")
 	})
-	w.Stop()
+	if err := w.Stop(); err != nil {
+		t.Fatalf("the watch generation must stop cleanly: %v", err)
+	}
 
 	// Runtime REMOVE via the same path: full body minus beta.
 	rs2 := settings.BuildRuntimeSettings(m.config)
@@ -186,12 +190,16 @@ func TestApplySettingsPropagatesRuntimeRosterToWatcherAndDrops(t *testing.T) {
 	// Watcher leg (remove): the next tick drops beta from the loop's roster.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	w.Start(ctx2)
-	defer w.Stop()
+	if err := w.Start(ctx2); err != nil {
+		t.Fatalf("a fresh watch generation must start after a clean join: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
 	waitForCondition(t, "watch loop to drop the removed streamer", 5*time.Second, func() bool {
 		return !debugHasDecision(w, "beta")
 	})
-	w.Stop()
+	if err := w.Stop(); err != nil {
+		t.Fatalf("the watch generation must stop cleanly: %v", err)
+	}
 
 	// Drops leg (remove): a fresh pass no longer assigns to beta.
 	beta.Stream.SetCampaigns(nil)

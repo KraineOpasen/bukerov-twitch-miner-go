@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -23,14 +24,23 @@ import (
 // onlineChecker is the slice of the Twitch client the watcher needs to
 // re-verify a stale stream; narrowed to an interface so the broker's send loop
 // can be tested with a fake. Satisfied by *twitch.TwitchClient.
+//
+// It deliberately asks for the CONTEXT form: the broker's two online checks
+// belong to the watch generation and must stop when it does. The plain
+// CheckStreamerOnline keeps its own background ownership for pubsub, the
+// miner's stream-check loop, the streamer manager and the health canary, none
+// of which this watcher may cancel. Directory discovery is deliberately NOT on
+// that list: its candidate re-verification runs on this loop goroutine (see
+// CandidateSource) and so takes the generation context too.
 type onlineChecker interface {
-	CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition
+	CheckStreamerOnlineContext(ctx context.Context, streamer *models.Streamer) models.StatusTransition
 }
 
 // minuteReporter abstracts MinuteSender so the loop can be exercised in tests
-// without real HTTP. Satisfied by *MinuteSender.
+// without real HTTP. Satisfied by *MinuteSender. The ctx is the watch
+// generation's: a send outlives neither its generation nor its slot.
 type minuteReporter interface {
-	Send(streamer *models.Streamer) SendResult
+	Send(ctx context.Context, streamer *models.Streamer) SendResult
 }
 
 // MinuteWatcher is the unified slot broker: the single owner of the (at most
@@ -245,6 +255,13 @@ type MinuteWatcher struct {
 	// only — it never lets discovery exceed the slot cap or take an occupied slot.
 	preferConfigured atomic.Bool
 
+	// ctx/cancel record the current generation's context. Production code must
+	// NOT read ctx: the loop and everything it starts take the context as an
+	// explicit parameter (Start captures it once and threads it down), so a
+	// helper reaching for this field would get a retired generation's cancelled
+	// context after a restart, or nil on a watcher built without Start. It is
+	// kept because Stop needs cancel, and because the broker tests install a
+	// generation context through it.
 	ctx    context.Context
 	cancel context.CancelFunc
 	// loopDone is closed when the watch loop goroutine exits; Stop waits on
@@ -509,23 +526,64 @@ func (w *MinuteWatcher) SetDiscoveryCandidatePolicy(login string, facts Candidat
 // can shrink it.
 var stopJoinTimeout = 5 * time.Second
 
-func (w *MinuteWatcher) Start(ctx context.Context) {
+// ErrStopJoinTimeout reports a DIRTY watcher teardown: the bounded join in Stop
+// expired while generation-owned work was still running, so the old generation
+// is NOT quiescent and its goroutine may still touch the store, the streamers
+// and the Twitch client. It is the watcher's contribution to the existing
+// dirty-teardown classification — internal/miner folds it into the drain error
+// its own errLoopJoinTimeout sentinel wraps, which internal/lifecycle already
+// recognises through miner.IsJoinTimeoutError, so a generation that did not
+// quiesce is never retired as though it were gone. No second lifecycle
+// controller, scheduler or generation counter is introduced for it.
+var ErrStopJoinTimeout = errors.New("watcher: watch generation did not quiesce within the stop join timeout")
+
+// ErrGenerationLive reports a refused Start: this instance's previous watch
+// generation has not quiesced, so admitting a new one would let two generations
+// race over the same slots, streamers and store. The caller must join the
+// previous generation (Stop returning nil) before starting another.
+var ErrGenerationLive = errors.New("watcher: a watch generation is already live on this watcher")
+
+// Start runs one watch generation: it derives the generation context from ctx
+// and spawns the single loop goroutine that owns every watch-generation
+// operation. It refuses to start a second generation while a previous one is
+// still live — silently overwriting ctx/cancel/loopDone would orphan the first
+// loop and let two generations mine the same slots against the same store.
+func (w *MinuteWatcher) Start(ctx context.Context) error {
 	w.mu.Lock()
+	if prev := w.loopDone; prev != nil {
+		select {
+		case <-prev:
+			// The previous generation joined: its state is safe to replace.
+		default:
+			w.mu.Unlock()
+			return ErrGenerationLive
+		}
+	}
 	w.ctx, w.cancel = context.WithCancel(ctx)
+	loopCtx := w.ctx
 	done := make(chan struct{})
 	w.loopDone = done
 	w.mu.Unlock()
 
 	go func() {
 		defer close(done)
-		w.loop()
+		w.loop(loopCtx)
 	}()
+	return nil
 }
 
-// Stop cancels the watch loop and waits (bounded by stopJoinTimeout) for it
-// to finish, so an in-flight tick's watch_time write completes before the
-// caller proceeds to close the database.
-func (w *MinuteWatcher) Stop() {
+// Stop cancels the watch generation and joins it, bounded by stopJoinTimeout,
+// so an in-flight tick's watch_time write completes before the caller proceeds
+// to close the database.
+//
+// It returns nil for a CLEAN stop — the generation observed cancellation and
+// every operation it owned has finished, so nothing of it is still running when
+// Stop returns. It returns ErrStopJoinTimeout for a DIRTY teardown: the join
+// deadline expired with owned work still in flight. That error is not cosmetic:
+// the caller (internal/miner) folds it into the shutdown drain error, which
+// internal/lifecycle classifies as a dirty teardown, so a generation that never
+// quiesced stays known as such instead of being retired silently.
+func (w *MinuteWatcher) Stop() error {
 	// Stop accepting provisional ownership before joining the loop. Any
 	// already-running network call remains outside observationMu and may finish,
 	// so its permit deliberately remains live until ReleaseObservationPermit;
@@ -548,12 +606,17 @@ func (w *MinuteWatcher) Stop() {
 	w.mu.Unlock()
 
 	if done == nil {
-		return
+		return nil
 	}
+	timer := time.NewTimer(stopJoinTimeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(stopJoinTimeout):
-		slog.Warn("Watcher loop did not finish within the stop timeout; proceeding with shutdown", "timeout", stopJoinTimeout)
+		return nil
+	case <-timer.C:
+		slog.Warn("Watcher loop did not finish within the stop timeout; teardown is dirty and the watch generation is still live",
+			"timeout", stopJoinTimeout)
+		return fmt.Errorf("%w after %s", ErrStopJoinTimeout, stopJoinTimeout)
 	}
 }
 
@@ -776,28 +839,30 @@ func (w *MinuteWatcher) randomizedDelay(base time.Duration) time.Duration {
 // pace waits between two per-slot sends, spreading them across the tick
 // interval (with ±20% jitter) while remaining responsive to shutdown. Returns
 // false if the context was cancelled during the wait, so the send loop stops.
-func (w *MinuteWatcher) pace(d time.Duration) bool {
+func (w *MinuteWatcher) pace(ctx context.Context, d time.Duration) bool {
 	if w.pacer != nil {
 		return w.pacer(d)
 	}
+	timer := time.NewTimer(w.randomizedDelay(d))
+	defer timer.Stop()
 	select {
-	case <-w.ctx.Done():
+	case <-ctx.Done():
 		return false
-	case <-time.After(w.randomizedDelay(d)):
+	case <-timer.C:
 		return true
 	}
 }
 
-func (w *MinuteWatcher) loop() {
+func (w *MinuteWatcher) loop(ctx context.Context) {
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-ctx.Done():
 			return
 		default:
 		}
 
 		tickStart := time.Now()
-		w.processWatching()
+		w.processWatching(ctx)
 
 		// processWatching already spreads this tick's per-slot sends across
 		// roughly one interval (pace(interval/len(slots)) after each slot), so a
@@ -815,15 +880,17 @@ func (w *MinuteWatcher) loop() {
 		if remaining <= 0 {
 			continue
 		}
+		timer := time.NewTimer(remaining)
 		select {
-		case <-w.ctx.Done():
+		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(remaining):
+		case <-timer.C:
 		}
 	}
 }
 
-func (w *MinuteWatcher) processWatching() {
+func (w *MinuteWatcher) processWatching(ctx context.Context) {
 	sources, avoid := w.applyPendingSettings()
 	w.activeCampaignSemanticPolicy.Store(w.captureCampaignSemanticSnapshot())
 	defer w.activeCampaignSemanticPolicy.Store(nil)
@@ -842,10 +909,14 @@ func (w *MinuteWatcher) processWatching() {
 		routineRefreshAfter = 10 * time.Minute
 	}
 	for _, idx := range onlineStreamers {
+		if ctx.Err() != nil {
+			// The generation is gone: start no further re-verification.
+			return
+		}
 		if w.client != nil && w.streamers[idx].Stream.UpdateElapsed() > routineRefreshAfter {
 			streamer := w.streamers[idx]
 			w.RunRoutineRefresh(streamer, func() {
-				w.client.CheckStreamerOnline(streamer)
+				w.client.CheckStreamerOnlineContext(ctx, streamer)
 			})
 		}
 	}
@@ -857,7 +928,15 @@ func (w *MinuteWatcher) processWatching() {
 	if len(onlineStreamers) > 0 {
 		configuredWatch = w.selectStreamersToWatch(onlineStreamers)
 	}
-	extra := w.gatherCandidates(sources, avoid)
+	extra := w.gatherCandidates(ctx, sources, avoid)
+	if ctx.Err() != nil {
+		// The generation ended during candidate preparation. Continuing would
+		// arbitrate on a candidate set the sources never actually produced, and
+		// publish slot releases and a broker snapshot on behalf of a generation
+		// that no longer exists. End the tick instead, like the two sibling
+		// guards above and below.
+		return
+	}
 	// Rotation refreshes this evidence itself. Direct mode normally needs no
 	// fairness comparison, but two configured occupants plus an external
 	// contender do: capture the same persisted deficit before cross-source
@@ -893,7 +972,7 @@ func (w *MinuteWatcher) processWatching() {
 	// Execute any staged watch-session refreshes before the sends, so a
 	// successful refresh takes effect for this very tick. Requests for channels
 	// that lost their slot complete as skipped.
-	w.executeSessionRefreshes(slots)
+	w.executeSessionRefreshes(ctx, slots)
 
 	interval := time.Duration(w.settings.MinuteWatchedInterval) * time.Second
 
@@ -925,6 +1004,12 @@ func (w *MinuteWatcher) processWatching() {
 	reported := false
 	watchedOK := 0
 	for _, sl := range slots {
+		if ctx.Err() != nil {
+			// A cancelled generation must not NEWLY START a send — and so can
+			// never newly start a minute-watched beacon it no longer owns. An
+			// already-running send observes the same ctx inside the transport.
+			return
+		}
 		streamer := sl.streamer
 		leaseID := uint64(0)
 		var (
@@ -955,9 +1040,18 @@ func (w *MinuteWatcher) processWatching() {
 			continue
 		}
 
-		res := w.sendMinuteWatched(streamer)
+		res := w.sendMinuteWatched(ctx, streamer)
 		w.completeObservationPermit(permit, res.Delivered)
 		switch {
+		case res.Cancelled:
+			// The watch generation was cancelled mid-send. That is a teardown,
+			// not a Twitch transport failure: do not note a failure outcome, do
+			// not re-check the channel online (a fresh network call on a dying
+			// generation), and do not journal a delivery. Leave the tick here —
+			// quiescence is what the generation owes its owner now.
+			slog.Debug("Watch generation cancelled mid-send; abandoning the tick",
+				"streamer", streamer.GetUsername(), "origin", sl.origin)
+			return
 		case res.Stale:
 			// The playback session changed between snapshot capture and the beacon
 			// (a new broadcast or a completed refresh). No minute was delivered, but
@@ -975,7 +1069,7 @@ func (w *MinuteWatcher) processWatching() {
 			// online state so the next tick drops or switches it (and, for a
 			// discovery channel, so discovery's own maintenance abandons it).
 			if w.client != nil {
-				w.client.CheckStreamerOnline(streamer)
+				w.client.CheckStreamerOnlineContext(ctx, streamer)
 			}
 		default:
 			reported = true
@@ -987,6 +1081,12 @@ func (w *MinuteWatcher) processWatching() {
 				// Configured channel: credit fair-rotation watch time and track
 				// streak pursuit. Discovery channels are intentionally excluded
 				// from the fairness store and streak accounting.
+				// Deliberately NOT bound to the generation context. The
+				// bounded join in Stop exists precisely so an in-flight
+				// watch_time write DRAINS before the caller closes the
+				// database; cancelling this write would discard credited
+				// watch time to save milliseconds of shutdown, which is the
+				// opposite of what the join is for.
 				if w.store != nil && delta > 0 {
 					if err := w.store.RecordMinutes(streamer.GetUsername(), delta, time.Now()); err != nil {
 						slog.Debug("Failed to record watch time", "streamer", streamer.GetUsername(), "error", err)
@@ -1001,7 +1101,7 @@ func (w *MinuteWatcher) processWatching() {
 		// injected; never changes control flow above.
 		w.recordSlotDelivery(streamer, res)
 
-		if !w.pace(sleepBetween) {
+		if !w.pace(ctx, sleepBetween) {
 			return
 		}
 	}
@@ -1033,8 +1133,15 @@ func (w *MinuteWatcher) processWatching() {
 // on a legitimate Phase-A slot without accepting a same-login clone or creating
 // a second channel identity. Earlier-source dedup and watchdog avoidance still
 // apply to both paths.
-func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidChecker) []Candidate {
+func (w *MinuteWatcher) gatherCandidates(ctx context.Context, sources []CandidateSource, avoid AvoidChecker) []Candidate {
 	if len(sources) == 0 {
+		return nil
+	}
+	if ctx.Err() != nil {
+		// The generation is gone: start no candidate preparation. Sources do
+		// their own re-verification I/O here, on THIS goroutine (see
+		// CandidateSource), so entering it after cancellation would both work on
+		// behalf of a dead generation and delay its join.
 		return nil
 	}
 	configured := make(map[string]*models.Streamer, len(w.streamers))
@@ -1044,7 +1151,7 @@ func (w *MinuteWatcher) gatherCandidates(sources []CandidateSource, avoid AvoidC
 	var out []Candidate
 	seen := make(map[string]bool)
 	for _, src := range sources {
-		for _, c := range src.WatchCandidates() {
+		for _, c := range src.WatchCandidates(ctx) {
 			if c.Streamer == nil {
 				continue
 			}
@@ -2270,8 +2377,8 @@ func (w *MinuteWatcher) selectByPriority(onlineIndexes []int) []int {
 	return result
 }
 
-func (w *MinuteWatcher) sendMinuteWatched(streamer *models.Streamer) SendResult {
-	res := w.sender.Send(streamer)
+func (w *MinuteWatcher) sendMinuteWatched(ctx context.Context, streamer *models.Streamer) SendResult {
+	res := w.sender.Send(ctx, streamer)
 	if res.SimulateErr != nil {
 		slog.Debug("Failed to simulate watching", "streamer", streamer.GetUsername(), "error", res.SimulateErr)
 	}

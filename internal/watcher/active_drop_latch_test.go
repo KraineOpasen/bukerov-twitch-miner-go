@@ -103,7 +103,7 @@ func TestProcessWatchingStreakTerminalReleasesUnrestrictedActiveDropLatch(t *tes
 					"streamerd": 20,
 				})
 
-				w.processWatching()
+				w.processWatching(tickCtx(w))
 				first := w.BrokerSnapshot()
 				if len(first.Slots) != constants.MaxSimultaneousStreams || !brokerHasChannel(first, "streamerc") {
 					t.Fatalf("initial streak target was not latched at cap %d: %v", constants.MaxSimultaneousStreams, brokerChannels(first))
@@ -117,7 +117,7 @@ func TestProcessWatchingStreakTerminalReleasesUnrestrictedActiveDropLatch(t *tes
 						t.Fatalf("advance fairness for %s: %v", login, err)
 					}
 				}
-				w.processWatching()
+				w.processWatching(tickCtx(w))
 				pursuingBase := sortedPair(w.GetDebugState().ActivePair)
 				if len(pursuingBase) != 2 || pursuingBase[0] != "streamera" || pursuingBase[1] != "streamerd" {
 					t.Fatalf("test did not replace the fair pair while streak pursued: %v", pursuingBase)
@@ -130,7 +130,7 @@ func TestProcessWatchingStreakTerminalReleasesUnrestrictedActiveDropLatch(t *tes
 				for _, login := range []string{"streamerc", "streamerd"} {
 					terminalCase.terminate(t, byLogin[login])
 				}
-				w.processWatching()
+				w.processWatching(tickCtx(w))
 				for _, login := range []string{"streamerc", "streamerd"} {
 					streamer := byLogin[login]
 					decision := streamer.Stream.EvaluateWatchStreak(time.Now())
@@ -144,7 +144,7 @@ func TestProcessWatchingStreakTerminalReleasesUnrestrictedActiveDropLatch(t *tes
 				assertBrokerMatchesFairPair(t, w, []string{"streamera", "streamerd"})
 
 				for repeat := 0; repeat < 3; repeat++ {
-					w.processWatching()
+					w.processWatching(tickCtx(w))
 					assertBrokerMatchesFairPair(t, w, []string{"streamera", "streamerd"})
 				}
 			})
@@ -173,7 +173,7 @@ func TestBoundedSecondaryUtilityDoesNotCreatePermanentDropIncumbency(t *testing.
 		"streamerd": 5,
 	})
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	first := w.BrokerSnapshot()
 	if len(first.Slots) != constants.MaxSimultaneousStreams || !brokerHasChannel(first, "streamerc") {
 		t.Fatalf("bounded secondary utility did not break the primary tie: %v", brokerChannels(first))
@@ -188,7 +188,7 @@ func TestBoundedSecondaryUtilityDoesNotCreatePermanentDropIncumbency(t *testing.
 		"streamerc": {SemanticClass: 0, PrimaryCampaignID: "campaign-c"},
 		"streamerd": {SemanticClass: 0, PrimaryCampaignID: "campaign-d"},
 	}, nil, nil)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	second := w.BrokerSnapshot()
 	if len(second.Slots) != constants.MaxSimultaneousStreams || !brokerHasChannel(second, "streamerd") || brokerHasChannel(second, "streamerc") {
 		t.Fatalf("removed secondary utility created permanent incumbency: %v", brokerChannels(second))

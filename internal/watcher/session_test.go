@@ -28,7 +28,7 @@ type fakeRefresher struct {
 	beforeApply func(*models.Streamer)
 }
 
-func (f *fakeRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
+func (f *fakeRefresher) RefreshPlaybackSession(ctx context.Context, s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	f.mu.Lock()
 	res := twitch.SessionRefreshResult{
 		CurrentGeneration:  s.Stream.SessionGeneration(),
@@ -118,7 +118,7 @@ func TestSessionRefreshFullModeRebuildsSession(t *testing.T) {
 	w.refresher = ref
 
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[0].Username, Mode: RefreshSession})
-	w.executeSessionRefreshes(occupantsFor(w, 0, 1))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0, 1))
 
 	spade, stream := ref.calls()
 	if len(spade) != 1 || spade[0] != w.streamers[0].Username {
@@ -144,7 +144,7 @@ func TestSessionRefreshInfoModeSkipsSpade(t *testing.T) {
 	w.refresher = ref
 
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[0].Username, Mode: RefreshStreamInfo})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	spade, stream := ref.calls()
 	if len(spade) != 0 {
@@ -164,7 +164,7 @@ func TestSessionRefreshSkippedWhenNotSlotted(t *testing.T) {
 	w.refresher = ref
 
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: w.streamers[1].Username, Mode: RefreshSession})
-	w.executeSessionRefreshes(occupantsFor(w, 0)) // only streamer 0 slotted
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0)) // only streamer 0 slotted
 
 	spade, stream := ref.calls()
 	if len(spade) != 0 || len(stream) != 0 {
@@ -176,7 +176,7 @@ func TestSessionRefreshSkippedWhenNotSlotted(t *testing.T) {
 	}
 
 	// The request must have been consumed, not requeued.
-	w.executeSessionRefreshes(occupantsFor(w, 0, 1))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0, 1))
 	if _, stream := ref.calls(); len(stream) != 0 {
 		t.Fatalf("a skipped request must not linger into later ticks, got %v", stream)
 	}
@@ -193,7 +193,7 @@ func TestSessionRefreshCoalescesToStrongestMode(t *testing.T) {
 	login := w.streamers[0].Username
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo}) // weaker: must not downgrade
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	spade, stream := ref.calls()
 	if len(stream) != 1 {
@@ -210,7 +210,7 @@ func TestSessionRefreshCoalescesToStrongestMode(t *testing.T) {
 	w.refresher = ref2
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo})
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	spade2, stream2 := ref2.calls()
 	if len(stream2) != 1 {
@@ -234,7 +234,7 @@ func TestProcessWatchingPopulatesReportStats(t *testing.T) {
 	defer cancel()
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	for _, s := range streamers {
 		stats, ok := w.ReportStats(s.Username)
@@ -248,7 +248,7 @@ func TestProcessWatchingPopulatesReportStats(t *testing.T) {
 
 	// Failures must be accounted too.
 	sender.err = errors.New("send failed")
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	stats, ok := w.ReportStats(streamers[0].Username)
 	if !ok || stats.Failures != 1 || stats.Successes != 1 {
 		t.Fatalf("expected the failed tick to be recorded, got ok=%v %+v", ok, stats)
@@ -263,7 +263,7 @@ func TestSessionRefreshFailureOutcomes(t *testing.T) {
 
 	w.refresher = &fakeRefresher{spadeErr: errors.New("boom http://leak.example/sig=abc")}
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshSession})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 	out, _ := w.LastSessionRefresh(login)
 	if out.Success {
 		t.Fatal("spade failure must publish a not-OK outcome")
@@ -274,7 +274,7 @@ func TestSessionRefreshFailureOutcomes(t *testing.T) {
 
 	w.refresher = &fakeRefresher{streamErr: errors.New("stream fail")}
 	w.RequestSessionRefresh(SessionRefreshRequest{Login: login, Mode: RefreshStreamInfo})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 	out, _ = w.LastSessionRefresh(login)
 	if out.Success {
 		t.Fatal("stream-info failure must publish a not-OK outcome")
@@ -344,7 +344,7 @@ func TestAvoidedChannelExcludedFromSelection(t *testing.T) {
 		{Streamer: discoveryStreamer("disco", true), Origin: OriginDiscovery},
 	}}
 	avoid.set("disco", true)
-	if got := w.gatherCandidates([]CandidateSource{src}, avoid); len(got) != 0 {
+	if got := w.gatherCandidates(tickCtx(w), []CandidateSource{src}, avoid); len(got) != 0 {
 		t.Fatalf("expected the avoided discovery candidate to be dropped, got %v", got)
 	}
 }
@@ -358,12 +358,12 @@ type delayedRefresher struct {
 	inner fakeRefresher
 }
 
-func (d *delayedRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
+func (d *delayedRefresher) RefreshPlaybackSession(ctx context.Context, s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	if fetchSpade {
 		time.Sleep(d.delay) // spade round
 	}
 	time.Sleep(d.delay) // stream-info round
-	return d.inner.RefreshPlaybackSession(s, fetchSpade, expected)
+	return d.inner.RefreshPlaybackSession(ctx, s, fetchSpade, expected)
 }
 
 // timestampingSender records when each minute-watched send happens.
@@ -372,7 +372,7 @@ type timestampingSender struct {
 	sends []time.Time
 }
 
-func (s *timestampingSender) Send(*models.Streamer) SendResult {
+func (s *timestampingSender) Send(context.Context, *models.Streamer) SendResult {
 	s.mu.Lock()
 	s.sends = append(s.sends, time.Now())
 	s.mu.Unlock()
@@ -422,7 +422,7 @@ func TestSessionRefreshBothSlotsParallelBoundsTickDelay(t *testing.T) {
 	// (instant pacer, instant sender), so the measured window is dominated by
 	// the refresh execution the test is bounding.
 	start := time.Now()
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	firstSend, ok := sender.first()
 	if !ok {
@@ -484,7 +484,7 @@ func TestBrokerLoopConcurrentWithWatchdogCalls(t *testing.T) {
 	loopDone.Add(1)
 	go func() {
 		defer loopDone.Done()
-		w.loop()
+		w.loop(tickCtx(w))
 	}()
 
 	login := streamers[0].Username

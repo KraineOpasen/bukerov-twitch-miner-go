@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
@@ -112,7 +113,7 @@ func TestWatchCandidatesReevaluatesValidCurrentAfterPolicyChange(t *testing.T) {
 	m.pool = []*Channel{g1, g2}
 
 	m.SetGameRanks(map[string]int{"game one": 0, "game two": 1})
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].Streamer != g1.Streamer {
 		t.Fatalf("initial policy proposal = %v, want Game One", candidateLogins(initial))
 	}
@@ -120,7 +121,7 @@ func TestWatchCandidatesReevaluatesValidCurrentAfterPolicyChange(t *testing.T) {
 	// A pure semantic change: both candidates are still online, carry their
 	// active campaigns, remain configured, and have not changed game.
 	m.SetGameRanks(map[string]int{"game one": 1, "game two": 0})
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != g2.Streamer {
 		t.Fatalf("proposal after strictly stronger Game Two rank = %v, want [game_two_channel]", candidateLogins(got))
 	}
@@ -156,7 +157,7 @@ func TestWatchCandidatesUsesExactCarriedCampaignClassAcrossGames(t *testing.T) {
 		map[string]int{"game one": 0, "game two": 1},
 		map[string]policy.SemanticClass{urgentOne.ID: 0, weakOne.ID: 5, middleTwo.ID: 1},
 	)
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != gameTwo.Streamer {
 		t.Fatalf("exact carried-campaign proposal = %v, want [game_two_middle]", candidateLogins(got))
 	}
@@ -167,7 +168,7 @@ func TestWatchCandidatesUsesExactCarriedCampaignClassAcrossGames(t *testing.T) {
 	m.current = nil
 	m.pool = nil
 	m.mu.Unlock()
-	if got := m.WatchCandidates(); len(got) != 0 || published.login != "" {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 || published.login != "" {
 		t.Fatalf("empty proposal retained stale policy publication: candidates=%v login=%q", candidateLogins(got), published.login)
 	}
 }
@@ -191,7 +192,7 @@ func TestWatchCandidatesReevaluatesExactCampaignClassWithinOneGame(t *testing.T)
 		map[string]policy.SemanticClass{strong.ID: 0, weak.ID: 2},
 	)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != strongChannel.Streamer {
 		t.Fatalf("same-game exact semantic reevaluation = %v, want [strong_candidate]", candidateLogins(got))
 	}
@@ -222,7 +223,7 @@ func TestWatchCandidatesUsesBoundedSecondaryAfterEqualPrimary(t *testing.T) {
 		overlapPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
 		overlapSecondary.ID: {SemanticClass: 4},
 	})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != current.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != current.Streamer {
 		t.Fatalf("ineligible secondary changed equal-primary continuity: %v", candidateLogins(got))
 	}
 
@@ -234,7 +235,7 @@ func TestWatchCandidatesUsesBoundedSecondaryAfterEqualPrimary(t *testing.T) {
 		overlapPrimary.ID:   {SemanticClass: 0, SecondaryEligible: true},
 		overlapSecondary.ID: {SemanticClass: 4, SecondaryEligible: true},
 	})
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != overlap.Streamer {
 		t.Fatalf("equal-primary overlap proposal = %v, want [overlap_channel]", candidateLogins(got))
 	}
@@ -269,7 +270,7 @@ func TestWatchCandidatesCompletedSecondaryProvidesNoUtility(t *testing.T) {
 		overlapPrimary.ID:     {SemanticClass: 0, SecondaryEligible: true},
 		completedSecondary.ID: {SemanticClass: 4, SecondaryEligible: true},
 	})
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != current.Streamer {
 		t.Fatalf("completed secondary changed equal-primary continuity: %v", candidateLogins(got))
 	}
@@ -295,7 +296,7 @@ func TestWatchCandidatesExactEqualClassKeepsCurrentContinuity(t *testing.T) {
 	)
 
 	for i := 0; i < 3; i++ {
-		got := m.WatchCandidates()
+		got := m.WatchCandidates(context.Background())
 		if len(got) != 1 || got[0].Streamer != current.Streamer {
 			t.Fatalf("equal-class iteration %d proposal = %v, want current continuity", i, candidateLogins(got))
 		}
@@ -318,7 +319,7 @@ func TestWatchCandidatesCarriesRestrictedHardFact(t *testing.T) {
 		map[string]policy.SemanticClass{restricted.ID: 0},
 	)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("restricted proposal = %v, want one candidate", candidateLogins(got))
 	}
@@ -357,7 +358,7 @@ func TestWatchCandidatesFailsClosedOnUnknownCampaignACL(t *testing.T) {
 		map[string]policy.SemanticClass{unknown.ID: 0, allowed.ID: 1},
 	)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != allowedChannel.Streamer {
 		t.Fatalf("ACLUnknown discovery proposal = %v, want fail-closed [allowed]", candidateLogins(got))
 	}
@@ -388,13 +389,13 @@ func TestWatchCandidatesKeepsCurrentForEqualOrWeakerSemanticRank(t *testing.T) {
 			g2 := onlineCandidate("game_two_channel", "2", "Game Two", "g2", 9000)
 			m.pool = []*Channel{g2, g1}
 			m.SetGameRanks(map[string]int{"game one": 0, "game two": 1})
-			if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+			if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 				t.Fatalf("initial proposal = %v, want Game One", candidateLogins(got))
 			}
 
 			m.SetGameRanks(tc.ranks)
 			for i := 0; i < 3; i++ {
-				got := m.WatchCandidates()
+				got := m.WatchCandidates(context.Background())
 				if len(got) != 1 || got[0].Streamer != g1.Streamer {
 					t.Fatalf("iteration %d proposal = %v, want continuity on Game One", i, candidateLogins(got))
 				}
@@ -417,19 +418,19 @@ func TestWatchCandidatesEquivalentRankPublicationsAreIdempotent(t *testing.T) {
 	g2 := onlineCandidate("game_two_channel", "2", "Game Two", "g2", 9000)
 	m.pool = []*Channel{g1, g2}
 	m.SetGameRanks(map[string]int{"game one": 0, "game two": 1})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("initial proposal = %v, want Game One", candidateLogins(got))
 	}
 
 	for i := 0; i < 5; i++ {
 		m.SetGameRanks(map[string]int{"game one": 0, "game two": 1})
-		if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+		if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 			t.Fatalf("identical publication %d changed current to %v", i, candidateLogins(got))
 		}
 	}
 	// The ordinal values changed, but their ordering relation did not.
 	m.SetGameRanks(map[string]int{"game one": 10, "game two": 11})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("order-equivalent publication changed current to %v", candidateLogins(got))
 	}
 	if len(client.checked) != 0 {
@@ -449,24 +450,24 @@ func TestWatchCandidatesPolicyModeTransitionsIncludeConfiguredGameOrder(t *testi
 
 	// nil is GAME_ORDER fallback: configured Game One wins even though the
 	// cached pool order and viewer count favor Game Two.
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("GAME_ORDER proposal = %v, want Game One", candidateLogins(got))
 	}
 
 	// GAME_ORDER -> ranked policy, then ranked -> another ranked mode.
 	m.SetGameRanks(map[string]int{"game one": 1, "game two": 0})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g2.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g2.Streamer {
 		t.Fatalf("ranked transition proposal = %v, want Game Two", candidateLogins(got))
 	}
 	m.SetGameRanks(map[string]int{"game one": 0, "game two": 1})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("ranked-to-ranked proposal = %v, want Game One", candidateLogins(got))
 	}
 
 	// Ranked policy -> GAME_ORDER restores the configured semantic order. G1
 	// is already that winner, so continuity is preserved.
 	m.SetGameRanks(nil)
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("return to GAME_ORDER proposal = %v, want Game One", candidateLogins(got))
 	}
 }
@@ -481,7 +482,7 @@ func TestWatchCandidatesSeesStrongerCandidateAddedAfterRankPublication(t *testin
 	g2 := onlineCandidate("game_two_channel", "2", "Game Two", "g2", 9000)
 	m.pool = []*Channel{g1}
 	m.SetGameRanks(map[string]int{"game one": 1, "game two": 0})
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g1.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g1.Streamer {
 		t.Fatalf("fallback proposal = %v, want available Game One", candidateLogins(got))
 	}
 
@@ -490,7 +491,7 @@ func TestWatchCandidatesSeesStrongerCandidateAddedAfterRankPublication(t *testin
 	m.mu.Lock()
 	m.pool = []*Channel{g1, g2}
 	m.mu.Unlock()
-	if got := m.WatchCandidates(); len(got) != 1 || got[0].Streamer != g2.Streamer {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].Streamer != g2.Streamer {
 		t.Fatalf("proposal after stronger pool arrival = %v, want Game Two", candidateLogins(got))
 	}
 }
@@ -500,7 +501,7 @@ type exactPolicyVerificationClient struct {
 	campaignIDs map[string][]string
 }
 
-func (c *exactPolicyVerificationClient) CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition {
+func (c *exactPolicyVerificationClient) CheckStreamerOnlineContext(_ context.Context, streamer *models.Streamer) models.StatusTransition {
 	c.checked = append(c.checked, streamer.GetUsername())
 	streamer.Stream.SetCampaignIDs(c.campaignIDs[streamer.GetUsername()])
 	return streamer.SetConfirmedOnline()
@@ -536,7 +537,7 @@ func TestWatchCandidatesCarriesClassFromSameTickVerification(t *testing.T) {
 		map[string]policy.SemanticClass{weak.ID: 2, strong.ID: 0},
 	)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != late.Streamer {
 		t.Fatalf("same-tick verified proposal = %v, want [strong_late]", candidateLogins(got))
 	}
@@ -574,7 +575,7 @@ func TestWatchCandidatesUsesBrokerSemanticSnapshotAsProductionOwner(t *testing.T
 	}
 	m.SetSlotStatus(published)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != better.Streamer {
 		t.Fatalf("broker-owned semantic proposal = %v, want [strong_broker]", candidateLogins(got))
 	}
@@ -591,7 +592,7 @@ type transientPolicyClient struct {
 	attempts int
 }
 
-func (c *transientPolicyClient) CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition {
+func (c *transientPolicyClient) CheckStreamerOnlineContext(_ context.Context, streamer *models.Streamer) models.StatusTransition {
 	c.attempts++
 	if c.attempts == 1 {
 		return streamer.SetUnknown(models.ReasonTransportError)
@@ -614,11 +615,11 @@ func TestPolicyPreemptionRetriesTransientlyUnknownStrongerCandidate(t *testing.T
 	m.pool = []*Channel{g1, g2}
 	m.SetGameRanks(map[string]int{"game one": 1, "game two": 0})
 
-	first := m.WatchCandidates()
+	first := m.WatchCandidates(context.Background())
 	if len(first) != 1 || first[0].Streamer != g1.Streamer {
 		t.Fatalf("transient UNKNOWN displaced current without confirmation: %v", candidateLogins(first))
 	}
-	second := m.WatchCandidates()
+	second := m.WatchCandidates(context.Background())
 	if len(second) != 1 || second[0].Streamer != g2.Streamer {
 		t.Fatalf("unchanged ranks did not retry and converge stronger candidate: %v", candidateLogins(second))
 	}
@@ -656,7 +657,7 @@ func TestPolicyPreemptionHonorsDiscoveryEligibility(t *testing.T) {
 	m.SetAvoidChecker(&staticAvoidChecker{avoided: map[string]bool{avoided.Streamer.GetUsername(): true}})
 	m.SetGameRanks(map[string]int{"game one": 1, "game two": 0})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != eligible.Streamer {
 		t.Fatalf("strict semantic preemption bypassed discovery eligibility: got %v, want [eligible_game_two]", candidateLogins(got))
 	}

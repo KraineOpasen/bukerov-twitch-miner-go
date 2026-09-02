@@ -32,7 +32,7 @@ func TestLoopCadenceIsOneIntervalNotTwo(t *testing.T) {
 	w.ctx = ctx
 
 	done := make(chan struct{})
-	go func() { w.loop(); close(done) }()
+	go func() { w.loop(tickCtx(w)); close(done) }()
 
 	time.Sleep(4200 * time.Millisecond)
 	cancel()

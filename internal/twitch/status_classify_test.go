@@ -79,7 +79,7 @@ func TestGetStreamInfoClassification(t *testing.T) {
 			})
 			s := newTestStreamer("classify")
 
-			_, err := c.GetStreamInfo(s)
+			_, err := c.GetStreamInfo(context.Background(), s)
 			gotStatus, gotReason := classifyCheck(err)
 			if gotStatus != tc.wantStatus {
 				t.Fatalf("status = %v, want %v (err=%v)", gotStatus, tc.wantStatus, err)
@@ -106,7 +106,7 @@ func TestUnauthorizedClassifiesUnknown(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"Unauthorized"}`))
 	})
 	s := newTestStreamer("unauth")
-	_, err := c.GetStreamInfo(s)
+	_, err := c.GetStreamInfo(context.Background(), s)
 	status, reason := classifyCheck(err)
 	if status != models.StatusUnknown {
 		t.Fatalf("status = %v, want unknown (err=%v)", status, err)
