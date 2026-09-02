@@ -19,7 +19,7 @@ type mutableSource struct {
 }
 
 func (s *mutableSource) SourceName() string { return "discovery" }
-func (s *mutableSource) WatchCandidates() []Candidate {
+func (s *mutableSource) WatchCandidates(context.Context) []Candidate {
 	if c := s.cand.Load(); c != nil {
 		return *c
 	}
@@ -64,7 +64,7 @@ func TestBrokerConcurrentRefreshSettingsSnapshot(t *testing.T) {
 	go func() { // broker loop
 		defer wg.Done()
 		for i := 0; i < iters; i++ {
-			w.processWatching()
+			w.processWatching(tickCtx(w))
 		}
 	}()
 	go func() { // runtime settings updates
@@ -149,7 +149,7 @@ func TestConcurrentSettingsUpdateNoLostState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	w.ctx = ctx
 	for i := 0; i < 500; i++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		time.Sleep(time.Microsecond)
 	}
 	wg.Wait()

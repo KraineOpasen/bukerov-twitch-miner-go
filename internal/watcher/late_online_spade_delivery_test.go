@@ -95,9 +95,9 @@ type recordingSenderAdapter struct {
 	calls []sendRecord
 }
 
-func (a *recordingSenderAdapter) Send(streamer *models.Streamer) SendResult {
+func (a *recordingSenderAdapter) Send(ctx context.Context, streamer *models.Streamer) SendResult {
 	session := streamer.Stream.SessionSnapshot()
-	res := a.real.Send(streamer)
+	res := a.real.Send(ctx, streamer)
 	a.mu.Lock()
 	a.calls = append(a.calls, sendRecord{
 		login:      streamer.GetUsername(),
@@ -142,7 +142,7 @@ type noSpadeChecker struct {
 	calls map[string]int
 }
 
-func (c *noSpadeChecker) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
+func (c *noSpadeChecker) CheckStreamerOnlineContext(_ context.Context, s *models.Streamer) models.StatusTransition {
 	c.mu.Lock()
 	if c.calls == nil {
 		c.calls = make(map[string]int)
@@ -227,7 +227,7 @@ func TestMinuteWatchedDelivery_CoherentPairBothDeliver(t *testing.T) {
 
 	w, rt, adapter, _ := newDeliveryLifecycleWatcher(t, []*models.Streamer{a, b})
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	requireCommittedPair(t, w, 0, a.GetUsername(), b.GetUsername())
 
@@ -304,7 +304,7 @@ func TestMinuteWatchedDelivery_LateOnlineNoSpadeNeverDelivers(t *testing.T) {
 	w, rt, adapter, _, bLogin, cLogin := lateOnlineFixture(t)
 
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		requireCommittedPair(t, w, tick, cLogin, bLogin)
 
 		if calls := adapter.callsFor(cLogin); len(calls) == 0 {
@@ -392,7 +392,7 @@ func TestMinuteWatchedDelivery_RetainedCompanionDeliversIndependently(t *testing
 	w, _, adapter, _, bLogin, cLogin := lateOnlineFixture(t)
 
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		requireCommittedPair(t, w, tick, cLogin, bLogin)
 
 		calls := adapter.callsFor(bLogin)

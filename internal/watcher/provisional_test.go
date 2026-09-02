@@ -117,7 +117,7 @@ func TestConfiguredProvisionalCandidateRequiresExactOwnerPointer(t *testing.T) {
 			source := &staticSource{name: OriginDiscovery, cand: []Candidate{{
 				Streamer: test.streamer, ProvisionalDrop: &test.candidate,
 			}}}
-			got := w.gatherCandidates([]CandidateSource{source}, nil)
+			got := w.gatherCandidates(tickCtx(w), []CandidateSource{source}, nil)
 			if (len(got) == 1) != test.want {
 				t.Fatalf("gathered=%+v, want accepted=%v", got, test.want)
 			}
@@ -443,7 +443,7 @@ func TestProvisionalAcceptedScopeSurvivesStopOnlyAsFailClosedPolicy(t *testing.T
 	namespace := w.provisionalQuarantine.namespace
 	w.observationMu.Unlock()
 
-	w.Stop()
+	_ = w.Stop()
 	w.SetProvisionalMonitoringEnabled(true)
 	if w.provisionalQuarantine.namespace == namespace {
 		t.Fatal("Stop/re-enable reused the prior monitoring namespace")
@@ -1569,7 +1569,7 @@ func TestStopPreservesInflightPermitAcrossReenable(t *testing.T) {
 	conflicting.Stream.Update("other-broadcast", "", &models.Game{ID: "other-game"}, nil, 1)
 	conflicting.Stream.SetCampaignIDs(nil)
 	conflicting.Stream.SetSpadeURL("https://spade.invalid/other-session")
-	w.Stop()
+	_ = w.Stop()
 	w.SetProvisionalMonitoringEnabled(true)
 	streamer, candidate := provisionalWatcherFixture(t, "candidate", "candidate-id", "game-1")
 	slots, _ := w.reconcileProvisionalSlots([]slotOccupant{provisionalSlot(streamer, candidate)}, nil, time.Now())
@@ -1595,7 +1595,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	hookCalls := 0
 	w.SetOnMinuteWatched(func() { hookCalls++ })
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 0 {
 		t.Fatalf("new Pending lease sent %d beacon(s) before complete Inventory authority", got)
 	}
@@ -1611,7 +1611,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	if !w.ObserveProvisionalAbsence(lease.LeaseID, 1, absentAt) {
 		t.Fatal("failed to open one Pending bootstrap send")
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 1 {
 		t.Fatalf("fresh absence produced %d total beacon(s), want 1", got)
 	}
@@ -1624,7 +1624,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	if !ok || stats.Successes != 1 || stats.Failures != 0 || hookCalls != 1 {
 		t.Fatalf("Pending delivery accounting mismatch: stats=%+v ok=%v hookCalls=%d", stats, ok, hookCalls)
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 1 {
 		t.Fatalf("consumed absence token produced %d total beacon(s), want 1", got)
 	}
@@ -1637,7 +1637,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	if !w.ObserveProvisionalTupleUnknown(lease.LeaseID, 2, unknownAt) {
 		t.Fatal("failed to open one tuple-UNKNOWN bootstrap send")
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 2 {
 		t.Fatalf("tuple UNKNOWN produced %d total beacon(s), want 2", got)
 	}
@@ -1651,7 +1651,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	if !w.ArmProvisionalLease(lease.LeaseID, 3, baselineAt, 0) {
 		t.Fatal("failed to arm process lease")
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 3 {
 		t.Fatalf("observing lease sent total %d beacon(s), want 3", got)
 	}
@@ -1671,7 +1671,7 @@ func TestProvisionalProcessPendingSendACKDoesNotProve(t *testing.T) {
 	if !w.ObserveProvisionalProgress(lease.LeaseID, 4, lease.MaxAt.Add(time.Second), 1) {
 		t.Fatal("failed to prove process lease from exact server delta")
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 4 {
 		t.Fatalf("promoted proof sent total %d beacon(s), want 4", got)
 	}

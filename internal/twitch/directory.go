@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -57,7 +58,7 @@ func (c *TwitchClient) GetDirectoryStreams(gameName string, limit int) ([]Direct
 		"sortTypeIsRecency": false,
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +229,7 @@ func (c *TwitchClient) GetGameIdentity(gameName string) (GameIdentity, error) {
 		"name": name,
 	})
 
-	resp, err := c.postGQLRequest(op)
+	resp, err := c.postGQLRequest(context.Background(), op)
 	if err != nil {
 		return GameIdentity{}, err
 	}

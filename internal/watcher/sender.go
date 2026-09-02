@@ -35,7 +35,7 @@ import (
 // narrowed to an interface so Probe can be tested without a real client.
 // Satisfied by *twitch.TwitchClient.
 type playbackTokenProvider interface {
-	GetPlaybackAccessToken(username string) (sig, token string, err error)
+	GetPlaybackAccessToken(ctx context.Context, username string) (sig, token string, err error)
 }
 
 type MinuteSender struct {
@@ -87,15 +87,26 @@ type WatchFailure struct {
 //     (new broadcast or completed refresh); the beacon was NOT sent. This is
 //     neither an authoritative offline nor a Twitch transport failure — the loop
 //     simply retries next tick against the new session.
+//   - Cancelled: the caller's context (the watch generation) was cancelled
+//     during the send. The beacon may or may not have been attempted, but the
+//     outcome is NOT a Twitch transport failure and NOT an offline signal — the
+//     generation is being torn down, so it is classified separately instead of
+//     being laundered into a StageBeacon failure that would trigger a fresh
+//     online check on a dying generation.
 //   - Failure != nil: a fatal stage failed (session snapshot unusable, playback
 //     token, or beacon rejected).
 //
-// SimulateErr is the best-effort playlist/segment error: informational only,
-// never fatal for a production Send (it is surfaced for debug logging exactly as
-// the old (simulateErr, err) return did).
+// SimulateErr is the best-effort playlist/segment outcome: informational only,
+// never fatal for a production Send. It is REDACTED at construction (stage and
+// HTTP status only, see simulateFailure) because the raw transport error wraps
+// the signed usher URL, which embeds the playback sig and token — and this value
+// is logged. It is deliberately left nil on a Cancelled result: an aborted
+// request carries no information about Twitch, and reporting one would log a
+// simulate failure for every teardown.
 type SendResult struct {
 	Delivered   bool
 	Stale       bool
+	Cancelled   bool
 	Generation  uint64
 	SimulateErr error
 	Failure     *WatchFailure
@@ -108,34 +119,83 @@ type SendResult struct {
 // informational) -> generation re-check + spade beacon (fatal), with a session
 // that changed mid-send reported as a non-fatal Stale outcome instead of a beacon.
 //
-// The steps run with context.Background(), exactly as the original inline
-// http.NewRequest calls did.
-func (s *MinuteSender) Send(streamer *models.Streamer) SendResult {
+// Every step runs on ctx — the watch generation's context. A cancelled
+// generation therefore aborts the playback-token request, the three HLS
+// requests and the beacon POST instead of riding each one's 20-30s transport
+// timeout to completion, and cannot newly start a beacon it no longer owns.
+func (s *MinuteSender) Send(ctx context.Context, streamer *models.Streamer) SendResult {
 	session := streamer.Stream.SessionSnapshot()
-	if !session.HasSpadeURL() {
-		return SendResult{Failure: &WatchFailure{Stage: StageSessionSnapshot, ErrorCode: "no_spade_url"}}
-	}
-	if !session.HasPayload() {
+	if !session.HasSpadeURL() || !session.HasPayload() {
+		// Ownership is re-checked at the point of reporting, exactly as the
+		// playback-token and beacon branches do. These two gates do no I/O, so
+		// without the check a teardown landing on a slot whose session has not
+		// converged would surface as a StageSessionSnapshot transport failure —
+		// fabricating a failure statistic and sending the broker off to re-check
+		// a dying generation's channel.
+		if cancelled(ctx) {
+			return SendResult{Cancelled: true}
+		}
+		if !session.HasSpadeURL() {
+			return SendResult{Failure: &WatchFailure{Stage: StageSessionSnapshot, ErrorCode: "no_spade_url"}}
+		}
 		return SendResult{Failure: &WatchFailure{Stage: StageSessionSnapshot, ErrorCode: "no_payload"}}
 	}
 
 	login := streamer.GetUsername()
-	sig, token, err := s.client.GetPlaybackAccessToken(login)
+	sig, token, err := s.client.GetPlaybackAccessToken(ctx, login)
 	if err != nil {
+		if cancelled(ctx) {
+			return SendResult{Cancelled: true}
+		}
 		return SendResult{Failure: &WatchFailure{Stage: StagePlaybackToken, ErrorCode: "playback_token_error"}}
 	}
 
-	_, _, simulateErr := s.simulateWatching(context.Background(), login, sig, token)
+	simStage, simStatus, simErr := s.simulateWatching(ctx, login, sig, token)
+	simulateErr := redactSimulateErr(simStage, simStatus, simErr)
 
-	status, stale, beaconErr := s.postBeacon(context.Background(), streamer, session)
+	// A cancelled generation must not NEWLY START the beacon. The HLS stages
+	// above are deliberately non-fatal, so without this gate a send whose
+	// playlist fetch was aborted by cancellation would still go on to POST a
+	// minute-watched event — and whether that POST were rejected would depend
+	// on the transport noticing the dead context, not on ownership.
+	if ctx.Err() != nil {
+		// No SimulateErr: an aborted request carries no information about Twitch,
+		// and reporting one would put a "Failed to simulate watching" line in the
+		// log for every teardown — the same misreading res.Cancelled exists to
+		// prevent in the statistics.
+		return SendResult{Cancelled: true}
+	}
+
+	status, stale, beaconErr := s.postBeacon(ctx, streamer, session)
 	switch {
 	case stale:
 		return SendResult{Stale: true, SimulateErr: simulateErr}
 	case beaconErr != nil:
+		// Classify before reporting: a beacon that failed because the watch
+		// generation was cancelled is a teardown, not a Twitch transport
+		// failure. Suppressing the distinction would fabricate a failure
+		// statistic and send the broker off to re-check the channel's online
+		// state on a generation that no longer exists.
+		if cancelled(ctx) {
+			return SendResult{Cancelled: true}
+		}
 		return SendResult{SimulateErr: simulateErr, Failure: &WatchFailure{Stage: StageBeacon, Status: status, ErrorCode: beaconErrorCode(status)}}
 	default:
 		return SendResult{Delivered: true, Generation: session.Generation, SimulateErr: simulateErr}
 	}
+}
+
+// cancelled reports whether a step failed because the OWNER's context ended,
+// rather than because Twitch rejected the request.
+//
+// It deliberately keys on the owner's context alone and NOT on the error chain:
+// a context.DeadlineExceeded arriving from Twitch (or from a transport's own
+// per-request budget) while the watch generation is still alive is a genuine
+// transport failure and must keep being reported as one. Only the owner ending
+// makes an outcome a teardown. Cancellation is monotonic, so an owner-aborted
+// request always finds ctx.Err() non-nil here.
+func cancelled(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
 
 // ProbeResult is the redacted outcome of a watch-transport probe. It carries only
@@ -153,8 +213,9 @@ type ProbeResult struct {
 // Probe runs the exact watch-transport sequence Send uses — session snapshot ->
 // playback token -> playlist/lowest-variant/segment -> generation re-check + spade
 // beacon — but stage-instrumented and redacted, for the health canary. Unlike
-// Send, every step is fatal (a probe wants to know the first thing that breaks)
-// and cancellable via ctx. The streamer must already be brought online.
+// Send, every step is fatal (a probe wants to know the first thing that breaks);
+// both run entirely on their caller's ctx. The streamer must already be brought
+// online.
 func (s *MinuteSender) Probe(ctx context.Context, streamer *models.Streamer) ProbeResult {
 	start := time.Now()
 	elapsed := func() time.Duration { return time.Since(start) }
@@ -168,7 +229,7 @@ func (s *MinuteSender) Probe(ctx context.Context, streamer *models.Streamer) Pro
 	}
 
 	login := streamer.GetUsername()
-	sig, token, err := s.client.GetPlaybackAccessToken(login)
+	sig, token, err := s.client.GetPlaybackAccessToken(ctx, login)
 	if err != nil {
 		return probeFail(StagePlaybackToken, 0, elapsed())
 	}
@@ -186,6 +247,35 @@ func (s *MinuteSender) Probe(ctx context.Context, streamer *models.Streamer) Pro
 	}
 
 	return ProbeResult{OK: true, Duration: elapsed()}
+}
+
+// simulateFailure is the redacted best-effort playlist/segment outcome: the
+// stage reached and the HTTP status there, never the raw transport error. The
+// raw error wraps the signed usher playback URL (sig + token in the query), and
+// SendResult.SimulateErr is written to the debug log, so the raw form must never
+// reach a SendResult, a ProbeResult or a log line: every caller of
+// simulateWatching redacts it at the call site (redactSimulateErr here,
+// probeFail on the probe path). Mirrors the redaction WatchFailure and
+// ProbeResult already apply.
+type simulateFailure struct {
+	Stage  ProbeStage
+	Status int
+}
+
+func (e *simulateFailure) Error() string {
+	if e.Status > 0 {
+		return fmt.Sprintf("watch simulation failed at stage %s (status %d)", e.Stage, e.Status)
+	}
+	return fmt.Sprintf("watch simulation failed at stage %s", e.Stage)
+}
+
+// redactSimulateErr converts simulateWatching's (stage, status, err) triple into
+// the redacted informational error Send reports. nil in, nil out.
+func redactSimulateErr(stage ProbeStage, status int, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &simulateFailure{Stage: stage, Status: status}
 }
 
 // probeFail builds a redacted failure result. The error code is derived only from

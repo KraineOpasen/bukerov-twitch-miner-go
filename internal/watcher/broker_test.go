@@ -32,8 +32,8 @@ type staticSource struct {
 	cand []Candidate
 }
 
-func (s *staticSource) SourceName() string           { return s.name }
-func (s *staticSource) WatchCandidates() []Candidate { return s.cand }
+func (s *staticSource) SourceName() string                          { return s.name }
+func (s *staticSource) WatchCandidates(context.Context) []Candidate { return s.cand }
 
 func loginsOf(slots []slotOccupant) map[string]bool {
 	m := make(map[string]bool, len(slots))
@@ -221,7 +221,7 @@ func TestGatherCandidatesDropsConfiguredLogins(t *testing.T) {
 		{Streamer: w.streamers[0]},                          // duplicate of a configured login
 		{Streamer: discoveryStreamer("fresh_disco", false)}, // genuinely new
 	}}
-	got := w.gatherCandidates([]CandidateSource{src}, nil)
+	got := w.gatherCandidates(tickCtx(w), []CandidateSource{src}, nil)
 	if len(got) != 1 || got[0].Streamer.Username != "fresh_disco" {
 		t.Fatalf("expected only the non-configured candidate, got %v", got)
 	}
@@ -417,7 +417,7 @@ func TestSlotRankOrdering(t *testing.T) {
 // without real HTTP.
 type staticChecker struct{ checked chan string }
 
-func (c *staticChecker) CheckStreamerOnline(s *models.Streamer) models.StatusTransition {
+func (c *staticChecker) CheckStreamerOnlineContext(_ context.Context, s *models.Streamer) models.StatusTransition {
 	select {
 	case c.checked <- s.Username:
 	default:
@@ -430,7 +430,7 @@ type countingSender struct {
 	err  error
 }
 
-func (s *countingSender) Send(streamer *models.Streamer) SendResult {
+func (s *countingSender) Send(_ context.Context, streamer *models.Streamer) SendResult {
 	select {
 	case s.sent <- streamer.Username:
 	default:
@@ -485,7 +485,7 @@ func TestProcessWatchingNeverSendsMoreThanMaxSlots(t *testing.T) {
 	defer cancel()
 	w.ctx = ctx
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	close(sender.sent)
 	seen := map[string]bool{}
@@ -518,7 +518,7 @@ func TestBrokerSnapshotReflectsAllocation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	snap := w.BrokerSnapshot()
 	if snap.MaxSlots != constants.MaxSimultaneousStreams {
@@ -550,29 +550,34 @@ func TestBrokerSnapshotReflectsAllocation(t *testing.T) {
 	}
 }
 
-// TestProcessWatchingContextCancelStopsSends: a cancelled context aborts the
-// send loop between slots.
-func TestProcessWatchingContextCancelStopsSends(t *testing.T) {
+// TestProcessWatchingPacerStopSignalStopsSends: the inter-send wait reporting
+// "stop" aborts the send loop between slots.
+//
+// The context stays LIVE here on purpose. The tick now has its own cancellation
+// gates ahead of the slot loop (see processWatching), so a cancelled context
+// would make this test vacuous — it would observe zero sends without the pacer
+// signal ever mattering. Cancellation of the tick itself is covered by
+// TestCancelledTickStartsNoSend and TestPaceIsInterruptibleByTheGeneration; this
+// test keeps the pacer path itself honest: exactly one send, then stop.
+func TestProcessWatchingPacerStopSignalStopsSends(t *testing.T) {
 	sender := &countingSender{sent: make(chan string, 16)}
 	checker := &staticChecker{checked: make(chan string, 16)}
 	w, _ := newLoopWatcher(2, sender, checker)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	w.ctx = ctx
-	cancel()
-	// Simulate the pacing wait observing the cancelled context: the send loop
-	// must stop after the first send instead of pacing through every slot.
 	w.pacer = func(time.Duration) bool { return false }
 
-	w.processWatching() // must not hang or panic
+	w.processWatching(tickCtx(w)) // must not hang or panic
 
 	close(sender.sent)
 	count := 0
 	for range sender.sent {
 		count++
 	}
-	if count > 1 {
-		t.Fatalf("expected the send loop to stop after the first send on cancellation, got %d sends", count)
+	if count != 1 {
+		t.Fatalf("expected the send loop to stop after exactly one send when the wait reports stop, got %d sends", count)
 	}
 }
 
@@ -590,7 +595,7 @@ func TestUpdateSettingsAppliedNextTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching() // applies pending settings at the start of the tick
+	w.processWatching(tickCtx(w)) // applies pending settings at the start of the tick
 
 	if w.settings.MinuteWatchedInterval != 2 {
 		t.Errorf("expected the staged interval applied, got %d", w.settings.MinuteWatchedInterval)

@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"testing"
@@ -50,7 +51,7 @@ func TestPostGQLRequestDoesNotMarkSuccessOnTopLevelErrors(t *testing.T) {
 	sentinel := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.lastSuccess = sentinel
 
-	_, _ = c.postGQLRequest(constants.Inventory)
+	_, _ = c.postGQLRequest(context.Background(), constants.Inventory)
 
 	if got := c.LastSuccessAt(); !got.Equal(sentinel) {
 		t.Fatalf(healthSentinelUnchanged, got, sentinel)
@@ -65,7 +66,7 @@ func TestPostGQLRequestDoesNotMarkSuccessOnPQNF(t *testing.T) {
 	sentinel := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.lastSuccess = sentinel
 
-	_, _ = c.postGQLRequest(constants.Inventory)
+	_, _ = c.postGQLRequest(context.Background(), constants.Inventory)
 
 	if got := c.LastSuccessAt(); !got.Equal(sentinel) {
 		t.Fatalf(healthSentinelUnchanged, got, sentinel)
@@ -79,7 +80,7 @@ func TestPostGQLRequestMarksSuccessOnRealData(t *testing.T) {
 	sentinel := time.Now().Add(-time.Hour)
 	c.lastSuccess = sentinel
 
-	if _, err := c.postGQLRequest(constants.Inventory); err != nil {
+	if _, err := c.postGQLRequest(context.Background(), constants.Inventory); err != nil {
 		t.Fatalf("unexpected error on a real data response: %v", err)
 	}
 	if got := c.LastSuccessAt(); !got.After(sentinel) {
@@ -94,7 +95,7 @@ func TestPostGQLBatchRequestDoesNotMarkSuccessOnTopLevelErrors(t *testing.T) {
 	sentinel := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.lastSuccess = sentinel
 
-	_, _ = c.postGQLBatchRequest([]constants.GQLOperation{constants.Inventory})
+	_, _ = c.postGQLBatchRequest(context.Background(), []constants.GQLOperation{constants.Inventory})
 
 	if got := c.LastSuccessAt(); !got.Equal(sentinel) {
 		t.Fatalf(healthSentinelUnchanged, got, sentinel)
@@ -107,7 +108,7 @@ func TestPostGQLBatchRequestMarksSuccessOnRealData(t *testing.T) {
 	sentinel := time.Now().Add(-time.Hour)
 	c.lastSuccess = sentinel
 
-	if _, err := c.postGQLBatchRequest([]constants.GQLOperation{constants.Inventory}); err != nil {
+	if _, err := c.postGQLBatchRequest(context.Background(), []constants.GQLOperation{constants.Inventory}); err != nil {
 		t.Fatalf("unexpected error on a real batch data response: %v", err)
 	}
 	if got := c.LastSuccessAt(); !got.After(sentinel) {

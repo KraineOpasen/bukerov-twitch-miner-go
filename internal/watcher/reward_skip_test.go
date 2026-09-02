@@ -69,7 +69,7 @@ func TestSlotAdmissionRefusesSkippedOnlyDropJustification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	if sent := drainSent(sender); len(sent) != 0 {
 		t.Fatalf("skipped-only drop justification must not reach the send boundary, got %v", sent)
@@ -95,7 +95,7 @@ func TestSlotAdmissionKeepsPointsJustifiedChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	if sent := drainSent(sender); len(sent) != 1 || sent[0] != "pointschan" {
 		t.Fatalf("points-justified watching must continue (mixed-conflict contract), got %v", sent)
@@ -123,7 +123,7 @@ func TestSlotAdmissionKeepsUnskippedDropJustification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	if sent := drainSent(sender); len(sent) != 1 || sent[0] != "dropchan" {
 		t.Fatalf("unskipped drop justification must keep its slot, got %v", sent)
@@ -156,7 +156,7 @@ func TestSetRewardSkipsConcurrentWithBrokerTicks(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 20; i++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 	}
 	<-done
 
@@ -165,7 +165,7 @@ func TestSetRewardSkipsConcurrentWithBrokerTicks(t *testing.T) {
 	for len(sender.sent) > 0 {
 		<-sender.sent
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if got := len(sender.sent); got != 0 {
 		t.Fatalf("after publication the skipped-only channel must not be sent, got %d sends", got)
 	}
@@ -191,7 +191,7 @@ func TestSlotAdmissionKeepsSiblingWantedCampaign(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w.ctx = ctx
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	if sent := drainSent(sender); len(sent) != 1 || sent[0] != "mixedchan" {
 		t.Fatalf("the wanted sibling must keep the drop-justified slot, got %v", sent)

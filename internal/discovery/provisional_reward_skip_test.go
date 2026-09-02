@@ -7,6 +7,7 @@ package discovery
 // start, evidence typing) stays untouched for unskipped rewards.
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestProvisionalUnknownSkippedRewardIsNotACandidate(t *testing.T) {
 			m, ch := provisionalUnknownFixture(t, campaign)
 			m.UpdateRewardSkips(skipRuleFor("g1", campaign.Drops[0].Name))
 
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("skipped reward produced %d provisional candidates, want 0", len(got))
 			}
 			if assigned := ch.Streamer.Stream.GetCampaigns(); len(assigned) != 0 {
@@ -48,14 +49,14 @@ func TestProvisionalUnknownSkippedRewardIsNotACandidate(t *testing.T) {
 			// Removing the rule from the same exact reward restores
 			// provisional eligibility with all other authority unchanged.
 			m.UpdateRewardSkips(nil)
-			got := m.WatchCandidates()
+			got := m.WatchCandidates(context.Background())
 			if len(got) != 1 || got[0].ProvisionalDrop == nil {
 				t.Fatalf("un-skipped reward did not regain provisional candidacy: %+v", got)
 			}
 
 			// The same reward name under ANOTHER game never collides.
 			m.UpdateRewardSkips(skipRuleFor("other-game", campaign.Drops[0].Name))
-			if got := m.WatchCandidates(); len(got) != 1 || got[0].ProvisionalDrop == nil {
+			if got := m.WatchCandidates(context.Background()); len(got) != 1 || got[0].ProvisionalDrop == nil {
 				t.Fatalf("foreign-game rule wrongly excluded the candidate: %+v", got)
 			}
 		})
@@ -79,7 +80,7 @@ func TestProvisionalKnownEmptyVetoIndependentOfSkip(t *testing.T) {
 			obs := ch.Streamer.Stream.BeginCampaignAvailabilityObservation()
 			ch.Streamer.Stream.ApplyCampaignAvailability(obs, true, nil, time.Now())
 			m.UpdateRewardSkips(tc.skips)
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("Known-empty must veto provisional candidacy regardless of Skip, got %d", len(got))
 			}
 		})
@@ -102,12 +103,12 @@ func TestProvisionalRetainedCampaignIDsDoNotBypassSkip(t *testing.T) {
 	}
 
 	m.UpdateRewardSkips(skipRuleFor("g1", campaign.Drops[0].Name))
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("retained IDs bypassed the Skip veto: %d candidates", len(got))
 	}
 
 	m.UpdateRewardSkips(nil)
-	if got := m.WatchCandidates(); len(got) != 1 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 1 {
 		t.Fatalf("control: retained IDs must not block unskipped candidacy, got %d", len(got))
 	}
 }
@@ -130,7 +131,7 @@ func TestProvisionalConcurrentRewardSkipsUpdate(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 20; i++ {
-		if got := m.WatchCandidates(); len(got) != 0 {
+		if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 			t.Fatalf("skipped campaign proposed under concurrent updates: %d candidates", len(got))
 		}
 	}
@@ -145,14 +146,14 @@ func TestProvisionalRuntimeSkipFlipStopsProposalAndFence(t *testing.T) {
 	campaign := provisionalCampaign(false)
 	m, ch := provisionalUnknownFixture(t, campaign)
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil {
 		t.Fatalf("baseline proposal missing: %+v", got)
 	}
 	candidate := *got[0].ProvisionalDrop
 
 	m.UpdateRewardSkips(skipRuleFor("g1", campaign.Drops[0].Name))
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("flip did not stop the provisional proposal: %+v", got)
 	}
 	if m.provisionalCandidateStillCurrentAtSource(ch, candidate, 0, false) {

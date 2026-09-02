@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ type perGameDirectoryClient struct {
 
 func (f *provisionalScopeCapture) RequireProvisionalScope() {}
 
-func (f *perGameDirectoryClient) CheckStreamerOnline(streamer *models.Streamer) models.StatusTransition {
+func (f *perGameDirectoryClient) CheckStreamerOnlineContext(_ context.Context, streamer *models.Streamer) models.StatusTransition {
 	return streamer.SetConfirmedOnline()
 }
 
@@ -158,7 +159,7 @@ func TestProvisionalQuarantineScopeIncludesQuarantinedAndUnselectedTuples(t *tes
 		quarantined: map[string]bool{all[0].candidate.QuarantineKey(): true},
 	}}
 	m.SetSlotStatus(capture)
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil ||
 		got[0].ProvisionalDrop.CampaignID != campaignB.ID {
 		t.Fatalf("quarantined A did not fall through to B: %+v", got)
@@ -177,13 +178,13 @@ func TestProvisionalQuarantineScopeIncludesQuarantinedAndUnselectedTuples(t *tes
 	}
 
 	firstGeneration := capture.generations[0]
-	m.WatchCandidates()
+	m.WatchCandidates(context.Background())
 	if len(capture.generations) != 2 || capture.generations[1] <= firstGeneration {
 		t.Fatalf("complete scope generation did not advance strictly: %v", capture.generations)
 	}
 	provider.currentRevision++
 	beforeStaleSource := len(capture.generations)
-	m.WatchCandidates()
+	m.WatchCandidates(context.Background())
 	if len(capture.generations) != beforeStaleSource {
 		t.Fatal("stale broker campaign source emitted a prune scope")
 	}
@@ -196,7 +197,7 @@ func TestProvisionalQuarantineScopeIncludesQuarantinedAndUnselectedTuples(t *tes
 	m.client = &fakeClient{err: errors.New("directory unavailable")}
 	m.syncOnce()
 	before := len(capture.generations)
-	m.WatchCandidates()
+	m.WatchCandidates(context.Background())
 	if len(capture.generations) != before+1 {
 		t.Fatal("errored Directory enumeration did not emit a fenced scope")
 	}
@@ -221,7 +222,7 @@ func TestProvisionalQuarantineScopeTemporaryAvoidanceDoesNotPruneLiveTuple(t *te
 	m.SetSlotStatus(capture)
 	m.SetAvoidChecker(&staticAvoidChecker{avoided: map[string]bool{channel.Streamer.GetUsername(): true}})
 
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("temporarily avoided login remained selectable: %+v", got)
 	}
 	if len(capture.scopes) != 1 || len(capture.scopes[0]) != 1 ||
@@ -339,7 +340,7 @@ func TestConfiguredProvisionalUnknown_DefaultAndTrackedOnly(t *testing.T) {
 				// discovery modes share the same exact configured pointer path.
 				m, streamer := configuredProvisionalFixture(t, mode, provisionalCampaign(restricted), true)
 				before := streamer.Stream.GetCampaigns()
-				got := m.WatchCandidates()
+				got := m.WatchCandidates(context.Background())
 				if len(got) != 1 || got[0].Streamer != streamer || got[0].ProvisionalDrop == nil {
 					t.Fatalf("configured proposal = %+v, want one exact-pointer provisional candidate", got)
 				}
@@ -362,7 +363,7 @@ func TestConfiguredProvisionalUnknown_RestrictedNeedsNoDirectory(t *testing.T) {
 	for _, mode := range []config.DiscoveryMode{config.DiscoveryModeAll, config.DiscoveryModeTrackedOnly} {
 		t.Run(string(mode), func(t *testing.T) {
 			m, streamer := configuredProvisionalFixture(t, mode, provisionalCampaign(true), false)
-			got := m.WatchCandidates()
+			got := m.WatchCandidates(context.Background())
 			if len(got) != 1 || got[0].Streamer != streamer || got[0].ProvisionalDrop == nil ||
 				got[0].ProvisionalDrop.Evidence != models.ProvisionalEvidenceRestrictedACL ||
 				got[0].ProvisionalDrop.DirectoryObs != 0 {
@@ -381,7 +382,7 @@ func TestConfiguredProvisionalUnknown_EmptyDirectoryGamesRemainsDormant(t *testi
 		t.Run(name, func(t *testing.T) {
 			m, _ := configuredProvisionalFixture(t, config.DiscoveryModeAll, provisionalCampaign(restricted), true)
 			m.UpdateSettings(nil, config.DiscoveryModeAll, false, testRateLimits())
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("configured %s proposal escaped dormant DirectoryGames scope: %+v", name, got)
 			}
 			m.mu.RLock()
@@ -397,7 +398,7 @@ func TestConfiguredProvisionalUnknown_EmptyDirectoryGamesRemainsDormant(t *testi
 func TestConfiguredProvisionalUnknown_OpenRequiresExactFreshDirectory(t *testing.T) {
 	t.Run("absent", func(t *testing.T) {
 		m, _ := configuredProvisionalFixture(t, config.DiscoveryModeAll, provisionalCampaign(false), false)
-		if got := m.WatchCandidates(); len(got) != 0 {
+		if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 			t.Fatalf("open configured campaign without Directory evidence = %+v", got)
 		}
 	})
@@ -405,7 +406,7 @@ func TestConfiguredProvisionalUnknown_OpenRequiresExactFreshDirectory(t *testing
 	t.Run("channel id mismatch", func(t *testing.T) {
 		m, streamer := configuredProvisionalFixture(t, config.DiscoveryModeAll, provisionalCampaign(false), true)
 		streamer.ChannelID = "replacement-channel"
-		if got := m.WatchCandidates(); len(got) != 0 {
+		if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 			t.Fatalf("open configured campaign reused another channel identity = %+v", got)
 		}
 	})
@@ -414,7 +415,7 @@ func TestConfiguredProvisionalUnknown_OpenRequiresExactFreshDirectory(t *testing
 		m, _ := configuredProvisionalFixture(t, config.DiscoveryModeAll, provisionalCampaign(false), true)
 		m.client = &fakeClient{err: errors.New("directory unavailable")}
 		m.syncOnce()
-		if got := m.WatchCandidates(); len(got) != 0 {
+		if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 			t.Fatalf("open configured campaign reused stale Directory evidence = %+v", got)
 		}
 	})
@@ -439,7 +440,7 @@ func TestConfiguredProvisionalUnknown_KnownStatesRemainOrdinary(t *testing.T) {
 			}
 			streamer.Stream.SetCampaigns(assigned)
 
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("configured %s leaked into provisional source: %+v", test.name, got)
 			}
 			after := streamer.Stream.GetCampaigns()
@@ -472,7 +473,7 @@ func TestMergedAvailableDropsUnknownContinuityUsesOnlyProvisionalAuthority(t *te
 	if state != models.CampaignAvailabilityUnknown || len(ids) != 1 || ids[0] != campaign.ID {
 		t.Fatalf("UNKNOWN continuity = state=%s ids=%v, want retained diagnostic ID", state, ids)
 	}
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != streamer || got[0].ProvisionalDrop == nil {
 		t.Fatalf("UNKNOWN continuity proposal = %+v, want one provisional candidate", got)
 	}
@@ -491,7 +492,7 @@ func TestMergedAvailableDropsUnknownContinuityUsesOnlyProvisionalAuthority(t *te
 	); !result.Applied || result.State != models.CampaignAvailabilityKnown {
 		t.Fatalf("Known-empty publication = %+v", result)
 	}
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("Known-empty produced provisional candidates: %+v", got)
 	}
 	state, ids = streamer.Stream.CampaignAvailability()
@@ -510,7 +511,7 @@ func TestProvisionalQuarantineHandsOffWithinSameChannel(t *testing.T) {
 	m, _ := provisionalUnknownFixture(t, first)
 	m.campaigns.(*fakeCampaigns).campaigns = []*models.Campaign{first, second}
 
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil || initial[0].ProvisionalDrop.CampaignID != first.ID {
 		t.Fatalf("initial same-channel choice = %+v", initial)
 	}
@@ -518,7 +519,7 @@ func TestProvisionalQuarantineHandsOffWithinSameChannel(t *testing.T) {
 		initial[0].ProvisionalDrop.QuarantineKey(): true,
 	}})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil || got[0].ProvisionalDrop.CampaignID != second.ID {
 		t.Fatalf("quarantined first Drop hid same-channel fallback: %+v", got)
 	}
@@ -527,7 +528,7 @@ func TestProvisionalQuarantineHandsOffWithinSameChannel(t *testing.T) {
 func TestProvisionalQuarantineHandsOffToNextChannelSameTick(t *testing.T) {
 	campaign := provisionalCampaign(false)
 	m, current := provisionalUnknownFixture(t, campaign)
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 		t.Fatalf("initial proposal = %+v", initial)
 	}
@@ -551,7 +552,7 @@ func TestProvisionalQuarantineHandsOffToNextChannelSameTick(t *testing.T) {
 		initial[0].ProvisionalDrop.QuarantineKey(): true,
 	}})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != backup.Streamer || got[0].ProvisionalDrop == nil {
 		t.Fatalf("quarantined current did not hand off to next channel in the same source call: %+v", got)
 	}
@@ -559,7 +560,7 @@ func TestProvisionalQuarantineHandsOffToNextChannelSameTick(t *testing.T) {
 
 func TestProvisionalQuarantineSurvivesRefreshButNotNewSession(t *testing.T) {
 	m, current := provisionalUnknownFixture(t, provisionalCampaign(false))
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 		t.Fatalf("initial proposal = %+v", initial)
 	}
@@ -569,12 +570,12 @@ func TestProvisionalQuarantineSurvivesRefreshButNotNewSession(t *testing.T) {
 
 	observation := current.Streamer.Stream.BeginCampaignAvailabilityObservation()
 	current.Streamer.Stream.ApplyCampaignAvailability(observation, false, nil, time.Now())
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("routine UNKNOWN refresh escaped exact session quarantine: %+v", got)
 	}
 
 	current.Streamer.Stream.Update("broadcast-new", "", &models.Game{ID: "g1", Name: "World of Tanks"}, nil, 1)
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil ||
 		got[0].ProvisionalDrop.BroadcastID != "broadcast-new" ||
 		got[0].ProvisionalDrop.QuarantineKey() == initial[0].ProvisionalDrop.QuarantineKey() {
@@ -625,7 +626,7 @@ func TestConfiguredProvisionalOrdering_StrictStrongerBeatsLeaseContinuityAcrossR
 			})
 			m.SetSlotStatus(&observationOwnerSlotStatus{owner: a})
 
-			got := m.WatchCandidates()
+			got := m.WatchCandidates(context.Background())
 			if len(got) < 1 || got[0].Streamer != b || got[0].ProvisionalDrop == nil ||
 				got[0].ProvisionalDrop.CampaignID != campaignB.ID {
 				t.Fatalf("strict stronger configured proposal lost under %s roster: %+v", name, got)
@@ -635,7 +636,7 @@ func TestConfiguredProvisionalOrdering_StrictStrongerBeatsLeaseContinuityAcrossR
 				campaignA.ID: {SemanticClass: 1, SecondaryEligible: true},
 				campaignB.ID: {SemanticClass: 1, SecondaryEligible: true},
 			})
-			got = m.WatchCandidates()
+			got = m.WatchCandidates(context.Background())
 			if len(got) < 1 || got[0].Streamer != a {
 				t.Fatalf("equal configured proposal displaced active lease continuity under %s roster: %+v", name, got)
 			}
@@ -656,7 +657,7 @@ func TestConfiguredAndDirectoryProvisionalUseOnePolicyOrdering(t *testing.T) {
 		directoryCampaign.ID:  {SemanticClass: 5, SecondaryEligible: true},
 		configuredCampaign.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) < 1 || got[0].Streamer != configured {
 		t.Fatalf("strict stronger configured proposal did not preempt weaker directory lease: %+v", got)
 	}
@@ -665,14 +666,14 @@ func TestConfiguredAndDirectoryProvisionalUseOnePolicyOrdering(t *testing.T) {
 		directoryCampaign.ID:  {SemanticClass: 1, SecondaryEligible: true},
 		configuredCampaign.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
-	got = m.WatchCandidates()
+	got = m.WatchCandidates(context.Background())
 	if len(got) < 1 || got[0].Streamer != current.Streamer {
 		t.Fatalf("equal configured proposal displaced directory continuity: %+v", got)
 	}
 
 	observation := current.Streamer.Stream.BeginCampaignAvailabilityObservation()
 	current.Streamer.Stream.ApplyCampaignAvailability(observation, true, []string{directoryCampaign.ID}, time.Now())
-	got = m.WatchCandidates()
+	got = m.WatchCandidates(context.Background())
 	if len(got) != 2 || got[0].Streamer != current.Streamer || got[0].ProvisionalDrop != nil ||
 		got[1].Streamer != configured || got[1].ProvisionalDrop == nil {
 		t.Fatalf("unproved configured proposal preempted ordinary confirmed current: %+v", got)
@@ -692,7 +693,7 @@ func TestSameChannelCampaignPermutationRetainsExactLeaseOnlyOnTie(t *testing.T) 
 		first.ID:  {SemanticClass: 1, SecondaryEligible: true},
 		second.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil || initial[0].ProvisionalDrop.CampaignID != first.ID {
 		t.Fatalf("initial equal campaign selection = %+v", initial)
 	}
@@ -701,7 +702,7 @@ func TestSameChannelCampaignPermutationRetainsExactLeaseOnlyOnTie(t *testing.T) 
 	m.SetSlotStatus(status)
 	m.campaigns.(*fakeCampaigns).campaigns = []*models.Campaign{second, first}
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil ||
 		!got[0].ProvisionalDrop.SameLeaseIdentity(owned) {
 		t.Fatalf("equal campaign permutation churned exact active lease: %+v", got)
@@ -711,7 +712,7 @@ func TestSameChannelCampaignPermutationRetainsExactLeaseOnlyOnTie(t *testing.T) 
 		first.ID:  {SemanticClass: 5, SecondaryEligible: true},
 		second.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
-	got = m.WatchCandidates()
+	got = m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil || got[0].ProvisionalDrop.CampaignID != second.ID {
 		t.Fatalf("exact lease continuity blocked strict stronger same-channel campaign: %+v", got)
 	}
@@ -721,7 +722,7 @@ func TestSameChannelCampaignPermutationRetainsExactLeaseOnlyOnTie(t *testing.T) 
 		first.ID:  {SemanticClass: 1, SecondaryEligible: true},
 		second.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
-	got = m.WatchCandidates()
+	got = m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil || got[0].ProvisionalDrop.CampaignID != second.ID {
 		t.Fatalf("quarantined owned campaign hid same-channel fallback: %+v", got)
 	}
@@ -738,7 +739,7 @@ func TestTrackedOnlyConfiguredExactOwnerReplacesKnownEphemeralClone(t *testing.T
 	clone.Stream.Update("clone-broadcast", "", &models.Game{ID: "g1", Name: "World of Tanks"}, nil, 1)
 	clone.Stream.SetCampaignIDs([]string{campaign.ID})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != owner || got[0].ProvisionalDrop == nil {
 		t.Fatalf("Known ephemeral configured clone hid exact UNKNOWN owner: %+v", got)
 	}
@@ -749,7 +750,7 @@ func TestTrackedOnlyConfiguredExactOwnerReplacesKnownEphemeralClone(t *testing.T
 
 func TestProvisionalUnknownColdStart_OpenCampaignCanReachCandidateSource(t *testing.T) {
 	m, ch := provisionalUnknownFixture(t, provisionalCampaign(false))
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("UNKNOWN valid open campaign produced %d candidates, want one provisional observation candidate", len(got))
 	}
@@ -771,7 +772,7 @@ func TestProvisionalUnknownColdStart_OpenCampaignCanReachCandidateSource(t *test
 
 func TestProvisionalUnknownColdStart_RestrictedCampaignCanReachCandidateSource(t *testing.T) {
 	m, ch := provisionalUnknownFixture(t, provisionalCampaign(true))
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("UNKNOWN exact restricted ACL produced %d candidates, want one provisional observation candidate", len(got))
 	}
@@ -856,7 +857,7 @@ func TestProvisionalUnknownColdStart_HardVetoMatrix(t *testing.T) {
 			campaign := provisionalCampaign(true)
 			m, ch := provisionalUnknownFixture(t, campaign)
 			tc.mutate(m, ch, campaign)
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("hard veto produced %d candidates, want none", len(got))
 			}
 			if assigned := ch.Streamer.Stream.GetCampaigns(); len(assigned) != 0 {
@@ -872,7 +873,7 @@ func TestProvisionalUnknownColdStart_KnownPositiveBehaviorUnchanged(t *testing.T
 	obs := ch.Streamer.Stream.BeginCampaignAvailabilityObservation()
 	ch.Streamer.Stream.ApplyCampaignAvailability(obs, true, []string{campaign.ID}, time.Now())
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("known-positive campaign produced %d candidates, want 1", len(got))
 	}
@@ -894,7 +895,7 @@ func TestProvisionalUnknownColdStart_OpenDirectoryEvidenceStalesOnListingError(t
 	if ch.directoryObservation != original || m.directoryObservation == original {
 		t.Fatalf("retained row generation=%d manager=%d, want old row under a newer attempt", ch.directoryObservation, m.directoryObservation)
 	}
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("stale retained open Directory row produced %d candidates, want none", len(got))
 	}
 }
@@ -904,7 +905,7 @@ func TestProvisionalUnknownColdStart_RestrictedACLDoesNotNeedFreshDirectoryRow(t
 	m.client = &fakeClient{err: errors.New("directory unavailable")}
 	m.syncOnce()
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil ||
 		got[0].ProvisionalDrop.Evidence != models.ProvisionalEvidenceRestrictedACL {
 		t.Fatalf("exact restricted ACL after Directory error = %+v, want one provisional candidate", got)
@@ -917,7 +918,7 @@ func TestProvisionalUnknownColdStart_OpenCampaignRequiresDropsEnabledDirectoryRo
 	ch.DropsEnabled = false
 	m.mu.Unlock()
 
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("open campaign without DROPS_ENABLED evidence produced %d candidates, want none", len(got))
 	}
 }
@@ -968,7 +969,7 @@ func TestProvisionalUnknownColdStart_PreviousConfirmedAssignmentClearsAndDoesNot
 		t.Fatal("provisional candidate survived a concurrently-published confirmed assignment")
 	}
 
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("prior confirmed assignment produced %d provisional candidates, want none", len(got))
 	}
 	if assigned := ch.Streamer.Stream.GetCampaigns(); len(assigned) != 0 {
@@ -1018,7 +1019,7 @@ func TestProvisionalUnknownColdStart_UsesBrokerAccountCampaignViewAndSemanticOrd
 		preferred.ID: {SemanticClass: 1, SecondaryEligible: true},
 	})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil || got[0].ProvisionalDrop.CampaignID != preferred.ID {
 		t.Fatalf("broker campaign selection = %+v, want semantically preferred %s", got, preferred.ID)
 	}
@@ -1097,7 +1098,7 @@ func TestProvisionalUnknownColdStart_FinalBrokerSourceFenceRejectsConcurrentDrif
 				},
 			}
 
-			if got := m.WatchCandidates(); len(got) != 0 {
+			if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 				t.Fatalf("source changed between derivation and final publication, got %+v", got)
 			}
 		})
@@ -1117,7 +1118,7 @@ func TestProvisionalUnknownColdStart_RejectsBrokerViewBehindCurrentCampaignRevis
 		}},
 	}
 
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("stale broker view produced a provisional proposal: %+v", got)
 	}
 }
@@ -1134,7 +1135,7 @@ func TestProvisionalUnknownColdStart_OuterPublicationFenceRejectsLateBrokerDrift
 		},
 	}
 
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("late broker-source removal escaped the outer publication fence: %+v", got)
 	}
 }
@@ -1169,7 +1170,7 @@ func appendConfirmedCandidate(m *Manager, campaign *models.Campaign, login, chan
 func TestProvisionalProofRetainsStrongerCurrentAgainstWeakerConfirmedAlternative(t *testing.T) {
 	provedCampaign := provisionalCampaign(true)
 	m, current := provisionalUnknownFixture(t, provedCampaign)
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 		t.Fatalf("initial provisional proposal = %+v, want one exact tuple", initial)
 	}
@@ -1189,7 +1190,7 @@ func TestProvisionalProofRetainsStrongerCurrentAgainstWeakerConfirmedAlternative
 		},
 	})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != current.Streamer || got[0].ProvisionalDrop == nil ||
 		!got[0].ProvisionalDrop.SameLeaseIdentity(proof) {
 		t.Fatalf("proved stronger current was switched or proof tuple omitted: %+v", got)
@@ -1205,7 +1206,7 @@ func TestProvisionalProofRetainsStrongerCurrentAgainstWeakerConfirmedAlternative
 func TestProvisionalProofYieldsToGenuinelyStrongerConfirmedAlternative(t *testing.T) {
 	provedCampaign := provisionalCampaign(false)
 	m, current := provisionalUnknownFixture(t, provedCampaign)
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 		t.Fatalf("initial provisional proposal = %+v, want one exact tuple", initial)
 	}
@@ -1225,7 +1226,7 @@ func TestProvisionalProofYieldsToGenuinelyStrongerConfirmedAlternative(t *testin
 		},
 	})
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != confirmed.Streamer || got[0].ProvisionalDrop != nil {
 		t.Fatalf("genuinely stronger confirmed alternative did not win existing policy ordering: %+v", got)
 	}
@@ -1234,7 +1235,7 @@ func TestProvisionalProofYieldsToGenuinelyStrongerConfirmedAlternative(t *testin
 func TestProvisionalProofSurvivesFreshUnknownAndDirectoryEnvelope(t *testing.T) {
 	campaign := provisionalCampaign(false)
 	m, current := provisionalUnknownFixture(t, campaign)
-	initial := m.WatchCandidates()
+	initial := m.WatchCandidates(context.Background())
 	if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 		t.Fatalf("initial candidate = %+v, want provisional", initial)
 	}
@@ -1247,7 +1248,7 @@ func TestProvisionalProofSurvivesFreshUnknownAndDirectoryEnvelope(t *testing.T) 
 	}
 	m.syncOnce()
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].Streamer != current.Streamer || got[0].ProvisionalDrop == nil {
 		t.Fatalf("fresh source envelope revoked the proved target: %+v", got)
 	}
@@ -1292,7 +1293,7 @@ func TestProvisionalObservationOwnerDefersOnlyRoutineStaleRecheck(t *testing.T) 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m, current := provisionalUnknownFixture(t, provisionalCampaign(false))
-			initial := m.WatchCandidates()
+			initial := m.WatchCandidates(context.Background())
 			if len(initial) != 1 || initial[0].ProvisionalDrop == nil {
 				t.Fatalf("initial candidate = %+v, want provisional", initial)
 			}
@@ -1307,7 +1308,7 @@ func TestProvisionalObservationOwnerDefersOnlyRoutineStaleRecheck(t *testing.T) 
 			staleStreamRecheck = -time.Nanosecond
 			t.Cleanup(func() { staleStreamRecheck = previousThreshold })
 
-			got := m.WatchCandidates()
+			got := m.WatchCandidates(context.Background())
 			if len(client.checked) != tc.wantChecks {
 				t.Fatalf("routine stale check count=%d, want %d", len(client.checked), tc.wantChecks)
 			}
@@ -1325,7 +1326,7 @@ func TestProvisionalUnknownColdStart_ConfirmedAssignmentVetoesSecondPassSameBroa
 	campaign := provisionalCampaign(false)
 	m, current := provisionalUnknownFixture(t, campaign)
 
-	first := m.WatchCandidates()
+	first := m.WatchCandidates(context.Background())
 	if len(first) != 1 || first[0].ProvisionalDrop == nil ||
 		first[0].ProvisionalDrop.CampaignID != campaign.ID {
 		t.Fatalf("initial provisional proposal = %+v, want campaign %q", first, campaign.ID)
@@ -1336,7 +1337,7 @@ func TestProvisionalUnknownColdStart_ConfirmedAssignmentVetoesSecondPassSameBroa
 	if !current.Streamer.Stream.ProvisionalDropSnapshot().HasConfirmedCampaign(campaign.ID) {
 		t.Fatal("empty intersection erased the confirmed campaign's same-broadcast fence")
 	}
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("confirmed campaign re-entered on the second same-broadcast pass: %+v", got)
 	}
 }
@@ -1347,7 +1348,7 @@ func TestProvisionalUnknownColdStart_ConfirmedAssignmentFenceAllowsNewBroadcast(
 
 	current.Streamer.Stream.SetCampaigns([]*models.Campaign{campaign})
 	current.Streamer.Stream.SetCampaigns(nil)
-	if got := m.WatchCandidates(); len(got) != 0 {
+	if got := m.WatchCandidates(context.Background()); len(got) != 0 {
 		t.Fatalf("confirmed campaign re-entered during its original broadcast: %+v", got)
 	}
 
@@ -1362,7 +1363,7 @@ func TestProvisionalUnknownColdStart_ConfirmedAssignmentFenceAllowsNewBroadcast(
 		t.Fatal("prior-broadcast confirmed campaign fence transferred to the new broadcast")
 	}
 
-	got := m.WatchCandidates()
+	got := m.WatchCandidates(context.Background())
 	if len(got) != 1 || got[0].ProvisionalDrop == nil ||
 		got[0].ProvisionalDrop.CampaignID != campaign.ID ||
 		got[0].ProvisionalDrop.BroadcastID != "broadcast-2" {

@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sync"
@@ -34,7 +35,7 @@ type perLoginFailRefresher struct {
 	failLogins map[string]bool
 }
 
-func (f *perLoginFailRefresher) RefreshPlaybackSession(s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
+func (f *perLoginFailRefresher) RefreshPlaybackSession(ctx context.Context, s *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult {
 	if fetchSpade && f.failLogins[s.GetUsername()] {
 		return twitch.SessionRefreshResult{
 			Stage:              "spade",
@@ -42,7 +43,7 @@ func (f *perLoginFailRefresher) RefreshPlaybackSession(s *models.Streamer, fetch
 			CurrentBroadcastID: s.Stream.GetBroadcastID(),
 		}
 	}
-	return f.inner.RefreshPlaybackSession(s, fetchSpade, expected)
+	return f.inner.RefreshPlaybackSession(ctx, s, fetchSpade, expected)
 }
 
 // T4: an incomplete session delivers nothing (and credits nothing, and never
@@ -60,7 +61,7 @@ func TestSessionConverge_IncompleteThenCompleteDelivers(t *testing.T) {
 
 	// Tick 0: incomplete session, the convergence attempt fails -> no
 	// delivery, no watched-minute credit, and no false offline.
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	calls := adapter.callsFor(cLogin)
 	if len(calls) != 1 || calls[0].result.Delivered {
@@ -93,7 +94,7 @@ func TestSessionConverge_IncompleteThenCompleteDelivers(t *testing.T) {
 
 	// Tick 1 (a LATER tick): the retried convergence succeeds and publishes
 	// spade within this tick, so this same tick's send delivers a real beacon.
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	calls = adapter.callsFor(cLogin)
 	if len(calls) != 2 || !calls[1].result.Delivered {
@@ -120,7 +121,7 @@ func TestSessionConverge_CommittedSlotsMatchActualSends(t *testing.T) {
 	const ticks = 5
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 
 		snap := w.BrokerSnapshot()
 		committed := map[string]bool{}
@@ -186,7 +187,7 @@ func TestSessionConverge_CommittedSnapshotReflectsBoostDisplacement(t *testing.T
 		t.Fatalf("failed to seed watch time: %v", err)
 	}
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	wantBase := map[string]bool{a.GetUsername(): true, b.GetUsername(): true}
 	gotBase := map[string]bool{
@@ -256,7 +257,7 @@ func TestSessionConverge_StaleOutgoingResultDoesNotClobber(t *testing.T) {
 	}
 	w.refresher = ref
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	if !raced {
 		t.Fatal("expected the beforeApply hook to have fired for the incomplete streamer's convergence refresh")
@@ -321,20 +322,20 @@ func TestSessionConverge_RapidReplacementFinalOwnerConverges(t *testing.T) {
 	seed(b.GetUsername(), 20)
 	seed(c.GetUsername(), 3000)
 	seed(d.GetUsername(), 6000)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 1, a.GetUsername(), b.GetUsername())
 
 	// Tick 2: push A above C -> {C, B}. C's convergence attempt is staged and
 	// FAILS (perLoginFailRefresher), so C never delivers this tick.
 	seed(a.GetUsername(), 6000)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, c.GetUsername(), b.GetUsername())
 
 	// Tick 3: push C above D -> {D, B}. C is displaced BEFORE its convergence
 	// ever succeeded; D's own (independent) convergence now stages and,
 	// unlike C's, SUCCEEDS.
 	seed(c.GetUsername(), 6000)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 3, d.GetUsername(), b.GetUsername())
 
 	for i, rec := range adapter.callsFor(c.GetUsername()) {
@@ -381,7 +382,7 @@ func TestSessionConverge_DeliveringSendUsesCoherentPostConvergenceTuple(t *testi
 
 	preGen := c.Stream.SessionGeneration()
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	calls := adapter.callsFor(c.GetUsername())
 	if len(calls) != 1 || !calls[0].result.Delivered {
@@ -421,7 +422,7 @@ func TestSessionConverge_PersistentFailureIsolatesOnlyThatSlot(t *testing.T) {
 
 	const ticks = 4
 	for i := 0; i < ticks; i++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 	}
 
 	cDelivered := 0
@@ -456,7 +457,7 @@ func TestSessionConverge_NoDuplicateOwnerPerTick(t *testing.T) {
 	const ticks = 6
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		all := adapter.allCalls()
 		batch := all[prevLen:]
 		prevLen = len(all)
@@ -481,7 +482,7 @@ func TestSessionConverge_NeverExceedsSlotCap(t *testing.T) {
 	const ticks = 6
 	prevLen := 0
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 		all := adapter.allCalls()
 		batch := all[prevLen:]
 		prevLen = len(all)
@@ -505,7 +506,7 @@ func TestSessionConverge_JournalNeverFabricatesDeliverySuccess(t *testing.T) {
 	w.refresher = &fakeRefresher{spadeErr: errors.New("still incomplete")}
 	w.SetSlotJournal(journal.New[journal.SlotEvent](64, time.Now))
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 
 	evs := slotEvents(w)
 
@@ -557,7 +558,7 @@ func TestSessionConverge_BrokerAndDebugSnapshotsAgree(t *testing.T) {
 
 	const ticks = 6
 	for tick := 0; tick < ticks; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 
 		snap := w.BrokerSnapshot()
 		committed := map[string]bool{}
@@ -625,7 +626,7 @@ func TestSessionConverge_RaceSafety(t *testing.T) {
 	}()
 
 	for tick := 0; tick < 6; tick++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 	}
 
 	stop.Store(true)
@@ -685,7 +686,7 @@ func TestSessionConverge_Guard9DedupWithinBackoffWindow(t *testing.T) {
 
 	const ticks = 10
 	for i := 0; i < ticks; i++ {
-		w.processWatching() // no aging of lastAttempt between ticks
+		w.processWatching(tickCtx(w)) // no aging of lastAttempt between ticks
 	}
 
 	spadeCalls, _ := ref.calls()
@@ -716,21 +717,21 @@ func TestSessionConverge_Guard9BoundedRetryThenCapThenResetOnNewBroadcast(t *tes
 	}
 
 	// Attempt 1.
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if spade, _ := ref.calls(); len(spade) != 1 {
 		t.Fatalf("expected exactly 1 spade-fetch call after the first tick, got %d", len(spade))
 	}
 
 	// Attempt 2 (forced past the backoff window).
 	age()
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if spade, _ := ref.calls(); len(spade) != 2 {
 		t.Fatalf("expected exactly 2 spade-fetch calls after the second attempt, got %d", len(spade))
 	}
 
 	// Attempt 3 (forced past the backoff window again) — hits the cap.
 	age()
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if spade, _ := ref.calls(); len(spade) != 3 {
 		t.Fatalf("expected exactly 3 spade-fetch calls after the third attempt, got %d", len(spade))
 	}
@@ -741,14 +742,14 @@ func TestSessionConverge_Guard9BoundedRetryThenCapThenResetOnNewBroadcast(t *tes
 	// A 4th tick, even with the backoff aged out of the way, must NOT stage a
 	// 4th attempt: the cap is per-broadcast-identity, not time-bounded.
 	age()
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if spade, _ := ref.calls(); len(spade) != 3 {
 		t.Fatalf("expected NO 4th spade-fetch call once the attempt cap is reached, got %d", len(spade))
 	}
 
 	// A genuinely new broadcast resets the budget from scratch.
 	c.Stream.Update("broadcast-c-2", "t", nil, nil, 1)
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	if spade, _ := ref.calls(); len(spade) != 4 {
 		t.Fatalf("expected a 4th spade-fetch call (attempt 1 of the NEW broadcast identity) after the broadcast changed, got %d", len(spade))
 	}
@@ -768,7 +769,7 @@ func TestSessionConverge_Guard9StopsStagingOnceSpadeConverges(t *testing.T) {
 	ref := &fakeRefresher{} // succeeds immediately
 	w.refresher = ref
 
-	w.processWatching() // converges and delivers within this very tick
+	w.processWatching(tickCtx(w)) // converges and delivers within this very tick
 	if spade, _ := ref.calls(); len(spade) != 1 {
 		t.Fatalf("expected exactly 1 spade-fetch call on convergence, got %d", len(spade))
 	}
@@ -778,7 +779,7 @@ func TestSessionConverge_Guard9StopsStagingOnceSpadeConverges(t *testing.T) {
 
 	const moreTicks = 9
 	for i := 0; i < moreTicks; i++ {
-		w.processWatching()
+		w.processWatching(tickCtx(w))
 	}
 	if spade, _ := ref.calls(); len(spade) != 1 {
 		t.Fatalf("expected NO further spade-fetch calls once spade is present, got %d total across %d further ticks", len(spade), moreTicks)
@@ -807,7 +808,7 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	ref := &fakeRefresher{spadeErr: errors.New("spade unavailable")}
 	w.refresher = ref
 
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 0, cLogin, bLogin)
 	if st := w.sessionConverge[cLogin]; st == nil || st.attempts != 1 {
 		t.Fatalf("expected %s to have one staged (failed) convergence attempt while slotted, got %+v", cLogin, st)
@@ -817,7 +818,7 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(cLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 1, aLogin, bLogin)
 
 	if st, tracked := w.sessionConverge[cLogin]; tracked {
@@ -829,7 +830,7 @@ func TestSessionConverge_Guard9ReleaseInvalidatesTrackedState(t *testing.T) {
 	if err := w.store.RecordMinutes(aLogin, 100000, time.Now()); err != nil {
 		t.Fatalf("failed to reseed watch time: %v", err)
 	}
-	w.processWatching()
+	w.processWatching(tickCtx(w))
 	requireCommittedPair(t, w, 2, cLogin, bLogin)
 
 	st := w.sessionConverge[cLogin]

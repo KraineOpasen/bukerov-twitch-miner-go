@@ -58,7 +58,7 @@ type hookToken struct {
 	onCall     func()
 }
 
-func (h hookToken) GetPlaybackAccessToken(string) (string, string, error) {
+func (h hookToken) GetPlaybackAccessToken(context.Context, string) (string, string, error) {
 	if h.onCall != nil {
 		h.onCall()
 	}
@@ -82,7 +82,7 @@ func TestSendUsesOneCoherentSnapshot(t *testing.T) {
 	streamer := coherentStreamer("https://spade.twitch.tv/track")
 	gen := streamer.Stream.SessionGeneration()
 
-	res := s.Send(streamer)
+	res := s.Send(context.Background(), streamer)
 	if !res.Delivered || res.Generation != gen {
 		t.Fatalf("expected a delivered send recording the captured generation, got %+v (gen=%d)", res, gen)
 	}
@@ -105,7 +105,7 @@ func TestSendStaleSessionSkipsBeacon(t *testing.T) {
 	}}
 	s := &MinuteSender{client: tok, httpClient: &http.Client{Transport: rt}}
 
-	res := s.Send(streamer)
+	res := s.Send(context.Background(), streamer)
 	if !res.Stale || res.Delivered || res.Failure != nil {
 		t.Fatalf("a session change mid-send must be Stale (not delivered, not a failure), got %+v", res)
 	}
@@ -124,7 +124,7 @@ func TestSendNewBroadcastMidSendSkipsBeacon(t *testing.T) {
 	}}
 	s := &MinuteSender{client: tok, httpClient: &http.Client{Transport: rt}}
 
-	res := s.Send(streamer)
+	res := s.Send(context.Background(), streamer)
 	if !res.Stale {
 		t.Fatalf("a new broadcast mid-send must yield a Stale result, got %+v", res)
 	}
@@ -173,7 +173,7 @@ func TestSendResultCarriesNoSecrets(t *testing.T) {
 	rt := &recordingRT{}
 	streamer := coherentStreamer("https://spade.twitch.tv/track")
 	s := &MinuteSender{client: fakeToken{sig: "SECRETSIG", token: "SECRETTOKEN"}, httpClient: &http.Client{Transport: rt}}
-	res := s.Send(streamer)
+	res := s.Send(context.Background(), streamer)
 	blob := ""
 	if res.Failure != nil {
 		blob = res.Failure.ErrorCode + " " + string(res.Failure.Stage)

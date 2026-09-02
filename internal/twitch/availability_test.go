@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"reflect"
@@ -77,7 +78,7 @@ func TestGetCampaignIDsFromStreamerServiceFailureIsError(t *testing.T) {
 			s := newTestStreamer("streamer")
 			s.ChannelID = "chan-1"
 
-			ids, err := c.GetCampaignIDsFromStreamer(s)
+			ids, err := c.GetCampaignIDsFromStreamer(context.Background(), s)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error (=> availability UNKNOWN), got ids=%v nil err", ids)
@@ -281,7 +282,7 @@ func TestGetCampaignIDsFromStreamerAllOrNothing(t *testing.T) {
 			s := newTestStreamer("streamer")
 			s.ChannelID = "chan-1"
 
-			ids, err := c.GetCampaignIDsFromStreamer(s)
+			ids, err := c.GetCampaignIDsFromStreamer(context.Background(), s)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error (=> UNKNOWN) for a malformed element, got ids=%v", ids)
@@ -359,7 +360,7 @@ func TestGetCampaignIDsFromStreamerContainerMatrix(t *testing.T) {
 			s := newTestStreamer("streamer")
 			s.ChannelID = "chan-1"
 
-			ids, err := c.GetCampaignIDsFromStreamer(s)
+			ids, err := c.GetCampaignIDsFromStreamer(context.Background(), s)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error (=> availability UNKNOWN), got ids=%v", ids)

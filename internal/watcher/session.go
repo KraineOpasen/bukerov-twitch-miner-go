@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -25,7 +26,7 @@ import (
 // expected broadcast/generation. Narrowed to an interface so refresh execution can
 // be tested with a fake. Satisfied by *twitch.TwitchClient.
 type sessionRefresher interface {
-	RefreshPlaybackSession(streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult
+	RefreshPlaybackSession(ctx context.Context, streamer *models.Streamer, fetchSpade bool, expected models.ExpectedSession) twitch.SessionRefreshResult
 }
 
 // AvoidChecker reports whether a channel is temporarily excluded from watch
@@ -143,6 +144,11 @@ const (
 	RefreshReasonSuperseded      = models.SessionStaleSupersededObs // "superseded_observation"
 	RefreshReasonSpadeFailed     = "spade_failed"
 	RefreshReasonStreamInfoFail  = "stream_info_failed"
+	// RefreshReasonCancelled: the watch generation was cancelled, so the refresh
+	// never observed Twitch at all. Reported as SKIPPED, not failed: like a lost
+	// slot it is not a completed transport recovery, and the requester must
+	// re-stage it rather than count a failure Twitch never returned.
+	RefreshReasonCancelled = "cancelled"
 )
 
 // SetAvoidChecker registers the temporary avoid list consulted during watch
@@ -423,7 +429,13 @@ func (w *MinuteWatcher) convergeIncompleteSlotSessions(slots []slotOccupant, now
 // rounds complete in well under a second and refreshes are rare: they exist
 // only as watchdog recovery stages, at most one new request per ~1-minute
 // watchdog pass, cooldown-bounded.
-func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
+func (w *MinuteWatcher) executeSessionRefreshes(ctx context.Context, slots []slotOccupant) {
+	if ctx.Err() != nil {
+		// The generation is gone: do not even DRAIN the staged requests. Draining
+		// them here would consume recovery episodes this generation can no longer
+		// execute, and publish outcomes for work that never ran.
+		return
+	}
 	pending := w.drainPendingRefreshes()
 	if len(pending) == 0 {
 		return
@@ -502,7 +514,7 @@ func (w *MinuteWatcher) executeSessionRefreshes(slots []slotOccupant) {
 			wg.Add(1)
 			go func(out *SessionRefreshOutcome, streamer *models.Streamer, req SessionRefreshRequest) {
 				defer wg.Done()
-				w.runSessionRefresh(out, streamer, req)
+				w.runSessionRefresh(ctx, out, streamer, req)
 			}(out, streamer, req)
 		}
 	}
@@ -539,10 +551,13 @@ func requestStale(req SessionRefreshRequest, curBroadcast string, curGen uint64)
 // atomic apply re-checks the expected broadcast/generation, so a session that
 // changed during the I/O yields a stale outcome without a partial overwrite.
 // Detail strings never carry a URL or token by construction.
-func (w *MinuteWatcher) runSessionRefresh(out *SessionRefreshOutcome, streamer *models.Streamer, req SessionRefreshRequest) {
+func (w *MinuteWatcher) runSessionRefresh(ctx context.Context, out *SessionRefreshOutcome, streamer *models.Streamer, req SessionRefreshRequest) {
 	// RefreshPlaybackSession always fetches fresh stream info (a recovery refresh
 	// is never gated by the 2-minute cadence), so no ForceUpdateRequired is needed.
-	res := w.refresher.RefreshPlaybackSession(streamer, req.Mode == RefreshSession,
+	// It runs on the watch generation's context: the worker is joined by the tick
+	// (wg.Wait below), so an uncancellable refresh would hold the loop goroutine —
+	// and therefore Stop's bounded join — for the whole transport budget.
+	res := w.refresher.RefreshPlaybackSession(ctx, streamer, req.Mode == RefreshSession,
 		models.ExpectedSession{BroadcastID: req.ExpectedBroadcastID, Generation: req.ExpectedGeneration})
 
 	out.AppliedSessionGeneration = res.AppliedGeneration
@@ -551,6 +566,18 @@ func (w *MinuteWatcher) runSessionRefresh(out *SessionRefreshOutcome, streamer *
 	out.Completed = time.Now()
 
 	switch {
+	case ctx.Err() != nil && !res.Applied && !res.Stale:
+		// The watch generation was cancelled during the refresh. That is a
+		// teardown, not a Twitch failure: reporting it as one would fabricate a
+		// transport-failure statistic and burn a watchdog recovery stage on
+		// something Twitch never said. Skipped has exactly the right semantics
+		// (see RefreshReasonNotSlotted): the stage rolls back and re-runs once
+		// farming is re-confirmed. Ordered so a genuinely superseded apply keeps
+		// its own Stale classification: that is a real, correlated Twitch-side
+		// outcome, and the watchdog rebaselines the episode on it.
+		out.Skipped = true
+		out.Reason = RefreshReasonCancelled
+		out.Detail = "skipped: the watch generation was cancelled during the refresh"
 	case res.Stale:
 		// The session was superseded (newer observation, broadcast, or generation)
 		// during the I/O: NOT applied, NOT a success.

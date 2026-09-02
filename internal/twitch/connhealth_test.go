@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -45,7 +46,7 @@ func TestConnHealthRecordsSuccessAndAttempt(t *testing.T) {
 	c := newConnHealthClient(http.StatusOK, `{"data":{"user":{"id":"1"}}}`)
 	c.lastSuccess = time.Now().Add(-time.Hour)
 
-	if _, err := c.postGQLRequest(constants.Inventory); err != nil {
+	if _, err := c.postGQLRequest(context.Background(), constants.Inventory); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -70,7 +71,7 @@ func TestConnHealthRecordsFunctionalFailureOnTopLevelErrors(t *testing.T) {
 	sentinel := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.lastSuccess = sentinel
 
-	_, _ = c.postGQLRequest(constants.Inventory)
+	_, _ = c.postGQLRequest(context.Background(), constants.Inventory)
 
 	now := time.Now()
 	h := c.ConnHealth(now, 5*time.Minute)
@@ -95,7 +96,7 @@ func TestConnHealthRecordsFunctionalFailureOnPQNF(t *testing.T) {
 	sentinel := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	c.lastSuccess = sentinel
 
-	_, _ = c.postGQLRequest(constants.Inventory)
+	_, _ = c.postGQLRequest(context.Background(), constants.Inventory)
 
 	now := time.Now()
 	h := c.ConnHealth(now, 5*time.Minute)
@@ -121,7 +122,7 @@ func TestConnHealthAuthErrorIsNotConnectivityFailure(t *testing.T) {
 	}
 	c.lastSuccess = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	_, _ = c.postGQLRequest(constants.Inventory) // expected to fail with ErrUnauthorized
+	_, _ = c.postGQLRequest(context.Background(), constants.Inventory) // expected to fail with ErrUnauthorized
 
 	now := time.Now()
 	h := c.ConnHealth(now, 5*time.Minute)
@@ -154,7 +155,7 @@ func TestConnHealthConcurrentAccess(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_, _ = c.postGQLRequest(constants.Inventory)
+					_, _ = c.postGQLRequest(context.Background(), constants.Inventory)
 				}
 			}
 		}()

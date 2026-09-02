@@ -24,7 +24,7 @@ func TestStopReturnsDespiteHungLoop(t *testing.T) {
 	start := time.Now()
 	done := make(chan struct{})
 	go func() {
-		w.Stop()
+		_ = w.Stop()
 		close(done)
 	}()
 
@@ -59,7 +59,9 @@ func TestStopJoinsFinishedLoop(t *testing.T) {
 		close(done)
 	}()
 
-	w.Stop()
+	if err := w.Stop(); err != nil {
+		t.Fatalf("a joined loop must stop cleanly: %v", err)
+	}
 	if !loopExited {
 		t.Fatal("Stop returned before the loop finished — join is not effective")
 	}
@@ -70,7 +72,7 @@ func TestStopWithoutStart(t *testing.T) {
 	w := &MinuteWatcher{}
 	finished := make(chan struct{})
 	go func() {
-		w.Stop()
+		_ = w.Stop()
 		close(finished)
 	}()
 	select {

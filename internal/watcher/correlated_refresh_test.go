@@ -53,7 +53,7 @@ func TestRefreshCoalesceDedupBySignature(t *testing.T) {
 	sig := RecoverySignature{Login: login, BroadcastID: "b1", SessionGeneration: 1, Stage: StageBeacon, Mode: RefreshStreamInfo}.String()
 	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r1", Login: login, Mode: RefreshStreamInfo, Signature: sig})
 	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r2", Login: login, Mode: RefreshStreamInfo, Signature: sig})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	if _, stream := ref.calls(); len(stream) != 1 {
 		t.Fatalf("identical-signature requests must coalesce to one refresh, got %v", stream)
@@ -74,7 +74,7 @@ func TestRefreshNewerSessionSupersedes(t *testing.T) {
 
 	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "old", Login: login, Mode: RefreshStreamInfo, ExpectedGeneration: 1, Signature: "old"})
 	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "new", Login: login, Mode: RefreshStreamInfo, ExpectedGeneration: 2, Signature: "new"})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	out, _ := w.LastSessionRefresh(login)
 	if out.RequestID != "new" || out.ExpectedSessionGeneration != 2 {
@@ -95,7 +95,7 @@ func TestRefreshBroadcastMismatchIsStale(t *testing.T) {
 		RequestID: "r1", Login: login, Mode: RefreshSession,
 		ExpectedBroadcastID: "old-broadcast", Signature: "s",
 	})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	if spade, stream := ref.calls(); len(spade) != 0 || len(stream) != 0 {
 		t.Fatalf("a broadcast-mismatch refresh must do no I/O, got spade=%v stream=%v", spade, stream)
@@ -115,7 +115,7 @@ func TestRefreshOutcomeRedacted(t *testing.T) {
 	login := w.streamers[0].Username
 
 	w.RequestSessionRefresh(SessionRefreshRequest{RequestID: "r1", Login: login, Mode: RefreshSession, Signature: "s"})
-	w.executeSessionRefreshes(occupantsFor(w, 0))
+	w.executeSessionRefreshes(tickCtx(w), occupantsFor(w, 0))
 
 	out, _ := w.LastSessionRefresh(login)
 	blob := out.Reason + " " + out.Detail + " " + out.Signature

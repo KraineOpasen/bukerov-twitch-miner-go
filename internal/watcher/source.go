@@ -1,6 +1,10 @@
 package watcher
 
-import "github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+import (
+	"context"
+
+	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
+)
 
 // Watch-slot origins. Every channel that occupies one of the (at most
 // constants.MaxSimultaneousStreams) Twitch watch slots comes from one of these.
@@ -42,14 +46,21 @@ type Candidate struct {
 //
 // WatchCandidates is called from the broker's loop goroutine while the source
 // mutates its own state from another goroutine, so it must return an
-// independent snapshot and must not block on the network or hold a lock across
-// external calls.
+// independent snapshot and must not hold a lock across external calls.
+//
+// It runs ON the broker's loop goroutine, so any work it does belongs to the
+// watch generation: it is handed that generation's context and every blocking
+// call it makes must observe it. A source that does re-verification I/O here
+// (directory discovery re-checks a stale candidate's online status) would
+// otherwise pin the loop goroutine — and therefore the generation's join —
+// for the whole transport budget after cancellation.
 type CandidateSource interface {
 	// SourceName identifies the source in logs and snapshots (e.g. "discovery").
 	SourceName() string
 	// WatchCandidates returns the source's proposed channels in the source's
 	// own priority order (most-wanted first). The broker fills at most
 	// constants.MaxSimultaneousStreams slots total across the configured list
-	// and every source combined.
-	WatchCandidates() []Candidate
+	// and every source combined. ctx is the watch generation's: a cancelled
+	// generation must not start or continue candidate-preparation work.
+	WatchCandidates(ctx context.Context) []Candidate
 }
