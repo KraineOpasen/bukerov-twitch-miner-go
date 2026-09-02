@@ -224,9 +224,18 @@ func (s *WatchTimeStore) RecordMinutes(streamer string, minutes float64, at time
 	// Reported as the caller's error it would be worse still: the row is already
 	// committed, so a prune that lost its own race against Close would make a
 	// landed credit look like a failed one.
+	// Outside the credit's verdict is not the same as invisible: a prune that
+	// keeps failing (schema fault, disk error) lets watch_time_events grow
+	// without bound and quietly degrades the rotation-fairness window it feeds,
+	// so it is logged where an operator will actually see it. Losing the
+	// shutdown race is the one expected failure, and it is not noise: it only
+	// happens on a dirty teardown, which is already an exceptional, explicitly
+	// classified event worth a line. (It cannot be singled out with errors.Is
+	// either — this statement runs on the embedded handle, so a closed database
+	// surfaces as database/sql's unexported errDBClosed, not database.ErrClosed.)
 	cutoff := at.Add(-2 * watchTimeWindow).Unix()
 	if _, err := s.db.Exec(`DELETE FROM watch_time_events WHERE timestamp < ?`, cutoff); err != nil {
-		slog.Debug("Failed to prune old watch-time events", "error", err)
+		slog.Warn("Failed to prune old watch-time events", "error", err, "cutoff", cutoff)
 	}
 	return nil
 }
