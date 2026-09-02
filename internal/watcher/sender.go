@@ -1,9 +1,12 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -338,9 +341,10 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 
 	// The beacon POST must never follow a redirect: a redirected target could
 	// be cross-origin, downgrade https to http, or (for 307/308) replay the
-	// full beacon body to a third party. This override is local to a shallow
-	// copy of the shared client, so playlist/variant/segment requests made
-	// through s.httpClient elsewhere keep following redirects normally.
+	// full beacon body to a third party. The HLS leg is deliberately different
+	// — it still follows redirects, under its own validating policy in hlsDo —
+	// so the two must not be unified. Both install their policy on a shallow
+	// per-request copy, leaving the shared s.httpClient untouched.
 	beaconClient := *s.httpClient
 	beaconClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -359,20 +363,367 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 	return resp.StatusCode, false, nil
 }
 
-// simulateWatching mimics a player fetching the stream: playlist, lowest quality
-// variant, and a HEAD request on the newest segment. It returns the stage that
-// failed and the HTTP status reached there (0 if the request itself failed before
-// a response or the failure is a parse error), plus the raw error; on success it
-// returns ("", 0, nil).
-func (s *MinuteSender) simulateWatching(ctx context.Context, channel, sig, token string) (ProbeStage, int, error) {
-	playlistURL := fmt.Sprintf("%s/api/channel/hls/%s.m3u8", constants.UsherURL, channel)
+// --- C1: the HLS URL / redirect trust boundary -----------------------------
+//
+// Everything the HLS simulation dereferences after the master request is chosen
+// by a remote party: the master playlist body names the rendition, the rendition
+// body names the segment, and a Location header can redirect any of the three.
+// The requests also carry the playback sig and token in their query, so where
+// they are sent, and what is forwarded with them, is a trust decision — not a
+// transport detail.
+//
+// The policy below is URL-layer only and is applied BEFORE any I/O at every one
+// of those points. It deliberately does NOT resolve names or reason about the
+// address actually connected to: hostname-to-address policy (private ranges,
+// rebinding, the peer a dialer really reached) is a separate concern with a
+// separate mechanism, and pretending a URL check covers it would be worse than
+// not claiming it at all.
 
+const (
+	// maxPlaylistBytes bounds a playlist body. Both playlists this code reads
+	// are small text documents; a remote party that answers with an endless
+	// body would otherwise be allocating memory inside the miner.
+	maxPlaylistBytes = 1 << 20 // 1 MiB
+
+	// maxHLSRedirects mirrors net/http's own defaultCheckRedirect ceiling.
+	// Installing a CheckRedirect REPLACES that default rather than extending
+	// it, so the ceiling has to be restated or it would silently disappear.
+	// Like the default, it bounds the number of ACTUAL requests per Do at ten:
+	// len(via) is the number already made when the next hop is offered.
+	maxHLSRedirects = 10
+)
+
+// errHLSURLRejected is the sentinel behind every URL-policy refusal. The reason
+// wrapped with it is a short, bounded, low-cardinality token — never the URL,
+// the host, the query, or a Location value.
+//
+// Today nothing forces that: Send and Probe both discard this error and report
+// only (stage, status). It is written this way so the safety of the value does
+// not DEPEND on that discipline — a future caller that logs what simulateWatching
+// returns should find nothing worth redacting.
+var errHLSURLRejected = errors.New("hls target rejected")
+
+var (
+	errPlaylistTooLarge    = errors.New("hls playlist body exceeds the size bound")
+	errTooManyHLSRedirects = errors.New("hls request exceeded the redirect ceiling")
+)
+
+func rejectHLSURL(reason string) error {
+	return fmt.Errorf("%w: %s", errHLSURLRejected, reason)
+}
+
+// validateHLSURL applies the watch URL policy to one absolute request target.
+//
+// Admissible: https, on the default port or an explicit :443, to an ASCII
+// registered name. Cross-origin is fine — Twitch hands the player from usher to
+// whichever CDN edge serves the channel, and those are different hosts — so
+// there is deliberately no same-origin rule and no domain allowlist.
+//
+// Refused: any other scheme, any other explicit port, userinfo, a fragment, an
+// empty host, an IP literal (v4 or v6, zone identifiers included), localhost,
+// .localhost, .local, a host that is really a number in disguise, a host with a
+// character no registered name may carry, and anything that failed to parse.
+func validateHLSURL(u *url.URL) error {
+	if u == nil {
+		return rejectHLSURL("no_url")
+	}
+	if u.Opaque != "" {
+		return rejectHLSURL("opaque_url")
+	}
+	if u.Scheme != "https" {
+		return rejectHLSURL("scheme_not_https")
+	}
+	if u.User != nil {
+		return rejectHLSURL("userinfo")
+	}
+	if u.Fragment != "" || u.RawFragment != "" {
+		return rejectHLSURL("fragment")
+	}
+	// A bracketed authority is the IP-literal form. Refuse it on the brackets
+	// themselves rather than on what is inside them: url.Parse only insists the
+	// contents really are an IPv6 address for modules declaring go1.26 or later
+	// (this one does), a caller can hand this function a URL value it built
+	// itself, and Hostname() unwraps the brackets — so "[not-an-ip]" would
+	// otherwise arrive here looking like an ordinary registered name. It is also
+	// the only form that carries an IPv6 zone identifier.
+	if strings.ContainsAny(u.Host, "[]") {
+		return rejectHLSURL("ip_literal")
+	}
+	switch u.Port() {
+	case "", "443":
+	default:
+		return rejectHLSURL("port_not_443")
+	}
+	// url.Parse accepts "https://host:/path": Port() is empty, yet the
+	// authority still carries a colon. Fail closed rather than guess.
+	if u.Port() == "" && strings.Contains(u.Host, ":") {
+		return rejectHLSURL("malformed_authority")
+	}
+
+	host := u.Hostname()
+	if net.ParseIP(host) != nil {
+		return rejectHLSURL("ip_literal")
+	}
+	for i := 0; i < len(host); i++ {
+		switch c := host[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-', c == '.', c == '_':
+		case c > 0x7f:
+			return rejectHLSURL("non_ascii_host")
+		default:
+			// Anything else — ':', '%', '/', a space, a control byte. url.Parse
+			// already refuses most of these in a host, so this branch mostly
+			// catches a URL value a caller assembled rather than parsed; it is
+			// the floor, not the first line.
+			return rejectHLSURL("invalid_host_char")
+		}
+	}
+
+	// One trailing dot is the DNS root label. Strip it before the name checks
+	// below so "localhost." cannot walk past them, and lower-case the name
+	// because url.Parse normalises the scheme but never the host. This is also
+	// the single owner of the empty-host rule: it catches both a missing
+	// authority and a host that is nothing but the root label.
+	name := strings.ToLower(strings.TrimSuffix(host, "."))
+	if name == "" {
+		return rejectHLSURL("empty_host")
+	}
+	labels := strings.Split(name, ".")
+	for _, label := range labels {
+		if label == "" {
+			return rejectHLSURL("empty_label")
+		}
+	}
+	if name == "localhost" || strings.HasSuffix(name, ".localhost") {
+		return rejectHLSURL("localhost")
+	}
+	if name == "local" || strings.HasSuffix(name, ".local") {
+		return rejectHLSURL("mdns_local")
+	}
+	if isNumericHostLabel(labels[len(labels)-1]) {
+		return rejectHLSURL("numeric_host")
+	}
+	return nil
+}
+
+// isNumericHostLabel reports whether a host's rightmost label is a number, in
+// any of the spellings that make a name an alias for an address: decimal
+// ("2130706433"), octal by leading zero ("0177.0.0.1" -> last label "1"), or
+// hexadecimal ("0x7f000001"). net.ParseIP alone is not enough — it rejects every
+// one of those strings — so a host ending in a number is refused outright rather
+// than resolved and second-guessed.
+func isNumericHostLabel(label string) bool {
+	if label == "" {
+		return false
+	}
+	if len(label) >= 2 && label[0] == '0' && (label[1] == 'x' || label[1] == 'X') {
+		for i := 2; i < len(label); i++ {
+			if !isHexDigit(label[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	for i := 0; i < len(label); i++ {
+		if label[i] < '0' || label[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// resolveHLSTarget turns one HLS URI into an absolute target that has passed the
+// policy: the master URL this code builds, a bare URI line from a playlist body,
+// or a redirect target. base is the FINAL response URL of the playlist that
+// named ref (nil when ref is absolute by construction).
+//
+// Only the two roles production already dereferences take a relative form — a
+// master playlist naming its rendition, a rendition naming its segment — and
+// resolving them against the final URL, not the requested one, is what makes a
+// relative line mean the same thing to this code as to a player: after a
+// redirect, "low.m3u8" is a sibling of where the playlist actually came from.
+//
+// A literal '#' is refused on the raw string rather than after parsing: an empty
+// fragment ("...#") leaves both URL.Fragment and URL.RawFragment empty, so the
+// parsed check alone cannot see it. Refusing fragments buys no security property
+// by itself — a fragment is never put on the wire — it keeps the URL this code
+// approves identical to the URL it sends, so no later reader has to work out
+// which parts of a target were only decorative.
+func resolveHLSTarget(base *url.URL, ref string) (*url.URL, error) {
+	if ref == "" {
+		return nil, rejectHLSURL("empty_uri")
+	}
+	if strings.Contains(ref, "#") {
+		return nil, rejectHLSURL("fragment")
+	}
+
+	var (
+		u   *url.URL
+		err error
+	)
+	if base == nil {
+		u, err = url.Parse(ref)
+	} else {
+		u, err = base.Parse(ref)
+	}
+	if err != nil {
+		// The parse error text quotes the offending URL, which on this path can
+		// carry the signed query. Only the reason survives.
+		return nil, rejectHLSURL("unparseable")
+	}
+	if err := validateHLSURL(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// hlsDo issues one policy-governed HLS request and returns the response together
+// with the FINAL request URL — the base a relative URI in the returned body must
+// be resolved against.
+//
+// Redirects stay allowed, because the real playback path relies on them, but
+// every hop is validated before it is contacted, the Referer Go would synthesise
+// from the previous (signed) URL is stripped, and the ten-request ceiling is
+// restated because installing CheckRedirect replaces Go's default.
+//
+// The policy goes on a per-request SHALLOW COPY of the shared client, exactly as
+// postBeacon does: the injected Transport, Timeout and Jar are preserved, the
+// caller's context still owns cancellation at every hop (net/http carries the
+// original request's ctx onto each redirect), s.httpClient is never mutated, and
+// concurrent sends through one MinuteSender cannot race on the field.
+//
+// One invariant is worth stating because url.URL cannot express it: an empty
+// fragment ("https://h/p#") leaves both Fragment and RawFragment empty, so
+// validateHLSURL alone cannot see it. Every target reaching here has already
+// been through the raw-string check in resolveHLSTarget or in the redirect
+// closure below, which is where that case is caught.
+func (s *MinuteSender) hlsDo(ctx context.Context, method string, target *url.URL, extra http.Header) (*http.Response, *url.URL, error) {
+	if err := validateHLSURL(target); err != nil {
+		return nil, nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+	if err != nil {
+		return nil, nil, rejectHLSURL("unbuildable_request")
+	}
+	for key, values := range extra {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+
+	// final is the URL actually requested, taken from the request rather than
+	// from the argument, so the base a relative URI is later resolved against is
+	// exact by construction rather than by an argument round-tripping through
+	// String() and back. It is then written only from inside CheckRedirect,
+	// which net/http invokes synchronously on the goroutine driving this single
+	// Do; the closure and the client copy are per request, so there is no state
+	// here to share or race.
+	final := req.URL
+
+	client := *s.httpClient
+	client.CheckRedirect = func(hop *http.Request, via []*http.Request) error {
+		// Go builds the Referer from the previous request's URL, query and all
+		// (refererForURL strips userinfo, never the query) — and on this path
+		// that query is the playback sig and token. Strip it first, so no early
+		// return below can leave it in place.
+		hop.Header.Del("Referer")
+
+		if len(via) >= maxHLSRedirects {
+			return errTooManyHLSRedirects
+		}
+		// net/http has already resolved the Location header against the previous
+		// URL, but it drops an empty fragment ("...#") while doing so, leaving
+		// both URL.Fragment and URL.RawFragment empty. Check the raw header too,
+		// so "reject fragments" means the same thing at a redirect as it does for
+		// a playlist's URI line. net/http always sets Response on a redirect
+		// request, so the nil guard is defensive: were it ever nil, the parsed
+		// check below would still catch every fragment that changes the request,
+		// leaving only the inert empty one.
+		if hop.Response != nil && strings.Contains(hop.Response.Header.Get("Location"), "#") {
+			return rejectHLSURL("fragment")
+		}
+		if err := validateHLSURL(hop.URL); err != nil {
+			return err
+		}
+		final = hop.URL
+		return nil
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// When CheckRedirect refuses, Do returns the previous response next to
+		// the error with its body already closed, so there is nothing here to
+		// release. The error itself quotes a URL and is redacted by the callers
+		// of simulateWatching, exactly as every other transport error is.
+		return nil, nil, err
+	}
+	return resp, final, nil
+}
+
+// readPlaylistBody reads a playlist body under the size bound. It reads one byte
+// past the bound so a body exactly at the limit is still accepted and anything
+// larger is distinguishable — and refused without ever being held in full.
+func readPlaylistBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxPlaylistBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPlaylistBytes {
+		return nil, errPlaylistTooLarge
+	}
+	return body, nil
+}
+
+// lastPlaylistURI returns a playlist's last URI line: the last non-blank line
+// that is not a tag or comment. Twitch orders a master playlist best-quality
+// first, so the last URI line is the lowest-bandwidth rendition — the one this
+// simulation has always picked. The line may be absolute or relative; the caller
+// resolves and validates it.
+//
+// It walks the bytes backwards instead of splitting them, so the only string it
+// allocates is the line it returns. Splitting would undo the point of the body
+// bound: a bounded 1 MiB body made entirely of newlines becomes roughly 16 MiB
+// of slice headers, and the memory a hostile playlist costs would once again be
+// set by its contents rather than by its size.
+func lastPlaylistURI(body []byte) string {
+	for end := len(body); end > 0; {
+		start := bytes.LastIndexByte(body[:end], '\n') + 1
+		line := strings.TrimSpace(string(body[start:end]))
+		end = start - 1
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// simulateWatching mimics a player fetching the stream: master playlist, lowest
+// quality rendition, and a HEAD request on the newest segment. Each of the three
+// targets — and every redirect between them — passes the watch URL policy before
+// it is contacted. It returns the stage that failed and the HTTP status reached
+// there (0 if the request failed before a response, was refused before it was
+// sent, or the failure is a parse error), plus the raw error, which every caller
+// redacts; on success it returns ("", 0, nil).
+func (s *MinuteSender) simulateWatching(ctx context.Context, channel, sig, token string) (ProbeStage, int, error) {
 	params := url.Values{
 		"sig":   {sig},
 		"token": {token},
 	}
+	// The master target is the only one this code builds itself, but it still
+	// embeds a login this process did not choose, so it is admitted through the
+	// same gate as every remote-derived target.
+	master, err := resolveHLSTarget(nil, fmt.Sprintf("%s/api/channel/hls/%s.m3u8?%s", constants.UsherURL, channel, params.Encode()))
+	if err != nil {
+		return StagePlaylist, 0, fmt.Errorf("playlist url refused: %w", err)
+	}
 
-	resp, err := s.httpGet(ctx, playlistURL+"?"+params.Encode())
+	resp, masterFinal, err := s.hlsDo(ctx, http.MethodGet, master, nil)
 	if err != nil {
 		return StagePlaylist, 0, fmt.Errorf("failed to get playlist: %w", err)
 	}
@@ -382,26 +733,21 @@ func (s *MinuteSender) simulateWatching(ctx context.Context, channel, sig, token
 		return StagePlaylist, resp.StatusCode, fmt.Errorf("playlist request failed with status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readPlaylistBody(resp.Body)
 	if err != nil {
 		return StagePlaylist, resp.StatusCode, fmt.Errorf("failed to read playlist: %w", err)
 	}
 
-	lines := strings.Split(string(body), "\n")
-	var lowestQualityURL string
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(line, "http") {
-			lowestQualityURL = line
-			break
-		}
-	}
-
-	if lowestQualityURL == "" {
+	lowestQualityLine := lastPlaylistURI(body)
+	if lowestQualityLine == "" {
 		return StagePlaylist, 0, fmt.Errorf("no stream URL found in playlist")
 	}
+	lowestQualityURL, err := resolveHLSTarget(masterFinal, lowestQualityLine)
+	if err != nil {
+		return StagePlaylist, 0, fmt.Errorf("stream list url refused: %w", err)
+	}
 
-	streamListResp, err := s.httpGet(ctx, lowestQualityURL)
+	streamListResp, streamListFinal, err := s.hlsDo(ctx, http.MethodGet, lowestQualityURL, nil)
 	if err != nil {
 		return StagePlaylist, 0, fmt.Errorf("failed to get stream list: %w", err)
 	}
@@ -411,32 +757,24 @@ func (s *MinuteSender) simulateWatching(ctx context.Context, channel, sig, token
 		return StagePlaylist, streamListResp.StatusCode, fmt.Errorf("stream list request failed with status %d", streamListResp.StatusCode)
 	}
 
-	streamListBody, err := io.ReadAll(streamListResp.Body)
+	streamListBody, err := readPlaylistBody(streamListResp.Body)
 	if err != nil {
 		return StagePlaylist, streamListResp.StatusCode, fmt.Errorf("failed to read stream list: %w", err)
 	}
 
-	streamLines := strings.Split(string(streamListBody), "\n")
-	var segmentURL string
-	for i := len(streamLines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(streamLines[i])
-		if strings.HasPrefix(line, "http") {
-			segmentURL = line
-			break
-		}
-	}
-
-	if segmentURL == "" {
+	segmentLine := lastPlaylistURI(streamListBody)
+	if segmentLine == "" {
 		return StageSegment, 0, fmt.Errorf("no segment URL found")
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "HEAD", segmentURL, nil)
+	segmentURL, err := resolveHLSTarget(streamListFinal, segmentLine)
 	if err != nil {
-		return StageSegment, 0, fmt.Errorf("failed to create HEAD request: %w", err)
+		return StageSegment, 0, fmt.Errorf("segment url refused: %w", err)
 	}
-	req.Header.Set("User-Agent", constants.TVUserAgent)
 
-	headResp, err := s.httpClient.Do(req)
+	// The segment response body is deliberately not bounded the way the two
+	// playlists are: this is a HEAD, production never reads the body, and the
+	// bound exists to stop a body being read, not to describe one.
+	headResp, _, err := s.hlsDo(ctx, http.MethodHead, segmentURL, http.Header{"User-Agent": {constants.TVUserAgent}})
 	if err != nil {
 		return StageSegment, 0, fmt.Errorf("HEAD request failed: %w", err)
 	}
@@ -447,14 +785,4 @@ func (s *MinuteSender) simulateWatching(ctx context.Context, channel, sig, token
 	}
 
 	return "", 0, nil
-}
-
-// httpGet issues a context-aware GET, so the playlist/variant fetches can be
-// cancelled by a probe's context.
-func (s *MinuteSender) httpGet(ctx context.Context, rawURL string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	return s.httpClient.Do(req)
 }

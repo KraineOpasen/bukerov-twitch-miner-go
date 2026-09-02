@@ -38,9 +38,9 @@ func (r *recordingRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		return mk(200, ""), nil
 	default:
 		if strings.Contains(req.URL.Host, "variant") {
-			return mk(200, "#EXTM3U\nhttp://seg.test/s.ts\n"), nil
+			return mk(200, "#EXTM3U\nhttps://seg.test/s.ts\n"), nil
 		}
-		return mk(200, "#EXTM3U\nhttp://variant.test/low.m3u8\n"), nil
+		return mk(200, "#EXTM3U\nhttps://variant.test/low.m3u8\n"), nil
 	}
 }
 
