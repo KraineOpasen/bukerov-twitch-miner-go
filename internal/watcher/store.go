@@ -30,14 +30,19 @@ var ErrStreamerDeleted = errors.New("watch_time: streamer deleted")
 // long watch doesn't permanently deprioritize it today.
 const watchTimeWindow = 8 * time.Hour
 
-// watchTimeCreditTimeout ceilings how long one watch_time credit may wait on the
-// shared handle before giving up, so a credit can never hold a shutdown's
-// database Close open indefinitely. It is not a generation deadline: a credit is
-// deliberately not cancellable by the watch teardown that is draining it. Sized
-// for the pathological case only — a single-row insert on this handle completes
-// in well under a millisecond — and matching the other bounded teardown joins.
-// Package variable so tests can shrink it, like stopJoinTimeout.
-var watchTimeCreditTimeout = 5 * time.Second
+// watchTimeWriteTimeout ceilings how long EITHER statement below may wait on the
+// shared handle before giving up. Both need it, for different reasons: the
+// credit takes the closed-barrier, so an unbounded credit would hold a
+// shutdown's database Close open indefinitely; the prune does not, but it runs
+// on the watch loop goroutine, so an unbounded prune would pin the loop and
+// cause the very dirty teardown this file exists to survive.
+//
+// It is not a generation deadline: neither statement is cancellable by the
+// watch teardown that is draining it. Sized for the pathological case only — a
+// single-row insert on this handle completes in well under a millisecond — and
+// matching the other bounded teardown joins. Package variable so tests can
+// shrink it, like stopJoinTimeout.
+var watchTimeWriteTimeout = 5 * time.Second
 
 // WatchTimeStore persists accumulated per-streamer watch minutes in the
 // shared SQLite database (under the /database volume), so the fair-rotation
@@ -206,7 +211,7 @@ func (s *WatchTimeStore) RecordMinutes(streamer string, minutes float64, at time
 	// waits behind it, so the wait needs its own ceiling: without one, one
 	// wedged connection holder would wedge shutdown itself, which is exactly the
 	// "wait forever" this whole teardown design refuses.
-	writeCtx, cancelWrite := context.WithTimeout(context.Background(), watchTimeCreditTimeout)
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), watchTimeWriteTimeout)
 	defer cancelWrite()
 	if err := s.db.WithTx(writeCtx, func(tx *sql.Tx) error {
 		_, err := tx.Exec(
@@ -233,8 +238,16 @@ func (s *WatchTimeStore) RecordMinutes(streamer string, minutes float64, at time
 	// classified event worth a line. (It cannot be singled out with errors.Is
 	// either — this statement runs on the embedded handle, so a closed database
 	// surfaces as database/sql's unexported errDBClosed, not database.ErrClosed.)
+	//
+	// It carries the same ceiling as the credit, for a different reason: the
+	// prune holds no barrier, so it cannot delay a Close — but it runs on the
+	// watch loop goroutine, so an unbounded wait for the single pooled
+	// connection would pin the loop past Stop's join and manufacture a dirty
+	// teardown out of housekeeping.
+	pruneCtx, cancelPrune := context.WithTimeout(context.Background(), watchTimeWriteTimeout)
+	defer cancelPrune()
 	cutoff := at.Add(-2 * watchTimeWindow).Unix()
-	if _, err := s.db.Exec(`DELETE FROM watch_time_events WHERE timestamp < ?`, cutoff); err != nil {
+	if _, err := s.db.ExecContext(pruneCtx, `DELETE FROM watch_time_events WHERE timestamp < ?`, cutoff); err != nil {
 		slog.Warn("Failed to prune old watch-time events", "error", err, "cutoff", cutoff)
 	}
 	return nil

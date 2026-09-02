@@ -221,9 +221,9 @@ func TestClosingTheDatabaseDoesNotDiscardAnInFlightWatchTimeCredit(t *testing.T)
 // So the credit carries its own ceiling, independent of the generation context:
 // it gives up, and Close proceeds.
 func TestAStuckWatchTimeCreditCannotHoldShutdownOpenForever(t *testing.T) {
-	previous := watchTimeCreditTimeout
-	watchTimeCreditTimeout = 150 * time.Millisecond
-	t.Cleanup(func() { watchTimeCreditTimeout = previous })
+	previous := watchTimeWriteTimeout
+	watchTimeWriteTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { watchTimeWriteTimeout = previous })
 
 	store, db := openBarrierWatchTimeStore(t, filepath.Join(t.TempDir(), "wt.db"))
 
