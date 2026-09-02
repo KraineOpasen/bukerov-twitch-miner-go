@@ -269,10 +269,10 @@ func (ws *WebSocketClient) Connect() error {
 
 	slog.Info("WebSocket connected", "index", ws.index, "resubscribed", resubscribed)
 
-	// The loops are bound to THIS generation: gen fences the PONG deadline and
-	// invalid-topic correlation, and (stop, conn) fence the I/O, so an old loop
-	// outliving a reconnect can neither read the new conn nor heal/void the new
-	// generation's state.
+	// The loops are bound to THIS generation: gen fences the PONG deadline,
+	// invalid-topic correlation and ordinary MESSAGE dispatch, and (stop, conn)
+	// fence the I/O, so an old loop outliving a reconnect can neither read the
+	// new conn nor heal/void the new generation's state.
 	// The Add is registered in its own critical section immediately before
 	// the spawns — not up in the state section — so a Close arriving during
 	// replayPendingTopics does not spend its join budget waiting on loops
@@ -948,7 +948,7 @@ func (ws *WebSocketClient) failConnection(gen uint64, reason error) {
 // snapshotted by Connect under mu, so a loop outliving a reconnect can never
 // adopt the replacement channel/conn from the fields (which would leave it
 // unstoppable, or reading the new conn concurrently with its own reader) and
-// its PONG/ERR_BADTOPIC handling is fenced to its own generation.
+// its PONG/ERR_BADTOPIC/MESSAGE handling is fenced to its own generation.
 func (ws *WebSocketClient) readLoop(stop chan struct{}, conn *websocket.Conn, gen uint64) {
 	for {
 		select {
@@ -1035,6 +1035,28 @@ func (ws *WebSocketClient) handleMessageForGen(msg WSMessage, readerGen uint64) 
 
 		now := time.Now()
 		ws.mu.Lock()
+		if readerGen != ws.connGen {
+			// Generation fence. This reader's generation was retired by the
+			// reconnect swap (and the Connect after it), both of which advance
+			// connGen under this same mutex: a frame it drained from the old
+			// socket is void, exactly like a stale PONG (recordPong) or a stale
+			// LISTEN commit (listenUnderWriteLock). It must neither reach
+			// onMessage nor enter the replay window — a stale copy admitted
+			// here would suppress the same event's legitimate delivery on the
+			// live generation inside the 1-second window. The check and the
+			// fingerprint admission below share ONE critical section, so ws.mu
+			// is the linearization point against the swap: either the swap is
+			// ordered first and the frame is dropped, or the admission is
+			// ordered first and the frame is dispatched as a current-generation
+			// frame. The callback runs with no lock held (S1) and is never
+			// re-checked: a frame admitted before a later swap is not stale,
+			// and a swap never waits for an in-flight handler.
+			liveGen := ws.connGen
+			ws.mu.Unlock()
+			slog.Debug("WebSocket ignoring message from superseded connection generation",
+				"index", ws.index, "reader_gen", readerGen, "conn_gen", liveGen)
+			return
+		}
 		if ws.recentMsgFingerprints == nil {
 			ws.recentMsgFingerprints = make(map[string]time.Time)
 		}
