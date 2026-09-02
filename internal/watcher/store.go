@@ -180,9 +180,15 @@ func (s *WatchTimeStore) RecordMinutes(streamer string, minutes float64, at time
 	// that arrives after is refused with database.ErrClosed, which a caller can
 	// actually recognise. Through the embedded handle neither held: Close ran
 	// straight past a parked credit and killed it, and the refusal was an
-	// unmatchable driver string. The wait this adds is one INSERT long and is
-	// the same bounded wait every other store here already imposes on Close; it
-	// is NOT a wait for the watch generation to quiesce.
+	// unmatchable driver string. The wait this adds is one INSERT long, the same
+	// kind of bounded wait Close already takes behind the WithTx paths in
+	// streamerlifecycle, notifications, analytics, drops, lifecycle and updater;
+	// it is NOT a wait for the watch generation to quiesce. Note those packages
+	// take the barrier on their TRANSACTIONAL paths only — their hot single-
+	// statement writes still use the embedded handle, so they keep the same
+	// shutdown-race exposure this credit no longer has. The credit is the case
+	// that cannot be left to chance: a dirty teardown guarantees the watch loop
+	// is still live precisely while the owner is closing.
 	//
 	// Lock order is s.mu -> database.DB.mu (RLock). Nothing may take them the
 	// other way round: a WithTx body that called Tombstone/Reinstate/

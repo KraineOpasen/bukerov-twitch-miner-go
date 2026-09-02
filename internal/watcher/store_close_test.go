@@ -21,12 +21,17 @@ import (
 // alternatives (waiting for a goroutine with no kill mechanism, or handing the
 // close to a reaper) are exactly what the concern's contract forbids.
 //
-// What is NOT by design is the store silently losing the race. WatchTimeStore
-// is the only store in this repository that talks to the shared handle through
-// the embedded *sql.DB, bypassing the closed-barrier that database.DB provides
-// and that internal/{analytics,notifications,drops,lifecycle,streamerlifecycle,
-// updater} all go through. The two tests below pin the two consequences of that
-// bypass, both of which are observable behaviour rather than a signature.
+// What is NOT by design is the store silently losing the race. RecordMinutes
+// reached the shared handle through the embedded *sql.DB, so it bypassed the
+// closed-barrier database.DB provides (WithTx). That barrier is taken per call
+// site, not per package: internal/{analytics,notifications,drops,lifecycle,
+// streamerlifecycle,updater} use it on their transactional paths, while their
+// hot single-statement writes go through the embedded handle just as this one
+// did — a wider, pre-existing exposure that is outside this concern's paths
+// and is recorded as a follow-up rather than fixed here. The credit is the one
+// that cannot be left to chance, because a dirty teardown guarantees the watch
+// loop is still live exactly while the owner is closing. The tests below pin
+// the consequences of that bypass as observable behaviour, not signatures.
 
 // openBarrierWatchTimeStore opens an independent SQLite file (bypassing
 // database.Open's process-wide singleton, like openWatchTimeStore does) and
@@ -114,8 +119,8 @@ func TestWatchTimeCreditRefusedAfterCloseIsRecognisable(t *testing.T) {
 // runs straight past it and database/sql wakes the parked request with
 // errDBClosed — the row is gone, and the only trace in production is a
 // slog.Debug line. Going through database.DB's own barrier, Close waits for
-// that single statement (the same bounded wait every other store in this
-// repository already imposes on it) and the row lands.
+// that single statement — the same kind of bounded wait it already takes
+// behind the other packages' WithTx paths — and the row lands.
 //
 // This is emphatically NOT the unbounded "do not close until the watcher loop
 // exits" the finding proposes: the wait is one INSERT long and completely
@@ -144,9 +149,31 @@ func TestClosingTheDatabaseDoesNotDiscardAnInFlightWatchTimeCredit(t *testing.T)
 	closed := make(chan error, 1)
 	go func() { closed <- db.Close() }()
 
-	// Release the connection: the credit can now complete. If Close respected
-	// the in-flight credit it is still waiting; if it did not, it has already
-	// torn the pool down and the credit is lost.
+	// Assert the discriminating state BEFORE releasing the connection, rather
+	// than racing it. Reading the row back afterwards is not enough on its own:
+	// if the credit holds no barrier, whether the row survives depends purely on
+	// whether Close reaches database/sql's pool teardown before Rollback hands
+	// the freed connection to the parked credit — and on GOMAXPROCS=1 the
+	// handoff always wins, so an unbarriered credit would commit and the test
+	// would pass against the very regression it exists to catch.
+	//
+	// Both of these are provably pending while the barrier holds: the credit
+	// cannot leave WithTx until `hold` releases the only connection, and Close
+	// is parked on the barrier's write lock. Neither can flake.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-credit:
+		t.Fatalf("the credit completed before the connection was released: %v", err)
+	default:
+	}
+	select {
+	case <-closed:
+		t.Fatal("Close completed while a credit was in flight: it did not take the barrier, so the " +
+			"earned minute is discarded whenever the pool teardown wins the race")
+	default:
+	}
+
+	// Release the connection: the credit can now complete, and Close after it.
 	if err := hold.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 		t.Logf("releasing the connection-holding transaction: %v", err)
 	}

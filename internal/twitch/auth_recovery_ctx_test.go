@@ -31,6 +31,17 @@ import (
 // actually derived. Rebinding either that derivation or the Recover argument to
 // context.Background() makes this test hang until its backstop and fail.
 //
+// What these tests deliberately do NOT cover, so the gap is not mistaken for
+// coverage: the 60s authRecoveryWait DEADLINE itself. They only ever cancel,
+// so a mutant that drops the WithTimeout and passes the caller's context
+// straight through keeps every assertion here green. Asserting the deadline
+// would mean either a 60s test or turning authRecoveryWait into a shrinkable
+// package variable; the bound is unchanged, pre-existing code, so it is
+// recorded as a known gap rather than paid for with either. The second half
+// below (the shared flight outliving one caller) is a guard, not a proof: it
+// catches a waiter that signals the flight complete, but the auth layer's own
+// suite is what owns the single-flight invariant.
+//
 // No network: the flight is parked at the first event deviceFlowAuthenticate
 // emits, which is its opening statement — before any request is built — and the
 // auth layer's lifecycle context is already cancelled, so even the released
@@ -133,7 +144,11 @@ func TestGenerationCancellationEndsThisCallersAuthRecoveryWait(t *testing.T) {
 	}
 
 	// The other half: one caller walking away must not have torn down the shared
-	// flight that every other caller depends on.
+	// flight that every other caller depends on. Settle first — the owning
+	// caller is parked in auth.Recover's own select, so a regression that let a
+	// cancelled waiter signal the flight complete would wake it on another
+	// goroutine, and checking instantly would often look past that.
+	time.Sleep(100 * time.Millisecond)
 	select {
 	case <-ownerDone:
 		t.Fatal("cancelling ONE caller aborted the shared auth recovery flight; the flight runs on " +
