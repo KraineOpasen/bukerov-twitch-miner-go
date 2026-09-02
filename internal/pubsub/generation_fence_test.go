@@ -38,7 +38,14 @@ import (
 // establishing and advancing connGen under ws.mu exactly as Connect and the
 // reconnect swap do (package precedent: lifecycle_test.go, invalid_topic_test.go),
 // and one diagnostic peeks at the replay window's size next to the behavioral
-// proof of the same property.
+// proof of the same property. The churn test's linearization witness also
+// reads the window under ws.mu, in the critical section that first observes a
+// round's generation retired: that instant is the earliest observation point
+// separating an admission ordered before the swap from one ordered after it
+// (the lock-free callback cannot tell a late-running legitimate dispatch from
+// a stale one), so it is what makes a check-then-act fence — one that checks
+// the generation and admits the fingerprint in separate critical sections —
+// visible to the suite at all.
 
 const genFenceTopic = "community-points-user-v1.123"
 
@@ -377,7 +384,11 @@ func awaitParkedReader(t *testing.T, st *genFenceBarrierState) {
 // the old reader resumes, its frame must not reach onMessage. Close joins
 // every loop of every generation, so once it returns the old reader has
 // finished and the negative assertion is deterministic — no sleep is
-// load-bearing.
+// load-bearing. What it pins is that the frame a real reader took off the
+// socket goes through the fence; it does not pin that readLoop hands the
+// fence its Connect-captured generation rather than the live one read at
+// dispatch entry, because the reader parks after that choice is made and no
+// seam exists between ReadMessage and the call.
 func TestGenerationFenceOldReaderParkedAcrossReconnectDoesNotDispatch(t *testing.T) {
 	// Wire bytes are built on the test goroutine: the server behavior runs on
 	// the HTTP handler goroutine, where t.Fatal is not allowed.
@@ -614,17 +625,30 @@ func TestGenerationFenceCloseStaysBoundedAcrossSwapWithParkedHandler(t *testing.
 	readerGen := currentGen(ws)
 	supersedeViaReconnect(t, ws, ts, readerGen)
 
+	// Close runs on its own goroutine under the test's own bound
+	// (stop_join_test.go precedent): a join that lost its timeout fails here,
+	// at this line, instead of hanging the package until go test's alarm.
+	type closeResult struct {
+		err     error
+		elapsed time.Duration
+	}
+	closed := make(chan closeResult, 1)
 	start := time.Now()
-	err := ws.Close()
-	elapsed := time.Since(start)
-	if !errors.Is(err, errLoopJoinTimeout) {
-		t.Fatalf("Close with a wedged retired-generation handler = %v, want errLoopJoinTimeout", err)
+	go func() {
+		err := ws.Close()
+		closed <- closeResult{err: err, elapsed: time.Since(start)}
+	}()
+	var res closeResult
+	select {
+	case res = <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked far beyond the join timeout — did the join lose its bound?")
 	}
-	if elapsed < stopJoinTimeout {
-		t.Fatalf("Close returned before the join timeout (%v)", elapsed)
+	if !errors.Is(res.err, errLoopJoinTimeout) {
+		t.Fatalf("Close with a wedged retired-generation handler = %v, want errLoopJoinTimeout", res.err)
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("Close blocked far beyond the join timeout (%v)", elapsed)
+	if res.elapsed < stopJoinTimeout {
+		t.Fatalf("Close returned before the join timeout (%v)", res.elapsed)
 	}
 }
 
@@ -634,11 +658,22 @@ func TestGenerationFenceCloseStaysBoundedAcrossSwapWithParkedHandler(t *testing.
 // generation produce zero dispatch, frames rejected during the race are still
 // deliverable on the live generation, every distinct frame is dispatched
 // exactly once overall, and Close still joins every generation's loops within
-// its bound. The test tolerates additional generations appearing on their own
-// (a superseded reader that classifies its own read error late can request
-// one extra reconnect — a pre-existing read-error-path behavior outside this
-// fence), because B1's invariant holds for every generation however it came
-// to be retired.
+// its bound. A linearization witness reads the replay window under ws.mu in
+// the critical section that first observes the round's generation retired: a
+// racer frame the window holds only after that instant was admitted after its
+// generation was retired, which a fence that checks the generation and admits
+// the fingerprint in separate critical sections lets through and the single
+// critical section rules out. The witness passes by construction on the
+// single critical section; against a split fence it fires whenever its
+// observation is ordered before the late admission, so a run is a
+// probabilistic falsifier of the split fence — most runs at GOMAXPROCS >= 2,
+// fewer at GOMAXPROCS=1 — not a per-round guarantee, since no seam exists
+// between a check and an admission. The test tolerates additional
+// generations appearing on their own (a superseded
+// reader that classifies its own read error late can request one extra
+// reconnect — a pre-existing read-error-path behavior outside this fence),
+// because B1's invariant holds for every generation however it came to be
+// retired.
 func TestGenerationFenceReconnectChurnStaysLinearizableAndJoinable(t *testing.T) {
 	ts := newWSTestServer(t, func(ts *wsTestServer, conn *websocket.Conn, dial int) {
 		ts.serve(conn)
@@ -657,61 +692,7 @@ func TestGenerationFenceReconnectChurnStaysLinearizableAndJoinable(t *testing.T)
 
 	const rounds, racers, postSwap = 6, 12, 4
 	for round := 1; round <= rounds; round++ {
-		gen := currentGen(ws)
-		base := round * 100
-
-		var wg sync.WaitGroup
-		for i := 0; i < racers; i++ {
-			wg.Add(1)
-			go func(n int) {
-				defer wg.Done()
-				ws.handleMessageForGen(genFenceFrame(n), gen)
-			}(base + i)
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ws.reconnectAfter(0)
-		}()
-		raced := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(raced)
-		}()
-		select {
-		case <-raced:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("round %d: racers or the reconnect swap did not complete within the bound", round)
-		}
-		// gen must be retired (connGen is monotonic, so every frame attributed
-		// to gen is void from here on) AND a live generation re-established —
-		// by this round's swap or, when that collapsed into a self-initiated
-		// reconnect already in flight, by that one. Closed is cleared only by
-		// a successful Connect, so it is the re-establishment signal even
-		// across a failed dial and its self-retry.
-		waitUntil(t, fmt.Sprintf("round %d generation retired and re-established", round), 5*time.Second, func() bool {
-			st := ws.state()
-			return currentGen(ws) != gen && !st.Reconnecting && !st.Closed
-		})
-
-		// Sequential, after the swap: the retired generation is void.
-		for j := 0; j < postSwap; j++ {
-			n := base + racers + j
-			ws.handleMessageForGen(genFenceFrame(n), gen)
-			if got := rec.count(n); got != 0 {
-				t.Fatalf("round %d: frame %d attributed to retired generation %d was dispatched %d time(s)", round, n, gen, got)
-			}
-		}
-		// Anything the race rejected must still be deliverable live (no
-		// poisoned window); anything admitted is already counted once.
-		for n := base; n < base+racers+postSwap; n++ {
-			if rec.count(n) == 0 {
-				deliverLive(t, ws, rec, n)
-			}
-			if got := rec.count(n); got != 1 {
-				t.Fatalf("round %d: frame %d dispatched %d time(s) overall, want exactly 1", round, n, got)
-			}
-		}
+		churnRound(t, ws, rec, round, racers, postSwap)
 	}
 
 	if err := ws.Close(); err != nil {
@@ -721,5 +702,166 @@ func TestGenerationFenceReconnectChurnStaysLinearizableAndJoinable(t *testing.T)
 	// ever dialed without an admitted swap, and at least one swap landed.
 	if got, admitted := ts.dialCount(), int(swaps.Load()); got < 2 || got > 1+admitted {
 		t.Fatalf("dials = %d with %d admitted swaps; want between 2 and %d", got, admitted, 1+admitted)
+	}
+}
+
+// churnRound races racers concurrent dispatch attempts attributed to the live
+// generation against one real reconnect swap, then checks the round's
+// invariants: zero dispatch for the retired generation after the swap, no
+// admission ordered after the swap (the linearization witness), and every
+// frame delivered exactly once overall.
+func churnRound(t *testing.T, ws *WebSocketClient, rec *genFenceRecorder, round, racers, postSwap int) {
+	gen := currentGen(ws)
+	base := round * 100
+	fps := racerFingerprints(t, base, base+racers)
+
+	witnessStop := make(chan struct{})
+	defer close(witnessStop) // on every exit, so the witness never outlives the round
+	witnessed := make(chan map[int]struct{}, 1)
+	witnessReady := make(chan struct{})
+	go func() { witnessed <- witnessRetirement(ws, gen, fps, witnessReady, witnessStop) }()
+	// The racers start only once the witness has taken its first read of the
+	// generation, so a witness that is not yet scheduled cannot miss a swap.
+	select {
+	case <-witnessReady:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("round %d: the witness never took its first read of the generation", round)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			ws.handleMessageForGen(genFenceFrame(n), gen)
+		}(base + i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ws.reconnectAfter(0)
+	}()
+	raced := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(raced)
+	}()
+	select {
+	case <-raced:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("round %d: racers or the reconnect swap did not complete within the bound", round)
+	}
+	// gen must be retired (connGen is monotonic, so every frame attributed
+	// to gen is void from here on) AND a live generation re-established —
+	// by this round's swap or, when that collapsed into a self-initiated
+	// reconnect already in flight, by that one. Closed is cleared only by
+	// a successful Connect, so it is the re-establishment signal even
+	// across a failed dial and its self-retry.
+	waitUntil(t, fmt.Sprintf("round %d generation retired and re-established", round), 5*time.Second, func() bool {
+		st := ws.state()
+		return currentGen(ws) != gen && !st.Reconnecting && !st.Closed
+	})
+	var atRetirement map[int]struct{}
+	select {
+	case atRetirement = <-witnessed:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("round %d: the witness never observed generation %d retired", round, gen)
+	}
+
+	// Sequential, after the swap: the retired generation is void.
+	for j := 0; j < postSwap; j++ {
+		n := base + racers + j
+		ws.handleMessageForGen(genFenceFrame(n), gen)
+		if got := rec.count(n); got != 0 {
+			t.Fatalf("round %d: frame %d attributed to retired generation %d was dispatched %d time(s)", round, n, gen, got)
+		}
+	}
+	// Linearization witness: every racer frame the window holds now was
+	// already in it when gen was first observed retired, i.e. no admission
+	// was ordered after the swap. Read before deliverLive below, which
+	// admits the rejected frames on the live generation.
+	ws.mu.RLock()
+	afterRace := windowedRacersLocked(ws, fps)
+	ws.mu.RUnlock()
+	for n := range afterRace {
+		if _, ok := atRetirement[n]; !ok {
+			t.Fatalf("round %d: frame %d attributed to generation %d entered the replay window after that generation was retired (dispatched %d time(s)); the admission was not ordered against the swap", round, n, gen, rec.count(n))
+		}
+	}
+	// Anything the race rejected must still be deliverable live (no
+	// poisoned window); anything admitted is already counted once.
+	for n := base; n < base+racers+postSwap; n++ {
+		if rec.count(n) == 0 {
+			deliverLive(t, ws, rec, n)
+		}
+		if got := rec.count(n); got != 1 {
+			t.Fatalf("round %d: frame %d dispatched %d time(s) overall, want exactly 1", round, n, got)
+		}
+	}
+}
+
+// racerFingerprints maps each racer frame's EventFingerprint to its n, so the
+// replay window can be read back in terms of frames.
+func racerFingerprints(t *testing.T, from, to int) map[string]int {
+	t.Helper()
+	fps := make(map[string]int, to-from)
+	for n := from; n < to; n++ {
+		msg, err := ParsePubSubMessage(genFenceFrame(n).Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fps[msg.EventFingerprint] = n
+	}
+	return fps
+}
+
+// windowedRacersLocked reports which racer frames the replay window holds.
+// ws.mu must be held (read or write).
+func windowedRacersLocked(ws *WebSocketClient, fps map[string]int) map[int]struct{} {
+	held := make(map[int]struct{})
+	for fp, n := range fps {
+		if _, ok := ws.recentMsgFingerprints[fp]; ok {
+			held[n] = struct{}{}
+		}
+	}
+	return held
+}
+
+// witnessRetirement spins under ws.mu until gen is no longer the live
+// generation and reports which racer frames the replay window holds in that
+// same critical section. The swap retires gen under ws.mu — the mutex the
+// fence check and the fingerprint admission share — so with the check and the
+// admission in one critical section every racer frame attributed to gen is
+// admitted either before this observation (and is in the set) or never. A
+// racer frame that enters the window only later was admitted after its
+// generation was retired. ready is closed once the witness has taken its
+// first read of the generation; it returns nil if stopped before the
+// retirement.
+//
+// The loop deliberately does not yield between reads: the witness catches a
+// late admission only when its read section is ordered before that
+// admission's write section, which it is whenever it is already waiting on
+// the lock when the swap releases it (sync.RWMutex hands the lock to waiting
+// readers before the next writer). Yielding between iterations measurably
+// weakens that. The spin lasts only until the swap and is stopped on every
+// exit of the round.
+func witnessRetirement(ws *WebSocketClient, gen uint64, fps map[string]int, ready chan<- struct{}, stop <-chan struct{}) map[int]struct{} {
+	var readyOnce sync.Once
+	signalReady := func() { readyOnce.Do(func() { close(ready) }) }
+	defer signalReady()
+	for {
+		ws.mu.RLock()
+		if ws.connGen != gen {
+			held := windowedRacersLocked(ws, fps)
+			ws.mu.RUnlock()
+			return held
+		}
+		ws.mu.RUnlock()
+		signalReady()
+		select {
+		case <-stop:
+			return nil
+		default:
+		}
 	}
 }
