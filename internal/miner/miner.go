@@ -2062,6 +2062,24 @@ func (m *Miner) teardown() error {
 	// own loops, chat/pubsub read loops and reconnect drivers, watcher,
 	// drops, notification dispatch) every asynchronous SQLite WRITER this
 	// runtime spawns has been joined or refused by the time this line runs.
+	//
+	// "Joined OR REFUSED" is load-bearing for exactly one writer. When
+	// m.watcher.Stop() above returned watcher.ErrStopJoinTimeout the watch loop
+	// is BY DEFINITION not joined, and it can still attempt the one write it
+	// deliberately does not bind to the generation context — the watch_time
+	// credit (watcher.WatchTimeStore.RecordMinutes). That write goes through
+	// database.DB's closed-barrier, so this close either waits for a credit
+	// already inside it (one statement) or refuses a later one with
+	// database.ErrClosed; it can neither be torn out from under nor silently
+	// swallowed. The same holds for the internal/app path, where the handle is
+	// injected and the composition root closes it after Run returns: the
+	// barrier belongs to the handle, not to whoever closes it.
+	//
+	// This is deliberately NOT "solved" by holding the handle open until the
+	// loop exits (an unbounded shutdown wait on a goroutine with no kill
+	// mechanism) or by handing the close to a reaper (a second lifecycle
+	// owner). The generation stays classified dirty either way: the error
+	// appended above is what keeps it from being retired as though it were gone.
 	// The process-level auto-updater (design v6 §7) is no longer one of
 	// these generation-owned loops — it is joined by the lifecycle
 	// controller itself, independently of any one generation's teardown.
