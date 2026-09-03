@@ -356,7 +356,24 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+	// ONLY 204 No Content is a credited minute-watched beacon. Both current
+	// reference implementations require exactly that (DevilXD/TwitchDropsMiner @
+	// 65d1092 channel.py send_watch: `return response.status == 204`;
+	// INKCR0W/TwitchDropsMinerGo @ 7ee5387 internal/watch/watch.go:
+	// `response.StatusCode == http.StatusNoContent`).
+	//
+	// Accepting HTTP 200 as success is what made an uncredited beacon
+	// indistinguishable from a credited one: Twitch answers a stale or malformed
+	// minute-watched payload at the transport layer without counting the watch, so
+	// a 200 was being laundered into Delivered — local watched minutes, slot
+	// delivery_success and watch-time fairness credit for a minute Twitch never
+	// granted. Every non-204 status now returns the existing bounded
+	// StageBeacon/status/beacon_http_<status> failure instead.
+	if resp.StatusCode != http.StatusNoContent {
+		// Drain (bounded) before closing: a rejected beacon is now a once-a-minute
+		// path, and an undrained body forces the transport to discard the
+		// connection instead of reusing it. The content is never inspected.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBeaconDrainBytes))
 		return resp.StatusCode, false, fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
@@ -378,6 +395,11 @@ func (s *MinuteSender) postBeacon(ctx context.Context, streamer *models.Streamer
 // rebinding, the peer a dialer really reached) is a separate concern with a
 // separate mechanism, and pretending a URL check covers it would be worse than
 // not claiming it at all.
+
+// maxBeaconDrainBytes bounds how much of a rejected beacon response is drained
+// before the body is closed, so a remote party answering with an endless body
+// cannot make the miner read forever.
+const maxBeaconDrainBytes = 1 << 16 // 64 KiB
 
 const (
 	// maxPlaylistBytes bounds a playlist body. Both playlists this code reads

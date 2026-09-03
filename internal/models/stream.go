@@ -1,9 +1,12 @@
 package models
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -113,10 +116,81 @@ type Tag struct {
 	LocalizedName string `json:"localizedName"`
 }
 
-type MinuteWatchedEvent struct {
-	Event      string                 `json:"event"`
-	Properties map[string]interface{} `json:"properties"`
+// MinuteWatchedProperties is the TYPED minute-watched wire payload. Every field
+// is protocol-significant and its JSON TYPE is part of the contract, so the
+// payload is a struct rather than an untyped map: Twitch transport-accepts a
+// payload with the wrong shape (HTTP 204 all the same) and simply does not
+// credit the watch, which is indistinguishable from success at the HTTP layer.
+//
+// The field set and types are the modern minute-watched contract evidenced by
+// two independent current miners:
+//
+//   - DevilXD/TwitchDropsMiner @ 65d109289874b7c8e9ef2d667a9bf9e46c51fdce,
+//     channel.py Stream._watch_payload (primary reference);
+//   - INKCR0W/TwitchDropsMinerGo @ 7ee53871fb1def09f4e07f2f10ee1d0c659d3007,
+//     internal/watch/watch.go spadeProperties (independent corroboration).
+//
+// Notes on the exact shape:
+//
+//   - broadcast_id, channel_id and game_id stay STRINGS while user_id is a
+//     NUMBER. That asymmetry is deliberate in the primary reference, which
+//     str()-wraps the first three in the same dict literal but converts the user
+//     id to int at the auth boundary (twitch.py: self.user_id: int = int(
+//     validate_response["user_id"])).
+//   - game and game_id are always present; an unknown game sends "" for both
+//     rather than omitting the keys, so no `omitempty` may be added here.
+//   - hidden and muted are false and MUST still be serialized; `omitempty` on
+//     any boolean here would silently drop them from the wire.
+//   - player is not sent by the primary reference but IS sent by the independent
+//     Go implementation and by this miner's existing wire; it is retained
+//     because removing a field the current payload already carries is not
+//     supported by any evidence.
+//   - location is deliberately NOT sent: the primary reference omits it and
+//     earns credit, so the secondary implementation's location="channel" is an
+//     unevidenced, secondary-only choice.
+type MinuteWatchedProperties struct {
+	BroadcastID   string `json:"broadcast_id"`
+	ChannelID     string `json:"channel_id"`
+	Channel       string `json:"channel"`
+	ClientTime    string `json:"client_time"`
+	Game          string `json:"game"`
+	GameID        string `json:"game_id"`
+	Hidden        bool   `json:"hidden"`
+	IsLive        bool   `json:"is_live"`
+	Live          bool   `json:"live"`
+	LoggedIn      bool   `json:"logged_in"`
+	MinutesLogged int    `json:"minutes_logged"`
+	Muted         bool   `json:"muted"`
+	Player        string `json:"player"`
+	UserID        int64  `json:"user_id"`
 }
+
+type MinuteWatchedEvent struct {
+	Event      string                  `json:"event"`
+	Properties MinuteWatchedProperties `json:"properties"`
+}
+
+// MinuteWatchedClientTimeLayout is the exact client_time format: an ISO-8601 UTC
+// instant with exactly three fractional digits and a literal Z. It matches the
+// primary reference's isonow() (datetime.now(timezone.utc).isoformat(
+// timespec="milliseconds").replace("+00:00", "Z")) and the independent Go
+// implementation's layout byte for byte.
+const MinuteWatchedClientTimeLayout = "2006-01-02T15:04:05.000Z"
+
+// ErrInvalidUserID is returned when the authenticated user id is empty or is not
+// a positive base-10 integer. The minute-watched payload carries user_id as a
+// JSON NUMBER, and a zero (or negative) user id is never a real Twitch identity,
+// so the payload is refused outright instead of being coerced: a beacon sent with
+// user_id:0 would be transport-accepted and silently uncredited, which is exactly
+// the false-positive success this contract exists to prevent.
+var ErrInvalidUserID = errors.New("minute-watched payload: user id is not a positive Twitch numeric id")
+
+// ErrIncompleteIdentity is returned when the broadcast, channel id or channel
+// login is empty. Those three name WHAT is being watched; a beacon missing any of
+// them is transport-accepted and never credited, which is the same false-positive
+// success ErrInvalidUserID exists to prevent. The payload is refused rather than
+// sent with an empty identity field.
+var ErrIncompleteIdentity = errors.New("minute-watched payload: broadcast, channel id or channel login is empty")
 
 // WatchStreakPursuitCapMinutes is the single behavioral pursuit cap. It is
 // continuous successfully-delivered watch evidence for one exact BroadcastID;
@@ -400,49 +474,146 @@ func (s *Stream) SetCampaigns(campaigns []*Campaign) {
 }
 
 // BuildMinuteWatchedPayload builds the beacon events for a minute-watched report
-// from the identity of one observed broadcast. It is pure (no lock, no I/O), so a
+// from the identity of one observed broadcast. It takes no lock and does no I/O
+// (its only ambient input is the injected Clock), so a
 // full session refresh can build the payload off-lock as part of an immutable
 // PlaybackSessionCandidate and publish it atomically with the spade URL and
 // broadcast ID (see ApplyPlaybackSessionIfCurrent), instead of via a separate
 // SetPayload write.
-func BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel string, game *Game) []MinuteWatchedEvent {
-	properties := map[string]interface{}{
-		"channel_id":   channelID,
-		"broadcast_id": broadcastID,
-		"player":       "site",
-		"user_id":      userID,
-		"live":         true,
-		"channel":      channel,
+// client_time is stamped ONCE here, when the payload is built, and is then
+// replayed unchanged by every beacon sent from that payload. That lifetime is
+// taken from the primary reference, where _watch_payload (and the base64
+// spade_payload derived from it) are @cached_property: the same client_time —
+// indeed the same body bytes — are re-POSTed for every minute-watched beacon of
+// a Stream object, refreshed only when a new Stream is constructed (channel
+// discovery, bulk reload, or the post-ONLINE_DELAY refresh), never by the watch
+// loop itself. Twitch credits that, so a per-send timestamp is not required.
+//
+// Binding it to the payload is also what keeps the playback session coherent
+// here. Because the timestamp lives IN the published payload, re-stamping it each
+// minute would mean re-publishing the payload each minute; every re-publish bumps
+// sessionGen (see ApplyPlaybackSessionIfCurrent), and postBeacon's coherence gate
+// suppresses any send whose captured generation no longer matches — so it would
+// turn every beacon into a StageStaleSession no-op. (Stamping it in the sender
+// instead, outside the published payload, would be a different design; the
+// reference behaviour above is why it is not taken.) See TestClientTimeIsSessionBound.
+func BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel string, game *Game, clock Clock) ([]MinuteWatchedEvent, error) {
+	numericUserID, err := parseTwitchUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	// The three identity fields that say WHAT is being watched are checked with
+	// the same fail-closed rule as the viewer identity: an empty broadcast_id,
+	// channel_id or channel produces a payload Twitch answers 204 to and never
+	// credits, which the strict-204 transport rule cannot detect on its own.
+	if broadcastID == "" || channelID == "" || channel == "" {
+		return nil, ErrIncompleteIdentity
 	}
 
-	if game != nil && game.Name != "" && game.ID != "" {
-		properties["game"] = game.Name
-		properties["game_id"] = game.ID
+	// game/game_id are always present; an unknown game sends "" for both rather
+	// than omitting the keys.
+	gameName, gameID := "", ""
+	if game != nil {
+		gameName, gameID = game.Name, game.ID
 	}
 
 	return []MinuteWatchedEvent{
 		{
-			Event:      "minute-watched",
-			Properties: properties,
+			Event: "minute-watched",
+			Properties: MinuteWatchedProperties{
+				BroadcastID:   broadcastID,
+				ChannelID:     channelID,
+				Channel:       channel,
+				ClientTime:    clock.Now().UTC().Format(MinuteWatchedClientTimeLayout),
+				Game:          gameName,
+				GameID:        gameID,
+				Hidden:        false,
+				IsLive:        true,
+				Live:          true,
+				LoggedIn:      true,
+				MinutesLogged: 1,
+				Muted:         false,
+				Player:        "site",
+				UserID:        numericUserID,
+			},
 		},
-	}
+	}, nil
 }
 
-func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game *Game) {
+// marshalBeaconPayload serializes the minute-watched events exactly as they must
+// appear on the wire. encoding/json escapes '&', '<' and '>' as \u0026 / \u003c /
+// \u003e by default; both reference implementations put those characters through
+// literally, and real game names contain them (for example "Dungeons & Dragons").
+// A conforming JSON parser decodes either form to the same string, so this is
+// byte fidelity rather than a semantic fix — but on a wire we cannot test against
+// Twitch directly, an avoidable divergence from the evidenced contract is not
+// worth carrying. Encode appends a newline, which is trimmed.
+func marshalBeaconPayload(events []MinuteWatchedEvent) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(events); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// parseTwitchUserID converts the authenticated user id (carried as a string
+// everywhere else in this codebase, because that is how the OAuth validate
+// response spells it) into the positive integer the wire contract requires. It
+// fails closed: an empty, non-numeric, zero or negative id yields ErrInvalidUserID
+// and no payload at all, never a payload with user_id coerced to 0.
+func parseTwitchUserID(userID string) (int64, error) {
+	// Pure ASCII digits only. strconv.ParseInt alone would also accept a signed
+	// form like "+44322889", which the auth layer never produces; requiring plain
+	// digits keeps "numeric" meaning exactly one thing on this wire.
+	if userID == "" {
+		return 0, ErrInvalidUserID
+	}
+	for i := 0; i < len(userID); i++ {
+		if userID[i] < '0' || userID[i] > '9' {
+			return 0, ErrInvalidUserID
+		}
+	}
+	parsed, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, ErrInvalidUserID
+	}
+	return parsed, nil
+}
+
+// SetPayload publishes a freshly built beacon payload. Production publishes the
+// payload atomically with the rest of the session (see
+// PlaybackSessionCandidate.WithPayload / ApplyPlaybackSessionIfCurrent); this
+// setter remains for single-goroutine test setup and any legacy caller.
+//
+// It fails closed like the builder: a refused build publishes NOTHING and leaves
+// the session generation untouched. Note the difference from the production path:
+// this setter only declines to publish, whereas an applied faulted candidate also
+// CLEARS an existing payload (see PlaybackSessionCandidate.WithPayload and
+// ApplyPlaybackSessionIfCurrent). A payload already published therefore survives a
+// refused SetPayload, which is why production publishes through the candidate.
+func (s *Stream) SetPayload(channelID, broadcastID, userID, channel string, game *Game, clock Clock) error {
+	payload, err := BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel, game, clock)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.payload = BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel, game)
+	s.payload = payload
 	// A freshly built payload (new broadcast, refreshed game/user context) is a new
 	// playback session for beacon purposes.
 	s.sessionGen++
+	return nil
 }
 
 func (s *Stream) EncodePayload() (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := json.Marshal(s.payload)
+	data, err := marshalBeaconPayload(s.payload)
 	if err != nil {
 		return "", err
 	}

@@ -22,18 +22,33 @@ func snapTuple(s *Stream) sessionTuple {
 	snap := s.SessionSnapshot()
 	pbc := ""
 	if len(snap.payload) > 0 {
-		pbc, _ = snap.payload[0].Properties["broadcast_id"].(string)
+		pbc = snap.payload[0].Properties.BroadcastID
 	}
 	return sessionTuple{broadcast: snap.BroadcastID, spade: snap.SpadeURL, payloadBc: pbc}
+}
+
+// testUserID is a VALID numeric Twitch user id. The beacon payload carries
+// user_id as a JSON number and refuses to build for anything else, so fixtures
+// must use a real positive integer rather than a placeholder like "uid".
+const testUserID = "44322889"
+
+// mustPayload attaches a beacon payload to a candidate for fixture setup. The
+// user id is a valid constant, so a build error here is a broken fixture, not a
+// behaviour under test.
+func mustPayload(c PlaybackSessionCandidate, channelID, broadcastID, channel string) PlaybackSessionCandidate {
+	out, err := c.WithPayload(channelID, broadcastID, testUserID, channel, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	return out
 }
 
 // applyTuple publishes a full session for generation marker n atomically.
 func applyTuple(s *Stream, n int) SessionApplyResult {
 	obs := s.BeginSessionObservation()
 	b := fmt.Sprintf("b%d", n)
-	cand := PlaybackSessionCandidate{BroadcastID: b, Title: "t"}.
-		WithSpadeURL(fmt.Sprintf("https://spade.twitch.tv/%d", n)).
-		WithPayload("cid", b, "uid", "chan", nil)
+	cand := mustPayload(PlaybackSessionCandidate{BroadcastID: b, Title: "t"}.
+		WithSpadeURL(fmt.Sprintf("https://spade.twitch.tv/%d", n)), "cid", b, "chan")
 	return s.ApplyPlaybackSessionIfCurrent(obs, cand, ExpectedSession{})
 }
 
@@ -105,14 +120,14 @@ func TestApplyStaleObservationDoesNotPublish(t *testing.T) {
 	oldObs := s.BeginSessionObservation()
 	newObs := s.BeginSessionObservation()
 
-	newCand := PlaybackSessionCandidate{BroadcastID: "b2"}.
-		WithSpadeURL("https://spade.twitch.tv/2").WithPayload("cid", "b2", "uid", "chan", nil)
+	newCand := mustPayload(PlaybackSessionCandidate{BroadcastID: "b2"}.
+		WithSpadeURL("https://spade.twitch.tv/2"), "cid", "b2", "chan")
 	if r := s.ApplyPlaybackSessionIfCurrent(newObs, newCand, ExpectedSession{}); !r.Applied {
 		t.Fatalf("newer observation must apply, got %+v", r)
 	}
 
-	oldCand := PlaybackSessionCandidate{BroadcastID: "b3"}.
-		WithSpadeURL("https://spade.twitch.tv/3").WithPayload("cid", "b3", "uid", "chan", nil)
+	oldCand := mustPayload(PlaybackSessionCandidate{BroadcastID: "b3"}.
+		WithSpadeURL("https://spade.twitch.tv/3"), "cid", "b3", "chan")
 	r := s.ApplyPlaybackSessionIfCurrent(oldObs, oldCand, ExpectedSession{})
 	if r.Applied || !r.Stale || r.Reason != SessionStaleSupersededObs {
 		t.Fatalf("stale older observation must not publish, got %+v", r)
@@ -134,8 +149,8 @@ func TestApplyExpectedBroadcastMismatchStale(t *testing.T) {
 	// A new broadcast lands during the refresh's I/O.
 	s.Update("b2", "t", nil, nil, 0)
 
-	cand := PlaybackSessionCandidate{BroadcastID: "b1"}.
-		WithSpadeURL("https://spade.twitch.tv/1b").WithPayload("cid", "b1", "uid", "chan", nil)
+	cand := mustPayload(PlaybackSessionCandidate{BroadcastID: "b1"}.
+		WithSpadeURL("https://spade.twitch.tv/1b"), "cid", "b1", "chan")
 	r := s.ApplyPlaybackSessionIfCurrent(obs, cand, ExpectedSession{BroadcastID: "b1"})
 	if r.Applied || !r.Stale || r.Reason != SessionStaleBroadcast {
 		t.Fatalf("expected a stale broadcast_changed result, got %+v", r)
@@ -157,8 +172,7 @@ func TestApplyExpectedGenerationDriftStale(t *testing.T) {
 	// A concurrent change bumps the generation during the refresh.
 	s.SetSpadeURL("https://spade.twitch.tv/drift")
 
-	cand := PlaybackSessionCandidate{BroadcastID: "b1"}.
-		WithPayload("cid", "b1", "uid", "chan", nil)
+	cand := mustPayload(PlaybackSessionCandidate{BroadcastID: "b1"}, "cid", "b1", "chan")
 	r := s.ApplyPlaybackSessionIfCurrent(obs, cand, ExpectedSession{Generation: gen})
 	if r.Applied || !r.Stale || r.Reason != SessionStaleGeneration {
 		t.Fatalf("expected a stale generation_drift result, got %+v", r)
@@ -174,8 +188,8 @@ func TestApplyExpectedMatchApplies(t *testing.T) {
 	bc := s.GetBroadcastID()
 
 	obs := s.BeginSessionObservation()
-	cand := PlaybackSessionCandidate{BroadcastID: bc}.
-		WithSpadeURL("https://spade.twitch.tv/refreshed").WithPayload("cid", bc, "uid", "chan", nil)
+	cand := mustPayload(PlaybackSessionCandidate{BroadcastID: bc}.
+		WithSpadeURL("https://spade.twitch.tv/refreshed"), "cid", bc, "chan")
 	r := s.ApplyPlaybackSessionIfCurrent(obs, cand, ExpectedSession{BroadcastID: bc, Generation: gen})
 	if !r.Applied || r.Stale {
 		t.Fatalf("a matching expected session must apply, got %+v", r)

@@ -57,7 +57,13 @@ func (f *fakeRefresher) RefreshPlaybackSession(ctx context.Context, s *models.St
 	if fetchSpade {
 		cand = cand.WithSpadeURL("http://spade.test/refreshed")
 	}
-	cand = cand.WithPayload("cid", cand.BroadcastID, "uid", s.Username, nil)
+	// Mirror the real client: a beacon payload is built only from an OBSERVED
+	// broadcast. Before this fake has a broadcast id there is nothing creditable
+	// to describe, and the production builder now refuses such a payload rather
+	// than emitting one with an empty identity.
+	if cand.BroadcastID != "" {
+		cand = mustWithPayload(cand, "cid", cand.BroadcastID, "44322889", s.Username, nil, nil)
+	}
 	if beforeApply != nil {
 		beforeApply(s)
 	}

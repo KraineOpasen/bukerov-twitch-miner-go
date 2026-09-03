@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,11 +42,20 @@ func TestSpadeFormBodyPercentEncodesPayload(t *testing.T) {
 	}
 }
 
-// TestSpadeFormBodyRoundTripsRealPayload confirms a realistic base64-encoded
-// minute-watched JSON blob decodes back to identical bytes after the form
-// encode/parse cycle a real spade request goes through.
+// TestSpadeFormBodyRoundTripsRealPayload confirms a REAL minute-watched payload
+// decodes back to identical bytes after the form encode/parse cycle a spade
+// request goes through. The blob is produced by the production builder rather
+// than hand-written, so this test can never keep passing against a wire shape the
+// miner no longer sends.
 func TestSpadeFormBodyRoundTripsRealPayload(t *testing.T) {
-	original := []byte(`[{"event":"minute-watched","properties":{"channel_id":"123","broadcast_id":"456","player":"site","user_id":"789","live":true,"channel":"somestreamer"}}]`)
+	events, err := models.BuildMinuteWatchedPayload("123", "456", "44322889", "somestreamer", &models.Game{ID: "509658", Name: "Just Chatting"}, nil)
+	if err != nil {
+		t.Fatalf("building the real payload must succeed: %v", err)
+	}
+	original, err := json.Marshal(events)
+	if err != nil {
+		t.Fatalf("marshalling the real payload must succeed: %v", err)
+	}
 	payload := base64.StdEncoding.EncodeToString(original)
 
 	body := spadeFormBody(payload)
@@ -215,7 +225,7 @@ func beaconRedirectSender(rt *beaconRedirectRT, spadeURL string) (*MinuteSender,
 	s := models.NewStreamer("redirect_channel", models.StreamerSettings{})
 	s.ChannelID = "cid"
 	s.Stream.SetSpadeURL(spadeURL)
-	s.Stream.SetPayload("cid", "bid", "uid", "redirect_channel", nil)
+	mustSetPayload(s.Stream, "cid", "bid", "44322889", "redirect_channel", nil, nil)
 
 	sender := &MinuteSender{
 		client:     fakeToken{sig: "sig", token: "tok"},
@@ -298,7 +308,13 @@ func TestSendRejectsBeaconHTTPSToHTTPDowngrade(t *testing.T) {
 
 // --- Normal controls: unchanged direct-response behavior -------------------
 
-func TestSendBeaconDirect200IsDelivered(t *testing.T) {
+// TestSendBeaconDirect200IsNotDelivered pins the strict status rule from the
+// other side of the old behaviour: a direct HTTP 200 used to be accepted as a
+// delivered minute. Twitch answers 200 to a minute-watched beacon it does not
+// credit, so accepting it manufactured watched minutes, slot delivery_success
+// records and watch-time fairness credit for views that never counted. Only 204
+// No Content is a credited beacon.
+func TestSendBeaconDirect200IsNotDelivered(t *testing.T) {
 	rt := newBeaconRedirectRT()
 	rt.okChain()
 	rt.beacon = beaconRedirectStep{status: 200}
@@ -306,8 +322,14 @@ func TestSendBeaconDirect200IsDelivered(t *testing.T) {
 	sender, streamer := beaconRedirectSender(rt, "http://spade.test/beacon")
 	res := sender.Send(context.Background(), streamer)
 
-	if !res.Delivered || res.Failure != nil {
-		t.Fatalf("expected a direct 200 beacon to be Delivered, got %+v", res)
+	if res.Delivered {
+		t.Fatal("a direct 200 beacon must not be Delivered — Twitch does not credit it")
+	}
+	if res.Failure == nil || res.Failure.Stage != StageBeacon || res.Failure.Status != 200 {
+		t.Fatalf("expected a StageBeacon failure with status 200, got %+v", res.Failure)
+	}
+	if res.Failure.ErrorCode != "beacon_http_200" {
+		t.Fatalf("expected the bounded code beacon_http_200, got %q", res.Failure.ErrorCode)
 	}
 }
 

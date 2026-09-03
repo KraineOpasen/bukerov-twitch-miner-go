@@ -623,6 +623,7 @@ To earn watch time points, the application must report viewing activity.
    POST {spade_url}
    Content-Type: application/x-www-form-urlencoded
    Body: data=<url-encoded base64(json_payload)>
+   Success: HTTP 204 No Content — and ONLY 204
 ```
 
 The base64 payload is placed in a form field (`data=...`) and **must be
@@ -638,19 +639,76 @@ miner's `requests` form post and the web player's `btoa` + `encodeURIComponent`)
 4. Parse for "spade_url": "{url}"
 ```
 
+#### Beacon Status Contract
+
+**`HTTP 204 No Content` is required for a credited minute-watched beacon — and it
+is not by itself proof of credit.** Twitch answers a stale or malformed
+minute-watched payload at the transport layer — commonly `HTTP 200` — *without
+counting the watch*, so treating any non-204 status as success produces a silent
+false-positive: watched minutes, slot `delivery_success` records and watch-time
+fairness credit are all booked for a view Twitch never granted, while nothing in
+the logs looks wrong.
+
+A 204 means only that the beacon was accepted. Whether the watch was actually
+credited is observable solely through real `WATCH` points events and server-side
+balance growth — the same honest limitation the health canary documents.
+
+Every non-204 status is a bounded `StageBeacon` failure carrying the status and
+the `beacon_http_<status>` error code; it never increments delivered minutes,
+never counts as a slot delivery success, never triggers `onMinuteWatched`, and
+never writes watch-time fairness credit.
+
+The beacon carries no credential material: only `Content-Type` and `User-Agent`
+are set, and the beacon POST refuses to follow redirects (a redirected target
+could be cross-origin, downgrade HTTPS, or — for 307/308 — replay the body to a
+third party). No OAuth, `Client-Id`, `Device-Id`, cookie, `Origin` or `Referer`
+header is sent to the spade endpoint.
+
 #### Minute-Watched Payload
+
+Every property below is required and its **JSON type is part of the contract**.
+`broadcast_id`, `channel_id` and `game_id` are JSON *strings* while `user_id` is a
+JSON *number*; that asymmetry is deliberate. `game`/`game_id` are always present
+(`""` when the game is unknown) rather than omitted, and the `false`-valued
+booleans are always serialized.
+
+`client_time` is stamped once when the payload is built and replayed unchanged by
+every beacon sent from that payload — it is bound to the playback session, not to
+the individual send. That lifetime is taken from the reference implementation,
+which caches the whole payload (and therefore its `client_time`) per stream object
+and replays identical bytes for every beacon; Twitch credits that.
+
+It also has to be that way given where `client_time` lives. Because the timestamp
+is part of the *published* payload, re-stamping it per send would mean
+re-publishing the payload each minute; every re-publish bumps the playback-session
+generation, and the sender's coherence gate suppresses any send whose captured
+generation no longer matches — so it would silently turn every beacon into a
+stale-session no-op. (Stamping the timestamp in the sender instead, outside the
+published payload, would be a different design; it is not adopted, because the
+reference behaviour shows a session-bound value is what earns credit.)
+
+An empty or non-numeric authenticated user id is refused outright: no payload is
+built, so the sender fails closed at its session-snapshot gate before any spade
+request. A `user_id` of `0` is never sent.
+
 ```json
 [{
     "event": "minute-watched",
     "properties": {
-        "channel_id": "123456",
         "broadcast_id": "789012",
-        "player": "site",
-        "user_id": "456789",
-        "live": true,
+        "channel_id": "123456",
         "channel": "streamer_name",
-        "game": "Game Name",      // Optional: for drops
-        "game_id": "12345"        // Optional: for drops
+        "client_time": "2026-09-03T16:24:44.000Z",
+        "game": "Game Name",
+        "game_id": "12345",
+        "hidden": false,
+        "is_live": true,
+        "live": true,
+        "logged_in": true,
+        "minutes_logged": 1,
+        "muted": false,
+        "player": "site",
+        "user_id": 456789
     }
 }]
 ```

@@ -35,8 +35,7 @@ func payloadBroadcastID(t *testing.T, snap models.PlaybackSessionSnapshot) strin
 	if len(events) == 0 {
 		return ""
 	}
-	id, _ := events[0].Properties["broadcast_id"].(string)
-	return id
+	return events[0].Properties.BroadcastID
 }
 
 // TestUpdateStreamNoPartialSessionWindow proves the corrective-pass Blocker-1 fix:
@@ -77,7 +76,9 @@ func TestUpdateStreamNoPartialSessionWindow(t *testing.T) {
 	s.ChannelID = "cid"
 	s.Stream.Update("b1", "t1", &models.Game{ID: "g1", Name: "GameX"}, nil, 1)
 	s.Stream.SetSpadeURL("https://spade.twitch.tv/u1")
-	s.Stream.SetPayload("cid", "b1", "uid", "streamer", &models.Game{ID: "g1", Name: "GameX"})
+	if err := s.Stream.SetPayload("cid", "b1", "44322889", "streamer", &models.Game{ID: "g1", Name: "GameX"}, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 
 	isOld := func() bool {
 		snap := s.Stream.SessionSnapshot()
