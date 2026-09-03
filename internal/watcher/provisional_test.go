@@ -19,7 +19,9 @@ func provisionalWatcherFixture(t *testing.T, login, channelID, gameID string) (*
 	game := &models.Game{ID: gameID, Name: gameID}
 	streamer.Stream.Update("broadcast-"+login, "", game, nil, 1)
 	streamer.Stream.SetSpadeURL("https://spade.invalid/" + login)
-	_ = streamer.Stream.SetPayload(channelID, "broadcast-"+login, "44322889", login, game, nil)
+	if err := streamer.Stream.SetPayload(channelID, "broadcast-"+login, "44322889", login, game, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 	streamer.Stream.MarkCampaignAvailabilityUnknown()
 	snapshot := streamer.Stream.ProvisionalDropSnapshot()
 	return streamer, models.ProvisionalDropCandidate{

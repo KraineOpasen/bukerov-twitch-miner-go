@@ -95,7 +95,7 @@ func watchGenerationStreamer(login string) *models.Streamer {
 	s.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	s.Stream.Update("b1", "t", nil, nil, 1)
 	s.Stream.SetSpadeURL("https://spade.test/track")
-	_ = s.Stream.SetPayload("cid", "b1", "44322889", login, nil, nil)
+	mustSetPayload(s.Stream, "cid", "b1", "44322889", login, nil, nil)
 	return s
 }
 

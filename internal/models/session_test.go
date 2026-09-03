@@ -14,7 +14,9 @@ func TestSessionSnapshotCoherentAndCallerOwned(t *testing.T) {
 	s := NewStream()
 	s.Update("b1", "t", &Game{ID: "g", Name: "G"}, nil, 1)
 	s.SetSpadeURL("https://spade.twitch.tv/track")
-	_ = s.SetPayload("cid", "b1", "44322889", "chan", &Game{ID: "g", Name: "G"}, nil)
+	if err := s.SetPayload("cid", "b1", "44322889", "chan", &Game{ID: "g", Name: "G"}, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 
 	snap := s.SessionSnapshot()
 	if snap.BroadcastID != "b1" || snap.SpadeURL != "https://spade.twitch.tv/track" || !snap.HasPayload() {
@@ -27,7 +29,9 @@ func TestSessionSnapshotCoherentAndCallerOwned(t *testing.T) {
 
 	// Live mutations after capture must not touch the caller-owned snapshot.
 	s.SetSpadeURL("https://spade.twitch.tv/other")
-	_ = s.SetPayload("cid", "b2", "44322889", "chan", nil, nil)
+	if err := s.SetPayload("cid", "b2", "44322889", "chan", nil, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 	if snap.SpadeURL != "https://spade.twitch.tv/track" || snap.Generation != gen {
 		t.Fatalf("snapshot must be immutable after capture, got %+v", snap)
 	}
@@ -141,7 +145,9 @@ func TestNewBroadcastDuringRefreshInvalidates(t *testing.T) {
 	s := NewStream()
 	s.Update("b1", "t", nil, nil, 1)
 	s.SetSpadeURL("https://spade.twitch.tv/track")
-	_ = s.SetPayload("cid", "b1", "44322889", "chan", nil, nil)
+	if err := s.SetPayload("cid", "b1", "44322889", "chan", nil, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 
 	snap := s.SessionSnapshot()
 	// A new broadcast arrives while a send holds `snap`.

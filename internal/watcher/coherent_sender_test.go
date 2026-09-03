@@ -70,7 +70,7 @@ func coherentStreamer(spade string) *models.Streamer {
 	s.ChannelID = "cid"
 	s.Stream.Update("b1", "t", nil, nil, 1)
 	s.Stream.SetSpadeURL(spade)
-	_ = s.Stream.SetPayload("cid", "b1", "44322889", "chan", nil, nil)
+	mustSetPayload(s.Stream, "cid", "b1", "44322889", "chan", nil, nil)
 	return s
 }
 

@@ -76,7 +76,9 @@ func TestUpdateStreamNoPartialSessionWindow(t *testing.T) {
 	s.ChannelID = "cid"
 	s.Stream.Update("b1", "t1", &models.Game{ID: "g1", Name: "GameX"}, nil, 1)
 	s.Stream.SetSpadeURL("https://spade.twitch.tv/u1")
-	_ = s.Stream.SetPayload("cid", "b1", "44322889", "streamer", &models.Game{ID: "g1", Name: "GameX"}, nil)
+	if err := s.Stream.SetPayload("cid", "b1", "44322889", "streamer", &models.Game{ID: "g1", Name: "GameX"}, nil); err != nil {
+		t.Fatalf("fixture payload must build: %v", err)
+	}
 
 	isOld := func() bool {
 		snap := s.Stream.SessionSnapshot()

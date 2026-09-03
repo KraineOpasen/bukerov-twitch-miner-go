@@ -113,6 +113,27 @@ func decodeBeaconProperties(t *testing.T, body string) map[string]any {
 	return events[0].Properties
 }
 
+// mustSetPayload publishes a fixture beacon payload, panicking if it cannot be
+// built. Fixture identities are valid constants, so a failure here is a broken
+// fixture rather than behaviour under test — and panicking instead of discarding
+// the error is what stops a payload-build regression from silently leaving a
+// payload-free session that still satisfies a test's other assertions. Used by
+// the fixture builders that have no *testing.T in scope.
+func mustSetPayload(stream *models.Stream, channelID, broadcastID, userID, channel string, game *models.Game, clock models.Clock) {
+	if err := stream.SetPayload(channelID, broadcastID, userID, channel, game, clock); err != nil {
+		panic("fixture beacon payload must build: " + err.Error())
+	}
+}
+
+// mustWithPayload is mustSetPayload for the atomic candidate path.
+func mustWithPayload(c models.PlaybackSessionCandidate, channelID, broadcastID, userID, channel string, game *models.Game, clock models.Clock) models.PlaybackSessionCandidate {
+	out, err := c.WithPayload(channelID, broadcastID, userID, channel, game, clock)
+	if err != nil {
+		panic("fixture beacon payload must build: " + err.Error())
+	}
+	return out
+}
+
 // contractClientTime is the exact instant every contract fixture stamps its
 // payload with, so a test can assert the value that actually reaches the wire
 // rather than merely its shape.

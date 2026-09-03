@@ -154,9 +154,13 @@ func TestConcurrentChecksNewestSessionObservationWins(t *testing.T) {
 	// session (broadcast bNEW).
 	c.beforeSessionApply = func() {
 		obs := s.Stream.BeginSessionObservation()
-		cand, _ := models.PlaybackSessionCandidate{BroadcastID: "bNEW"}.
+		cand, err := models.PlaybackSessionCandidate{BroadcastID: "bNEW"}.
 			WithSpadeURL("https://spade.twitch.tv/new").
 			WithPayload("cid", "bNEW", "44322889", "streamer", nil, nil)
+		if err != nil {
+			t.Errorf("the newer session's payload must build: %v", err)
+			return
+		}
 		if r := s.Stream.ApplyPlaybackSessionIfCurrent(obs, cand, models.ExpectedSession{}); !r.Applied {
 			t.Errorf("the newer session must apply, got %+v", r)
 		}
@@ -169,6 +173,12 @@ func TestConcurrentChecksNewestSessionObservationWins(t *testing.T) {
 	snap := s.Stream.SessionSnapshot()
 	if snap.BroadcastID != "bNEW" || snap.SpadeURL != "https://spade.twitch.tv/new" {
 		t.Fatalf("the newest session must win, got broadcast=%q spade=%q", snap.BroadcastID, snap.SpadeURL)
+	}
+	// The winning session must also carry a payload: without this a payload-build
+	// regression would leave a payload-free session and still satisfy the
+	// broadcast/spade ordering assertions above.
+	if !snap.HasPayload() {
+		t.Fatal("the newest session must carry a beacon payload")
 	}
 }
 

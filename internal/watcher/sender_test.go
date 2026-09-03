@@ -225,7 +225,7 @@ func beaconRedirectSender(rt *beaconRedirectRT, spadeURL string) (*MinuteSender,
 	s := models.NewStreamer("redirect_channel", models.StreamerSettings{})
 	s.ChannelID = "cid"
 	s.Stream.SetSpadeURL(spadeURL)
-	_ = s.Stream.SetPayload("cid", "bid", "44322889", "redirect_channel", nil, nil)
+	mustSetPayload(s.Stream, "cid", "bid", "44322889", "redirect_channel", nil, nil)
 
 	sender := &MinuteSender{
 		client:     fakeToken{sig: "sig", token: "tok"},

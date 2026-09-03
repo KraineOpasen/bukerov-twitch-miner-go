@@ -53,7 +53,7 @@ func bringOnlineViaStreamUp(login, channelID, broadcastID string) *models.Stream
 	// The metadata-only convergence a production UpdateStream call performs:
 	// broadcast ID and beacon payload, deliberately WITHOUT SetSpadeURL.
 	s.Stream.Update(broadcastID, "t", nil, nil, 3)
-	_ = s.Stream.SetPayload(channelID, broadcastID, "44322889", login, nil, nil)
+	mustSetPayload(s.Stream, channelID, broadcastID, "44322889", login, nil, nil)
 	return s
 }
 
@@ -70,7 +70,7 @@ func bringOnlineCoherent(login, channelID, broadcastID, spadeURL string) *models
 	s.SetChannelPointsCapability(models.CapabilityEnabled, models.CapReasonConfirmedContext)
 	s.Stream.Update(broadcastID, "t", nil, nil, 3)
 	s.Stream.SetSpadeURL(spadeURL)
-	_ = s.Stream.SetPayload(channelID, broadcastID, "44322889", login, nil, nil)
+	mustSetPayload(s.Stream, channelID, broadcastID, "44322889", login, nil, nil)
 	return s
 }
 
