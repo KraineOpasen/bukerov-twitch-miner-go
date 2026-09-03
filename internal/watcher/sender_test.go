@@ -101,8 +101,8 @@ func newBeaconRedirectRT() *beaconRedirectRT {
 // okChain configures a normal, non-redirecting playlist -> variant -> segment
 // chain so Send/Probe can reach the beacon step deterministically.
 func (rt *beaconRedirectRT) okChain() {
-	rt.playlist = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttp://variant.test/low.m3u8\n"}
-	rt.variant = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttp://seg.test/s.ts\n"}
+	rt.playlist = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttps://variant.test/low.m3u8\n"}
+	rt.variant = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttps://seg.test/s.ts\n"}
 	rt.segment = beaconRedirectStep{status: 200}
 }
 
@@ -408,15 +408,15 @@ func TestSendTwoPhaseBeaconRejectionThenNormalRedirectsFollowed(t *testing.T) {
 	// beacon now answers directly with 204.
 	rt.resetHits()
 
-	const playlistTarget = "http://playlist-target.test/hop2.m3u8"
-	const variantTarget = "http://variant-target.test/hop2.m3u8"
-	const segmentTarget = "http://seg-target.test/hop2"
+	const playlistTarget = "https://playlist-target.test/hop2.m3u8"
+	const variantTarget = "https://variant-target.test/hop2.m3u8"
+	const segmentTarget = "https://seg-target.test/hop2"
 
 	rt.playlist = beaconRedirectStep{status: 302, location: playlistTarget}
-	rt.extra[playlistTarget] = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttp://variant.test/redirect-hop\n"}
+	rt.extra[playlistTarget] = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttps://variant.test/redirect-hop\n"}
 
 	rt.variant = beaconRedirectStep{status: 302, location: variantTarget}
-	rt.extra[variantTarget] = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttp://seg.test/redirect-hop\n"}
+	rt.extra[variantTarget] = beaconRedirectStep{status: 200, body: "#EXTM3U\nhttps://seg.test/redirect-hop\n"}
 
 	rt.segment = beaconRedirectStep{status: 302, location: segmentTarget}
 	rt.extra[segmentTarget] = beaconRedirectStep{status: 200}

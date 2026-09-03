@@ -255,9 +255,9 @@ func (r *stageCountingRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		case <-time.After(transportParkCap):
 		}
 	}
-	body := "#EXTM3U\nhttp://variant.test/low.m3u8\n"
+	body := "#EXTM3U\nhttps://variant.test/low.m3u8\n"
 	if strings.Contains(req.URL.Host, "variant") {
-		body = "#EXTM3U\nhttp://seg.test/s.ts\n"
+		body = "#EXTM3U\nhttps://seg.test/s.ts\n"
 	}
 	status := http.StatusOK
 	if req.Method == http.MethodPost {
@@ -956,9 +956,9 @@ func (v *variantParkingRT) RoundTrip(req *http.Request) (*http.Response, error) 
 			}
 		}
 	}
-	body := "#EXTM3U\nhttp://variant.test/low.m3u8\n"
+	body := "#EXTM3U\nhttps://variant.test/low.m3u8\n"
 	if strings.Contains(req.URL.Host, "variant") {
-		body = "#EXTM3U\nhttp://seg.test/s.ts\n"
+		body = "#EXTM3U\nhttps://seg.test/s.ts\n"
 	}
 	return &http.Response{
 		StatusCode: http.StatusOK,

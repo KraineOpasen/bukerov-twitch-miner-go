@@ -29,8 +29,8 @@ type rtBehavior struct {
 
 func okBehavior() rtBehavior {
 	return rtBehavior{
-		playlistStatus: 200, playlistBody: "#EXTM3U\nhttp://variant.test/low.m3u8\n",
-		variantStatus: 200, variantBody: "#EXTM3U\nhttp://seg.test/s.ts\n",
+		playlistStatus: 200, playlistBody: "#EXTM3U\nhttps://variant.test/low.m3u8\n",
+		variantStatus: 200, variantBody: "#EXTM3U\nhttps://seg.test/s.ts\n",
 		segmentStatus: 200,
 		beaconStatus:  204,
 	}
