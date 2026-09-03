@@ -154,9 +154,9 @@ func TestConcurrentChecksNewestSessionObservationWins(t *testing.T) {
 	// session (broadcast bNEW).
 	c.beforeSessionApply = func() {
 		obs := s.Stream.BeginSessionObservation()
-		cand := models.PlaybackSessionCandidate{BroadcastID: "bNEW"}.
+		cand, _ := models.PlaybackSessionCandidate{BroadcastID: "bNEW"}.
 			WithSpadeURL("https://spade.twitch.tv/new").
-			WithPayload("cid", "bNEW", "uid", "streamer", nil)
+			WithPayload("cid", "bNEW", "44322889", "streamer", nil, nil)
 		if r := s.Stream.ApplyPlaybackSessionIfCurrent(obs, cand, models.ExpectedSession{}); !r.Applied {
 			t.Errorf("the newer session must apply, got %+v", r)
 		}

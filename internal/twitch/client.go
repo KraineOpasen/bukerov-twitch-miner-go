@@ -1580,7 +1580,20 @@ func (c *TwitchClient) doRefreshPlaybackSession(ctx context.Context, streamer *m
 			haveAvail = true
 		}
 
-		cand = cand.WithPayload(streamer.ChannelID, broadcastID, c.auth.GetUserID(), streamer.GetUsername(), game)
+		// A payload that cannot be built (an unusable viewer identity) is NOT a
+		// stream-check outcome: the channel's online state is unaffected, so this
+		// deliberately does not fail the refresh or feed the tri-state classifier.
+		// The faulted candidate clears the session payload instead, and the minute
+		// sender then fails closed at its session-snapshot gate before any Spade
+		// request — never a beacon with a coerced user_id.
+		var payloadErr error
+		cand, payloadErr = cand.WithPayload(streamer.ChannelID, broadcastID, c.auth.GetUserID(), streamer.GetUsername(), game, nil)
+		if payloadErr != nil {
+			// Loud, not silent: without a payload NOTHING can earn watch credit for
+			// this channel. The bounded sentinel is logged; the offending id is not.
+			slog.Warn("Minute-watched beacon payload could not be built; watch credit is impossible until the viewer identity is valid",
+				"channel", streamer.GetUsername(), "error", payloadErr)
+		}
 	}
 
 	if cand.IsEmpty() {

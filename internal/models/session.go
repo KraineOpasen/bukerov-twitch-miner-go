@@ -2,7 +2,6 @@ package models
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"time"
 )
 
@@ -43,7 +42,7 @@ func (p PlaybackSessionSnapshot) HasPayload() bool { return len(p.payload) > 0 }
 // endpoint expects. It reads only the snapshot's own copy — never the live
 // Stream — so it stays coherent with SpadeURL/BroadcastID for the whole send.
 func (p PlaybackSessionSnapshot) EncodePayload() (string, error) {
-	data, err := json.Marshal(p.payload)
+	data, err := marshalBeaconPayload(p.payload)
 	if err != nil {
 		return "", err
 	}
@@ -198,6 +197,10 @@ type PlaybackSessionCandidate struct {
 	spadeURL    string
 	hasSpadeURL bool
 	payload     []MinuteWatchedEvent
+	// payloadFault marks a candidate whose beacon payload could not be built (an
+	// unusable viewer identity). Applying it clears any payload the session still
+	// holds instead of leaving a stale one in place.
+	payloadFault bool
 }
 
 // WithSpadeURL returns a copy of the candidate carrying a freshly-discovered spade
@@ -209,16 +212,29 @@ func (c PlaybackSessionCandidate) WithSpadeURL(url string) PlaybackSessionCandid
 }
 
 // WithPayload returns a copy of the candidate carrying the beacon payload built
-// from the same observed broadcast identity.
-func (c PlaybackSessionCandidate) WithPayload(channelID, broadcastID, userID, channel string, game *Game) PlaybackSessionCandidate {
-	c.payload = BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel, game)
-	return c
+// from the same observed broadcast identity, and the error from building it.
+//
+// On a build failure (ErrInvalidUserID) the returned candidate carries NO payload
+// and is marked payload-faulted, so applying it CLEARS whatever payload the
+// session already had. A session whose viewer identity cannot be encoded must
+// stop beaconing rather than keep replaying an older payload: the sender then
+// fails closed at its existing session-snapshot gate, before any Spade request.
+func (c PlaybackSessionCandidate) WithPayload(channelID, broadcastID, userID, channel string, game *Game, clock Clock) (PlaybackSessionCandidate, error) {
+	payload, err := BuildMinuteWatchedPayload(channelID, broadcastID, userID, channel, game, clock)
+	if err != nil {
+		c.payload = nil
+		c.payloadFault = true
+		return c, err
+	}
+	c.payload = payload
+	c.payloadFault = false
+	return c, nil
 }
 
 // IsEmpty reports whether the candidate would change nothing (no broadcast, no
 // spade URL, no payload) — the apply is then a no-op.
 func (c PlaybackSessionCandidate) IsEmpty() bool {
-	return c.BroadcastID == "" && !c.hasSpadeURL && len(c.payload) == 0
+	return c.BroadcastID == "" && !c.hasSpadeURL && len(c.payload) == 0 && !c.payloadFault
 }
 
 // SessionApplyResult is the outcome of an atomic session publication.
@@ -287,7 +303,12 @@ func (s *Stream) ApplyPlaybackSessionIfCurrent(obs uint64, cand PlaybackSessionC
 	if cand.hasSpadeURL {
 		s.spadeURL = cand.spadeURL
 	}
-	if len(cand.payload) > 0 {
+	switch {
+	case cand.payloadFault:
+		// The refresh proved the session cannot produce a creditable payload:
+		// drop the old one rather than keep beaconing it.
+		s.payload = nil
+	case len(cand.payload) > 0:
 		s.payload = cand.payload
 	}
 

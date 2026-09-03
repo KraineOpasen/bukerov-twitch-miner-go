@@ -85,7 +85,7 @@ func canaryStreamer() *models.Streamer {
 	s := models.NewStreamer("probe_channel", models.StreamerSettings{})
 	s.ChannelID = "cid"
 	s.Stream.SetSpadeURL("http://spade.test/track")
-	s.Stream.SetPayload("cid", "bid", "uid", "probe_channel", nil)
+	_ = s.Stream.SetPayload("cid", "bid", "44322889", "probe_channel", nil, nil)
 	return s
 }
 

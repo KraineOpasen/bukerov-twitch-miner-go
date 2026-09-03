@@ -178,7 +178,7 @@ func c1Sender(rt *hlsRecordRT, channel string) (*MinuteSender, *models.Streamer)
 	s := models.NewStreamer(channel, models.StreamerSettings{})
 	s.ChannelID = "cid"
 	s.Stream.SetSpadeURL(c1Spade)
-	s.Stream.SetPayload("cid", "bid", "uid", channel, nil)
+	_ = s.Stream.SetPayload("cid", "bid", "44322889", channel, nil, nil)
 
 	sender := &MinuteSender{
 		client:     fakeToken{sig: c1Sig, token: c1Token},
