@@ -217,10 +217,15 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Both exact events are stamped at base; the request takes its own
+	// time.Now() later on the same wall clock and the SQL window end is
+	// inclusive (timestamp <= end.UnixMilli()), so base is inside the window
+	// and the request needs no wait. At an equal millisecond the exact
+	// samples still sort after the legacy rows: the read orders by
+	// (timestamp, id) and they were inserted later.
 	base := time.Now()
-	recordExact(t, srv, s, "1", "WATCH_STREAK", 450, 1490, base.Add(time.Millisecond))
-	recordExact(t, srv, s, "2", "CLAIM", 50, 1540, base.Add(2*time.Millisecond))
-	time.Sleep(10 * time.Millisecond) // the request window ends at its own time.Now()
+	recordExact(t, srv, s, "1", "WATCH_STREAK", 450, 1490, base)
+	recordExact(t, srv, s, "2", "CLAIM", 50, 1540, base)
 
 	got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=24h")
 	if !got.RawTruncated || len(got.Points) != 3 {

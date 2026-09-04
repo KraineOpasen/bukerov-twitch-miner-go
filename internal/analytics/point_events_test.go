@@ -642,11 +642,18 @@ func TestRenameStreamerPreservesPointEvents(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("ledger rows changed across rename: before=%+v after=%+v", before, after)
 	}
-	exact, _ := r.ExactEarningsBetween(newName, time.Time{}, time.Time{})
+	exact, err := r.ExactEarningsBetween(newName, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if exact.Events != 1 || exact.Breakdown[0].Gained != 450 {
 		t.Fatalf("exact earnings under the new name = %+v, want the original event", exact)
 	}
-	if gone, _ := r.ExactEarningsBetween(old, time.Time{}, time.Time{}); gone.Events != 0 {
+	gone, err := r.ExactEarningsBetween(old, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone.Events != 0 {
 		t.Fatalf("old name still carries exact history: %+v", gone)
 	}
 }
@@ -912,7 +919,11 @@ func TestServiceRecordPointMarkerWritesOnlyStreakAndRaidMarkers(t *testing.T) {
 	if len(anns) != 2 || anns[0].Reason != "+450 - Watch Streak" || anns[1].Reason != "+250 - Raid" {
 		t.Fatalf("annotations = %+v, want exactly the streak and raid markers", anns)
 	}
-	if exact, _ := r.ExactEarningsBetween(login, time.Time{}, time.Time{}); exact.Events != 0 {
+	exact, err := r.ExactEarningsBetween(login, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact.Events != 0 {
 		t.Fatalf("a marker wrote a ledger row: %+v", exact)
 	}
 }
