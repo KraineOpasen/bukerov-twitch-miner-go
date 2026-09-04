@@ -2398,7 +2398,8 @@ are kept apart and none is authority for another:
    exact integer). No earning or `balance_after` is ever re-read from the
    mutable `Streamer` (a poll or a later frame may already have moved its
    balance); only the chart's timeline sample falls back to the streamer's
-   current balance, as a display value, when the frame carried none.
+   current balance, as a display value, when the frame carried no exact
+   balance (absent, or present but not an exact integer).
    `timestamp` is the acceptance time stamped by the analytics service,
    consistent with every other analytics table. `Service.RecordPointEvent`
    writes the ledger row, its balance-timeline sample and — for
@@ -2416,9 +2417,10 @@ are kept apart and none is authority for another:
    magnitude, since a decoded float64 at that bound may have rounded from
    2^53+1 — never coerced to 0; a payload without an RFC 3339
    `data.timestamp`, whose fingerprint would not distinguish two equal grants)
-   are recorded here only, at the frame's own balance when it carries one
-   (else the streamer's current balance, as before the ledger existed), still
-   with their `WATCH_STREAK`/`RAID` marker when the amount is exact.
+   are recorded here only, at the frame's own balance when it carries an
+   exact one (else the streamer's current balance, as before the ledger
+   existed), still with their `WATCH_STREAK`/`RAID` marker when the amount
+   is exact.
 3. **Annotations** — display markers whose text (`+450 - Watch Streak`) is
    built from the same event-local amount; they are never parsed back into
    accounting numbers.

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -82,6 +83,15 @@ func deliverPointsEarned(t *testing.T, m *Miner, s *models.Streamer, msg *pubsub
 // analytics service on the shared test database, ready for handlePubSubMessage.
 func newPointEventMiner(t *testing.T, prefix string) (*Miner, *models.Streamer, *analytics.Service) {
 	t.Helper()
+	m, s, svc, _ := newPointEventMinerWithDB(t, prefix)
+	return m, s, svc
+}
+
+// newPointEventMinerWithDB is newPointEventMiner that also hands back the
+// shared database handle, for assertions the Repository has no reader for
+// (the ledger's balance_after column).
+func newPointEventMinerWithDB(t *testing.T, prefix string) (*Miner, *models.Streamer, *analytics.Service, *database.DB) {
+	t.Helper()
 	login := fmt.Sprintf("%s-%d", prefix, pointEventTestSequence.Add(1))
 	m, _, _ := newCapabilityMiner(t, login)
 	s := m.streamers.Get(login)
@@ -97,7 +107,7 @@ func newPointEventMiner(t *testing.T, prefix string) (*Miner, *models.Streamer, 
 		t.Fatal(err)
 	}
 	m.analyticsSvc = svc
-	return m, s, svc
+	return m, s, svc, db
 }
 
 // pointsHistoryViaAPI starts the real dashboard server on a loopback probe
@@ -324,6 +334,78 @@ func TestPointsEarnedMalformedAmountIsNeverAnExactEarning(t *testing.T) {
 			est := shareByReason(got.Breakdown, "WATCH_STREAK")
 			if est.Gained != 450 || est.Count != 1 {
 				t.Fatalf("legacy estimate = %+v, want the +450 balance delta reported as an estimate (not dropped, not zero)", got.Breakdown)
+			}
+		})
+	}
+}
+
+// TestPointsEarnedMalformedBalanceKeepsExactAmountAndUnknownBalance: a frame
+// whose balance.balance is present but not an exact integer (Twitch sends
+// integers; this is the defensive class) is still an exact earning at its
+// event-local amount. The ledger keeps balance_after UNKNOWN — a rounded
+// balance is never persisted as the frame's own — and the timeline sample
+// falls back to the shared Streamer balance exactly as for a frame that
+// carries none, so a poll between the pool and the callback can move that
+// display value but never the recorded earning, and the legacy estimator
+// attributes nothing to the exact-backed sample.
+func TestPointsEarnedMalformedBalanceKeepsExactAmountAndUnknownBalance(t *testing.T) {
+	cases := []struct {
+		name    string
+		balance string
+	}{
+		{"non-integral", "1234.5"},
+		{"beyond exact range", "1e300"},
+		{"string", `"1234"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, s, svc, db := newPointEventMinerWithDB(t, "malformed-balance-"+strings.ReplaceAll(tc.name, " ", "-"))
+			login := s.GetUsername()
+			raw := fmt.Sprintf(`{"type":"points-earned","data":{"timestamp":"2026-09-01T10:20:00.000000000Z","channel_id":%q,`+
+				`"point_gain":{"user_id":"999","channel_id":%q,"total_points":50,"baseline_points":50,"reason_code":"CLAIM","multipliers":[]},`+
+				`"balance":{"user_id":"999","channel_id":%q,"balance":%s}}}`, s.ChannelID, s.ChannelID, s.ChannelID, tc.balance)
+			msg, err := pubsub.ParsePubSubMessage(&pubsub.WSData{Topic: "community-points-user-v1.999", Message: raw})
+			if err != nil {
+				t.Fatalf("ParsePubSubMessage: %v", err)
+			}
+			if msg.EventFingerprint == "" {
+				t.Fatal("parsed message carries no EventFingerprint")
+			}
+			// Whatever the pool mirrored from this frame, a poll moves the
+			// shared balance to a sentinel before the callback observes it.
+			s.SetChannelPoints(999_999)
+			m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
+
+			exact, err := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exact.Events != 1 || len(exact.Breakdown) != 1 || exact.Breakdown[0].Reason != "CLAIM" || exact.Breakdown[0].Gained != 50 || exact.Breakdown[0].Count != 1 {
+				t.Fatalf("exact ledger = %+v, want one CLAIM event of 50 (the wire amount, whatever the balance looked like)", exact)
+			}
+			var balanceAfter sql.NullInt64
+			if err := db.QueryRow(`SELECT balance_after FROM point_events WHERE event_id = ?`, msg.EventFingerprint).Scan(&balanceAfter); err != nil {
+				t.Fatal(err)
+			}
+			if balanceAfter.Valid {
+				t.Fatalf("balance_after = %d, want NULL: a malformed wire balance is never persisted rounded as the frame's own", balanceAfter.Int64)
+			}
+			samples, err := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(samples) != 1 || !samples[0].Exact || samples[0].Balance != 999_999 {
+				t.Fatalf("samples = %+v, want one exact-backed sample at the streamer's balance (the only balance available), never a rounded wire value", samples)
+			}
+			if legacy := analytics.EstimateLegacyBreakdown(samples); legacy.Samples != 0 || len(legacy.Breakdown) != 0 {
+				t.Fatalf("legacy estimate = %+v, want nothing attributed to an exact-backed sample", legacy)
+			}
+			got := pointsHistoryViaAPI(t, m, svc, login, "7d")
+			if !got.Earnings.Exact || got.Earnings.Coverage != analytics.EarningsCoverageExact || len(got.LegacyBreakdown) != 0 {
+				t.Fatalf("earnings = %+v legacy=%+v, want fully exact coverage untouched by the mutated balance", got.Earnings, got.LegacyBreakdown)
+			}
+			if claim := shareByReason(got.Breakdown, "CLAIM"); claim.Gained != 50 || claim.Count != 1 {
+				t.Fatalf("CLAIM = %+v, want the wire amount 50", claim)
 			}
 		})
 	}

@@ -107,8 +107,10 @@ func (s *Service) RecordPointsAt(streamer *models.Streamer, eventType string, ba
 // the chart annotation built from the SAME event-local amount, all in one
 // transaction. Nothing about the earning is re-read from the mutable Streamer:
 // the timeline sample is written at the frame's own balance and falls back to
-// the streamer's current balance only when the frame carried no balance at all
-// (a display value for the chart, never an accounting input). ev.Timestamp
+// the streamer's current balance only when the frame carried no exact balance
+// (absent, or present but not an exact integer — see the miner's
+// exactWirePoints); that fallback is a display value for the chart, never an
+// accounting input. ev.Timestamp
 // defaults to the service clock. Returns whether the event was newly recorded
 // (false for an exact re-delivery, which writes nothing) and the write error,
 // which is also logged — a failed analytics write never disrupts mining.
