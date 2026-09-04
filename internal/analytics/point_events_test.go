@@ -371,8 +371,8 @@ func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 	if empty, err := r.ExactEarningsBetween(uniqueName("pe-agg-nobody"), time.Time{}, time.Time{}); err != nil || empty.Events != 0 || empty.Breakdown != nil || empty.Since != 0 {
 		t.Fatalf("unknown streamer = %+v err=%v, want empty", empty, err)
 	}
-	if empty, _ := r.ExactEarningsBetween(s, base.Add(2*time.Hour), base.Add(3*time.Hour)); empty.Events != 0 || empty.Breakdown != nil {
-		t.Fatalf("empty window = %+v, want empty", empty)
+	if empty, err := r.ExactEarningsBetween(s, base.Add(2*time.Hour), base.Add(3*time.Hour)); err != nil || empty.Events != 0 || empty.Breakdown != nil {
+		t.Fatalf("empty window = %+v err=%v, want empty", empty, err)
 	}
 }
 
@@ -665,10 +665,18 @@ func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	recordedCount := 0
+	// Start barrier: every worker is parked on `start` before the first
+	// write is attempted, so the deliveries really contend for the identity
+	// instead of trickling in sequentially as goroutines are scheduled.
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(workers)
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
+			ready.Done()
+			<-start
 			rec, err := r.RecordPointEvent(s, ev, 1450, streakAnnotation(450))
 			if err != nil {
 				t.Errorf("concurrent RecordPointEvent: %v", err)
@@ -681,6 +689,8 @@ func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 			}
 		}()
 	}
+	ready.Wait()
+	close(start)
 	wg.Wait()
 
 	if recordedCount != 1 {

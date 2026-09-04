@@ -3,6 +3,7 @@ package miner
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"reflect"
@@ -292,6 +293,7 @@ func TestPointsEarnedMalformedAmountIsNeverAnExactEarning(t *testing.T) {
 		{"string", `"450"`},
 		{"non-integral", "450.5"},
 		{"beyond exact range", "1e300"},
+		{"at the float64 integer bound", "9007199254740992"}, // 2^53: a wire 2^53+1 has already rounded to it
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,6 +324,42 @@ func TestPointsEarnedMalformedAmountIsNeverAnExactEarning(t *testing.T) {
 			est := shareByReason(got.Breakdown, "WATCH_STREAK")
 			if est.Gained != 450 || est.Count != 1 {
 				t.Fatalf("legacy estimate = %+v, want the +450 balance delta reported as an estimate (not dropped, not zero)", got.Breakdown)
+			}
+		})
+	}
+}
+
+// TestExactWirePointsBounds pins the exact-integer contract of the wire
+// decoder: every integer below 2^53 is exact, 2^53 itself is not (a wire
+// 2^53+1 has already rounded to it during JSON decoding), and nothing
+// non-integral, non-finite or non-numeric is ever coerced.
+func TestExactWirePointsBounds(t *testing.T) {
+	// The largest exact value is 2^53-1 where int holds it and the platform
+	// int bound on 32-bit builds, matching the decoder's second guard.
+	largest := int(math.Min(float64(1<<53-1), float64(math.MaxInt)))
+	cases := []struct {
+		name string
+		in   interface{}
+		want int
+		ok   bool
+	}{
+		{"typical grant", float64(450), 450, true},
+		{"zero", float64(0), 0, true},
+		{"negative integral", float64(-450), -450, true},
+		{"largest exact", float64(largest), largest, true},
+		{"float64 integer bound", float64(1 << 53), 0, false},
+		{"negative bound", -float64(1 << 53), 0, false},
+		{"non-integral", 450.5, 0, false},
+		{"NaN", math.NaN(), 0, false},
+		{"+Inf", math.Inf(1), 0, false},
+		{"string", "450", 0, false},
+		{"missing", nil, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := exactWirePoints(tc.in)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("exactWirePoints(%v) = (%d, %v), want (%d, %v)", tc.in, got, ok, tc.want, tc.ok)
 			}
 		})
 	}
@@ -363,25 +401,26 @@ func TestPointsEarnedWithoutIdentityKeepsTimelineAndMarker(t *testing.T) {
 // duplicates) and neither enters the exact ledger.
 func TestPointsEarnedTimestamplessFrameIsNotAnExactEvent(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  func(channelID string) string
+		name        string
+		raw         func(channelID string) string
+		wantBalance int // the frame's own balance, or the streamer's when the frame has none
 	}{
 		{"neither timestamp nor balance", func(id string) string {
 			return fmt.Sprintf(`{"type":"points-earned","data":{"channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"}}}`, id)
-		}},
+		}, 999999},
 		{"balance only, repeated after a spend", func(id string) string {
 			return fmt.Sprintf(`{"type":"points-earned","data":{"channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"},"balance":{"channel_id":%q,"balance":1012}}}`, id, id)
-		}},
+		}, 1012},
 		{"timestamp present but not RFC 3339", func(id string) string {
 			return fmt.Sprintf(`{"type":"points-earned","data":{"timestamp":"not-a-time","channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"},"balance":{"channel_id":%q,"balance":1012}}}`, id, id)
-		}},
+		}, 1012},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m, s, svc := newPointEventMiner(t, "timestampless-"+strings.ReplaceAll(tc.name, " ", "-"))
 			login := s.GetUsername()
 			raw := tc.raw(s.ChannelID)
-			for _, balance := range []int{1012, 1012} {
+			for i := 0; i < 2; i++ {
 				msg, err := pubsub.ParsePubSubMessage(&pubsub.WSData{Topic: "community-points-user-v1.999", Message: raw})
 				if err != nil {
 					t.Fatal(err)
@@ -389,7 +428,10 @@ func TestPointsEarnedTimestamplessFrameIsNotAnExactEvent(t *testing.T) {
 				if msg.EventFingerprint == "" {
 					t.Fatal("parser produced no fingerprint")
 				}
-				s.SetChannelPoints(balance)
+				// The pool applied the frame's 1012, then a poll (or a later frame)
+				// moved the shared balance before this callback: the timeline
+				// sample must still carry the frame's own balance when it has one.
+				s.SetChannelPoints(999999)
 				m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
 			}
 
@@ -398,8 +440,8 @@ func TestPointsEarnedTimestamplessFrameIsNotAnExactEvent(t *testing.T) {
 				t.Fatalf("timestamp-less frames entered the exact ledger: %+v", exact)
 			}
 			samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
-			if len(samples) != 2 || samples[0].Exact || samples[1].Exact {
-				t.Fatalf("samples = %+v, want two legacy timeline samples (the second identical frame must not vanish)", samples)
+			if len(samples) != 2 || samples[0].Exact || samples[1].Exact || samples[0].Balance != tc.wantBalance || samples[1].Balance != tc.wantBalance {
+				t.Fatalf("samples = %+v, want two legacy timeline samples at %d (the second identical frame must not vanish, and a foreign balance must not be lent)", samples, tc.wantBalance)
 			}
 		})
 	}

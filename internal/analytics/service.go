@@ -73,9 +73,19 @@ var annotationColors = map[string]string{
 // the Statistics page estimates it from balance deltas and labels it so.
 // Accepted points-earned events go through RecordPointEvent instead.
 func (s *Service) RecordPoints(streamer *models.Streamer, eventType string) {
+	s.RecordPointsAt(streamer, eventType, streamer.GetChannelPoints())
+}
+
+// RecordPointsAt writes one balance-timeline sample at an explicit balance —
+// the frame's own balance.balance — instead of re-reading the mutable
+// Streamer, so a poll or a later frame between the pool and the miner
+// callback cannot lend a foreign balance to the sample of a frame the exact
+// ledger could not admit. RecordPoints is this with the streamer's current
+// balance, for frames that carry none.
+func (s *Service) RecordPointsAt(streamer *models.Streamer, eventType string, balance int) {
 	eventType = timelineReason(eventType)
 	login := streamer.GetUsername()
-	err := s.repo.RecordPoints(login, streamer.GetChannelPoints(), eventType)
+	err := s.repo.RecordPoints(login, balance, eventType)
 	switch {
 	case errors.Is(err, ErrStreamerDeleted):
 		slog.Debug("Dropping timeline sample for a deleted streamer", "streamer", login, "reason", eventType)

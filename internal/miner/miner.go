@@ -1661,6 +1661,10 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 // and labels it as such.
 func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer, pointGain map[string]interface{}, reasonCode string) {
 	total, exact := exactWirePoints(pointGain["total_points"])
+	balanceAfter, balanceKnown := 0, false
+	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+		balanceAfter, balanceKnown = exactWirePoints(balance["balance"])
+	}
 	eventTime, _ := msg.Data["timestamp"].(string)
 	_, timeErr := time.Parse(time.RFC3339, eventTime)
 	if msg.EventFingerprint == "" || !exact || timeErr != nil {
@@ -1671,7 +1675,14 @@ func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer
 			"exactAmount", exact,
 			"hasEventTime", timeErr == nil,
 		)
-		m.analyticsSvc.RecordPoints(s, reasonCode)
+		// The timeline sample keeps the frame's own balance when it carries
+		// one: a poll or a later frame between the pool and this callback must
+		// not lend a foreign balance to an inadmissible frame's sample.
+		if balanceKnown {
+			m.analyticsSvc.RecordPointsAt(s, reasonCode, balanceAfter)
+		} else {
+			m.analyticsSvc.RecordPoints(s, reasonCode)
+		}
 		// The chart marker is a display fact: keep writing it, as before this
 		// ledger existed, whenever the frame's amount is at least exact — such
 		// a frame still earned; an inexact amount has nothing truthful to print.
@@ -1681,11 +1692,6 @@ func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer
 		return
 	}
 
-	balanceAfter, balanceKnown := 0, false
-	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
-		balanceAfter, balanceKnown = exactWirePoints(balance["balance"])
-	}
-
 	ev := analytics.PointEvent{
 		EventID:      msg.EventFingerprint,
 		ReasonCode:   reasonCode,
@@ -1693,9 +1699,14 @@ func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer
 		BalanceAfter: balanceAfter,
 		BalanceKnown: balanceKnown,
 	}
-	// The service logs the outcome; a failed analytics write is never fatal
-	// to point mining.
-	_, _ = m.analyticsSvc.RecordPointEvent(s, ev)
+	// A failed analytics write is never fatal to point mining. The service
+	// has already logged the cause at the level it deserves (debug for the
+	// teardown race and a deleted streamer, error otherwise); this trace adds
+	// the event identity, which the service does not log, so a replay can be
+	// matched against the ledger.
+	if _, err := m.analyticsSvc.RecordPointEvent(s, ev); err != nil {
+		slog.Debug("Exact point event not recorded", "streamer", s.GetUsername(), "reason", reasonCode, "eventId", msg.EventFingerprint, "error", err)
+	}
 }
 
 // exactWirePoints converts a decoded JSON number to an exact integer point
@@ -1707,10 +1718,12 @@ func exactWirePoints(v interface{}) (int, bool) {
 	if !ok || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
 		return 0, false
 	}
-	// 2^53 bounds the integers a float64 represents exactly; the platform int
-	// bound guards 32-bit builds.
+	// Below 2^53 every integer has one float64 representation. 2^53 itself is
+	// refused too: a wire value of 2^53+1 has already rounded to it during
+	// JSON decoding, so it cannot be told apart from an exact 2^53. The
+	// platform int bound guards 32-bit builds.
 	const exactLimit = float64(1 << 53)
-	if f > exactLimit || f < -exactLimit || f > float64(math.MaxInt) || f < float64(math.MinInt) {
+	if f >= exactLimit || f <= -exactLimit || f > float64(math.MaxInt) || f < float64(math.MinInt) {
 		return 0, false
 	}
 	return int(f), true

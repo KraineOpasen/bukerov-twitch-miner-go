@@ -2185,10 +2185,10 @@ CREATE TABLE point_events (
     streamer_id   INTEGER NOT NULL,
     event_id      TEXT NOT NULL UNIQUE,
     timestamp     INTEGER NOT NULL,
-    reason_code   TEXT NOT NULL,       -- raw Twitch reason_code (WATCH, CLAIM, WATCH_STREAK, RAID, PREDICTION, ...)
-    total_points  INTEGER NOT NULL,    -- event-local amount granted by THIS event
-    balance_after INTEGER,             -- balance reported in the same frame, NULL when unknown
-    points_id     INTEGER NOT NULL     -- the points row (timeline sample) this event produced
+    reason_code   TEXT NOT NULL,       -- raw Twitch reason_code (WATCH, CLAIM, ...)
+    total_points  INTEGER NOT NULL,    -- event-local amount granted by this event
+    balance_after INTEGER,             -- frame balance, NULL when unknown
+    points_id     INTEGER NOT NULL     -- the timeline sample this event produced
 );
 
 -- Indexes for performance
@@ -2412,11 +2412,13 @@ are kept apart and none is authority for another:
 2. **Balance timeline** (`points`) — absolute balance snapshots for the chart,
    tagged with the reason that caused the change. Points-spent frames and
    points-earned frames the ledger cannot admit (no identity; a `total_points`
-   that is missing, non-numeric, non-integral or outside exact float range —
-   never coerced to 0; a payload without an RFC 3339 `data.timestamp`, whose
-   fingerprint would not distinguish two equal grants) are recorded here only,
-   at the streamer's current balance as before the ledger existed, still with
-   their `WATCH_STREAK`/`RAID` marker when the amount is exact.
+   that is missing, non-numeric, non-integral or not strictly below 2^53 in
+   magnitude, since a decoded float64 at that bound may have rounded from
+   2^53+1 — never coerced to 0; a payload without an RFC 3339
+   `data.timestamp`, whose fingerprint would not distinguish two equal grants)
+   are recorded here only, at the frame's own balance when it carries one
+   (else the streamer's current balance, as before the ledger existed), still
+   with their `WATCH_STREAK`/`RAID` marker when the amount is exact.
 3. **Annotations** — display markers whose text (`+450 - Watch Streak`) is
    built from the same event-local amount; they are never parsed back into
    accounting numbers.
