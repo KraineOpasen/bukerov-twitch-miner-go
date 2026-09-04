@@ -148,7 +148,10 @@ func pointsHistoryViaAPI(t *testing.T, m *Miner, svc *analytics.Service, streame
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	resp, err := http.Get("http://" + addr + "/api/points-history?streamer=" + streamer + "&range=" + rng)
+	// A bounded client: a handler that stalls fails this helper promptly
+	// instead of holding the test until the suite-wide timeout.
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("http://" + addr + "/api/points-history?streamer=" + streamer + "&range=" + rng)
 	if err != nil {
 		t.Fatalf("GET points-history: %v", err)
 	}

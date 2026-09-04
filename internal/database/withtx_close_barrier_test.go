@@ -65,7 +65,7 @@ func TestWithTxHoldsCloseUntilCommit(t *testing.T) {
 		t.Fatalf("Close after the transaction: %v", err)
 	}
 	if !closeSawFnReturned {
-		t.Fatal("Close returned before the transaction's function had")
+		t.Fatal("Close returned before the transaction's function had returned")
 	}
 	if err := db.WithTx(context.Background(), func(*sql.Tx) error { return nil }); !errors.Is(err, ErrClosed) {
 		t.Fatalf("WithTx after Close = %v, want ErrClosed", err)
