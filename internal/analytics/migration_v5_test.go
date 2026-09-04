@@ -231,7 +231,7 @@ func TestMigrationV5RestartPreservesLedgerAndUniqueness(t *testing.T) {
 	if _, err := db2.Exec(`INSERT INTO point_events (streamer_id, event_id, timestamp, reason_code, total_points, points_id) VALUES (1, 'sha256:restart-1', 1, 'WATCH', 1, 1)`); err == nil {
 		t.Fatal("UNIQUE(event_id) was not enforced after reopen")
 	}
-	samples, _ := repo2.GetPointSamples("restart-streamer", time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, repo2, "restart-streamer", time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || !samples[0].Exact {
 		t.Fatalf("samples after reopen = %+v, want the single exact sample", samples)
 	}
@@ -283,6 +283,9 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 		n++
 	}
 	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("pre-ledger GetPointSamples read failed on v5 schema: %v", err)
+	}
 	if n != 2 {
 		t.Fatalf("pre-ledger read saw %d samples, want 2", n)
 	}
@@ -303,7 +306,7 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 	if len(samples) != 2 || !samples[0].Exact || samples[1].Exact {
 		t.Fatalf("samples = %+v, want [exact ledger sample, legacy rollback-era sample]", samples)
 	}
-	exact, _ := repo2.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, repo2, "rollback-streamer", time.Time{}, time.Time{})
 	if exact.Events != 1 {
 		t.Fatalf("exact earnings = %+v, want only the pre-rollback event", exact)
 	}
@@ -348,7 +351,7 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 	if len(samples) != 1 || samples[0].Exact {
 		t.Fatalf("after an old-binary prune samples = %+v, want the one legacy sample", samples)
 	}
-	if exact, _ = repo3.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 1 {
+	if exact = mustExactEarnings(t, repo3, "rollback-streamer", time.Time{}, time.Time{}); exact.Events != 1 {
 		t.Fatalf("orphaned ledger row lost: exact = %+v, want 1 event", exact)
 	}
 	if n, err := repo3.PruneBefore(ts.Add(2 * time.Hour)); err != nil || n != 3 {

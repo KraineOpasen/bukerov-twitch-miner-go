@@ -54,8 +54,21 @@ func parsedPointsEarned(t *testing.T, channelID, reason string, totalPoints, bal
 func deliverPointsEarned(t *testing.T, m *Miner, s *models.Streamer, msg *pubsub.PubSubMessage) pubsub.MessageOutcome {
 	t.Helper()
 	var outcome pubsub.MessageOutcome
-	gain, _ := msg.Data["point_gain"].(map[string]interface{})
-	reason, _ := gain["reason_code"].(string)
+	// Every frame these tests hand to this helper carries a point_gain object
+	// with a reason_code. The pool tolerates both a balance-only frame and a
+	// point_gain without reason_code (either falls through with an empty
+	// reason), but no fixture here uses those shapes, and a balance-only
+	// delivery would go to handlePubSubMessage directly. A fixture that lost
+	// either field would otherwise skip the WATCH_STREAK admission silently
+	// and let a "nothing recorded" assertion pass vacuously.
+	gain, ok := msg.Data["point_gain"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("deliverPointsEarned: frame carries no point_gain object: %v", msg.Data)
+	}
+	reason, ok := gain["reason_code"].(string)
+	if !ok {
+		t.Fatalf("deliverPointsEarned: point_gain carries no reason_code: %v", gain)
+	}
 	earned := 0
 	if pts, ok := gain["total_points"].(float64); ok {
 		earned = int(pts)
