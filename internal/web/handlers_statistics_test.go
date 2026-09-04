@@ -220,6 +220,26 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 	}
 	body := rec.Body.String()
 	kpiFn := jsFunctionBody(t, body, "function renderKPIs(data)", "function setText")
+	// The page must not take the "no data" branch when the API reports exact
+	// earnings without chart samples (a ledger row that outlived its sample
+	// after a rollback-era prune): the tiles, note and donut still render,
+	// with balance/net dashed as unavailable.
+	loadFn := jsFunctionBody(t, body, "async function load(isRefresh)", "function scheduleRefresh")
+	for _, want := range []string{"const hasSeries = !!(data.points && data.points.length > 0)", "const hasExact = !!(data.earnings && data.earnings.exact)", "if (!hasSeries && !hasExact) {"} {
+		if !strings.Contains(loadFn, want) {
+			t.Errorf("load must render exact earnings without chart samples; lost marker %q:\n%s", want, loadFn)
+		}
+	}
+	// After the gate, the empty state is shown inside its branch and the chart
+	// state after it (the earlier show('empty') is the no-streamer guard).
+	if gate := strings.Index(loadFn, "if (!hasSeries && !hasExact) {"); gate < 0 {
+		t.Errorf("load lost the series/exact gate:\n%s", loadFn)
+	} else if after := loadFn[gate:]; !strings.Contains(after, "show('empty')") || strings.Index(after, "show('empty')") > strings.Index(after, "show('chart')") {
+		t.Errorf("load must show the empty state only inside the gate and the chart state after it:\n%s", loadFn)
+	}
+	if !strings.Contains(kpiFn, "if (data.rawTruncated || !pts.length) {") {
+		t.Errorf("renderKPIs must dash balance/net when the series is truncated or absent:\n%s", kpiFn)
+	}
 	earnFn := jsFunctionBody(t, body, "function renderEarningsKPIs(data)", "function renderEarningsNote")
 	breakdownFn := jsFunctionBody(t, body, "function renderBreakdown(data)", "function setUpdated")
 

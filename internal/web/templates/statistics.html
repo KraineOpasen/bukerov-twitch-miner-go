@@ -481,12 +481,15 @@
     // accrued/earn-event tiles are rendered by renderEarningsKPIs from the
     // server's earnings accounting instead, so an exact aggregate (computed
     // from the event ledger, not the truncated series) stays visible. The
-    // chart stays visible under the partial-data warning. (These gates are
-    // deliberately keyed on rawTruncated only — chartDownsampled never hides
-    // KPIs.)
+    // chart stays visible under the partial-data warning. An absent series
+    // (exact earnings whose samples a rollback-era sweep removed) dashes the
+    // same two tiles. (These gates are deliberately keyed on rawTruncated and
+    // series presence only — chartDownsampled never hides KPIs.)
     function renderKPIs(data) {
         const pts = data.points || [];
-        if (data.rawTruncated) {
+        // Balance and net change come from the raw series only: dashed when
+        // the series is truncated or absent (exact earnings without samples).
+        if (data.rawTruncated || !pts.length) {
             ['kpi-balance', 'kpi-net'].forEach(id => setKPI(id, '—'));
         } else {
             const first = pts.length ? pts[0].balance : 0;
@@ -686,7 +689,13 @@
 
             els.stale.classList.add('hidden');
 
-            if (!data.points || data.points.length === 0) {
+            // Exact earnings are renderable without chart samples: a ledger
+            // row can outlive its balance sample (a pre-ledger binary's
+            // retention sweep after a rollback), and the API still reports the
+            // exact aggregate. Only a window with neither is "no data".
+            const hasSeries = !!(data.points && data.points.length > 0);
+            const hasExact = !!(data.earnings && data.earnings.exact);
+            if (!hasSeries && !hasExact) {
                 if (chart) { chart.destroy(); chart = null; }
                 if (donut) { donut.destroy(); donut = null; }
                 els.breakdown.classList.add('hidden');
