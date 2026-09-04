@@ -2458,7 +2458,9 @@ cannot run the writer's statements until the transaction ends, and in the
 default rollback-journal mode a writer on any other connection additionally
 cannot commit against its SHARED lock (the observable the tests use). The
 transaction takes no repository mutex, is committed before the method returns,
-and nothing is held while the response is encoded.
+and nothing is held while the response is encoded. Every statement of the
+snapshot runs under the request context, so a request abandoned by its client
+interrupts the read it is on and releases the connection.
 
 ### Prediction ROI Analytics
 

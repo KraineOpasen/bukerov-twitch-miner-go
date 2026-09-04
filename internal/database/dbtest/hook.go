@@ -30,10 +30,17 @@ import (
 // Event is one statement or transaction boundary about to run on the hooked
 // connection. Kind is one of "begin", "commit", "rollback", "query", "exec"
 // or "prepare"; SQL is the statement text for the last three and empty for
-// the transaction boundaries.
+// the transaction boundaries. Ctx is the context the driver received for a
+// begin, prepare, exec or query (nil for commit and rollback), so a test can
+// check its lineage — a value carried by the caller's context — and not only
+// whether it can be cancelled; Cancellable is Ctx.Done() != nil, false for
+// context.Background(), which is what a statement issued without the
+// caller's context runs under.
 type Event struct {
-	Kind string
-	SQL  string
+	Kind        string
+	SQL         string
+	Ctx         context.Context
+	Cancellable bool
 }
 
 // Hook observes every Event before it reaches the driver.
@@ -108,7 +115,7 @@ type hookConn struct {
 }
 
 func (c *hookConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	c.hook(Event{Kind: "begin"})
+	c.hook(Event{Kind: "begin", Ctx: ctx, Cancellable: ctx.Done() != nil})
 	t, err := c.contextConn.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
@@ -117,17 +124,17 @@ func (c *hookConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.T
 }
 
 func (c *hookConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	c.hook(Event{Kind: "prepare", SQL: query})
+	c.hook(Event{Kind: "prepare", SQL: query, Ctx: ctx, Cancellable: ctx.Done() != nil})
 	return c.contextConn.PrepareContext(ctx, query)
 }
 
 func (c *hookConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	c.hook(Event{Kind: "exec", SQL: query})
+	c.hook(Event{Kind: "exec", SQL: query, Ctx: ctx, Cancellable: ctx.Done() != nil})
 	return c.contextConn.ExecContext(ctx, query, args)
 }
 
 func (c *hookConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	c.hook(Event{Kind: "query", SQL: query})
+	c.hook(Event{Kind: "query", SQL: query, Ctx: ctx, Cancellable: ctx.Done() != nil})
 	return c.contextConn.QueryContext(ctx, query, args)
 }
 
