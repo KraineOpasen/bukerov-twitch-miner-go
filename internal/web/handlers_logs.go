@@ -11,9 +11,20 @@ import (
 )
 
 const (
-	// logTailLines is how many trailing log lines the viewer shows.
+	// logTailLines is how many trailing log lines the viewer LISTS, i.e. the
+	// cap on dashboard-visible lines (see visibleLogLines).
 	logTailLines = 500
-	// logTailMaxBytes is one total read budget for the retained log family.
+	// logScanLines is how many trailing RAW lines are read and classified to
+	// find those. It is deliberately much larger than logTailLines: file
+	// logging defaults to DEBUG (internal/config/config.go), so the retained
+	// tail is dominated by transport chatter the Logs page suppresses. If the
+	// raw window were the same size as the visible cap, a busy miner could
+	// fill all of it with suppressed lines and the page would show a handful
+	// of entries — or, at the limit, an empty state on a perfectly healthy
+	// miner.
+	logScanLines = 5000
+	// logTailMaxBytes is one total read budget for the retained log family,
+	// and the hard ceiling on the scan above.
 	logTailMaxBytes = 2 << 20 // 2 MiB
 )
 
@@ -53,10 +64,16 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 	s.renderPartial(w, r, "logs_lines", LogsLinesData{Lines: lines, FileLogging: enabled})
 }
 
-// readLogTail reads the last logTailLines lines of the retained log family and
-// classifies each by level for coloring. The second return is false when file
-// logging is off (the file doesn't exist), so the page can explain how to
-// enable it rather than showing a bare empty state.
+// readLogTail reads the last logScanLines lines of the retained log family and
+// classifies each one. The second return is false when file logging is off
+// (the file doesn't exist), so the page can explain how to enable it rather
+// than showing a bare empty state.
+//
+// It is a faithful reader: every non-blank line of the tail comes back,
+// carrying its classification. Deciding which lines the human Logs page
+// actually lists is the render seam's job (LogLineView.DashboardVisible,
+// applied in the logs_lines partial), so nothing here censors the retained
+// evidence.
 func (s *Server) readLogTail() ([]LogLineView, bool) {
 	path := s.logPath
 	if path == "" {
@@ -65,7 +82,7 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 	if path == "" {
 		return nil, false
 	}
-	raw, err := logger.TailLogFamily(path, logTailLines, logTailMaxBytes)
+	raw, err := logger.TailLogFamily(path, logScanLines, logTailMaxBytes)
 	if err != nil {
 		// Missing file => file logging disabled (or nothing written yet).
 		if os.IsNotExist(err) {
@@ -76,8 +93,8 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 	}
 
 	all := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	if len(all) > logTailLines {
-		all = all[len(all)-logTailLines:]
+	if len(all) > logScanLines {
+		all = all[len(all)-logScanLines:]
 	}
 
 	views := make([]LogLineView, 0, len(all))
@@ -86,7 +103,15 @@ func (s *Server) readLogTail() ([]LogLineView, bool) {
 			continue
 		}
 		p := classifyLogLine(line)
-		views = append(views, LogLineView{Class: p.Class, Emoji: p.Emoji, Text: line})
+		views = append(views, LogLineView{
+			Class:            p.Class,
+			Emoji:            p.Emoji,
+			Text:             line,
+			Level:            p.Level,
+			Subsystem:        p.Subsystem,
+			Reconnect:        p.Reconnect,
+			DashboardVisible: p.DashboardVisible,
+		})
 	}
 	return views, true
 }

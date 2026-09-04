@@ -84,14 +84,98 @@ func TestReadLogTailCrossesRotatedSegments(t *testing.T) {
 	if !enabled {
 		t.Fatal("readLogTail reported a retained family as disabled")
 	}
-	if len(views) != logTailLines {
-		t.Fatalf("views=%d, want %d", len(views), logTailLines)
+	// 550 lines fit inside the raw scan window (logScanLines), so the whole
+	// family comes back in chronological order across the rotation boundary.
+	if len(views) != 550 {
+		t.Fatalf("views=%d, want 550", len(views))
 	}
-	if !strings.Contains(views[0].Text, "archive-051") || !strings.Contains(views[299].Text, "archive-350") {
-		t.Fatalf("archive portion is not the chronological newest 300 lines: first=%q boundary=%q", views[0].Text, views[299].Text)
+	if !strings.Contains(views[0].Text, "archive-001") || !strings.Contains(views[349].Text, "archive-350") {
+		t.Fatalf("archive portion is not chronological: first=%q boundary=%q", views[0].Text, views[349].Text)
 	}
-	if !strings.Contains(views[300].Text, "active-001") || !strings.Contains(views[499].Text, "active-200") {
-		t.Fatalf("active portion is not chronological: boundary=%q last=%q", views[300].Text, views[499].Text)
+	if !strings.Contains(views[350].Text, "active-001") || !strings.Contains(views[549].Text, "active-200") {
+		t.Fatalf("active portion is not chronological: boundary=%q last=%q", views[350].Text, views[549].Text)
+	}
+}
+
+// TestReadLogTailScanWindowAndVisibleCap pins the two separate budgets the
+// Logs page runs on: readLogTail classifies up to logScanLines RAW lines,
+// and the render seam lists at most logTailLines VISIBLE ones (newest).
+//
+// The two must not be the same number. File logging defaults to DEBUG, so a
+// busy miner's tail is mostly suppressed transport chatter; if the raw window
+// were only logTailLines deep, the page could show a handful of entries — or
+// an empty state — on a perfectly healthy miner.
+func TestReadLogTailScanWindowAndVisibleCap(t *testing.T) {
+	// The two budgets are different numbers on purpose, and the scan window
+	// must stay comfortably deeper than the visible cap.
+	if logScanLines <= logTailLines {
+		t.Fatalf("logScanLines=%d must exceed logTailLines=%d", logScanLines, logTailLines)
+	}
+
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("logs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// One suppressed chatter line for every meaningful one, and more raw lines
+	// in total than the scan window. The ratio matters: the SCANNED window
+	// must hold strictly more than logTailLines meaningful lines, otherwise
+	// every assertion below would hold even with the cap removed. Each line
+	// carries a monotonic seq so the direction of both truncations is
+	// observable — taking the oldest end instead of the newest is the easiest
+	// way to get this wrong.
+	const totalRaw = logScanLines + 1000
+	var b strings.Builder
+	for i := 1; i <= totalRaw; i++ {
+		if i%2 == 0 {
+			fmt.Fprintf(&b, "time=2026-07-14T00:00:00Z level=INFO msg=\"Points earned\" reason=WATCH points=10 seq=%06d\n", i)
+			continue
+		}
+		fmt.Fprintf(&b, "time=2026-07-14T00:00:00Z level=DEBUG msg=\"WebSocket send\" index=0 type=PING seq=%06d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join("logs", "budget.log"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Meaningful lines inside the scan window (the newest logScanLines raw
+	// lines), which is what the visible cap actually has to bind against.
+	if inWindow := logScanLines / 2; inWindow <= logTailLines {
+		t.Fatalf("fixture is too weak: the scan window holds %d meaningful lines, need more than the %d visible cap", inWindow, logTailLines)
+	}
+
+	s := &Server{username: "budget"}
+	views, enabled := s.readLogTail()
+	if !enabled {
+		t.Fatal("readLogTail reported the retained file as disabled")
+	}
+	if len(views) != logScanLines {
+		t.Fatalf("readLogTail classified %d lines, want exactly logScanLines=%d", len(views), logScanLines)
+	}
+	// The raw window must be the NEWEST logScanLines lines, not the oldest.
+	if !strings.Contains(views[len(views)-1].Text, fmt.Sprintf("seq=%06d", totalRaw)) {
+		t.Errorf("raw scan window does not end at the newest line: last=%q", views[len(views)-1].Text)
+	}
+	if !strings.Contains(views[0].Text, fmt.Sprintf("seq=%06d", totalRaw-logScanLines+1)) {
+		t.Errorf("raw scan window does not start at the expected offset: first=%q", views[0].Text)
+	}
+
+	visible := visibleLogLines(views)
+	if len(visible) != logTailLines {
+		t.Fatalf("visible lines = %d, want exactly the %d cap", len(visible), logTailLines)
+	}
+	// ...and the visible cap must also keep the NEWEST end.
+	if !strings.Contains(visible[len(visible)-1].Text, fmt.Sprintf("seq=%06d", totalRaw)) {
+		t.Errorf("visible cap does not end at the newest line: last=%q", visible[len(visible)-1].Text)
+	}
+	if !strings.Contains(visible[0].Text, fmt.Sprintf("seq=%06d", totalRaw-2*logTailLines+2)) {
+		t.Errorf("visible cap does not keep the newest %d lines: first=%q", logTailLines, visible[0].Text)
+	}
+	for _, v := range visible {
+		if !v.DashboardVisible {
+			t.Error("visibleLogLines returned a suppressed line")
+		}
+		if strings.Contains(v.Text, "WebSocket send") {
+			t.Error("suppressed transport chatter reached the visible set")
+		}
 	}
 }
 
@@ -261,11 +345,13 @@ func TestReadLogTailClassifies(t *testing.T) {
 // the text is present (and escaped).
 func TestLogsLinesPartialColoring(t *testing.T) {
 	partials := testPartials(t)
+	// The partial renders only dashboard-visible lines, so these fixtures
+	// declare visibility explicitly; this test is about colour/escaping.
 	data := LogsLinesData{FileLogging: true, Lines: []LogLineView{
-		{Class: "log-info", Emoji: "ℹ️", Text: `level=INFO msg="hello"`},
-		{Class: "log-warn", Emoji: "⚠️", Text: `level=WARN msg="careful"`},
-		{Class: "log-error", Emoji: "❌", Text: `level=ERROR msg="boom <script>alert(1)</script>"`},
-		{Class: "log-points-streak", Emoji: "🔥", Text: `level=INFO msg="Points earned" reason=WATCH_STREAK`},
+		{Class: "log-info", Emoji: "ℹ️", Text: `level=INFO msg="hello"`, Level: "info", Subsystem: "other", DashboardVisible: true},
+		{Class: "log-warn", Emoji: "⚠️", Text: `level=WARN msg="careful"`, Level: "warning", Subsystem: "other", DashboardVisible: true},
+		{Class: "log-error", Emoji: "❌", Text: `level=ERROR msg="boom <script>alert(1)</script>"`, Level: "error", Subsystem: "other", DashboardVisible: true},
+		{Class: "log-points-streak", Emoji: "🔥", Text: `level=INFO msg="Points earned" reason=WATCH_STREAK`, Level: "info", Subsystem: "points", DashboardVisible: true},
 	}}
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "logs_lines", data); err != nil {
@@ -299,7 +385,10 @@ func TestLogsLinesPartialNoDoubleEmoji(t *testing.T) {
 	if !p.HasLeadingEmoji || p.Emoji != "" {
 		t.Fatalf("classify(%q) = %+v, want HasLeadingEmoji with empty Emoji", raw, p)
 	}
-	data := LogsLinesData{FileLogging: true, Lines: []LogLineView{{Class: p.Class, Emoji: p.Emoji, Text: raw}}}
+	data := LogsLinesData{FileLogging: true, Lines: []LogLineView{{
+		Class: p.Class, Emoji: p.Emoji, Text: raw,
+		Level: p.Level, Subsystem: p.Subsystem, DashboardVisible: p.DashboardVisible,
+	}}}
 	var buf bytes.Buffer
 	if err := partials.ExecuteTemplate(&buf, "logs_lines", data); err != nil {
 		t.Fatalf("render logs_lines: %v", err)

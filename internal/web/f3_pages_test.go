@@ -350,43 +350,79 @@ func TestF3LogsCardIsRelativeClassNotInlineStyle(t *testing.T) {
 	}
 }
 
-// TestF3LogsSubsystemMappingCoversEveryClass parses the rendered logs.html
-// script for the SUBSYS class->subsystem lookup table and asserts every
-// class allLogLineClasses() can emit appears there exactly once — so no log
-// line can silently escape every subsystem filter bucket.
-func TestF3LogsSubsystemMappingCoversEveryClass(t *testing.T) {
+// TestF3LogsSubsystemMappingCoversEveryFilterOption asserts every subsystem
+// the classifier can emit is an option the subsystem <select> actually
+// offers, so no log line can silently escape every filter bucket.
+//
+// This guard used to parse a class->subsystem lookup table out of the
+// rendered JS. Subsystem is now server-owned metadata (data-subsystem),
+// independent of the CSS class, so the invariant is checked where it now
+// lives: classifier output against the rendered options.
+func TestF3LogsSubsystemMappingCoversEveryFilterOption(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/logs", "en")
 
-	start := strings.Index(body, "const SUBSYS = {")
-	if start < 0 {
-		t.Fatal("rendered logs.html has no \"const SUBSYS = {\" mapping literal")
+	for _, subsystem := range allLogSubsystems() {
+		needle := `<option value="` + subsystem + `">`
+		if n := strings.Count(body, needle); n != 1 {
+			t.Errorf("subsystem filter: option %q appears %d times in the rendered page, want exactly 1", subsystem, n)
+		}
 	}
-	end := strings.Index(body[start:], "};")
-	if end < 0 {
-		t.Fatal("rendered logs.html's SUBSYS mapping literal is not terminated with \"};\"")
-	}
-	table := body[start : start+end]
 
-	for _, class := range allLogLineClasses() {
-		needle := "'" + class + "':"
-		if n := strings.Count(table, needle); n != 1 {
-			t.Errorf("SUBSYS mapping: class %q appears %d times in the rendered table, want exactly 1", class, n)
+	// And no stale option the classifier can never produce.
+	known := make(map[string]bool, len(allLogSubsystems()))
+	for _, s := range allLogSubsystems() {
+		known[s] = true
+	}
+	start := strings.Index(body, `id="logs-filter-subsystem"`)
+	if start < 0 {
+		t.Fatal("rendered logs.html has no subsystem filter select")
+	}
+	end := strings.Index(body[start:], "</select>")
+	if end < 0 {
+		t.Fatal("subsystem filter select is not terminated")
+	}
+	for _, opt := range strings.Split(body[start:start+end], `<option value="`)[1:] {
+		value := opt[:strings.Index(opt, `"`)]
+		if value == "all" {
+			continue
+		}
+		if !known[value] {
+			t.Errorf("subsystem filter offers %q, which the classifier can never emit", value)
 		}
 	}
 }
 
-// TestF3LogsLevelMappingLiteral pins the class->level branches (error/warning,
-// everything else info) that back the level filter.
+// TestF3LogsLevelMappingLiteral pins the level filter against the severity
+// values the classifier emits. The browser reads data-level rather than
+// re-deriving severity from a CSS class, so the options and the classifier's
+// vocabulary must agree.
 func TestF3LogsLevelMappingLiteral(t *testing.T) {
 	srv := buildF3PageServer(t)
 	body := f3GetPage(t, srv, "/logs", "en")
+
 	for _, want := range []string{
-		"if (cls === 'log-error') return 'error';",
-		"if (cls === 'log-warn') return 'warning';",
+		`<option value="info">`,
+		`<option value="warning">`,
+		`<option value="error">`,
+		"function lineLevel(el) { return el.dataset.level || 'info'; }",
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("logs page missing level-mapping literal %q", want)
+			t.Errorf("logs page missing level-filter literal %q", want)
+		}
+	}
+
+	// Every severity the classifier can produce must be selectable.
+	const ts = "time=2026-07-14T10:00:00.000+03:00 "
+	for _, line := range []string{
+		ts + `level=INFO msg="Streamer is online" streamer=a`,
+		ts + `level=WARN msg="careful"`,
+		ts + `level=ERROR msg="boom"`,
+		`a malformed line with no level`,
+	} {
+		lvl := classifyLogLine(line).Level
+		if !strings.Contains(body, `<option value="`+lvl+`">`) {
+			t.Errorf("classifier emits level %q for %q, but the level filter has no such option", lvl, line)
 		}
 	}
 }
