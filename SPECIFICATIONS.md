@@ -2424,7 +2424,8 @@ are kept apart and none is authority for another:
    accounting numbers.
 
 **Statistics breakdown.** `GET /api/points-history` aggregates exact earnings
-in SQL (`ExactEarningsBetween`: `SUM` of positive `total_points` and `COUNT`
+in SQL (the `ExactEarningsBetween` aggregation, read through
+`PointsSnapshotBetween`: `SUM` of positive `total_points` and `COUNT`
 of positive events per canonical reason, plus `COUNT(*)` of all rows as the
 event total, independent of the raw-series row cap). Unknown reason codes are
 exact earnings pooled into `OTHER`; non-positive amounts are accepted facts
@@ -2443,6 +2444,19 @@ truncated raw series makes the legacy estimate `unavailable` (never zero)
 while the exact aggregate stays complete. The dashboard labels estimates as
 such (every estimated figure is marked `≈`) and shows the legacy part on its
 own line. Retention prunes `point_events` with `points`/`annotations`.
+
+**One snapshot per response.** Both endpoints read everything they present
+together — the balance samples with their `exact` flags, the annotations, the
+exact aggregate and (history only) the settled bets — through
+`Repository.PointsSnapshotBetween`, one read transaction on the shared
+connection (`database.WithTx`). A point event committing during the request is
+therefore in every component or in none: one read transaction yields one
+consistent snapshot whatever the journal mode, the single pooled connection
+cannot run the writer's statements until the transaction ends, and in the
+default rollback-journal mode a writer on any other connection additionally
+cannot commit against its SHARED lock (the observable the tests use). The
+transaction takes no repository mutex, is committed before the method returns,
+and nothing is held while the response is encoded.
 
 ### Prediction ROI Analytics
 

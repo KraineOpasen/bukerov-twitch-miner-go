@@ -79,6 +79,24 @@ type PointEventAnnotation struct {
 	Color     string
 }
 
+// PointsSnapshot is everything the Statistics history and export responses
+// present together for one streamer and window, read from ONE database
+// snapshot (a single read transaction on the shared connection, see
+// Repository.PointsSnapshotBetween): the balance samples with their
+// exact-backed flags, the chart annotations, the exact ledger aggregate and,
+// when requested, the settled bets. A concurrent accepted event is therefore
+// either in every component or in none of them — never in the aggregate
+// while its sample and marker are missing.
+type PointsSnapshot struct {
+	Samples     []PointSample
+	Annotations []AnnotationRecord
+	Exact       ExactEarnings
+	// Bets holds the window's settled bets when they were requested. The
+	// bets read is best-effort, as the history endpoint has always treated
+	// it: a failed read leaves Bets nil without failing the snapshot.
+	Bets []BetRecord
+}
+
 // ExactEarnings is the exact point-event aggregation over one streamer and
 // time range, computed in SQL from the ledger (never from balance samples,
 // never subject to the chart's raw-series row cap).

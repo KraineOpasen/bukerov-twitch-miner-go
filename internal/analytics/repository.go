@@ -51,6 +51,20 @@ type Repository interface {
 	// same tombstone fence and close barrier as RecordPointEvent.
 	RecordPointMarker(streamer string, at int64, ann PointEventAnnotation) error
 	RecordAnnotation(streamer string, eventType, text, color string) error
+	// PointsSnapshotBetween reads the balance samples (oldest-first, at most
+	// limit when limit > 0, each flagged when an exact ledger row backs it),
+	// the annotations, the exact ledger aggregate and — when withBets — the
+	// settled bets of one streamer within [startTime, endTime] (zero bounds
+	// are open-ended) in ONE read transaction on the shared connection, so
+	// every component reflects the same committed state: a concurrent
+	// accepted event lands entirely before or entirely after the snapshot,
+	// never in one component only. The transaction ends before the method
+	// returns, so nothing is held while the caller serializes. An unknown
+	// streamer yields an empty snapshot; after Close it returns
+	// database.ErrClosed. ctx bounds the wait for the connection and the
+	// transaction itself: a request abandoned by its client releases the
+	// connection instead of finishing a read nobody will receive.
+	PointsSnapshotBetween(ctx context.Context, streamer string, startTime, endTime time.Time, limit int, withBets bool) (PointsSnapshot, error)
 	GetStreamerData(streamer string) (*StreamerData, error)
 	GetStreamerDataFiltered(streamer string, startTime, endTime time.Time) (*StreamerData, error)
 	GetPointSamples(streamer string, startTime, endTime time.Time, limit int) ([]PointSample, error)
@@ -583,16 +597,37 @@ func insertAnnotationTx(tx *sql.Tx, streamerID, at int64, ann PointEventAnnotati
 // reasons into their canonical categories. Non-positive rows are still
 // counted in Events (they are accepted facts) but never become earnings.
 func (r *SQLiteRepository) ExactEarningsBetween(streamer string, startTime, endTime time.Time) (ExactEarnings, error) {
-	var out ExactEarnings
+	streamerID, ok, err := lookupStreamerID(r.db, streamer)
+	if err != nil || !ok {
+		return ExactEarnings{}, err
+	}
+	return exactEarningsBetween(r.db, streamerID, startTime, endTime)
+}
+
+// querier is the read surface shared by the pooled handle and a transaction,
+// so one statement text serves a standalone read and the same read inside
+// the snapshot transaction (PointsSnapshotBetween) without a second copy.
+type querier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+// lookupStreamerID resolves a login to its stable id; ok is false for an
+// unknown login, which every read treats as an empty result, never an error.
+func lookupStreamerID(q querier, streamer string) (int64, bool, error) {
 	var streamerID int64
-	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
+	err := q.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
 	if err == sql.ErrNoRows {
-		return out, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return out, err
+		return 0, false, err
 	}
+	return streamerID, true, nil
+}
 
+func exactEarningsBetween(q querier, streamerID int64, startTime, endTime time.Time) (ExactEarnings, error) {
+	var out ExactEarnings
 	query := `SELECT reason_code,
 	                 COALESCE(SUM(CASE WHEN total_points > 0 THEN total_points ELSE 0 END), 0),
 	                 SUM(CASE WHEN total_points > 0 THEN 1 ELSE 0 END),
@@ -610,7 +645,7 @@ func (r *SQLiteRepository) ExactEarningsBetween(streamer string, startTime, endT
 	}
 	query += " GROUP BY reason_code"
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return out, err
 	}
@@ -747,15 +782,14 @@ func (r *SQLiteRepository) GetStreamerDataFiltered(streamer string, startTime, e
 // of rows fetched (a memory/timeout guard); the caller downsamples the result
 // for display. An unknown streamer yields nil.
 func (r *SQLiteRepository) GetPointSamples(streamer string, startTime, endTime time.Time, limit int) ([]PointSample, error) {
-	var streamerID int64
-	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
+	streamerID, ok, err := lookupStreamerID(r.db, streamer)
+	if err != nil || !ok {
 		return nil, err
 	}
+	return pointSamplesBetween(r.db, streamerID, startTime, endTime, limit)
+}
 
+func pointSamplesBetween(q querier, streamerID int64, startTime, endTime time.Time, limit int) ([]PointSample, error) {
 	query := `SELECT p.timestamp, p.points, COALESCE(p.event_type, ''),
 	                 EXISTS (SELECT 1 FROM point_events e WHERE e.points_id = p.id)
 	          FROM points p WHERE p.streamer_id = ?`
@@ -774,7 +808,7 @@ func (r *SQLiteRepository) GetPointSamples(streamer string, startTime, endTime t
 		args = append(args, limit)
 	}
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -791,21 +825,64 @@ func (r *SQLiteRepository) GetPointSamples(streamer string, startTime, endTime t
 	return samples, rows.Err()
 }
 
+// PointsSnapshotBetween reads the samples, annotations, exact aggregate and
+// (optionally) bets of one window inside ONE read transaction. The shared
+// handle has a single connection, so the transaction is the snapshot: no
+// other statement — a pubsub commit, a retention sweep, a purge — can run on
+// the connection until it ends, and a writer on any other connection cannot
+// commit while the transaction's SHARED lock is held. The transaction takes
+// only the handle's read lock (never the repository mutex), so it cannot
+// deadlock with the write paths, which take the repository mutex first and
+// then wait for the connection; Close waits for it to finish. It is committed
+// before this method returns and holds nothing during serialization.
+func (r *SQLiteRepository) PointsSnapshotBetween(ctx context.Context, streamer string, startTime, endTime time.Time, limit int, withBets bool) (PointsSnapshot, error) {
+	var snap PointsSnapshot
+	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
+		streamerID, ok, err := lookupStreamerID(tx, streamer)
+		if err != nil || !ok {
+			return err
+		}
+		if snap.Samples, err = pointSamplesBetween(tx, streamerID, startTime, endTime, limit); err != nil {
+			return err
+		}
+		if snap.Annotations, err = annotationRecordsBetween(tx, streamerID, startTime, endTime); err != nil {
+			return err
+		}
+		if snap.Exact, err = exactEarningsBetween(tx, streamerID, startTime, endTime); err != nil {
+			return err
+		}
+		if withBets {
+			// Best-effort, as the history page has always treated the bet
+			// summary: a SELECT that fails logically neither fails the page
+			// nor aborts the SQLite transaction, so the other components
+			// stay valid; an I/O-class failure or a cancelled context fails
+			// the whole snapshot at COMMIT, never serving a partial one.
+			if bets, err := betsBetween(tx, streamerID, "", startTime, endTime); err == nil {
+				snap.Bets = bets
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return PointsSnapshot{}, err
+	}
+	return snap, nil
+}
+
 // GetAnnotationRecords returns the event markers for a streamer within
 // [startTime, endTime] (zero bounds are open-ended), ordered oldest-first. The
 // event type falls back to the label text for rows written before the
 // event_type column existed; the per-type colour is carried through so the
 // chart can render each marker distinctly. An unknown streamer yields nil.
 func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endTime time.Time) ([]AnnotationRecord, error) {
-	var streamerID int64
-	err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
+	streamerID, ok, err := lookupStreamerID(r.db, streamer)
+	if err != nil || !ok {
 		return nil, err
 	}
+	return annotationRecordsBetween(r.db, streamerID, startTime, endTime)
+}
 
+func annotationRecordsBetween(q querier, streamerID int64, startTime, endTime time.Time) ([]AnnotationRecord, error) {
 	query := "SELECT timestamp, COALESCE(event_type, ''), text, color FROM annotations WHERE streamer_id = ?"
 	args := []interface{}{streamerID}
 	if !startTime.IsZero() {
@@ -818,7 +895,7 @@ func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endT
 	}
 	query += " ORDER BY timestamp ASC"
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1095,6 +1172,20 @@ func (r *SQLiteRepository) RecordBet(b BetRecord) error {
 // for the lifetime period). An unknown streamer name yields nil, not an error —
 // mirroring GetPointSamples.
 func (r *SQLiteRepository) GetBets(streamer, strategy string, startTime, endTime time.Time) ([]BetRecord, error) {
+	var streamerID int64
+	if streamer != "" {
+		id, ok, err := lookupStreamerID(r.db, streamer)
+		if err != nil || !ok {
+			return nil, err
+		}
+		streamerID = id
+	}
+	return betsBetween(r.db, streamerID, strategy, startTime, endTime)
+}
+
+// betsBetween lists resolved bets oldest-first; streamerID 0 (never a real
+// AUTOINCREMENT id) means no streamer filter.
+func betsBetween(q querier, streamerID int64, strategy string, startTime, endTime time.Time) ([]BetRecord, error) {
 	query := `SELECT s.name, b.event_id, b.timestamp, b.strategy, b.result_type,
 	                 b.placed, b.won, b.gained, b.odds, b.manual
 	          FROM prediction_bets b
@@ -1102,15 +1193,7 @@ func (r *SQLiteRepository) GetBets(streamer, strategy string, startTime, endTime
 	          WHERE 1=1`
 	var args []interface{}
 
-	if streamer != "" {
-		var streamerID int64
-		err := r.db.QueryRow("SELECT id FROM streamers WHERE name = ?", streamer).Scan(&streamerID)
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
+	if streamerID != 0 {
 		query += " AND b.streamer_id = ?"
 		args = append(args, streamerID)
 	}
@@ -1128,7 +1211,7 @@ func (r *SQLiteRepository) GetBets(streamer, strategy string, startTime, endTime
 	}
 	query += " ORDER BY b.timestamp ASC"
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

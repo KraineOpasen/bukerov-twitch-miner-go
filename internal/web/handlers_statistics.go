@@ -143,30 +143,30 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	end := time.Now()
 	start := end.Add(-window)
 
+	// Everything the response presents together — the balance series, its
+	// markers, the exact ledger aggregate and the bets behind the PREDICTION
+	// slice — comes from ONE database snapshot, so a point event committing
+	// during the request is in every component or in none. The transaction
+	// is over before anything below runs; encoding holds no database state.
 	repo := s.analytics.Repository()
 	rowCap := rowCapOrDefault(s.historyRowCap, maxHistoryRows)
-	raw, err := repo.GetPointSamples(streamer, start, end, rowCap)
+	snap, err := repo.PointsSnapshotBetween(r.Context(), streamer, start, end, rowCap, true)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
 	}
+	raw := snap.Samples
 	points := analytics.Downsample(raw, maxChartPoints)
-
-	annotations, err := repo.GetAnnotationRecords(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load annotations")
-		return
-	}
 
 	// Betting summary for the SAME streamer/window as the series, so the
 	// earnings donut's PREDICTION slice (a gross positive credit) can be shown
 	// beside the stake risked, refunded, and net result — making the origin of
 	// the positive prediction points explicit instead of an unexplained "Other".
 	// Best-effort: a bet-history read failure must not fail the whole page, it
-	// just omits the summary.
+	// just omits the summary (the snapshot leaves Bets nil in that case).
 	var betSummary *analytics.BetSummary
-	if bets, betErr := repo.GetBets(streamer, "", start, end); betErr == nil && len(bets) > 0 {
-		bs := analytics.SummarizeBets(bets)
+	if len(snap.Bets) > 0 {
+		bs := analytics.SummarizeBets(snap.Bets)
 		betSummary = &bs
 	}
 
@@ -175,19 +175,14 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	// the raw balance series and of its row cap. The legacy balance-delta
 	// estimate covers only the samples no exact event backs, and is
 	// unavailable — never silently zero — when the raw series was truncated.
-	exact, err := repo.ExactEarningsBetween(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load points history")
-		return
-	}
 	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), rowCap)
-	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
+	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
 
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:         streamer,
 		Range:            label,
 		Points:           points,
-		Annotations:      annotations,
+		Annotations:      snap.Annotations,
 		Breakdown:        breakdown,
 		LegacyBreakdown:  legacyBreakdown,
 		Earnings:         earnings,
@@ -243,39 +238,33 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 	end := time.Now()
 	start := end.Add(-window)
 
+	// One database snapshot for the series, its markers and the exact
+	// aggregate, exactly as the history endpoint: the export is a coherent
+	// point in time, and the transaction is over before encoding starts.
 	repo := s.analytics.Repository()
 	rowCap := rowCapOrDefault(s.exportRowCap, maxExportRows)
-	points, err := repo.GetPointSamples(streamer, start, end, rowCap)
+	snap, err := repo.PointsSnapshotBetween(r.Context(), streamer, start, end, rowCap, false)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
 	}
-	annotations, err := repo.GetAnnotationRecords(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load annotations")
-		return
-	}
+	points := snap.Samples
 
 	// The export carries the same earnings accounting as the history
 	// endpoint so an external consumer never sees an empty accounting block:
 	// the exact aggregation from the ledger and the legacy estimate over the
-	// exported samples, qualified by the same coverage metadata.
-	exact, err := repo.ExactEarningsBetween(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load points history")
-		return
-	}
-	// The export is full-fidelity (never downsampled), so only the raw row
-	// cap can make it incomplete.
+	// exported samples, qualified by the same coverage metadata. The export
+	// is full-fidelity (never downsampled), so only the raw row cap can make
+	// it incomplete.
 	rawTruncated := len(points) >= rowCap
-	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
+	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
 
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:        streamer,
 		Range:           label,
 		Points:          points,
-		Annotations:     annotations,
+		Annotations:     snap.Annotations,
 		Breakdown:       breakdown,
 		LegacyBreakdown: legacyBreakdown,
 		Earnings:        earnings,
