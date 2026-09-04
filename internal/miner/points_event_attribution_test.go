@@ -225,7 +225,7 @@ func TestPointsEarnedExactReDeliveryRecordsOnce(t *testing.T) {
 	if exact.Events != 1 || len(exact.Breakdown) != 1 || exact.Breakdown[0].Gained != 12 || exact.Breakdown[0].Count != 1 {
 		t.Fatalf("exact earnings after re-delivery = %+v, want one WATCH event of 12", exact)
 	}
-	samples, _ := svc.Repository().GetPointSamples(s.GetUsername(), time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, svc.Repository(), s.GetUsername(), time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 {
 		t.Fatalf("samples = %+v, want one (the replay must not add a timeline row)", samples)
 	}
@@ -252,12 +252,12 @@ func TestWatchStreakNotNewlyAcceptedWritesNoExactEvent(t *testing.T) {
 	s.SetChannelPoints(1900)
 	m.handlePubSubMessage(streak, s, pubsub.MessageOutcome{})
 
-	exact, _ := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if exact.Events != 1 || exact.Breakdown[0].Gained != 450 || exact.Breakdown[0].Count != 1 {
 		t.Fatalf("exact earnings = %+v, want exactly one 450 streak", exact)
 	}
-	samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
-	anns, _ := svc.Repository().GetAnnotationRecords(login, time.Time{}, time.Time{})
+	samples := mustPointSamples(t, svc.Repository(), login, time.Time{}, time.Time{}, 0)
+	anns := mustAnnotationRecords(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if len(samples) != 1 || len(anns) != 1 {
 		t.Fatalf("samples=%d annotations=%d, want 1/1 after a duplicate and an unadmitted callback", len(samples), len(anns))
 	}
@@ -281,12 +281,12 @@ func TestWatchStreakNotNewlyAcceptedWritesNoExactEvent(t *testing.T) {
 		t.Fatalf("post-analytics replay admission = %s, want DUPLICATE", again.WatchStreak.Admission)
 	}
 
-	exact, _ = svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+	exact = mustExactEarnings(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if exact.Events != 1 {
 		t.Fatalf("exact earnings = %+v, want still exactly one event: the admission gate, not the ledger, must stop unadmitted streaks", exact)
 	}
-	samples, _ = svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
-	anns, _ = svc.Repository().GetAnnotationRecords(login, time.Time{}, time.Time{})
+	samples = mustPointSamples(t, svc.Repository(), login, time.Time{}, time.Time{}, 0)
+	anns = mustAnnotationRecords(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if len(samples) != 1 || len(anns) != 1 {
 		t.Fatalf("samples=%d annotations=%d, want 1/1 after unadmitted streaks the ledger never saw", len(samples), len(anns))
 	}
@@ -325,7 +325,7 @@ func TestPointsEarnedMalformedAmountIsNeverAnExactEarning(t *testing.T) {
 			if exact.Events != 0 {
 				t.Fatalf("malformed amount entered the exact ledger: %+v", exact)
 			}
-			samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
+			samples := mustPointSamples(t, svc.Repository(), login, time.Time{}, time.Time{}, 0)
 			if len(samples) != 2 || samples[1].Exact || samples[1].Balance != 1450 {
 				t.Fatalf("samples = %+v, want two legacy samples with the frame's balance on the timeline", samples)
 			}
@@ -464,15 +464,15 @@ func TestPointsEarnedWithoutIdentityKeepsTimelineAndMarker(t *testing.T) {
 	outcome := s.ApplyWatchStreakGrant(models.WatchStreakGrantEvent{EventID: "sha256:no-identity-grant", AcceptedAt: time.Now()}, 450)
 	m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{WatchStreak: outcome})
 
-	exact, _ := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if exact.Events != 0 {
 		t.Fatalf("identity-less frame entered the exact ledger: %+v", exact)
 	}
-	samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, svc.Repository(), login, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || samples[0].Exact || samples[0].Balance != 1450 || samples[0].Reason != "WATCH STREAK" {
 		t.Fatalf("samples = %+v, want one legacy WATCH STREAK sample at 1450", samples)
 	}
-	anns, _ := svc.Repository().GetAnnotationRecords(login, time.Time{}, time.Time{})
+	anns := mustAnnotationRecords(t, svc.Repository(), login, time.Time{}, time.Time{})
 	if len(anns) != 1 || anns[0].Type != "WATCH_STREAK" || anns[0].Reason != "+450 - Watch Streak" {
 		t.Fatalf("annotations = %+v, want the streak marker from the frame's own amount", anns)
 	}
@@ -520,11 +520,11 @@ func TestPointsEarnedTimestamplessFrameIsNotAnExactEvent(t *testing.T) {
 				m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
 			}
 
-			exact, _ := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+			exact := mustExactEarnings(t, svc.Repository(), login, time.Time{}, time.Time{})
 			if exact.Events != 0 {
 				t.Fatalf("timestamp-less frames entered the exact ledger: %+v", exact)
 			}
-			samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
+			samples := mustPointSamples(t, svc.Repository(), login, time.Time{}, time.Time{}, 0)
 			if len(samples) != 2 || samples[0].Exact || samples[1].Exact || samples[0].Balance != tc.wantBalance || samples[1].Balance != tc.wantBalance {
 				t.Fatalf("samples = %+v, want two legacy timeline samples at %d (the second identical frame must not vanish, and a foreign balance must not be lent)", samples, tc.wantBalance)
 			}

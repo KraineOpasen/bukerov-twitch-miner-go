@@ -245,9 +245,9 @@ func TestPointsSnapshotBetweenMatchesStandaloneReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	samples, _ := r.GetPointSamples(s, start, end, 0)
-	anns, _ := r.GetAnnotationRecords(s, start, end)
-	exact, _ := r.ExactEarningsBetween(s, start, end)
+	samples := mustPointSamples(t, r, s, start, end, 0)
+	anns := mustAnnotationRecords(t, r, s, start, end)
+	exact := mustExactEarnings(t, r, s, start, end)
 	if len(snap.Samples) != len(samples) || len(samples) != 1 || snap.Samples[0] != samples[0] {
 		t.Fatalf("snapshot samples = %+v, standalone = %+v", snap.Samples, samples)
 	}

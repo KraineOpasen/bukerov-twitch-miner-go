@@ -391,13 +391,13 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after an old-binary purge: %v", err)
 	}
-	if exact, _ = repo4.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
+	if exact = mustExactEarnings(t, repo4, "rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
 		t.Fatalf("purged streamer still reports exact earnings: %+v", exact)
 	}
 	if err := repo4.RecordPoints("rollback-streamer", 100, "WATCH"); err != nil {
 		t.Fatal(err)
 	}
-	if exact, _ = repo4.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
+	if exact = mustExactEarnings(t, repo4, "rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
 		t.Fatalf("re-added streamer inherited an orphaned ledger row: %+v", exact)
 	}
 	if n, err := repo4.PruneBefore(ts.Add(3 * time.Hour)); err != nil || n != 2 {

@@ -175,15 +175,15 @@ func TestRecordPointEventDuplicateIdentityWritesNothing(t *testing.T) {
 	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, id); n != 1 {
 		t.Fatalf("ledger rows for the identity = %d, want 1", n)
 	}
-	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || samples[0].Balance != 11772 {
 		t.Fatalf("samples = %+v, want the single original sample (replay must leave no timeline row)", samples)
 	}
-	anns, _ := r.GetAnnotationRecords(s, time.Time{}, time.Time{})
+	anns := mustAnnotationRecords(t, r, s, time.Time{}, time.Time{})
 	if len(anns) != 1 {
 		t.Fatalf("annotations = %+v, want one (replay must leave no marker)", anns)
 	}
-	exact, _ := r.ExactEarningsBetween(s, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, r, s, time.Time{}, time.Time{})
 	if exact.Events != 1 || exact.Breakdown[0].Gained != 450 || exact.Breakdown[0].Count != 1 {
 		t.Fatalf("exact earnings after replay = %+v, want one 450 event", exact)
 	}
@@ -201,11 +201,11 @@ func TestRecordPointEventDistinctIdentitiesSameAmountBothKept(t *testing.T) {
 			t.Fatalf("%s: recorded=%v err=%v", suffix, rec, err)
 		}
 	}
-	exact, _ := r.ExactEarningsBetween(s, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, r, s, time.Time{}, time.Time{})
 	if exact.Events != 2 || exact.Breakdown[0].Gained != 900 || exact.Breakdown[0].Count != 2 {
 		t.Fatalf("exact earnings = %+v, want two distinct 450 events (900 over 2)", exact)
 	}
-	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0)
 	if len(samples) != 2 || !samples[0].Exact || !samples[1].Exact {
 		t.Fatalf("samples = %+v, want two exact-backed samples", samples)
 	}
@@ -289,7 +289,7 @@ func TestRecordPointEventRefusesEmptyIdentity(t *testing.T) {
 	if !errors.Is(err, errPointEventNoIdentity) || rec {
 		t.Fatalf("empty identity: recorded=%v err=%v, want errPointEventNoIdentity and nothing recorded", rec, err)
 	}
-	if samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0); len(samples) != 0 {
+	if samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0); len(samples) != 0 {
 		t.Fatalf("empty-identity event wrote a sample: %+v", samples)
 	}
 }
@@ -308,7 +308,7 @@ func TestRecordPointEventUnknownBalanceIsNull(t *testing.T) {
 	if len(ledger) != 1 || ledger[0].balanceAfter.Valid {
 		t.Fatalf("ledger = %+v, want one row with NULL balance_after", ledger)
 	}
-	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || samples[0].Balance != 777 || !samples[0].Exact {
 		t.Fatalf("samples = %+v, want one exact sample at the display balance 777", samples)
 	}
@@ -409,7 +409,7 @@ func TestGetPointSamplesFlagsExactAndOrdersSameMillisecond(t *testing.T) {
 		}
 	}
 	// The limit applies to the same ordering.
-	limited, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 2)
+	limited := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 2)
 	if len(limited) != 2 || limited[0].Balance != 1000 || limited[1].Balance != 1450 {
 		t.Fatalf("limited samples = %+v, want the first two in order", limited)
 	}
@@ -552,11 +552,11 @@ func TestPruneBeforeRemovesExpiredPointEvents(t *testing.T) {
 	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-prune-old"); n != 0 {
 		t.Fatal("expired ledger row survived retention")
 	}
-	exact, _ := r.ExactEarningsBetween(s, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, r, s, time.Time{}, time.Time{})
 	if exact.Events != 1 || exact.Since != now.Add(-2*24*time.Hour).UnixMilli() {
 		t.Fatalf("exact earnings after prune = %+v, want only the fresh event", exact)
 	}
-	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || !samples[0].Exact {
 		t.Fatalf("samples after prune = %+v, want the single fresh exact sample", samples)
 	}
@@ -586,7 +586,7 @@ func TestServiceRecordPointEventTriggersRetentionSweep(t *testing.T) {
 	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, stale.EventID); n != 0 {
 		t.Fatal("RecordPointEvent did not trigger the retention sweep: the stale ledger row survived")
 	}
-	exact, _ := r.ExactEarningsBetween(st.GetUsername(), time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, r, st.GetUsername(), time.Time{}, time.Time{})
 	if exact.Events != 1 || exact.Breakdown[0].Reason != "WATCH" {
 		t.Fatalf("exact earnings after the sweep = %+v, want only the fresh WATCH event", exact)
 	}
@@ -706,8 +706,8 @@ func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:"+s); n != 1 {
 		t.Fatalf("ledger rows = %d, want 1", n)
 	}
-	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
-	anns, _ := r.GetAnnotationRecords(s, time.Time{}, time.Time{})
+	samples := mustPointSamples(t, r, s, time.Time{}, time.Time{}, 0)
+	anns := mustAnnotationRecords(t, r, s, time.Time{}, time.Time{})
 	if len(samples) != 1 || len(anns) != 1 {
 		t.Fatalf("samples=%d annotations=%d, want 1/1", len(samples), len(anns))
 	}
@@ -830,11 +830,11 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 	if len(ledger) != 1 || ledger[0].total != 450 || !ledger[0].balanceAfter.Valid || ledger[0].balanceAfter.Int64 != 11772 || ledger[0].timestamp != fixed.UnixMilli() {
 		t.Fatalf("ledger = %+v, want total 450, balance_after 11772, stamped by the service clock", ledger)
 	}
-	samples, _ := r.GetPointSamples(login, time.Time{}, time.Time{}, 0)
+	samples := mustPointSamples(t, r, login, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || samples[0].Balance != 11772 || !samples[0].Exact {
 		t.Fatalf("timeline sample = %+v, want the frame's 11772, never the streamer's 999999/5", samples)
 	}
-	anns, _ := r.GetAnnotationRecords(login, time.Time{}, time.Time{})
+	anns := mustAnnotationRecords(t, r, login, time.Time{}, time.Time{})
 	if len(anns) != 1 || anns[0].Reason != "+450 - Watch Streak" || anns[0].Color != annotationColors["WATCH_STREAK"] {
 		t.Fatalf("annotation = %+v, want '+450 - Watch Streak' in the streak colour", anns)
 	}
@@ -850,11 +850,11 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 	if len(ledger) != 2 || ledger[1].balanceAfter.Valid || ledger[1].total != 250 {
 		t.Fatalf("ledger = %+v, want a second RAID row with NULL balance_after", ledger)
 	}
-	samples, _ = r.GetPointSamples(login, time.Time{}, time.Time{}, 0)
+	samples = mustPointSamples(t, r, login, time.Time{}, time.Time{}, 0)
 	if len(samples) != 2 || samples[1].Balance != 4242 {
 		t.Fatalf("samples = %+v, want the fallback display balance 4242 for the balance-less frame", samples)
 	}
-	anns, _ = r.GetAnnotationRecords(login, time.Time{}, time.Time{})
+	anns = mustAnnotationRecords(t, r, login, time.Time{}, time.Time{})
 	if len(anns) != 2 || anns[1].Type != "RAID" || anns[1].Reason != "+250 - Raid" {
 		t.Fatalf("annotations = %+v, want a RAID marker '+250 - Raid'", anns)
 	}
@@ -863,7 +863,7 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 	if _, err := svc.RecordPointEvent(st, PointEvent{EventID: "sha256:" + login + "-watch", ReasonCode: "WATCH", TotalPoints: 12}); err != nil {
 		t.Fatal(err)
 	}
-	if anns, _ = r.GetAnnotationRecords(login, time.Time{}, time.Time{}); len(anns) != 2 {
+	if anns = mustAnnotationRecords(t, r, login, time.Time{}, time.Time{}); len(anns) != 2 {
 		t.Fatalf("a WATCH event wrote a marker: %+v", anns)
 	}
 }
@@ -880,7 +880,7 @@ func TestServiceRecordPointEventRejectsEmptyIdentityAndReportsDuplicate(t *testi
 	if rec, err := svc.RecordPointEvent(st, PointEvent{ReasonCode: "WATCH", TotalPoints: 12}); !errors.Is(err, errPointEventNoIdentity) || rec {
 		t.Fatalf("identity-less event: recorded=%v err=%v, want errPointEventNoIdentity", rec, err)
 	}
-	if samples, _ := r.GetPointSamples(login, time.Time{}, time.Time{}, 0); len(samples) != 0 {
+	if samples := mustPointSamples(t, r, login, time.Time{}, time.Time{}, 0); len(samples) != 0 {
 		t.Fatalf("identity-less event wrote a sample: %+v", samples)
 	}
 
@@ -891,7 +891,7 @@ func TestServiceRecordPointEventRejectsEmptyIdentityAndReportsDuplicate(t *testi
 	if rec, err := svc.RecordPointEvent(st, ev); err != nil || rec {
 		t.Fatalf("replay: recorded=%v err=%v, want (false, nil)", rec, err)
 	}
-	exact, _ := r.ExactEarningsBetween(login, time.Time{}, time.Time{})
+	exact := mustExactEarnings(t, r, login, time.Time{}, time.Time{})
 	if exact.Events != 1 {
 		t.Fatalf("exact earnings after replay = %+v, want one event", exact)
 	}
