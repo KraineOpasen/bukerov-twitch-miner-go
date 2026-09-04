@@ -355,34 +355,53 @@ func TestPointsEarnedWithoutIdentityKeepsTimelineAndMarker(t *testing.T) {
 	}
 }
 
-// TestPointsEarnedIndistinguishableFrameIsNotAnExactEvent: a payload carrying
-// neither Twitch's event timestamp nor a balance would fingerprint identically
-// for every equal grant, so it is not an event identity: two such WATCH frames
-// both land on the timeline (never silently dropped as duplicates) and neither
-// enters the exact ledger.
-func TestPointsEarnedIndistinguishableFrameIsNotAnExactEvent(t *testing.T) {
-	m, s, svc := newPointEventMiner(t, "indistinct")
-	login := s.GetUsername()
-	raw := fmt.Sprintf(`{"type":"points-earned","data":{"channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"}}}`, s.ChannelID)
-	for i, balance := range []int{1012, 1024} {
-		msg, err := pubsub.ParsePubSubMessage(&pubsub.WSData{Topic: "community-points-user-v1.999", Message: raw})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i == 1 && msg.EventFingerprint == "" {
-			t.Fatal("parser produced no fingerprint")
-		}
-		s.SetChannelPoints(balance) // the pool's balance for a frame without one stays whatever it was
-		m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
+// TestPointsEarnedTimestamplessFrameIsNotAnExactEvent: a payload without
+// Twitch's event timestamp fingerprints identically for every equal grant —
+// with or without a balance, since a balance is not monotonic across spends
+// (earn to 1012, spend, earn back to 1012) — so it is not an event identity:
+// two such WATCH frames both land on the timeline (never silently dropped as
+// duplicates) and neither enters the exact ledger.
+func TestPointsEarnedTimestamplessFrameIsNotAnExactEvent(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  func(channelID string) string
+	}{
+		{"neither timestamp nor balance", func(id string) string {
+			return fmt.Sprintf(`{"type":"points-earned","data":{"channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"}}}`, id)
+		}},
+		{"balance only, repeated after a spend", func(id string) string {
+			return fmt.Sprintf(`{"type":"points-earned","data":{"channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"},"balance":{"channel_id":%q,"balance":1012}}}`, id, id)
+		}},
+		{"timestamp present but not RFC 3339", func(id string) string {
+			return fmt.Sprintf(`{"type":"points-earned","data":{"timestamp":"not-a-time","channel_id":%q,"point_gain":{"total_points":12,"reason_code":"WATCH"},"balance":{"channel_id":%q,"balance":1012}}}`, id, id)
+		}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, s, svc := newPointEventMiner(t, "timestampless-"+strings.ReplaceAll(tc.name, " ", "-"))
+			login := s.GetUsername()
+			raw := tc.raw(s.ChannelID)
+			for _, balance := range []int{1012, 1012} {
+				msg, err := pubsub.ParsePubSubMessage(&pubsub.WSData{Topic: "community-points-user-v1.999", Message: raw})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if msg.EventFingerprint == "" {
+					t.Fatal("parser produced no fingerprint")
+				}
+				s.SetChannelPoints(balance)
+				m.handlePubSubMessage(msg, s, pubsub.MessageOutcome{})
+			}
 
-	exact, _ := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
-	if exact.Events != 0 {
-		t.Fatalf("indistinguishable frames entered the exact ledger: %+v", exact)
-	}
-	samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
-	if len(samples) != 2 || samples[0].Exact || samples[1].Exact {
-		t.Fatalf("samples = %+v, want two legacy timeline samples (the second identical frame must not vanish)", samples)
+			exact, _ := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+			if exact.Events != 0 {
+				t.Fatalf("timestamp-less frames entered the exact ledger: %+v", exact)
+			}
+			samples, _ := svc.Repository().GetPointSamples(login, time.Time{}, time.Time{}, 0)
+			if len(samples) != 2 || samples[0].Exact || samples[1].Exact {
+				t.Fatalf("samples = %+v, want two legacy timeline samples (the second identical frame must not vanish)", samples)
+			}
+		})
 	}
 }
 
@@ -462,26 +481,36 @@ func TestPointsSpentIsNeverAnEarning(t *testing.T) {
 	}
 }
 
-// TestMutableStreamerBalanceCannotChangeRecordedEarnings: a Streamer balance
-// mutated after an event was received (a ChannelPointsContext poll, a later
-// frame) leaves the already-captured amount and balance untouched.
+// TestMutableStreamerBalanceCannotChangeRecordedEarnings: the shared Streamer
+// balance is mutated by other goroutines (a ChannelPointsContext poll, a later
+// frame) — including BETWEEN the pool applying a frame's balance and the miner
+// callback running. The recorded amount, balance and timeline sample must be
+// the frame's own values, never whatever the Streamer holds at callback time.
 func TestMutableStreamerBalanceCannotChangeRecordedEarnings(t *testing.T) {
 	m, s, svc := newPointEventMiner(t, "mutable")
 	login := s.GetUsername()
+
+	// Frame 1 delivered normally, then a poll rewrites the shared balance.
 	deliverPointsEarned(t, m, s, parsedPointsEarned(t, s.ChannelID, "WATCH_STREAK", 450, 11772, "2026-09-01T13:00:00.000000000Z"))
-	s.SetChannelPoints(999_999) // concurrent poll rewrites the shared balance
-	deliverPointsEarned(t, m, s, parsedPointsEarned(t, s.ChannelID, "WATCH", 12, 11784, "2026-09-01T13:05:00.000000000Z"))
+	s.SetChannelPoints(999_999)
+
+	// Frame 2: the pool has applied the wire balance (11784) but a concurrent
+	// poll overwrites it with a sentinel before the callback observes it.
+	watch := parsedPointsEarned(t, s.ChannelID, "WATCH", 12, 11784, "2026-09-01T13:05:00.000000000Z")
+	s.SetChannelPoints(11784)
+	s.SetChannelPoints(424_242)
+	m.handlePubSubMessage(watch, s, pubsub.MessageOutcome{})
 	s.SetChannelPoints(1)
 
 	got := pointsHistoryViaAPI(t, m, svc, login, "7d")
 	if streak := shareByReason(got.Breakdown, "WATCH_STREAK"); streak.Gained != 450 || streak.Count != 1 {
 		t.Fatalf("WATCH_STREAK = %+v, want the captured 450", streak)
 	}
-	if watch := shareByReason(got.Breakdown, "WATCH"); watch.Gained != 12 || watch.Count != 1 {
-		t.Fatalf("WATCH = %+v, want the captured 12", watch)
+	if w := shareByReason(got.Breakdown, "WATCH"); w.Gained != 12 || w.Count != 1 {
+		t.Fatalf("WATCH = %+v, want the captured 12", w)
 	}
 	if len(got.Points) != 2 || got.Points[0].Balance != 11772 || got.Points[1].Balance != 11784 {
-		t.Fatalf("timeline = %+v, want the frames' own balances 11772/11784, never the mutated 999999/1", got.Points)
+		t.Fatalf("timeline = %+v, want the frames' own balances 11772/11784, never the mutated 999999/424242/1", got.Points)
 	}
 }
 

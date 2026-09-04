@@ -1651,42 +1651,39 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 // UNIQUE event identity is only a persistence invariant behind it.
 //
 // A frame the exact ledger cannot admit — no event identity, a total_points
-// that is missing, non-numeric or non-integral, or a payload with neither
-// Twitch's event timestamp nor a balance (the fields that make two otherwise
-// identical grants distinct events, so a fingerprint over such a payload is
-// not an event identity) — is NOT coerced to a zero earning: it is logged and
-// recorded on the balance timeline only, where the Statistics page estimates
-// it from balance deltas and labels it as such.
+// that is missing, non-numeric or non-integral, or a payload without Twitch's
+// RFC 3339 event timestamp (the same parse the pool applies; it is the field
+// that makes two otherwise identical grants distinct events, and a balance
+// alone is not monotonic across spends, so a fingerprint over a payload
+// without a real timestamp is not an event identity) — is
+// NOT coerced to a zero earning: it is logged and recorded on the balance
+// timeline only, where the Statistics page estimates it from balance deltas
+// and labels it as such.
 func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer, pointGain map[string]interface{}, reasonCode string) {
 	total, exact := exactWirePoints(pointGain["total_points"])
-	balanceAfter, balanceKnown := 0, false
-	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
-		balanceAfter, balanceKnown = exactWirePoints(balance["balance"])
-	}
 	eventTime, _ := msg.Data["timestamp"].(string)
-	distinct := eventTime != "" || balanceKnown
-	if msg.EventFingerprint == "" || !exact || !distinct {
+	_, timeErr := time.Parse(time.RFC3339, eventTime)
+	if msg.EventFingerprint == "" || !exact || timeErr != nil {
 		slog.Warn("points-earned event is not admissible to the exact ledger; recording balance timeline only",
 			"streamer", s.GetUsername(),
 			"reason", reasonCode,
 			"hasIdentity", msg.EventFingerprint != "",
 			"exactAmount", exact,
-			"distinguishable", distinct,
+			"hasEventTime", timeErr == nil,
 		)
 		m.analyticsSvc.RecordPoints(s, reasonCode)
 		// The chart marker is a display fact: keep writing it, as before this
-		// ledger existed, whenever the frame's amount is at least exact — an
-		// identity-less frame still earned; an inexact amount has nothing
-		// truthful to print.
+		// ledger existed, whenever the frame's amount is at least exact — such
+		// a frame still earned; an inexact amount has nothing truthful to print.
 		if exact {
-			switch reasonCode {
-			case "WATCH_STREAK":
-				m.analyticsSvc.RecordAnnotation(s, reasonCode, fmt.Sprintf("+%d - Watch Streak", total))
-			case "RAID":
-				m.analyticsSvc.RecordAnnotation(s, reasonCode, fmt.Sprintf("+%d - Raid", total))
-			}
+			m.analyticsSvc.RecordPointMarker(s, reasonCode, total)
 		}
 		return
+	}
+
+	balanceAfter, balanceKnown := 0, false
+	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+		balanceAfter, balanceKnown = exactWirePoints(balance["balance"])
 	}
 
 	ev := analytics.PointEvent{

@@ -4,15 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/database"
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
+
+// pointEventTestSeq makes every streamer login and event identity these tests
+// write unique for the life of the process: the package shares one database
+// singleton (history_test.go TestMain), so fixed names would collide under
+// `go test -count=N` and turn a repeat into a false duplicate.
+var pointEventTestSeq atomic.Uint64
+
+func uniqueName(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, pointEventTestSeq.Add(1))
+}
 
 // streakEvent is the production-shaped exact fact behind this change: one
 // accepted WATCH_STREAK grant of 450 points whose frame reported the given
@@ -29,7 +42,7 @@ func streakEvent(id string, ts time.Time, balance int) PointEvent {
 }
 
 func streakAnnotation(amount int) *PointEventAnnotation {
-	return pointEventAnnotation(PointEvent{ReasonCode: "WATCH_STREAK", TotalPoints: amount})
+	return pointEventAnnotation("WATCH_STREAK", amount)
 }
 
 // ledgerRow reads one point_events row back through SQL — the persisted
@@ -78,10 +91,10 @@ func countRows(t *testing.T, r *SQLiteRepository, query string, args ...interfac
 // timestamp.
 func TestRecordPointEventWritesLedgerSampleAndAnnotationTogether(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-write-streamer"
+	s := uniqueName("pe-write")
 	ts := time.Now().Add(-time.Hour)
 
-	recorded, err := r.RecordPointEvent(s, streakEvent("sha256:pe-write-1", ts, 11772), 11772, streakAnnotation(450))
+	recorded, err := r.RecordPointEvent(s, streakEvent("sha256:"+s+"-1", ts, 11772), 11772, streakAnnotation(450))
 	if err != nil {
 		t.Fatalf("RecordPointEvent: %v", err)
 	}
@@ -143,13 +156,14 @@ func TestRecordPointEventWritesLedgerSampleAndAnnotationTogether(t *testing.T) {
 // sample, no second annotation, one exact earning.
 func TestRecordPointEventDuplicateIdentityWritesNothing(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-dup-streamer"
+	s := uniqueName("pe-dup")
+	id := "sha256:" + s
 	ts := time.Now().Add(-time.Hour)
 
-	if rec, err := r.RecordPointEvent(s, streakEvent("sha256:pe-dup", ts, 11772), 11772, streakAnnotation(450)); err != nil || !rec {
+	if rec, err := r.RecordPointEvent(s, streakEvent(id, ts, 11772), 11772, streakAnnotation(450)); err != nil || !rec {
 		t.Fatalf("first delivery: recorded=%v err=%v", rec, err)
 	}
-	replay := streakEvent("sha256:pe-dup", ts.Add(time.Minute), 11784)
+	replay := streakEvent(id, ts.Add(time.Minute), 11784)
 	rec, err := r.RecordPointEvent(s, replay, 11784, streakAnnotation(450))
 	if err != nil {
 		t.Fatalf("replay must not error: %v", err)
@@ -158,7 +172,7 @@ func TestRecordPointEventDuplicateIdentityWritesNothing(t *testing.T) {
 		t.Fatal("replay of the same identity reported as recorded")
 	}
 
-	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-dup"); n != 1 {
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, id); n != 1 {
 		t.Fatalf("ledger rows for the identity = %d, want 1", n)
 	}
 	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
@@ -179,12 +193,12 @@ func TestRecordPointEventDuplicateIdentityWritesNothing(t *testing.T) {
 // events with identical amount, reason and timestamp are two facts.
 func TestRecordPointEventDistinctIdentitiesSameAmountBothKept(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-distinct-streamer"
+	s := uniqueName("pe-distinct")
 	ts := time.Now().Add(-time.Hour)
 
-	for _, id := range []string{"sha256:pe-distinct-a", "sha256:pe-distinct-b"} {
-		if rec, err := r.RecordPointEvent(s, streakEvent(id, ts, 11772), 11772, nil); err != nil || !rec {
-			t.Fatalf("%s: recorded=%v err=%v", id, rec, err)
+	for _, suffix := range []string{"-a", "-b"} {
+		if rec, err := r.RecordPointEvent(s, streakEvent("sha256:"+s+suffix, ts, 11772), 11772, nil); err != nil || !rec {
+			t.Fatalf("%s: recorded=%v err=%v", suffix, rec, err)
 		}
 	}
 	exact, _ := r.ExactEarningsBetween(s, time.Time{}, time.Time{})
@@ -202,27 +216,78 @@ func TestRecordPointEventDistinctIdentitiesSameAmountBothKept(t *testing.T) {
 // purged writes nothing and cannot recreate the streamer row.
 func TestRecordPointEventTombstonedIsRefused(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-fenced-streamer"
+	s := uniqueName("pe-fenced")
 	r.Tombstone(s)
-	rec, err := r.RecordPointEvent(s, streakEvent("sha256:pe-fenced", time.Now(), 1), 1, streakAnnotation(450))
+	rec, err := r.RecordPointEvent(s, streakEvent("sha256:"+s, time.Now(), 1), 1, streakAnnotation(450))
 	if !errors.Is(err, ErrStreamerDeleted) || rec {
 		t.Fatalf("tombstoned write: recorded=%v err=%v, want ErrStreamerDeleted", rec, err)
 	}
 	if n := countRows(t, r, `SELECT COUNT(*) FROM streamers WHERE name = ?`, s); n != 0 {
 		t.Fatal("a fenced point event recreated the streamer row")
 	}
-	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-fenced"); n != 0 {
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:"+s); n != 0 {
 		t.Fatal("a fenced point event wrote a ledger row")
+	}
+	// The timeline-only marker takes the same fence.
+	if err := r.RecordPointMarker(s, time.Now().UnixMilli(), *streakAnnotation(450)); !errors.Is(err, ErrStreamerDeleted) {
+		t.Fatalf("tombstoned marker: err=%v, want ErrStreamerDeleted", err)
+	}
+	if n := countRows(t, r, `SELECT COUNT(*) FROM streamers WHERE name = ?`, s); n != 0 {
+		t.Fatal("a fenced point marker recreated the streamer row")
+	}
+}
+
+// TestRecordPointEventNonConflictFailureSurfaces: only the event_id conflict
+// is swallowed as a duplicate. Any other constraint failure inside the ledger
+// insert (here a CHECK standing in for one, on a private copy of the table)
+// surfaces as an error, is never classified as a duplicate, and rolls the
+// timeline sample back with it — and the identity is not consumed, so a later
+// clean write of the same event still lands. An `INSERT OR IGNORE` would
+// swallow the CHECK violation too and report a false duplicate.
+func TestRecordPointEventNonConflictFailureSurfaces(t *testing.T) {
+	r, db := openPrivateRepo(t, t.TempDir())
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`DROP TABLE point_events`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE point_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		streamer_id INTEGER NOT NULL,
+		event_id TEXT NOT NULL UNIQUE,
+		timestamp INTEGER NOT NULL,
+		reason_code TEXT NOT NULL CHECK (reason_code <> 'POISON'),
+		total_points INTEGER NOT NULL,
+		balance_after INTEGER,
+		points_id INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	s := uniqueName("pe-nonconflict")
+	id := "sha256:" + s
+	poison := PointEvent{EventID: id, Timestamp: 1, ReasonCode: "POISON", TotalPoints: 5}
+	rec, err := r.RecordPointEvent(s, poison, 100, nil)
+	if err == nil || rec {
+		t.Fatalf("poisoned insert: recorded=%v err=%v, want an error and no row", rec, err)
+	}
+	if errors.Is(err, errDuplicatePointEvent) {
+		t.Fatalf("a non-conflict failure was classified as a duplicate: %v", err)
+	}
+	if n := countRows(t, r, `SELECT COUNT(*) FROM points p JOIN streamers st ON st.id = p.streamer_id WHERE st.name = ?`, s); n != 0 {
+		t.Fatalf("timeline sample survived the rolled-back ledger insert (%d rows)", n)
+	}
+	good := PointEvent{EventID: id, Timestamp: 2, ReasonCode: "WATCH", TotalPoints: 5}
+	if rec, err := r.RecordPointEvent(s, good, 100, nil); err != nil || !rec {
+		t.Fatalf("clean write after a failed one: recorded=%v err=%v, want recorded", rec, err)
 	}
 }
 
 // TestRecordPointEventRefusesEmptyIdentity: no identity, no exact fact.
 func TestRecordPointEventRefusesEmptyIdentity(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-noid-streamer"
+	s := uniqueName("pe-noid")
 	rec, err := r.RecordPointEvent(s, PointEvent{ReasonCode: "WATCH", TotalPoints: 12, Timestamp: time.Now().UnixMilli()}, 100, nil)
-	if err == nil || rec {
-		t.Fatalf("empty identity: recorded=%v err=%v, want an error and nothing recorded", rec, err)
+	if !errors.Is(err, errPointEventNoIdentity) || rec {
+		t.Fatalf("empty identity: recorded=%v err=%v, want errPointEventNoIdentity and nothing recorded", rec, err)
 	}
 	if samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0); len(samples) != 0 {
 		t.Fatalf("empty-identity event wrote a sample: %+v", samples)
@@ -234,8 +299,8 @@ func TestRecordPointEventRefusesEmptyIdentity(t *testing.T) {
 // caller's display balance.
 func TestRecordPointEventUnknownBalanceIsNull(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-nobalance-streamer"
-	ev := PointEvent{EventID: "sha256:pe-nobalance", Timestamp: time.Now().UnixMilli(), ReasonCode: "CLAIM", TotalPoints: 50}
+	s := uniqueName("pe-nobalance")
+	ev := PointEvent{EventID: "sha256:" + s, Timestamp: time.Now().UnixMilli(), ReasonCode: "CLAIM", TotalPoints: 50}
 	if rec, err := r.RecordPointEvent(s, ev, 777, nil); err != nil || !rec {
 		t.Fatalf("recorded=%v err=%v", rec, err)
 	}
@@ -252,10 +317,11 @@ func TestRecordPointEventUnknownBalanceIsNull(t *testing.T) {
 // TestExactEarningsBetweenAggregatesInRangeByCanonicalReason: the SQL
 // aggregation sums event-local amounts per canonical reason (unknown reasons
 // pool into OTHER, never vanish), counts positive events only, reports every
-// row in Events, honors the window, and reports the earliest in-range event.
+// row in Events (zero and negative amounts included), honors the window, and
+// reports the earliest in-range event.
 func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-agg-streamer"
+	s := uniqueName("pe-agg")
 	base := time.Now().Add(-2 * time.Hour)
 	events := []struct {
 		id     string
@@ -263,18 +329,19 @@ func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 		amount int
 		at     time.Duration
 	}{
-		{"agg-old", "WATCH", 12, -48 * time.Hour}, // outside the window
-		{"agg-1", "WATCH", 12, 0},
-		{"agg-2", "WATCH", 12, time.Minute},
-		{"agg-3", "CLAIM", 50, 2 * time.Minute},
-		{"agg-4", "RAID", 250, 3 * time.Minute},
-		{"agg-5", "WATCH_STREAK", 450, 4 * time.Minute},
-		{"agg-6", "PREDICTION", 1000, 5 * time.Minute},
-		{"agg-7", "WEEKLY_REWARDS", 7, 6 * time.Minute}, // unknown reason: OTHER, still exact
-		{"agg-8", "WATCH", 0, 7 * time.Minute},          // accepted fact, not an earning
+		{"old", "WATCH", 12, -48 * time.Hour}, // outside the window
+		{"1", "WATCH", 12, 0},
+		{"2", "WATCH", 12, time.Minute},
+		{"3", "CLAIM", 50, 2 * time.Minute},
+		{"4", "RAID", 250, 3 * time.Minute},
+		{"5", "WATCH_STREAK", 450, 4 * time.Minute},
+		{"6", "PREDICTION", 1000, 5 * time.Minute},
+		{"7", "WEEKLY_REWARDS", 7, 6 * time.Minute}, // unknown reason: OTHER, still exact
+		{"8", "WATCH", 0, 7 * time.Minute},          // accepted fact, not an earning
+		{"9", "CLAIM", -50, 8 * time.Minute},        // accepted fact, never an earning
 	}
 	for _, e := range events {
-		ev := PointEvent{EventID: "sha256:" + e.id, Timestamp: base.Add(e.at).UnixMilli(), ReasonCode: e.reason, TotalPoints: e.amount}
+		ev := PointEvent{EventID: "sha256:" + s + "-" + e.id, Timestamp: base.Add(e.at).UnixMilli(), ReasonCode: e.reason, TotalPoints: e.amount}
 		if rec, err := r.RecordPointEvent(s, ev, 0, nil); err != nil || !rec {
 			t.Fatalf("%s: recorded=%v err=%v", e.id, rec, err)
 		}
@@ -293,7 +360,7 @@ func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 			{Reason: "WATCH", Gained: 24, Count: 2},
 			{Reason: "OTHER", Gained: 7, Count: 1},
 		},
-		Events: 8,
+		Events: 9,
 		Since:  base.UnixMilli(),
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -301,7 +368,7 @@ func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 	}
 
 	// An unknown streamer and an empty window are empty, not errors.
-	if empty, err := r.ExactEarningsBetween("pe-agg-nobody", time.Time{}, time.Time{}); err != nil || empty.Events != 0 || empty.Breakdown != nil || empty.Since != 0 {
+	if empty, err := r.ExactEarningsBetween(uniqueName("pe-agg-nobody"), time.Time{}, time.Time{}); err != nil || empty.Events != 0 || empty.Breakdown != nil || empty.Since != 0 {
 		t.Fatalf("unknown streamer = %+v err=%v, want empty", empty, err)
 	}
 	if empty, _ := r.ExactEarningsBetween(s, base.Add(2*time.Hour), base.Add(3*time.Hour)); empty.Events != 0 || empty.Breakdown != nil {
@@ -315,15 +382,15 @@ func TestExactEarningsBetweenAggregatesInRangeByCanonicalReason(t *testing.T) {
 // deltas depend on that order being stable.
 func TestGetPointSamplesFlagsExactAndOrdersSameMillisecond(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-order-streamer"
+	s := uniqueName("pe-order")
 	ts := time.Now().Add(-time.Hour)
 
 	seedPoint(t, r, s, ts, 1000, "WATCH") // legacy
-	if _, err := r.RecordPointEvent(s, streakEvent("sha256:pe-order-1", ts, 1450), 1450, nil); err != nil {
+	if _, err := r.RecordPointEvent(s, streakEvent("sha256:"+s+"-1", ts, 1450), 1450, nil); err != nil {
 		t.Fatal(err)
 	}
 	seedPoint(t, r, s, ts, 1400, "Spent") // legacy spend at the same ms
-	if _, err := r.RecordPointEvent(s, streakEvent("sha256:pe-order-2", ts, 1850), 1850, nil); err != nil {
+	if _, err := r.RecordPointEvent(s, streakEvent("sha256:"+s+"-2", ts, 1850), 1850, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -409,7 +476,9 @@ func TestEstimateLegacyBreakdownSkipsExactAndSpent(t *testing.T) {
 // TestComposeEarningsCoverageMatrix pins the coverage contract: exact is
 // claimed only for a range with exact events, no legacy earning sample and a
 // complete series; a mixed range reports both accountings separately; a
-// truncated series never turns the legacy part into zero or into exactness.
+// legacy-only range reports its estimate once (as breakdown) so nothing can
+// be summed; a truncated series never turns the legacy part into zero or
+// into exactness.
 func TestComposeEarningsCoverageMatrix(t *testing.T) {
 	exactShares := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 1350, Count: 3}}
 	legacyShares := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 462, Count: 1}}
@@ -431,7 +500,7 @@ func TestComposeEarningsCoverageMatrix(t *testing.T) {
 			EarningsAccounting{Coverage: EarningsCoverageMixed, Exact: true, ExactSince: 1700000000000, LegacyStatus: LegacyStatusEstimated}},
 		{"mixed with unattributable legacy baseline", exact, LegacyEstimate{Samples: 1}, false, exactShares, nil,
 			EarningsAccounting{Coverage: EarningsCoverageMixed, Exact: true, ExactSince: 1700000000000, LegacyStatus: LegacyStatusEstimated}},
-		{"legacy only is an estimate", ExactEarnings{}, legacy, false, legacyShares, legacyShares,
+		{"legacy only is an estimate reported once", ExactEarnings{}, legacy, false, legacyShares, nil,
 			EarningsAccounting{Coverage: EarningsCoverageLegacy, Exact: false, LegacyStatus: LegacyStatusEstimated}},
 		{"nothing", ExactEarnings{}, LegacyEstimate{}, false, nil, nil,
 			EarningsAccounting{Coverage: EarningsCoverageNone, Exact: false, LegacyStatus: LegacyStatusNone}},
@@ -493,14 +562,44 @@ func TestPruneBeforeRemovesExpiredPointEvents(t *testing.T) {
 	}
 }
 
+// TestServiceRecordPointEventTriggersRetentionSweep: the ledger write is now
+// the frequent analytics write, so it must drive the throttled retention
+// sweep exactly as RecordPoints does — otherwise an install whose history is
+// entirely exact events would never prune.
+func TestServiceRecordPointEventTriggersRetentionSweep(t *testing.T) {
+	r, db := openPrivateRepo(t, t.TempDir())
+	defer func() { _ = db.Close() }()
+	fixed := time.Now()
+	svc := &Service{repo: r, retentionDays: 30, now: func() time.Time { return fixed }}
+	st := models.NewStreamer("pe-svc-retention", models.DefaultStreamerSettings())
+
+	stale := streakEvent("sha256:pe-svc-retention-stale", fixed.Add(-40*24*time.Hour), 1000)
+	if rec, err := r.RecordPointEvent(st.GetUsername(), stale, 1000, streakAnnotation(450)); err != nil || !rec {
+		t.Fatalf("seed stale: recorded=%v err=%v", rec, err)
+	}
+
+	fresh := PointEvent{EventID: "sha256:pe-svc-retention-fresh", ReasonCode: "WATCH", TotalPoints: 12, BalanceAfter: 1012, BalanceKnown: true}
+	if rec, err := svc.RecordPointEvent(st, fresh); err != nil || !rec {
+		t.Fatalf("fresh: recorded=%v err=%v", rec, err)
+	}
+
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, stale.EventID); n != 0 {
+		t.Fatal("RecordPointEvent did not trigger the retention sweep: the stale ledger row survived")
+	}
+	exact, _ := r.ExactEarningsBetween(st.GetUsername(), time.Time{}, time.Time{})
+	if exact.Events != 1 || exact.Breakdown[0].Reason != "WATCH" {
+		t.Fatalf("exact earnings after the sweep = %+v, want only the fresh WATCH event", exact)
+	}
+}
+
 // TestDeleteStreamerPurgesPointEventsAndFenceHolds: the purge removes the
 // ledger rows with everything else in one transaction, and a late event that
 // lost the race with the tombstone cannot resurrect any of it.
 func TestDeleteStreamerPurgesPointEventsAndFenceHolds(t *testing.T) {
 	r := newTestRepo(t)
-	const victim, keep = "pe-del-victim", "pe-del-keep"
+	victim, keep := uniqueName("pe-del-victim"), uniqueName("pe-del-keep")
 	for _, s := range []string{victim, keep} {
-		if _, err := r.RecordPointEvent(s, streakEvent("sha256:pe-del-"+s, time.Now(), 1450), 1450, streakAnnotation(450)); err != nil {
+		if _, err := r.RecordPointEvent(s, streakEvent("sha256:"+s, time.Now(), 1450), 1450, streakAnnotation(450)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -509,13 +608,13 @@ func TestDeleteStreamerPurgesPointEventsAndFenceHolds(t *testing.T) {
 	if err != nil || !existed {
 		t.Fatalf("delete: existed=%v err=%v", existed, err)
 	}
-	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-del-"+victim); n != 0 {
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:"+victim); n != 0 {
 		t.Fatal("victim's ledger row survived the purge (orphan point_events)")
 	}
-	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-del-"+keep); n != 1 {
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:"+keep); n != 1 {
 		t.Fatal("unrelated streamer's ledger row was purged")
 	}
-	late, err := r.RecordPointEvent(victim, streakEvent("sha256:pe-del-late", time.Now(), 1900), 1900, nil)
+	late, err := r.RecordPointEvent(victim, streakEvent("sha256:"+victim+"-late", time.Now(), 1900), 1900, nil)
 	if !errors.Is(err, ErrStreamerDeleted) || late {
 		t.Fatalf("late event after purge: recorded=%v err=%v, want ErrStreamerDeleted", late, err)
 	}
@@ -530,9 +629,9 @@ func TestDeleteStreamerPurgesPointEventsAndFenceHolds(t *testing.T) {
 // a single ledger row.
 func TestRenameStreamerPreservesPointEvents(t *testing.T) {
 	r := newTestRepo(t)
-	old, newName := "pe-rename-old", "pe-rename-new"
+	old, newName := uniqueName("pe-rename-old"), uniqueName("pe-rename-new")
 	ts := time.Now().Add(-time.Hour)
-	if _, err := r.RecordPointEvent(old, streakEvent("sha256:pe-rename", ts, 1450), 1450, streakAnnotation(450)); err != nil {
+	if _, err := r.RecordPointEvent(old, streakEvent("sha256:"+old, ts, 1450), 1450, streakAnnotation(450)); err != nil {
 		t.Fatal(err)
 	}
 	before := readLedger(t, r, old)
@@ -554,12 +653,13 @@ func TestRenameStreamerPreservesPointEvents(t *testing.T) {
 
 // TestRecordPointEventConcurrentSameIdentityExactlyOneWinner: concurrent
 // deliveries of one identity (the pool can dispatch replays on more than one
-// connection generation) serialize on the single SQLite connection and exactly
-// one commits — no partial sample or marker from the losers.
+// connection generation) serialize on the repository write mutex — and behind
+// it the single SQLite connection — and exactly one commits: no partial
+// sample or marker from the losers.
 func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 	r := newTestRepo(t)
-	const s = "pe-race-streamer"
-	ev := streakEvent("sha256:pe-race", time.Now(), 1450)
+	s := uniqueName("pe-race")
+	ev := streakEvent("sha256:"+s, time.Now(), 1450)
 
 	const workers = 32
 	var wg sync.WaitGroup
@@ -586,7 +686,7 @@ func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 	if recordedCount != 1 {
 		t.Fatalf("recorded winners = %d, want exactly 1", recordedCount)
 	}
-	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:pe-race"); n != 1 {
+	if n := countRows(t, r, `SELECT COUNT(*) FROM point_events WHERE event_id = ?`, "sha256:"+s); n != 1 {
 		t.Fatalf("ledger rows = %d, want 1", n)
 	}
 	samples, _ := r.GetPointSamples(s, time.Time{}, time.Time{}, 0)
@@ -601,12 +701,7 @@ func TestRecordPointEventConcurrentSameIdentityExactlyOneWinner(t *testing.T) {
 // without touching the shared package handle.
 func openPrivateRepo(t *testing.T, dir string) (*SQLiteRepository, *database.DB) {
 	t.Helper()
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dir, "miner.db"))
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	sqlDB.SetMaxOpenConns(1)
-	db := &database.DB{DB: sqlDB}
+	db := openPrivateDB(t, filepath.Join(dir, "miner.db"))
 	repo, err := NewSQLiteRepository(db, dir)
 	if err != nil {
 		t.Fatalf("new repo: %v", err)
@@ -626,6 +721,73 @@ func TestRecordPointEventAfterCloseIsRefusedTyped(t *testing.T) {
 	if !errors.Is(err, database.ErrClosed) || rec {
 		t.Fatalf("write after close: recorded=%v err=%v, want database.ErrClosed", rec, err)
 	}
+	// The timeline-only marker and sample are refused by the same barrier,
+	// typed.
+	if err := r.RecordPointMarker("pe-closed", time.Now().UnixMilli(), *streakAnnotation(450)); !errors.Is(err, database.ErrClosed) {
+		t.Fatalf("marker after close: err=%v, want database.ErrClosed", err)
+	}
+	if err := r.RecordPoints("pe-closed", 1, "WATCH"); !errors.Is(err, database.ErrClosed) {
+		t.Fatalf("sample after close: err=%v, want database.ErrClosed", err)
+	}
+}
+
+// levelRecorder is a slog.Handler that records every message with its
+// severity so a test can pin "each path logged exactly at Debug, and nothing
+// was logged above Debug".
+type levelRecorder struct {
+	mu         sync.Mutex
+	debug      []string
+	aboveDebug []string
+}
+
+func (h *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *levelRecorder) Handle(_ context.Context, rec slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if rec.Level > slog.LevelDebug {
+		h.aboveDebug = append(h.aboveDebug, rec.Message)
+	} else {
+		h.debug = append(h.debug, rec.Message)
+	}
+	return nil
+}
+func (h *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelRecorder) WithGroup(string) slog.Handler      { return h }
+
+// TestServiceRecordPointEventAfterCloseIsDroppedTyped exercises the service
+// seam of the close barrier: a handler that outlived shutdown gets the typed
+// refusal back (nothing partial), and every analytics write path — ledger,
+// marker, timeline sample and the retention sweep behind it — drops at debug
+// level, never as a warning or error, because it is the expected teardown
+// race rather than a fault.
+func TestServiceRecordPointEventAfterCloseIsDroppedTyped(t *testing.T) {
+	r, db := openPrivateRepo(t, t.TempDir())
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	logs := &levelRecorder{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	svc := &Service{repo: r, now: time.Now, retentionDays: 1}
+	st := models.NewStreamer("pe-svc-closed", models.DefaultStreamerSettings())
+	rec, err := svc.RecordPointEvent(st, streakEvent("sha256:pe-svc-closed", time.Now(), 1))
+	if !errors.Is(err, database.ErrClosed) || rec {
+		t.Fatalf("service write after close: recorded=%v err=%v, want database.ErrClosed", rec, err)
+	}
+	svc.RecordPointMarker(st, "WATCH_STREAK", 450) // must not panic or reopen anything
+	svc.RecordPoints(st, "WATCH")                  // timeline-only path
+	svc.maybePrune()                               // the retention sweep behind the writes
+	want := []string{
+		"Dropping point event after database close",
+		"Dropping point marker after database close",
+		"Dropping timeline sample after database close",
+		"Skipping analytics retention sweep after database close",
+	}
+	if !reflect.DeepEqual(logs.debug, want) || len(logs.aboveDebug) != 0 {
+		t.Fatalf("after-close writes logged debug=%q aboveDebug=%q; want exactly %q at debug and nothing above", logs.debug, logs.aboveDebug, want)
+	}
 }
 
 // TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance is the
@@ -636,25 +798,26 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 	r := newTestRepo(t)
 	fixed := time.Now().Add(-time.Hour)
 	svc := &Service{repo: r, now: func() time.Time { return fixed }}
-	st := models.NewStreamer("pe-svc-mutable", models.DefaultStreamerSettings())
+	login := uniqueName("pe-svc-mutable")
+	st := models.NewStreamer(login, models.DefaultStreamerSettings())
 	st.SetChannelPoints(999_999) // stale/mutated shared state
 
-	ev := PointEvent{EventID: "sha256:pe-svc-mutable", ReasonCode: "WATCH_STREAK", TotalPoints: 450, BalanceAfter: 11772, BalanceKnown: true}
+	ev := PointEvent{EventID: "sha256:" + login, ReasonCode: "WATCH_STREAK", TotalPoints: 450, BalanceAfter: 11772, BalanceKnown: true}
 	rec, err := svc.RecordPointEvent(st, ev)
 	if err != nil || !rec {
 		t.Fatalf("recorded=%v err=%v", rec, err)
 	}
 	st.SetChannelPoints(5)
 
-	ledger := readLedger(t, r, "pe-svc-mutable")
+	ledger := readLedger(t, r, login)
 	if len(ledger) != 1 || ledger[0].total != 450 || !ledger[0].balanceAfter.Valid || ledger[0].balanceAfter.Int64 != 11772 || ledger[0].timestamp != fixed.UnixMilli() {
 		t.Fatalf("ledger = %+v, want total 450, balance_after 11772, stamped by the service clock", ledger)
 	}
-	samples, _ := r.GetPointSamples("pe-svc-mutable", time.Time{}, time.Time{}, 0)
+	samples, _ := r.GetPointSamples(login, time.Time{}, time.Time{}, 0)
 	if len(samples) != 1 || samples[0].Balance != 11772 || !samples[0].Exact {
 		t.Fatalf("timeline sample = %+v, want the frame's 11772, never the streamer's 999999/5", samples)
 	}
-	anns, _ := r.GetAnnotationRecords("pe-svc-mutable", time.Time{}, time.Time{})
+	anns, _ := r.GetAnnotationRecords(login, time.Time{}, time.Time{})
 	if len(anns) != 1 || anns[0].Reason != "+450 - Watch Streak" || anns[0].Color != annotationColors["WATCH_STREAK"] {
 		t.Fatalf("annotation = %+v, want '+450 - Watch Streak' in the streak colour", anns)
 	}
@@ -662,28 +825,28 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 	// Without a wire balance the timeline sample falls back to the streamer's
 	// current balance (a display value), while the ledger keeps it unknown.
 	st.SetChannelPoints(4242)
-	rec, err = svc.RecordPointEvent(st, PointEvent{EventID: "sha256:pe-svc-nobal", ReasonCode: "RAID", TotalPoints: 250})
+	rec, err = svc.RecordPointEvent(st, PointEvent{EventID: "sha256:" + login + "-nobal", ReasonCode: "RAID", TotalPoints: 250})
 	if err != nil || !rec {
 		t.Fatalf("recorded=%v err=%v", rec, err)
 	}
-	ledger = readLedger(t, r, "pe-svc-mutable")
+	ledger = readLedger(t, r, login)
 	if len(ledger) != 2 || ledger[1].balanceAfter.Valid || ledger[1].total != 250 {
 		t.Fatalf("ledger = %+v, want a second RAID row with NULL balance_after", ledger)
 	}
-	samples, _ = r.GetPointSamples("pe-svc-mutable", time.Time{}, time.Time{}, 0)
+	samples, _ = r.GetPointSamples(login, time.Time{}, time.Time{}, 0)
 	if len(samples) != 2 || samples[1].Balance != 4242 {
 		t.Fatalf("samples = %+v, want the fallback display balance 4242 for the balance-less frame", samples)
 	}
-	anns, _ = r.GetAnnotationRecords("pe-svc-mutable", time.Time{}, time.Time{})
+	anns, _ = r.GetAnnotationRecords(login, time.Time{}, time.Time{})
 	if len(anns) != 2 || anns[1].Type != "RAID" || anns[1].Reason != "+250 - Raid" {
 		t.Fatalf("annotations = %+v, want a RAID marker '+250 - Raid'", anns)
 	}
 
 	// Plain WATCH/CLAIM/PREDICTION events carry no chart marker.
-	if _, err := svc.RecordPointEvent(st, PointEvent{EventID: "sha256:pe-svc-watch", ReasonCode: "WATCH", TotalPoints: 12}); err != nil {
+	if _, err := svc.RecordPointEvent(st, PointEvent{EventID: "sha256:" + login + "-watch", ReasonCode: "WATCH", TotalPoints: 12}); err != nil {
 		t.Fatal(err)
 	}
-	if anns, _ = r.GetAnnotationRecords("pe-svc-mutable", time.Time{}, time.Time{}); len(anns) != 2 {
+	if anns, _ = r.GetAnnotationRecords(login, time.Time{}, time.Time{}); len(anns) != 2 {
 		t.Fatalf("a WATCH event wrote a marker: %+v", anns)
 	}
 }
@@ -694,24 +857,52 @@ func TestServiceRecordPointEventUsesEventLocalValuesNotStreamerBalance(t *testin
 func TestServiceRecordPointEventRejectsEmptyIdentityAndReportsDuplicate(t *testing.T) {
 	r := newTestRepo(t)
 	svc := &Service{repo: r, now: time.Now}
-	st := models.NewStreamer("pe-svc-ident", models.DefaultStreamerSettings())
+	login := uniqueName("pe-svc-ident")
+	st := models.NewStreamer(login, models.DefaultStreamerSettings())
 
-	if rec, err := svc.RecordPointEvent(st, PointEvent{ReasonCode: "WATCH", TotalPoints: 12}); err == nil || rec {
-		t.Fatalf("identity-less event: recorded=%v err=%v, want error", rec, err)
+	if rec, err := svc.RecordPointEvent(st, PointEvent{ReasonCode: "WATCH", TotalPoints: 12}); !errors.Is(err, errPointEventNoIdentity) || rec {
+		t.Fatalf("identity-less event: recorded=%v err=%v, want errPointEventNoIdentity", rec, err)
 	}
-	if samples, _ := r.GetPointSamples("pe-svc-ident", time.Time{}, time.Time{}, 0); len(samples) != 0 {
+	if samples, _ := r.GetPointSamples(login, time.Time{}, time.Time{}, 0); len(samples) != 0 {
 		t.Fatalf("identity-less event wrote a sample: %+v", samples)
 	}
 
-	ev := PointEvent{EventID: "sha256:pe-svc-ident-1", ReasonCode: "CLAIM", TotalPoints: 50, BalanceAfter: 150, BalanceKnown: true}
+	ev := PointEvent{EventID: "sha256:" + login + "-1", ReasonCode: "CLAIM", TotalPoints: 50, BalanceAfter: 150, BalanceKnown: true}
 	if rec, err := svc.RecordPointEvent(st, ev); err != nil || !rec {
 		t.Fatalf("first: recorded=%v err=%v", rec, err)
 	}
 	if rec, err := svc.RecordPointEvent(st, ev); err != nil || rec {
 		t.Fatalf("replay: recorded=%v err=%v, want (false, nil)", rec, err)
 	}
-	exact, _ := r.ExactEarningsBetween("pe-svc-ident", time.Time{}, time.Time{})
+	exact, _ := r.ExactEarningsBetween(login, time.Time{}, time.Time{})
 	if exact.Events != 1 {
 		t.Fatalf("exact earnings after replay = %+v, want one event", exact)
+	}
+}
+
+// TestServiceRecordPointMarkerWritesOnlyStreakAndRaidMarkers: the timeline-only
+// fallback marker reuses the ledger's marker table, so a frame that earned an
+// exact amount but could not be admitted still gets the same "+N - Watch
+// Streak" / "+N - Raid" text, and nothing else gets a marker.
+func TestServiceRecordPointMarkerWritesOnlyStreakAndRaidMarkers(t *testing.T) {
+	r := newTestRepo(t)
+	svc := &Service{repo: r, now: time.Now}
+	login := uniqueName("pe-svc-marker")
+	st := models.NewStreamer(login, models.DefaultStreamerSettings())
+
+	svc.RecordPointMarker(st, "WATCH_STREAK", 450)
+	svc.RecordPointMarker(st, "RAID", 250)
+	svc.RecordPointMarker(st, "WATCH", 12)
+	svc.RecordPointMarker(st, "CLAIM", 50)
+
+	anns, err := r.GetAnnotationRecords(login, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(anns) != 2 || anns[0].Reason != "+450 - Watch Streak" || anns[1].Reason != "+250 - Raid" {
+		t.Fatalf("annotations = %+v, want exactly the streak and raid markers", anns)
+	}
+	if exact, _ := r.ExactEarningsBetween(login, time.Time{}, time.Time{}); exact.Events != 0 {
+		t.Fatalf("a marker wrote a ledger row: %+v", exact)
 	}
 }

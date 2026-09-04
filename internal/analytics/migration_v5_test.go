@@ -292,7 +292,6 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 
 	// --- current release reopens: nothing lost, the rollback-era row is legacy ---
 	cur := openPrivateDB(t, path)
-	defer func() { _ = cur.Close() }()
 	repo2, err := NewSQLiteRepository(cur, filepath.Dir(path))
 	if err != nil {
 		t.Fatalf("reopen with current release: %v", err)
@@ -313,5 +312,98 @@ func TestPreLedgerBinaryOpensV5DatabaseSafely(t *testing.T) {
 	_, _, acc := ComposeEarnings(exact, EstimateLegacyBreakdown(samples), false)
 	if acc.Coverage != EarningsCoverageMixed {
 		t.Fatalf("coverage across a rollback gap = %q, want %q", acc.Coverage, EarningsCoverageMixed)
+	}
+	if err := cur.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- previous release again: its retention sweep knows nothing about
+	// point_events, so it can orphan a ledger row from its sample. Cutoff
+	// between the ledger event (ts) and the rollback-era sample (ts+1m).
+	old = openPrivateDB(t, path)
+	if err := old.RegisterModule(preLedgerModule{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"points", "annotations"} {
+		if _, err := old.Exec("DELETE FROM "+table+" WHERE timestamp < ?", ts.Add(30*time.Second).UnixMilli()); err != nil {
+			t.Fatalf("pre-ledger PruneBefore statement on %s failed on v5 schema: %v", table, err)
+		}
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- current release tolerates the orphan: the earning stays an accepted
+	// fact, the timeline shows only what survived, and its own sweep removes
+	// the orphan with everything else past the cutoff.
+	cur = openPrivateDB(t, path)
+	repo3, err := NewSQLiteRepository(cur, filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("reopen after an old-binary prune: %v", err)
+	}
+	samples, err = repo3.GetPointSamples("rollback-streamer", time.Time{}, time.Time{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 1 || samples[0].Exact {
+		t.Fatalf("after an old-binary prune samples = %+v, want the one legacy sample", samples)
+	}
+	if exact, _ = repo3.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 1 {
+		t.Fatalf("orphaned ledger row lost: exact = %+v, want 1 event", exact)
+	}
+	if n, err := repo3.PruneBefore(ts.Add(2 * time.Hour)); err != nil || n != 3 {
+		t.Fatalf("current-release sweep = %d rows, err=%v; want 3 (legacy sample, orphaned ledger row, legacy annotation)", n, err)
+	}
+	if n := countRows(t, repo3, `SELECT COUNT(*) FROM point_events`); n != 0 {
+		t.Fatalf("%d orphaned ledger rows survived the sweep", n)
+	}
+	// A new ledger row for the streamer, then the previous release purges
+	// the streamer with its own DeleteStreamerTx shape (which does not know
+	// point_events either).
+	if rec, err := repo3.RecordPointEvent("rollback-streamer", streakEvent("sha256:rollback-2", ts.Add(90*time.Minute), 1900), 1900, nil); err != nil || !rec {
+		t.Fatalf("recorded=%v err=%v", rec, err)
+	}
+	if err := cur.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old = openPrivateDB(t, path)
+	if err := old.RegisterModule(preLedgerModule{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"points", "annotations", "chat_messages", "prediction_bets"} {
+		if _, err := old.Exec("DELETE FROM "+table+" WHERE streamer_id = ?", 1); err != nil {
+			t.Fatalf("pre-ledger DeleteStreamerTx statement on %s failed on v5 schema: %v", table, err)
+		}
+	}
+	if _, err := old.Exec("DELETE FROM streamers WHERE id = ?", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- the orphan of a purged streamer is unreachable by name (streamer ids
+	// are never reused) and is swept by retention; it can never attach to a
+	// re-added streamer of the same login.
+	cur = openPrivateDB(t, path)
+	defer func() { _ = cur.Close() }()
+	repo4, err := NewSQLiteRepository(cur, filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("reopen after an old-binary purge: %v", err)
+	}
+	if exact, _ = repo4.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
+		t.Fatalf("purged streamer still reports exact earnings: %+v", exact)
+	}
+	if err := repo4.RecordPoints("rollback-streamer", 100, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	if exact, _ = repo4.ExactEarningsBetween("rollback-streamer", time.Time{}, time.Time{}); exact.Events != 0 {
+		t.Fatalf("re-added streamer inherited an orphaned ledger row: %+v", exact)
+	}
+	if n, err := repo4.PruneBefore(ts.Add(3 * time.Hour)); err != nil || n != 2 {
+		t.Fatalf("sweep past everything = %d rows, err=%v; want 2 (the purged streamer's orphaned ledger row and the re-added streamer's sample)", n, err)
+	}
+	if n := countRows(t, repo4, `SELECT COUNT(*) FROM point_events`); n != 0 {
+		t.Fatalf("%d orphaned ledger rows survived the sweep", n)
 	}
 }

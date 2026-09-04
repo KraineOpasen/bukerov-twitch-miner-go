@@ -56,7 +56,7 @@ func (s *Service) BasePath() string {
 // annotationColors is the per-event-type chart marker palette persisted with
 // every annotation (the chart falls back to it for types it has no theme
 // token for). Shared by RecordAnnotation and the event-backed markers
-// RecordPointEvent writes.
+// RecordPointEvent and RecordPointMarker write.
 var annotationColors = map[string]string{
 	"WATCH_STREAK":    "#45c1ff",
 	"PREDICTION_MADE": "#ffe045",
@@ -68,14 +68,25 @@ var annotationColors = map[string]string{
 // RecordPoints records a balance-timeline sample from the streamer's CURRENT
 // balance. It is the timeline-only path: points-spent frames (reason "Spent")
 // and points-earned frames that cannot be admitted to the exact ledger (no
-// event identity, or an amount that is not an exact integer). Such a sample
-// is never an exact earning: the Statistics page estimates it from balance
-// deltas and labels it so. Accepted points-earned events go through
-// RecordPointEvent instead.
+// event identity, an amount that is not an exact integer, or a payload
+// without Twitch's event timestamp). Such a sample is never an exact earning:
+// the Statistics page estimates it from balance deltas and labels it so.
+// Accepted points-earned events go through RecordPointEvent instead.
 func (s *Service) RecordPoints(streamer *models.Streamer, eventType string) {
 	eventType = timelineReason(eventType)
-	if err := s.repo.RecordPoints(streamer.GetUsername(), streamer.GetChannelPoints(), eventType); err != nil {
-		slog.Error("Failed to record points", "streamer", streamer.GetUsername(), "error", err)
+	login := streamer.GetUsername()
+	err := s.repo.RecordPoints(login, streamer.GetChannelPoints(), eventType)
+	switch {
+	case errors.Is(err, ErrStreamerDeleted):
+		slog.Debug("Dropping timeline sample for a deleted streamer", "streamer", login, "reason", eventType)
+	case errors.Is(err, database.ErrClosed):
+		// The expected teardown race: a handler that outlived the shutdown
+		// join. Nothing partial was written; a retention sweep would only
+		// hit the same barrier.
+		slog.Debug("Dropping timeline sample after database close", "streamer", login, "reason", eventType)
+		return
+	case err != nil:
+		slog.Error("Failed to record points", "streamer", login, "error", err)
 	}
 	s.maybePrune()
 }
@@ -94,9 +105,8 @@ func (s *Service) RecordPoints(streamer *models.Streamer, eventType string) {
 func (s *Service) RecordPointEvent(streamer *models.Streamer, ev PointEvent) (bool, error) {
 	login := streamer.GetUsername()
 	if ev.EventID == "" {
-		err := errors.New("analytics: point event has no identity")
-		slog.Error("Refusing to record point event", "streamer", login, "reason", ev.ReasonCode, "error", err)
-		return false, err
+		slog.Error("Refusing to record point event", "streamer", login, "reason", ev.ReasonCode, "error", errPointEventNoIdentity)
+		return false, errPointEventNoIdentity
 	}
 	if ev.Timestamp == 0 {
 		ev.Timestamp = s.now().UnixMilli()
@@ -106,10 +116,15 @@ func (s *Service) RecordPointEvent(streamer *models.Streamer, ev PointEvent) (bo
 		timeline = streamer.GetChannelPoints()
 	}
 
-	recorded, err := s.repo.RecordPointEvent(login, ev, timeline, pointEventAnnotation(ev))
+	recorded, err := s.repo.RecordPointEvent(login, ev, timeline, pointEventAnnotation(ev.ReasonCode, ev.TotalPoints))
 	switch {
 	case errors.Is(err, ErrStreamerDeleted):
 		slog.Debug("Dropping point event for a deleted streamer", "streamer", login, "reason", ev.ReasonCode)
+		return false, err
+	case errors.Is(err, database.ErrClosed):
+		// A handler that outlived the shutdown join: the write is refused
+		// whole (nothing partial), which is the expected teardown race.
+		slog.Debug("Dropping point event after database close", "streamer", login, "reason", ev.ReasonCode)
 		return false, err
 	case err != nil:
 		slog.Error("Failed to record point event", "streamer", login, "reason", ev.ReasonCode, "error", err)
@@ -121,13 +136,37 @@ func (s *Service) RecordPointEvent(streamer *models.Streamer, ev PointEvent) (bo
 	return recorded, nil
 }
 
+// RecordPointMarker writes the chart marker of a points-earned frame that
+// earned an exact amount but could NOT be admitted to the exact ledger (it
+// carried no event identity or no event timestamp), so the marker is still
+// built from the frame's own amount and the timeline-only history keeps its
+// streak/raid markers exactly as before the ledger existed. No-op for reasons
+// that carry no marker. Never used for ledger events — those write their
+// marker inside RecordPointEvent's transaction.
+func (s *Service) RecordPointMarker(streamer *models.Streamer, reasonCode string, totalPoints int) {
+	ann := pointEventAnnotation(reasonCode, totalPoints)
+	if ann == nil {
+		return
+	}
+	login := streamer.GetUsername()
+	err := s.repo.RecordPointMarker(login, s.now().UnixMilli(), *ann)
+	switch {
+	case errors.Is(err, ErrStreamerDeleted):
+		slog.Debug("Dropping point marker for a deleted streamer", "streamer", login, "reason", reasonCode)
+	case errors.Is(err, database.ErrClosed):
+		slog.Debug("Dropping point marker after database close", "streamer", login, "reason", reasonCode)
+	case err != nil:
+		slog.Error("Failed to record point marker", "streamer", login, "reason", reasonCode, "error", err)
+	}
+}
+
 // pointEventAnnotation builds the chart marker for the reasons that carry one
 // (WATCH_STREAK, RAID) from the event-local amount; nil for every other
 // reason. The marker text is a display fact — it is never parsed back into an
 // accounting number.
-func pointEventAnnotation(ev PointEvent) *PointEventAnnotation {
+func pointEventAnnotation(reasonCode string, totalPoints int) *PointEventAnnotation {
 	var label string
-	switch ev.ReasonCode {
+	switch reasonCode {
 	case "WATCH_STREAK":
 		label = "Watch Streak"
 	case "RAID":
@@ -136,9 +175,9 @@ func pointEventAnnotation(ev PointEvent) *PointEventAnnotation {
 		return nil
 	}
 	return &PointEventAnnotation{
-		EventType: ev.ReasonCode,
-		Text:      fmt.Sprintf("+%d - %s", ev.TotalPoints, label),
-		Color:     annotationColors[ev.ReasonCode],
+		EventType: reasonCode,
+		Text:      fmt.Sprintf("+%d - %s", totalPoints, label),
+		Color:     annotationColors[reasonCode],
 	}
 }
 
@@ -154,9 +193,9 @@ func (s *Service) RecordAnnotation(streamer *models.Streamer, eventType, text st
 }
 
 // maybePrune runs a retention sweep at most once per pruneInterval. It is called
-// from RecordPoints (the frequent write path) so cleanup happens periodically
-// without a separate polling loop; the throttle keeps it off the hot path. A
-// no-op when retention is disabled (retentionDays <= 0).
+// from RecordPointEvent and RecordPoints (the frequent write paths) so cleanup
+// happens periodically without a separate polling loop; the throttle keeps it
+// off the hot path. A no-op when retention is disabled (retentionDays <= 0).
 func (s *Service) maybePrune() {
 	if s.retentionDays <= 0 {
 		return
@@ -173,6 +212,10 @@ func (s *Service) maybePrune() {
 
 	cutoff := now.Add(-time.Duration(s.retentionDays) * 24 * time.Hour)
 	deleted, err := s.repo.PruneBefore(cutoff)
+	if errors.Is(err, database.ErrClosed) {
+		slog.Debug("Skipping analytics retention sweep after database close")
+		return
+	}
 	if err != nil {
 		slog.Error("Failed to prune analytics history", "error", err)
 		return

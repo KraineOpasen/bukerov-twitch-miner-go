@@ -245,6 +245,48 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 	if strings.Contains(breakdownFn, "rawTruncated") {
 		t.Errorf("renderBreakdown must not consult rawTruncated — the exact donut survives a truncated series:\n%s", breakdownFn)
 	}
+	// The donut never folds the separate legacy estimate into the primary
+	// breakdown, and an estimated donut marks every figure it prints.
+	if strings.Contains(breakdownFn, "legacyBreakdown") {
+		t.Errorf("renderBreakdown must not touch legacyBreakdown — exact and estimated figures are never summed:\n%s", breakdownFn)
+	}
+	for _, want := range []string{"primaryAccounting(data)", "≈", "js.stat.estimate", "aria-label"} {
+		if !strings.Contains(breakdownFn, want) {
+			t.Errorf("renderBreakdown lost its estimate-marking marker %q", want)
+		}
+	}
+	noteFn := jsFunctionBody(t, body, "function renderEarningsNote(data)", "function renderBreakdown")
+	for _, want := range []string{"js.stat.earnings.mixed_unavailable", "js.stat.earnings.mixed_none", "js.stat.earnings.legacy_none", "data.legacyBreakdown"} {
+		if !strings.Contains(noteFn, want) {
+			t.Errorf("renderEarningsNote lost its marker %q", want)
+		}
+	}
+	// Control flow, not only tokens: the unavailable branch and the
+	// nothing-attributable branch both leave the mixed case BEFORE the legacy
+	// line is computed, and a legacy-only window with an empty estimate uses
+	// the legacy_none wording instead of the estimate wording.
+	legacyLineAt := strings.Index(noteFn, "js.stat.earnings.legacy_line")
+	unavailableAt := strings.Index(noteFn, "js.stat.earnings.mixed_unavailable")
+	legacyCaseAt, mixedCaseAt := strings.Index(noteFn, "case 'legacy':"), strings.Index(noteFn, "case 'mixed':")
+	if legacyLineAt < 0 || unavailableAt < 0 || legacyCaseAt < 0 || mixedCaseAt < 0 || legacyCaseAt > mixedCaseAt {
+		t.Fatalf("renderEarningsNote lost its legacy line, unavailable branch or case order:\n%s", noteFn)
+	}
+	unavailableBreak := strings.Index(noteFn[unavailableAt:], "break;")
+	if unavailableBreak < 0 || unavailableAt+unavailableBreak > legacyLineAt {
+		t.Errorf("the unavailable branch must break before the legacy line is computed:\n%s", noteFn)
+	}
+	mixedNoneAt := strings.Index(noteFn, "js.stat.earnings.mixed_none")
+	if mixedNoneAt < 0 {
+		t.Fatalf("renderEarningsNote lost the mixed_none branch:\n%s", noteFn)
+	}
+	mixedNoneBreak := strings.Index(noteFn[mixedNoneAt:], "break;")
+	if mixedNoneBreak < 0 || mixedNoneAt+mixedNoneBreak > legacyLineAt || strings.LastIndex(noteFn, "js.stat.earnings.legacy_none") > legacyLineAt {
+		t.Errorf("the nothing-attributable branches must break before the legacy line is computed:\n%s", noteFn)
+	}
+	legacyCase := noteFn[legacyCaseAt:mixedCaseAt]
+	if !strings.Contains(legacyCase, "js.stat.earnings.legacy_none") || !strings.Contains(legacyCase, ".length") {
+		t.Errorf("a legacy-only window with nothing attributable must use the legacy_none wording:\n%s", legacyCase)
+	}
 
 	// (2) chartDownsampled must never influence KPI visibility.
 	for name, fn := range map[string]string{"renderKPIs": kpiFn, "renderEarningsKPIs": earnFn} {
@@ -260,7 +302,7 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 			t.Errorf("renderKPIs lost its balance computation marker %q", want)
 		}
 	}
-	for _, want := range []string{"primaryAccounting(data)", "share.gained", "share.count", "kpi-earned", "kpi-events", "≈", "js.stat.estimate", "'—'"} {
+	for _, want := range []string{"primaryAccounting(data)", "share.gained", "share.count", "kpi-earned", "kpi-events", "≈", "js.stat.estimate", "'—'", "shares.length > 0"} {
 		if !strings.Contains(earnFn, want) {
 			t.Errorf("renderEarningsKPIs lost its computation marker %q", want)
 		}

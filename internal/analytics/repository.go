@@ -26,6 +26,11 @@ var ErrStreamerDeleted = errors.New("analytics: streamer deleted")
 // ledger row: the duplicate leaves no sample and no annotation behind either.
 var errDuplicatePointEvent = errors.New("analytics: duplicate point event")
 
+// errPointEventNoIdentity rejects a point event without an event identity: the
+// ledger's whole idempotency contract rests on event_id, so an identity-less
+// event is never an exact fact.
+var errPointEventNoIdentity = errors.New("analytics: point event has no identity")
+
 type Repository interface {
 	RecordPoints(streamer string, points int, eventType string) error
 	// RecordPointEvent persists one accepted points-earned event as the exact
@@ -41,6 +46,10 @@ type Repository interface {
 	// earliest event timestamp. Never derived from balance samples and never
 	// subject to a row cap. An unknown streamer yields an empty result.
 	ExactEarningsBetween(streamer string, startTime, endTime time.Time) (ExactEarnings, error)
+	// RecordPointMarker writes the chart marker of a points-earned frame the
+	// ledger could not admit, at the given Unix-millisecond time, through the
+	// same tombstone fence and close barrier as RecordPointEvent.
+	RecordPointMarker(streamer string, at int64, ann PointEventAnnotation) error
 	RecordAnnotation(streamer string, eventType, text, color string) error
 	GetStreamerData(streamer string) (*StreamerData, error)
 	GetStreamerDataFiltered(streamer string, startTime, endTime time.Time) (*StreamerData, error)
@@ -266,7 +275,7 @@ func NewSQLiteRepository(db *database.DB, basePath string) (*SQLiteRepository, e
 }
 
 // Tombstone arms the resurrection fence for login: subsequent write paths
-// (RecordPoints/Annotation/ChatMessage/Bet) return ErrStreamerDeleted instead
+// (RecordPoints/PointEvent/Annotation/ChatMessage/Bet) return ErrStreamerDeleted instead
 // of recreating the streamers row. Because it takes mu — the same lock every
 // write holds across its check+insert — once Tombstone returns, every in-flight
 // write has finished (its row now exists, to be removed by the purge that
@@ -428,23 +437,28 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 	return existed, err
 }
 
+// RecordPoints writes one balance-timeline sample (a points-spent frame, or a
+// points-earned frame the exact ledger could not admit) through the same
+// tombstone fence and close barrier as the ledger and marker writes, so a
+// late sample after shutdown is refused typed (database.ErrClosed) instead of
+// reaching a closed driver handle.
 func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tombstonedLocked(streamer) {
 		return ErrStreamerDeleted
 	}
-
-	streamerID, err := r.getOrCreateStreamer(streamer)
-	if err != nil {
+	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		streamerID, err := r.getOrCreateStreamerTx(tx, streamer)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(
+			"INSERT INTO points (streamer_id, timestamp, points, event_type) VALUES (?, ?, ?, ?)",
+			streamerID, time.Now().UnixMilli(), points, eventType,
+		)
 		return err
-	}
-
-	_, err = r.db.Exec(
-		"INSERT INTO points (streamer_id, timestamp, points, event_type) VALUES (?, ?, ?, ?)",
-		streamerID, time.Now().UnixMilli(), points, eventType,
-	)
-	return err
+	})
 }
 
 // RecordPointEvent writes the three facts of one accepted points-earned event
@@ -455,12 +469,14 @@ func (r *SQLiteRepository) RecordPoints(streamer string, points int, eventType s
 // event-local amount. All three share ev.Timestamp.
 //
 // Idempotency is the ledger's UNIQUE(event_id): the sample is inserted first
-// so the ledger row can reference it, and when the ledger INSERT is ignored
-// the transaction is rolled back through errDuplicatePointEvent, so an exact
-// re-delivery leaves no second sample, no second row and no second marker.
-// Two concurrent deliveries of one identity serialize on the single SQLite
-// connection and exactly one commits. The tombstone fence is checked under
-// mu, like every other write path, so a purge in progress can never be
+// so the ledger row can reference it, and when the ledger INSERT hits the
+// event_id conflict (ON CONFLICT(event_id) DO NOTHING — only that conflict is
+// tolerated; any other constraint still errors) the transaction is rolled back
+// through errDuplicatePointEvent, so an exact re-delivery leaves no second
+// sample, no second row and no second marker. Two concurrent deliveries of one
+// identity serialize on the repository write mutex (and, behind it, the single
+// SQLite connection) and exactly one commits. The tombstone fence is checked
+// under mu, like every other write path, so a purge in progress can never be
 // resurrected by a late event.
 func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, timelineBalance int, ann *PointEventAnnotation) (bool, error) {
 	r.mu.Lock()
@@ -469,7 +485,7 @@ func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, time
 		return false, ErrStreamerDeleted
 	}
 	if ev.EventID == "" {
-		return false, errors.New("analytics: point event has no identity")
+		return false, errPointEventNoIdentity
 	}
 
 	recorded := false
@@ -496,9 +512,10 @@ func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, time
 			balanceAfter = ev.BalanceAfter
 		}
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO point_events
+			`INSERT INTO point_events
 			   (streamer_id, event_id, timestamp, reason_code, total_points, balance_after, points_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(event_id) DO NOTHING`,
 			streamerID, ev.EventID, ev.Timestamp, ev.ReasonCode, ev.TotalPoints, balanceAfter, sampleID,
 		)
 		if err != nil {
@@ -511,10 +528,7 @@ func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, time
 		}
 
 		if ann != nil {
-			if _, err := tx.Exec(
-				"INSERT INTO annotations (streamer_id, timestamp, text, color, event_type) VALUES (?, ?, ?, ?, ?)",
-				streamerID, ev.Timestamp, ann.Text, ann.Color, ann.EventType,
-			); err != nil {
+			if err := insertAnnotationTx(tx, streamerID, ev.Timestamp, *ann); err != nil {
 				return err
 			}
 		}
@@ -528,6 +542,39 @@ func (r *SQLiteRepository) RecordPointEvent(streamer string, ev PointEvent, time
 		return false, err
 	}
 	return recorded, nil
+}
+
+// RecordPointMarker writes the WATCH_STREAK/RAID chart marker of a
+// points-earned frame that earned an exact amount but could not be admitted to
+// the exact ledger (no identity or no event timestamp). It takes the same
+// tombstone fence and close barrier as RecordPointEvent: a marker written
+// after shutdown is refused whole with database.ErrClosed instead of reaching
+// a closed driver handle. Ledger events never use it — their marker is written
+// inside RecordPointEvent's transaction.
+func (r *SQLiteRepository) RecordPointMarker(streamer string, at int64, ann PointEventAnnotation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tombstonedLocked(streamer) {
+		return ErrStreamerDeleted
+	}
+	return r.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		streamerID, err := r.getOrCreateStreamerTx(tx, streamer)
+		if err != nil {
+			return err
+		}
+		return insertAnnotationTx(tx, streamerID, at, ann)
+	})
+}
+
+// insertAnnotationTx writes one chart annotation inside the caller's
+// transaction; shared by the ledger write and the timeline-only marker so the
+// two paths cannot drift.
+func insertAnnotationTx(tx *sql.Tx, streamerID, at int64, ann PointEventAnnotation) error {
+	_, err := tx.Exec(
+		"INSERT INTO annotations (streamer_id, timestamp, text, color, event_type) VALUES (?, ?, ?, ?, ?)",
+		streamerID, at, ann.Text, ann.Color, ann.EventType,
+	)
+	return err
 }
 
 // ExactEarningsBetween aggregates the exact ledger in SQLite: one GROUP BY
@@ -798,7 +845,9 @@ func (r *SQLiteRepository) GetAnnotationRecords(streamer string, startTime, endT
 // together, and the single transaction means a crash mid-sweep can never
 // leave a ledger row without its sample); prediction_bets is deliberately not
 // swept. Used by the retention sweep; the single-connection DB serializes it
-// against concurrent writes, and database.WithTx refuses it after shutdown.
+// against concurrent writes (a writer arriving mid-sweep waits for the whole
+// sweep, which runs at most once per pruneInterval), and database.WithTx
+// refuses it after shutdown. It takes no mu, so it never blocks Tombstone.
 func (r *SQLiteRepository) PruneBefore(cutoff time.Time) (int64, error) {
 	c := cutoff.UnixMilli()
 	var total int64

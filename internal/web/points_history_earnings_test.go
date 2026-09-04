@@ -2,8 +2,11 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,14 +14,24 @@ import (
 	"github.com/KraineOpasen/bukerov-twitch-miner-go/internal/models"
 )
 
+// earningsTestSeq keeps streamer logins and event identities unique for the
+// life of the process (the package shares one database singleton), so these
+// tests stay hermetic under `go test -count=N`.
+var earningsTestSeq atomic.Uint64
+
+func uniqueLogin(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, earningsTestSeq.Add(1))
+}
+
 // recordExact writes one exact point event for a streamer through the
 // analytics service — the production write path of an accepted points-earned
-// frame — at an explicit timestamp.
-func recordExact(t *testing.T, srv *Server, streamer, id, reason string, amount, balance int, ts time.Time) {
+// frame — at an explicit timestamp. The event identity is derived from the
+// streamer login and the suffix, so it is unique per test run.
+func recordExact(t *testing.T, srv *Server, streamer, suffix, reason string, amount, balance int, ts time.Time) {
 	t.Helper()
 	st := models.NewStreamer(streamer, models.DefaultStreamerSettings())
 	rec, err := srv.analytics.RecordPointEvent(st, analytics.PointEvent{
-		EventID:      id,
+		EventID:      "sha256:" + streamer + "-" + suffix,
 		Timestamp:    ts.UnixMilli(),
 		ReasonCode:   reason,
 		TotalPoints:  amount,
@@ -26,31 +39,106 @@ func recordExact(t *testing.T, srv *Server, streamer, id, reason string, amount,
 		BalanceKnown: true,
 	})
 	if err != nil || !rec {
-		t.Fatalf("RecordPointEvent %s: recorded=%v err=%v", id, rec, err)
+		t.Fatalf("RecordPointEvent %s/%s: recorded=%v err=%v", streamer, suffix, rec, err)
 	}
 }
 
-func fetchHistory(t *testing.T, srv *Server, path string) analytics.PointsHistory {
+func fetchRaw(t *testing.T, srv *Server, path string) []byte {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	srv.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s: status = %d, want 200; body=%s", path, rec.Code, rec.Body.String())
 	}
+	return rec.Body.Bytes()
+}
+
+func fetchHistory(t *testing.T, srv *Server, path string) analytics.PointsHistory {
+	t.Helper()
+	body := fetchRaw(t, srv, path)
 	var got analytics.PointsHistory
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, body)
 	}
 	return got
 }
 
+// TestPointsHistoryWindowBoundsExactAggregate: both endpoints hand the
+// selected range to the ledger aggregation — an exact event older than the
+// preset is absent from the breakdown and from exactSince, while an in-range
+// one is present.
+func TestPointsHistoryWindowBoundsExactAggregate(t *testing.T) {
+	srv := newStatsTestServer(t)
+	s := uniqueLogin("earn_window")
+	old := time.Now().Add(-25 * time.Hour)
+	recent := time.Now().Add(-time.Hour)
+	recordExact(t, srv, s, "old", "RAID", 250, 1250, old)
+	recordExact(t, srv, s, "recent", "WATCH_STREAK", 450, 1700, recent)
+
+	for _, path := range []string{"/api/points-history?streamer=" + s + "&range=24h", "/api/points-history/export?streamer=" + s + "&range=24h"} {
+		got := fetchHistory(t, srv, path)
+		want := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}}
+		if len(got.Breakdown) != 1 || got.Breakdown[0] != want[0] {
+			t.Fatalf("%s: breakdown = %+v, want only the in-range event %+v", path, got.Breakdown, want)
+		}
+		if got.Earnings.ExactSince != recent.UnixMilli() || got.Earnings.Coverage != analytics.EarningsCoverageExact {
+			t.Fatalf("%s: earnings = %+v, want exact coverage since the in-range event", path, got.Earnings)
+		}
+		if len(got.Points) != 1 {
+			t.Fatalf("%s: points = %+v, want only the in-range sample", path, got.Points)
+		}
+	}
+	// A wider preset includes both.
+	if got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=7d"); len(got.Breakdown) != 2 || got.Earnings.ExactSince != old.UnixMilli() {
+		t.Fatalf("7d: breakdown = %+v since %d, want both events since the older one", got.Breakdown, got.Earnings.ExactSince)
+	}
+}
+
+// TestPointsHistoryWireKeysArePinned pins the public JSON names the dashboard
+// reads, as raw bytes: a renamed or retyped struct tag would still decode
+// into the shared Go struct, so only the wire form proves the additive
+// contract (no existing key renamed; new keys exactly as documented).
+func TestPointsHistoryWireKeysArePinned(t *testing.T) {
+	srv := newStatsTestServer(t)
+	repo := srv.analytics.Repository()
+	s := uniqueLogin("earn_wire")
+	if err := repo.RecordPoints(s, 1000, "WATCH"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordPoints(s, 1050, "CLAIM"); err != nil {
+		t.Fatal(err)
+	}
+	exactAt := time.Now()
+	recordExact(t, srv, s, "1", "WATCH", 12, 1062, exactAt)
+
+	for _, path := range []string{"/api/points-history?streamer=" + s + "&range=24h", "/api/points-history/export?streamer=" + s + "&range=24h"} {
+		body := string(fetchRaw(t, srv, path))
+		for _, want := range []string{
+			`"streamer":"` + s + `"`, `"range":"24h"`, `"points":[`, `"breakdown":[{"reason":"WATCH","gained":12,"count":1}]`,
+			`"legacyBreakdown":[{"reason":"CLAIM","gained":50,"count":1}]`,
+			`"earnings":{"coverage":"mixed","exact":true,"exactSince":` + fmt.Sprint(exactAt.UnixMilli()) + `,"legacyStatus":"estimated"}`,
+			`"balance":1062,"reason":"WATCH","exact":true}`, `"rawTruncated":false`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: wire body lacks %s\nbody=%s", path, want, body)
+			}
+		}
+		// A legacy sample carries no exact key at all (omitempty), so old
+		// consumers see byte-identical sample objects.
+		if !strings.Contains(body, `"balance":1000,"reason":"WATCH"}`) {
+			t.Errorf("%s: legacy sample gained a key: %s", path, body)
+		}
+	}
+}
+
 // TestPointsHistoryLegacyOnlyRangeIsAnEstimate: history recorded before the
 // exact ledger is still served, but labelled: coverage "legacy", exact=false,
-// the breakdown IS the balance-delta estimate, no exactSince.
+// the breakdown IS the balance-delta estimate (reported once — never repeated
+// in legacyBreakdown, so nothing can be summed), no exactSince.
 func TestPointsHistoryLegacyOnlyRangeIsAnEstimate(t *testing.T) {
 	srv := newStatsTestServer(t)
 	repo := srv.analytics.Repository()
-	const s = "earn_legacy_only"
+	s := uniqueLogin("earn_legacy_only")
 	for _, p := range []struct {
 		balance int
 		reason  string
@@ -69,8 +157,8 @@ func TestPointsHistoryLegacyOnlyRangeIsAnEstimate(t *testing.T) {
 	if len(got.Breakdown) != 2 || got.Breakdown[0] != wantShares[0] || got.Breakdown[1] != wantShares[1] {
 		t.Fatalf("breakdown = %+v, want the legacy estimate %+v", got.Breakdown, wantShares)
 	}
-	if len(got.LegacyBreakdown) != 2 || got.LegacyBreakdown[0] != wantShares[0] {
-		t.Fatalf("legacyBreakdown = %+v, want the same estimate", got.LegacyBreakdown)
+	if got.LegacyBreakdown != nil {
+		t.Fatalf("legacyBreakdown = %+v, want none for a legacy-only range (the estimate is breakdown itself)", got.LegacyBreakdown)
 	}
 	for _, p := range got.Points {
 		if p.Exact {
@@ -84,11 +172,11 @@ func TestPointsHistoryLegacyOnlyRangeIsAnEstimate(t *testing.T) {
 // no legacy part.
 func TestPointsHistoryExactOnlyRange(t *testing.T) {
 	srv := newStatsTestServer(t)
-	const s = "earn_exact_only"
+	s := uniqueLogin("earn_exact_only")
 	first := time.Now().Add(-3 * time.Hour)
-	recordExact(t, srv, s, "sha256:exact-only-1", "WATCH_STREAK", 450, 11772, first)
-	recordExact(t, srv, s, "sha256:exact-only-2", "WATCH", 12, 11784, first.Add(time.Minute))
-	recordExact(t, srv, s, "sha256:exact-only-3", "WATCH_STREAK", 450, 12234, first.Add(2*time.Minute))
+	recordExact(t, srv, s, "1", "WATCH_STREAK", 450, 11772, first)
+	recordExact(t, srv, s, "2", "WATCH", 12, 11784, first.Add(time.Minute))
+	recordExact(t, srv, s, "3", "WATCH_STREAK", 450, 12234, first.Add(2*time.Minute))
 
 	got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=24h")
 	want := analytics.EarningsAccounting{Coverage: analytics.EarningsCoverageExact, Exact: true, ExactSince: first.UnixMilli(), LegacyStatus: analytics.LegacyStatusNone}
@@ -118,11 +206,9 @@ func TestPointsHistoryExactOnlyRange(t *testing.T) {
 // series — stays complete and visible.
 func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 	srv := newStatsTestServer(t)
+	srv.historyRowCap = 3
 	repo := srv.analytics.Repository()
-	const s = "earn_truncated"
-	prev := historyRowCap
-	historyRowCap = 3
-	t.Cleanup(func() { historyRowCap = prev })
+	s := uniqueLogin("earn_truncated")
 
 	// Five legacy samples first (older), then two exact events (newer): the
 	// ascending fetch with a cap of 3 never reaches the exact rows' samples.
@@ -132,8 +218,8 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 		}
 	}
 	base := time.Now()
-	recordExact(t, srv, s, "sha256:trunc-1", "WATCH_STREAK", 450, 1490, base.Add(time.Millisecond))
-	recordExact(t, srv, s, "sha256:trunc-2", "CLAIM", 50, 1540, base.Add(2*time.Millisecond))
+	recordExact(t, srv, s, "1", "WATCH_STREAK", 450, 1490, base.Add(time.Millisecond))
+	recordExact(t, srv, s, "2", "CLAIM", 50, 1540, base.Add(2*time.Millisecond))
 	time.Sleep(10 * time.Millisecond) // the request window ends at its own time.Now()
 
 	got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=24h")
@@ -153,7 +239,7 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 
 	// Without any exact event a truncated range is "unavailable" — never a
 	// silent zero and never a PASS.
-	const s2 = "earn_truncated_legacy"
+	s2 := uniqueLogin("earn_truncated_legacy")
 	for _, balance := range []int{1000, 1010, 1020, 1030} {
 		if err := repo.RecordPoints(s2, balance, "WATCH"); err != nil {
 			t.Fatal(err)
@@ -163,22 +249,56 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 	if !got2.RawTruncated || got2.Earnings.Coverage != analytics.EarningsCoverageUnavailable || got2.Breakdown != nil || got2.Earnings.Exact {
 		t.Fatalf("truncated legacy-only response = earnings %+v breakdown %+v, want unavailable with no breakdown", got2.Earnings, got2.Breakdown)
 	}
+
+	// The export applies its own cap with the same accounting rules.
+	srv.exportRowCap = 3
+	exp := fetchHistory(t, srv, "/api/points-history/export?streamer="+s+"&range=24h")
+	if !exp.RawTruncated || len(exp.Points) != 3 || exp.Earnings.Coverage != analytics.EarningsCoverageMixed || exp.Earnings.LegacyStatus != analytics.LegacyStatusUnavailable {
+		t.Fatalf("truncated export = rawTruncated %v, %d points, earnings %+v; want 3 points, mixed, legacy unavailable", exp.RawTruncated, len(exp.Points), exp.Earnings)
+	}
+	if len(exp.Breakdown) != 2 || exp.Breakdown[0] != wantShares[0] || exp.Breakdown[1] != wantShares[1] || exp.LegacyBreakdown != nil {
+		t.Fatalf("truncated export breakdown = %+v legacy %+v, want the complete exact aggregate and no legacy estimate", exp.Breakdown, exp.LegacyBreakdown)
+	}
+
+	// A zero cap (a Server built without its constructor) means the
+	// production cap, never "always truncated".
+	srv.historyRowCap, srv.exportRowCap = 0, 0
+	for _, path := range []string{"/api/points-history?streamer=" + s + "&range=24h", "/api/points-history/export?streamer=" + s + "&range=24h"} {
+		if got := fetchHistory(t, srv, path); got.RawTruncated || len(got.Points) != 7 || got.Earnings.LegacyStatus != analytics.LegacyStatusEstimated {
+			t.Fatalf("%s with zero cap: rawTruncated=%v points=%d earnings=%+v, want the complete series", path, got.RawTruncated, len(got.Points), got.Earnings)
+		}
+	}
 }
 
-// TestPointsHistoryExportCarriesExactFlags: the full-fidelity export marks
-// which samples are exact-backed, so an external tool can tell exact history
-// from legacy history without re-deriving it.
-func TestPointsHistoryExportCarriesExactFlags(t *testing.T) {
+// TestPointsHistoryExportCarriesExactFlagsAndAccounting: the full-fidelity
+// export marks which samples are exact-backed and carries the same earnings
+// accounting as the history endpoint, so an external tool never sees an
+// empty, undocumented accounting block.
+func TestPointsHistoryExportCarriesExactFlagsAndAccounting(t *testing.T) {
 	srv := newStatsTestServer(t)
 	repo := srv.analytics.Repository()
-	const s = "earn_export"
+	s := uniqueLogin("earn_export")
 	if err := repo.RecordPoints(s, 1000, "WATCH"); err != nil {
 		t.Fatal(err)
 	}
-	recordExact(t, srv, s, "sha256:export-1", "WATCH", 12, 1012, time.Now())
+	if err := repo.RecordPoints(s, 1050, "CLAIM"); err != nil {
+		t.Fatal(err)
+	}
+	exactAt := time.Now()
+	recordExact(t, srv, s, "1", "WATCH", 12, 1062, exactAt)
 
 	got := fetchHistory(t, srv, "/api/points-history/export?streamer="+s+"&range=24h")
-	if len(got.Points) != 2 || got.Points[0].Exact || !got.Points[1].Exact {
-		t.Fatalf("export points = %+v, want [legacy, exact]", got.Points)
+	if len(got.Points) != 3 || got.Points[0].Exact || got.Points[1].Exact || !got.Points[2].Exact {
+		t.Fatalf("export points = %+v, want [legacy, legacy, exact]", got.Points)
+	}
+	want := analytics.EarningsAccounting{Coverage: analytics.EarningsCoverageMixed, Exact: true, ExactSince: exactAt.UnixMilli(), LegacyStatus: analytics.LegacyStatusEstimated}
+	if got.Earnings != want {
+		t.Fatalf("export earnings = %+v, want %+v", got.Earnings, want)
+	}
+	if len(got.Breakdown) != 1 || got.Breakdown[0] != (analytics.ReasonShare{Reason: "WATCH", Gained: 12, Count: 1}) {
+		t.Fatalf("export breakdown = %+v, want the exact WATCH event only", got.Breakdown)
+	}
+	if len(got.LegacyBreakdown) != 1 || got.LegacyBreakdown[0] != (analytics.ReasonShare{Reason: "CLAIM", Gained: 50, Count: 1}) {
+		t.Fatalf("export legacyBreakdown = %+v, want the legacy CLAIM estimate reported separately", got.LegacyBreakdown)
 	}
 }

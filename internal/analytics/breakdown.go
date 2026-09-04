@@ -144,9 +144,11 @@ func EstimateLegacyBreakdown(samples []PointSample) LegacyEstimate {
 //     Breakdown is the exact aggregation.
 //   - exact events present, legacy samples present or series truncated →
 //     "mixed": Breakdown is the exact aggregation, LegacyBreakdown the
-//     estimate for the legacy part (absent when unavailable).
+//     estimate for the legacy part (absent when unavailable or when nothing
+//     could be attributed).
 //   - no exact event, legacy samples present → "legacy": Breakdown IS the
-//     estimate (Exact == false).
+//     estimate (Exact == false); LegacyBreakdown is not repeated, so no
+//     consumer can add the two and double-count.
 //   - no exact event, series truncated → "unavailable": nothing can be said.
 //   - nothing → "none".
 func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bool) (breakdown, legacyBreakdown []ReasonShare, acc EarningsAccounting) {
@@ -157,7 +159,6 @@ func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bo
 		acc.LegacyStatus = LegacyStatusUnavailable
 	case legacy.Samples > 0:
 		acc.LegacyStatus = LegacyStatusEstimated
-		legacyBreakdown = legacy.Breakdown
 	default:
 		acc.LegacyStatus = LegacyStatusNone
 	}
@@ -176,11 +177,15 @@ func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bo
 		acc.Coverage = EarningsCoverageNone
 	}
 
-	if exactPresent {
+	switch {
+	case exactPresent:
 		breakdown = exact.Breakdown
 		acc.ExactSince = exact.Since
-	} else {
-		breakdown = legacyBreakdown
+		if acc.LegacyStatus == LegacyStatusEstimated {
+			legacyBreakdown = legacy.Breakdown
+		}
+	case acc.LegacyStatus == LegacyStatusEstimated:
+		breakdown = legacy.Breakdown
 	}
 	return breakdown, legacyBreakdown, acc
 }

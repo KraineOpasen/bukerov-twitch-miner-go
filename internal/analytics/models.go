@@ -66,10 +66,13 @@ type PointEvent struct {
 	BalanceKnown bool
 }
 
-// PointEventAnnotation is the optional chart marker written in the SAME
-// transaction as its PointEvent (WATCH_STREAK and RAID grants), so the marker
-// text and the ledger row always carry the identical event-local amount and a
-// duplicate event can never leave a second marker behind.
+// PointEventAnnotation is the chart marker of a WATCH_STREAK or RAID grant,
+// built from the event-local amount. For a ledger event RecordPointEvent
+// writes it in the SAME transaction as the PointEvent, so the marker text and
+// the ledger row always carry the identical amount and a duplicate event can
+// never leave a second marker behind; for a frame the ledger could not admit
+// RecordPointMarker writes it on its own, through the same fence and close
+// barrier.
 type PointEventAnnotation struct {
 	EventType string
 	Text      string
@@ -196,9 +199,11 @@ type PointsHistory struct {
 	Breakdown []ReasonShare `json:"breakdown,omitempty"`
 	// LegacyBreakdown is the balance-delta ESTIMATE over the samples of the
 	// range that no exact event backs (history recorded before the exact
-	// ledger). Present only when Earnings.LegacyStatus is "estimated" and
-	// something could be attributed; it is reported beside Breakdown, never
-	// added to it.
+	// ledger). Present only for a MIXED range (Earnings.Exact == true and
+	// Earnings.LegacyStatus == "estimated") where something could be
+	// attributed; it is reported beside the exact Breakdown, never added to
+	// it. For a legacy-only range the estimate is Breakdown itself and is not
+	// repeated here, so no consumer can double-count by summing the two.
 	LegacyBreakdown []ReasonShare `json:"legacyBreakdown,omitempty"`
 	// Earnings qualifies Breakdown/LegacyBreakdown: which accounting produced
 	// them, from when the range is exactly covered, and whether the legacy

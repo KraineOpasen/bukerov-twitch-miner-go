@@ -2207,7 +2207,12 @@ v5 are additive (no `ALTER` of existing tables, no data rewrite), so they are
 safe to apply to a populated database, and a pre-v5 binary opening a v5
 database skips the higher version, never touches `point_events`, and keeps
 working on the tables it knows (its own `points` rows then read back as
-legacy, not exact-backed). `DeleteStreamerTx` purges `point_events` together
+legacy, not exact-backed). Its retention sweep and streamer purge do not know
+`point_events` either, so a rollback can orphan ledger rows (a pruned sample,
+a purged `streamer_id`); the current release tolerates them: an orphan of a
+pruned sample remains an accepted earning until retention sweeps it, and an
+orphan of a purged streamer is unreachable by login (ids are never reused)
+until retention sweeps it. `DeleteStreamerTx` purges `point_events` together
 with the other tables in the same transaction; a rename preserves them through
 the stable `streamer_id`.
 
@@ -2378,51 +2383,64 @@ Analytics data is stored in the unified database (`database/{username}/miner.db`
 
 ### Exact Point-Event Ledger
 
-Channel-point earnings are accounted for from **events, never from balance
-deltas**. Three kinds of facts are kept apart and none is authority for
-another:
+The Statistics earnings breakdown is accounted for from **events, never from
+balance deltas** (the daily digest's *Net points* remains, by definition, a
+net balance change and is out of the ledger's scope). Three kinds of facts
+are kept apart and none is authority for another:
 
 1. **Exact earning events** (`point_events`) — immutable accounting facts. For
-   every points-earned event the PubSub pool ADMITTED (for `WATCH_STREAK`, only
-   a newly accepted grant — the pool's admission stays the linearization
+   every points-earned event the PubSub pool ADMITTED (for `WATCH_STREAK`,
+   only a newly accepted grant — the pool's admission stays the linearization
    point), the miner builds an event-local snapshot from the same frame: the
    event identity (`EventFingerprint`), the raw `reason_code`, the exact
-   `point_gain.total_points`, and `balance.balance` when present. Nothing is
-   re-read from the mutable `Streamer` (a poll or a later frame may already
-   have moved its balance). `Service.RecordPointEvent` writes the ledger row,
-   its balance-timeline sample and — for `WATCH_STREAK`/`RAID` — the chart
-   annotation in **one transaction** (`database.WithTx`, so the close barrier
-   holds); `UNIQUE(event_id)` rolls the whole transaction back on an exact
-   re-delivery, so a duplicate identity leaves no second row, sample or marker
-   and two concurrent deliveries yield exactly one winner. The ledger is a
-   persistence invariant only — it is not a second replay controller.
+   `point_gain.total_points`, and `balance.balance` when present (the ledger's
+   `balance_after` is NULL when the frame carried none, or one that is not an
+   exact integer). No earning or `balance_after` is ever re-read from the
+   mutable `Streamer` (a poll or a later frame may already have moved its
+   balance); only the chart's timeline sample falls back to the streamer's
+   current balance, as a display value, when the frame carried none.
+   `timestamp` is the acceptance time stamped by the analytics service,
+   consistent with every other analytics table. `Service.RecordPointEvent`
+   writes the ledger row, its balance-timeline sample and — for
+   `WATCH_STREAK`/`RAID` — the chart annotation in **one transaction**
+   (`database.WithTx`, so the close barrier holds); `ON CONFLICT(event_id) DO
+   NOTHING` is detected through `RowsAffected() == 0` and the whole
+   transaction is rolled back on an exact re-delivery, so a duplicate identity
+   leaves no second row, sample or marker and two concurrent deliveries yield
+   exactly one winner. The ledger is a persistence invariant only — it is not
+   a second replay controller.
 2. **Balance timeline** (`points`) — absolute balance snapshots for the chart,
    tagged with the reason that caused the change. Points-spent frames and
-   points-earned frames the ledger cannot admit (no identity; a
-   `total_points` that is missing, non-numeric, non-integral or outside exact
-   float range — never coerced to 0; a payload with neither `data.timestamp`
-   nor `balance.balance`, whose fingerprint would not distinguish two equal
-   grants) are recorded here only.
+   points-earned frames the ledger cannot admit (no identity; a `total_points`
+   that is missing, non-numeric, non-integral or outside exact float range —
+   never coerced to 0; a payload without an RFC 3339 `data.timestamp`, whose
+   fingerprint would not distinguish two equal grants) are recorded here only,
+   at the streamer's current balance as before the ledger existed, still with
+   their `WATCH_STREAK`/`RAID` marker when the amount is exact.
 3. **Annotations** — display markers whose text (`+450 - Watch Streak`) is
    built from the same event-local amount; they are never parsed back into
    accounting numbers.
 
 **Statistics breakdown.** `GET /api/points-history` aggregates exact earnings
-in SQL (`ExactEarningsBetween`: `SUM(total_points)`, `COUNT(*)` of positive
-events per canonical reason, independent of the raw-series row cap). Unknown
-reason codes are exact earnings pooled into `OTHER`; non-positive amounts are
-accepted facts but never earnings. History recorded **before the ledger** (or
-by a pre-v5 binary) is not backfilled; it stays available only as a clearly
-separate **legacy estimate** (`EstimateLegacyBreakdown`: positive deltas into
-samples no exact event backs, skipping points-spent snapshots). The response
-carries `breakdown` (exact when `earnings.exact`, otherwise the estimate),
-`legacyBreakdown` (the estimate for the legacy part of a mixed range) and
-`earnings{coverage: exact|legacy|mixed|none|unavailable, exact, exactSince,
-legacyStatus: none|estimated|unavailable}`; each sample carries `exact`. Exact
-and estimated figures are **never summed**; a truncated raw series makes the
-legacy estimate `unavailable` (never zero) while the exact aggregate stays
-complete. The dashboard labels estimates as such and shows the legacy part on
-its own line. Retention prunes `point_events` with `points`/`annotations`.
+in SQL (`ExactEarningsBetween`: `SUM` of positive `total_points` and `COUNT`
+of positive events per canonical reason, plus `COUNT(*)` of all rows as the
+event total, independent of the raw-series row cap). Unknown reason codes are
+exact earnings pooled into `OTHER`; non-positive amounts are accepted facts
+but never earnings. History recorded **before the ledger** (or by a pre-v5
+binary) is not backfilled; it stays available only as a clearly separate
+**legacy estimate** (`EstimateLegacyBreakdown`: positive deltas into samples
+no exact event backs, skipping points-spent snapshots). The response carries
+`breakdown` (exact when `earnings.exact`, otherwise the estimate),
+`legacyBreakdown` (the estimate for the legacy part of a *mixed* range only —
+a legacy-only range reports its estimate as `breakdown` and does not repeat
+it) and `earnings{coverage: exact|legacy|mixed|none|unavailable, exact,
+exactSince, legacyStatus: none|estimated|unavailable}`; each sample carries
+`exact: true` when an exact event produced it. The export endpoint carries the
+same accounting fields. Exact and estimated figures are **never summed**; a
+truncated raw series makes the legacy estimate `unavailable` (never zero)
+while the exact aggregate stays complete. The dashboard labels estimates as
+such (every estimated figure is marked `≈`) and shows the legacy part on its
+own line. Retention prunes `point_events` with `points`/`annotations`.
 
 ### Prediction ROI Analytics
 
@@ -2475,8 +2493,10 @@ legacy estimate; the exact ledger stores the raw Twitch `reason_code`.
 ### Annotation Types
 
 Display facts only: their text is never parsed back into accounting numbers.
-`WATCH_STREAK` and `RAID` markers are written in the same transaction as their
-exact point event, from the same event-local amount.
+`WATCH_STREAK` and `RAID` markers are built from the event-local amount; when
+the event was admitted to the ledger they are written in the same transaction
+as its point event, and a timeline-only frame writes its marker separately
+(`Service.RecordPointMarker`).
 
 | Type | Color | Description |
 |------|-------|-------------|

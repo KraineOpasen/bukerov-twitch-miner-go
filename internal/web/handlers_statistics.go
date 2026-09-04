@@ -21,12 +21,6 @@ const (
 	maxChartPoints = 2000
 )
 
-// historyRowCap is the live raw-series cap the history endpoint applies
-// (maxHistoryRows in production). A variable rather than the constant so a
-// test can drive the truncation path with a small series instead of 20000
-// rows; production never reassigns it.
-var historyRowCap = maxHistoryRows
-
 // rangeWindow maps a range preset to its lookback duration and canonical label.
 // An absent range means the page default — 24h, matching the UI's initial
 // selection. Unknown values fall back to 7d. maxWindow (30d) bounds any query.
@@ -150,7 +144,8 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	start := end.Add(-window)
 
 	repo := s.analytics.Repository()
-	raw, err := repo.GetPointSamples(streamer, start, end, historyRowCap)
+	rowCap := rowCapOrDefault(s.historyRowCap, maxHistoryRows)
+	raw, err := repo.GetPointSamples(streamer, start, end, rowCap)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
@@ -185,7 +180,7 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		writeInternalError(w, "Failed to load points history")
 		return
 	}
-	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), historyRowCap)
+	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), rowCap)
 	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
 
 	writeJSONOK(w, analytics.PointsHistory{
@@ -204,13 +199,25 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 
 // historyFlags derives the two independent completeness signals for a
 // points-history response: rawTruncated means the raw series hit the backend
-// row cap (the window — and thus the breakdown — is incomplete);
-// chartDownsampled means the display series was merely thinned while the raw
-// series, and the breakdown built from it, remain complete. They are
-// deliberately separate: only rawTruncated may hide the breakdown or raise a
-// partial-data warning.
+// row cap, so the balance-derived KPIs and the legacy estimate are
+// unavailable (the exact breakdown is aggregated from the ledger in SQL and
+// does not depend on the cap); chartDownsampled means the display series was
+// merely thinned while the raw series remains complete. They are deliberately
+// separate: only rawTruncated may withhold figures or raise a partial-data
+// warning.
 func historyFlags(rawLen, pointsLen, rawCap int) (rawTruncated, chartDownsampled bool) {
 	return rawLen >= rawCap, pointsLen < rawLen
+}
+
+// rowCapOrDefault normalises a per-Server row cap: the zero value (a Server
+// built without NewServer/NewServerEarly) falls back to the production cap
+// rather than meaning "unlimited" to the query and "always truncated" to the
+// completeness flags.
+func rowCapOrDefault(rowCap, fallback int) int {
+	if rowCap <= 0 {
+		return fallback
+	}
+	return rowCap
 }
 
 // handleAPIPointsHistoryExport returns the same data as handleAPIPointsHistory
@@ -237,7 +244,8 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 	start := end.Add(-window)
 
 	repo := s.analytics.Repository()
-	points, err := repo.GetPointSamples(streamer, start, end, maxExportRows)
+	rowCap := rowCapOrDefault(s.exportRowCap, maxExportRows)
+	points, err := repo.GetPointSamples(streamer, start, end, rowCap)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
@@ -248,14 +256,29 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
+	// The export carries the same earnings accounting as the history
+	// endpoint so an external consumer never sees an empty accounting block:
+	// the exact aggregation from the ledger and the legacy estimate over the
+	// exported samples, qualified by the same coverage metadata.
+	exact, err := repo.ExactEarningsBetween(streamer, start, end)
+	if err != nil {
+		writeInternalError(w, "Failed to load points history")
+		return
+	}
 	// The export is full-fidelity (never downsampled), so only the raw row
 	// cap can make it incomplete.
+	rawTruncated := len(points) >= rowCap
+	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
+
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
 	writeJSONOK(w, analytics.PointsHistory{
-		Streamer:     streamer,
-		Range:        label,
-		Points:       points,
-		Annotations:  annotations,
-		RawTruncated: len(points) >= maxExportRows,
+		Streamer:        streamer,
+		Range:           label,
+		Points:          points,
+		Annotations:     annotations,
+		Breakdown:       breakdown,
+		LegacyBreakdown: legacyBreakdown,
+		Earnings:        earnings,
+		RawTruncated:    rawTruncated,
 	})
 }

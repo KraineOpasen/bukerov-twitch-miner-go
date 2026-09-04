@@ -520,15 +520,20 @@
     // than shown as a fabricated zero.
     function renderEarningsKPIs(data) {
         const mode = primaryAccounting(data);
-        const qualifier = mode === 'estimate' ? '· ' + t('js.stat.estimate') : '';
+        const shares = data.breakdown || [];
+        // An estimate with nothing attributable is dashed like "none": a
+        // measured-looking "≈ +0" would claim a zero the data cannot support
+        // (the note names the state instead).
+        const usable = mode === 'exact' || (mode === 'estimate' && shares.length > 0);
+        const qualifier = usable && mode === 'estimate' ? '· ' + t('js.stat.estimate') : '';
         setText('kpi-earned-qualifier', qualifier);
         setText('kpi-events-qualifier', qualifier);
-        if (mode === 'none') {
+        if (!usable) {
             setKPI('kpi-earned', '—');
             setKPI('kpi-events', '—');
         } else {
             let earned = 0, events = 0;
-            for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
+            for (const share of shares) { earned += share.gained; events += share.count; }
             const approx = mode === 'estimate' ? '≈ ' : '';
             setKPI('kpi-earned', approx + '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');
             setKPI('kpi-events', approx + nfStat.format(events));
@@ -551,27 +556,43 @@
                 note = t('js.stat.earnings.exact');
                 break;
             case 'legacy':
-                note = t('js.stat.earnings.legacy');
+                // Legacy history whose balance changes attributed nothing is
+                // said so, never shown as an estimate of zero.
+                note = (data.breakdown || []).length ? t('js.stat.earnings.legacy') : t('js.stat.earnings.legacy_none');
                 break;
-            case 'mixed':
-                note = t('js.stat.earnings.mixed').replace('{date}', e.exactSince ? new Date(e.exactSince).toLocaleString() : '—');
-                if (e.legacyStatus === 'estimated') {
-                    let gained = 0, count = 0;
-                    const parts = [];
-                    for (const share of data.legacyBreakdown || []) {
-                        gained += share.gained;
-                        count += share.count;
-                        const r = R[share.reason] || R.OTHER;
-                        parts.push(r.label() + ' +' + nfStat.format(share.gained) + ' ×' + nfStat.format(share.count));
-                    }
-                    legacyLine = t('js.stat.earnings.legacy_line')
-                        .replace('{gained}', '+' + nfStat.format(gained))
-                        .replace('{count}', nfStat.format(count));
-                    if (parts.length) legacyLine += ' — ' + parts.join(' · ');
-                } else if (e.legacyStatus === 'unavailable') {
+            case 'mixed': {
+                const since = e.exactSince ? new Date(e.exactSince).toLocaleString() : '—';
+                if (e.legacyStatus === 'unavailable') {
+                    // The legacy part exists but its estimate could not be
+                    // computed: say so, rather than promising a line below.
+                    note = t('js.stat.earnings.mixed_unavailable').replace('{date}', since);
                     legacyLine = t('js.stat.earnings.legacy_unavailable');
+                    break;
                 }
+                const legacyShares = data.legacyBreakdown || [];
+                if (!legacyShares.length) {
+                    // Legacy history is present (e.g. a lone pre-ledger
+                    // baseline) but nothing could be attributed: the note
+                    // says so itself instead of promising a listed estimate,
+                    // and no measured-looking "+0" is printed.
+                    note = t('js.stat.earnings.mixed_none').replace('{date}', since);
+                    break;
+                }
+                note = t('js.stat.earnings.mixed').replace('{date}', since);
+                let gained = 0, count = 0;
+                const parts = [];
+                for (const share of legacyShares) {
+                    gained += share.gained;
+                    count += share.count;
+                    const r = R[share.reason] || R.OTHER;
+                    parts.push(r.label() + ' ≈ +' + nfStat.format(share.gained) + ' ×' + nfStat.format(share.count));
+                }
+                legacyLine = t('js.stat.earnings.legacy_line')
+                    .replace('{gained}', '≈ +' + nfStat.format(gained))
+                    .replace('{count}', nfStat.format(count));
+                legacyLine += ' — ' + parts.join(' · ');
                 break;
+            }
             case 'unavailable':
                 note = t('js.stat.earnings.unavailable');
                 break;
@@ -595,7 +616,18 @@
         const R = reasonPalette(P);
         const mode = primaryAccounting(data);
         const slices = mode === 'none' ? [] : breakdownSlices(data.breakdown, R);
+        // Every figure of an estimated donut — centre total, slice values,
+        // tooltip, legend and the accessible name — carries the "≈" /
+        // estimate marker, so no number reads as exact accounting.
+        const approx = mode === 'estimate' ? '≈ ' : '';
+        const fmtGain = v => approx + '+' + nfStat.format(v);
         setText('stat-breakdown-qualifier', mode === 'estimate' ? '(' + t('js.stat.estimate') + ')' : '');
+        const donutHost = document.getElementById('stat-donut');
+        if (donutHost) {
+            const title = donutHost.getAttribute('data-title') || donutHost.getAttribute('aria-label') || '';
+            if (!donutHost.getAttribute('data-title')) donutHost.setAttribute('data-title', title);
+            donutHost.setAttribute('aria-label', mode === 'estimate' ? title + ' (' + t('js.stat.estimate') + ')' : title);
+        }
         if (!slices.length) {
             if (donut) { donut.destroy(); donut = null; }
             els.breakdown.classList.add('hidden');
@@ -611,13 +643,13 @@
             legend: { show: false },
             dataLabels: { enabled: false },
             stroke: { colors: [P.surface], width: 2 },
-            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: P.textPrimary, fontSize: '1.05rem', formatter: v => '+' + nfStat.format(v) }, total: { show: true, showAlways: true, label: '', color: P.textPrimary, formatter: w => '+' + nfStat.format(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
-            tooltip: { theme: resolvedTheme(), y: { formatter: v => '+' + nfStat.format(v) + ' ' + t('js.stat.points_suffix') } },
+            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: P.textPrimary, fontSize: '1.05rem', formatter: v => fmtGain(v) }, total: { show: true, showAlways: true, label: '', color: P.textPrimary, formatter: w => fmtGain(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+            tooltip: { theme: resolvedTheme(), y: { formatter: v => fmtGain(v) + ' ' + t('js.stat.points_suffix') } },
         };
         if (donut) {
             donut.updateOptions(options, false, !reducedMotion);
         } else {
-            donut = new ApexCharts(document.getElementById('stat-donut'), options);
+            donut = new ApexCharts(donutHost, options);
             donut.render();
         }
 
@@ -627,7 +659,7 @@
                 '<span class="breakdown-dot" style="background:' + r.color + '"></span>' +
                 '<span class="breakdown-name">' + r.label() + '</span>' +
                 '<span class="breakdown-count num">×' + nfStat.format(s.count) + '</span>' +
-                '<span class="breakdown-val num">+' + nfStat.format(s.gained) + '</span>' +
+                '<span class="breakdown-val num">' + fmtGain(s.gained) + '</span>' +
                 '</div>';
         }).join('');
     }

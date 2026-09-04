@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,9 +20,12 @@ var watchStreakTestSequence atomic.Uint64
 
 func TestWatchStreakReplayWritesCacheAndAnalyticsOnce(t *testing.T) {
 	// The miner test package intentionally shares database.Open's process-wide
-	// singleton. A unique identity keeps this assertion hermetic under
-	// `go test -count=N`, where TestMain runs only once for all repetitions.
+	// singleton. A per-run login AND a per-run ledger identity keep this
+	// assertion hermetic under `go test -count=N`, where TestMain runs only
+	// once for all repetitions: point_events.event_id is UNIQUE across every
+	// streamer, so a fixed fingerprint would collide on the second run.
 	login := fmt.Sprintf("pr05-idempotency-%d", watchStreakTestSequence.Add(1))
+	eventID := "sha256:exact-replay-" + login
 	m, _, _ := newCapabilityMiner(t, login)
 	s := m.streamers.Get(login)
 	if s == nil {
@@ -55,10 +59,10 @@ func TestWatchStreakReplayWritesCacheAndAnalyticsOnce(t *testing.T) {
 				"total_points": float64(350),
 			},
 		},
-		EventFingerprint: "sha256:exact-replay",
+		EventFingerprint: eventID,
 	}
 	s.SetChannelPoints(1234)
-	event := models.WatchStreakGrantEvent{EventID: "sha256:exact-replay", AcceptedAt: time.Now()}
+	event := models.WatchStreakGrantEvent{EventID: eventID, AcceptedAt: time.Now()}
 	first := s.ApplyWatchStreakGrant(event, 350)
 	if !first.NewlyAccepted() || first.Admission != models.WatchStreakGrantNewUnbound {
 		t.Fatalf("first admission=%s, want NEW_UNBOUND", first.Admission)
@@ -107,6 +111,16 @@ func TestWatchStreakReplayWritesCacheAndAnalyticsOnce(t *testing.T) {
 	}
 	if exact.Events != 1 || len(exact.Breakdown) != 1 || exact.Breakdown[0].Reason != "WATCH_STREAK" || exact.Breakdown[0].Gained != 350 || exact.Breakdown[0].Count != 1 {
 		t.Fatalf("exact ledger=%+v, want one WATCH_STREAK event of 350", exact)
+	}
+	// The frame carried no balance: the ledger keeps balance_after unknown
+	// (NULL) rather than borrowing the streamer's balance, which only the
+	// chart sample above uses as a display value.
+	var balanceAfter sql.NullInt64
+	if err := db.QueryRow(`SELECT balance_after FROM point_events WHERE event_id = ?`, eventID).Scan(&balanceAfter); err != nil {
+		t.Fatal(err)
+	}
+	if balanceAfter.Valid {
+		t.Fatalf("balance_after = %d, want NULL for a frame that carried no balance", balanceAfter.Int64)
 	}
 	loaded := cache.Load(time.Now())[login]
 	if loaded.Revision != 1 || len(loaded.Grants) != 1 || loaded.Grants[0].Binding != models.WatchStreakGrantUnbound {

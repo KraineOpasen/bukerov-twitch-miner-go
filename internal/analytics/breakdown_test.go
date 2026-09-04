@@ -43,7 +43,11 @@ func TestCanonicalPointReason(t *testing.T) {
 	}
 }
 
-func TestBreakdownFromSamples(t *testing.T) {
+// The tests below pin the LEGACY balance-delta estimator
+// (EstimateLegacyBreakdown), which only covers samples no exact event backs;
+// the exact breakdown is aggregated from point_events and is pinned in
+// point_events_test.go.
+func TestEstimateLegacyBreakdown(t *testing.T) {
 	cases := []struct {
 		name    string
 		samples []PointSample
@@ -152,7 +156,8 @@ func TestBreakdownFromSamples(t *testing.T) {
 }
 
 // TestBreakdownFirstSampleIsBaseline pins the documented window-edge
-// limitation: the first in-window sample only establishes the baseline — its
+// limitation of the legacy estimate: the first in-window sample only
+// establishes the baseline — its
 // own delta cannot be known without a pre-window sample, which is
 // deliberately not fetched (deferred data-quality work). A lone streak event
 // at the window edge therefore yields no breakdown rather than a guessed one.
@@ -174,9 +179,9 @@ func TestBreakdownFirstSampleIsBaseline(t *testing.T) {
 	}
 }
 
-// TestBreakdownWatchStreakSums pins the four watch-streak grant sizes Twitch
-// awards (300/350/400/450) and proves they aggregate into a single WATCH_STREAK
-// category regardless of the on-disk spelling ("WATCH STREAK" from
+// TestBreakdownWatchStreakSums pins, for the legacy estimate, the four
+// watch-streak grant sizes Twitch awards (300/350/400/450) and proves they
+// aggregate into a single WATCH_STREAK category regardless of the on-disk spelling ("WATCH STREAK" from
 // Service.RecordPoints' underscore→space rewrite, or the underscore form from
 // legacy rows). Each grant is counted exactly once (no double-counting), and
 // nothing bleeds into WATCH or CLAIM.
