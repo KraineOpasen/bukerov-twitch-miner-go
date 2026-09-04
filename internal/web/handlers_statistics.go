@@ -21,6 +21,12 @@ const (
 	maxChartPoints = 2000
 )
 
+// historyRowCap is the live raw-series cap the history endpoint applies
+// (maxHistoryRows in production). A variable rather than the constant so a
+// test can drive the truncation path with a small series instead of 20000
+// rows; production never reassigns it.
+var historyRowCap = maxHistoryRows
+
 // rangeWindow maps a range preset to its lookback duration and canonical label.
 // An absent range means the page default — 24h, matching the UI's initial
 // selection. Unknown values fall back to 7d. maxWindow (30d) bounds any query.
@@ -113,11 +119,16 @@ func (s *Server) configuredStreamerNames() []string {
 // handleAPIPointsHistory returns the balance series + event annotations for one
 // streamer over a range preset (24h/7d/30d). Response:
 //
-//	{ streamer, range, points:[{t,balance}], annotations:[{t,type,reason}],
-//	  breakdown:[{reason,gained,count}], rawTruncated, chartDownsampled }
+//	{ streamer, range, points:[{t,balance,reason,exact}], annotations:[{t,type,reason}],
+//	  breakdown:[{reason,gained,count}], legacyBreakdown:[...],
+//	  earnings:{coverage,exact,exactSince,legacyStatus}, rawTruncated, chartDownsampled }
 //
-// The series is downsampled to maxChartPoints for display; use the export
-// endpoint for full fidelity. Auth is inherited from the global middleware.
+// breakdown is the exact point-event aggregation when the window holds exact
+// events (earnings.exact), otherwise the legacy balance-delta estimate; the
+// legacy part of a mixed window is reported separately in legacyBreakdown and
+// never added to the exact figures (see analytics.ComposeEarnings). The series
+// is downsampled to maxChartPoints for display; use the export endpoint for
+// full fidelity. Auth is inherited from the global middleware.
 func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeNotAllowed(w)
@@ -139,7 +150,7 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	start := end.Add(-window)
 
 	repo := s.analytics.Repository()
-	raw, err := repo.GetPointSamples(streamer, start, end, maxHistoryRows)
+	raw, err := repo.GetPointSamples(streamer, start, end, historyRowCap)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
@@ -164,13 +175,27 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 		betSummary = &bs
 	}
 
-	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), maxHistoryRows)
+	// Exact earnings come from the point-event ledger, aggregated in SQL over
+	// the same window: the event-local amounts Twitch granted, independent of
+	// the raw balance series and of its row cap. The legacy balance-delta
+	// estimate covers only the samples no exact event backs, and is
+	// unavailable — never silently zero — when the raw series was truncated.
+	exact, err := repo.ExactEarningsBetween(streamer, start, end)
+	if err != nil {
+		writeInternalError(w, "Failed to load points history")
+		return
+	}
+	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), historyRowCap)
+	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
+
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:         streamer,
 		Range:            label,
 		Points:           points,
 		Annotations:      annotations,
-		Breakdown:        analytics.BreakdownFromSamples(raw),
+		Breakdown:        breakdown,
+		LegacyBreakdown:  legacyBreakdown,
+		Earnings:         earnings,
 		BetSummary:       betSummary,
 		RawTruncated:     rawTruncated,
 		ChartDownsampled: chartDownsampled,

@@ -25,11 +25,131 @@ type StreamerData struct {
 // PointSample is one balance-over-time reading returned by the points-history
 // endpoint: T is a Unix-millis timestamp, Balance is the absolute channel-point
 // balance snapshot recorded at that moment, Reason is the event that caused the
-// change (e.g. "WATCH", "CLAIM") shown in the chart tooltip.
+// change (e.g. "WATCH", "CLAIM") shown in the chart tooltip. Exact marks a
+// sample that an exact point event produced (see PointEvent): its balance
+// delta is accounted for by that event's event-local amount, so the legacy
+// estimator never attributes it a second time. Samples recorded before the
+// exact ledger existed, by a pre-ledger binary, or for a points-spent frame
+// are not Exact.
 type PointSample struct {
 	T       int64  `json:"t"`
 	Balance int    `json:"balance"`
 	Reason  string `json:"reason,omitempty"`
+	Exact   bool   `json:"exact,omitempty"`
+}
+
+// PointEvent is the immutable, event-local snapshot of ONE accepted Twitch
+// points-earned event — the accounting fact the exact earnings ledger stores.
+// Every value comes from the same PubSub frame that carried the event; none
+// of it is re-read from the shared, mutable Streamer after admission:
+//
+//   - EventID is the exact event identity (the PubSub EventFingerprint: a
+//     SHA-256 of topic + canonical inner message). UNIQUE in the ledger, so an
+//     exact re-delivery of the same event is idempotent.
+//   - ReasonCode is the raw Twitch point_gain.reason_code ("WATCH", "CLAIM",
+//     "WATCH_STREAK", "RAID", "PREDICTION", ...), canonicalized only at
+//     aggregation time.
+//   - TotalPoints is the event-local point_gain.total_points — the amount
+//     Twitch says THIS event granted. It is the only earning authority; a
+//     balance delta between two snapshots never is.
+//   - BalanceAfter is the balance.balance Twitch reported in the same frame,
+//     when it carried one (BalanceKnown); it is informational and never used
+//     to derive an earning.
+//   - Timestamp is the Unix-millis time the event was accepted into the
+//     ledger; zero lets the Service stamp its clock.
+type PointEvent struct {
+	EventID      string
+	Timestamp    int64
+	ReasonCode   string
+	TotalPoints  int
+	BalanceAfter int
+	BalanceKnown bool
+}
+
+// PointEventAnnotation is the optional chart marker written in the SAME
+// transaction as its PointEvent (WATCH_STREAK and RAID grants), so the marker
+// text and the ledger row always carry the identical event-local amount and a
+// duplicate event can never leave a second marker behind.
+type PointEventAnnotation struct {
+	EventType string
+	Text      string
+	Color     string
+}
+
+// ExactEarnings is the exact point-event aggregation over one streamer and
+// time range, computed in SQL from the ledger (never from balance samples,
+// never subject to the chart's raw-series row cap).
+type ExactEarnings struct {
+	// Breakdown sums each canonical reason's positive event-local amounts
+	// (Gained) and counts its positive events (Count); sorted like the legacy
+	// estimate for rendering. Nil when no positive event is in range.
+	Breakdown []ReasonShare
+	// Events is the number of ledger rows in range, positive or not.
+	Events int
+	// Since is the Unix-millis timestamp of the earliest ledger row in range
+	// (0 when Events == 0): the point from which exact accounting exists in
+	// the selected period. It is not a guarantee of continuous coverage —
+	// samples a pre-ledger binary wrote after it (a rollback gap) still show
+	// up as legacy, and the coverage classification says so.
+	Since int64
+}
+
+// LegacyEstimate is the balance-delta ESTIMATE over the samples of a range
+// that no exact event backs. It is an estimate by construction (a delta
+// between two mutable balance snapshots, attributed to the later snapshot's
+// reason), kept only so history recorded before the exact ledger existed
+// stays visible; it is never added to exact figures.
+type LegacyEstimate struct {
+	// Breakdown attributes each positive delta into a legacy earning sample
+	// to that sample's canonical reason. Nil when nothing could be attributed.
+	Breakdown []ReasonShare
+	// Samples counts the legacy EARNING samples in the window (not Exact, not
+	// a points-spent snapshot): evidence that pre-ledger history is present
+	// even when no positive delta could be attributed (e.g. a lone baseline).
+	Samples int
+}
+
+// Earnings coverage values reported by EarningsAccounting.Coverage.
+const (
+	// EarningsCoverageExact: every earning in range is an exact ledger event.
+	EarningsCoverageExact = "exact"
+	// EarningsCoverageLegacy: no exact event in range; only the balance-delta
+	// estimate is available.
+	EarningsCoverageLegacy = "legacy"
+	// EarningsCoverageMixed: exact events AND legacy history (or a legacy part
+	// whose estimate is unavailable) share the range; the two are reported
+	// separately and never summed.
+	EarningsCoverageMixed = "mixed"
+	// EarningsCoverageNone: no earning of either kind in range.
+	EarningsCoverageNone = "none"
+	// EarningsCoverageUnavailable: no exact event in range and the legacy
+	// estimate could not be computed (raw series truncated).
+	EarningsCoverageUnavailable = "unavailable"
+)
+
+// Legacy-estimate status values reported by EarningsAccounting.LegacyStatus.
+const (
+	LegacyStatusNone        = "none"        // no legacy earning sample in range
+	LegacyStatusEstimated   = "estimated"   // LegacyBreakdown is a balance-delta estimate
+	LegacyStatusUnavailable = "unavailable" // raw series truncated: the estimate cannot be computed
+)
+
+// EarningsAccounting is the additive points-history metadata that tells a
+// consumer which accounting produced Breakdown and whether a separately
+// estimated legacy part exists, so exact and estimated figures are never
+// mistaken for one another — and never summed.
+type EarningsAccounting struct {
+	// Coverage is one of the EarningsCoverage* values.
+	Coverage string `json:"coverage"`
+	// Exact is true when Breakdown is the exact ledger aggregation.
+	Exact bool `json:"exact"`
+	// ExactSince is the Unix-millis timestamp of the earliest exact event in
+	// range (omitted when there is none): where exact accounting starts, not
+	// a promise that everything after it is exact — Coverage carries that.
+	ExactSince int64 `json:"exactSince,omitempty"`
+	// LegacyStatus is one of the LegacyStatus* values and qualifies
+	// LegacyBreakdown.
+	LegacyStatus string `json:"legacyStatus"`
 }
 
 // AnnotationRecord is a machine-readable event marker for the points-history
@@ -48,9 +168,10 @@ type AnnotationRecord struct {
 }
 
 // ReasonShare is one slice of the earnings breakdown for the points-history
-// endpoint: how many points arrived under one reason code (WATCH, CLAIM,
-// RAID, WATCH_STREAK, ...) within the requested range, and how many positive
-// balance changes carried that reason.
+// endpoint: how many points arrived under one canonical reason (WATCH, CLAIM,
+// RAID, WATCH_STREAK, PREDICTION, OTHER) within the requested range, and how
+// many earning events (exact) or positive balance changes (legacy estimate)
+// carried that reason.
 type ReasonShare struct {
 	Reason string `json:"reason"`
 	Gained int    `json:"gained"`
@@ -64,11 +185,25 @@ type PointsHistory struct {
 	Range       string             `json:"range"`
 	Points      []PointSample      `json:"points"`
 	Annotations []AnnotationRecord `json:"annotations"`
-	// Breakdown aggregates the range's positive balance changes by canonical
-	// reason so the dashboard can chart WATCH/CLAIM/RAID/WATCH_STREAK/PREDICTION
-	// shares. Computed from the raw (pre-downsampling) series; omitted when there
-	// is nothing earned in range.
+	// Breakdown is the range's primary earnings attribution by canonical
+	// reason (WATCH/CLAIM/RAID/WATCH_STREAK/PREDICTION/OTHER). When the range
+	// holds exact point events it is the EXACT ledger aggregation
+	// (Earnings.Exact == true) — event-local Twitch amounts, computed in SQL,
+	// unaffected by RawTruncated; the legacy part of a mixed range then lives
+	// only in LegacyBreakdown. When the range holds no exact event it is the
+	// legacy balance-delta ESTIMATE (Earnings.Exact == false). Omitted when
+	// there is nothing earned in range. The two accountings are never summed.
 	Breakdown []ReasonShare `json:"breakdown,omitempty"`
+	// LegacyBreakdown is the balance-delta ESTIMATE over the samples of the
+	// range that no exact event backs (history recorded before the exact
+	// ledger). Present only when Earnings.LegacyStatus is "estimated" and
+	// something could be attributed; it is reported beside Breakdown, never
+	// added to it.
+	LegacyBreakdown []ReasonShare `json:"legacyBreakdown,omitempty"`
+	// Earnings qualifies Breakdown/LegacyBreakdown: which accounting produced
+	// them, from when the range is exactly covered, and whether the legacy
+	// estimate exists, is unavailable (truncated), or is not needed.
+	Earnings EarningsAccounting `json:"earnings"`
 	// BetSummary is the prediction-betting accounting (won/staked/refunded/net)
 	// for the same streamer and window as the series, shown next to the earnings
 	// donut so the PREDICTION slice's origin is explicit. Nil/omitted when there
@@ -76,13 +211,15 @@ type PointsHistory struct {
 	// section for an equivalent window (only the window differs).
 	BetSummary *BetSummary `json:"betSummary,omitempty"`
 	// RawTruncated is true when the raw series hit the backend row cap, so
-	// the window is incomplete and Breakdown (and any KPI derived from it)
-	// must not be presented as a full-period result.
+	// the balance window is incomplete: balance-derived KPIs and the legacy
+	// estimate (Earnings.LegacyStatus == "unavailable") must not be presented
+	// as full-period results. An exact Breakdown is unaffected — it is
+	// aggregated from the ledger, not from the truncated series.
 	RawTruncated bool `json:"rawTruncated"`
 	// ChartDownsampled is true when Points was thinned for display only; the
-	// raw series (and therefore Breakdown) is still complete. Deliberately a
-	// separate flag from RawTruncated: downsampling alone must never hide the
-	// breakdown or trigger a partial-data warning.
+	// raw series (and therefore the legacy estimate) is still complete.
+	// Deliberately a separate flag from RawTruncated: downsampling alone must
+	// never hide the breakdown or trigger a partial-data warning.
 	ChartDownsampled bool `json:"chartDownsampled"`
 }
 

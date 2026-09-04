@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -1596,18 +1597,7 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 						}
 
 						if m.analyticsSvc != nil {
-							m.analyticsSvc.RecordPoints(s, reasonCode)
-
-							switch reasonCode {
-							case "WATCH_STREAK":
-								if earned, ok := pointGain["total_points"].(float64); ok {
-									m.analyticsSvc.RecordAnnotation(s, "WATCH_STREAK", fmt.Sprintf("+%d - Watch Streak", int(earned)))
-								}
-							case "RAID":
-								if earned, ok := pointGain["total_points"].(float64); ok {
-									m.analyticsSvc.RecordAnnotation(s, "RAID", fmt.Sprintf("+%d - Raid", int(earned)))
-								}
-							}
+							m.recordPointsEarned(msg, s, pointGain, reasonCode)
 						}
 					}
 				}
@@ -1648,6 +1638,85 @@ func (m *Miner) handlePubSubMessage(msg *pubsub.PubSubMessage, s *models.Streame
 			}
 		}
 	}
+}
+
+// recordPointsEarned persists one ACCEPTED points-earned event into analytics
+// as an exact, event-local fact. The snapshot is built from the wire frame
+// only — the PubSub event identity, Twitch's point_gain.total_points and the
+// balance the same frame reported — never from the shared Streamer, whose
+// balance is mutable and may already reflect a later frame or a poll by the
+// time this callback runs (production recorded three 450-point streak grants
+// as 462/450/462 balance deltas for exactly that reason). Pool admission has
+// already linearized WATCH_STREAK replays before this point; the exact ledger's
+// UNIQUE event identity is only a persistence invariant behind it.
+//
+// A frame the exact ledger cannot admit — no event identity, a total_points
+// that is missing, non-numeric or non-integral, or a payload with neither
+// Twitch's event timestamp nor a balance (the fields that make two otherwise
+// identical grants distinct events, so a fingerprint over such a payload is
+// not an event identity) — is NOT coerced to a zero earning: it is logged and
+// recorded on the balance timeline only, where the Statistics page estimates
+// it from balance deltas and labels it as such.
+func (m *Miner) recordPointsEarned(msg *pubsub.PubSubMessage, s *models.Streamer, pointGain map[string]interface{}, reasonCode string) {
+	total, exact := exactWirePoints(pointGain["total_points"])
+	balanceAfter, balanceKnown := 0, false
+	if balance, ok := msg.Data["balance"].(map[string]interface{}); ok {
+		balanceAfter, balanceKnown = exactWirePoints(balance["balance"])
+	}
+	eventTime, _ := msg.Data["timestamp"].(string)
+	distinct := eventTime != "" || balanceKnown
+	if msg.EventFingerprint == "" || !exact || !distinct {
+		slog.Warn("points-earned event is not admissible to the exact ledger; recording balance timeline only",
+			"streamer", s.GetUsername(),
+			"reason", reasonCode,
+			"hasIdentity", msg.EventFingerprint != "",
+			"exactAmount", exact,
+			"distinguishable", distinct,
+		)
+		m.analyticsSvc.RecordPoints(s, reasonCode)
+		// The chart marker is a display fact: keep writing it, as before this
+		// ledger existed, whenever the frame's amount is at least exact — an
+		// identity-less frame still earned; an inexact amount has nothing
+		// truthful to print.
+		if exact {
+			switch reasonCode {
+			case "WATCH_STREAK":
+				m.analyticsSvc.RecordAnnotation(s, reasonCode, fmt.Sprintf("+%d - Watch Streak", total))
+			case "RAID":
+				m.analyticsSvc.RecordAnnotation(s, reasonCode, fmt.Sprintf("+%d - Raid", total))
+			}
+		}
+		return
+	}
+
+	ev := analytics.PointEvent{
+		EventID:      msg.EventFingerprint,
+		ReasonCode:   reasonCode,
+		TotalPoints:  total,
+		BalanceAfter: balanceAfter,
+		BalanceKnown: balanceKnown,
+	}
+	// The service logs the outcome; a failed analytics write is never fatal
+	// to point mining.
+	_, _ = m.analyticsSvc.RecordPointEvent(s, ev)
+}
+
+// exactWirePoints converts a decoded JSON number to an exact integer point
+// value. It refuses anything that is not a finite, integral float64 within
+// the platform int range instead of truncating it: an amount the ledger
+// cannot represent exactly must stay UNKNOWN, never become a rounded earning.
+func exactWirePoints(v interface{}) (int, bool) {
+	f, ok := v.(float64)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, false
+	}
+	// 2^53 bounds the integers a float64 represents exactly; the platform int
+	// bound guards 32-bit builds.
+	const exactLimit = float64(1 << 53)
+	if f > exactLimit || f < -exactLimit || f > float64(math.MaxInt) || f < float64(math.MinInt) {
+		return 0, false
+	}
+	return int(f), true
 }
 
 // recordBetResult persists a settled prediction bet emitted by the pubsub pool

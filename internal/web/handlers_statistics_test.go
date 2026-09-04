@@ -179,18 +179,38 @@ func TestPointsHistoryDefaultRange24h(t *testing.T) {
 	}
 }
 
+// jsFunctionBody slices one top-level function out of the rendered page
+// source, from its declaration to the next declaration named by until.
+func jsFunctionBody(t *testing.T, body, decl, until string) string {
+	t.Helper()
+	start := strings.Index(body, decl)
+	if start < 0 {
+		t.Fatalf("statistics page lost %q", decl)
+	}
+	end := strings.Index(body[start:], until)
+	if end < 0 {
+		t.Fatalf("cannot delimit %q (%q moved?)", decl, until)
+	}
+	return body[start : start+end]
+}
+
 // TestStatisticsKPIsDashOnRawTruncation pins the client-side KPI honesty
-// contract in the page's renderKPIs function (there is no JS test harness in
-// this project, so the contract is asserted on the shipped source):
+// contract in the page's renderKPIs/renderEarningsKPIs functions (there is
+// no JS test harness in this project, so the contract is asserted on the
+// shipped source):
 //
-//  1. rawTruncated=true dashes out ALL FOUR KPI tiles — a truncated window is
-//     missing its newest rows (ascending fetch + row cap), so the loaded
-//     last balance is not the current balance and last-first is not the
-//     full-period change;
-//  2. chartDownsampled alone never hides KPIs (the function must not consult
+//  1. rawTruncated=true dashes out the two BALANCE tiles — a truncated
+//     window is missing its newest rows (ascending fetch + row cap), so the
+//     loaded last balance is not the current balance and last-first is not
+//     the full-period change — and ONLY those two: the accrued/earn-event
+//     tiles come from the server's earnings accounting, whose exact
+//     aggregate is computed from the event ledger and is complete regardless
+//     of the series cap, so truncation must never hide it;
+//  2. chartDownsampled alone never hides KPIs (neither function may consult
 //     that flag at all);
 //  3. the normal full-response path still computes balance/net from the
-//     series and accrued/events from the breakdown, unchanged.
+//     series and accrued/events from the primary breakdown, and the estimate
+//     case is marked as such rather than presented as exact.
 func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 	srv := newStatsTestServer(t)
 	rec := httptest.NewRecorder()
@@ -199,41 +219,62 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
+	kpiFn := jsFunctionBody(t, body, "function renderKPIs(data)", "function setText")
+	earnFn := jsFunctionBody(t, body, "function renderEarningsKPIs(data)", "function renderEarningsNote")
+	breakdownFn := jsFunctionBody(t, body, "function renderBreakdown(data)", "function setUpdated")
 
-	start := strings.Index(body, "function renderKPIs(data)")
-	if start < 0 {
-		t.Fatal("statistics page lost the renderKPIs function")
-	}
-	end := strings.Index(body[start:], "function renderBreakdown")
-	if end < 0 {
-		t.Fatal("cannot delimit renderKPIs body (renderBreakdown moved?)")
-	}
-	kpiFn := body[start : start+end]
-
-	// (1) The rawTruncated guard dashes all four tiles and runs BEFORE any
-	// computation on the (incomplete) series.
+	// (1) The rawTruncated guard dashes exactly the two balance tiles and
+	// runs BEFORE any computation on the (incomplete) series.
 	guard := strings.Index(kpiFn, "data.rawTruncated")
 	compute := strings.Index(kpiFn, "last - first")
 	if guard < 0 || compute < 0 || guard > compute {
 		t.Errorf("renderKPIs must gate on data.rawTruncated before computing last-first (guard=%d compute=%d)", guard, compute)
 	}
-	if !strings.Contains(kpiFn, `['kpi-balance', 'kpi-net', 'kpi-earned', 'kpi-events']`) {
-		t.Errorf("rawTruncated guard must dash out all four KPI tiles, got:\n%s", kpiFn)
+	if !strings.Contains(kpiFn, `['kpi-balance', 'kpi-net'].forEach(id => setKPI(id, '—'))`) {
+		t.Errorf("rawTruncated guard must dash out exactly the balance and net tiles, got:\n%s", kpiFn)
 	}
-	if !strings.Contains(kpiFn, "'—'") {
-		t.Errorf("rawTruncated guard must render the dash placeholder")
+	if strings.Contains(kpiFn, `'kpi-earned'`) || strings.Contains(kpiFn, `'kpi-events'`) {
+		t.Errorf("renderKPIs must not dash the accrued/earn-event tiles on truncation — the exact aggregate is independent of the series cap:\n%s", kpiFn)
+	}
+	if !strings.Contains(kpiFn, "renderEarningsKPIs(data)") {
+		t.Errorf("renderKPIs must delegate the accrued/earn-event tiles to renderEarningsKPIs")
+	}
+	if strings.Contains(earnFn, "rawTruncated") {
+		t.Errorf("renderEarningsKPIs must not consult rawTruncated — truncation never hides an exact aggregate:\n%s", earnFn)
+	}
+	if strings.Contains(breakdownFn, "rawTruncated") {
+		t.Errorf("renderBreakdown must not consult rawTruncated — the exact donut survives a truncated series:\n%s", breakdownFn)
 	}
 
 	// (2) chartDownsampled must never influence KPI visibility.
-	if strings.Contains(kpiFn, "chartDownsampled") {
-		t.Errorf("renderKPIs must not consult chartDownsampled — downsampling alone never hides KPIs")
+	for name, fn := range map[string]string{"renderKPIs": kpiFn, "renderEarningsKPIs": earnFn} {
+		if strings.Contains(fn, "chartDownsampled") {
+			t.Errorf("%s must not consult chartDownsampled — downsampling alone never hides KPIs", name)
+		}
 	}
 
-	// (3) The full-response computation is intact.
-	for _, want := range []string{"share.gained", "share.count", "kpi-balance", "kpi-net", "kpi-earned", "kpi-events"} {
+	// (3) The full-response computation is intact, driven by the server's
+	// accounting metadata, and an estimate is never dressed up as exact.
+	for _, want := range []string{"kpi-balance", "kpi-net", "last - first"} {
 		if !strings.Contains(kpiFn, want) {
-			t.Errorf("renderKPIs lost its normal computation marker %q", want)
+			t.Errorf("renderKPIs lost its balance computation marker %q", want)
 		}
+	}
+	for _, want := range []string{"primaryAccounting(data)", "share.gained", "share.count", "kpi-earned", "kpi-events", "≈", "js.stat.estimate", "'—'"} {
+		if !strings.Contains(earnFn, want) {
+			t.Errorf("renderEarningsKPIs lost its computation marker %q", want)
+		}
+	}
+	// The primary accounting is chosen from the server's flags, never by
+	// summing the exact and legacy breakdowns.
+	accountingFn := jsFunctionBody(t, body, "function primaryAccounting(data)", "function renderEarningsKPIs")
+	for _, want := range []string{"e.exact", "e.legacyStatus === 'estimated'"} {
+		if !strings.Contains(accountingFn, want) {
+			t.Errorf("primaryAccounting lost its marker %q", want)
+		}
+	}
+	if strings.Contains(earnFn, "legacyBreakdown") {
+		t.Errorf("renderEarningsKPIs must not fold legacyBreakdown into the accrued tiles")
 	}
 }
 
@@ -395,6 +436,18 @@ func TestStatisticsPageRenders(t *testing.T) {
 			t.Errorf("statistics page missing completeness wiring %q", want)
 		}
 	}
+
+	// Exact-vs-legacy earnings accounting: the note element, the separate
+	// legacy line, the tile qualifiers, and the JS wiring that reads the
+	// server's accounting metadata and the separate legacy breakdown.
+	for _, want := range []string{
+		"stat-earnings-note", "stat-earnings-legacy", "kpi-earned-qualifier", "kpi-events-qualifier", "stat-breakdown-qualifier",
+		"data.earnings", "legacyBreakdown", "exactSince", "js.stat.earnings.mixed", "js.stat.earnings.legacy_unavailable",
+	} {
+		if !contains(body, want) {
+			t.Errorf("statistics page missing earnings-accounting wiring %q", want)
+		}
+	}
 }
 
 // TestStatisticsPageLocalized verifies the page renders the default RU strings
@@ -431,6 +484,20 @@ func TestStatisticsPageLocalized(t *testing.T) {
 	for _, want := range []string{"Balance change", "Accrued", "includes spending and bets"} {
 		if !contains(body, want) {
 			t.Errorf("EN statistics page missing KPI wording %q", want)
+		}
+	}
+
+	// The exact-vs-estimate vocabulary reaches the client catalog in both
+	// languages (injected as js.* messages), so an estimated figure is never
+	// presented without its qualifier.
+	for _, want := range []string{"Точный учёт по событиям", "оценка", "к точным цифрам она не прибавляется"} {
+		if !contains(ru.Body.String(), want) {
+			t.Errorf("RU statistics page missing earnings-accounting wording %q", want)
+		}
+	}
+	for _, want := range []string{"Exact event accounting", "estimate", "not added to the exact figures", "without an exact event"} {
+		if !contains(body, want) {
+			t.Errorf("EN statistics page missing earnings-accounting wording %q", want)
 		}
 	}
 }

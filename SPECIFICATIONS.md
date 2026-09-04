@@ -538,7 +538,7 @@ gracefully instead of corrupting local state:
 
 | Topic | Message Type | Action |
 |-------|--------------|--------|
-| `community-points-user-v1` | `points-earned` | Update balance, log earnings |
+| `community-points-user-v1` | `points-earned` | Update balance, log earnings, persist the accepted event to the exact point-event ledger (see *Exact Point-Event Ledger*) |
 | `community-points-user-v1` | `points-spent` | Update balance |
 | `community-points-user-v1` | `claim-available` | Auto-claim bonus |
 | `video-playback-by-id` | `stream-up` | Mark streamer online |
@@ -2168,17 +2168,48 @@ CREATE TABLE prediction_bets (
     manual       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Exact point-event ledger (migration v5) — one row per ACCEPTED
+-- points-earned event, the accounting authority behind the Statistics
+-- earnings breakdown (see "Exact Point-Event Ledger"). event_id is the PubSub
+-- EventFingerprint (SHA-256 of topic + canonical inner message), so
+-- UNIQUE(event_id) makes RecordPointEvent idempotent against an exact
+-- re-delivery. total_points is the event-local point_gain.total_points Twitch
+-- granted; balance_after is the balance.balance the same frame reported (NULL
+-- when the frame carried none). points_id is the balance-timeline sample
+-- (points.id) written in the same transaction, which is how a sample is
+-- recognized as exact-backed. No FOREIGN KEY (same reasoning as v4). Unlike
+-- prediction_bets this table IS part of the retention sweep. Additive only:
+-- no ALTER of existing tables and no backfill of pre-ledger history.
+CREATE TABLE point_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    streamer_id   INTEGER NOT NULL,
+    event_id      TEXT NOT NULL UNIQUE,
+    timestamp     INTEGER NOT NULL,
+    reason_code   TEXT NOT NULL,       -- raw Twitch reason_code (WATCH, CLAIM, WATCH_STREAK, RAID, PREDICTION, ...)
+    total_points  INTEGER NOT NULL,    -- event-local amount granted by THIS event
+    balance_after INTEGER,             -- balance reported in the same frame, NULL when unknown
+    points_id     INTEGER NOT NULL     -- the points row (timeline sample) this event produced
+);
+
 -- Indexes for performance
 CREATE INDEX idx_points_streamer_time ON points(streamer_id, timestamp);
 CREATE INDEX idx_annotations_streamer_time ON annotations(streamer_id, timestamp);
 CREATE INDEX idx_chat_streamer_time ON chat_messages(streamer_id, timestamp);
 CREATE INDEX idx_predbets_streamer_time ON prediction_bets(streamer_id, timestamp);
+CREATE INDEX idx_point_events_streamer_time ON point_events(streamer_id, timestamp);
+CREATE INDEX idx_point_events_points_id ON point_events(points_id);
 ```
 
 `prediction_bets` is deliberately **excluded** from the retention sweep
-(`PruneBefore` only prunes `points` and `annotations`), so lifetime ROI stays
-exact; it grows by one row per resolved prediction. Migration v4 is additive
-(no `ALTER` of existing tables), so it is safe to apply to a populated database.
+(`PruneBefore` prunes `points`, `point_events` and `annotations`), so lifetime
+ROI stays exact; it grows by one row per resolved prediction. Migrations v4 and
+v5 are additive (no `ALTER` of existing tables, no data rewrite), so they are
+safe to apply to a populated database, and a pre-v5 binary opening a v5
+database skips the higher version, never touches `point_events`, and keeps
+working on the tables it knows (its own `points` rows then read back as
+legacy, not exact-backed). `DeleteStreamerTx` purges `point_events` together
+with the other tables in the same transaction; a rename preserves them through
+the stable `streamer_id`.
 
 #### Notifications Module Schema
 
@@ -2345,6 +2376,54 @@ Both must be set to enable authentication. When enabled, all dashboard routes re
 
 Analytics data is stored in the unified database (`database/{username}/miner.db`) under the analytics module.
 
+### Exact Point-Event Ledger
+
+Channel-point earnings are accounted for from **events, never from balance
+deltas**. Three kinds of facts are kept apart and none is authority for
+another:
+
+1. **Exact earning events** (`point_events`) — immutable accounting facts. For
+   every points-earned event the PubSub pool ADMITTED (for `WATCH_STREAK`, only
+   a newly accepted grant — the pool's admission stays the linearization
+   point), the miner builds an event-local snapshot from the same frame: the
+   event identity (`EventFingerprint`), the raw `reason_code`, the exact
+   `point_gain.total_points`, and `balance.balance` when present. Nothing is
+   re-read from the mutable `Streamer` (a poll or a later frame may already
+   have moved its balance). `Service.RecordPointEvent` writes the ledger row,
+   its balance-timeline sample and — for `WATCH_STREAK`/`RAID` — the chart
+   annotation in **one transaction** (`database.WithTx`, so the close barrier
+   holds); `UNIQUE(event_id)` rolls the whole transaction back on an exact
+   re-delivery, so a duplicate identity leaves no second row, sample or marker
+   and two concurrent deliveries yield exactly one winner. The ledger is a
+   persistence invariant only — it is not a second replay controller.
+2. **Balance timeline** (`points`) — absolute balance snapshots for the chart,
+   tagged with the reason that caused the change. Points-spent frames and
+   points-earned frames the ledger cannot admit (no identity; a
+   `total_points` that is missing, non-numeric, non-integral or outside exact
+   float range — never coerced to 0; a payload with neither `data.timestamp`
+   nor `balance.balance`, whose fingerprint would not distinguish two equal
+   grants) are recorded here only.
+3. **Annotations** — display markers whose text (`+450 - Watch Streak`) is
+   built from the same event-local amount; they are never parsed back into
+   accounting numbers.
+
+**Statistics breakdown.** `GET /api/points-history` aggregates exact earnings
+in SQL (`ExactEarningsBetween`: `SUM(total_points)`, `COUNT(*)` of positive
+events per canonical reason, independent of the raw-series row cap). Unknown
+reason codes are exact earnings pooled into `OTHER`; non-positive amounts are
+accepted facts but never earnings. History recorded **before the ledger** (or
+by a pre-v5 binary) is not backfilled; it stays available only as a clearly
+separate **legacy estimate** (`EstimateLegacyBreakdown`: positive deltas into
+samples no exact event backs, skipping points-spent snapshots). The response
+carries `breakdown` (exact when `earnings.exact`, otherwise the estimate),
+`legacyBreakdown` (the estimate for the legacy part of a mixed range) and
+`earnings{coverage: exact|legacy|mixed|none|unavailable, exact, exactSince,
+legacyStatus: none|estimated|unavailable}`; each sample carries `exact`. Exact
+and estimated figures are **never summed**; a truncated raw series makes the
+legacy estimate `unavailable` (never zero) while the exact aggregate stays
+complete. The dashboard labels estimates as such and shows the legacy part on
+its own line. Retention prunes `point_events` with `points`/`annotations`.
+
 ### Prediction ROI Analytics
 
 Resolved prediction bets are persisted to `prediction_bets` and aggregated into a
@@ -2380,6 +2459,10 @@ The report never places, modifies, or auto-disables a bet or strategy.
 
 ### Event Types for Series
 
+Reasons tagged on balance-timeline samples (`points.event_type`, display form
+with underscores replaced by spaces). They label the chart tooltip and the
+legacy estimate; the exact ledger stores the raw Twitch `reason_code`.
+
 | Event | Description |
 |-------|-------------|
 | `Watch` | Points from watching |
@@ -2387,13 +2470,18 @@ The report never places, modifies, or auto-disables a bet or strategy.
 | `Watch Streak` | Watch streak bonus |
 | `Raid` | Raid participation |
 | `Prediction` | Prediction result |
-| `Spent` | Points spent |
+| `Spent` | Points spent (never an earning) |
 
 ### Annotation Types
+
+Display facts only: their text is never parsed back into accounting numbers.
+`WATCH_STREAK` and `RAID` markers are written in the same transaction as their
+exact point event, from the same event-local amount.
 
 | Type | Color | Description |
 |------|-------|-------------|
 | `WATCH_STREAK` | Blue (#45c1ff) | Watch streak earned |
+| `RAID` | Tan (#d9a25c) | Raid points earned |
 | `PREDICTION_MADE` | Yellow (#ffe045) | Bet placed |
 | `WIN` | Green (#36b535) | Prediction won (tracked rounds only — see *Terminal Result Admission (tracked-only)*) |
 | `LOSE` | Red (#ff4545) | Prediction lost (tracked rounds only — see *Terminal Result Admission (tracked-only)*) |

@@ -143,9 +143,9 @@ func TestBreakdownFromSamples(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BreakdownFromSamples(tc.samples)
+			got := EstimateLegacyBreakdown(tc.samples).Breakdown
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("BreakdownFromSamples() = %+v, want %+v", got, tc.want)
+				t.Errorf("EstimateLegacyBreakdown() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -158,16 +158,16 @@ func TestBreakdownFromSamples(t *testing.T) {
 // at the window edge therefore yields no breakdown rather than a guessed one.
 func TestBreakdownFirstSampleIsBaseline(t *testing.T) {
 	// Single in-window sample: its own event is unattributable.
-	if got := BreakdownFromSamples([]PointSample{{Balance: 1450, Reason: "WATCH STREAK"}}); got != nil {
+	if got := EstimateLegacyBreakdown([]PointSample{{Balance: 1450, Reason: "WATCH STREAK"}}).Breakdown; got != nil {
 		t.Errorf("single-sample window should yield nil breakdown, got %+v", got)
 	}
 
 	// With a baseline present, only deltas from the second sample onward are
 	// attributed; the first sample's own event never contributes.
-	got := BreakdownFromSamples([]PointSample{
+	got := EstimateLegacyBreakdown([]PointSample{
 		{Balance: 1000, Reason: "WATCH"},        // baseline: its event is not counted
 		{Balance: 1450, Reason: "WATCH STREAK"}, // attributed
-	})
+	}).Breakdown
 	want := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("breakdown = %+v, want %+v (baseline sample must not contribute)", got, want)
@@ -190,7 +190,7 @@ func TestBreakdownWatchStreakSums(t *testing.T) {
 		{Balance: 11510, Reason: "  watch streak "}, // +450 (untrimmed/lowercased)
 		{Balance: 12010, Reason: "CLAIM"},           // +500 bonus claim
 	}
-	got := BreakdownFromSamples(samples)
+	got := EstimateLegacyBreakdown(samples).Breakdown
 
 	byReason := make(map[string]ReasonShare, len(got))
 	for _, s := range got {

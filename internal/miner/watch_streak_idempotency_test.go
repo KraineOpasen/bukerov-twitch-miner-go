@@ -41,15 +41,21 @@ func TestWatchStreakReplayWritesCacheAndAnalyticsOnce(t *testing.T) {
 	cache := streamermanager.NewStreakCache(cachePath)
 	m.streamers.SetStreakCache(cache)
 
+	// The exact event identity is the same fingerprint the pool hands to the
+	// streak admission below; the exact ledger keys its row by it too. The
+	// frame carries Twitch's event timestamp, as every real points-earned
+	// frame does (it is what makes equal grants distinct events).
 	msg := &pubsub.PubSubMessage{
 		Topic: pubsub.NewTopic(pubsub.TopicCommunityPointsUser, "user"),
 		Type:  "points-earned",
 		Data: map[string]interface{}{
+			"timestamp": "2026-08-25T09:00:00.000000000Z",
 			"point_gain": map[string]interface{}{
 				"reason_code":  "WATCH_STREAK",
 				"total_points": float64(350),
 			},
 		},
+		EventFingerprint: "sha256:exact-replay",
 	}
 	s.SetChannelPoints(1234)
 	event := models.WatchStreakGrantEvent{EventID: "sha256:exact-replay", AcceptedAt: time.Now()}
@@ -92,6 +98,15 @@ func TestWatchStreakReplayWritesCacheAndAnalyticsOnce(t *testing.T) {
 	}
 	if len(annotations) != 1 || annotations[0].Type != "WATCH_STREAK" {
 		t.Fatalf("analytics annotations=%+v, want one WATCH_STREAK", annotations)
+	}
+	// The exact ledger holds the single accepted grant at its event-local
+	// amount; the replay (not newly accepted) never reached analytics.
+	exact, err := svc.Repository().ExactEarningsBetween(login, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact.Events != 1 || len(exact.Breakdown) != 1 || exact.Breakdown[0].Reason != "WATCH_STREAK" || exact.Breakdown[0].Gained != 350 || exact.Breakdown[0].Count != 1 {
+		t.Fatalf("exact ledger=%+v, want one WATCH_STREAK event of 350", exact)
 	}
 	loaded := cache.Load(time.Now())[login]
 	if loaded.Revision != 1 || len(loaded.Grants) != 1 || loaded.Grants[0].Binding != models.WatchStreakGrantUnbound {
