@@ -55,7 +55,10 @@ func harvestSlogCorpus(t *testing.T) []corpusMsg {
 			if err != nil {
 				return err
 			}
-			rel, _ := filepath.Rel(root, path)
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return fmt.Errorf("relative path of %s under %s: %w", path, root, err)
+			}
 			for _, m := range slogCallRe.FindAllSubmatch(src, -1) {
 				// A literal immediately followed by "+" is only the first
 				// fragment of a message assembled at runtime; the complete
