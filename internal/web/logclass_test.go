@@ -23,7 +23,10 @@ func TestClassifyLogLineTable(t *testing.T) {
 	cases := []classifyCase{
 		// Levels and fallbacks.
 		{"ordinary INFO", ts + `level=INFO msg="Streamer stats" streamer=xqc`, "log-info", "ℹ️"},
-		{"ordinary DEBUG", ts + `level=DEBUG msg="Watching streams" count=2`, "log-info", "ℹ️"},
+		{"ordinary DEBUG", ts + `level=DEBUG msg="an unrecognized debug message" count=2`, "log-info", "ℹ️"},
+		// "Watching streams" used to be the unclassified-DEBUG example here;
+		// it is now a recognized watch event (see logsignal_test.go).
+		{"watching streams", ts + `level=DEBUG msg="Watching streams" count=2`, "log-points-watch", "👀"},
 		{"ordinary WARN", ts + `level=WARN msg="GQL request failed, retrying" attempt=2`, "log-warn", "⚠️"},
 		{"ordinary ERROR", ts + `level=ERROR msg="Failed to join raid" error=boom`, "log-error", "❌"},
 		{"unknown line without level", `some free-form line`, "log-info", "✨"},
@@ -198,7 +201,9 @@ func TestEmojiCoverage(t *testing.T) {
 		if rule.emoji == "" {
 			t.Errorf("logMsgRules[%d] (%s) has empty emoji", i, rule.class)
 		}
-		if len(rule.exact) == 0 && len(rule.prefix) == 0 {
+		// A rule matches by literal (exact/prefix) or, for a message the miner
+		// assembles at runtime, by shape.
+		if len(rule.exact) == 0 && len(rule.prefix) == 0 && rule.match == nil {
 			t.Errorf("logMsgRules[%d] (%s) matches nothing", i, rule.class)
 		}
 	}

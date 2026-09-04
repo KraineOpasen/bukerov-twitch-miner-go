@@ -95,43 +95,18 @@
 
         if (!scrollEl || !linesEl) return;
 
-        // class -> subsystem. Deterministic, test-covered table (see
-        // f3_pages_test.go): every class allLogLineClasses() can emit must
-        // appear here exactly once, so no log line silently escapes every
-        // subsystem filter bucket.
-        const SUBSYS = {
-            'log-error': 'other', 'log-warn': 'other', 'log-info': 'other',
-            'log-startup': 'service', 'log-service': 'service',
-            'log-auth': 'auth', 'log-auth-success': 'auth',
-            'log-streamer-online': 'stream', 'log-streamer-offline': 'stream',
-            'log-connected': 'stream', 'log-chat': 'stream', 'log-reconnect': 'stream',
-            'log-points-watch': 'points', 'log-points-streak': 'points', 'log-points-claim': 'points',
-            'log-points-raid': 'points', 'log-points-gain': 'points', 'log-bonus': 'points',
-            'log-bet-win': 'predictions', 'log-bet-lose': 'predictions', 'log-bet-refund': 'predictions',
-            'log-bet-filter': 'predictions', 'log-bet-general': 'predictions', 'log-bet-failed': 'predictions',
-            'log-bet-gated': 'predictions',
-            'log-watch-assigned': 'watch', 'log-watch-released': 'watch', 'log-watch-changed': 'watch',
-            'log-rotation': 'watch', 'log-pursuing-streak': 'watch',
-            'log-drops': 'drops', 'log-drop-skipped': 'drops', 'log-drop-complete': 'drops', 'log-discovery': 'drops',
-            'log-update': 'updater', 'log-update-success': 'updater',
-            'log-settings': 'system', 'log-health-ok': 'system', 'log-database': 'system',
-        };
-
-        function levelOf(cls) {
-            if (cls === 'log-error') return 'error';
-            if (cls === 'log-warn') return 'warning';
-            return 'info';
-        }
-        function subsystemOf(cls) {
-            return SUBSYS[cls] || 'other';
-        }
-        // One line = one authoritative class: the template renders
-        // class="log-line <semantic-class>", so the first class after
-        // "log-line" is the line's classification.
-        function semanticClass(el) {
-            const parts = (el.className || '').trim().split(/\s+/);
-            return parts.length > 1 ? parts[1] : parts[0];
-        }
+        // Severity, subsystem and reconnect identity are INDEPENDENT
+        // dimensions decided by the server (internal/web/logclass.go) and
+        // rendered as data-* attributes on each line. The browser reads that
+        // authoritative metadata; it deliberately keeps no taxonomy of its
+        // own, so severity can never overwrite a line's subsystem the way it
+        // did when both were derived from one CSS class.
+        //
+        // Lines the server marked non-visible are not in the DOM at all, so
+        // they are never counted, searched or copied here.
+        function lineLevel(el) { return el.dataset.level || 'info'; }
+        function lineSubsystem(el) { return el.dataset.subsystem || 'other'; }
+        function lineIsReconnect(el) { return el.dataset.reconnect === '1'; }
 
         // Geometry-derived pin threshold, computed once at init: 2 line-heights
         // (min 32px) so a swap that adds one or two trailing lines while the
@@ -198,11 +173,10 @@
             const lineEls = linesEl.querySelectorAll('.log-line');
             let shown = 0;
             lineEls.forEach(function (el) {
-                const cls = semanticClass(el);
                 let visible = true;
-                if (level !== 'all' && levelOf(cls) !== level) visible = false;
-                if (visible && sub !== 'all' && subsystemOf(cls) !== sub) visible = false;
-                if (visible && !showReconnect && cls === 'log-reconnect') visible = false;
+                if (level !== 'all' && lineLevel(el) !== level) visible = false;
+                if (visible && sub !== 'all' && lineSubsystem(el) !== sub) visible = false;
+                if (visible && !showReconnect && lineIsReconnect(el)) visible = false;
                 if (visible && q) {
                     const textEl = el.querySelector('.log-text');
                     const text = textEl ? textEl.textContent.toLowerCase() : '';
@@ -278,6 +252,42 @@
             }, 4000);
         }
 
+        // The dashboard is normally reached over plain LAN HTTP, which is NOT
+        // a secure context, so navigator.clipboard is frequently absent (and
+        // can reject even where it exists). Without a second path the button
+        // could only ever report "copy failed" on a LAN dashboard, which is
+        // exactly what operators saw. This fallback runs inside the click's
+        // user-activation window, copies the identical string, and removes
+        // its scratch element on every path.
+        function copyViaTextarea(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            // Off-screen but still focusable/selectable; never display:none,
+            // which would make the selection (and the copy) a no-op.
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '-9999px';
+            ta.style.opacity = '0';
+            const prevActive = document.activeElement;
+            document.body.appendChild(ta);
+            let ok = false;
+            try {
+                ta.focus();
+                ta.select();
+                ta.setSelectionRange(0, text.length);
+                ok = document.execCommand('copy');
+            } catch (err) {
+                ok = false;
+            } finally {
+                document.body.removeChild(ta);
+                if (prevActive && typeof prevActive.focus === 'function') {
+                    try { prevActive.focus(); } catch (err) { /* focus restore is best-effort */ }
+                }
+            }
+            return ok;
+        }
+
         if (copyBtn) {
             copyBtn.addEventListener('click', async function () {
                 // Clear first (not through setCopyStatus, so an empty
@@ -285,12 +295,28 @@
                 // repeated, IDENTICAL result still re-announces in the
                 // role=status region instead of being a same-text no-op.
                 if (copyStatus) copyStatus.textContent = '';
+                // Exactly the lines the filters left visible, in display
+                // order: the text spans only, so no decorative emoji, no
+                // toolbar text and no markup ever enter the payload. Lines
+                // the server suppressed are not in the DOM to begin with.
                 const textEls = linesEl.querySelectorAll('.log-line:not([hidden]) .log-text');
                 const text = Array.prototype.map.call(textEls, function (el) { return el.textContent; }).join('\n');
-                try {
-                    await navigator.clipboard.writeText(text);
+
+                let copied = false;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        copied = true;
+                    } catch (err) {
+                        // Rejected (insecure context, permission, focus loss):
+                        // fall through to the synchronous fallback below.
+                        copied = false;
+                    }
+                }
+                if (!copied) copied = copyViaTextarea(text);
+                if (copied) {
                     setCopyStatus(window.t('js.logs.copy_ok'));
-                } catch (err) {
+                } else {
                     setCopyStatus(window.t('js.logs.copy_failed'));
                 }
             });

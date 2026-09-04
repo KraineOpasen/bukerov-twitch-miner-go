@@ -329,15 +329,58 @@ type DropsPageData struct {
 	PolicyModes []string
 }
 
-// LogLineView is one rendered log line: Class is the semantic color class and
-// Emoji the decorative icon, both assigned by classifyLogLine (logclass.go);
-// Text is the raw log line, rendered untouched. Emoji is empty when the raw
-// line already starts with its own emoji, so icons are never doubled.
+// LogLineView is one rendered log line, as classified by classifyLogLine
+// (logclass.go). Class is the semantic color class and Emoji the decorative
+// icon; Text is the raw log line, rendered untouched. Emoji is empty when the
+// raw line already starts with its own emoji, so icons are never doubled.
+//
+// Level, Subsystem and Reconnect are independent filter dimensions rendered
+// as data-* attributes, so the browser filter reads authoritative server
+// metadata instead of reconstructing severity and subsystem from a CSS class.
+// DashboardVisible is false for structured DEBUG/INFO with no recognized
+// user-facing meaning: the logs_lines partial skips those lines, so they are
+// not listed, counted, searched, or copied. This is a presentation decision
+// only — readLogTail still returns them, and the retained log file, the debug
+// snapshot and the support bundle are untouched.
 type LogLineView struct {
 	Class string
 	Emoji string
 	Text  string
+
+	Level            string
+	Subsystem        string
+	Reconnect        bool
+	DashboardVisible bool
 }
+
+// visibleLogLines returns the lines the human Logs page lists: everything the
+// classifier recognized as user-facing, plus every WARN/ERROR and every line
+// whose level could not be read. Suppressed lines are dropped at this render
+// seam only — they stay in the retained file, the debug snapshot and the
+// support bundle, and readLogTail still returns them.
+//
+// The result is capped at the newest logTailLines entries. That cap is the
+// reason readLogTail scans a much larger raw window (logScanLines): the
+// budget has to bound what the page SHOWS, not what it reads past, or a tail
+// full of suppressed transport chatter would leave the page nearly empty.
+func visibleLogLines(lines []LogLineView) []LogLineView {
+	out := make([]LogLineView, 0, len(lines))
+	for _, l := range lines {
+		if l.DashboardVisible {
+			out = append(out, l)
+		}
+	}
+	if len(out) > logTailLines {
+		out = out[len(out)-logTailLines:]
+	}
+	return out
+}
+
+// VisibleLines is what the logs_lines partial ranges over.
+func (d LogsPageData) VisibleLines() []LogLineView { return visibleLogLines(d.Lines) }
+
+// VisibleLines is what the logs_lines partial ranges over.
+func (d LogsLinesData) VisibleLines() []LogLineView { return visibleLogLines(d.Lines) }
 
 type LogsPageData struct {
 	Username       string
