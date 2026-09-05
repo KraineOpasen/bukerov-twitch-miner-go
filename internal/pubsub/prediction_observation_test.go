@@ -318,6 +318,7 @@ func TestChannelFrameObservationIsSanitized(t *testing.T) {
 		Type:             "event-updated",
 		ChannelID:        "chan-1",
 		Timestamp:        time.Unix(1700000000, 0),
+		TimestampSource:  TimestampFromProducer,
 		EventFingerprint: "sha256:transport-fingerprint-must-not-be-persisted",
 		Data: map[string]interface{}{
 			"event": map[string]interface{}{
@@ -926,4 +927,81 @@ func TestEveryTrackedRoundIsAdmittedWithAnIncarnation(t *testing.T) {
 			t.Fatalf("a round control is published without a local admission incarnation:\n\t%s", strings.TrimSpace(line))
 		}
 	}
+}
+
+// TestProducerTimeIsNotClaimedForAReceiverClockReading is an independent
+// review's F3, time half.
+//
+// ParsePubSubMessage always sets Timestamp: when a frame carries no producer
+// time it falls back to server_time, and when it carries neither it falls back
+// to this process's own clock. The observer read only the value and, finding it
+// non-zero, labelled every frame PRODUCER. A durable trail then asserted that
+// Twitch had stated a time for frames whose time this process had invented —
+// and the RECEIVER branch was unreachable for any parsed frame.
+//
+// Provenance now travels with the value, and a receiver-clock reading is
+// recorded as the absence of a producer time rather than as one.
+func TestProducerTimeIsNotClaimedForAReceiverClockReading(t *testing.T) {
+	frame := func(inner string) *PubSubMessage {
+		t.Helper()
+		msg, err := ParsePubSubMessage(&WSData{
+			Topic:   "predictions-channel-v1.chan-1",
+			Message: inner,
+		})
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return msg
+	}
+
+	const event = `"event":{"id":"e1","status":"ACTIVE"}`
+
+	t.Run("producer time", func(t *testing.T) {
+		msg := frame(`{"type":"event-updated","data":{"timestamp":"2026-01-02T03:04:05Z",` + event + `}}`)
+		if msg.TimestampSource != TimestampFromProducer {
+			t.Fatalf("source = %q, want PRODUCER", msg.TimestampSource)
+		}
+		o := observationFromMessage(msg, nil)
+		if o.ProducerTimeSource != ObsTimeProducer {
+			t.Fatalf("observation time source = %q, want PRODUCER", o.ProducerTimeSource)
+		}
+		if o.ProducerAtMS != time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli() {
+			t.Fatalf("producer time = %d, want the frame's own timestamp", o.ProducerAtMS)
+		}
+	})
+
+	t.Run("server time", func(t *testing.T) {
+		msg := frame(`{"type":"event-updated","server_time":1700000000,"data":{` + event + `}}`)
+		if msg.TimestampSource != TimestampFromServer {
+			t.Fatalf("source = %q, want SERVER", msg.TimestampSource)
+		}
+		o := observationFromMessage(msg, nil)
+		if o.ProducerTimeSource != ObsTimeServer {
+			t.Fatalf("observation time source = %q, want SERVER: a server envelope time is not "+
+				"a time the producer stated", o.ProducerTimeSource)
+		}
+		if o.ProducerAtMS != time.Unix(1700000000, 0).UnixMilli() {
+			t.Fatalf("server time = %d, want the envelope's server_time", o.ProducerAtMS)
+		}
+	})
+
+	t.Run("no time on the wire at all", func(t *testing.T) {
+		before := time.Now()
+		msg := frame(`{"type":"event-updated","data":{` + event + `}}`)
+		if msg.TimestampSource != TimestampFromReceiver {
+			t.Fatalf("source = %q, want RECEIVER", msg.TimestampSource)
+		}
+		// The transport value is unchanged: it is still this process's clock.
+		if msg.Timestamp.Before(before) {
+			t.Fatalf("fallback timestamp %v predates the parse", msg.Timestamp)
+		}
+		o := observationFromMessage(msg, nil)
+		if o.ProducerTimeSource != ObsTimeReceiver {
+			t.Fatalf("observation time source = %q, want RECEIVER", o.ProducerTimeSource)
+		}
+		if o.ProducerAtMS != 0 {
+			t.Fatalf("producer time = %d, want none: this process's own clock reading is not a "+
+				"time the producer stated", o.ProducerAtMS)
+		}
+	})
 }

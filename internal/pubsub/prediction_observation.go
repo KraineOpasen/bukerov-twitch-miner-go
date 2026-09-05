@@ -251,10 +251,20 @@ func observationFromMessage(msg *PubSubMessage, streamer streamerIdentity) Predi
 		obs.RoutedLogin = login
 		obs.RetentionGroupOwnerLogin = login
 	}
-	if !msg.Timestamp.IsZero() {
+	// A frame's Timestamp is ALWAYS set — the parser falls back to this
+	// process's own clock — so the value alone cannot say whether a producer
+	// stated it. Only its recorded provenance can, and a receiver-clock
+	// reading is not a producer time at all: it is left absent rather than
+	// stored as one the producer never gave.
+	switch msg.TimestampSource {
+	case TimestampFromProducer:
 		obs.ProducerAtMS = msg.Timestamp.UnixMilli()
 		obs.ProducerTimeSource = ObsTimeProducer
-	} else {
+	case TimestampFromServer:
+		obs.ProducerAtMS = msg.Timestamp.UnixMilli()
+		obs.ProducerTimeSource = ObsTimeServer
+	default:
+		obs.ProducerAtMS = 0
 		obs.ProducerTimeSource = ObsTimeReceiver
 	}
 	return obs

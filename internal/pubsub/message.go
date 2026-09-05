@@ -51,7 +51,27 @@ type PubSubMessage struct {
 	ConnectionGeneration uint64
 	ConnectionSequence   uint64
 	ConnectionKnown      bool
+
+	// TimestampSource says WHERE Timestamp came from. Timestamp itself is
+	// always set — it falls back to the receiver's own clock — so its value
+	// alone cannot distinguish a time the producer stated from one this
+	// process invented. Nothing in the transport branches on this; it exists
+	// so a durable record can say which it has. Empty on a message a caller
+	// built directly rather than parsed off the wire.
+	TimestampSource string
 }
+
+// Where a PubSubMessage.Timestamp came from.
+const (
+	// TimestampFromProducer: the frame carried its own data.timestamp.
+	TimestampFromProducer = "PRODUCER"
+	// TimestampFromServer: no producer time, but the envelope carried
+	// server_time.
+	TimestampFromServer = "SERVER"
+	// TimestampFromReceiver: neither was usable, so Timestamp is this
+	// process's own clock reading and says nothing about the producer.
+	TimestampFromReceiver = "RECEIVER"
+)
 
 func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
 	topic, err := ParseTopic(data.Topic)
@@ -79,7 +99,7 @@ func ParsePubSubMessage(data *WSData) (*PubSubMessage, error) {
 		msg.Data = msgData
 	}
 
-	msg.Timestamp = extractTimestamp(message, msg.Data)
+	msg.Timestamp, msg.TimestampSource = extractTimestamp(message, msg.Data)
 
 	if msg.Data != nil {
 		msg.ChannelID = extractChannelID(msg.Data, topic.ChannelID)
@@ -101,20 +121,25 @@ func fingerprintPubSubEvent(topic Topic, message map[string]interface{}) string 
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-func extractTimestamp(message, data map[string]interface{}) time.Time {
+// extractTimestamp returns the frame's best available time AND where that time
+// came from. The value is unchanged from what this function has always
+// returned; only the provenance is new. The fallback to the local clock is what
+// makes the provenance necessary: without it every frame looks producer-timed,
+// including the ones this process timed itself.
+func extractTimestamp(message, data map[string]interface{}) (time.Time, string) {
 	if data != nil {
 		if ts, ok := data["timestamp"].(string); ok {
 			if t, err := time.Parse(time.RFC3339, ts); err == nil {
-				return t
+				return t, TimestampFromProducer
 			}
 		}
 	}
 
 	if ts, ok := message["server_time"].(float64); ok {
-		return time.Unix(int64(ts), 0)
+		return time.Unix(int64(ts), 0), TimestampFromServer
 	}
 
-	return time.Now()
+	return time.Now(), TimestampFromReceiver
 }
 
 func extractChannelID(data map[string]interface{}, defaultID string) string {
