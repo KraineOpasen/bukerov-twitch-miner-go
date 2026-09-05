@@ -2201,6 +2201,22 @@ CREATE TABLE point_events (
 -- written is dropped and its session is finalized INCOMPLETE, so a failure is
 -- always borne by the trail alone.
 --
+-- A fact is recorded WHOLE or not at all. Every frozen ceiling -- identifier
+-- length, outcomes per fact, predictor cohort, payload bytes, rows and bytes
+-- per round, per deletion identity and per store -- refuses the observation
+-- rather than shortening it, because a shortened fact is not a smaller truth:
+-- a truncated channel id names a different channel, and a round stored with 64
+-- of its 70 outcomes is indistinguishable from one that had 64. The ceilings
+-- are checked BEFORE the insert, against current usage plus the incoming fact,
+-- and the per-identity ones are what bound the cost of a privacy erasure in
+-- advance. Every refusal is counted, which is what makes the session
+-- INCOMPLETE and says so.
+--
+-- collector_sequence is reserved when a fact is CAPTURED, not when it is
+-- written, so a loss leaves a gap: committed_count + dropped_count accounts for
+-- every position the session handed out, and a reader that finds otherwise
+-- treats the session as an integrity error rather than as authoritative.
+--
 -- One collector session exists per process run. collector_epoch is allocated
 -- by a committed INSERT and LastInsertId — never MAX(epoch)+1, which would
 -- reuse an epoch after a deletion and silently merge two runs — and the row is
@@ -2227,7 +2243,12 @@ CREATE TABLE prediction_observation_sessions (
 -- gap-detectable. Every parent id requires its corresponding channel id, so no
 -- row can exist that a channel-scoped erasure cannot reach, and
 -- round_incarnation_id exists exactly when retention_group_owner_channel_id
--- does, which is what makes whole-round retention well defined. event_id and
+-- does, which is what makes whole-round retention well defined. It names one
+-- LOCAL ADMISSION -- the pool instance that admitted the round plus that
+-- pool's admission counter -- not a Twitch event: a round cleaned up and
+-- created again, or admitted by a rebuilt pool, is a different local round,
+-- and the retention unit is the compound (collector_epoch, pool_instance_id,
+-- round_incarnation_id) that retention groups and deletes by. event_id and
 -- source_fingerprint are deliberately NOT unique: one round produces many
 -- facts, and a duplicate delivery is itself a fact worth keeping. No FOREIGN
 -- KEY (same reasoning as v4 and v5); parents are resolved lookup-only, so an
@@ -2243,7 +2264,7 @@ CREATE TABLE prediction_observations (
     collector_epoch                   INTEGER NOT NULL,
     collector_sequence                INTEGER NOT NULL,
     pool_instance_id                  TEXT NOT NULL,   -- producing pool instance
-    round_incarnation_id              TEXT,            -- the whole-round retention unit
+    round_incarnation_id              TEXT,            -- this pool's LOCAL admission of a round
     routed_streamer_id                INTEGER,
     routed_channel_id                 TEXT,
     round_owner_streamer_id           INTEGER,         -- provenance; never expands deletion
@@ -2256,7 +2277,9 @@ CREATE TABLE prediction_observations (
     source_message_type               TEXT,            -- closed enum
     source_fingerprint                TEXT,            -- own digest, NOT the transport one
     producer_at_ms                    INTEGER,
-    producer_time_source              TEXT NOT NULL,   -- PRODUCER | SERVER | RECEIVER | UNKNOWN
+    producer_time_source              TEXT NOT NULL,   -- where producer_at_ms came from; a frame
+                                                       -- timed by the receiver's own clock records
+                                                       -- RECEIVER and no producer time at all
     received_at_ms                    INTEGER NOT NULL,
     connection_index                  INTEGER,
     connection_generation             INTEGER,
@@ -2276,11 +2299,13 @@ CREATE INDEX idx_point_events_streamer_time ON point_events(streamer_id, timesta
 CREATE INDEX idx_point_events_points_id ON point_events(points_id);
 CREATE INDEX idx_predobs_session ON prediction_observations(collector_session_id, collector_sequence);
 CREATE INDEX idx_predobs_epoch ON prediction_observations(collector_epoch, id);
+CREATE INDEX idx_predobs_exact_pair ON prediction_observations(collector_epoch, collector_session_id, collector_sequence);
 CREATE INDEX idx_predobs_routed_identity ON prediction_observations(routed_channel_id, id);
 CREATE INDEX idx_predobs_retention_identity ON prediction_observations(retention_group_owner_channel_id, id);
 CREATE INDEX idx_predobs_routed_parent ON prediction_observations(routed_streamer_id, id);
 CREATE INDEX idx_predobs_retention_parent ON prediction_observations(retention_group_owner_streamer_id, id);
 CREATE INDEX idx_predobs_round ON prediction_observations(round_incarnation_id, id);
+CREATE INDEX idx_predobs_round_unit ON prediction_observations(collector_epoch, pool_instance_id, round_incarnation_id, received_at_ms);
 CREATE INDEX idx_predobs_null_round_retention ON prediction_observations(received_at_ms, id)
     WHERE round_incarnation_id IS NULL;
 CREATE INDEX idx_predobs_fingerprint ON prediction_observations(source_fingerprint);
