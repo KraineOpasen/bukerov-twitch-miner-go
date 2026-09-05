@@ -113,10 +113,19 @@ func (s *Server) configuredStreamerNames() []string {
 // handleAPIPointsHistory returns the balance series + event annotations for one
 // streamer over a range preset (24h/7d/30d). Response:
 //
-//	{ streamer, range, points:[{t,balance}], annotations:[{t,type,reason}],
-//	  breakdown:[{reason,gained,count}], rawTruncated, chartDownsampled }
+//	{ streamer, range, points:[{t,balance,reason,exact}], annotations:[{t,type,reason}],
+//	  breakdown:[{reason,gained,count}], exactBreakdown:[...], legacyBreakdown:[...],
+//	  earnings:{coverage,exact,exactSince,legacyStatus}, rawTruncated, chartDownsampled }
 //
-// The series is downsampled to maxChartPoints for display; use the export
+// exactBreakdown is the authoritative accounting (the exact point-event
+// aggregation, present when the window holds a positive exact event;
+// earnings.exact is true for any exact event, positive or not);
+// legacyBreakdown is the explicit balance-delta estimate for the history no
+// exact event covers, never added to the exact figures (see
+// analytics.ComposeEarnings). breakdown is the compatibility attribution of
+// the first release (analytics.BreakdownFromSamples over the raw series),
+// kept unchanged for existing consumers and not canonical accounting. The
+// series is downsampled to maxChartPoints for display; use the export
 // endpoint for full fidelity. Auth is inherited from the global middleware.
 func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -138,39 +147,52 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	end := time.Now()
 	start := end.Add(-window)
 
+	// Everything the response presents together — the balance series, its
+	// markers, the exact ledger aggregate and the bets behind the PREDICTION
+	// slice — comes from ONE database snapshot, so a point event committing
+	// during the request is in every component or in none. The transaction
+	// is over before anything below runs; encoding holds no database state.
 	repo := s.analytics.Repository()
-	raw, err := repo.GetPointSamples(streamer, start, end, maxHistoryRows)
+	rowCap := rowCapOrDefault(s.historyRowCap, maxHistoryRows)
+	snap, err := repo.PointsSnapshotBetween(r.Context(), streamer, start, end, rowCap, true)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
 	}
+	raw := snap.Samples
 	points := analytics.Downsample(raw, maxChartPoints)
-
-	annotations, err := repo.GetAnnotationRecords(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load annotations")
-		return
-	}
 
 	// Betting summary for the SAME streamer/window as the series, so the
 	// earnings donut's PREDICTION slice (a gross positive credit) can be shown
 	// beside the stake risked, refunded, and net result — making the origin of
 	// the positive prediction points explicit instead of an unexplained "Other".
 	// Best-effort: a bet-history read failure must not fail the whole page, it
-	// just omits the summary.
+	// just omits the summary (the snapshot leaves Bets nil in that case).
 	var betSummary *analytics.BetSummary
-	if bets, betErr := repo.GetBets(streamer, "", start, end); betErr == nil && len(bets) > 0 {
-		bs := analytics.SummarizeBets(bets)
+	if len(snap.Bets) > 0 {
+		bs := analytics.SummarizeBets(snap.Bets)
 		betSummary = &bs
 	}
 
-	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), maxHistoryRows)
+	// Exact earnings come from the point-event ledger, aggregated in SQL over
+	// the same window: the event-local amounts Twitch granted, independent of
+	// the raw balance series and of its row cap. The legacy balance-delta
+	// estimate covers only the samples no exact event backs, and is
+	// unavailable — never silently zero — when the raw series was truncated.
+	// The compatibility breakdown is the first release's attribution over the
+	// same raw series (truncated or not), independent of both accountings.
+	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), rowCap)
+	exactBreakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
+
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:         streamer,
 		Range:            label,
 		Points:           points,
-		Annotations:      annotations,
+		Annotations:      snap.Annotations,
 		Breakdown:        analytics.BreakdownFromSamples(raw),
+		ExactBreakdown:   exactBreakdown,
+		LegacyBreakdown:  legacyBreakdown,
+		Earnings:         earnings,
 		BetSummary:       betSummary,
 		RawTruncated:     rawTruncated,
 		ChartDownsampled: chartDownsampled,
@@ -179,13 +201,25 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 
 // historyFlags derives the two independent completeness signals for a
 // points-history response: rawTruncated means the raw series hit the backend
-// row cap (the window — and thus the breakdown — is incomplete);
-// chartDownsampled means the display series was merely thinned while the raw
-// series, and the breakdown built from it, remain complete. They are
-// deliberately separate: only rawTruncated may hide the breakdown or raise a
-// partial-data warning.
+// row cap, so the balance-derived KPIs and the legacy estimate are
+// unavailable (the exact breakdown is aggregated from the ledger in SQL and
+// does not depend on the cap); chartDownsampled means the display series was
+// merely thinned while the raw series remains complete. They are deliberately
+// separate: only rawTruncated may withhold figures or raise a partial-data
+// warning.
 func historyFlags(rawLen, pointsLen, rawCap int) (rawTruncated, chartDownsampled bool) {
 	return rawLen >= rawCap, pointsLen < rawLen
+}
+
+// rowCapOrDefault normalises a per-Server row cap: the zero value (a Server
+// built without NewServer/NewServerEarly) falls back to the production cap
+// rather than meaning "unlimited" to the query and "always truncated" to the
+// completeness flags.
+func rowCapOrDefault(rowCap, fallback int) int {
+	if rowCap <= 0 {
+		return fallback
+	}
+	return rowCap
 }
 
 // handleAPIPointsHistoryExport returns the same data as handleAPIPointsHistory
@@ -211,26 +245,40 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 	end := time.Now()
 	start := end.Add(-window)
 
+	// One database snapshot for the series, its markers and the exact
+	// aggregate, exactly as the history endpoint: the export is a coherent
+	// point in time, and the transaction is over before encoding starts.
 	repo := s.analytics.Repository()
-	points, err := repo.GetPointSamples(streamer, start, end, maxExportRows)
+	rowCap := rowCapOrDefault(s.exportRowCap, maxExportRows)
+	snap, err := repo.PointsSnapshotBetween(r.Context(), streamer, start, end, rowCap, false)
 	if err != nil {
 		writeInternalError(w, "Failed to load points history")
 		return
 	}
-	annotations, err := repo.GetAnnotationRecords(streamer, start, end)
-	if err != nil {
-		writeInternalError(w, "Failed to load annotations")
-		return
-	}
+	points := snap.Samples
+
+	// The export carries the same earnings accounting as the history
+	// endpoint so an external consumer never sees an empty accounting block:
+	// the exact aggregation from the ledger, the legacy estimate over the
+	// exported samples, the same coverage metadata, and the same
+	// compatibility breakdown over the exported series (additive on this
+	// endpoint — the first release's export carried no breakdown — so it is
+	// parity with the history endpoint, not a preserved figure). The export
+	// is full-fidelity (never downsampled), so only the raw row cap can make
+	// it incomplete.
+	rawTruncated := len(points) >= rowCap
+	exactBreakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
 
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
-	// The export is full-fidelity (never downsampled), so only the raw row
-	// cap can make it incomplete.
 	writeJSONOK(w, analytics.PointsHistory{
-		Streamer:     streamer,
-		Range:        label,
-		Points:       points,
-		Annotations:  annotations,
-		RawTruncated: len(points) >= maxExportRows,
+		Streamer:        streamer,
+		Range:           label,
+		Points:          points,
+		Annotations:     snap.Annotations,
+		Breakdown:       analytics.BreakdownFromSamples(points),
+		ExactBreakdown:  exactBreakdown,
+		LegacyBreakdown: legacyBreakdown,
+		Earnings:        earnings,
+		RawTruncated:    rawTruncated,
 	})
 }

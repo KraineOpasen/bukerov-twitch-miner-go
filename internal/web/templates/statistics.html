@@ -52,17 +52,25 @@
         <div class="kpi-grid">
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.balance" }}</span><span id="kpi-balance" class="stat-value num"></span></div>
             <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.net_change" }}</span><span id="kpi-net" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }}</span><span id="kpi-earned" class="stat-value num"></span></div>
-            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }}</span><span id="kpi-events" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.earned" }} <span id="kpi-earned-qualifier"></span></span><span id="kpi-earned" class="stat-value num"></span></div>
+            <div class="stat-tile"><span class="stat-label">{{ t "stat.kpi.events" }} <span id="kpi-events-qualifier"></span></span><span id="kpi-events" class="stat-value num"></span></div>
         </div>
         <p class="text-xs text-neutral-500 mb-4">{{ t "stat.kpi.note" }}</p>
+        <!-- Earnings accounting note: which accounting produced the accrued
+             figures (exact per-event grants vs. the legacy balance-delta
+             estimate) and, for a period that spans both, the legacy estimate
+             on its own line — the two are never added together. -->
+        <div id="stat-earnings" class="hidden text-xs text-neutral-500 mb-4" role="status">
+            <p id="stat-earnings-note"></p>
+            <p id="stat-earnings-legacy" class="num mt-2"></p>
+        </div>
         <div id="stat-chart"></div>
         <p id="stat-truncated" class="hidden text-xs text-neutral-500 mt-2">{{ t "stat.truncated" }}</p>
 
         <div id="stat-breakdown" class="breakdown-grid hidden">
             <div id="stat-donut" role="img" aria-label="{{ t "stat.breakdown.title" }}"></div>
             <div>
-                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.breakdown.title" }}</h3>
+                <h3 class="text-sm font-semibold text-neutral-300 mb-2">{{ t "stat.breakdown.title" }} <span id="stat-breakdown-qualifier" class="text-neutral-500"></span></h3>
                 <p class="text-xs text-neutral-500 mb-3">{{ t "stat.breakdown.subtitle" }}</p>
                 <div id="stat-breakdown-legend" class="breakdown-legend"></div>
             </div>
@@ -464,40 +472,177 @@
         if (sign) el.classList.add(sign);
     }
 
-    // Summary widgets over the fetched series: closing balance, signed
-    // balance change across the range (spending and bets included), points
-    // accrued (positive gains only, from the breakdown), and how many
-    // positive events produced them. rawTruncated dashes out ALL FOUR tiles:
-    // the backend fetches ascending with a row cap, so a truncated window is
-    // missing its NEWEST rows — the loaded series' last balance is not the
-    // current balance and last-first is not the full-period change, not just
-    // the breakdown-derived tiles. The chart stays visible under the
-    // partial-data warning. (This gate is deliberately keyed on rawTruncated
-    // only — chartDownsampled never hides KPIs.)
+    // Summary widgets over the fetched series: closing balance and signed
+    // balance change across the range (spending and bets included) come from
+    // the balance series; rawTruncated dashes out THOSE TWO tiles — the
+    // backend fetches ascending with a row cap, so a truncated window is
+    // missing its NEWEST rows: the loaded series' last balance is not the
+    // current balance and last-first is not the full-period change. The
+    // accrued/earn-event tiles are rendered by renderEarningsKPIs from the
+    // server's earnings accounting instead, so an exact aggregate (computed
+    // from the event ledger, not the truncated series) stays visible. The
+    // chart stays visible under the partial-data warning. An absent series
+    // (exact earnings whose samples a rollback-era sweep removed) dashes the
+    // same two tiles. (These gates are deliberately keyed on rawTruncated and
+    // series presence only — chartDownsampled never hides KPIs.)
     function renderKPIs(data) {
-        if (data.rawTruncated) {
-            ['kpi-balance', 'kpi-net', 'kpi-earned', 'kpi-events'].forEach(id => setKPI(id, '—'));
-            return;
-        }
         const pts = data.points || [];
-        const first = pts.length ? pts[0].balance : 0;
-        const last = pts.length ? pts[pts.length - 1].balance : 0;
-        const net = last - first;
-        setKPI('kpi-balance', nfStat.format(last));
-        setKPI('kpi-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
-        let earned = 0, events = 0;
-        for (const share of data.breakdown || []) { earned += share.gained; events += share.count; }
-        setKPI('kpi-earned', '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');
-        setKPI('kpi-events', nfStat.format(events));
+        // Balance and net change come from the raw series only: dashed when
+        // the series is truncated or absent (exact earnings without samples).
+        if (data.rawTruncated || !pts.length) {
+            ['kpi-balance', 'kpi-net'].forEach(id => setKPI(id, '—'));
+        } else {
+            const first = pts.length ? pts[0].balance : 0;
+            const last = pts.length ? pts[pts.length - 1].balance : 0;
+            const net = last - first;
+            setKPI('kpi-balance', nfStat.format(last));
+            setKPI('kpi-net', (net > 0 ? '+' : '') + nfStat.format(net), net > 0 ? 'pos' : (net < 0 ? 'neg' : ''));
+        }
+        renderEarningsKPIs(data);
     }
 
-    // Earnings-breakdown donut + colour-coded legend. Hidden entirely when
-    // the raw series was truncated (partial data); mere chart downsampling
-    // never hides it — the breakdown is built from the full raw series.
+    function setText(id, text) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+    }
+
+    // Which accounting the response's primary breakdown carries: exact
+    // per-event grants (earnings.exact), the legacy balance-delta estimate
+    // (legacyStatus 'estimated' with no exact event), or nothing usable.
+    function primaryAccounting(data) {
+        const e = data.earnings || {};
+        if (e.exact) return 'exact';
+        if (e.legacyStatus === 'estimated') return 'estimate';
+        return 'none';
+    }
+
+    // The shares behind that accounting: the authoritative exact ledger
+    // aggregation (exactBreakdown) for an exact or mixed window, the
+    // explicit estimate (legacyBreakdown) for a legacy-only window. The
+    // compatibility `breakdown` — the first release's whole-timeline
+    // attribution, kept for older consumers — is never read here: it is
+    // not accounting, and the two accountings are never summed.
+    function accountingShares(data, mode) {
+        if (mode === 'exact') return data.exactBreakdown || [];
+        if (mode === 'estimate') return data.legacyBreakdown || [];
+        return [];
+    }
+
+    // Accrued points and earn events: the sum of the accounting shares,
+    // which are EITHER the exact event aggregation OR the legacy estimate —
+    // never both. An estimate is marked with "≈" and a qualifier on the tile
+    // label; with nothing usable the tiles are dashed rather than shown as a
+    // fabricated zero.
+    function renderEarningsKPIs(data) {
+        const mode = primaryAccounting(data);
+        const shares = accountingShares(data, mode);
+        // An estimate with nothing attributable is dashed like "none": a
+        // measured-looking "≈ +0" would claim a zero the data cannot support
+        // (the note names the state instead).
+        const usable = mode === 'exact' || (mode === 'estimate' && shares.length > 0);
+        const qualifier = usable && mode === 'estimate' ? '· ' + t('js.stat.estimate') : '';
+        setText('kpi-earned-qualifier', qualifier);
+        setText('kpi-events-qualifier', qualifier);
+        if (!usable) {
+            setKPI('kpi-earned', '—');
+            setKPI('kpi-events', '—');
+        } else {
+            let earned = 0, events = 0;
+            for (const share of shares) { earned += share.gained; events += share.count; }
+            const approx = mode === 'estimate' ? '≈ ' : '';
+            setKPI('kpi-earned', approx + '+' + nfStat.format(earned), earned > 0 ? 'pos' : '');
+            setKPI('kpi-events', approx + nfStat.format(events));
+        }
+        renderEarningsNote(data);
+    }
+
+    // Explains the accounting behind the accrued figures and, for a period
+    // that spans pre-ledger history and exact events, lists the legacy
+    // estimate on its own line — reported beside the exact figures, never
+    // added to them — so the user can see why older history differs.
+    function renderEarningsNote(data) {
+        const e = data.earnings || {};
+        const wrap = document.getElementById('stat-earnings');
+        if (!wrap) return;
+        const R = reasonPalette(palette());
+        let note = '', legacyLine = '';
+        switch (e.coverage) {
+            case 'exact':
+                note = t('js.stat.earnings.exact');
+                break;
+            case 'legacy':
+                // Legacy history whose balance changes attributed nothing is
+                // said so, never shown as an estimate of zero.
+                note = (data.legacyBreakdown || []).length ? t('js.stat.earnings.legacy') : t('js.stat.earnings.legacy_none');
+                break;
+            case 'mixed': {
+                const since = e.exactSince ? new Date(e.exactSince).toLocaleString() : '—';
+                if (e.legacyStatus === 'unavailable') {
+                    // The legacy part exists but its estimate could not be
+                    // computed: say so, rather than promising a line below.
+                    note = t('js.stat.earnings.mixed_unavailable').replace('{date}', since);
+                    legacyLine = t('js.stat.earnings.legacy_unavailable');
+                    break;
+                }
+                const legacyShares = data.legacyBreakdown || [];
+                if (!legacyShares.length) {
+                    // Legacy history is present (e.g. a lone pre-ledger
+                    // baseline) but nothing could be attributed: the note
+                    // says so itself instead of promising a listed estimate,
+                    // and no measured-looking "+0" is printed.
+                    note = t('js.stat.earnings.mixed_none').replace('{date}', since);
+                    break;
+                }
+                note = t('js.stat.earnings.mixed').replace('{date}', since);
+                let gained = 0, count = 0;
+                const parts = [];
+                for (const share of legacyShares) {
+                    gained += share.gained;
+                    count += share.count;
+                    const r = R[share.reason] || R.OTHER;
+                    parts.push(r.label() + ' ≈ +' + nfStat.format(share.gained) + ' ×' + nfStat.format(share.count));
+                }
+                legacyLine = t('js.stat.earnings.legacy_line')
+                    .replace('{gained}', '≈ +' + nfStat.format(gained))
+                    .replace('{count}', nfStat.format(count));
+                legacyLine += ' — ' + parts.join(' · ');
+                break;
+            }
+            case 'unavailable':
+                note = t('js.stat.earnings.unavailable');
+                break;
+            default:
+                note = '';
+        }
+        setText('stat-earnings-note', note);
+        setText('stat-earnings-legacy', legacyLine);
+        const legacyEl = document.getElementById('stat-earnings-legacy');
+        if (legacyEl) legacyEl.classList.toggle('hidden', !legacyLine);
+        wrap.classList.toggle('hidden', !note);
+    }
+
+    // Earnings-breakdown donut + colour-coded legend over the accounting
+    // shares: the exact event aggregation when the period holds exact events
+    // (independent of the raw-series row cap, so truncation never hides it),
+    // otherwise the legacy estimate, titled as an estimate. Hidden when
+    // neither is usable; mere chart downsampling never hides it.
     function renderBreakdown(data) {
         const P = palette();
         const R = reasonPalette(P);
-        const slices = data.rawTruncated ? [] : breakdownSlices(data.breakdown, R);
+        const mode = primaryAccounting(data);
+        const slices = mode === 'none' ? [] : breakdownSlices(accountingShares(data, mode), R);
+        // Every figure of an estimated donut — centre total, slice values,
+        // tooltip, legend and the accessible name — carries the "≈" /
+        // estimate marker, so no number reads as exact accounting.
+        const approx = mode === 'estimate' ? '≈ ' : '';
+        const fmtGain = v => approx + '+' + nfStat.format(v);
+        setText('stat-breakdown-qualifier', mode === 'estimate' ? '(' + t('js.stat.estimate') + ')' : '');
+        const donutHost = document.getElementById('stat-donut');
+        if (donutHost) {
+            const title = donutHost.getAttribute('data-title') || donutHost.getAttribute('aria-label') || '';
+            if (!donutHost.getAttribute('data-title')) donutHost.setAttribute('data-title', title);
+            donutHost.setAttribute('aria-label', mode === 'estimate' ? title + ' (' + t('js.stat.estimate') + ')' : title);
+        }
         if (!slices.length) {
             if (donut) { donut.destroy(); donut = null; }
             els.breakdown.classList.add('hidden');
@@ -513,13 +658,13 @@
             legend: { show: false },
             dataLabels: { enabled: false },
             stroke: { colors: [P.surface], width: 2 },
-            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: P.textPrimary, fontSize: '1.05rem', formatter: v => '+' + nfStat.format(v) }, total: { show: true, showAlways: true, label: '', color: P.textPrimary, formatter: w => '+' + nfStat.format(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
-            tooltip: { theme: resolvedTheme(), y: { formatter: v => '+' + nfStat.format(v) + ' ' + t('js.stat.points_suffix') } },
+            plotOptions: { pie: { donut: { size: '72%', labels: { show: true, name: { show: false }, value: { show: true, color: P.textPrimary, fontSize: '1.05rem', formatter: v => fmtGain(v) }, total: { show: true, showAlways: true, label: '', color: P.textPrimary, formatter: w => fmtGain(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+            tooltip: { theme: resolvedTheme(), y: { formatter: v => fmtGain(v) + ' ' + t('js.stat.points_suffix') } },
         };
         if (donut) {
             donut.updateOptions(options, false, !reducedMotion);
         } else {
-            donut = new ApexCharts(document.getElementById('stat-donut'), options);
+            donut = new ApexCharts(donutHost, options);
             donut.render();
         }
 
@@ -529,7 +674,7 @@
                 '<span class="breakdown-dot" style="background:' + r.color + '"></span>' +
                 '<span class="breakdown-name">' + r.label() + '</span>' +
                 '<span class="breakdown-count num">×' + nfStat.format(s.count) + '</span>' +
-                '<span class="breakdown-val num">+' + nfStat.format(s.gained) + '</span>' +
+                '<span class="breakdown-val num">' + fmtGain(s.gained) + '</span>' +
                 '</div>';
         }).join('');
     }
@@ -556,7 +701,13 @@
 
             els.stale.classList.add('hidden');
 
-            if (!data.points || data.points.length === 0) {
+            // Exact earnings are renderable without chart samples: a ledger
+            // row can outlive its balance sample (a pre-ledger binary's
+            // retention sweep after a rollback), and the API still reports the
+            // exact aggregate. Only a window with neither is "no data".
+            const hasSeries = !!(data.points && data.points.length > 0);
+            const hasExact = !!(data.earnings && data.earnings.exact);
+            if (!hasSeries && !hasExact) {
                 if (chart) { chart.destroy(); chart = null; }
                 if (donut) { donut.destroy(); donut = null; }
                 els.breakdown.classList.add('hidden');

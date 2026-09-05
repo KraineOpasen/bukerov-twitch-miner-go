@@ -43,7 +43,11 @@ func TestCanonicalPointReason(t *testing.T) {
 	}
 }
 
-func TestBreakdownFromSamples(t *testing.T) {
+// The tests below pin the LEGACY balance-delta estimator
+// (EstimateLegacyBreakdown), which only covers samples no exact event backs;
+// the exact breakdown is aggregated from point_events and is pinned in
+// point_events_test.go.
+func TestEstimateLegacyBreakdown(t *testing.T) {
 	cases := []struct {
 		name    string
 		samples []PointSample
@@ -143,40 +147,41 @@ func TestBreakdownFromSamples(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BreakdownFromSamples(tc.samples)
+			got := EstimateLegacyBreakdown(tc.samples).Breakdown
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("BreakdownFromSamples() = %+v, want %+v", got, tc.want)
+				t.Errorf("EstimateLegacyBreakdown() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
 }
 
 // TestBreakdownFirstSampleIsBaseline pins the documented window-edge
-// limitation: the first in-window sample only establishes the baseline — its
+// limitation of the legacy estimate: the first in-window sample only
+// establishes the baseline — its
 // own delta cannot be known without a pre-window sample, which is
 // deliberately not fetched (deferred data-quality work). A lone streak event
 // at the window edge therefore yields no breakdown rather than a guessed one.
 func TestBreakdownFirstSampleIsBaseline(t *testing.T) {
 	// Single in-window sample: its own event is unattributable.
-	if got := BreakdownFromSamples([]PointSample{{Balance: 1450, Reason: "WATCH STREAK"}}); got != nil {
+	if got := EstimateLegacyBreakdown([]PointSample{{Balance: 1450, Reason: "WATCH STREAK"}}).Breakdown; got != nil {
 		t.Errorf("single-sample window should yield nil breakdown, got %+v", got)
 	}
 
 	// With a baseline present, only deltas from the second sample onward are
 	// attributed; the first sample's own event never contributes.
-	got := BreakdownFromSamples([]PointSample{
+	got := EstimateLegacyBreakdown([]PointSample{
 		{Balance: 1000, Reason: "WATCH"},        // baseline: its event is not counted
 		{Balance: 1450, Reason: "WATCH STREAK"}, // attributed
-	})
+	}).Breakdown
 	want := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("breakdown = %+v, want %+v (baseline sample must not contribute)", got, want)
 	}
 }
 
-// TestBreakdownWatchStreakSums pins the four watch-streak grant sizes Twitch
-// awards (300/350/400/450) and proves they aggregate into a single WATCH_STREAK
-// category regardless of the on-disk spelling ("WATCH STREAK" from
+// TestBreakdownWatchStreakSums pins, for the legacy estimate, the four
+// watch-streak grant sizes Twitch awards (300/350/400/450) and proves they
+// aggregate into a single WATCH_STREAK category regardless of the on-disk spelling ("WATCH STREAK" from
 // Service.RecordPoints' underscore→space rewrite, or the underscore form from
 // legacy rows). Each grant is counted exactly once (no double-counting), and
 // nothing bleeds into WATCH or CLAIM.
@@ -190,7 +195,7 @@ func TestBreakdownWatchStreakSums(t *testing.T) {
 		{Balance: 11510, Reason: "  watch streak "}, // +450 (untrimmed/lowercased)
 		{Balance: 12010, Reason: "CLAIM"},           // +500 bonus claim
 	}
-	got := BreakdownFromSamples(samples)
+	got := EstimateLegacyBreakdown(samples).Breakdown
 
 	byReason := make(map[string]ReasonShare, len(got))
 	for _, s := range got {

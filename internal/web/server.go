@@ -130,12 +130,19 @@ type PredictionControlProvider interface {
 }
 
 type Server struct {
-	host           string
-	port           int
-	refresh        int
-	daysAgo        int
-	username       string
-	basePath       string
+	host     string
+	port     int
+	refresh  int
+	daysAgo  int
+	username string
+	basePath string
+	// historyRowCap and exportRowCap are the raw-series row caps the
+	// points-history and export endpoints apply (maxHistoryRows and
+	// maxExportRows in production); per instance so a test can drive the
+	// truncation paths with a small series. A zero value falls back to the
+	// production cap (rowCapOrDefault).
+	historyRowCap  int
+	exportRowCap   int
 	logPath        string
 	streamers      []*models.Streamer
 	discordEnabled bool
@@ -245,20 +252,22 @@ func NewServer(analyticsSettings config.AnalyticsSettings, username string, base
 	pages, partials := loadTemplates(loc)
 
 	return &Server{
-		host:      analyticsSettings.Host,
-		port:      analyticsSettings.Port,
-		refresh:   analyticsSettings.Refresh,
-		daysAgo:   analyticsSettings.DaysAgo,
-		username:  username,
-		basePath:  basePath,
-		logPath:   stableLogPath(basePath, username),
-		streamers: streamers,
-		analytics: analyticsSvc,
-		i18n:      loc,
-		templates: pages,
-		partials:  partials,
-		status:    NewStatusBroadcaster(),
-		ready:     len(streamers) > 0,
+		host:          analyticsSettings.Host,
+		port:          analyticsSettings.Port,
+		refresh:       analyticsSettings.Refresh,
+		daysAgo:       analyticsSettings.DaysAgo,
+		username:      username,
+		basePath:      basePath,
+		logPath:       stableLogPath(basePath, username),
+		streamers:     streamers,
+		analytics:     analyticsSvc,
+		historyRowCap: maxHistoryRows,
+		exportRowCap:  maxExportRows,
+		i18n:          loc,
+		templates:     pages,
+		partials:      partials,
+		status:        NewStatusBroadcaster(),
+		ready:         len(streamers) > 0,
 	}
 }
 
@@ -267,20 +276,22 @@ func NewServerEarly(analyticsSettings config.AnalyticsSettings, username string,
 	pages, partials := loadTemplates(loc)
 
 	return &Server{
-		host:      analyticsSettings.Host,
-		port:      analyticsSettings.Port,
-		refresh:   analyticsSettings.Refresh,
-		daysAgo:   analyticsSettings.DaysAgo,
-		username:  username,
-		basePath:  basePath,
-		logPath:   stableLogPath(basePath, username),
-		streamers: nil,
-		analytics: analyticsSvc,
-		i18n:      loc,
-		templates: pages,
-		partials:  partials,
-		status:    NewStatusBroadcaster(),
-		ready:     false,
+		host:          analyticsSettings.Host,
+		port:          analyticsSettings.Port,
+		refresh:       analyticsSettings.Refresh,
+		daysAgo:       analyticsSettings.DaysAgo,
+		username:      username,
+		basePath:      basePath,
+		logPath:       stableLogPath(basePath, username),
+		streamers:     nil,
+		analytics:     analyticsSvc,
+		historyRowCap: maxHistoryRows,
+		exportRowCap:  maxExportRows,
+		i18n:          loc,
+		templates:     pages,
+		partials:      partials,
+		status:        NewStatusBroadcaster(),
+		ready:         false,
 	}
 }
 
