@@ -1234,7 +1234,7 @@ func TestAbandonedSessionsAreReclaimedAtStartup(t *testing.T) {
 			(collector_session_id, producer_revision, started_at_ms, close_state,
 			 committed_count, dropped_count, unsettled_obligation_count,
 			 post_fence_producer_count, producer_shutdown_uncertain_count)
-			VALUES (?, ?, ?, 'OPEN', 7, 0, 0, 0, 0)`,
+			VALUES (?, ?, ?, 'OPEN', 0, 0, 0, 0, 0)`,
 			"dead-"+strconv.Itoa(i), ObservationProducerRevision, int64(1000+i)); err != nil {
 			t.Fatal(err)
 		}
@@ -1290,9 +1290,11 @@ func TestAbandonedSessionsAreReclaimedAtStartup(t *testing.T) {
 			}
 			continue
 		}
-		if state != SessionIncomplete {
+		if state != SessionAbandoned {
 			t.Fatalf("abandoned session %s is %q, want %q: nothing knows what that process "+
-				"observed, so it cannot be called complete", id, state, SessionIncomplete)
+				"observed, so it can be called neither complete nor incomplete — INCOMPLETE "+
+				"means the collector finalized and reported a loss, and this one never "+
+				"finalized at all", id, state, SessionAbandoned)
 		}
 		// Aged from the session's OWN start, so a store that keeps crashing
 		// can still drain: stamping the reconciliation's clock would restart
@@ -1303,8 +1305,12 @@ func TestAbandonedSessionsAreReclaimedAtStartup(t *testing.T) {
 				"reconciliation clock would restart the retention window every startup",
 				id, closedAt, started)
 		}
-		// The dead process's own numbers are evidence and are left alone.
-		if committed != 7 {
+		// A session is only ever INSERTed with zero counters — they are
+		// written once, at finalization — so a process that died left the
+		// initial zeros behind. They are not evidence, and the reconciliation
+		// must neither dress them up as the dead process's accounting nor
+		// invent a replacement from the surviving facts.
+		if committed != 0 {
 			t.Fatalf("abandoned session %s had its committed count rewritten to %d; the "+
 				"reconciliation knows nothing about what it observed", id, committed)
 		}
@@ -3268,8 +3274,9 @@ func TestAFactReservedInsideTheErasureCannotSurviveTheReinstate(t *testing.T) {
 	c.write(ctx, inFlight)
 	if c.dropped.Load() != before+1 {
 		t.Fatal("a fact reserved inside the erasure was accepted after the re-add: it is above " +
-			"the watermark and carries the erasure's own generation, so only advancing the " +
-			"generation when the fence is LIFTED can refuse it")
+			"the fence-time watermark and carries the erasure's own generation, and the live " +
+			"fence is gone — so only raising this identity's watermark to the position the " +
+			"re-add happened at can refuse it")
 	}
 	got, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
 	if err != nil {
@@ -4120,5 +4127,652 @@ func TestABootstrapThatLosesTheFenceDoesNotStartATicker(t *testing.T) {
 	}
 	if c.capturing() {
 		t.Fatal("intake opened on a fenced collector")
+	}
+}
+
+// TestAnOrdinaryRoundLinkedSessionVerifiesItsOwnWitnesses is the regression for
+// a defect an independent acceptance review found, and it is the worst kind:
+// the witness check did not fail an EDITED row, it failed EVERY row.
+//
+// observationDigest hashes round_capture_origin and round_capture_gap_cause,
+// because they are persisted columns and a witness that omitted them could not
+// detect a row whose capture provenance had been altered. But
+// verifyObservationWitnesses reconstructed the fact WITHOUT them, so the digest
+// it recomputed was the digest of a different fact. Every round-linked fact
+// carries provenance — freezeRoundProvenance stamps ACTIVE_AT_ADMISSION at
+// every admission — so an untouched production database read INTEGRITY_ERROR,
+// whose own contract says nothing may be concluded from the session at all.
+//
+// The existing witness tests missed it because channelObservation leaves the
+// provenance empty, which is the one shape whose recomputation happened to
+// agree.
+func TestAnOrdinaryRoundLinkedSessionVerifiesItsOwnWitnesses(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+
+	// Exactly what the producer emits: a round admitted while capture was
+	// live, and a round whose prefix was missed with a stated cause.
+	active := channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED")
+	active.RoundCaptureOrigin = RoundOriginActive
+	gapped := channelObservation("pool-1", "chan-a", "streamer-a", "event-2", "ROUND_UPDATED")
+	gapped.RoundCaptureOrigin = RoundOriginPrefixUnobserved
+	gapped.RoundCaptureGapCause = "STARTING"
+
+	svc.RecordPredictionObservation(active)
+	svc.RecordPredictionObservation(gapped)
+	awaitCommitted(t, svc, 2)
+	svc.observations.Close()
+
+	reading, found, err := repo.ReadObservationSession(ctx, epoch)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if reading.Reading != ReadingAsFinalized {
+		t.Fatalf("an untouched session of ordinary round-linked facts reads %q (%s), want %q: "+
+			"the digest covers the capture provenance, so a verification that does not read "+
+			"those columns recomputes the digest of a different fact and condemns every row",
+			reading.Reading, reading.Detail, ReadingAsFinalized)
+	}
+	if reading.WitnessesVerified != 2 {
+		t.Fatalf("witnesses verified = %d, want 2", reading.WitnessesVerified)
+	}
+
+	// And the witness still does its job: editing the provenance in place is
+	// exactly the alteration the digest covers those columns to detect.
+	if _, err := repo.db.Exec(
+		`UPDATE prediction_observations SET round_capture_origin = ?, round_capture_gap_cause = ?
+		  WHERE collector_sequence = 2`, RoundOriginActive, nil); err != nil {
+		t.Fatal(err)
+	}
+	reading, _, err = repo.ReadObservationSession(ctx, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Reading != ReadingIntegrityError {
+		t.Fatalf("a fact whose capture provenance was edited in place reads %q, want %q",
+			reading.Reading, ReadingIntegrityError)
+	}
+}
+
+// TestCaptureStateAsksWhetherTheNEXTFactWouldBeFenced is the regression for a
+// defect an independent acceptance review found: captureState probed the fence
+// with a zero-value observation, so the probe's causal position was 0.
+//
+// isFenced's second clause refuses a fact captured no later than the erasure
+// that removed the identity — `o.sequence <= at`. At position 0 that is true
+// for EVERY watermark ever recorded, and unfence deliberately never clears
+// erasedAt (it is what makes the erasure boundary irreversible). So a single
+// erasure made captureState answer IDENTITY_FENCE for that channel forever,
+// including long after a re-add, while real facts for the same channel — which
+// carry real, larger positions — were being committed normally.
+//
+// captureState is what freezeRoundProvenance consults, so every round admitted
+// after the re-add was durably stamped PREFIX_UNOBSERVED_AT_ADMISSION with
+// cause IDENTITY_FENCE: a false statement about capture, written into the one
+// column a replay uses to decide it must not invent the missing prefix.
+//
+// The question captureState actually means is "would a fact captured NOW be
+// fenced?", so it must probe at the next position, not at zero.
+func TestCaptureStateAsksWhetherTheNEXTFactWouldBeFenced(t *testing.T) {
+	svc, repo := newObservationService(t)
+	c := svc.observations
+
+	if got := c.captureState("chan-a", "streamer-a"); got != "" {
+		t.Fatalf("a never-erased identity reports capture state %q, want live", got)
+	}
+
+	// An armed fence is a real gap cause, and must still be reported.
+	c.fence("chan-a", "streamer-a")
+	if got := c.captureState("chan-a", "streamer-a"); got != "IDENTITY_FENCE" {
+		t.Fatalf("an armed fence reports %q, want IDENTITY_FENCE", got)
+	}
+
+	// The re-add lifts it. The erasure watermark stays — that is what keeps
+	// the boundary irreversible for facts of the ERASED life — but a fact
+	// captured from here on belongs to the new life and is not fenced.
+	repo.Reinstate("streamer-a")
+	if got := c.captureState("chan-a", "streamer-a"); got != "" {
+		t.Fatalf("after the re-add, capture state is %q: the erasure watermark is being read "+
+			"as if it fenced the new life, so every round admitted from now on is stamped "+
+			"with a prefix gap that did not happen", got)
+	}
+
+	// And the claim is true: a fact captured now really does commit.
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-a", "streamer-a", "after-readd", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	// An unrelated identity is unaffected either way.
+	if got := c.captureState("chan-b", "streamer-b"); got != "" {
+		t.Fatalf("an unrelated identity reports %q, want live", got)
+	}
+}
+
+// TestARetryThatDiffersInCaptureProvenanceIsACollision is the regression for a
+// defect an independent acceptance review found: the capture-supplied columns
+// compared to decide "identical retry or typed collision" did not include
+// round_capture_origin or round_capture_gap_cause, though both are supplied by
+// capture and both are persisted.
+//
+// A second write at the same position with DIFFERENT provenance was therefore
+// reported as idempotent success, the stored row silently kept the first
+// provenance, and the caller was told its fact was recorded. Because write()
+// disables capture on errObservationCollision, swallowing the collision also
+// swallowed the fail-closed response to a store that is contradicting itself.
+func TestARetryThatDiffersInCaptureProvenanceIsACollision(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+
+	first := channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED")
+	first.RoundCaptureOrigin = RoundOriginActive
+	if err := repo.AppendObservation(ctx, mustSanitize(t, first), sessionID, epoch, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// The byte-identical retry is still idempotent success.
+	if err := repo.AppendObservation(ctx, mustSanitize(t, first), sessionID, epoch, 1); err != nil {
+		t.Fatalf("an identical retry must be idempotent success, got %v", err)
+	}
+
+	// The same position claiming a different capture provenance is not the
+	// same fact, and must not be blessed as one.
+	differing := first
+	differing.RoundCaptureOrigin = RoundOriginPrefixUnobserved
+	differing.RoundCaptureGapCause = "CLOSING"
+	err := repo.AppendObservation(ctx, mustSanitize(t, differing), sessionID, epoch, 1)
+	if !errors.Is(err, errObservationCollision) {
+		t.Fatalf("a retry differing in capture provenance returned %v, want errObservationCollision: "+
+			"the provenance is capture-supplied and persisted, so two facts that disagree about "+
+			"it are two different facts", err)
+	}
+
+	// And the stored row was never overwritten.
+	got, err := repo.ObservationsBySession(ctx, sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RoundCaptureOrigin != RoundOriginActive || got[0].RoundCaptureGapCause != "" {
+		t.Fatalf("stored rows = %+v, want the first fact's provenance intact", got)
+	}
+}
+
+// TestACrashedRunStaysReadable is the regression for a defect an independent
+// acceptance review found: restarting after an unclean shutdown converted the
+// previous run's trail into an INTEGRITY_ERROR.
+//
+// A session's counters are written ONLY at finalization, so a process that dies
+// leaves committed_count = 0 beside however many facts it did commit. The
+// startup reconciliation closed such a session but left those zeros in place,
+// and classifyObservationSession then read them as a claim: facts present > 0
+// committed, "more facts are present than the session committed". Per that
+// constant's own contract, nothing may be concluded from the session at all —
+// so every crash permanently destroyed the readability of what that run saw.
+//
+// The zeros are not evidence, they are the initial values. A reconciliation
+// knows nothing about what the dead process observed and must neither claim
+// its accounting nor invent a replacement, so the run is recorded ABANDONED
+// and reads UNFINALIZED: its surviving facts are a lower bound on what it
+// observed, and nothing about loss can be concluded either way.
+func TestACrashedRunStaysReadable(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	deadEpoch := svc.observations.epoch.Load()
+
+	// Three facts really were committed by this session; then the process
+	// dies, so FinalizeObservationSession never runs.
+	for i := 1; i <= 3; i++ {
+		svc.RecordPredictionObservation(
+			channelObservation("pool-1", "chan-a", "streamer-a", "event-"+strconv.Itoa(i), "ROUND_CREATED"))
+	}
+	awaitCommitted(t, svc, 3)
+
+	reading, found, err := repo.ReadObservationSession(ctx, deadEpoch)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if reading.Reading != ReadingUnfinalized {
+		t.Fatalf("the live session reads %q, want %q", reading.Reading, ReadingUnfinalized)
+	}
+
+	// The next process starts and reclaims what the dead one left behind.
+	if _, err := repo.ReconcileAbandonedObservationSessions(ctx, "the-next-process", 100); err != nil {
+		t.Fatal(err)
+	}
+
+	reading, _, err = repo.ReadObservationSession(ctx, deadEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.Reading != ReadingUnfinalized {
+		t.Fatalf("after the restart, the crashed run reads %q (%s), want %q: its counters were "+
+			"never written, so reading the initial zeros as a claim condemns every fact it "+
+			"did commit", reading.Reading, reading.Detail, ReadingUnfinalized)
+	}
+	if reading.Session.CloseState != SessionAbandoned {
+		t.Fatalf("close state = %q, want %q: the run neither completed nor finalized after a "+
+			"drop — it never finalized at all", reading.Session.CloseState, SessionAbandoned)
+	}
+	if reading.FactsPresent != 3 {
+		t.Fatalf("facts present = %d, want 3", reading.FactsPresent)
+	}
+	// The reconciliation invents nothing: the counters stay exactly the
+	// unwritten zeros, so no reader can mistake them for the dead process's
+	// own accounting.
+	if reading.Session.CommittedCount != 0 || reading.Session.DroppedCount != 0 ||
+		reading.Session.LastAssignedSequenceKnown {
+		t.Fatalf("the reconciliation wrote accounting it cannot know: committed=%d dropped=%d "+
+			"lastKnown=%v", reading.Session.CommittedCount, reading.Session.DroppedCount,
+			reading.Session.LastAssignedSequenceKnown)
+	}
+	// And the facts themselves are still readable and still witnessed.
+	if reading.WitnessesVerified != 3 {
+		t.Fatalf("witnesses verified = %d, want 3", reading.WitnessesVerified)
+	}
+}
+
+// TestTheStoreItselfRefusesAnUnreachableIdentifier is the regression for a gap
+// an independent acceptance review found in the erasure-reachability rule.
+//
+// A privacy erasure reaches a fact through exactly two doors: the routed
+// identity and the retention-group owner. round_owner_* is deliberately never
+// a door, because it names the broadcaster of a round rather than the identity
+// the fact was filed under. So a fact carrying NEITHER door but still naming a
+// channel through round_owner_channel_id or event_id is a channel-scoped
+// identifier no erasure can ever reach — exactly what the privacy rule forbids.
+//
+// The producer funnel already clears this shape, so no fact of that kind is
+// emitted today. But the neighbouring pairing rule is enforced here precisely
+// so it holds "for EVERY caller of this store, not just the one producer that
+// exists today", and this rule was left to the producer alone.
+func TestTheStoreItselfRefusesAnUnreachableIdentifier(t *testing.T) {
+	_, repo := newObservationService(t)
+	ctx := context.Background()
+
+	in := PredictionObservation{
+		PoolInstanceID: "pool-1",
+		// Neither erasure door is present.
+		RoutedChannelID:              "",
+		RetentionGroupOwnerChannelID: "",
+		// Yet the fact names a channel, twice.
+		RoundOwnerChannelID: "chan-secret",
+		RoundOwnerLogin:     "secret",
+		EventID:             "twitch-event-of-chan-secret",
+		Kind:                KindChannelEvent,
+		SourceTopicType:     TopicTypePredictionsChannel,
+		SourceMessageType:   MessageTypeEventCreated,
+		ProducerAtMS:        1_700_000_000_000,
+		ProducerTimeSource:  TimeSourceProducer,
+		ReceivedAtMS:        1_700_000_000_001,
+		Payload:             ObservationPayload{Phase: "ROUND_CREATED"},
+	}
+	fact := mustSanitize(t, in)
+	if fact.RoundOwnerChannelID != "" || fact.RoundOwnerLogin != "" || fact.EventID != "" {
+		t.Fatalf("the store kept a channel-scoped identifier no erasure can reach: "+
+			"roundOwner=%q/%q event=%q — round_owner_* is not an erasure door, so with "+
+			"neither door present these name a channel that can never be erased",
+			fact.RoundOwnerChannelID, fact.RoundOwnerLogin, fact.EventID)
+	}
+
+	// The fact is still storable — the rule strips what cannot be reached, it
+	// does not refuse the whole fact — and a channel-scoped erasure of that
+	// channel is now vacuously satisfied because nothing names it.
+	if err := repo.AppendObservation(ctx, fact, "s-1", 1, 1); err == nil {
+		var n int
+		if err := repo.db.QueryRow(
+			`SELECT COUNT(*) FROM prediction_observations
+			  WHERE round_owner_channel_id = 'chan-secret' OR event_id LIKE '%chan-secret%'`).
+			Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%d stored rows still name the unreachable channel", n)
+		}
+	}
+
+	// And a fact that DOES carry an erasure door keeps its round owner, which
+	// is reachable through the round the door owns.
+	ok := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+	if ok.EventID != "event-1" {
+		t.Fatalf("a reachable fact lost its event id: %+v", ok)
+	}
+}
+
+// TestAStoredFactIsNeverReportedAsLost is the regression for an ordering
+// divergence an independent acceptance review found.
+//
+// The transaction proved the session was OPEN before it looked the observation
+// id up, so a retry after an ambiguous failure — the write committed, the
+// caller never learned it had — was refused with errObservationSessionNotOpen
+// if the session finalized in between. The fact IS stored, and the caller is
+// told it was not: the same "a stored fact counted as a loss" failure the
+// idempotency rule exists to prevent, reached through a narrower door.
+//
+// Asking about the fact first is also the only order that can answer honestly,
+// because whether THIS fact is already recorded does not depend on what has
+// since happened to its session.
+func TestAStoredFactIsNeverReportedAsLost(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	epoch := svc.observations.epoch.Load()
+	sessionID := svc.observations.sessionID
+	fact := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.FinalizeObservationSession(ctx, epoch,
+		ObservationAccounting{LastAssignedSequence: 1, Committed: 1}, 5); err != nil || !applied {
+		t.Fatalf("finalize: applied=%v err=%v", applied, err)
+	}
+
+	// The retry names a fact that is already durably stored.
+	if err := repo.AppendObservation(ctx, fact, sessionID, epoch, 1); err != nil {
+		t.Fatalf("a retry of an already-stored fact returned %v, want idempotent success: the "+
+			"fact is present, and reporting it as unwritable would have a caller count a "+
+			"stored fact as a loss", err)
+	}
+	if n := countRows(t, repo, `SELECT COUNT(*) FROM prediction_observations`); n != 1 {
+		t.Fatalf("%d rows, want 1: the retry must not double-count the fact", n)
+	}
+
+	// A retry differing in content is still a collision, not a session refusal:
+	// the store must say which thing is actually wrong.
+	differing := fact
+	differing.Payload.Phase = "ROUND_UPDATED"
+	if err := repo.AppendObservation(ctx, differing, sessionID, epoch, 1); !errors.Is(err, errObservationCollision) {
+		t.Fatalf("a colliding retry returned %v, want errObservationCollision", err)
+	}
+
+	// And a genuinely NEW fact is still refused, because the session cannot
+	// accept one.
+	fresh := mustSanitize(t, channelObservation("pool-1", "chan-a", "streamer-a", "event-2", "ROUND_UPDATED"))
+	if err := repo.AppendObservation(ctx, fresh, sessionID, epoch, 2); !errors.Is(err, errObservationSessionNotOpen) {
+		t.Fatalf("a new fact into a finalized session returned %v, want errObservationSessionNotOpen", err)
+	}
+}
+
+// TestASessionThatNeverOpenedIntakeIsNotCOMPLETE is the regression for a defect
+// an independent acceptance review found, and it produces the single most
+// dangerous row this store can write.
+//
+// Close fences intake in one transition. A bootstrap that was still finishing
+// then loses publishRunning's compare-and-swap and returns without ever opening
+// intake — correct, and deliberate. But the session row it had already
+// allocated is real, and Close finalizes it from an accounting that is all
+// zeros: nothing dropped, nothing queued, nothing unsettled. Whole() is
+// therefore true, the row is written COMPLETE, and it reads AS_FINALIZED —
+// the ONE reading under which "the absence of a fact is evidence".
+//
+// So a session during whose entire wall-clock window capture was never on
+// asserted that nothing happened in it. Zero facts because the collector was
+// never listening is not the same claim as zero facts because there was
+// nothing to see, and only the second one is what COMPLETE means.
+func TestASessionThatNeverOpenedIntakeIsNotCOMPLETE(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	t.Cleanup(func() { _ = db.Close() })
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := svc.repo.(*SQLiteRepository)
+	c := svc.observations
+	ctx := context.Background()
+
+	// Drive exactly the losing interleaving: the bootstrap completes and
+	// allocates the session, and the shutdown fence lands before the
+	// bootstrap can publish RUNNING.
+	if err := c.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	epoch := c.epoch.Load()
+	if epoch == 0 {
+		t.Fatal("the bootstrap allocated no session; this test would prove nothing")
+	}
+	c.phase.Store(phaseStarting)
+	if was := c.fencePhase(); was != phaseStarting {
+		t.Fatalf("fence came from phase %d, want phaseStarting", was)
+	}
+	if c.publishRunning() {
+		t.Fatal("RUNNING was published on top of the shutdown fence")
+	}
+	c.noteIntakeNeverOpened()
+
+	if _, err := repo.FinalizeObservationSession(ctx, epoch, c.accounting(), c.now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	reading, found, err := repo.ReadObservationSession(ctx, epoch)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("a session whose intake never opened finalized %q, want %q: zero facts because "+
+			"the collector was never listening is not the claim COMPLETE makes",
+			reading.Session.CloseState, SessionIncomplete)
+	}
+	// AS_FINALIZED is a statement about the dataset, and this session's
+	// (empty) dataset really is coherent. What must not happen is the pair a
+	// reader is entitled to act on: AS_FINALIZED beside COMPLETE, which
+	// together are the licence to treat the absence of a fact as evidence.
+	if reading.Reading == ReadingAsFinalized && reading.Session.CloseState == SessionComplete {
+		t.Fatal("the session reads AS_FINALIZED and COMPLETE, which together license a reader " +
+			"to treat the absence of a fact as evidence — during a window in which capture " +
+			"was never on")
+	}
+	if reading.Detail == "" {
+		t.Fatal("an incomplete session gives a reader no reason it is incomplete")
+	}
+}
+
+// TestOneRowCannotCarryTheStorePastTheDeletionKeyCeiling is the regression for
+// a defect an independent acceptance review found in the pre-insert quota
+// ledger, and it is the exact case the ceiling exists for.
+//
+// One fact carries up to FOUR distinct deletion keys — its routed channel, its
+// retention-group owner channel, and the analytics parent of each. The ceiling
+// on distinct deletion keys is the advance promise about how many separately
+// erasable identities the store may hold, which is what makes a bounded purge
+// pilot mean anything.
+//
+// admit tested each new key against len(l.deletionKeys), which admit never
+// changes. So four new keys on one row were each compared with the SAME
+// pre-row count, and a store one key under the ceiling accepted a row that put
+// it three keys over.
+func TestOneRowCannotCarryTheStorePastTheDeletionKeyCeiling(t *testing.T) {
+	newLedgerAtKeys := func(n int64) *observationQuotaLedger {
+		l := newObservationQuotaLedger()
+		l.setStoreLimits(MaxStoreRows, MaxStoreBytes)
+		for i := int64(0); i < n; i++ {
+			l.deletionKeys["seed:"+strconv.FormatInt(i, 10)] = observationUsage{}
+		}
+		return l
+	}
+	four := []string{"chan:a", "chan:b", "parent:1", "parent:2"}
+
+	// One key under the ceiling, one new key: admitted, and it lands exactly
+	// on the ceiling.
+	l := newLedgerAtKeys(MaxStoreDeletionKeys - 1)
+	if ok, _ := l.admit([]string{"chan:a"}, "", 1); !ok {
+		t.Fatal("a single new key one under the ceiling was refused")
+	}
+	l.charge([]string{"chan:a"}, "", 1)
+	if got := int64(l.distinctDeletionKeys()); got != MaxStoreDeletionKeys {
+		t.Fatalf("distinct keys = %d, want exactly the ceiling %d", got, MaxStoreDeletionKeys)
+	}
+
+	// One key under the ceiling, FOUR new keys: three of them would not fit,
+	// so the whole fact must be refused as an identity breach.
+	l = newLedgerAtKeys(MaxStoreDeletionKeys - 1)
+	ok, breach := l.admit(four, "", 1)
+	if ok {
+		l.charge(four, "", 1)
+		t.Fatalf("a row carrying four new deletion keys was admitted one key under the "+
+			"ceiling, leaving %d distinct keys against a ceiling of %d: each new key was "+
+			"compared with the same pre-row count, so the row's own keys never counted "+
+			"against each other",
+			l.distinctDeletionKeys(), MaxStoreDeletionKeys)
+	}
+	if !breach {
+		t.Fatal("exceeding the store's distinct-identity ceiling must be reported as an identity breach")
+	}
+
+	// Four under the ceiling, four new keys: fits exactly, and is admitted.
+	l = newLedgerAtKeys(MaxStoreDeletionKeys - 4)
+	if ok, _ := l.admit(four, "", 1); !ok {
+		t.Fatal("a row whose four new keys fit exactly was refused")
+	}
+	l.charge(four, "", 1)
+	if got := int64(l.distinctDeletionKeys()); got != MaxStoreDeletionKeys {
+		t.Fatalf("distinct keys = %d, want exactly the ceiling %d", got, MaxStoreDeletionKeys)
+	}
+
+	// Keys the store already knows are free: they are not new. Seeded so the
+	// four are part of a store sitting exactly ON the ceiling, not past it.
+	l = newLedgerAtKeys(MaxStoreDeletionKeys - 4)
+	for _, k := range four {
+		l.deletionKeys[k] = observationUsage{}
+	}
+	if got := int64(l.distinctDeletionKeys()); got != MaxStoreDeletionKeys {
+		t.Fatalf("fixture holds %d keys, want exactly the ceiling %d", got, MaxStoreDeletionKeys)
+	}
+	if ok, _ := l.admit(four, "", 1); !ok {
+		t.Fatal("a row naming only identities the store already tracks was refused at the ceiling")
+	}
+}
+
+// TestAByteCeilingRefusesTheFactThatWouldCrossIt closes a test gap an
+// independent acceptance review found by mutation: the whole analytics suite
+// passed with every byte ceiling weakened from "current + incoming <= cap" to
+// "current >= cap".
+//
+// The existing limit table seeds each byte case at exactly cap - payload, where
+// the two forms are indistinguishable — the strong form admits because it lands
+// exactly on the ceiling, and the weak form admits because current is still
+// below it. Neither is discriminating, so the ledger's real property was
+// unproven for round bytes, deletion-identity bytes and store bytes alike.
+//
+// Seeded ONE byte fuller, the forms disagree: the fact would cross the ceiling
+// and must be refused, while the weak form still sees room. Under the weak form
+// a whole payload — up to MaxObservationPayloadBytes — lands past every byte
+// ceiling, which is the defect the pre-insert ledger exists to prevent.
+func TestAByteCeilingRefusesTheFactThatWouldCrossIt(t *testing.T) {
+	const payload = int64(100)
+	for _, tc := range []struct {
+		name string
+		// seed leaves room for payload-1 bytes: one byte too few for this
+		// fact, and still strictly below the ceiling.
+		seed           func(*observationQuotaLedger)
+		keys           []string
+		round          string
+		identityBreach bool
+	}{
+		{
+			name:  "round bytes",
+			seed:  func(l *observationQuotaLedger) { l.rounds["r"] = observationUsage{Bytes: MaxRoundBytes - payload + 1} },
+			round: "r",
+		},
+		{
+			name: "deletion identity bytes",
+			seed: func(l *observationQuotaLedger) {
+				l.deletionKeys["k"] = observationUsage{Bytes: MaxDeletionIdentityBytes - payload + 1}
+			},
+			keys:           []string{"k"},
+			identityBreach: true,
+		},
+		{
+			name:           "store bytes",
+			seed:           func(l *observationQuotaLedger) { l.store = observationUsage{Bytes: MaxStoreBytes - payload + 1} },
+			identityBreach: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newObservationQuotaLedger()
+			tc.seed(l)
+
+			ok, identity := l.admit(tc.keys, tc.round, payload)
+			if ok {
+				t.Fatalf("the %s ceiling admitted a fact that would cross it: the bucket had "+
+					"room for %d fewer bytes than the fact carries, so the ceiling is being "+
+					"read as 'is the bucket already full' rather than 'would this fact fit'",
+					tc.name, payload-1)
+			}
+			if identity != tc.identityBreach {
+				t.Fatalf("%s refusal reported identityBreach=%v, want %v",
+					tc.name, identity, tc.identityBreach)
+			}
+
+			// A SMALLER fact that does fit is still admitted, so the refusal
+			// is about this fact's size and not a jammed bucket.
+			if ok, _ := l.admit(tc.keys, tc.round, payload-1); !ok {
+				t.Fatalf("the %s ceiling refused a fact that fits exactly in the remaining room",
+					tc.name)
+			}
+		})
+	}
+}
+
+// TestAReAddDrawsTheLifeBoundaryOnlyForTheIdentityItLifts is the other half of
+// the erasure boundary, and it is what keeps that boundary from costing more
+// than it protects.
+//
+// Reinstate runs for EVERY streamer added, and lifting a fence refuses every
+// fact reserved before the lift. Drawn any wider than the identities actually
+// being lifted, one operator re-add would discard the in-flight facts of every
+// other streamer in the session — each one a drop, each one a permanent gap in
+// the causal sequence, and enough on its own to turn a session that observed
+// everything into an INCOMPLETE one for a reason having nothing to do with it.
+//
+// An independent acceptance review raised exactly this cost against a global
+// boundary. The per-identity watermark is what makes the refusal narrow.
+func TestAReAddDrawsTheLifeBoundaryOnlyForTheIdentityItLifts(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	// "recycled" is erased and added back: an identity the store has a
+	// watermark for, and whose new life is being observed normally.
+	c.invalidateGeneration()
+	c.fence("chan-recycled", "recycled")
+	repo.Tombstone("recycled")
+	repo.Reinstate("recycled")
+
+	// Its new life reserves a fact, which is legitimately in flight.
+	recycled := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "new-life", "ROUND_CREATED"))
+	recycled.sequence = c.sequence.Add(1)
+	recycled.generation = c.generation.Load()
+
+	// A never-erased streamer also has one in flight.
+	untouched := mustSanitize(t, channelObservation("pool-1", "chan-b", "streamer-b", "live", "ROUND_CREATED"))
+	untouched.sequence = c.sequence.Add(1)
+	untouched.generation = c.generation.Load()
+
+	// A THIRD, unrelated streamer is added — the ordinary case, and the one
+	// that must cost the other two nothing.
+	repo.Reinstate("someone-else")
+
+	committed := c.committed.Load()
+	c.write(ctx, recycled)
+	c.write(ctx, untouched)
+	if got := c.committed.Load(); got != committed+2 {
+		t.Fatalf("%d of 2 in-flight facts survived an unrelated streamer's re-add: the life "+
+			"boundary is being drawn across identities it did not lift, so one operator "+
+			"action discards the session's unrelated work", got-committed)
+	}
+
+	stored, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, rec := range stored {
+		seen[rec.EventID] = true
+	}
+	if !seen["new-life"] || !seen["live"] {
+		t.Fatalf("stored events = %v, want both the re-added streamer's new life and the "+
+			"untouched streamer's fact", seen)
 	}
 }

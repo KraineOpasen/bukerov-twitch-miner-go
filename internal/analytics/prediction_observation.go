@@ -218,13 +218,23 @@ const (
 	// shutdown. Its facts are still exact; the SET of facts is not provably
 	// whole.
 	SessionIncomplete = "INCOMPLETE"
+	// SessionAbandoned: the process died without finalizing, and a later
+	// startup reclaimed the row so retention can age it and the session
+	// ceiling can be freed. It is deliberately NOT INCOMPLETE: that state
+	// means the collector finalized and reported a loss, whereas here nothing
+	// was ever reported. The counters are the untouched initial zeros, which
+	// are not evidence and must never be read as the dead process's own
+	// accounting; its surviving facts are a LOWER BOUND on what it observed.
+	SessionAbandoned = "ABANDONED"
 )
 
 // Session readings — how a reader must classify a session before drawing any
 // conclusion from the facts that belong to it.
 const (
-	// ReadingUnfinalized: close_state is OPEN. Either the collector is live
-	// or it died; completeness is unknown and no absence may be inferred.
+	// ReadingUnfinalized: the session never wrote its accounting — close_state
+	// is OPEN (the collector is live, or died before a startup reclaimed the
+	// row) or ABANDONED (it died and one did). Completeness is unknown and no
+	// absence may be inferred.
 	ReadingUnfinalized = "UNFINALIZED"
 	// ReadingIntegrityError: the row contradicts itself (a finalized session
 	// with no close time, an unknown close state, negative counters, or
@@ -236,8 +246,15 @@ const (
 	// surviving facts are exact; the set is deliberately not whole.
 	ReadingAdministrativelyTruncated = "ADMINISTRATIVELY_TRUNCATED"
 	// ReadingAsFinalized: the session finalized coherently and the facts
-	// present are exactly the ones it committed. Only here may a reader treat
-	// the absence of a fact as evidence.
+	// present are exactly the ones it committed.
+	//
+	// This is a statement about the DATASET, not about completeness: an
+	// INCOMPLETE session reads AS_FINALIZED too, because the facts it did
+	// commit are still exactly present and exactly right. A reader may treat
+	// the absence of a fact as evidence only when the reading is AS_FINALIZED
+	// AND Session.CloseState is COMPLETE — reading it from the classification
+	// alone would take a session that dropped facts, or one whose intake never
+	// opened at all, as proof that nothing happened.
 	ReadingAsFinalized = "AS_FINALIZED"
 )
 
@@ -887,6 +904,20 @@ func sanitizeObservation(in PredictionObservation, now int64) (PredictionObserva
 	} else if out.RetentionGroupOwnerChannelID == "" {
 		out.RoundIncarnationID = ""
 	}
+	// A privacy erasure reaches a fact through exactly two doors: the routed
+	// identity and the retention-group owner. round_owner_* is deliberately
+	// never a door — it names the broadcaster of a round, not the identity the
+	// fact was filed under — so with neither door present, a round owner or an
+	// event id would be a channel-scoped identifier no erasure could ever
+	// reach. Strip them rather than store an identifier that outlives every
+	// erasure that could apply to it. Same reasoning as the pairing rule
+	// above: the producer already does this, and doing it here is what makes
+	// it true for every caller.
+	if out.RoutedChannelID == "" && out.RetentionGroupOwnerChannelID == "" {
+		out.EventID = ""
+		out.RoundOwnerChannelID = ""
+		out.RoundOwnerLogin = ""
+	}
 	if out.ProducerAtMS <= 0 {
 		out.ProducerAtMS = 0
 		out.ProducerTimeSource = TimeSourceReceiver
@@ -1193,7 +1224,7 @@ var predictionObservationSchemaSQL = `
 		started_at_ms                     INTEGER NOT NULL,
 		closed_at_ms                      INTEGER,
 		close_state                       TEXT NOT NULL
-			CHECK (close_state IN ('OPEN', 'COMPLETE', 'INCOMPLETE')),
+			CHECK (close_state IN ('OPEN', 'COMPLETE', 'INCOMPLETE', 'ABANDONED')),
 		last_assigned_sequence            INTEGER,
 		committed_count                   INTEGER NOT NULL CHECK (committed_count >= 0),
 		dropped_count                     INTEGER NOT NULL CHECK (dropped_count >= 0),
@@ -1464,7 +1495,7 @@ func (r *SQLiteRepository) ReconcileAbandonedObservationSessions(ctx context.Con
 			      WHERE close_state = 'OPEN'
 			        AND collector_session_id <> ?
 			      ORDER BY collector_epoch
-			      LIMIT ?)`, SessionIncomplete, liveSessionID, limit)
+			      LIMIT ?)`, SessionAbandoned, liveSessionID, limit)
 		if e != nil {
 			return e
 		}
@@ -1492,6 +1523,11 @@ type ObservationAccounting struct {
 	// this session, which is enough to make the session INCOMPLETE: its facts
 	// are deliberately no longer the whole set it observed.
 	IdentityErasures int64
+	// IntakeNeverOpened is NOT persisted either. It records that intake never
+	// opened at all for this session — the shutdown fence beat the bootstrap's
+	// publish — so its zero facts mean "the collector was never listening",
+	// which is emphatically not the claim COMPLETE makes.
+	IntakeNeverOpened bool
 	// PreIntakeLosses is NOT persisted either. It records facts offered while
 	// capture was not running, which took no causal position and so cannot be
 	// counted as drops without contradicting the session's counter form. They
@@ -1503,7 +1539,8 @@ type ObservationAccounting struct {
 // dropped, no obligation was left unsettled, no producer ran past the fence
 // and no producer shutdown was uncertain.
 func (a ObservationAccounting) Whole() bool {
-	return a.Dropped == 0 &&
+	return !a.IntakeNeverOpened &&
+		a.Dropped == 0 &&
 		a.UnsettledObligations == 0 &&
 		a.PostFenceProducers == 0 &&
 		a.ProducerShutdownUncertain == 0 &&
@@ -1548,6 +1585,7 @@ var (
 // collision.
 type observationCaptureColumns struct {
 	pool, incarnation, routedChannel, ownerChannel, retentionChannel string
+	captureOrigin, captureGapCause                                   string
 	eventID, kind, topicType, messageType, fingerprint               string
 	producerAtMS                                                     int64
 	timeSource                                                       string
@@ -1566,12 +1604,14 @@ type observationCaptureColumns struct {
 //
 // The transaction does four things before it inserts, in this order:
 //
-//  1. It proves the target session is the published OPEN one. A finalized or
-//     crash-left session's counters are fixed; a late row would contradict them.
-//  2. It looks the observation id up. An identical retry is idempotent SUCCESS
+//  1. It looks the observation id up. An identical retry is idempotent SUCCESS
 //     — the fact is already recorded, and a second row would double-count it.
 //     The same id with different capture-supplied content is a typed collision
-//     and the existing row is never overwritten.
+//     and the existing row is never overwritten. This is asked first because
+//     it is the only question whose answer does not depend on what has since
+//     happened to the session.
+//  2. It proves the target session is the published OPEN one. A finalized or
+//     crash-left session's counters are fixed; a late row would contradict them.
 //  3. It resolves the parents lookup-only, freezing a round group's
 //     retention-group owner from whatever the group's FIRST committed row
 //     resolved, so companions of one round cannot disagree about who owns it
@@ -1597,7 +1637,11 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		pool: o.PoolInstanceID, incarnation: incarnation,
 		routedChannel: o.RoutedChannelID, ownerChannel: o.RoundOwnerChannelID,
 		retentionChannel: o.RetentionGroupOwnerChannelID,
-		eventID:          o.EventID, kind: o.Kind,
+		// Capture-supplied and persisted, so two facts that disagree about the
+		// provenance are two different facts: a retry that differs here is a
+		// typed collision, not an idempotent success.
+		captureOrigin: o.RoundCaptureOrigin, captureGapCause: o.RoundCaptureGapCause,
+		eventID: o.EventID, kind: o.Kind,
 		topicType: o.SourceTopicType, messageType: o.SourceMessageType,
 		fingerprint:  o.SourceFingerprint,
 		producerAtMS: o.ProducerAtMS, timeSource: o.ProducerTimeSource,
@@ -1614,7 +1658,27 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 		inserted     bool
 	)
 	err := r.db.WithTx(ctx, func(tx *sql.Tx) error {
-		// (1) the exact published OPEN session, by BOTH halves of the pair.
+		// (1) identical retry, before anything else is asked. This question
+		// comes FIRST because it is the only one whose honest answer does not
+		// depend on what has since happened to the session: the fact either is
+		// already stored or it is not. Asking about the session first would
+		// refuse a retry — after an ambiguous failure whose write actually
+		// committed — with errObservationSessionNotOpen once the session had
+		// finalized in between, telling the caller a stored fact was lost.
+		existing, found, e := readObservationCaptureColumns(ctx, tx, observationID)
+		if e != nil {
+			return e
+		}
+		if found {
+			if existing != want {
+				return errObservationCollision
+			}
+			return nil
+		}
+
+		// (2) the exact published OPEN session, by BOTH halves of the pair.
+		// Reached only for a fact that is genuinely new, which is the only
+		// kind a finalized session's fixed counters could contradict.
 		var closeState string
 		switch e := tx.QueryRowContext(ctx, `
 			SELECT close_state FROM prediction_observation_sessions
@@ -1626,18 +1690,6 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 			return e
 		case closeState != SessionOpen:
 			return errObservationSessionNotOpen
-		}
-
-		// (2) identical retry, before anything is written.
-		existing, found, e := readObservationCaptureColumns(ctx, tx, observationID)
-		if e != nil {
-			return e
-		}
-		if found {
-			if existing != want {
-				return errObservationCollision
-			}
-			return nil
 		}
 
 		routedID, err := observationParentID(ctx, tx, o.RoutedLogin, o.RoutedChannelID)
@@ -1740,15 +1792,19 @@ func (r *SQLiteRepository) AppendObservation(ctx context.Context, o PredictionOb
 func readObservationCaptureColumns(ctx context.Context, tx *sql.Tx, observationID string) (observationCaptureColumns, bool, error) {
 	var got observationCaptureColumns
 	var incarnation, routed, owner, retention, event, topic, message, fingerprint sql.NullString
+	var captureOrigin, captureGapCause sql.NullString
 	var producerAt sql.NullInt64
 	e := tx.QueryRowContext(ctx, `
 		SELECT pool_instance_id, round_incarnation_id, routed_channel_id, round_owner_channel_id,
-		       retention_group_owner_channel_id, event_id, kind, source_topic_type,
+		       retention_group_owner_channel_id,
+		       round_capture_origin, round_capture_gap_cause,
+		       event_id, kind, source_topic_type,
 		       source_message_type, source_fingerprint, producer_at_ms, producer_time_source,
 		       received_at_ms, connection_index, connection_generation, connection_sequence,
 		       payload_version, payload_json
 		  FROM prediction_observations WHERE observation_id = ?`, observationID).
-		Scan(&got.pool, &incarnation, &routed, &owner, &retention, &event, &got.kind, &topic,
+		Scan(&got.pool, &incarnation, &routed, &owner, &retention,
+			&captureOrigin, &captureGapCause, &event, &got.kind, &topic,
 			&message, &fingerprint, &producerAt, &got.timeSource,
 			&got.receivedAtMS, &got.connIndex, &got.connGeneration, &got.connSequence,
 			&got.payloadVersion, &got.payloadJSON)
@@ -1760,6 +1816,7 @@ func readObservationCaptureColumns(ctx context.Context, tx *sql.Tx, observationI
 	}
 	got.incarnation, got.routedChannel, got.ownerChannel = incarnation.String, routed.String, owner.String
 	got.retentionChannel, got.eventID = retention.String, event.String
+	got.captureOrigin, got.captureGapCause = captureOrigin.String, captureGapCause.String
 	got.topicType, got.messageType, got.fingerprint = topic.String, message.String, fingerprint.String
 	got.producerAtMS = producerAt.Int64
 	return got, true, nil
@@ -1946,13 +2003,25 @@ func (l *observationQuotaLedger) admit(keys []string, roundKey string, bytes int
 			return false, false
 		}
 	}
+	// The row's OWN new keys have to count against each other. One fact
+	// carries up to four distinct deletion keys, and testing each against
+	// len(l.deletionKeys) — which this function never changes — compared all
+	// four with the same pre-row count, so a store one key under the ceiling
+	// accepted a row that put it three keys over. Count them first, then test
+	// the total the row would actually leave behind.
+	newKeys := int64(0)
 	for _, k := range keys {
-		u, known := l.deletionKeys[k]
-		if !known && int64(len(l.deletionKeys)) >= MaxStoreDeletionKeys {
-			// A new key would push the store past the number of separately
-			// erasable identities it may hold.
-			return false, true
+		if _, known := l.deletionKeys[k]; !known {
+			newKeys++
 		}
+	}
+	if int64(len(l.deletionKeys))+newKeys > MaxStoreDeletionKeys {
+		// These keys would push the store past the number of separately
+		// erasable identities it may hold.
+		return false, true
+	}
+	for _, k := range keys {
+		u := l.deletionKeys[k]
 		if u.Rows+1 > MaxDeletionIdentityRows || u.Bytes+bytes > MaxDeletionIdentityBytes {
 			return false, true
 		}
@@ -2258,6 +2327,7 @@ func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, se
 	}
 	rows, e := tx.QueryContext(ctx, `
 		SELECT observation_id, collector_sequence, pool_instance_id, round_incarnation_id,
+		       round_capture_origin, round_capture_gap_cause,
 		       routed_streamer_id, routed_channel_id,
 		       round_owner_streamer_id, round_owner_channel_id,
 		       retention_group_owner_streamer_id, retention_group_owner_channel_id,
@@ -2279,12 +2349,14 @@ func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, se
 			seq, receivedAt                                      int64
 			pool                                                 string
 			incarnation, routedChan, ownerChan, retentionChan    sql.NullString
+			captureOrigin, captureGap                            sql.NullString
 			eventID, topic, message, fingerprint                 sql.NullString
 			routedID, ownerID, retentionID                       sql.NullInt64
 			producerAt                                           sql.NullInt64
 			connIndex, connGeneration, connSequence              sql.NullInt64
 		)
 		if e := rows.Scan(&observationID, &seq, &pool, &incarnation,
+			&captureOrigin, &captureGap,
 			&routedID, &routedChan, &ownerID, &ownerChan, &retentionID, &retentionChan,
 			&eventID, &kind, &topic, &message, &fingerprint,
 			&producerAt, &timeSource, &receivedAt,
@@ -2294,6 +2366,8 @@ func verifyObservationWitnesses(ctx context.Context, tx *sql.Tx, epoch int64, se
 		}
 		o := PredictionObservation{
 			PoolInstanceID:               pool,
+			RoundCaptureOrigin:           captureOrigin.String,
+			RoundCaptureGapCause:         captureGap.String,
 			RoutedChannelID:              routedChan.String,
 			RoundOwnerChannelID:          ownerChan.String,
 			RetentionGroupOwnerChannelID: retentionChan.String,
@@ -2368,6 +2442,15 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 	case s.CloseState == SessionOpen:
 		out.Reading = ReadingUnfinalized
 		out.Detail = "collector session is still OPEN: it is either live or was left behind by an unclean shutdown"
+		return out
+	case s.CloseState == SessionAbandoned:
+		// The counters below are the initial zeros — this run died before it
+		// could write any accounting — so every check past this point would
+		// be reading unwritten values as a claim, and would condemn a session
+		// for holding the very facts it committed.
+		out.Reading = ReadingUnfinalized
+		out.Detail = "the process died without finalizing: its accounting was never written, so the " +
+			"facts present are a lower bound on what it observed and nothing about loss follows"
 		return out
 	case s.CloseState != SessionComplete && s.CloseState != SessionIncomplete:
 		return integrity("close_state is outside the closed set")
@@ -2807,6 +2890,11 @@ type observationCollector struct {
 	// must not finalize COMPLETE while any exist. Not persisted: it is a
 	// reason for INCOMPLETE, not a column of its own.
 	preIntakeLosses atomic.Int64
+	// intakeNeverOpened records that this session allocated a row but never
+	// opened intake: the shutdown fence beat the bootstrap's publish. It is
+	// not a count of anything, and like identityErasures it is not persisted —
+	// it exists to keep the session from being called whole.
+	intakeNeverOpened atomic.Bool
 
 	// identityErasures counts privacy erasures performed during this session.
 	// One is enough to make the session INCOMPLETE: after an erasure its facts
@@ -3022,7 +3110,19 @@ func (c *observationCollector) captureState(channelID, login string) string {
 	}
 	// Running. The remaining reason a round's prefix would go unobserved is an
 	// identity fence armed for the channel the round belongs to.
-	if c.isFenced(PredictionObservation{RoutedChannelID: channelID, RoutedLogin: login}) {
+	//
+	// The probe carries the NEXT causal position, because that is the question
+	// being asked: would a fact captured now be refused? At position 0 the
+	// probe would instead match isFenced's watermark clause for every identity
+	// ever erased — and unfence deliberately never clears those watermarks, so
+	// one erasure would answer IDENTITY_FENCE forever, long after a re-add
+	// whose facts commit normally. A live fence still answers through the
+	// first clause, which is position-independent.
+	if c.isFenced(PredictionObservation{
+		RoutedChannelID: channelID,
+		RoutedLogin:     login,
+		sequence:        c.sequence.Load() + 1,
+	}) {
 		return "IDENTITY_FENCE"
 	}
 	return ""
@@ -3113,11 +3213,11 @@ func (c *observationCollector) fence(channelID, login string) {
 	// nonetheless above the watermark. Reading it here makes the watermark as
 	// high as this erasure can honestly claim.
 	//
-	// That alone still would not be a proof: a producer can always reserve a
-	// position after ANY watermark. What makes the boundary total is that
-	// lifting this fence advances the capture generation (see unfence), so a
-	// fact reserved before the re-add carries the older generation and is
-	// refused at the write regardless of its position.
+	// This watermark alone is not the whole boundary. It refuses facts
+	// reserved BEFORE the erasure; a producer descheduled across the erasure
+	// reserves a later position and this check would pass it. What closes that
+	// is unfence RAISING the watermark to the position the re-add happened at,
+	// so the refused set is exactly "reserved before this identity came back".
 	at := c.sequence.Load()
 	// The erasure record is bounded like every other identity key. A store
 	// that has erased more identities than the bound allows cannot go on
@@ -3148,42 +3248,39 @@ func (c *observationCollector) unfence(login string) {
 	if login == "" {
 		return
 	}
-	lifted := false
 	c.fenceMu.Lock()
+	defer c.fenceMu.Unlock()
+
+	// Lifting a fence is a LIFE BOUNDARY, and the erasure watermark is what
+	// records one. The live fence refuses facts only while it is armed, so
+	// without this a fact reserved DURING the erasure — after the purge, before
+	// the re-add — would carry a position above the fence-time watermark, meet
+	// no live fence once this returns, and be persisted against the RE-ADDED
+	// streamer's row: an observation of the erased life filed under the life
+	// that replaced it.
+	//
+	// Raising the watermark to the position the re-add happens at refuses
+	// exactly that set: every position reserved before this instant belongs to
+	// the previous life, and every position reserved after it belongs to the
+	// new one, which is precisely what the two lives differ by.
+	//
+	// It is done UNDER the same lock isFenced reads, so there is no window in
+	// which the fence is gone and the watermark has not yet risen. And it is
+	// per-identity: Reinstate runs for EVERY streamer added, so a boundary
+	// drawn any wider than the identities actually lifted would discard the
+	// in-flight facts of every unrelated streamer in the session.
+	at := c.sequence.Load()
 	if _, ok := c.fenced["login:"+login]; ok {
-		lifted = true
+		c.erasedAt["login:"+login] = at
 	}
 	delete(c.fenced, "login:"+login)
 	for _, ch := range c.loginChannels[login] {
 		if _, ok := c.fenced["chan:"+ch]; ok {
-			lifted = true
+			c.erasedAt["chan:"+ch] = at
 		}
 		delete(c.fenced, "chan:"+ch)
 	}
 	delete(c.loginChannels, login)
-	c.fenceMu.Unlock()
-
-	// Lifting a fence is a LIFE BOUNDARY, and the capture generation is what
-	// records one. Without this, a fact reserved while the erasure was in
-	// flight carries the same generation as one reserved after the re-add:
-	// the write-side generation check cannot separate them, the live fence is
-	// gone, and its causal position is above the erasure watermark because a
-	// producer can always reserve a position after any watermark. That fact
-	// would then be persisted and bound to the RE-ADDED streamer's row — the
-	// resurrection the fence exists to prevent, reached through the one door
-	// the watermark cannot close.
-	//
-	// Advancing the generation closes it totally: every position reserved
-	// before this instant belongs to the previous life and is refused at the
-	// write, whatever its number.
-	//
-	// Gated on having actually lifted something, because Reinstate runs for
-	// EVERY added streamer and an unrelated re-add must not invalidate the
-	// facts of a live session. And it advances the generation ALONE — an
-	// erasure already counted itself, and a re-add is not a second erasure.
-	if lifted {
-		c.generation.Add(1)
-	}
 }
 
 // isFenced reports whether any identity this fact names has been erased.
@@ -3251,6 +3348,11 @@ func (c *observationCollector) run(ctx context.Context) {
 	published := c.publishRunning()
 	close(c.bootstrapped)
 	if !published {
+		// Recorded BEFORE the return, so it is visible to Close, which reads
+		// the accounting only after joining this goroutine. The session row
+		// this bootstrap allocated is about to be finalized, and it must not
+		// be finalized as whole.
+		c.noteIntakeNeverOpened()
 		// Close fenced intake while this bootstrap was finishing, so intake
 		// will never open and there is nothing to serve. Returning here is
 		// what keeps the promise that no database-capable collector goroutine
@@ -3697,6 +3799,16 @@ func (c *observationCollector) invalidateGeneration() {
 	c.identityErasures.Add(1)
 }
 
+// noteIntakeNeverOpened records that this session's intake never opened: the
+// bootstrap allocated the session row, then lost publishRunning's CAS to the
+// shutdown fence. The row is real and Close will finalize it, so without this
+// the finalization would see an all-zero accounting, call the session whole and
+// write COMPLETE — a durable claim that nothing happened during a window in
+// which the collector was never listening.
+func (c *observationCollector) noteIntakeNeverOpened() {
+	c.intakeNeverOpened.Store(true)
+}
+
 // noteProducerShutdownUncertain records that a producer could not prove it had
 // stopped offering facts — the pool's Close returned an error, so a late
 // producer may still exist. It forces INCOMPLETE.
@@ -3733,6 +3845,7 @@ func (c *observationCollector) accounting() ObservationAccounting {
 		ProducerShutdownUncertain: c.producerShutdownUncertain.Load(),
 		IdentityErasures:          c.identityErasures.Load(),
 		PreIntakeLosses:           c.preIntakeLosses.Load(),
+		IntakeNeverOpened:         c.intakeNeverOpened.Load(),
 	}
 }
 

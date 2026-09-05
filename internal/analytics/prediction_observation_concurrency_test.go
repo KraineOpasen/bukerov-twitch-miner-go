@@ -985,3 +985,225 @@ func TestObservationSessionBoundsAreEnforced(t *testing.T) {
 		t.Fatal("committed payload bytes were not accounted, so the byte ceiling could never be reached")
 	}
 }
+
+// TestAnErasureThatLandsWhileTheWriteWaitsForTheLeaseStillHolds closes a test
+// gap an independent acceptance review found by mutation: deleting the entire
+// re-check that write performs AFTER acquiring the gate lease left the whole
+// analytics suite green, though its own comment calls it "the difference
+// between an erasure that holds and one that only looks like it does".
+//
+// The window is real and is not small. Acquiring the lease waits for whatever
+// business writer currently holds the single connection, and an operator's
+// erasure runs on one of exactly those paths. A fact admitted by the checks
+// before the lease, and committed after the erasure released it, is an
+// observation of an erased identity written after the erasure — the one
+// outcome the fence exists to prevent.
+//
+// Driving that requires the erasure to land while the write is ALREADY past
+// its pre-lease checks, so this test proves the writer is blocked before it
+// erases: the only blocking point in write is the lease acquisition, so a
+// writer that has not returned is a writer holding the pre-lease verdict. The
+// fence alone is armed and the generation is deliberately left untouched, so
+// the generation check cannot be what refuses the fact either.
+func TestAnErasureThatLandsWhileTheWriteWaitsForTheLeaseStillHolds(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	fact := channelObservation("pool-1", "chan-doomed", "doomed", "event-1", "ROUND_CREATED")
+	fact.sequence = c.sequence.Add(1)
+	fact.generation = c.generation.Load()
+
+	// It passes every check write makes BEFORE the lease.
+	sanitized, ok := sanitizeObservation(fact, c.now().UnixMilli())
+	if !ok {
+		t.Fatal("the fixture does not sanitize; it would be dropped before the lease")
+	}
+	if c.disabled.Load() || c.isFenced(sanitized) {
+		t.Fatal("the fixture is already refused before the lease; this test would prove nothing")
+	}
+
+	// A business writer takes the gate and holds it.
+	claimed := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	go func() {
+		release := c.gate.Claim()
+		close(claimed)
+		defer release()
+		<-releaseClaim
+	}()
+	<-claimed
+
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		c.write(ctx, fact)
+	}()
+
+	// The writer must be INSIDE the lease wait before the erasure lands,
+	// otherwise the pre-lease check would be what refuses the fact and this
+	// test would pass for the wrong reason. Everything write does before the
+	// lease is non-blocking, so a writer that has not returned is blocked
+	// exactly there.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-written:
+		t.Fatal("the write completed while a business claim was held; it never waited for the " +
+			"lease, so the window this test is about was never entered")
+	default:
+	}
+
+	// Only the fence is armed. The generation is left alone on purpose: if it
+	// advanced, the generation half of the re-check could refuse the fact and
+	// the fence half would stay unproven.
+	c.fence("chan-doomed", "doomed")
+	repo.Tombstone("doomed")
+
+	close(releaseClaim)
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the write never completed after the claim was released")
+	}
+
+	got, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range got {
+		if rec.EventID == "event-1" {
+			t.Fatalf("an observation of an erased identity was written AFTER the erasure: %+v. "+
+				"Every check before the lease passed, so only the re-check after it can "+
+				"refuse this fact", rec)
+		}
+	}
+}
+
+// TestAReservedPositionThatNeverReachesTheWriterIsSettledAsDropped closes a
+// second gap the same review found by mutation: removing accounting's gap
+// settlement left the suite green.
+//
+// A position is reserved when a producer captures a fact and is only later
+// either committed or dropped. A producer preempted in between leaves a
+// position that reached neither counter, and reporting that verbatim finalizes
+// a session whose own numbers do not add up: committed + dropped below
+// last_assigned_sequence is exactly the counter-form violation the reader
+// classifies as INTEGRITY_ERROR. Settling the shortfall as dropped is both
+// true — the fact was captured and never stored — and what keeps the session
+// honestly INCOMPLETE instead of self-contradicting.
+func TestAReservedPositionThatNeverReachesTheWriterIsSettledAsDropped(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-a", "streamer-a", "event-1", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+
+	// A producer reserves its position and is then preempted: the fact never
+	// reaches the writer, so neither counter ever moves for it.
+	c.sequence.Add(1)
+
+	acc := c.accounting()
+	if acc.LastAssignedSequence != 2 {
+		t.Fatalf("last assigned = %d, want 2", acc.LastAssignedSequence)
+	}
+	if acc.Committed+acc.Dropped != acc.LastAssignedSequence {
+		t.Fatalf("accounting = %d committed + %d dropped against %d reserved: a session whose "+
+			"counters do not account for every position it handed out reads INTEGRITY_ERROR, "+
+			"and nothing may be concluded from it at all",
+			acc.Committed, acc.Dropped, acc.LastAssignedSequence)
+	}
+	if acc.Whole() {
+		t.Fatal("a session that lost a captured fact reports itself whole")
+	}
+
+	// And the finalized session really does read coherently.
+	c.Close()
+	reading, found, err := repo.ReadObservationSession(ctx, c.epoch.Load())
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if reading.Reading == ReadingIntegrityError {
+		t.Fatalf("the finalized session reads INTEGRITY_ERROR (%s)", reading.Detail)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("close state = %q, want %q", reading.Session.CloseState, SessionIncomplete)
+	}
+}
+
+// TestABusinessWriterPreemptsTheCollectorsOwnMaintenance closes a test gap an
+// independent acceptance review found by mutation: replacing leased's body with
+// a bare `return fn(leaseCtx)` — removing the gate from the retention pass, the
+// store measurement, the session open, the bootstrap recount, the startup
+// reconciliation and the finalize — left the whole analytics suite green.
+//
+// That gate is the entire reason a P1 maintenance transaction is allowed to
+// hold the single shared connection for up to its budget: a business writer can
+// take it back. Proven only at the txPriority unit level and for the per-fact
+// write path, the collector's OWN transactions could have stopped participating
+// without anything noticing.
+//
+// This asserts the behaviour end to end through leased: a maintenance
+// transaction in flight has its context cancelled by a business claim, and the
+// business writer gets the connection rather than waiting out the budget.
+func TestABusinessWriterPreemptsTheCollectorsOwnMaintenance(t *testing.T) {
+	svc, repo := newObservationService(t)
+	c := svc.observations
+
+	// The budget is deliberately far larger than production's, and far larger
+	// than the window this test allows. A lease that ends because its budget
+	// expired proves nothing about the gate — the two causes are otherwise
+	// indistinguishable — so the budget is put out of reach and only a
+	// business claim can explain a prompt cancellation.
+	const budget = 30 * time.Second
+	const promptly = 3 * time.Second
+
+	inside := make(chan struct{})
+	cancelled := make(chan time.Duration, 1)
+	done := make(chan error, 1)
+	var heldFrom time.Time
+	go func() {
+		done <- c.leased(context.Background(), budget,
+			func(lease context.Context) error {
+				heldFrom = time.Now()
+				close(inside)
+				select {
+				case <-lease.Done():
+					cancelled <- time.Since(heldFrom)
+				case <-time.After(budget):
+				}
+				return nil
+			})
+	}()
+	<-inside
+
+	// A business write on a gated repository path. It must not wait out the
+	// maintenance budget.
+	claimReturned := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_ = repo.RecordPoints("streamer-a", 100, "WATCH")
+		claimReturned <- time.Since(start)
+	}()
+
+	select {
+	case held := <-cancelled:
+		if held >= promptly {
+			t.Fatalf("the maintenance transaction was cancelled only after %v; a business "+
+				"claim must preempt it, not the budget eventually expiring", held)
+		}
+	case <-time.After(promptly):
+		t.Fatal("a business writer's claim did not cancel the collector's in-flight maintenance " +
+			"transaction: the collector's own transactions are not participating in the gate, " +
+			"so a business write can be stuck behind one for its whole budget")
+	}
+	select {
+	case <-claimReturned:
+	case <-time.After(promptly):
+		t.Fatal("the business write never completed after preempting the maintenance transaction")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the preempted maintenance transaction returned %v", err)
+	}
+}
