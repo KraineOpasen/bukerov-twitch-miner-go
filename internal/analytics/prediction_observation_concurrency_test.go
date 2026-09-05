@@ -648,58 +648,133 @@ func TestObservationWholeRoundPruneSparesTheActiveEpoch(t *testing.T) {
 	}
 }
 
-// TestObservationCapacityPausesAndResumesCapture proves the hard store bounds
-// are enforced against a FRESH measurement while the collector runs, not once
-// at startup against a stale one, and that capture resumes when space is
-// freed rather than staying permanently disabled.
-func TestObservationCapacityPausesAndResumesCapture(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "miner.db")
-	db := openPrivateDB(t, path)
-	defer func() { _ = db.Close() }()
-	svc, err := NewService(db, filepath.Dir(path), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := svc.observations
-	c.writeDeadline = 5 * time.Second
-	c.maintenanceInterval = 10 * time.Millisecond
-	t.Cleanup(func() { _ = svc.Close() })
-	if err := svc.Start(); err != nil {
-		t.Fatal(err)
-	}
-	<-c.bootstrapped
-	if !c.capturing() {
-		t.Fatal("capture did not come up")
-	}
-
-	// Simulate an over-capacity store by measuring against a bound of zero.
-	// The pass must pause capture rather than keep growing.
-	c.overCapacity.Store(false)
-	awaitPaused := func(want bool) {
+// TestObservationCapacityStopsCaptureSTICKILY drives the hard store bound at
+// a REAL limit and proves what happens on either side of it.
+//
+// The previous test set the flags by hand and called maintain, so the branch
+// it claimed to cover was never actually reached by a measurement, and it
+// asserted that capture RESUMES once a later pass measures less. That is the
+// opposite of the contract: capacity is released only by a new process's exact
+// per-key and global recount. A pass that measures the whole store under its
+// bound has not re-established the per-identity ledger that overflowed, so
+// resuming would mean capturing again on ceilings nobody has re-derived.
+func TestObservationCapacityStopsCaptureSTICKILY(t *testing.T) {
+	newCollector := func(t *testing.T, rowCap int64) (*Service, *observationCollector) {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if c.capturing() != want {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		t.Cleanup(func() { _ = db.Close() })
+		svc, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Fatalf("capture running=%v, want %v", c.capturing(), !want)
+		c := svc.observations
+		c.writeDeadline = 5 * time.Second
+		c.maxStoreRows = rowCap
+		t.Cleanup(func() { _ = svc.Close() })
+		if err := svc.Start(); err != nil {
+			t.Fatal(err)
+		}
+		<-c.bootstrapped
+		if !c.capturing() {
+			t.Fatal("capture did not come up")
+		}
+		return svc, c
 	}
-	_ = awaitPaused
 
-	// The store caps themselves are compile-time constants, so drive the
-	// same code path directly: an over-capacity verdict pauses, and a
-	// subsequent under-capacity verdict resumes.
-	c.phase.Store(phasePaused)
-	c.overCapacity.Store(true)
-	c.maintain(context.Background())
-	if !c.capturing() {
-		t.Fatal("capture did not resume once the store was measured under its bounds")
-	}
-	if c.overCapacity.Load() {
-		t.Fatal("the over-capacity flag was not cleared on resume")
-	}
+	t.Run("one below the ceiling capture continues", func(t *testing.T) {
+		svc, c := newCollector(t, 3)
+		for i := 0; i < 2; i++ {
+			svc.RecordPredictionObservation(
+				channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+		}
+		awaitCommitted(t, svc, 2)
+		c.maintain(context.Background())
+		if !c.capturing() {
+			t.Fatal("capture stopped below the ceiling")
+		}
+		if c.disabled.Load() {
+			t.Fatal("capture was disabled below the ceiling")
+		}
+	})
+
+	t.Run("at the ceiling capture stops and stays stopped", func(t *testing.T) {
+		svc, c := newCollector(t, 3)
+		for i := 0; i < 3; i++ {
+			svc.RecordPredictionObservation(
+				channelObservation("pool-1", "chan-a", "s", "e"+itoa(int64(i)), "ROUND_CREATED"))
+		}
+		awaitCommitted(t, svc, 3)
+
+		c.maintain(context.Background())
+		if c.capturing() {
+			t.Fatal("capture continued at the store ceiling")
+		}
+		if !c.overCapacity.Load() || !c.disabled.Load() {
+			t.Fatalf("capacity breach did not latch: overCapacity=%v disabled=%v",
+				c.overCapacity.Load(), c.disabled.Load())
+		}
+
+		// Space is freed and the store now measures far under the bound. It
+		// still must not resume: only a restart's exact recount may.
+		c.maxStoreRows = MaxStoreRows
+		c.maintain(context.Background())
+		if c.capturing() {
+			t.Fatal("capture resumed in-process after a capacity breach; only a restart's exact " +
+				"per-key and global recount may release it")
+		}
+		if !c.disabled.Load() {
+			t.Fatal("the capacity latch was cleared without a restart")
+		}
+
+		// And a fact offered afterwards is accounted, never quietly kept.
+		before := c.preIntakeLosses.Load()
+		svc.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "late", "ROUND_CREATED"))
+		if c.preIntakeLosses.Load() != before+1 {
+			t.Fatal("a fact offered after the capacity latch was not accounted")
+		}
+	})
+
+	t.Run("bootstrap refuses to open a session over the ceiling", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "miner.db")
+		db := openPrivateDB(t, path)
+		defer func() { _ = db.Close() }()
+
+		// A first run fills the store.
+		first, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first.observations.writeDeadline = 5 * time.Second
+		if err := first.Start(); err != nil {
+			t.Fatal(err)
+		}
+		<-first.observations.bootstrapped
+		first.RecordPredictionObservation(channelObservation("pool-1", "chan-a", "s", "e0", "ROUND_CREATED"))
+		awaitCommitted(t, first, 1)
+		if err := first.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		// A second run whose ceiling the store already exceeds must disable
+		// P1 without failing startup and without opening a session.
+		second, err := NewService(db, filepath.Dir(path), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = second.Close() }()
+		second.observations.maxStoreRows = 1
+		if err := second.Start(); err != nil {
+			t.Fatalf("a store at its ceiling must not fail startup: %v", err)
+		}
+		<-second.observations.bootstrapped
+		if !second.observations.disabled.Load() {
+			t.Fatal("bootstrap opened capture on a store already at its ceiling")
+		}
+		if second.observations.epoch.Load() != 0 {
+			t.Fatal("bootstrap allocated a session on a store already at its ceiling")
+		}
+	})
 }
 
 // TestObservationCloseBeatsAFinishingBootstrap proves Close's intake fence

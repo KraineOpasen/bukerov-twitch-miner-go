@@ -2435,6 +2435,13 @@ type observationCollector struct {
 	// ceilings. It is seeded from the store at bootstrap, because the ceilings
 	// are properties of the STORE and a run that started counting from zero
 	// would let a store already at its bound accept another session's worth.
+	// The store ceilings this collector enforces. They default to the frozen
+	// constants and exist as fields ONLY so a test can drive the branch at a
+	// real limit instead of asserting it by inspection: reaching 262,144 rows
+	// or a gigabyte of payload in a test is not feasible, and a ceiling whose
+	// enforcement has never been executed is a comment.
+	maxStoreRows, maxStoreBytes, maxStoreSessions int64
+
 	// erasedAt records, per fence key, the causal position this session had
 	// reached when that identity was last erased — and unlike the fence it is
 	// never lifted for the life of the session.
@@ -2498,6 +2505,9 @@ func newObservationCollector(repo *SQLiteRepository, gate *txPriority, retention
 		fenced:              make(map[string]struct{}),
 		loginChannels:       make(map[string][]string),
 		erasedAt:            make(map[string]int64),
+		maxStoreRows:        MaxStoreRows,
+		maxStoreBytes:       MaxStoreBytes,
+		maxStoreSessions:    MaxStoreSessions,
 	}
 }
 
@@ -2737,16 +2747,18 @@ func (c *observationCollector) maintain(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	over := stats.Rows >= MaxStoreRows || stats.Bytes >= MaxStoreBytes || stats.Sessions >= MaxStoreSessions
+	over := stats.Rows >= c.maxStoreRows || stats.Bytes >= c.maxStoreBytes || stats.Sessions >= c.maxStoreSessions
 	if over && c.phase.CompareAndSwap(phaseRunning, phasePaused) {
+		// STICKY until a restart. Capacity is released only by a new
+		// process's exact per-key and global recount, never by observing that
+		// a later pass measured less: this pass measured the whole store, but
+		// the per-identity ledger it would have to trust to resume was built
+		// against the state that overflowed. Resuming in-process would mean
+		// capturing again on ceilings nobody has re-established, which is the
+		// one thing a hard bound must not allow.
 		c.overCapacity.Store(true)
-		observationLog("Prediction observation capture paused: store is at a hard capacity bound", errObservationAtCapacity)
-		return
-	}
-	// Resuming is a swap out of PAUSED, so it can never reopen intake on a
-	// collector that has since been fenced.
-	if !over && c.overCapacity.Load() && c.phase.CompareAndSwap(phasePaused, phaseRunning) {
-		c.overCapacity.Store(false)
+		c.disabled.Store(true)
+		observationLog("Prediction observation capture disabled: store is at a hard capacity bound", errObservationAtCapacity)
 	}
 }
 
@@ -2779,7 +2791,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("analytics: observation store recount: %w", err)
 	}
-	if stats.Sessions >= MaxStoreSessions || stats.Rows >= MaxStoreRows || stats.Bytes >= MaxStoreBytes {
+	if stats.Sessions >= c.maxStoreSessions || stats.Rows >= c.maxStoreRows || stats.Bytes >= c.maxStoreBytes {
 		// Still at a hard cap after a full pruning pass: refuse to add more
 		// rather than growing past the bound.
 		return fmt.Errorf("%w (rows=%d bytes=%d sessions=%d)",
@@ -3103,7 +3115,23 @@ func (c *observationCollector) Close() {
 			<-c.joined
 		}
 
-		// 5. Finalize — after the join, so the accounting can no longer move.
+		// 5. Anything still queued after the join was admitted by a producer
+		//    that read an open phase microseconds before the fence went up.
+		//    It reserved a causal position and will never be written, so it
+		//    is a drop — and counting it is what keeps committed + dropped
+		//    equal to the positions the session handed out. Left uncounted it
+		//    was a silent hole that the session could still call COMPLETE.
+		for {
+			select {
+			case <-c.queue:
+				c.dropped.Add(1)
+				continue
+			default:
+			}
+			break
+		}
+
+		// 6. Finalize — after the join, so the accounting can no longer move.
 		defer c.phase.Store(phaseClosed)
 		if c.epoch.Load() == 0 {
 			return // bootstrap never allocated a session: nothing to finalize
