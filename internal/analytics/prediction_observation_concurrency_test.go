@@ -1207,3 +1207,83 @@ func TestABusinessWriterPreemptsTheCollectorsOwnMaintenance(t *testing.T) {
 		t.Fatalf("the preempted maintenance transaction returned %v", err)
 	}
 }
+
+// TestAProducerDescheduledAcrossAReAddCannotResurrectTheErasedLife is the
+// regression for a defect an independent acceptance review found in the
+// erasure boundary, and it is the one interleaving the boundary's own
+// reasoning got wrong.
+//
+// A fact carries two values that say when it was captured: its causal position
+// and the capture generation. They were NOT taken together — offer read the
+// generation first and reserved the position second — so a producer could be
+// descheduled between them. Park it there across a whole erase-and-re-add and
+// it emerges with a generation loaded AFTER the erasure (so the generation
+// check passes), no live fence left to meet, and a position taken AFTER the
+// re-add raised the watermark (so the causal check passes too). Every check
+// agrees, and a fact of the ERASED life is written against the re-added
+// streamer's row.
+//
+// Reserving the position first closes it, because every watermark is a value
+// of that same counter: a position taken before an erasure can never be above
+// the boundary that erasure leaves.
+//
+// afterReserve occupies exactly that gap, so the race is a fixture rather than
+// a hope.
+func TestAProducerDescheduledAcrossAReAddCannotResurrectTheErasedLife(t *testing.T) {
+	svc, repo := newObservationService(t)
+	ctx := context.Background()
+	c := svc.observations
+
+	// The erasure has already happened when the producer reaches offer: the
+	// generation is bumped, the fence armed, the rows purged. A producer
+	// loading the generation now loads the POST-erasure one, so the
+	// generation check cannot be what refuses this fact.
+	c.invalidateGeneration()
+	c.fence("chan-doomed", "doomed")
+	repo.Tombstone("doomed")
+
+	// The re-add lands while the producer is inside offer, between taking its
+	// position and reading its generation.
+	var once sync.Once
+	c.afterReserve = func() {
+		once.Do(func() { repo.Reinstate("doomed") })
+	}
+	t.Cleanup(func() { c.afterReserve = nil })
+
+	c.offer(channelObservation("pool-1", "chan-doomed", "doomed", "old-life", "ROUND_CREATED"))
+
+	// Wait for the writer to REACH a verdict, whichever way it went, so the
+	// assertion below reports what actually happened to the fact rather than
+	// timing out waiting for the verdict this test wants.
+	deadline := time.Now().Add(5 * time.Second)
+	for c.committed.Load()+c.dropped.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the writer never reached a verdict on the offered fact")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	stored, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range stored {
+		if rec.EventID == "old-life" {
+			t.Fatalf("a fact of the erased life was written against the re-added streamer: %+v. "+
+				"The producer was descheduled across the re-add, so it carries the erasure's "+
+				"own generation and meets no live fence — only a position taken BEFORE the "+
+				"re-add raised the watermark can refuse it", rec)
+		}
+	}
+
+	if c.dropped.Load() != 1 {
+		t.Fatalf("the fact was not counted as a drop: committed=%d dropped=%d",
+			c.committed.Load(), c.dropped.Load())
+	}
+
+	// And the re-added streamer's own new life is still fully observable.
+	c.afterReserve = nil
+	svc.RecordPredictionObservation(
+		channelObservation("pool-1", "chan-doomed", "doomed", "new-life", "ROUND_CREATED"))
+	awaitCommitted(t, svc, 1)
+}

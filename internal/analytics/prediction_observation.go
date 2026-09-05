@@ -1451,8 +1451,8 @@ func (r *SQLiteRepository) FinalizeObservationSession(ctx context.Context, epoch
 	return applied, err
 }
 
-// ReconcileAbandonedObservationSessions finalizes every session row left OPEN
-// by a PREVIOUS process as INCOMPLETE, and reports how many it closed.
+// ReconcileAbandonedObservationSessions closes every session row left OPEN by
+// a PREVIOUS process as ABANDONED, and reports how many it closed.
 //
 // A session row is opened by a live collector and closed by that same
 // collector. An unclean shutdown leaves it OPEN forever: retention refuses to
@@ -1462,11 +1462,19 @@ func (r *SQLiteRepository) FinalizeObservationSession(ctx context.Context, epoch
 // the next bootstrap refuses to open a session at all and P1 is disabled for
 // the rest of every subsequent process.
 //
-// The counters are left EXACTLY as the dead process last wrote them. This
-// function knows nothing about what that process observed and does not
-// pretend to: it records only that the session ended without being closed,
-// which is what INCOMPLETE means. After that the existing factless-session
-// sweep can reclaim the row like any other.
+// The counters are left EXACTLY as they stand. A session's counters are
+// written ONCE, at finalization, so a process that died left the zeros it was
+// inserted with — they are not that process's accounting, they are the initial
+// values. This function knows nothing about what that process observed and
+// must not pretend either way: it neither presents those zeros as accounting
+// nor reconstructs a replacement from the facts that happen to have survived.
+//
+// That is why the state is ABANDONED and not INCOMPLETE. INCOMPLETE means the
+// collector finalized and reported a loss; this session never reported
+// anything at all, and a reader must be able to tell those apart — the facts
+// it left are a LOWER BOUND on what it observed, and nothing about loss
+// follows. After that the existing factless-session sweep can reclaim the row
+// like any other.
 //
 // closed_at_ms is set to the session's OWN started_at_ms, not to now. The
 // dead process left no later timestamp, and — load-bearing — the sweep ages a
@@ -2443,16 +2451,8 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 		out.Reading = ReadingUnfinalized
 		out.Detail = "collector session is still OPEN: it is either live or was left behind by an unclean shutdown"
 		return out
-	case s.CloseState == SessionAbandoned:
-		// The counters below are the initial zeros — this run died before it
-		// could write any accounting — so every check past this point would
-		// be reading unwritten values as a claim, and would condemn a session
-		// for holding the very facts it committed.
-		out.Reading = ReadingUnfinalized
-		out.Detail = "the process died without finalizing: its accounting was never written, so the " +
-			"facts present are a lower bound on what it observed and nothing about loss follows"
-		return out
-	case s.CloseState != SessionComplete && s.CloseState != SessionIncomplete:
+	case s.CloseState != SessionComplete && s.CloseState != SessionIncomplete &&
+		s.CloseState != SessionAbandoned:
 		return integrity("close_state is outside the closed set")
 	case !s.ClosedAtKnown:
 		return integrity("finalized session carries no close time")
@@ -2460,6 +2460,27 @@ func classifyObservationSession(s ObservationSessionRecord, facts observationSes
 		return integrity("negative session counter")
 	case facts.HalfPair > 0:
 		return integrity("facts exist that match only one half of this session's (epoch, session id) pair")
+	}
+
+	// The structural checks above hold for every closed state, because they
+	// are about the FACTS rather than the accounting. Two facts sharing one
+	// causal position is a corrupt dataset whoever wrote it.
+	if facts.Present > 0 && facts.DistinctSequences != facts.Present {
+		return integrity("two surviving facts share one causal position")
+	}
+
+	if s.CloseState == SessionAbandoned {
+		// Everything past here reads the counters, and for an abandoned run
+		// those are the initial zeros: written once at finalization, which
+		// never happened. Testing them would be reading unwritten values as a
+		// claim, and would condemn the session for holding the very facts it
+		// did commit. Unlike the OPEN case above this state is terminal, so
+		// the structural checks are made first rather than deferred to a
+		// finalization that will never come.
+		out.Reading = ReadingUnfinalized
+		out.Detail = "the process died without finalizing: its accounting was never written, so the " +
+			"facts present are a lower bound on what it observed and nothing about loss follows"
+		return out
 	}
 
 	// The counter form.
@@ -2895,6 +2916,11 @@ type observationCollector struct {
 	// not a count of anything, and like identityErasures it is not persisted —
 	// it exists to keep the session from being called whole.
 	intakeNeverOpened atomic.Bool
+	// afterReserve, when set, runs between reserving a causal position and
+	// reading the capture generation. It is nil in production and exists so a
+	// test can occupy that gap deterministically — it is the only window in
+	// which the two values a fact carries can disagree about time.
+	afterReserve func()
 
 	// identityErasures counts privacy erasures performed during this session.
 	// One is enough to make the session INCOMPLETE: after an erasure its facts
@@ -3473,7 +3499,7 @@ func (c *observationCollector) bootstrap(ctx context.Context) error {
 	// live session is OPEN for its whole life and nothing may prune it — so
 	// without this pass those rows accumulate until MaxStoreSessions refuses
 	// the bootstrap and P1 is disabled permanently, with no in-product
-	// remedy. Closing them here as INCOMPLETE, with their dead process's
+	// remedy. Closing them here as ABANDONED, with their dead process's
 	// counters untouched, makes them ordinary finalized sessions the existing
 	// sweep can reclaim in the very same pass.
 	if err := c.leased(ctx, observationBootstrapBudget, func(lease context.Context) error {
@@ -3760,7 +3786,6 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 		}
 		return
 	}
-	obs.generation = c.generation.Load()
 	// The causal position is RESERVED HERE, on the producer's call, before the
 	// fact is queued — not later by the writer.
 	//
@@ -3776,6 +3801,24 @@ func (c *observationCollector) offer(obs PredictionObservation) {
 	//
 	// The reservation costs one atomic add on a path that already does two.
 	obs.sequence = c.sequence.Add(1)
+	// The position is taken BEFORE the generation is read, and the order is
+	// load-bearing rather than incidental.
+	//
+	// An erasure's boundary is the watermark its identity carries, and every
+	// watermark is a value of this same counter. Taking the position first
+	// means no watermark raised afterwards can be BELOW it — so a producer
+	// descheduled anywhere after this line still holds a position the erasure
+	// that follows will cover.
+	//
+	// Read the other way round, a producer could load a post-erasure
+	// generation, be descheduled across the whole erase-and-re-add, and only
+	// then take a position ABOVE the watermark the re-add left. That fact
+	// carries the current generation, meets no live fence, and sits above the
+	// boundary: it is a fact of the erased life, and every check would pass it.
+	if c.afterReserve != nil {
+		c.afterReserve()
+	}
+	obs.generation = c.generation.Load()
 	select {
 	case c.queue <- obs:
 	default:

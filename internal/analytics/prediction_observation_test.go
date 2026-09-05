@@ -4388,7 +4388,7 @@ func TestACrashedRunStaysReadable(t *testing.T) {
 // so it holds "for EVERY caller of this store, not just the one producer that
 // exists today", and this rule was left to the producer alone.
 func TestTheStoreItselfRefusesAnUnreachableIdentifier(t *testing.T) {
-	_, repo := newObservationService(t)
+	svc, repo := newObservationService(t)
 	ctx := context.Background()
 
 	in := PredictionObservation{
@@ -4418,18 +4418,23 @@ func TestTheStoreItselfRefusesAnUnreachableIdentifier(t *testing.T) {
 
 	// The fact is still storable — the rule strips what cannot be reached, it
 	// does not refuse the whole fact — and a channel-scoped erasure of that
-	// channel is now vacuously satisfied because nothing names it.
-	if err := repo.AppendObservation(ctx, fact, "s-1", 1, 1); err == nil {
-		var n int
-		if err := repo.db.QueryRow(
-			`SELECT COUNT(*) FROM prediction_observations
-			  WHERE round_owner_channel_id = 'chan-secret' OR event_id LIKE '%chan-secret%'`).
-			Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Fatalf("%d stored rows still name the unreachable channel", n)
-		}
+	// channel is now vacuously satisfied because nothing names it. The live
+	// session and epoch are used deliberately: a fabricated pair would be
+	// refused as "session is not open" and every assertion below would be
+	// skipped without saying so.
+	if err := repo.AppendObservation(ctx, fact,
+		svc.observations.sessionID, svc.observations.epoch.Load(), 1); err != nil {
+		t.Fatalf("the stripped fact was not storable: %v", err)
+	}
+	var n int
+	if err := repo.db.QueryRow(
+		`SELECT COUNT(*) FROM prediction_observations
+		  WHERE round_owner_channel_id = 'chan-secret' OR event_id LIKE '%chan-secret%'`).
+		Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d stored rows still name the unreachable channel", n)
 	}
 
 	// And a fact that DOES carry an erasure door keeps its round owner, which
@@ -4719,48 +4724,58 @@ func TestAByteCeilingRefusesTheFactThatWouldCrossIt(t *testing.T) {
 // the erasure boundary, and it is what keeps that boundary from costing more
 // than it protects.
 //
-// Reinstate runs for EVERY streamer added, and lifting a fence refuses every
-// fact reserved before the lift. Drawn any wider than the identities actually
-// being lifted, one operator re-add would discard the in-flight facts of every
-// other streamer in the session — each one a drop, each one a permanent gap in
-// the causal sequence, and enough on its own to turn a session that observed
-// everything into an INCOMPLETE one for a reason having nothing to do with it.
+// Reinstate runs for EVERY streamer added, and lifting a fence draws a life
+// boundary that refuses everything reserved before it. Drawn any wider than
+// the identity actually being lifted, one operator re-add would discard the
+// in-flight facts of every other streamer in the session — each one a drop,
+// each one a permanent gap in the causal sequence, and enough on its own to
+// turn a session that observed everything into an INCOMPLETE one for a reason
+// having nothing to do with it.
 //
-// An independent acceptance review raised exactly this cost against a global
-// boundary. The per-identity watermark is what makes the refusal narrow.
+// The operation under test is the LIFT alone, so every erasure this fixture
+// needs happens first: an erasure legitimately invalidates the facts in flight
+// when it runs, and including one after the facts exist would prove nothing
+// about the lift. An independent acceptance review raised exactly this cost
+// against a global boundary; the per-identity watermark is what makes the
+// refusal narrow.
 func TestAReAddDrawsTheLifeBoundaryOnlyForTheIdentityItLifts(t *testing.T) {
 	svc, repo := newObservationService(t)
 	ctx := context.Background()
 	c := svc.observations
 
-	// "recycled" is erased and added back: an identity the store has a
-	// watermark for, and whose new life is being observed normally.
+	// "recycled" is erased and added back: an identity the store carries a
+	// watermark for, whose new life is being observed normally.
 	c.invalidateGeneration()
 	c.fence("chan-recycled", "recycled")
 	repo.Tombstone("recycled")
 	repo.Reinstate("recycled")
 
-	// Its new life reserves a fact, which is legitimately in flight.
+	// "someone-else" is erased and NOT yet added back — its fence is armed,
+	// and lifting it is the operation this test is about.
+	c.invalidateGeneration()
+	c.fence("chan-other", "someone-else")
+	repo.Tombstone("someone-else")
+
+	// Only NOW do the bystanders reserve their positions, so nothing before
+	// this point can be what refuses them.
 	recycled := mustSanitize(t, channelObservation("pool-1", "chan-recycled", "recycled", "new-life", "ROUND_CREATED"))
 	recycled.sequence = c.sequence.Add(1)
 	recycled.generation = c.generation.Load()
 
-	// A never-erased streamer also has one in flight.
 	untouched := mustSanitize(t, channelObservation("pool-1", "chan-b", "streamer-b", "live", "ROUND_CREATED"))
 	untouched.sequence = c.sequence.Add(1)
 	untouched.generation = c.generation.Load()
 
-	// A THIRD, unrelated streamer is added — the ordinary case, and the one
-	// that must cost the other two nothing.
+	// The lift.
 	repo.Reinstate("someone-else")
 
 	committed := c.committed.Load()
 	c.write(ctx, recycled)
 	c.write(ctx, untouched)
 	if got := c.committed.Load(); got != committed+2 {
-		t.Fatalf("%d of 2 in-flight facts survived an unrelated streamer's re-add: the life "+
-			"boundary is being drawn across identities it did not lift, so one operator "+
-			"action discards the session's unrelated work", got-committed)
+		t.Fatalf("%d of 2 in-flight facts survived a re-add that lifted a DIFFERENT identity's "+
+			"fence: the life boundary is being drawn across identities it did not lift, so "+
+			"one operator action discards the session's unrelated work", got-committed)
 	}
 
 	stored, err := repo.ObservationsBySession(ctx, c.sessionID, 0)
@@ -4774,5 +4789,57 @@ func TestAReAddDrawsTheLifeBoundaryOnlyForTheIdentityItLifts(t *testing.T) {
 	if !seen["new-life"] || !seen["live"] {
 		t.Fatalf("stored events = %v, want both the re-added streamer's new life and the "+
 			"untouched streamer's fact", seen)
+	}
+}
+
+// TestRunItselfRecordsThatIntakeNeverOpened closes a gap an independent
+// acceptance review found by mutation: the PRODUCTION call site that records
+// "this session never opened intake" could be deleted with the whole module
+// suite still green.
+//
+// The sibling test drives the phase transitions by hand and calls the recorder
+// itself, so it proves the accounting half — a session flagged this way
+// finalizes INCOMPLETE — and nothing about run() ever setting the flag. Delete
+// the one line in run() and the blocking defect returns in full: a session
+// during whose entire window capture was never on finalizes COMPLETE.
+//
+// So this drives run() itself, with the shutdown fence already up, which is
+// exactly the state a Close that beats a finishing bootstrap leaves behind.
+func TestRunItselfRecordsThatIntakeNeverOpened(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	t.Cleanup(func() { _ = db.Close() })
+	svc, err := NewService(db, filepath.Dir(path), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := svc.repo.(*SQLiteRepository)
+	c := svc.observations
+
+	// The shutdown fence is already up when the bootstrap finishes, so
+	// publishRunning's compare-and-swap will lose and intake never opens.
+	c.phase.Store(phaseClosing)
+	c.run(context.Background())
+
+	if c.epoch.Load() == 0 {
+		t.Fatal("the bootstrap allocated no session; this test would prove nothing")
+	}
+	if c.phase.Load() == phaseRunning {
+		t.Fatal("RUNNING was published over the shutdown fence")
+	}
+	if !c.accounting().IntakeNeverOpened {
+		t.Fatal("run() returned without recording that intake never opened, so the session it " +
+			"allocated will be finalized from an all-zero accounting and called COMPLETE — a " +
+			"claim that nothing happened during a window in which capture was never on")
+	}
+
+	// Finalize through the production path and read it back.
+	c.Close()
+	reading, found, err := repo.ReadObservationSession(context.Background(), c.epoch.Load())
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if reading.Session.CloseState != SessionIncomplete {
+		t.Fatalf("close state = %q, want %q", reading.Session.CloseState, SessionIncomplete)
 	}
 }
