@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,19 +200,41 @@ func TestObservationsAreInsertOnlyAndOrdered(t *testing.T) {
 
 func assertNoFactMutations(t *testing.T) {
 	t.Helper()
-	for _, file := range []string{"prediction_observation.go", "repository.go", "service.go"} {
-		src := readPackageFile(t, file)
-		lower := strings.ToLower(src)
+	// Scanned over EVERY file in the package, and with whitespace collapsed
+	// first. A fixed list of three files could not see a mutation added in a
+	// fourth, and a literal substring could not see one written as
+	// "UPDATE\n\tprediction_observations" or "ON CONFLICT (observation_id)" —
+	// both of which SQLite accepts and both of which the old form missed.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) < 3 {
+		t.Fatalf("found %d package files; the scan has stopped covering the package", len(files))
+	}
+	collapse := regexp.MustCompile(`\s+`)
+	scanned := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		scanned++
+		flat := collapse.ReplaceAllString(strings.ToLower(readPackageFile(t, file)), " ")
 		for _, forbidden := range []string{
 			"update prediction_observations",
 			"replace into prediction_observations",
 			"insert or replace into prediction_observations",
+			"on conflict (observation_id)",
 			"on conflict(observation_id)",
+			"delete from prediction_observations where observation_id",
 		} {
-			if strings.Contains(lower, forbidden) {
+			if strings.Contains(flat, forbidden) {
 				t.Fatalf("%s mutates persisted observation facts (%q): the trail must be INSERT-only", file, forbidden)
 			}
 		}
+	}
+	if scanned == 0 {
+		t.Fatal("no package files were scanned; this assertion is vacuous")
 	}
 }
 
@@ -1020,7 +1043,7 @@ func TestErasureMatchesAnIdentityExactlyNotByPrefix(t *testing.T) {
 
 	var removed int64
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		n, e := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: selector})
+		n, e := repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: selector})
 		removed = n
 		return e
 	}); err != nil {
@@ -1038,7 +1061,7 @@ func TestErasureMatchesAnIdentityExactlyNotByPrefix(t *testing.T) {
 	// And the exact selector does reach it, so the test is not passing merely
 	// because nothing is ever erased.
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		n, e := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: stored})
+		n, e := repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: stored})
 		removed = n
 		return e
 	}); err != nil {
@@ -1570,7 +1593,7 @@ func TestObservationEraseByIdentity(t *testing.T) {
 	var removed int64
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var e error
-		removed, e = repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-victim", Login: "victim"})
+		removed, e = repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-victim", Login: "victim"})
 		return e
 	}); err != nil {
 		t.Fatal(err)
@@ -1609,7 +1632,7 @@ func TestObservationEraseByProvedParentFallback(t *testing.T) {
 	var removed int64
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var e error
-		removed, e = repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{Login: "proved"})
+		removed, e = repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{Login: "proved"})
 		return e
 	}); err != nil {
 		t.Fatal(err)
@@ -1624,7 +1647,7 @@ func TestObservationEraseByProvedParentFallback(t *testing.T) {
 	awaitCommitted(t, svc, 2)
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
 		var e error
-		removed, e = repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{Login: "unproved"})
+		removed, e = repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{Login: "unproved"})
 		return e
 	}); err != nil {
 		t.Fatal(err)
@@ -2092,7 +2115,7 @@ func TestObservationRemoveReAddDoesNotInheritFacts(t *testing.T) {
 
 	// Erase the identity exactly as the lifecycle purge does.
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		if _, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
+		if _, err := repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
 			return err
 		}
 		_, err := repo.DeleteStreamerTx(tx, "recycled")
@@ -2144,7 +2167,7 @@ func TestObservationErasureIsFencedAgainstQueuedFacts(t *testing.T) {
 	// the lifecycle coordinator does via InvalidateIdentity.
 	repo.InvalidateIdentity("chan-erased", "erased")
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		_, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-erased", Login: "erased"})
+		_, err := repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-erased", Login: "erased"})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -2186,7 +2209,7 @@ func TestObservationFenceRefusesPostErasureProduction(t *testing.T) {
 	// Erase exactly as the lifecycle coordinator does.
 	repo.InvalidateIdentity("chan-gone", "gone")
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		_, err := repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-gone", Login: "gone"})
+		_, err := repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-gone", Login: "gone"})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -3056,7 +3079,7 @@ func TestAFactCapturedBeforeAnErasureCannotSurviveTheReinstate(t *testing.T) {
 
 	// Meanwhile: the streamer is removed, erased, and added again.
 	if err := repo.db.WithTx(ctx, func(tx *sql.Tx) error {
-		if _, err := repo.EraseObservationsForIdentityTx(tx,
+		if _, err := repo.EraseObservationsForIdentityTx(context.Background(), tx,
 			ObservationIdentity{ChannelID: "chan-recycled", Login: "recycled"}); err != nil {
 			return err
 		}

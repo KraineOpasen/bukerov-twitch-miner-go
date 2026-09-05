@@ -2565,15 +2565,12 @@ type ObservationIdentity struct {
 // It acquires no repository mutex, waits on no worker and touches no gate:
 // running any of those inside a caller-owned *sql.Tx would invert the lock
 // order the business paths rely on.
-func (r *SQLiteRepository) EraseObservationsForIdentityTx(tx *sql.Tx, id ObservationIdentity) (int64, error) {
-	return r.eraseObservationsForIdentityTx(context.Background(), tx, id)
-}
-
-// EraseObservationsForIdentityCtxTx is EraseObservationsForIdentityTx with the
-// caller's context, so the lookup it performs is cancelled with the
-// transaction that owns it rather than running under a detached background
-// context.
-func (r *SQLiteRepository) EraseObservationsForIdentityCtxTx(ctx context.Context, tx *sql.Tx, id ObservationIdentity) (int64, error) {
+// It takes the CALLER's context, so its statements are cancelled with the
+// transaction that owns them. A detached background context here would mean
+// the four purge statements — the largest bounded work this store performs
+// inside someone else's transaction — kept running after the caller had given
+// up on them, on the one connection everything shares.
+func (r *SQLiteRepository) EraseObservationsForIdentityTx(ctx context.Context, tx *sql.Tx, id ObservationIdentity) (int64, error) {
 	return r.eraseObservationsForIdentityTx(ctx, tx, id)
 }
 
@@ -2606,7 +2603,7 @@ func (r *SQLiteRepository) eraseObservationsForIdentityTx(ctx context.Context, t
 	// and blows the bounded-purge budget on a large identity.
 	var removed int64
 	exec := func(what, query string, args ...interface{}) error {
-		res, err := tx.Exec(query, args...)
+		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("%s: %w", what, err)
 		}
@@ -2678,8 +2675,8 @@ func (r *SQLiteRepository) eraseObservationsForIdentityTx(ctx context.Context, t
 // deleting it first would silently narrow the erasure to the channel selector
 // alone. Returns true when the identity held persisted analytics state of
 // either kind.
-func (r *SQLiteRepository) DeleteStreamerIdentityTx(tx *sql.Tx, channelID, login string) (bool, error) {
-	erased, err := r.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: channelID, Login: login})
+func (r *SQLiteRepository) DeleteStreamerIdentityTx(ctx context.Context, tx *sql.Tx, channelID, login string) (bool, error) {
+	erased, err := r.EraseObservationsForIdentityTx(ctx, tx, ObservationIdentity{ChannelID: channelID, Login: login})
 	if err != nil {
 		return false, err
 	}

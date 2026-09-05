@@ -86,9 +86,12 @@ type Fencer interface {
 // Neither half is ever guessed. An empty channel id means the ledger genuinely
 // recorded none, and the store must fall back to what it can PROVE from the
 // login, or erase nothing.
+//
+// It takes the coordinator's context so its erasure is cancelled with the
+// transaction it runs inside, rather than under a detached one.
 type IdentityPurger interface {
 	Purger
-	DeleteStreamerIdentityTx(tx *sql.Tx, channelID, login string) (bool, error)
+	DeleteStreamerIdentityTx(ctx context.Context, tx *sql.Tx, channelID, login string) (bool, error)
 }
 
 // IdentityFencer is the OPTIONAL extension of Fencer for a store that holds
@@ -590,7 +593,7 @@ func (c *Coordinator) purgeAndClearTx(ctx context.Context, channelID, login stri
 			// the LEDGER-PROVEN pair; every other store keeps the login-only
 			// contract it has always had.
 			if idp, ok := p.(IdentityPurger); ok {
-				e, perr = idp.DeleteStreamerIdentityTx(tx, channelID, login)
+				e, perr = idp.DeleteStreamerIdentityTx(ctx, tx, channelID, login)
 			} else {
 				e, perr = p.DeleteStreamerTx(tx, login)
 			}

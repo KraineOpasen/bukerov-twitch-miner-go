@@ -522,7 +522,7 @@ func (r *SQLiteRepository) DeleteStreamer(ctx context.Context, login string) (bo
 		// caller that knows the channel gets a complete erasure through
 		// DeleteStreamerIdentityTx.
 		var e error
-		existed, e = r.DeleteStreamerIdentityTx(tx, "", login)
+		existed, e = r.DeleteStreamerIdentityTx(ctx, tx, "", login)
 		return e
 	})
 	return existed, err

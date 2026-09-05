@@ -78,6 +78,46 @@ func tableDDL(t *testing.T, db *database.DB, table string) string {
 	return ddl
 }
 
+// TestMigrationV6OnAFreshDatabase pins the FRESH path, which every other test
+// in this file exercises and none of them asserts. The version is only ever
+// checked after a populated upgrade or a reopen, so a v6 that ran its body but
+// left the module head behind — or one numbered wrongly on a new database —
+// would be invisible here: the constraint subtests would still pass, because
+// the tables exist either way.
+func TestMigrationV6OnAFreshDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miner.db")
+	db := openPrivateDB(t, path)
+	defer func() { _ = db.Close() }()
+
+	repo, err := NewSQLiteRepository(db, filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := moduleVersion(t, db); v != currentAnalyticsVersion() {
+		t.Fatalf("a fresh database is at analytics v%d, want the module head v%d",
+			v, currentAnalyticsVersion())
+	}
+	if v := moduleVersion(t, db); v != 6 {
+		t.Fatalf("the module head is v%d, want 6", v)
+	}
+	for _, table := range []string{"prediction_observations", "prediction_observation_sessions"} {
+		if !tableExists(t, db, table) {
+			t.Fatalf("%s missing on a fresh database", table)
+		}
+		if n := countRows(t, repo, `SELECT COUNT(*) FROM `+table); n != 0 {
+			t.Fatalf("%s has %d rows on a fresh database", table, n)
+		}
+	}
+
+	// And a second registration is a no-op, not a re-run.
+	if _, err := NewSQLiteRepository(db, filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	if v := moduleVersion(t, db); v != 6 {
+		t.Fatalf("a second open moved the module head to v%d", v)
+	}
+}
+
 // TestMigrationV6AdditiveOnPopulatedV5Database is the populated upgrade proof:
 // opening a real, populated v5 database with the current module applies
 // exactly the additive v6 migration. The two observation tables appear EMPTY
@@ -470,7 +510,7 @@ func TestMigrationV6PreV6BinaryReadsAndWrites(t *testing.T) {
 	var removed int64
 	if err := cur.WithTx(context.Background(), func(tx *sql.Tx) error {
 		var e error
-		removed, e = repo2.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-roll", Login: "rollback6"})
+		removed, e = repo2.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-roll", Login: "rollback6"})
 		return e
 	}); err != nil {
 		t.Fatal(err)

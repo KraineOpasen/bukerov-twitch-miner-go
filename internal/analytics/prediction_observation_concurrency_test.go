@@ -523,7 +523,7 @@ func TestObservationIdentityPurgePilot(t *testing.T) {
 	start := time.Now()
 	if err := db.WithTx(ctx, func(tx *sql.Tx) error {
 		var e error
-		removed, e = repo.EraseObservationsForIdentityTx(tx, ObservationIdentity{ChannelID: "chan-victim", Login: "victim"})
+		removed, e = repo.EraseObservationsForIdentityTx(context.Background(), tx, ObservationIdentity{ChannelID: "chan-victim", Login: "victim"})
 		return e
 	}); err != nil {
 		t.Fatalf("pilot purge: %v", err)

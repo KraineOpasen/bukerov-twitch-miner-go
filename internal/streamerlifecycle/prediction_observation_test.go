@@ -31,7 +31,7 @@ func (r *recordingPurger) DeleteStreamerTx(tx *sql.Tx, login string) (bool, erro
 	return false, nil
 }
 
-func (r *recordingPurger) DeleteStreamerIdentityTx(tx *sql.Tx, channelID, login string) (bool, error) {
+func (r *recordingPurger) DeleteStreamerIdentityTx(_ context.Context, tx *sql.Tx, channelID, login string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.identity = append(r.identity, [2]string{channelID, login})
@@ -215,7 +215,7 @@ type purgeFunc func(tx *sql.Tx, channelID, login string) (bool, error)
 func (f purgeFunc) DeleteStreamerTx(tx *sql.Tx, login string) (bool, error) {
 	return f(tx, "", login)
 }
-func (f purgeFunc) DeleteStreamerIdentityTx(tx *sql.Tx, channelID, login string) (bool, error) {
+func (f purgeFunc) DeleteStreamerIdentityTx(_ context.Context, tx *sql.Tx, channelID, login string) (bool, error) {
 	return f(tx, channelID, login)
 }
 

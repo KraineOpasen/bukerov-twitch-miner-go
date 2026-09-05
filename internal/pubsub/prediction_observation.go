@@ -29,6 +29,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -194,16 +195,23 @@ type PredictionObservationSink interface {
 // newPoolInstanceID mints the identity of one pool instance. Random and
 // non-identifying: it distinguishes this pool's facts from another
 // generation's, and carries no information about the account or its channels.
+// The id must be UNIQUE across every pool a database ever sees, not merely
+// hard to guess: a round incarnation embeds it, and the whole-round erasure
+// selects on the (pool, incarnation) pair. Two pools sharing an id would let
+// one channel's erasure reach another channel's identically-numbered round.
+// So the fallback is a process-local counter rather than a fixed string —
+// degraded provenance, never a collision.
 func newPoolInstanceID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// A pool instance id is required for every fact, so fall back to a
-		// fixed, obviously-degraded value rather than emitting facts with no
-		// provenance at all.
-		return "pool-unknown"
+		return "pool-degraded-" + strconv.FormatUint(degradedPoolIDs.Add(1), 10)
 	}
 	return "pool-" + hex.EncodeToString(b[:])
 }
+
+// degradedPoolIDs numbers the pools minted after a randomness failure, so even
+// that path cannot produce two pools with one identity.
+var degradedPoolIDs atomic.Uint64
 
 // newRoundIncarnation mints the identity of ONE local round admission: this
 // pool instance plus a pool-local admission counter. It is called exactly where
