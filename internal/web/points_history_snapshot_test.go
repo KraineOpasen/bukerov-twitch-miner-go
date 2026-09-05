@@ -190,7 +190,7 @@ func coherence(got analytics.PointsHistory) (exactSamples, markers, exactEvents 
 			markers++
 		}
 	}
-	exactEvents = shareByReason(got.Breakdown, "WATCH_STREAK").Count
+	exactEvents = shareByReason(got.ExactBreakdown, "WATCH_STREAK").Count
 	return
 }
 

@@ -516,14 +516,26 @@
         return 'none';
     }
 
-    // Accrued points and earn events: the sum of the server's primary
-    // breakdown, which is EITHER the exact event aggregation OR the legacy
-    // estimate — never both. An estimate is marked with "≈" and a qualifier
-    // on the tile label; with nothing usable the tiles are dashed rather
-    // than shown as a fabricated zero.
+    // The shares behind that accounting: the authoritative exact ledger
+    // aggregation (exactBreakdown) for an exact or mixed window, the
+    // explicit estimate (legacyBreakdown) for a legacy-only window. The
+    // compatibility `breakdown` — the first release's whole-timeline
+    // attribution, kept for older consumers — is never read here: it is
+    // not accounting, and the two accountings are never summed.
+    function accountingShares(data, mode) {
+        if (mode === 'exact') return data.exactBreakdown || [];
+        if (mode === 'estimate') return data.legacyBreakdown || [];
+        return [];
+    }
+
+    // Accrued points and earn events: the sum of the accounting shares,
+    // which are EITHER the exact event aggregation OR the legacy estimate —
+    // never both. An estimate is marked with "≈" and a qualifier on the tile
+    // label; with nothing usable the tiles are dashed rather than shown as a
+    // fabricated zero.
     function renderEarningsKPIs(data) {
         const mode = primaryAccounting(data);
-        const shares = data.breakdown || [];
+        const shares = accountingShares(data, mode);
         // An estimate with nothing attributable is dashed like "none": a
         // measured-looking "≈ +0" would claim a zero the data cannot support
         // (the note names the state instead).
@@ -561,7 +573,7 @@
             case 'legacy':
                 // Legacy history whose balance changes attributed nothing is
                 // said so, never shown as an estimate of zero.
-                note = (data.breakdown || []).length ? t('js.stat.earnings.legacy') : t('js.stat.earnings.legacy_none');
+                note = (data.legacyBreakdown || []).length ? t('js.stat.earnings.legacy') : t('js.stat.earnings.legacy_none');
                 break;
             case 'mixed': {
                 const since = e.exactSince ? new Date(e.exactSince).toLocaleString() : '—';
@@ -609,16 +621,16 @@
         wrap.classList.toggle('hidden', !note);
     }
 
-    // Earnings-breakdown donut + colour-coded legend over the server's
-    // primary breakdown: the exact event aggregation when the period holds
-    // exact events (independent of the raw-series row cap, so truncation
-    // never hides it), otherwise the legacy estimate, titled as an estimate.
-    // Hidden when neither is usable; mere chart downsampling never hides it.
+    // Earnings-breakdown donut + colour-coded legend over the accounting
+    // shares: the exact event aggregation when the period holds exact events
+    // (independent of the raw-series row cap, so truncation never hides it),
+    // otherwise the legacy estimate, titled as an estimate. Hidden when
+    // neither is usable; mere chart downsampling never hides it.
     function renderBreakdown(data) {
         const P = palette();
         const R = reasonPalette(P);
         const mode = primaryAccounting(data);
-        const slices = mode === 'none' ? [] : breakdownSlices(data.breakdown, R);
+        const slices = mode === 'none' ? [] : breakdownSlices(accountingShares(data, mode), R);
         // Every figure of an estimated donut — centre total, slice values,
         // tooltip, legend and the accessible name — carries the "≈" /
         // estimate marker, so no number reads as exact accounting.

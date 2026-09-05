@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +153,22 @@ func TestPointsHistoryBreakdown(t *testing.T) {
 	if got.RawTruncated || got.ChartDownsampled {
 		t.Errorf("flags = rawTruncated:%v chartDownsampled:%v, want false/false", got.RawTruncated, got.ChartDownsampled)
 	}
+	// breakdown above is the first release's compatibility attribution. This
+	// legacy-only timeline holds no exact event, so the authoritative
+	// exactBreakdown is absent and the explicit estimate is reported as
+	// legacyBreakdown; on this timeline the two attributions coincide (the
+	// only spend carries a negative delta, which both ignore).
+	if got.ExactBreakdown != nil {
+		t.Errorf("exactBreakdown = %+v, want none without exact events", got.ExactBreakdown)
+	}
+	if len(got.LegacyBreakdown) != len(want) {
+		t.Fatalf("legacyBreakdown = %+v, want the estimate %+v", got.LegacyBreakdown, want)
+	}
+	for i := range want {
+		if got.LegacyBreakdown[i] != want[i] {
+			t.Errorf("legacyBreakdown[%d] = %+v, want %+v", i, got.LegacyBreakdown[i], want[i])
+		}
+	}
 }
 
 // TestPointsHistoryDefaultRange24h: an absent range parameter must resolve to
@@ -265,14 +282,55 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 	if strings.Contains(breakdownFn, "rawTruncated") {
 		t.Errorf("renderBreakdown must not consult rawTruncated — the exact donut survives a truncated series:\n%s", breakdownFn)
 	}
-	// The donut never folds the separate legacy estimate into the primary
-	// breakdown, and an estimated donut marks every figure it prints.
-	if strings.Contains(breakdownFn, "legacyBreakdown") {
-		t.Errorf("renderBreakdown must not touch legacyBreakdown — exact and estimated figures are never summed:\n%s", breakdownFn)
+	// The donut takes exactly one list from accountingShares — the exact
+	// ledger aggregation or the estimate, never a sum of the two and never
+	// the compatibility breakdown — and an estimated donut marks every
+	// figure it prints.
+	if strings.Contains(breakdownFn, "legacyBreakdown") || strings.Contains(breakdownFn, "exactBreakdown") || strings.Contains(breakdownFn, "data.breakdown") {
+		t.Errorf("renderBreakdown must read its shares only through accountingShares:\n%s", breakdownFn)
 	}
-	for _, want := range []string{"primaryAccounting(data)", "≈", "js.stat.estimate", "aria-label"} {
+	for _, want := range []string{"primaryAccounting(data)", "accountingShares(data, mode)", "≈", "js.stat.estimate", "aria-label"} {
 		if !strings.Contains(breakdownFn, want) {
 			t.Errorf("renderBreakdown lost its estimate-marking marker %q", want)
+		}
+	}
+	// Owner decision A+: the dashboard's accounting truth is exactBreakdown
+	// when exact data exists and legacyBreakdown only as explicitly
+	// estimated data; the compatibility `breakdown` (the first release's
+	// whole-timeline attribution, kept for older consumers) is never
+	// consumed anywhere on the page.
+	sharesFn := jsFunctionBody(t, body, "function accountingShares(data, mode)", "function renderEarningsKPIs")
+	exactAt, estimateAt := strings.Index(sharesFn, "mode === 'exact'"), strings.Index(sharesFn, "mode === 'estimate'")
+	exactListAt, estimateListAt := strings.Index(sharesFn, "data.exactBreakdown"), strings.Index(sharesFn, "data.legacyBreakdown")
+	// Each mode's test precedes the list it selects, and the exact branch
+	// comes first: exact → exactBreakdown, estimate → legacyBreakdown.
+	ordered := exactAt >= 0 && exactListAt > exactAt && estimateAt > exactListAt && estimateListAt > estimateAt
+	if !ordered {
+		t.Errorf("accountingShares must map the exact mode to data.exactBreakdown and the estimate mode to data.legacyBreakdown:\n%s", sharesFn)
+	}
+	if strings.Contains(sharesFn, "data.breakdown") {
+		t.Errorf("accountingShares must never fall back to the compatibility breakdown:\n%s", sharesFn)
+	}
+	// Nowhere on the page — comments aside — is the compatibility field
+	// read, however the read is spelled (member, optional-chaining, bracket
+	// or destructuring access) and whichever of the page's two response
+	// variables (data, lastData) it goes through: it is not accounting.
+	// Without a JS runtime in the suite this source scan is the ceiling; a
+	// read through a further alias (`const d = data; d.breakdown`) is
+	// beyond it.
+	compatReads := []*regexp.Regexp{
+		regexp.MustCompile(`\b(data|lastData)\??\.breakdown\b`),
+		regexp.MustCompile(`\b(data|lastData)(\?\.)?\[\s*['"\x60]breakdown['"\x60]\s*\]`),
+		regexp.MustCompile(`\{[^}]*\bbreakdown\b[^}]*\}\s*=\s*(data|lastData)\b`),
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		for _, read := range compatReads {
+			if read.MatchString(line) {
+				t.Errorf("the Statistics page must not consume the compatibility breakdown anywhere: %q", strings.TrimSpace(line))
+			}
 		}
 	}
 	noteFn := jsFunctionBody(t, body, "function renderEarningsNote(data)", "function renderBreakdown")
@@ -304,8 +362,8 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 		t.Errorf("the nothing-attributable branches must break before the legacy line is computed:\n%s", noteFn)
 	}
 	legacyCase := noteFn[legacyCaseAt:mixedCaseAt]
-	if !strings.Contains(legacyCase, "js.stat.earnings.legacy_none") || !strings.Contains(legacyCase, ".length") {
-		t.Errorf("a legacy-only window with nothing attributable must use the legacy_none wording:\n%s", legacyCase)
+	if !strings.Contains(legacyCase, "js.stat.earnings.legacy_none") || !strings.Contains(legacyCase, "(data.legacyBreakdown || []).length") {
+		t.Errorf("a legacy-only window with nothing attributable must use the legacy_none wording, judged on the explicit estimate:\n%s", legacyCase)
 	}
 
 	// (2) chartDownsampled must never influence KPI visibility.
@@ -322,14 +380,17 @@ func TestStatisticsKPIsDashOnRawTruncation(t *testing.T) {
 			t.Errorf("renderKPIs lost its balance computation marker %q", want)
 		}
 	}
-	for _, want := range []string{"primaryAccounting(data)", "share.gained", "share.count", "kpi-earned", "kpi-events", "≈", "js.stat.estimate", "'—'", "shares.length > 0"} {
+	for _, want := range []string{"primaryAccounting(data)", "accountingShares(data, mode)", "share.gained", "share.count", "kpi-earned", "kpi-events", "≈", "js.stat.estimate", "'—'", "shares.length > 0"} {
 		if !strings.Contains(earnFn, want) {
 			t.Errorf("renderEarningsKPIs lost its computation marker %q", want)
 		}
 	}
+	if strings.Contains(earnFn, "data.breakdown") || strings.Contains(earnFn, "exactBreakdown") {
+		t.Errorf("renderEarningsKPIs must read its shares only through accountingShares:\n%s", earnFn)
+	}
 	// The primary accounting is chosen from the server's flags, never by
 	// summing the exact and legacy breakdowns.
-	accountingFn := jsFunctionBody(t, body, "function primaryAccounting(data)", "function renderEarningsKPIs")
+	accountingFn := jsFunctionBody(t, body, "function primaryAccounting(data)", "function accountingShares")
 	for _, want := range []string{"e.exact", "e.legacyStatus === 'estimated'"} {
 		if !strings.Contains(accountingFn, want) {
 			t.Errorf("primaryAccounting lost its marker %q", want)
@@ -504,7 +565,7 @@ func TestStatisticsPageRenders(t *testing.T) {
 	// server's accounting metadata and the separate legacy breakdown.
 	for _, want := range []string{
 		"stat-earnings-note", "stat-earnings-legacy", "kpi-earned-qualifier", "kpi-events-qualifier", "stat-breakdown-qualifier",
-		"data.earnings", "legacyBreakdown", "exactSince", "js.stat.earnings.mixed", "js.stat.earnings.legacy_unavailable",
+		"data.earnings", "exactBreakdown", "legacyBreakdown", "accountingShares", "exactSince", "js.stat.earnings.mixed", "js.stat.earnings.legacy_unavailable",
 	} {
 		if !contains(body, want) {
 			t.Errorf("statistics page missing earnings-accounting wiring %q", want)

@@ -347,9 +347,12 @@ func TestPointsEarnedMalformedAmountIsNeverAnExactEarning(t *testing.T) {
 			if got.Earnings.Exact || got.Earnings.Coverage != analytics.EarningsCoverageLegacy || got.Earnings.LegacyStatus != analytics.LegacyStatusEstimated {
 				t.Fatalf("earnings = %+v, want a legacy-only estimate, never exact", got.Earnings)
 			}
-			est := shareByReason(got.Breakdown, "WATCH_STREAK")
+			est := shareByReason(got.LegacyBreakdown, "WATCH_STREAK")
 			if est.Gained != 450 || est.Count != 1 {
-				t.Fatalf("legacy estimate = %+v, want the +450 balance delta reported as an estimate (not dropped, not zero)", got.Breakdown)
+				t.Fatalf("legacy estimate = %+v, want the +450 balance delta reported as an estimate (not dropped, not zero)", got.LegacyBreakdown)
+			}
+			if got.ExactBreakdown != nil {
+				t.Fatalf("exactBreakdown = %+v, want none: a malformed amount never becomes exact accounting", got.ExactBreakdown)
 			}
 		})
 	}
@@ -420,7 +423,7 @@ func TestPointsEarnedMalformedBalanceKeepsExactAmountAndUnknownBalance(t *testin
 			if !got.Earnings.Exact || got.Earnings.Coverage != analytics.EarningsCoverageExact || len(got.LegacyBreakdown) != 0 {
 				t.Fatalf("earnings = %+v legacy=%+v, want fully exact coverage untouched by the mutated balance", got.Earnings, got.LegacyBreakdown)
 			}
-			if claim := shareByReason(got.Breakdown, "CLAIM"); claim.Gained != 50 || claim.Count != 1 {
+			if claim := shareByReason(got.ExactBreakdown, "CLAIM"); claim.Gained != 50 || claim.Count != 1 {
 				t.Fatalf("CLAIM = %+v, want the wire amount 50", claim)
 			}
 		})
@@ -583,8 +586,8 @@ func TestPointsEarnedReasonCoverageUsesEventLocalAmounts(t *testing.T) {
 		{Reason: "WATCH", Gained: 24, Count: 2},
 		{Reason: "OTHER", Gained: 7, Count: 1},
 	}
-	if !reflect.DeepEqual(got.Breakdown, want) {
-		t.Fatalf("exact breakdown = %+v, want %+v", got.Breakdown, want)
+	if !reflect.DeepEqual(got.ExactBreakdown, want) {
+		t.Fatalf("exactBreakdown = %+v, want %+v", got.ExactBreakdown, want)
 	}
 	if got.LegacyBreakdown != nil {
 		t.Fatalf("legacy breakdown = %+v, want none for a fully exact range", got.LegacyBreakdown)
@@ -613,8 +616,11 @@ func TestPointsSpentIsNeverAnEarning(t *testing.T) {
 	if got.Earnings.Coverage != analytics.EarningsCoverageExact || !got.Earnings.Exact {
 		t.Fatalf("earnings = %+v, want exact coverage (spent snapshots are not legacy earnings)", got.Earnings)
 	}
-	if len(got.Breakdown) != 1 || got.Breakdown[0].Reason != "WATCH" || got.Breakdown[0].Gained != 24 || got.Breakdown[0].Count != 2 {
-		t.Fatalf("breakdown = %+v, want only WATCH 24 over 2 (no spend ever counted as earned)", got.Breakdown)
+	if len(got.ExactBreakdown) != 1 || got.ExactBreakdown[0].Reason != "WATCH" || got.ExactBreakdown[0].Gained != 24 || got.ExactBreakdown[0].Count != 2 {
+		t.Fatalf("exactBreakdown = %+v, want only WATCH 24 over 2 (no spend ever counted as earned)", got.ExactBreakdown)
+	}
+	if got.LegacyBreakdown != nil {
+		t.Fatalf("legacyBreakdown = %+v, want none: a spent snapshot is never an estimated earning either", got.LegacyBreakdown)
 	}
 	if len(got.Points) != 4 || got.Points[1].Exact || got.Points[2].Exact || got.Points[1].Reason != "Spent" {
 		t.Fatalf("timeline = %+v, want four samples with the two spent snapshots kept for charting, not exact", got.Points)
@@ -643,10 +649,10 @@ func TestMutableStreamerBalanceCannotChangeRecordedEarnings(t *testing.T) {
 	s.SetChannelPoints(1)
 
 	got := pointsHistoryViaAPI(t, m, svc, login, "7d")
-	if streak := shareByReason(got.Breakdown, "WATCH_STREAK"); streak.Gained != 450 || streak.Count != 1 {
+	if streak := shareByReason(got.ExactBreakdown, "WATCH_STREAK"); streak.Gained != 450 || streak.Count != 1 {
 		t.Fatalf("WATCH_STREAK = %+v, want the captured 450", streak)
 	}
-	if w := shareByReason(got.Breakdown, "WATCH"); w.Gained != 12 || w.Count != 1 {
+	if w := shareByReason(got.ExactBreakdown, "WATCH"); w.Gained != 12 || w.Count != 1 {
 		t.Fatalf("WATCH = %+v, want the captured 12", w)
 	}
 	if len(got.Points) != 2 || got.Points[0].Balance != 11772 || got.Points[1].Balance != 11784 {
@@ -676,7 +682,7 @@ func TestMixedHistoryReportsExactAndLegacySeparately(t *testing.T) {
 	if got.Earnings.Coverage != analytics.EarningsCoverageMixed || !got.Earnings.Exact || got.Earnings.LegacyStatus != analytics.LegacyStatusEstimated {
 		t.Fatalf("earnings = %+v, want mixed coverage with an estimated legacy part", got.Earnings)
 	}
-	exactStreak := shareByReason(got.Breakdown, "WATCH_STREAK")
+	exactStreak := shareByReason(got.ExactBreakdown, "WATCH_STREAK")
 	if exactStreak.Gained != 900 || exactStreak.Count != 2 {
 		t.Fatalf("exact WATCH_STREAK = %+v, want 900 over 2 — never 1362 (900 + the 462 estimate)", exactStreak)
 	}
@@ -743,20 +749,26 @@ func TestStatisticsWatchStreakEarningsAreExactEventAmounts(t *testing.T) {
 
 	got := pointsHistoryViaAPI(t, m, svc, login, "7d")
 
-	streak := shareByReason(got.Breakdown, "WATCH_STREAK")
+	streak := shareByReason(got.ExactBreakdown, "WATCH_STREAK")
 	if streak.Gained != 1350 || streak.Count != 3 {
-		t.Fatalf("WATCH_STREAK earnings = gained %d over %d events, want exact 1350 over 3 (production showed 1374 = 462+450+462 balance deltas); breakdown=%+v",
-			streak.Gained, streak.Count, got.Breakdown)
+		t.Fatalf("WATCH_STREAK earnings = gained %d over %d events, want exact 1350 over 3 (production showed 1374 = 462+450+462 balance deltas); exactBreakdown=%+v",
+			streak.Gained, streak.Count, got.ExactBreakdown)
+	}
+	// The compatibility breakdown still reports the production figure the
+	// first release showed — 1374 over 3 — unchanged for its consumers and
+	// never presented as accounting.
+	if compat := shareByReason(got.Breakdown, "WATCH_STREAK"); compat.Gained != 1374 || compat.Count != 3 {
+		t.Fatalf("compatibility WATCH_STREAK = gained %d over %d, want the first release's 1374 over 3; breakdown=%+v", compat.Gained, compat.Count, got.Breakdown)
 	}
 
 	// Interleaving: the seven passive WATCH frames carried +12 each. A balance
 	// jump between frames (the pre-streak baselines above) or a stale-balance
 	// frame must never be absorbed into WATCH — or into any other reason.
-	watch := shareByReason(got.Breakdown, "WATCH")
+	watch := shareByReason(got.ExactBreakdown, "WATCH")
 	if watch.Gained != 84 || watch.Count != 7 {
-		t.Fatalf("WATCH earnings = gained %d over %d events, want exact 84 over 7; breakdown=%+v", watch.Gained, watch.Count, got.Breakdown)
+		t.Fatalf("WATCH earnings = gained %d over %d events, want exact 84 over 7; exactBreakdown=%+v", watch.Gained, watch.Count, got.ExactBreakdown)
 	}
-	for _, share := range got.Breakdown {
+	for _, share := range got.ExactBreakdown {
 		if share.Reason != "WATCH_STREAK" && share.Reason != "WATCH" {
 			t.Fatalf("unexpected earnings category %+v; only WATCH_STREAK and WATCH events were delivered", share)
 		}

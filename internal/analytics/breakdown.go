@@ -89,6 +89,62 @@ func sortedShares(gained map[string]*ReasonShare) []ReasonShare {
 	return out
 }
 
+// BreakdownFromSamples is the COMPATIBILITY attribution behind the public
+// `breakdown` field of /api/points-history and /api/points-history/export:
+// the algorithm the first Statistics release shipped (base commit
+// dc5566049f1de1909d66c0f190338d54af863402), kept byte-for-byte so a
+// consumer written against it keeps reading the same figure for the same
+// raw timeline. Each consecutive positive balance delta is attributed to
+// the LATER sample's canonical reason — whether or not an exact event backs
+// that sample and whatever its reason, spends included; non-positive deltas
+// are ignored and the first sample only establishes the baseline. The
+// result is sorted by Gained descending, ties by Reason ascending, and is
+// computed on the raw series before downsampling, exactly as before.
+//
+// It is NOT accounting: a delta between two mutable balance snapshots is
+// not the event-local amount Twitch granted (production showed three
+// 450-point streak grants as 462/450/462 deltas). The authoritative figures
+// are the exact ledger aggregation (PointsHistory.ExactBreakdown) and, for
+// history no event covers, the explicit estimate (EstimateLegacyBreakdown,
+// PointsHistory.LegacyBreakdown). Deprecated for accounting; retained
+// unchanged for compatibility and never redefined. The body deliberately
+// does not share the newer accumulate/sort helpers, and the reason table
+// it shares (canonicalPointReason) is pinned against a verbatim copy of the
+// base source in the tests, so neither can drift under this contract.
+func BreakdownFromSamples(samples []PointSample) []ReasonShare {
+	if len(samples) < 2 {
+		return nil
+	}
+
+	gained := make(map[string]*ReasonShare)
+	for i := 1; i < len(samples); i++ {
+		diff := samples[i].Balance - samples[i-1].Balance
+		if diff <= 0 {
+			continue
+		}
+		reason := canonicalPointReason(samples[i].Reason)
+		share, ok := gained[reason]
+		if !ok {
+			share = &ReasonShare{Reason: reason}
+			gained[reason] = share
+		}
+		share.Gained += diff
+		share.Count++
+	}
+
+	out := make([]ReasonShare, 0, len(gained))
+	for _, share := range gained {
+		out = append(out, *share)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Gained != out[j].Gained {
+			return out[i].Gained > out[j].Gained
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	return out
+}
+
 // EstimateLegacyBreakdown is the LEGACY ESTIMATOR: it attributes each positive
 // balance delta INTO a legacy earning sample to that sample's canonical reason.
 // It exists only so history recorded before the exact point-event ledger (or
@@ -135,23 +191,25 @@ func EstimateLegacyBreakdown(samples []PointSample) LegacyEstimate {
 }
 
 // ComposeEarnings decides what a points-history response reports as its
-// primary Breakdown, its separate LegacyBreakdown, and the EarningsAccounting
-// metadata that qualifies both. The rules are conservative: exact coverage is
-// claimed only when the range holds exact events and NO legacy earning sample
-// and the legacy side is fully known; the two accountings are never summed.
+// authoritative ExactBreakdown, its explicit LegacyBreakdown estimate, and
+// the EarningsAccounting metadata that qualifies both. The rules are
+// conservative: exact coverage is claimed only when the range holds exact
+// events and NO legacy earning sample and the legacy side is fully known;
+// the two accountings are never summed, and neither is the compatibility
+// `breakdown` (BreakdownFromSamples), which the handlers compute on the raw
+// series independently of this decision.
 //
 //   - exact events present, no legacy sample, series complete → "exact":
-//     Breakdown is the exact aggregation.
+//     ExactBreakdown is the ledger aggregation, no LegacyBreakdown.
 //   - exact events present, legacy samples present or series truncated →
-//     "mixed": Breakdown is the exact aggregation, LegacyBreakdown the
-//     estimate for the legacy part (absent when unavailable or when nothing
-//     could be attributed).
-//   - no exact event, legacy samples present → "legacy": Breakdown IS the
-//     estimate (Exact == false); LegacyBreakdown is not repeated, so no
-//     consumer can add the two and double-count.
+//     "mixed": ExactBreakdown is the ledger aggregation, LegacyBreakdown the
+//     estimate for the uncovered part (absent when unavailable or when
+//     nothing could be attributed).
+//   - no exact event, legacy samples present → "legacy": no ExactBreakdown;
+//     LegacyBreakdown is the estimate for the whole (uncovered) range.
 //   - no exact event, series truncated → "unavailable": nothing can be said.
 //   - nothing → "none".
-func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bool) (breakdown, legacyBreakdown []ReasonShare, acc EarningsAccounting) {
+func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bool) (exactBreakdown, legacyBreakdown []ReasonShare, acc EarningsAccounting) {
 	exactPresent := exact.Events > 0
 
 	switch {
@@ -177,15 +235,12 @@ func ComposeEarnings(exact ExactEarnings, legacy LegacyEstimate, rawTruncated bo
 		acc.Coverage = EarningsCoverageNone
 	}
 
-	switch {
-	case exactPresent:
-		breakdown = exact.Breakdown
+	if exactPresent {
+		exactBreakdown = exact.Breakdown
 		acc.ExactSince = exact.Since
-		if acc.LegacyStatus == LegacyStatusEstimated {
-			legacyBreakdown = legacy.Breakdown
-		}
-	case acc.LegacyStatus == LegacyStatusEstimated:
-		breakdown = legacy.Breakdown
 	}
-	return breakdown, legacyBreakdown, acc
+	if acc.LegacyStatus == LegacyStatusEstimated {
+		legacyBreakdown = legacy.Breakdown
+	}
+	return exactBreakdown, legacyBreakdown, acc
 }

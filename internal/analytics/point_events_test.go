@@ -479,9 +479,10 @@ func TestEstimateLegacyBreakdownSkipsExactAndSpent(t *testing.T) {
 // TestComposeEarningsCoverageMatrix pins the coverage contract: exact is
 // claimed only for a range with exact events, no legacy earning sample and a
 // complete series; a mixed range reports both accountings separately; a
-// legacy-only range reports its estimate once (as breakdown) so nothing can
-// be summed; a truncated series never turns the legacy part into zero or
-// into exactness.
+// legacy-only range reports its explicit estimate as legacyBreakdown and no
+// exactBreakdown, so nothing can be summed; a truncated series never turns
+// the legacy part into zero or into exactness. The compatibility breakdown
+// is not composed here at all — the handlers derive it from the raw series.
 func TestComposeEarningsCoverageMatrix(t *testing.T) {
 	exactShares := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 1350, Count: 3}}
 	legacyShares := []ReasonShare{{Reason: "WATCH_STREAK", Gained: 462, Count: 1}}
@@ -489,13 +490,13 @@ func TestComposeEarningsCoverageMatrix(t *testing.T) {
 	legacy := LegacyEstimate{Breakdown: legacyShares, Samples: 2}
 
 	cases := []struct {
-		name          string
-		exact         ExactEarnings
-		legacy        LegacyEstimate
-		rawTruncated  bool
-		wantBreakdown []ReasonShare
-		wantLegacy    []ReasonShare
-		wantAcc       EarningsAccounting
+		name         string
+		exact        ExactEarnings
+		legacy       LegacyEstimate
+		rawTruncated bool
+		wantExact    []ReasonShare
+		wantLegacy   []ReasonShare
+		wantAcc      EarningsAccounting
 	}{
 		{"exact only", exact, LegacyEstimate{}, false, exactShares, nil,
 			EarningsAccounting{Coverage: EarningsCoverageExact, Exact: true, ExactSince: 1700000000000, LegacyStatus: LegacyStatusNone}},
@@ -503,7 +504,7 @@ func TestComposeEarningsCoverageMatrix(t *testing.T) {
 			EarningsAccounting{Coverage: EarningsCoverageMixed, Exact: true, ExactSince: 1700000000000, LegacyStatus: LegacyStatusEstimated}},
 		{"mixed with unattributable legacy baseline", exact, LegacyEstimate{Samples: 1}, false, exactShares, nil,
 			EarningsAccounting{Coverage: EarningsCoverageMixed, Exact: true, ExactSince: 1700000000000, LegacyStatus: LegacyStatusEstimated}},
-		{"legacy only is an estimate reported once", ExactEarnings{}, legacy, false, legacyShares, nil,
+		{"legacy only is an explicit estimate, never exact", ExactEarnings{}, legacy, false, nil, legacyShares,
 			EarningsAccounting{Coverage: EarningsCoverageLegacy, Exact: false, LegacyStatus: LegacyStatusEstimated}},
 		{"nothing", ExactEarnings{}, LegacyEstimate{}, false, nil, nil,
 			EarningsAccounting{Coverage: EarningsCoverageNone, Exact: false, LegacyStatus: LegacyStatusNone}},
@@ -514,9 +515,9 @@ func TestComposeEarningsCoverageMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			breakdown, legacyBreakdown, acc := ComposeEarnings(tc.exact, tc.legacy, tc.rawTruncated)
-			if !reflect.DeepEqual(breakdown, tc.wantBreakdown) {
-				t.Errorf("breakdown = %+v, want %+v", breakdown, tc.wantBreakdown)
+			exactBreakdown, legacyBreakdown, acc := ComposeEarnings(tc.exact, tc.legacy, tc.rawTruncated)
+			if !reflect.DeepEqual(exactBreakdown, tc.wantExact) {
+				t.Errorf("exactBreakdown = %+v, want %+v", exactBreakdown, tc.wantExact)
 			}
 			if !reflect.DeepEqual(legacyBreakdown, tc.wantLegacy) {
 				t.Errorf("legacyBreakdown = %+v, want %+v", legacyBreakdown, tc.wantLegacy)

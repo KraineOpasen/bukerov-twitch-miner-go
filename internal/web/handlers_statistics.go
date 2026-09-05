@@ -114,15 +114,19 @@ func (s *Server) configuredStreamerNames() []string {
 // streamer over a range preset (24h/7d/30d). Response:
 //
 //	{ streamer, range, points:[{t,balance,reason,exact}], annotations:[{t,type,reason}],
-//	  breakdown:[{reason,gained,count}], legacyBreakdown:[...],
+//	  breakdown:[{reason,gained,count}], exactBreakdown:[...], legacyBreakdown:[...],
 //	  earnings:{coverage,exact,exactSince,legacyStatus}, rawTruncated, chartDownsampled }
 //
-// breakdown is the exact point-event aggregation when the window holds exact
-// events (earnings.exact), otherwise the legacy balance-delta estimate; the
-// legacy part of a mixed window is reported separately in legacyBreakdown and
-// never added to the exact figures (see analytics.ComposeEarnings). The series
-// is downsampled to maxChartPoints for display; use the export endpoint for
-// full fidelity. Auth is inherited from the global middleware.
+// exactBreakdown is the authoritative accounting (the exact point-event
+// aggregation, present when the window holds a positive exact event;
+// earnings.exact is true for any exact event, positive or not);
+// legacyBreakdown is the explicit balance-delta estimate for the history no
+// exact event covers, never added to the exact figures (see
+// analytics.ComposeEarnings). breakdown is the compatibility attribution of
+// the first release (analytics.BreakdownFromSamples over the raw series),
+// kept unchanged for existing consumers and not canonical accounting. The
+// series is downsampled to maxChartPoints for display; use the export
+// endpoint for full fidelity. Auth is inherited from the global middleware.
 func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeNotAllowed(w)
@@ -175,15 +179,18 @@ func (s *Server) handleAPIPointsHistory(w http.ResponseWriter, r *http.Request) 
 	// the raw balance series and of its row cap. The legacy balance-delta
 	// estimate covers only the samples no exact event backs, and is
 	// unavailable — never silently zero — when the raw series was truncated.
+	// The compatibility breakdown is the first release's attribution over the
+	// same raw series (truncated or not), independent of both accountings.
 	rawTruncated, chartDownsampled := historyFlags(len(raw), len(points), rowCap)
-	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
+	exactBreakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(raw), rawTruncated)
 
 	writeJSONOK(w, analytics.PointsHistory{
 		Streamer:         streamer,
 		Range:            label,
 		Points:           points,
 		Annotations:      snap.Annotations,
-		Breakdown:        breakdown,
+		Breakdown:        analytics.BreakdownFromSamples(raw),
+		ExactBreakdown:   exactBreakdown,
 		LegacyBreakdown:  legacyBreakdown,
 		Earnings:         earnings,
 		BetSummary:       betSummary,
@@ -252,12 +259,15 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 
 	// The export carries the same earnings accounting as the history
 	// endpoint so an external consumer never sees an empty accounting block:
-	// the exact aggregation from the ledger and the legacy estimate over the
-	// exported samples, qualified by the same coverage metadata. The export
+	// the exact aggregation from the ledger, the legacy estimate over the
+	// exported samples, the same coverage metadata, and the same
+	// compatibility breakdown over the exported series (additive on this
+	// endpoint — the first release's export carried no breakdown — so it is
+	// parity with the history endpoint, not a preserved figure). The export
 	// is full-fidelity (never downsampled), so only the raw row cap can make
 	// it incomplete.
 	rawTruncated := len(points) >= rowCap
-	breakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
+	exactBreakdown, legacyBreakdown, earnings := analytics.ComposeEarnings(snap.Exact, analytics.EstimateLegacyBreakdown(points), rawTruncated)
 
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+streamer+"-points-"+label+".json\"")
 	writeJSONOK(w, analytics.PointsHistory{
@@ -265,7 +275,8 @@ func (s *Server) handleAPIPointsHistoryExport(w http.ResponseWriter, r *http.Req
 		Range:           label,
 		Points:          points,
 		Annotations:     snap.Annotations,
-		Breakdown:       breakdown,
+		Breakdown:       analytics.BreakdownFromSamples(points),
+		ExactBreakdown:  exactBreakdown,
 		LegacyBreakdown: legacyBreakdown,
 		Earnings:        earnings,
 		RawTruncated:    rawTruncated,

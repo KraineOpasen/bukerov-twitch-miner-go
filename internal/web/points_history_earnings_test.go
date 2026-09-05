@@ -78,8 +78,13 @@ func TestPointsHistoryWindowBoundsExactAggregate(t *testing.T) {
 	for _, path := range []string{"/api/points-history?streamer=" + s + "&range=24h", "/api/points-history/export?streamer=" + s + "&range=24h"} {
 		got := fetchHistory(t, srv, path)
 		want := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}}
-		if len(got.Breakdown) != 1 || got.Breakdown[0] != want[0] {
-			t.Fatalf("%s: breakdown = %+v, want only the in-range event %+v", path, got.Breakdown, want)
+		if len(got.ExactBreakdown) != 1 || got.ExactBreakdown[0] != want[0] {
+			t.Fatalf("%s: exactBreakdown = %+v, want only the in-range event %+v", path, got.ExactBreakdown, want)
+		}
+		// The compatibility breakdown has nothing to attribute from a single
+		// in-range sample (first sample baseline).
+		if got.Breakdown != nil {
+			t.Fatalf("%s: breakdown = %+v, want none from one sample", path, got.Breakdown)
 		}
 		if got.Earnings.ExactSince != recent.UnixMilli() || got.Earnings.Coverage != analytics.EarningsCoverageExact {
 			t.Fatalf("%s: earnings = %+v, want exact coverage since the in-range event", path, got.Earnings)
@@ -89,8 +94,8 @@ func TestPointsHistoryWindowBoundsExactAggregate(t *testing.T) {
 		}
 	}
 	// A wider preset includes both.
-	if got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=7d"); len(got.Breakdown) != 2 || got.Earnings.ExactSince != old.UnixMilli() {
-		t.Fatalf("7d: breakdown = %+v since %d, want both events since the older one", got.Breakdown, got.Earnings.ExactSince)
+	if got := fetchHistory(t, srv, "/api/points-history?streamer="+s+"&range=7d"); len(got.ExactBreakdown) != 2 || got.Earnings.ExactSince != old.UnixMilli() {
+		t.Fatalf("7d: exactBreakdown = %+v since %d, want both events since the older one", got.ExactBreakdown, got.Earnings.ExactSince)
 	}
 }
 
@@ -114,7 +119,12 @@ func TestPointsHistoryWireKeysArePinned(t *testing.T) {
 	for _, path := range []string{"/api/points-history?streamer=" + s + "&range=24h", "/api/points-history/export?streamer=" + s + "&range=24h"} {
 		body := string(fetchRaw(t, srv, path))
 		for _, want := range []string{
-			`"streamer":"` + s + `"`, `"range":"24h"`, `"points":[`, `"breakdown":[{"reason":"WATCH","gained":12,"count":1}]`,
+			`"streamer":"` + s + `"`, `"range":"24h"`, `"points":[`,
+			// breakdown: the first release's attribution over the whole raw
+			// timeline (+50 CLAIM, +12 WATCH); exactBreakdown: the ledger;
+			// legacyBreakdown: the uncovered estimate.
+			`"breakdown":[{"reason":"CLAIM","gained":50,"count":1},{"reason":"WATCH","gained":12,"count":1}]`,
+			`"exactBreakdown":[{"reason":"WATCH","gained":12,"count":1}]`,
 			`"legacyBreakdown":[{"reason":"CLAIM","gained":50,"count":1}]`,
 			`"earnings":{"coverage":"mixed","exact":true,"exactSince":` + fmt.Sprint(exactAt.UnixMilli()) + `,"legacyStatus":"estimated"}`,
 			`"balance":1062,"reason":"WATCH","exact":true}`, `"rawTruncated":false`,
@@ -133,8 +143,9 @@ func TestPointsHistoryWireKeysArePinned(t *testing.T) {
 
 // TestPointsHistoryLegacyOnlyRangeIsAnEstimate: history recorded before the
 // exact ledger is still served, but labelled: coverage "legacy", exact=false,
-// the breakdown IS the balance-delta estimate (reported once — never repeated
-// in legacyBreakdown, so nothing can be summed), no exactSince.
+// no exactBreakdown, the explicit estimate in legacyBreakdown (and, for this
+// spend-free timeline, the same figures under the compatibility breakdown),
+// no exactSince.
 func TestPointsHistoryLegacyOnlyRangeIsAnEstimate(t *testing.T) {
 	srv := newStatsTestServer(t)
 	repo := srv.analytics.Repository()
@@ -154,11 +165,14 @@ func TestPointsHistoryLegacyOnlyRangeIsAnEstimate(t *testing.T) {
 		t.Fatalf("earnings = %+v, want %+v", got.Earnings, want)
 	}
 	wantShares := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 462, Count: 1}, {Reason: "WATCH", Gained: 12, Count: 1}}
-	if len(got.Breakdown) != 2 || got.Breakdown[0] != wantShares[0] || got.Breakdown[1] != wantShares[1] {
-		t.Fatalf("breakdown = %+v, want the legacy estimate %+v", got.Breakdown, wantShares)
+	if !sharesEqual(got.LegacyBreakdown, wantShares) {
+		t.Fatalf("legacyBreakdown = %+v, want the explicit estimate %+v for a legacy-only range", got.LegacyBreakdown, wantShares)
 	}
-	if got.LegacyBreakdown != nil {
-		t.Fatalf("legacyBreakdown = %+v, want none for a legacy-only range (the estimate is breakdown itself)", got.LegacyBreakdown)
+	if got.ExactBreakdown != nil {
+		t.Fatalf("exactBreakdown = %+v, want none without exact events", got.ExactBreakdown)
+	}
+	if !sharesEqual(got.Breakdown, wantShares) {
+		t.Fatalf("breakdown = %+v, want the compatibility attribution %+v (no spend, so it coincides with the estimate)", got.Breakdown, wantShares)
 	}
 	for _, p := range got.Points {
 		if p.Exact {
@@ -184,11 +198,18 @@ func TestPointsHistoryExactOnlyRange(t *testing.T) {
 		t.Fatalf("earnings = %+v, want %+v", got.Earnings, want)
 	}
 	wantShares := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 900, Count: 2}, {Reason: "WATCH", Gained: 12, Count: 1}}
-	if len(got.Breakdown) != 2 || got.Breakdown[0] != wantShares[0] || got.Breakdown[1] != wantShares[1] {
-		t.Fatalf("breakdown = %+v, want %+v", got.Breakdown, wantShares)
+	if !sharesEqual(got.ExactBreakdown, wantShares) {
+		t.Fatalf("exactBreakdown = %+v, want %+v", got.ExactBreakdown, wantShares)
 	}
 	if got.LegacyBreakdown != nil {
 		t.Fatalf("legacyBreakdown = %+v, want none", got.LegacyBreakdown)
+	}
+	// The compatibility breakdown attributes the two deltas AFTER the first
+	// (baseline) exact sample: +12 WATCH, +450 WATCH STREAK — the first grant
+	// is invisible to it, which is exactly why it is not accounting.
+	wantCompat := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}, {Reason: "WATCH", Gained: 12, Count: 1}}
+	if !sharesEqual(got.Breakdown, wantCompat) {
+		t.Fatalf("breakdown = %+v, want the compatibility attribution %+v", got.Breakdown, wantCompat)
 	}
 	if len(got.Points) != 3 {
 		t.Fatalf("points = %+v, want 3", got.Points)
@@ -235,11 +256,18 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 		t.Fatalf("earnings = %+v, want exact=true, mixed coverage, legacy unavailable", got.Earnings)
 	}
 	wantShares := []analytics.ReasonShare{{Reason: "WATCH_STREAK", Gained: 450, Count: 1}, {Reason: "CLAIM", Gained: 50, Count: 1}}
-	if len(got.Breakdown) != 2 || got.Breakdown[0] != wantShares[0] || got.Breakdown[1] != wantShares[1] {
-		t.Fatalf("exact breakdown under truncation = %+v, want %+v (truncation must not hide the exact aggregate)", got.Breakdown, wantShares)
+	if !sharesEqual(got.ExactBreakdown, wantShares) {
+		t.Fatalf("exactBreakdown under truncation = %+v, want %+v (truncation must not hide the exact aggregate)", got.ExactBreakdown, wantShares)
 	}
 	if got.LegacyBreakdown != nil {
 		t.Fatalf("legacyBreakdown = %+v, want none (unavailable, not zero)", got.LegacyBreakdown)
+	}
+	// The compatibility breakdown is computed over the truncated raw series
+	// exactly as the first release did (1000, 1010, 1020 → two +10 WATCH
+	// deltas); rawTruncated is the consumer's signal that it is incomplete.
+	wantCompat := []analytics.ReasonShare{{Reason: "WATCH", Gained: 20, Count: 2}}
+	if !sharesEqual(got.Breakdown, wantCompat) {
+		t.Fatalf("breakdown under truncation = %+v, want the compatibility attribution over the capped series %+v", got.Breakdown, wantCompat)
 	}
 
 	// Without any exact event a truncated range is "unavailable" — never a
@@ -251,8 +279,14 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 		}
 	}
 	got2 := fetchHistory(t, srv, "/api/points-history?streamer="+s2+"&range=24h")
-	if !got2.RawTruncated || got2.Earnings.Coverage != analytics.EarningsCoverageUnavailable || got2.Breakdown != nil || got2.Earnings.Exact {
-		t.Fatalf("truncated legacy-only response = earnings %+v breakdown %+v, want unavailable with no breakdown", got2.Earnings, got2.Breakdown)
+	if !got2.RawTruncated || got2.Earnings.Coverage != analytics.EarningsCoverageUnavailable || got2.ExactBreakdown != nil || got2.LegacyBreakdown != nil || got2.Earnings.Exact {
+		t.Fatalf("truncated legacy-only response = earnings %+v exact %+v legacy %+v, want unavailable with no accounting", got2.Earnings, got2.ExactBreakdown, got2.LegacyBreakdown)
+	}
+	// ...while the compatibility breakdown still reports what the first
+	// release reported over the capped series (1000, 1010, 1020: two +10
+	// WATCH deltas; the fourth row is beyond the cap).
+	if !sharesEqual(got2.Breakdown, []analytics.ReasonShare{{Reason: "WATCH", Gained: 20, Count: 2}}) {
+		t.Fatalf("truncated legacy-only breakdown = %+v, want the compatibility attribution over the capped series", got2.Breakdown)
 	}
 
 	// The export applies its own cap with the same accounting rules.
@@ -261,8 +295,8 @@ func TestPointsHistoryTruncationKeepsExactAggregate(t *testing.T) {
 	if !exp.RawTruncated || len(exp.Points) != 3 || exp.Earnings.Coverage != analytics.EarningsCoverageMixed || exp.Earnings.LegacyStatus != analytics.LegacyStatusUnavailable {
 		t.Fatalf("truncated export = rawTruncated %v, %d points, earnings %+v; want 3 points, mixed, legacy unavailable", exp.RawTruncated, len(exp.Points), exp.Earnings)
 	}
-	if len(exp.Breakdown) != 2 || exp.Breakdown[0] != wantShares[0] || exp.Breakdown[1] != wantShares[1] || exp.LegacyBreakdown != nil {
-		t.Fatalf("truncated export breakdown = %+v legacy %+v, want the complete exact aggregate and no legacy estimate", exp.Breakdown, exp.LegacyBreakdown)
+	if !sharesEqual(exp.ExactBreakdown, wantShares) || exp.LegacyBreakdown != nil || !sharesEqual(exp.Breakdown, wantCompat) {
+		t.Fatalf("truncated export exact %+v legacy %+v breakdown %+v, want the complete exact aggregate, no legacy estimate and the compatibility attribution over the capped series", exp.ExactBreakdown, exp.LegacyBreakdown, exp.Breakdown)
 	}
 
 	// A zero cap (a Server built without its constructor) means the
@@ -300,10 +334,13 @@ func TestPointsHistoryExportCarriesExactFlagsAndAccounting(t *testing.T) {
 	if got.Earnings != want {
 		t.Fatalf("export earnings = %+v, want %+v", got.Earnings, want)
 	}
-	if len(got.Breakdown) != 1 || got.Breakdown[0] != (analytics.ReasonShare{Reason: "WATCH", Gained: 12, Count: 1}) {
-		t.Fatalf("export breakdown = %+v, want the exact WATCH event only", got.Breakdown)
+	if !sharesEqual(got.ExactBreakdown, []analytics.ReasonShare{{Reason: "WATCH", Gained: 12, Count: 1}}) {
+		t.Fatalf("export exactBreakdown = %+v, want the exact WATCH event only", got.ExactBreakdown)
 	}
-	if len(got.LegacyBreakdown) != 1 || got.LegacyBreakdown[0] != (analytics.ReasonShare{Reason: "CLAIM", Gained: 50, Count: 1}) {
+	if !sharesEqual(got.LegacyBreakdown, []analytics.ReasonShare{{Reason: "CLAIM", Gained: 50, Count: 1}}) {
 		t.Fatalf("export legacyBreakdown = %+v, want the legacy CLAIM estimate reported separately", got.LegacyBreakdown)
+	}
+	if !sharesEqual(got.Breakdown, []analytics.ReasonShare{{Reason: "CLAIM", Gained: 50, Count: 1}, {Reason: "WATCH", Gained: 12, Count: 1}}) {
+		t.Fatalf("export breakdown = %+v, want the compatibility attribution over the whole exported series", got.Breakdown)
 	}
 }

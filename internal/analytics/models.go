@@ -156,13 +156,15 @@ const (
 )
 
 // EarningsAccounting is the additive points-history metadata that tells a
-// consumer which accounting produced Breakdown and whether a separately
-// estimated legacy part exists, so exact and estimated figures are never
-// mistaken for one another — and never summed.
+// consumer which accounting the range has — the exact ledger aggregation in
+// ExactBreakdown, a separately estimated legacy part in LegacyBreakdown —
+// so exact and estimated figures are never mistaken for one another, never
+// summed, and never confused with the compatibility Breakdown.
 type EarningsAccounting struct {
 	// Coverage is one of the EarningsCoverage* values.
 	Coverage string `json:"coverage"`
-	// Exact is true when Breakdown is the exact ledger aggregation.
+	// Exact is true when the range holds exact ledger events, i.e. when
+	// ExactBreakdown is the authoritative accounting for (part of) it.
 	Exact bool `json:"exact"`
 	// ExactSince is the Unix-millis timestamp of the earliest exact event in
 	// range (omitted when there is none): where exact accounting starts, not
@@ -206,25 +208,36 @@ type PointsHistory struct {
 	Range       string             `json:"range"`
 	Points      []PointSample      `json:"points"`
 	Annotations []AnnotationRecord `json:"annotations"`
-	// Breakdown is the range's primary earnings attribution by canonical
-	// reason (WATCH/CLAIM/RAID/WATCH_STREAK/PREDICTION/OTHER). When the range
-	// holds exact point events it is the EXACT ledger aggregation
-	// (Earnings.Exact == true) — event-local Twitch amounts, computed in SQL,
-	// unaffected by RawTruncated; the legacy part of a mixed range then lives
-	// only in LegacyBreakdown. When the range holds no exact event it is the
-	// legacy balance-delta ESTIMATE (Earnings.Exact == false). Omitted when
-	// there is nothing earned in range. The two accountings are never summed.
+	// Breakdown is the COMPATIBILITY attribution (BreakdownFromSamples): the
+	// figure the first Statistics release reported — every consecutive
+	// positive balance delta of the raw series attributed to the later
+	// sample's canonical reason (WATCH/CLAIM/RAID/WATCH_STREAK/PREDICTION/
+	// OTHER), first sample baseline, computed on the raw series whether or
+	// not it was truncated, omitted when nothing was attributed. It is kept
+	// byte-for-byte for consumers written against that release (on the
+	// history endpoint; the export, which carried no breakdown then, gains
+	// the same attribution over the exported series additively) and is
+	// deprecated for accounting: it is neither the exact ledger nor the
+	// estimate, and it must never be summed with either. Never removed,
+	// renamed, retyped or redefined.
 	Breakdown []ReasonShare `json:"breakdown,omitempty"`
-	// LegacyBreakdown is the balance-delta ESTIMATE over the samples of the
-	// range that no exact event backs (history recorded before the exact
-	// ledger). Present only for a MIXED range (Earnings.Exact == true and
-	// Earnings.LegacyStatus == "estimated") where something could be
-	// attributed; it is reported beside the exact Breakdown, never added to
-	// it. For a legacy-only range the estimate is Breakdown itself and is not
-	// repeated here, so no consumer can double-count by summing the two.
+	// ExactBreakdown is the AUTHORITATIVE accounting: the exact point-event
+	// ledger aggregation by canonical reason — event-local Twitch amounts,
+	// computed in SQL, unaffected by RawTruncated. Present when the range
+	// holds a positive exact event; omitted otherwise. Earnings.Exact is
+	// true whenever the range holds any exact event, positive or not, so an
+	// exactly covered range with nothing earned carries no list. Never
+	// summed with LegacyBreakdown or Breakdown.
+	ExactBreakdown []ReasonShare `json:"exactBreakdown,omitempty"`
+	// LegacyBreakdown is the explicit balance-delta ESTIMATE over the samples
+	// of the range that no exact event backs (history recorded before the
+	// exact ledger, or by a pre-ledger binary): the uncovered part of a MIXED
+	// range, or the whole of a legacy-only range. Present when
+	// Earnings.LegacyStatus == "estimated" and something could be attributed;
+	// reported beside ExactBreakdown, never added to it.
 	LegacyBreakdown []ReasonShare `json:"legacyBreakdown,omitempty"`
-	// Earnings qualifies Breakdown/LegacyBreakdown: which accounting produced
-	// them, from when the range is exactly covered, and whether the legacy
+	// Earnings qualifies ExactBreakdown/LegacyBreakdown: which accounting the
+	// range has, from when it is exactly covered, and whether the legacy
 	// estimate exists, is unavailable (truncated), or is not needed.
 	Earnings EarningsAccounting `json:"earnings"`
 	// BetSummary is the prediction-betting accounting (won/staked/refunded/net)
@@ -234,10 +247,11 @@ type PointsHistory struct {
 	// section for an equivalent window (only the window differs).
 	BetSummary *BetSummary `json:"betSummary,omitempty"`
 	// RawTruncated is true when the raw series hit the backend row cap, so
-	// the balance window is incomplete: balance-derived KPIs and the legacy
-	// estimate (Earnings.LegacyStatus == "unavailable") must not be presented
-	// as full-period results. An exact Breakdown is unaffected — it is
-	// aggregated from the ledger, not from the truncated series.
+	// the balance window is incomplete: balance-derived KPIs, the legacy
+	// estimate (Earnings.LegacyStatus == "unavailable") and the compatibility
+	// Breakdown must not be presented as full-period results. ExactBreakdown
+	// is unaffected — it is aggregated from the ledger, not from the
+	// truncated series.
 	RawTruncated bool `json:"rawTruncated"`
 	// ChartDownsampled is true when Points was thinned for display only; the
 	// raw series (and therefore the legacy estimate) is still complete.

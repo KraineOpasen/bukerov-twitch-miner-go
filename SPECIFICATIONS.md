@@ -2383,9 +2383,11 @@ Analytics data is stored in the unified database (`database/{username}/miner.db`
 
 ### Exact Point-Event Ledger
 
-The Statistics earnings breakdown is accounted for from **events, never from
-balance deltas** (the daily digest's *Net points* remains, by definition, a
-net balance change and is out of the ledger's scope). Three kinds of facts
+The Statistics earnings accounting (`exactBreakdown`) is computed from
+**events, never from balance deltas** (the daily digest's *Net points*
+remains, by definition, a net balance change and is out of the ledger's
+scope; the compatibility `breakdown` field is the first release's
+balance-delta attribution, kept unchanged and never used as accounting). Three kinds of facts
 are kept apart and none is authority for another:
 
 1. **Exact earning events** (`point_events`) — immutable accounting facts. For
@@ -2435,17 +2437,36 @@ but never earnings. History recorded **before the ledger** (or by a pre-v5
 binary) is not backfilled; it stays available only as a clearly separate
 **legacy estimate** (`EstimateLegacyBreakdown`: positive deltas into samples
 no exact event backs, skipping points-spent snapshots). The response carries
-`breakdown` (exact when `earnings.exact`, otherwise the estimate),
-`legacyBreakdown` (the estimate for the legacy part of a *mixed* range only —
-a legacy-only range reports its estimate as `breakdown` and does not repeat
-it) and `earnings{coverage: exact|legacy|mixed|none|unavailable, exact,
-exactSince, legacyStatus: none|estimated|unavailable}`; each sample carries
-`exact: true` when an exact event produced it. The export endpoint carries the
-same accounting fields. Exact and estimated figures are **never summed**; a
-truncated raw series makes the legacy estimate `unavailable` (never zero)
-while the exact aggregate stays complete. The dashboard labels estimates as
-such (every estimated figure is marked `≈`) and shows the legacy part on its
-own line. Retention prunes `point_events` with `points`/`annotations`.
+three separate lists that are never summed with one another:
+`exactBreakdown` — the **authoritative accounting**, the ledger aggregation,
+present whenever the range holds a positive exact event; `legacyBreakdown` —
+the **explicit estimate** for the history no exact event covers (the
+uncovered part of a *mixed* range, or the whole of a legacy-only range;
+absent when unavailable or when nothing could be attributed); and
+`breakdown` — the **compatibility attribution** of the first Statistics
+release (`BreakdownFromSamples`, unchanged since base
+`dc5566049f1de1909d66c0f190338d54af863402`: every consecutive positive
+balance delta of the raw series attributed to the later sample's canonical
+reason, first sample baseline, ordered gained-descending then
+reason-ascending, computed over the raw series whether or not it was
+truncated), kept byte-for-byte for consumers written against that release,
+deprecated for accounting and never removed, renamed, retyped or redefined.
+`earnings{coverage: exact|legacy|mixed|none|unavailable, exact, exactSince,
+legacyStatus: none|estimated|unavailable}` qualifies the two accounting
+lists; each sample carries `exact: true` when an exact event produced it. The
+export endpoint carries the same fields over the exported series; on the
+export every one of them is additive (the first release's export carried no
+`breakdown`), so its `breakdown` is the same compatibility attribution over
+the full-fidelity exported series, for parity with the history endpoint,
+not a figure any older consumer could have read there. Exact and
+estimated figures are **never summed**, and neither is ever folded into the
+compatibility `breakdown`; a truncated raw series makes the legacy estimate
+`unavailable` (never zero) while the exact aggregate stays complete. The
+dashboard's accounting truth is `exactBreakdown` when exact data exists and
+`legacyBreakdown` only as explicitly estimated data (every estimated figure
+is marked `≈`, the legacy part on its own line); it never consumes the
+compatibility `breakdown`. Retention prunes `point_events` with
+`points`/`annotations`.
 
 **One snapshot per response.** Both endpoints read everything they present
 together — the balance samples with their `exact` flags, the annotations, the
